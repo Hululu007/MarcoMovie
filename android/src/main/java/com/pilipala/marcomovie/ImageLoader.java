@@ -314,6 +314,14 @@ final class ImageLoader {
         if (rawUrl == null || rawUrl.isEmpty()) return "";
         String url = rawUrl;
         if (url.contains("doubanio.com")) {
+            url =
+                    url.replaceAll(
+                            "https?://(?:img[4-9]|qnmob\\d*-sign)\\.doubanio\\.com/",
+                            "https://img1.doubanio.com/");
+            int qIdx = url.indexOf('?');
+            if (qIdx > 0 && url.substring(0, qIdx).endsWith(".jpg")) {
+                url = url.substring(0, qIdx);
+            }
             if (detail) {
                 url =
                         url.replace("/s_ratio_poster/", "/l_ratio_poster/")
@@ -321,7 +329,8 @@ final class ImageLoader {
                                 .replace("/view/photo/spic/", "/view/photo/lpic/")
                                 .replace("/view/photo/mpic/", "/view/photo/lpic/")
                                 .replace("/view/photo/s/", "/view/photo/l/")
-                                .replace("/view/photo/m/", "/view/photo/l/");
+                                .replace("/view/photo/m/", "/view/photo/l/")
+                                .replace("/view/photo/large/", "/view/photo/l/");
             } else {
                 url =
                         url.replace("/s_ratio_poster/", "/m_ratio_poster/")

@@ -97,8 +97,10 @@ final class ImmersivePoster extends FrameLayout {
                         if (files == null) return;
                         for (File f : files) {
                             String name = f.getName();
-                            if (name.startsWith("tv_wide_v1_") || name.startsWith("tv_wide_v2_")) {
-                                // Delete legacy unverified Bing/Bilibili cached images
+                            if (name.startsWith("tv_wide_v1_")
+                                    || name.startsWith("tv_wide_v2_")
+                                    || name.startsWith("tv_wide_v3_")) {
+                                // Delete legacy cached images
                                 f.delete();
                             }
                         }
@@ -238,8 +240,17 @@ final class ImmersivePoster extends FrameLayout {
                 base.replaceAll("(?i)\\b(1080p|720p|4k|hd|bd|mp4|mkv)\\b", "")
                         .replaceAll("【[^】]*】|\\[[^\\]]*\\]|\\([^)]*\\)|（[^）]*）", " ")
                         .replaceAll("(全集|高清|未删减|国语|粤语|中字|完结|更新至.*)", "")
+                        .replaceAll("(?<=[\\u4e00-\\u9fa5A-Za-z])\\s*(?:19|20)\\d{2}\\s*$", "")
+                        .replaceAll(
+                                "(?i)(?:第\\s*[一二三四五六七八九十百零两\\d]+\\s*[季部辑篇期]|年番\\s*[一二三四五六七八九十\\d]*|Season\\s*\\d+|S\\d+)\\s*$",
+                                "")
                         .trim();
         return base.isEmpty() ? rawTitle.trim() : base;
+    }
+
+    private static String stripSequelNumberBeforeColon(String s) {
+        if (s == null) return "";
+        return s.replaceAll("([\\u4e00-\\u9fa5]+)\\d+\\s*([：:])", "$1$2");
     }
 
     private static String normalizeForStrictCompare(String s) {
@@ -250,8 +261,13 @@ final class ImmersivePoster extends FrameLayout {
                 meta != null && meta.baseTitle != null && !meta.baseTitle.isEmpty()
                         ? meta.baseTitle
                         : noHtml;
+        base =
+                base.replaceAll("（[^）]*）|\\([^)]*\\)|【[^】]*】|\\[[^\\]]*\\]", "")
+                        .replaceAll("(?<=[\\u4e00-\\u9fa5A-Za-z])\\s*(?:19|20)\\d{2}\\s*$", "")
+                        .replaceAll(
+                                "(?i)(?:第\\s*[一二三四五六七八九十百零两\\d]+\\s*[季部辑篇期]|年番\\s*[一二三四五六七八九十\\d]*|Season\\s*\\d+|S\\d+)\\s*$",
+                                "");
         return base.toLowerCase()
-                .replaceAll("（[^）]*）|\\([^)]*\\)|【[^】]*】|\\[[^\\]]*\\]", "")
                 .replaceAll("[\\s·:：\\-—_（）()【】\\[\\]《》〈〉\"“”'’!！?？,，.。/\\\\]", "")
                 .trim();
     }
@@ -272,8 +288,16 @@ final class ImmersivePoster extends FrameLayout {
         final String cleanYear = extractFourDigitYear(rawYear);
         final String cacheKey = (cleanTitle + "#" + cleanYear).toLowerCase();
         Bitmap memCached = WIDE_MEM_CACHE.get(cacheKey);
+        if (memCached == null && !cleanYear.isEmpty()) {
+            memCached = WIDE_MEM_CACHE.get((cleanTitle + "#").toLowerCase());
+        }
         if (memCached != null && !memCached.isRecycled()) {
             applyWideBitmap(memCached);
+            return;
+        }
+        if (backdrop.wideBitmap != null
+                && !backdrop.wideBitmap.isRecycled()
+                && Objects.equals(rawTitle == null ? "" : rawTitle.trim(), currentTitle)) {
             return;
         }
         final int token = ++hdRevision;
@@ -285,7 +309,7 @@ final class ImmersivePoster extends FrameLayout {
                         File diskFile =
                                 new File(
                                         a.getCacheDir(),
-                                        "tv_wide_v3_"
+                                        "tv_wide_v4_"
                                                 + Integer.toHexString(cacheKey.hashCode())
                                                 + ".img");
                         if (diskFile.exists() && diskFile.length() > 8192) {
@@ -523,89 +547,184 @@ final class ImmersivePoster extends FrameLayout {
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
     }
 
+    private static final class DoubanCandidate {
+        final String id;
+        final String imgUrl;
+        final double rating;
+        final int score;
+
+        DoubanCandidate(String id, String imgUrl, double rating, int score) {
+            this.id = id;
+            this.imgUrl = imgUrl;
+            this.rating = rating;
+            this.score = score;
+        }
+    }
+
+    private static java.util.List<DoubanCandidate> findVerifiedDoubanSubjects(
+            String title, String year) {
+        java.util.List<DoubanCandidate> results = new java.util.ArrayList<>();
+        String normTarget = normalizeForStrictCompare(title);
+        if (normTarget.isEmpty()) return results;
+        String altTitle = stripSequelNumberBeforeColon(title);
+        String normAlt = normalizeForStrictCompare(altTitle);
+        String cleanYear = extractFourDigitYear(year);
+        int targetYear = parseYearInt(cleanYear);
+
+        // 1. Primary resolver: m.douban.com mobile search (returns 200 consistently without
+        // rate-limit blocks)
+        String[] queries =
+                altTitle.equals(title) ? new String[] {title} : new String[] {title, altTitle};
+        for (String qStr : queries) {
+            try {
+                String searchUrl =
+                        "https://m.douban.com/search/?query="
+                                + URLEncoder.encode(qStr, "UTF-8")
+                                + "&type=movie";
+                String html = httpGetText(searchUrl, "https://m.douban.com/", true, 4200);
+                if (html != null && html.contains("/movie/subject/")) {
+                    Matcher itemMatcher =
+                            Pattern.compile(
+                                            "<a\\s+href=\"/movie/subject/(\\d+)/\"[^>]*>([\\s\\S]*?)</a>")
+                                    .matcher(html);
+                    while (itemMatcher.find()) {
+                        String sid = itemMatcher.group(1).trim();
+                        String body = itemMatcher.group(2);
+                        Matcher tm =
+                                Pattern.compile("<span\\s+class=\"subject-title\">([^<]+)</span>")
+                                        .matcher(body);
+                        if (!tm.find()) continue;
+                        String rawSubTitle = tm.group(1).trim();
+                        String normSub = normalizeForStrictCompare(rawSubTitle);
+                        String normSubAlt =
+                                normalizeForStrictCompare(
+                                        stripSequelNumberBeforeColon(rawSubTitle));
+                        if (!normTarget.equals(normSub)
+                                && !normAlt.equals(normSub)
+                                && !normTarget.equals(normSubAlt)) {
+                            continue;
+                        }
+                        boolean hasDefaultImg = body.contains("default");
+                        boolean unreleased = body.contains("尚未");
+                        String imgUrl = "";
+                        Matcher im = Pattern.compile("src=\"(https?://[^\"]+)\"").matcher(body);
+                        if (im.find() && !hasDefaultImg) {
+                            imgUrl = im.group(1).trim();
+                        }
+                        double rating = 0.0;
+                        Matcher rm = Pattern.compile("data-rating=\"([0-9.]+)\"").matcher(body);
+                        if (rm.find()) {
+                            try {
+                                double rawR = Double.parseDouble(rm.group(1));
+                                if (rawR > 10.0) rawR = rawR / 10.0;
+                                if (rawR >= 2.0 && rawR <= 10.0) rating = rawR;
+                            } catch (Exception ignored) {
+                            }
+                        }
+                        int score =
+                                (hasDefaultImg ? 0 : 40)
+                                        + (unreleased ? 0 : 30)
+                                        + (rating >= 2.0 ? 25 : 0);
+                        results.add(new DoubanCandidate(sid, imgUrl, rating, score));
+                    }
+                }
+                if (!results.isEmpty()) break;
+            } catch (Exception ignored) {
+            }
+        }
+
+        // 2. Secondary fallback: movie.douban.com/j/subject_suggest
+        if (results.isEmpty()) {
+            try {
+                String suggestUrl =
+                        "https://movie.douban.com/j/subject_suggest?q="
+                                + URLEncoder.encode(title, "UTF-8");
+                String json = httpGetText(suggestUrl, "https://movie.douban.com/", false, 3800);
+                if (json != null && json.trim().startsWith("[")) {
+                    JSONArray arr = new JSONArray(json);
+                    for (int i = 0; i < arr.length(); i++) {
+                        JSONObject item = arr.optJSONObject(i);
+                        if (item == null) continue;
+                        String id = item.optString("id").trim();
+                        if (id.isEmpty()) continue;
+                        String itTitle = normalizeForStrictCompare(item.optString("title"));
+                        String itSub = normalizeForStrictCompare(item.optString("sub_title"));
+                        if (!normTarget.equals(itTitle)
+                                && !normTarget.equals(itSub)
+                                && !normAlt.equals(itTitle)) {
+                            continue;
+                        }
+                        int itYear = parseYearInt(extractFourDigitYear(item.optString("year")));
+                        int score = 40;
+                        if (targetYear > 0 && itYear > 0) {
+                            int diff = Math.abs(targetYear - itYear);
+                            if (diff == 0) score = 100;
+                            else if (diff == 1) score = 60;
+                            else continue;
+                        }
+                        results.add(
+                                new DoubanCandidate(
+                                        id, item.optString("img", "").trim(), 0.0, score));
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        java.util.Collections.sort(results, (a, b) -> Integer.compare(b.score, a.score));
+        for (DoubanCandidate c : results) {
+            if (c.rating >= 2.0 && c.rating <= 10.0) {
+                DOUBAN_RATING_CACHE.put(normTarget + "#" + cleanYear, c.rating);
+                DOUBAN_RATING_CACHE.put(normTarget + "#", c.rating);
+                break;
+            }
+        }
+        return results;
+    }
+
     private static void collectVerifiedDoubanPosters(
             String title, String year, String actor, String director, Set<String> out) {
         try {
-            String suggestUrl =
-                    "https://movie.douban.com/j/subject_suggest?q="
-                            + URLEncoder.encode(title, "UTF-8");
-            String json = httpGetText(suggestUrl, "https://movie.douban.com/", false, 4000);
-            if (json == null || !json.trim().startsWith("[")) return;
-            JSONArray arr = new JSONArray(json);
-            if (arr.length() == 0) return;
-
             String normTarget = normalizeForStrictCompare(title);
             if (normTarget.isEmpty()) return;
+            java.util.List<DoubanCandidate> cands = findVerifiedDoubanSubjects(title, year);
+            if (cands.isEmpty()) return;
 
-            int targetYear = parseYearInt(year);
-            String bestId = "";
-            String bestImg = "";
-            int bestScore = -1;
-
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject item = arr.optJSONObject(i);
-                if (item == null) continue;
-                String id = item.optString("id").trim();
-                if (id.isEmpty()) continue;
-
-                String itTitle = normalizeForStrictCompare(item.optString("title"));
-                String itSub = normalizeForStrictCompare(item.optString("sub_title"));
-                if (!normTarget.equals(itTitle) && !normTarget.equals(itSub)) {
-                    continue;
+            for (int i = 0; i < Math.min(2, cands.size()); i++) {
+                DoubanCandidate cand = cands.get(i);
+                if (!cand.imgUrl.isEmpty()) {
+                    out.add(ImageLoader.upgradePosterUrl(cand.imgUrl, true));
                 }
-
-                String itYearStr = extractFourDigitYear(item.optString("year"));
-                int itYear = parseYearInt(itYearStr);
-                int score = 0;
-                if (targetYear > 0) {
-                    if (itYear > 0) {
-                        int diff = Math.abs(targetYear - itYear);
-                        if (diff == 0) score = 100;
-                        else if (diff == 1) score = 60;
-                        else continue;
-                    } else {
-                        score = 15;
+                String rexxarUrl = "https://m.douban.com/rexxar/api/v2/movie/" + cand.id;
+                String rexxarJson =
+                        httpGetText(
+                                rexxarUrl,
+                                "https://m.douban.com/movie/subject/" + cand.id + "/",
+                                true,
+                                3800);
+                if (rexxarJson != null && rexxarJson.trim().startsWith("{")) {
+                    JSONObject obj = new JSONObject(rexxarJson);
+                    JSONObject ratingObj = obj.optJSONObject("rating");
+                    if (ratingObj != null) {
+                        double rv = ratingObj.optDouble("value", 0.0);
+                        if (rv >= 2.0 && rv <= 10.0) {
+                            DOUBAN_RATING_CACHE.put(
+                                    normTarget + "#" + extractFourDigitYear(year), rv);
+                            DOUBAN_RATING_CACHE.put(normTarget + "#", rv);
+                        }
                     }
-                } else {
-                    score = itYear > 0 ? 40 : 20;
-                }
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestId = id;
-                    bestImg = item.optString("img", "").trim();
-                }
-            }
-
-            if (bestId.isEmpty()) return;
-            if (!bestImg.isEmpty()) {
-                out.add(ImageLoader.upgradePosterUrl(bestImg, true));
-            }
-            String rexxarUrl = "https://m.douban.com/rexxar/api/v2/movie/" + bestId;
-            String rexxarJson =
-                    httpGetText(
-                            rexxarUrl,
-                            "https://m.douban.com/movie/subject/" + bestId + "/",
-                            true,
-                            3800);
-            if (rexxarJson != null && rexxarJson.trim().startsWith("{")) {
-                JSONObject obj = new JSONObject(rexxarJson);
-                JSONObject ratingObj = obj.optJSONObject("rating");
-                if (ratingObj != null) {
-                    double rv = ratingObj.optDouble("value", 0.0);
-                    if (rv >= 2.0 && rv <= 10.0) {
-                        DOUBAN_RATING_CACHE.put(normTarget + "#" + extractFourDigitYear(year), rv);
+                    JSONObject pic = obj.optJSONObject("pic");
+                    if (pic != null) {
+                        String large = pic.optString("large", "").trim();
+                        if (!large.isEmpty()) {
+                            out.add(ImageLoader.upgradePosterUrl(large, true));
+                        }
+                        String normal = pic.optString("normal", "").trim();
+                        if (!normal.isEmpty()) {
+                            out.add(ImageLoader.upgradePosterUrl(normal, true));
+                        }
                     }
-                }
-                JSONObject pic = obj.optJSONObject("pic");
-                if (pic != null) {
-                    String large = pic.optString("large", "").trim();
-                    if (!large.isEmpty()) {
-                        out.add(ImageLoader.upgradePosterUrl(large, true));
-                    }
-                    String normal = pic.optString("normal", "").trim();
-                    if (!normal.isEmpty()) {
-                        out.add(ImageLoader.upgradePosterUrl(normal, true));
-                    }
+                    if (!out.isEmpty()) break;
                 }
             }
         } catch (Exception ignored) {
@@ -624,6 +743,7 @@ final class ImmersivePoster extends FrameLayout {
         final String cleanYear = extractFourDigitYear(rawYear);
         final String rKey = normTarget + "#" + cleanYear;
         Double cached = DOUBAN_RATING_CACHE.get(rKey);
+        if (cached == null) cached = DOUBAN_RATING_CACHE.get(normTarget + "#");
         if (cached != null && cached >= 2.0) {
             try {
                 onResolved.accept(cached);
@@ -637,10 +757,17 @@ final class ImmersivePoster extends FrameLayout {
                     if (generation != a.generation || a.isFinishing()) return;
                     try {
                         Double after = DOUBAN_RATING_CACHE.get(rKey);
+                        if (after == null) after = DOUBAN_RATING_CACHE.get(normTarget + "#");
+                        if (after == null) {
+                            findVerifiedDoubanSubjects(cleanTitle, cleanYear);
+                            after = DOUBAN_RATING_CACHE.get(rKey);
+                            if (after == null) after = DOUBAN_RATING_CACHE.get(normTarget + "#");
+                        }
                         if (after == null) {
                             Set<String> dummy = new LinkedHashSet<>();
                             collectVerifiedDoubanPosters(cleanTitle, cleanYear, "", "", dummy);
                             after = DOUBAN_RATING_CACHE.get(rKey);
+                            if (after == null) after = DOUBAN_RATING_CACHE.get(normTarget + "#");
                         }
                         if (after != null && after >= 2.0) {
                             final Double val = after;
@@ -711,146 +838,45 @@ final class ImmersivePoster extends FrameLayout {
     private static void collectVerifiedDoubanStills(
             String title, String year, String actor, String director, Set<String> out) {
         try {
-            String suggestUrl =
-                    "https://movie.douban.com/j/subject_suggest?q="
-                            + URLEncoder.encode(title, "UTF-8");
-            String json = httpGetText(suggestUrl, "https://movie.douban.com/", false, 4000);
-            if (json == null || !json.trim().startsWith("[")) return;
-            JSONArray arr = new JSONArray(json);
-            if (arr.length() == 0) return;
+            java.util.List<DoubanCandidate> cands = findVerifiedDoubanSubjects(title, year);
+            if (cands.isEmpty()) return;
 
-            String normTarget = normalizeForStrictCompare(title);
-            if (normTarget.isEmpty()) return;
+            for (int cIdx = 0; cIdx < Math.min(3, cands.size()) && out.isEmpty(); cIdx++) {
+                String bestId = cands.get(cIdx).id;
+                if (bestId == null || bestId.isEmpty()) continue;
 
-            int targetYear = parseYearInt(year);
-            String bestId = "";
-            int bestScore = -1;
+                String photosUrl =
+                        "https://m.douban.com/rexxar/api/v2/movie/" + bestId + "/photos?count=20";
+                String photosJson =
+                        httpGetText(
+                                photosUrl,
+                                "https://m.douban.com/movie/subject/" + bestId + "/",
+                                true,
+                                4500);
+                if (photosJson == null || !photosJson.trim().startsWith("{")) continue;
+                JSONObject root = new JSONObject(photosJson);
+                JSONArray photos = root.optJSONArray("photos");
+                if (photos == null || photos.length() == 0) continue;
 
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject item = arr.optJSONObject(i);
-                if (item == null) continue;
-                String id = item.optString("id").trim();
-                if (id.isEmpty()) continue;
-
-                String itTitle = normalizeForStrictCompare(item.optString("title"));
-                String itSub = normalizeForStrictCompare(item.optString("sub_title"));
-                // Require strict title equality (never allow partial substring matches)
-                if (!normTarget.equals(itTitle) && !normTarget.equals(itSub)) {
-                    continue;
-                }
-
-                String itYearStr = extractFourDigitYear(item.optString("year"));
-                int itYear = parseYearInt(itYearStr);
-                int score = 0;
-
-                if (targetYear > 0) {
-                    if (itYear > 0) {
-                        int diff = Math.abs(targetYear - itYear);
-                        if (diff == 0) {
-                            score = 100;
-                        } else if (diff == 1) {
-                            score = 60;
-                        } else {
-                            // Different year (> 1 year apart): reject to prevent remake/homonym
-                            // mismatch
-                            continue;
-                        }
-                    } else {
-                        // Candidate has no year in suggest; only accept with low score if verified
-                        // later
-                        score = 15;
+                int added = 0;
+                for (int i = 0; i < photos.length() && added < 4; i++) {
+                    JSONObject p = photos.optJSONObject(i);
+                    if (p == null) continue;
+                    JSONObject img = p.optJSONObject("image");
+                    if (img == null) continue;
+                    JSONObject large = img.optJSONObject("large");
+                    if (large == null) large = img.optJSONObject("normal");
+                    if (large == null) continue;
+                    int w = large.optInt("width", 0);
+                    int h = large.optInt("height", 0);
+                    String u = large.optString("url", "").trim();
+                    if (w >= 600 && h >= 330 && w >= h * 1.18f && !u.isEmpty()) {
+                        out.add(ImageLoader.upgradePosterUrl(u, true));
+                        added++;
                     }
-                } else {
-                    score = itYear > 0 ? 40 : 20;
-                }
-
-                if (score > bestScore) {
-                    bestScore = score;
-                    bestId = id;
-                }
-            }
-
-            if (bestId.isEmpty()) return;
-
-            // If score was low (e.g. missing year in subject_suggest) or actor/director is known,
-            // verify the subject metadata via Rexxar before accepting its stills.
-            if (bestScore < 60 && (targetYear > 0 || (actor != null && !actor.isEmpty()))) {
-                if (!verifyDoubanSubjectMetadata(bestId, targetYear, actor, director)) {
-                    return;
-                }
-            }
-
-            String photosUrl =
-                    "https://m.douban.com/rexxar/api/v2/movie/" + bestId + "/photos?count=20";
-            String photosJson =
-                    httpGetText(
-                            photosUrl,
-                            "https://m.douban.com/movie/subject/" + bestId + "/",
-                            true,
-                            4500);
-            if (photosJson == null || !photosJson.trim().startsWith("{")) return;
-            JSONObject root = new JSONObject(photosJson);
-            JSONArray photos = root.optJSONArray("photos");
-            if (photos == null || photos.length() == 0) return;
-
-            int added = 0;
-            for (int i = 0; i < photos.length() && added < 4; i++) {
-                JSONObject p = photos.optJSONObject(i);
-                if (p == null) continue;
-                JSONObject img = p.optJSONObject("image");
-                if (img == null) continue;
-                JSONObject large = img.optJSONObject("large");
-                if (large == null) large = img.optJSONObject("normal");
-                if (large == null) continue;
-                int w = large.optInt("width", 0);
-                int h = large.optInt("height", 0);
-                String u = large.optString("url", "").trim();
-                if (w >= 600 && h >= 330 && w >= h * 1.18f && !u.isEmpty()) {
-                    out.add(ImageLoader.upgradePosterUrl(u, true));
-                    added++;
                 }
             }
         } catch (Exception ignored) {
-        }
-    }
-
-    private static boolean verifyDoubanSubjectMetadata(
-            String subjectId, int targetYear, String rawActor, String rawDirector) {
-        try {
-            String url = "https://m.douban.com/rexxar/api/v2/movie/" + subjectId;
-            String json =
-                    httpGetText(
-                            url,
-                            "https://m.douban.com/movie/subject/" + subjectId + "/",
-                            true,
-                            3500);
-            if (json == null || !json.trim().startsWith("{")) return false;
-            JSONObject obj = new JSONObject(json);
-            int subYear = parseYearInt(extractFourDigitYear(obj.optString("year")));
-            if (targetYear > 0 && subYear > 0 && Math.abs(targetYear - subYear) > 1) {
-                return false;
-            }
-            if (rawActor != null && !rawActor.trim().isEmpty()) {
-                String intro = obj.toString();
-                String[] parts = rawActor.split("[/,，、\\s]+");
-                boolean anyMatch = false;
-                int checked = 0;
-                for (String part : parts) {
-                    String clean = part.trim();
-                    if (clean.length() < 2) continue;
-                    checked++;
-                    if (intro.contains(clean)) {
-                        anyMatch = true;
-                        break;
-                    }
-                }
-                if (checked > 0 && !anyMatch && targetYear <= 0) {
-                    return false;
-                }
-            }
-            return true;
-        } catch (Exception e) {
-            return false;
         }
     }
 
@@ -868,7 +894,7 @@ final class ImmersivePoster extends FrameLayout {
                                 + type
                                 + "&keyword="
                                 + URLEncoder.encode(title, "UTF-8");
-                String json = httpGetText(url, "https://www.bilibili.com/", false, 3800);
+                String json = httpGetText(url, "https://search.bilibili.com/", false, 3800);
                 if (json == null || json.isEmpty()) continue;
                 JSONObject root = new JSONObject(json);
                 JSONObject data = root.optJSONObject("data");
@@ -897,6 +923,19 @@ final class ImmersivePoster extends FrameLayout {
                     if (!hCover.isEmpty()) {
                         out.add(hCover);
                         return;
+                    }
+                    JSONArray eps = item.optJSONArray("eps");
+                    if (eps != null && eps.length() > 0) {
+                        for (int e = 0; e < Math.min(2, eps.length()); e++) {
+                            JSONObject ep = eps.optJSONObject(e);
+                            if (ep != null) {
+                                String epCover = normalizeCoverUrl(ep.optString("cover"));
+                                if (!epCover.isEmpty()) {
+                                    out.add(epCover);
+                                }
+                            }
+                        }
+                        if (!out.isEmpty()) return;
                     }
                 }
             } catch (Exception ignored) {
@@ -937,6 +976,11 @@ final class ImmersivePoster extends FrameLayout {
                             ? "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.40"
                             : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
             conn.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
+            if (urlStr != null && urlStr.contains("bilibili.com")) {
+                conn.setRequestProperty(
+                        "Cookie",
+                        "buvid3=00000000-0000-0000-0000-000000000000infoc; b_nut=1700000000");
+            }
             if (referer != null && !referer.isEmpty()) {
                 conn.setRequestProperty("Referer", referer);
             }

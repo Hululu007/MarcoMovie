@@ -2,7 +2,7 @@
 
 ## 未发布 — 订阅兼容修复中
 
-Android 手机/平板（0.5.7）与电视（0.5.6）的已验证升级与修复已按各平台独立版本号发布。以下跨端验证及实验仍在继续，不能视为 iPhone 或其他端已更新。
+Android 手机/平板（0.5.7）与电视（0.5.7）的已验证升级与修复已按各平台独立版本号发布。以下跨端验证及实验仍在继续，不能视为 iPhone 或其他端已更新。
 
 - Python 请求保留二进制内容，修复 Session Cookie 属性与同名 Cookie 的域隔离。
 - 为指定版本 T4 插件加入本机配置解析和共享适配，保留真实分页、影片及剧集标识；两条样例已取得目录、详情和 HLS 清单，其中一条搜索仍要求网站验证。
@@ -30,6 +30,14 @@ iPhone 仍需完成指定订阅及插件线路的独立运行、实际播放验�
 - 同步订阅源、多仓、脚本源（HTTP T4、DRPY、CatVod JS、Python Spider、已移植 Guard 源）与直播目录（`LiveCatalogParser`、`lives[].api`、`proxy://?do=live&type=txt&ext=`、Base64 直播列表、`parses` 解析回退）完整适配。
 - 切换为按 macOS 独立检查更新（`updates/macos.json`），切换筛选、直播源或离开详情页时主动取消过期请求。
 - 0.5.0 客户端首次升级请从下载页手动下载 macOS 0.5.1 应用包；限制同上，未完成的 33 条插件移植不计为已支持。
+
+## Android 电视 / 盒子 0.5.7 — 2026-11-08
+
+完整说明：[Android 电视 / 盒子 0.5.7](docs/releases/android-tv-v0.5.7.md)。
+
+- 优化选集详情页（`DetailScreen` + `ImmersivePoster` + `ImageLoader`）国外电影与国内动漫的 16:9 横版剧照/海报获取：将失效返回空列表的 `subject_suggest` 接口升级为 `m.douban.com/search` 多候选评分排序检索并拉取 `rexxar/api/v2/movie/{id}/photos` 横版剧照，将 `img4`–`img9.doubanio.com` 重写为 `img1.doubanio.com` 解决 CDN 防盗链挑战，并为哔哩哔哩番剧检索补齐 `buvid3` Cookie 与 `eps[0].cover` 横版封面回退及 `年番`/续集片名归一化匹配。
+- 修复字幕调整页（`PlaybackControls.showSubtitleAdjuster`）进入方向键位置微调时底层设置页面跟随滚动的问题：调节期间不再每次按键触发 `SettingsScreen` 全量重绘（改为关闭弹窗时刷新一次），同时锁定底层 `ScrollView` 焦点穿透与滚动位置，并将方向键事件闭环拦截在弹窗内。
+- 将电视端选集详情页（`DetailScreen.buildRatingAndCastRow`）评分升级为**豆瓣评分（`豆瓣 ★ X.X`）**与**烂番茄指数（`烂番茄 XX%`）**双徽章展示，并实时接入 `ImmersivePoster.resolveDoubanRating` 回填真实豆瓣评分。
 
 ## Android 手机 / 平板 0.5.7 — 2026-11-08
 

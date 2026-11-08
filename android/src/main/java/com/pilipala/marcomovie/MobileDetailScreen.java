@@ -1737,7 +1737,7 @@ final class MobileDetailScreen {
         return new SeasonMeta(t, 1, "第 1 季", false);
     }
 
-    private static void updateRatingBadges(
+    static void updateRatingBadges(
             TextView doubanBadge, TextView rtBadge, Cms.Video v, double resolvedDouban) {
         double dbScore = resolvedDouban;
         if (dbScore < 2.0 && v != null) {

@@ -1017,7 +1017,20 @@ final class PlaybackControls {
         final TextView[] weightValRef = new TextView[1];
         final TextView[] posValRef = new TextView[1];
         final TextView[] styleBtnTextRef = new TextView[1];
+        final View[] initialTvFocusRef = new View[1];
         final boolean[] internalSync = {false};
+        final int savedScrollY = a.scroll != null ? a.scroll.getScrollY() : 0;
+        final String savedFocusTag =
+                a.getCurrentFocus() != null && a.getCurrentFocus().getTag() instanceof String
+                        ? (String) a.getCurrentFocus().getTag()
+                        : (a.current != null ? a.current.focus : null);
+        final int savedDescendantFocus =
+                a.scroll != null
+                        ? a.scroll.getDescendantFocusability()
+                        : ViewGroup.FOCUS_AFTER_DESCENDANTS;
+        if (a.scroll != null && liveSub == null) {
+            a.scroll.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        }
 
         final Runnable syncState =
                 () -> {
@@ -1053,7 +1066,7 @@ final class PlaybackControls {
                                 "字幕颜色与样式  ·  " + SubtitleOverlayView.STYLE_LABELS[st] + "  ▸");
                         styleBtnTextRef[0].setTextColor(SubtitleOverlayView.STYLE_COLORS[st]);
                     }
-                    if (onChanged != null) onChanged.run();
+                    if (liveSub != null && onChanged != null) onChanged.run();
                 };
 
         final Runnable resetDefaults =
@@ -1336,63 +1349,99 @@ final class PlaybackControls {
             LinearLayout posRow = a.row();
             posRow.setGravity(Gravity.CENTER_VERTICAL);
             final Button posDpadBtn = a.button("十字方向键调位置（点击进入全向微调）", "tv-sub-pos-mode", () -> {});
+            posDpadBtn.setId(View.generateViewId());
+            posDpadBtn.setNextFocusUpId(posDpadBtn.getId());
+            posDpadBtn.setNextFocusLeftId(posDpadBtn.getId());
             posDpadBtn.setTextSize(13f);
             posDpadBtn.setMinHeight(a.dp(40));
             posDpadBtn.setMinimumHeight(a.dp(40));
+            initialTvFocusRef[0] = posDpadBtn;
+
+            final Runnable updatePosModeUi =
+                    () -> {
+                        boolean active = posDpadActive[0];
+                        posDpadBtn.setText(
+                                active ? "● 正在用 ▲▼◀▶ 调节位置（按确认键或返回键退出位置模式）" : "十字方向键调位置（点击进入全向微调）");
+                        int selfId = posDpadBtn.getId();
+                        posDpadBtn.setNextFocusUpId(selfId);
+                        posDpadBtn.setNextFocusLeftId(selfId);
+                        posDpadBtn.setNextFocusDownId(active ? selfId : View.NO_ID);
+                        posDpadBtn.setNextFocusRightId(active ? selfId : View.NO_ID);
+                    };
+
             posDpadBtn.setOnClickListener(
                     v -> {
                         posDpadActive[0] = !posDpadActive[0];
-                        posDpadBtn.setText(
-                                posDpadActive[0]
-                                        ? "● 正在用 ▲▼◀▶ 调节位置（按确认键退出位置模式）"
-                                        : "十字方向键调位置（点击进入全向微调）");
+                        updatePosModeUi.run();
+                        posDpadBtn.requestFocus();
                     });
-            posDpadBtn.setOnKeyListener(
+
+            final View.OnKeyListener posModeKeyHandler =
                     (v, keyCode, event) -> {
-                        if (!posDpadActive[0] || event.getAction() != KeyEvent.ACTION_DOWN) {
+                        if (!posDpadActive[0]) {
                             return false;
                         }
+                        int action = event.getAction();
                         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-                            int bt =
-                                    Prefs.clampSubtitleBottom(
-                                            a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24) + 4);
-                            a.prefs.edit().putInt(Prefs.SUBTITLE_BOTTOM, bt).apply();
-                            syncState.run();
+                            if (action == KeyEvent.ACTION_DOWN) {
+                                int bt =
+                                        Prefs.clampSubtitleBottom(
+                                                a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24) + 4);
+                                a.prefs.edit().putInt(Prefs.SUBTITLE_BOTTOM, bt).apply();
+                                syncState.run();
+                            }
                             return true;
                         }
                         if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                            int bt =
-                                    Prefs.clampSubtitleBottom(
-                                            a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24) - 4);
-                            a.prefs.edit().putInt(Prefs.SUBTITLE_BOTTOM, bt).apply();
-                            syncState.run();
+                            if (action == KeyEvent.ACTION_DOWN) {
+                                int bt =
+                                        Prefs.clampSubtitleBottom(
+                                                a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24) - 4);
+                                a.prefs.edit().putInt(Prefs.SUBTITLE_BOTTOM, bt).apply();
+                                syncState.run();
+                            }
                             return true;
                         }
                         if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
-                            int ox =
-                                    Prefs.clampSubtitleOffsetX(
-                                            a.prefs.getInt(Prefs.SUBTITLE_OFFSET_X, 0) - 4);
-                            if (Math.abs(ox) <= 2) ox = 0;
-                            a.prefs.edit().putInt(Prefs.SUBTITLE_OFFSET_X, ox).apply();
-                            syncState.run();
+                            if (action == KeyEvent.ACTION_DOWN) {
+                                int ox =
+                                        Prefs.clampSubtitleOffsetX(
+                                                a.prefs.getInt(Prefs.SUBTITLE_OFFSET_X, 0) - 4);
+                                if (Math.abs(ox) <= 2) ox = 0;
+                                a.prefs.edit().putInt(Prefs.SUBTITLE_OFFSET_X, ox).apply();
+                                syncState.run();
+                            }
                             return true;
                         }
                         if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
-                            int ox =
-                                    Prefs.clampSubtitleOffsetX(
-                                            a.prefs.getInt(Prefs.SUBTITLE_OFFSET_X, 0) + 4);
-                            if (Math.abs(ox) <= 2) ox = 0;
-                            a.prefs.edit().putInt(Prefs.SUBTITLE_OFFSET_X, ox).apply();
-                            syncState.run();
+                            if (action == KeyEvent.ACTION_DOWN) {
+                                int ox =
+                                        Prefs.clampSubtitleOffsetX(
+                                                a.prefs.getInt(Prefs.SUBTITLE_OFFSET_X, 0) + 4);
+                                if (Math.abs(ox) <= 2) ox = 0;
+                                a.prefs.edit().putInt(Prefs.SUBTITLE_OFFSET_X, ox).apply();
+                                syncState.run();
+                            }
                             return true;
                         }
-                        if (keyCode == KeyEvent.KEYCODE_BACK) {
-                            posDpadActive[0] = false;
-                            posDpadBtn.setText("十字方向键调位置（点击进入全向微调）");
+                        if (keyCode == KeyEvent.KEYCODE_BACK
+                                || keyCode == KeyEvent.KEYCODE_ESCAPE
+                                || keyCode == KeyEvent.KEYCODE_DPAD_CENTER
+                                || keyCode == KeyEvent.KEYCODE_ENTER
+                                || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                            if (action == KeyEvent.ACTION_UP) {
+                                posDpadActive[0] = false;
+                                updatePosModeUi.run();
+                                posDpadBtn.requestFocus();
+                            }
                             return true;
                         }
-                        return false;
-                    });
+                        return true;
+                    };
+
+            posDpadBtn.setOnKeyListener(posModeKeyHandler);
+            dlg.setOnKeyListener(
+                    (d, keyCode, event) -> posModeKeyHandler.onKey(posDpadBtn, keyCode, event));
             LinearLayout.LayoutParams posBtnLp = new LinearLayout.LayoutParams(0, a.dp(40), 1f);
             posBtnLp.rightMargin = a.dp(8);
             posRow.addView(posDpadBtn, posBtnLp);
@@ -1408,6 +1457,8 @@ final class PlaybackControls {
                                 a.prefs.edit().putInt(Prefs.SUBTITLE_BOTTOM, bt).apply();
                                 syncState.run();
                             });
+            upBtn.setId(View.generateViewId());
+            upBtn.setNextFocusUpId(upBtn.getId());
             upBtn.setTextSize(12.5f);
             upBtn.setMinHeight(a.dp(40));
             upBtn.setMinimumHeight(a.dp(40));
@@ -1426,6 +1477,9 @@ final class PlaybackControls {
                                 a.prefs.edit().putInt(Prefs.SUBTITLE_BOTTOM, bt).apply();
                                 syncState.run();
                             });
+            downBtn.setId(View.generateViewId());
+            downBtn.setNextFocusUpId(downBtn.getId());
+            downBtn.setNextFocusRightId(downBtn.getId());
             downBtn.setTextSize(12.5f);
             downBtn.setMinHeight(a.dp(40));
             downBtn.setMinimumHeight(a.dp(40));
@@ -1557,6 +1611,9 @@ final class PlaybackControls {
                                             syncState.run();
                                         });
                             });
+            styleDrawerBtn.setId(View.generateViewId());
+            styleDrawerBtn.setNextFocusDownId(styleDrawerBtn.getId());
+            styleDrawerBtn.setNextFocusLeftId(styleDrawerBtn.getId());
             styleDrawerBtn.setTextSize(13f);
             styleDrawerBtn.setMinHeight(a.dp(42));
             styleDrawerBtn.setMinimumHeight(a.dp(42));
@@ -1566,6 +1623,8 @@ final class PlaybackControls {
             bottomRow.addView(styleDrawerBtn, styleLp);
 
             Button resetBtn = a.button("恢复默认", "tv-sub-reset", resetDefaults);
+            resetBtn.setId(View.generateViewId());
+            resetBtn.setNextFocusDownId(resetBtn.getId());
             resetBtn.setTextSize(13f);
             resetBtn.setMinHeight(a.dp(42));
             resetBtn.setMinimumHeight(a.dp(42));
@@ -1574,6 +1633,9 @@ final class PlaybackControls {
             bottomRow.addView(resetBtn, resetLp);
 
             Button doneBtn = a.button("完成", "tv-sub-done", dlg::dismiss);
+            doneBtn.setId(View.generateViewId());
+            doneBtn.setNextFocusDownId(doneBtn.getId());
+            doneBtn.setNextFocusRightId(doneBtn.getId());
             doneBtn.setTextSize(13f);
             doneBtn.setMinHeight(a.dp(42));
             doneBtn.setMinimumHeight(a.dp(42));
@@ -1593,11 +1655,19 @@ final class PlaybackControls {
 
         dlg.setOnDismissListener(
                 d -> {
+                    if (a.scroll != null && liveSub == null) {
+                        a.scroll.setDescendantFocusability(savedDescendantFocus);
+                        a.scroll.scrollTo(0, savedScrollY);
+                    }
+                    if (a.current != null && liveSub == null) {
+                        if (savedFocusTag != null) a.current.focus = savedFocusTag;
+                        a.current.scroll = savedScrollY;
+                    }
                     if (liveSub != null) {
                         liveSub.setPreviewActive(false);
                         liveSub.setVisibility(View.VISIBLE);
-                        if (onChanged != null) onChanged.run();
                     }
+                    if (onChanged != null) onChanged.run();
                 });
         dlg.setContentView(fullRoot, new ViewGroup.LayoutParams(a.windowWidth(), a.windowHeight()));
         dlg.show();
@@ -1606,6 +1676,10 @@ final class PlaybackControls {
                     .setLayout(
                             WindowManager.LayoutParams.MATCH_PARENT,
                             WindowManager.LayoutParams.MATCH_PARENT);
+        }
+        if (initialTvFocusRef[0] != null) {
+            initialTvFocusRef[0].requestFocus();
+            initialTvFocusRef[0].post(initialTvFocusRef[0]::requestFocus);
         }
     }
 
@@ -1746,9 +1820,12 @@ final class PlaybackControls {
                                             + "（"
                                             + clamped
                                             + " 秒）");
-                    if (onChanged != null) onChanged.run();
                 };
         applySec.accept(initialSec);
+        dlg.setOnDismissListener(
+                d -> {
+                    if (onChanged != null) onChanged.run();
+                });
 
         bar.setOnSeekBarChangeListener(
                 new SeekBar.OnSeekBarChangeListener() {

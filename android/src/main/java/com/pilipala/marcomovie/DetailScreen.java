@@ -369,7 +369,7 @@ final class DetailScreen {
                     listing.year,
                     listing.actor,
                     listing.director,
-                    listing.year != null && !listing.year.trim().isEmpty());
+                    true);
         }
     }
 
@@ -542,32 +542,35 @@ final class DetailScreen {
         LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER_VERTICAL);
 
-        TextView tmdb = a.text("TMDB", 10, 0xff111318);
-        tmdb.setTypeface(null, Typeface.BOLD);
-        tmdb.setPadding(a.dp(6), a.dp(2), a.dp(6), a.dp(2));
-        GradientDrawable tmdbBg = new GradientDrawable();
-        tmdbBg.setCornerRadius(a.dp(4));
-        tmdbBg.setColor(0xfff5c518);
-        tmdb.setBackground(tmdbBg);
-        row.addView(tmdb);
+        final TextView doubanBadge = a.text("", 12, 0xff6ee7b7);
+        doubanBadge.setTag("detail-douban-rating");
+        doubanBadge.setTypeface(null, Typeface.BOLD);
+        doubanBadge.setPadding(a.dp(10), a.dp(3.5f), a.dp(10), a.dp(3.5f));
+        doubanBadge.setBackground(MobileDetailScreen.glassBg(a, 0x3800b51d, 0x6634d399, 999));
+        LinearLayout.LayoutParams dbLp = new LinearLayout.LayoutParams(-2, -2);
+        dbLp.rightMargin = a.dp(8);
+        row.addView(doubanBadge, dbLp);
 
-        String scoreText = extractScore(v.remarks);
-        TextView score = a.text(scoreText, 14, 0xffffd54f);
-        score.setTypeface(null, Typeface.BOLD);
-        score.setPadding(a.dp(6), 0, a.dp(10), 0);
-        row.addView(score);
+        final TextView rtBadge = a.text("", 12, 0xffffb4a2);
+        rtBadge.setTag("detail-rt-rating");
+        rtBadge.setTypeface(null, Typeface.BOLD);
+        rtBadge.setPadding(a.dp(10), a.dp(3.5f), a.dp(10), a.dp(3.5f));
+        rtBadge.setBackground(MobileDetailScreen.glassBg(a, 0x38fa320a, 0x66ff6b4a, 999));
+        LinearLayout.LayoutParams rtLp = new LinearLayout.LayoutParams(-2, -2);
+        rtLp.rightMargin = a.dp(8);
+        row.addView(rtBadge, rtLp);
 
-        TextView dou = a.text("豆", 10, MainActivity.WHITE);
-        dou.setTypeface(null, Typeface.BOLD);
-        dou.setPadding(a.dp(5), a.dp(2), a.dp(5), a.dp(2));
-        GradientDrawable douBg = new GradientDrawable();
-        douBg.setCornerRadius(a.dp(4));
-        douBg.setColor(0xff00b51d);
-        dou.setBackground(douBg);
-        row.addView(dou);
+        MobileDetailScreen.updateRatingBadges(doubanBadge, rtBadge, v, 0.0);
+        ImmersivePoster.resolveDoubanRating(
+                a,
+                v.title,
+                v.year,
+                score -> MobileDetailScreen.updateRatingBadges(doubanBadge, rtBadge, v, score));
 
         if (s != null && s.name != null && !s.name.isEmpty()) {
-            TextView siteLabel = a.text(" · " + s.name, 13, 0xd0ebebf5);
+            TextView siteLabel = a.text(s.name, 12, 0xe6ffffff);
+            siteLabel.setPadding(a.dp(10), a.dp(3.5f), a.dp(10), a.dp(3.5f));
+            siteLabel.setBackground(MobileDetailScreen.glassBg(a, 0x26ffffff, 0x38ffffff, 999));
             row.addView(siteLabel);
         }
 
