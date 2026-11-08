@@ -221,7 +221,7 @@ final class MobileDetailScreen {
             this.posterWindowHeight = posterWindowHeight;
             this.topScrimHeight = topScrimHeight;
             this.ambientColor = initAmbient;
-            this.blurStartY = Math.round(posterWindowHeight * 0.48f);
+            this.blurStartY = Math.round(posterWindowHeight * 0.62f);
             maskPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_IN));
         }
 
@@ -316,8 +316,9 @@ final class MobileDetailScreen {
             if (bw <= 0 || bh <= 0 || targetW <= 0 || targetH <= 0) return;
             float scale = Math.max(targetW / bw, targetH / bh);
             float dx = (targetW - bw * scale) * 0.5f;
-            // Bias slightly toward upper-center (-0.32 alignment like iPhone) so faces/titles shine
-            float dy = (targetH - bh * scale) * 0.34f;
+            // Bias slightly toward upper-center so faces and key poster artwork fill the expanded
+            // upper window
+            float dy = (targetH - bh * scale) * 0.26f;
             drawMatrix.setScale(scale, scale);
             drawMatrix.postTranslate(dx, dy);
         }
@@ -332,8 +333,8 @@ final class MobileDetailScreen {
             canvas.drawColor(ambientColor);
 
             int winH = Math.min(h, posterWindowHeight);
-            int bTop = Math.max(a.dp(80), Math.min(winH - a.dp(60), blurStartY - a.dp(26)));
-            int bFull = Math.min(winH, bTop + a.dp(56));
+            int bTop = Math.max(a.dp(120), Math.min(winH - a.dp(56), blurStartY - a.dp(10)));
+            int bFull = Math.min(winH, bTop + a.dp(54));
 
             if (rawBitmap != null && !rawBitmap.isRecycled() && winH > 0) {
                 int save = canvas.saveLayer(0, 0, w, winH, null);
@@ -381,7 +382,7 @@ final class MobileDetailScreen {
                                 new int[] {
                                     0xffffffff, 0xffffffff, 0xd9ffffff, 0x66ffffff, 0x00ffffff
                                 },
-                                new float[] {0f, 0.72f, 0.85f, 0.94f, 1f},
+                                new float[] {0f, 0.78f, 0.88f, 0.95f, 1f},
                                 Shader.TileMode.CLAMP));
                 canvas.drawRect(0, 0, w, winH, maskPaint);
                 maskPaint.setShader(null);
@@ -546,9 +547,9 @@ final class MobileDetailScreen {
         final int topPad = getStatusBarHeight(a);
         final int screenH = a.getResources().getDisplayMetrics().heightPixels;
         final int posterWindowH =
-                Math.max(a.dp(560), Math.min(a.dp(740), Math.round(screenH * 0.77f)));
+                Math.max(a.dp(640), Math.min(a.dp(860), Math.round(screenH * 0.85f)));
         final int foregroundHeroH =
-                Math.max(a.dp(420), Math.min(a.dp(535), Math.round(posterWindowH * 0.74f)));
+                Math.max(a.dp(510), Math.min(a.dp(660), Math.round(posterWindowH * 0.81f)));
         final int initAmbient = defaultAmbientForTitle(listing.title);
 
         a.root = new FrameLayout(a);
@@ -632,10 +633,11 @@ final class MobileDetailScreen {
         pillsRowLp.topMargin = a.dp(12);
         heroCenterCol.addView(pillsRow, pillsRowLp);
 
-        // Sync progressive poster blur start Y with the top of heroCenterCol (the movie title)
+        // Sync progressive poster blur start Y with the unscrolled top of heroCenterCol (the movie
+        // title)
         heroCenterCol.addOnLayoutChangeListener(
                 (v, l, t, r, b, ol, ot, or, ob) -> {
-                    int titleTopY = heroStage.getTop() + t - scrollView.getScrollY();
+                    int titleTopY = heroStage.getTop() + t;
                     backdropView.setBlurStartY(titleTopY);
                 });
 
