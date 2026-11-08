@@ -9,7 +9,7 @@ Desktop/Apple tags use `windows-vX.Y.Z`, `ios-vX.Y.Z` and `macos-vX.Y.Z`. They d
 Android phone/tablet and TV editions now have separate update feeds and explicit
 `android-mobile` / `android-tv` package names. See [Android update isolation](android-update-isolation.md)
 for the release tags, old-client migration aliases and runtime verification scope.
-Android phone/tablet and TV 0.5.3 were independently published on November 8;
+Android phone/tablet and TV 0.5.4 were independently published on November 8;
 see the platform-specific records below.
 
 See [installation package names](installation-package-names.md) for explicit
@@ -43,11 +43,11 @@ This website deployment did not replace any application installer.
 
 ## Published Android maintenance update
 
+[Android phone/tablet 0.5.4](releases/android-mobile-v0.5.4.md) and
+[Android TV/box 0.5.4](releases/android-tv-v0.5.4.md) use build commit
+`d014a7add909237da1b2d8ee95d2a81962a10ff9` (version code 54), building on
 [Android phone/tablet 0.5.3](releases/android-mobile-v0.5.3.md) and
-[Android TV/box 0.5.3](releases/android-tv-v0.5.3.md) use build commit
-`1a148080511978fe39d02cf349acbeab914b6ce6` (version code 53), building on
-[Android phone/tablet 0.5.2](releases/android-mobile-v0.5.2.md) and
-[Android TV/box 0.5.2](releases/android-tv-v0.5.2.md) (`5039665cccc344f635fd2730c8c5fcc9f7d6de66`).
+[Android TV/box 0.5.3](releases/android-tv-v0.5.3.md) (`1a148080511978fe39d02cf349acbeab914b6ce6`).
 The 0.5.3 release eliminates `PixelCopy` backdrop blur and full-screen hardware
 layer reallocations on the playback overlay to fix Dolby Vision / HDR toolbar
 pull-up stutter on TV, adds progress-only HUD during D-pad fast-forward/rewind,

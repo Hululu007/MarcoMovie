@@ -24,4 +24,4 @@
 
 构建代码：`1a148080511978fe39d02cf349acbeab914b6ce6`（Android 0.5.3，版本代码 53）。
 
-本地 JVM 与字节码回归检查全部通过，并在电视真机（`192.168.1.28:5555`）完成 `HomeProbe`、`InteractionProbe` 与 `LayoutProbe` 全项真机验证。正式安装包经原签名签署、逐文件内容核对和摘要校验，附对应源码。
+本地 JVM 与字节码回归检查全部通过，并在电视真机完成 `HomeProbe`、`InteractionProbe` 与 `LayoutProbe` 全项真机验证。正式安装包经原签名签署、逐文件内容核对和摘要校验，附对应源码。
