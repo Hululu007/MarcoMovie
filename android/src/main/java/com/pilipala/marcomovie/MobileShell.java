@@ -97,6 +97,7 @@ final class MobileShell {
     private Runnable resumeHome;
     private FrameLayout retainedRoot;
     private int retainedWidth, retainedHeight, retainedEpoch;
+    private boolean renderedPortrait = true;
 
     boolean resume() {
         if (!homeReady
@@ -104,7 +105,8 @@ final class MobileShell {
                 || retainedRoot == null
                 || retainedEpoch != a.engineEpoch
                 || retainedWidth != a.windowWidth()
-                || retainedHeight != a.windowHeight()) return false;
+                || retainedHeight != a.windowHeight()
+                || renderedPortrait != a.isPortrait()) return false;
         a.cancelPageRequests();
         a.cancelArtwork();
         a.releasePlayer();
@@ -113,6 +115,7 @@ final class MobileShell {
         if (resumeHome != null) resumeHome.run();
         a.root = retainedRoot;
         a.setContentView(retainedRoot);
+        a.watchRootLayout(retainedRoot);
         a.applyMobileSystemBars(false);
         a.scroll = homeScroll;
         a.body = homeBody;
@@ -189,11 +192,16 @@ final class MobileShell {
         }
 
         FrameLayout backdrop = new FrameLayout(a);
+        backdrop.setMinimumWidth(a.windowWidth());
+        backdrop.setMinimumHeight(a.windowHeight());
         backdrop.setBackgroundColor(0x88000000);
         backdrop.setOnClickListener(v -> dlg.dismiss());
 
+        int sheetWidth =
+                a.isPortrait() ? a.windowWidth() : Math.min(a.windowWidth() - a.dp(32), a.dp(540));
         LinearLayout sheet = a.vertical();
         sheet.setClickable(true);
+        sheet.setMinimumWidth(sheetWidth);
         sheet.setPadding(a.dp(20), a.dp(12), a.dp(20), a.dp(28));
         GradientDrawable sheetBg =
                 new GradientDrawable(
@@ -274,12 +282,24 @@ final class MobileShell {
         sheet.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
 
         FrameLayout.LayoutParams sheetLp =
-                new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                new FrameLayout.LayoutParams(
+                        sheetWidth, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         sheetLp.topMargin = Math.max(a.dp(80), a.windowHeight() - maxSheetHeight);
         backdrop.addView(sheet, sheetLp);
 
-        dlg.setContentView(backdrop);
+        dlg.setContentView(
+                backdrop,
+                new android.view.ViewGroup.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT));
         dlg.show();
+        if (dlg.getWindow() != null) {
+            dlg.getWindow()
+                    .setLayout(
+                            android.view.WindowManager.LayoutParams.MATCH_PARENT,
+                            android.view.WindowManager.LayoutParams.MATCH_PARENT);
+            dlg.getWindow().setGravity(Gravity.BOTTOM | Gravity.FILL_HORIZONTAL);
+        }
     }
 
     static void showMobileImportDialog(MainActivity a) {
@@ -492,6 +512,29 @@ final class MobileShell {
         a.root = new FrameLayout(a);
         a.root.setBackgroundColor(0xff070c0a);
         a.setContentView(a.root);
+        a.watchRootLayout(a.root);
+        renderedPortrait = a.isPortrait();
+        final boolean builtPortrait = renderedPortrait;
+        final FrameLayout shellRoot = a.root;
+        shellRoot.addOnLayoutChangeListener(
+                (view, l, t, r, b, ol, ot, or, ob) -> {
+                    int w = r - l, h = b - t;
+                    if (w <= 0 || h <= 0 || a.root != shellRoot) return;
+                    a.usableWidth = w;
+                    a.usableHeight = h;
+                    if ((w < h) != builtPortrait) {
+                        a.ui.post(
+                                () -> {
+                                    if (!a.isFinishing()
+                                            && !a.isDestroyed()
+                                            && a.root == shellRoot
+                                            && a.current != null
+                                            && a.current.home) {
+                                        MobileShell.show(a);
+                                    }
+                                });
+                    }
+                });
 
         // Layer 0: iOS 27 Emerald-Obsidian Ambient Background
         a.root.addView(new AmbientCanvasView(a), new FrameLayout.LayoutParams(-1, -1));
@@ -2851,28 +2894,17 @@ final class MobileShell {
                         currentSite == null ? "未选择" : "当前：" + currentSite.name,
                         a::chooseSources);
                 final boolean cspEnabled = a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true);
-                addSettingCard(
+                addSettingToggleCard(
                         body,
                         1,
                         "启用第三方扩展片源 (JAR / JS / PY)",
-                        cspEnabled ? "当前状态：已开启（抽屉选择）" : "当前状态：已关闭（抽屉选择）",
-                        () ->
-                                showDrawerPicker(
-                                        a,
-                                        "第三方扩展片源 (JAR / JS / PY)",
-                                        "控制是否允许运行配置源提供的 JAR、JS 与 Python 扩展脚本",
-                                        new String[] {"开启扩展片源支持（推荐）", "关闭扩展片源支持"},
-                                        cspEnabled ? 0 : 1,
-                                        idx -> {
-                                            boolean next = (idx == 0);
-                                            a.prefs
-                                                    .edit()
-                                                    .putBoolean(Prefs.EXPERIMENTAL_CSP, next)
-                                                    .apply();
-                                            a.closeEngines();
-                                            refreshInPlace.run();
-                                            a.toast(next ? "已开启扩展片源支持" : "已关闭扩展片源支持");
-                                        }));
+                        "已开启 · 允许运行配置源中的 JAR、JS 与 PY 扩展",
+                        "已关闭 · 仅使用内置标准解析",
+                        cspEnabled,
+                        next -> {
+                            a.prefs.edit().putBoolean(Prefs.EXPERIMENTAL_CSP, next).apply();
+                            a.closeEngines();
+                        });
             } else if (settingsSubPage == 2) {
                 addSectionHeader(body, "播放器与解码器");
                 final int engine = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
@@ -2912,45 +2944,23 @@ final class MobileShell {
                                             refreshInPlace.run();
                                         }));
                 final boolean tunnel = a.prefs.getBoolean(Prefs.TUNNELED_PLAYBACK, false);
-                addSettingCard(
+                addSettingToggleCard(
                         body,
                         3,
                         "4K HDR 隧道模式",
-                        tunnel ? "已开启（硬件隧道直通）" : "已关闭（默认兼容模式）",
-                        () ->
-                                showDrawerPicker(
-                                        a,
-                                        "4K HDR 隧道模式",
-                                        "部分支持硬件隧道的设备可降低高码率掉帧",
-                                        new String[] {"关闭（默认兼容模式）", "开启（硬件隧道直通）"},
-                                        tunnel ? 1 : 0,
-                                        idx -> {
-                                            a.prefs
-                                                    .edit()
-                                                    .putBoolean(Prefs.TUNNELED_PLAYBACK, idx == 1)
-                                                    .apply();
-                                            refreshInPlace.run();
-                                        }));
+                        "已开启 · 硬件音视频隧道直通",
+                        "已关闭 · 默认兼容渲染模式",
+                        tunnel,
+                        next -> a.prefs.edit().putBoolean(Prefs.TUNNELED_PLAYBACK, next).apply());
                 final boolean autoNext = a.prefs.getBoolean(Prefs.AUTO_NEXT, true);
-                addSettingCard(
+                addSettingToggleCard(
                         body,
                         3,
                         "自动连播下一集",
-                        autoNext ? "已开启" : "已关闭",
-                        () ->
-                                showDrawerPicker(
-                                        a,
-                                        "自动连播下一集",
-                                        "当前剧集播放完毕后自动切换到下一集",
-                                        new String[] {"开启自动连播", "关闭自动连播"},
-                                        autoNext ? 0 : 1,
-                                        idx -> {
-                                            a.prefs
-                                                    .edit()
-                                                    .putBoolean(Prefs.AUTO_NEXT, idx == 0)
-                                                    .apply();
-                                            refreshInPlace.run();
-                                        }));
+                        "已开启 · 当前剧集播放完毕自动切换下一集",
+                        "已关闭 · 单集播放完毕后停止",
+                        autoNext,
+                        next -> a.prefs.edit().putBoolean(Prefs.AUTO_NEXT, next).apply());
 
                 a.gap(body, 18);
                 addSectionHeader(body, "片头片尾与字幕样式");
@@ -3053,49 +3063,28 @@ final class MobileShell {
                 final boolean reduced = a.prefs.getBoolean(Prefs.REDUCED, false);
                 final boolean reducedTransparency =
                         a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
-                addSettingCard(
+                addSettingToggleCard(
                         body,
                         4,
                         "减少透明效果",
-                        reducedTransparency ? "已开启（使用实色面板）" : "已关闭（背景液态毛玻璃材质）",
-                        () ->
-                                showDrawerPicker(
-                                        a,
-                                        "减少透明效果",
-                                        "控制导航栏与卡片是否使用毛玻璃透明材质",
-                                        new String[] {"关闭（使用液态毛玻璃材质）", "开启（使用高对比实色面板）"},
-                                        reducedTransparency ? 1 : 0,
-                                        idx -> {
-                                            a.prefs
-                                                    .edit()
-                                                    .putBoolean(
-                                                            Prefs.REDUCED_TRANSPARENCY, idx == 1)
-                                                    .apply();
-                                            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(
-                                                    a.root);
-                                            refreshInPlace.run();
-                                        }));
-                addSettingCard(
+                        "已开启 · 使用高对比实色面板",
+                        "已关闭 · 使用背景液态毛玻璃材质",
+                        reducedTransparency,
+                        next -> {
+                            a.prefs.edit().putBoolean(Prefs.REDUCED_TRANSPARENCY, next).apply();
+                            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
+                        });
+                addSettingToggleCard(
                         body,
                         4,
                         "精简界面动画",
-                        reduced ? "已开启（减少过渡动画，提升响应速度）" : "已关闭（保留完整流畅动效）",
-                        () ->
-                                showDrawerPicker(
-                                        a,
-                                        "精简界面动画",
-                                        "控制页面切换与控件过渡动效",
-                                        new String[] {"关闭（保留完整流畅动效）", "开启（减少过渡动画，提升响应速度）"},
-                                        reduced ? 1 : 0,
-                                        idx -> {
-                                            boolean nextRed = (idx == 1);
-                                            a.reduced = nextRed;
-                                            a.prefs
-                                                    .edit()
-                                                    .putBoolean(Prefs.REDUCED, nextRed)
-                                                    .apply();
-                                            refreshInPlace.run();
-                                        }));
+                        "已开启 · 减少过渡动画，提升响应速度",
+                        "已关闭 · 保留完整流畅动效",
+                        reduced,
+                        next -> {
+                            a.reduced = next;
+                            a.prefs.edit().putBoolean(Prefs.REDUCED, next).apply();
+                        });
                 addSettingCard(
                         body,
                         4,
@@ -3187,13 +3176,48 @@ final class MobileShell {
         parent.addView(h);
     }
 
+    interface BooleanAction {
+        void onToggle(boolean checked);
+    }
+
+    static void bindCardTouchFeedback(
+            MainActivity a,
+            View card,
+            android.graphics.drawable.Drawable normalBg,
+            android.graphics.drawable.Drawable pressedBg) {
+        if (card == null) return;
+        card.setOnTouchListener(
+                (v, ev) -> {
+                    int act = ev.getActionMasked();
+                    if (act == android.view.MotionEvent.ACTION_DOWN) {
+                        if (pressedBg != null) v.setBackground(pressedBg);
+                        if (!a.reduced) {
+                            v.animate().cancel();
+                            v.animate().scaleX(0.986f).scaleY(0.986f).setDuration(80).start();
+                        }
+                    } else if (act == android.view.MotionEvent.ACTION_UP
+                            || act == android.view.MotionEvent.ACTION_CANCEL) {
+                        if (normalBg != null) v.setBackground(normalBg);
+                        if (!a.reduced) {
+                            v.animate().cancel();
+                            v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
+                        }
+                    }
+                    return false;
+                });
+    }
+
     private void addSettingCard(
             LinearLayout parent, int iconKind, String title, String subtitle, Runnable action) {
         LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(a.dp(18), a.dp(16), a.dp(18), a.dp(16));
-        row.setBackground(glassBg(0xb81b2320, 0xb8131917, a.dp(20), a.dp(0.7f), 0x26ffffff));
-        MobileDetailScreen.bindTouchFeedback(row);
+        GradientDrawable normalBg =
+                glassBg(0xb81b2320, 0xb8131917, a.dp(20), a.dp(0.7f), 0x26ffffff);
+        GradientDrawable pressedBg =
+                glassBg(0xd825322d, 0xd81b2420, a.dp(20), a.dp(0.9f), 0x48ffffff);
+        row.setBackground(normalBg);
+        bindCardTouchFeedback(a, row, normalBg, pressedBg);
         row.setOnClickListener(v -> action.run());
 
         SettingIconView icon = new SettingIconView(a, iconKind);
@@ -3218,6 +3242,158 @@ final class MobileShell {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
         lp.bottomMargin = a.dp(15);
         parent.addView(row, lp);
+    }
+
+    private void addSettingToggleCard(
+            LinearLayout parent,
+            int iconKind,
+            String title,
+            final String onSubtitle,
+            final String offSubtitle,
+            boolean initialChecked,
+            final BooleanAction onToggle) {
+        LinearLayout row = a.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(a.dp(18), a.dp(16), a.dp(18), a.dp(16));
+        GradientDrawable normalBg =
+                glassBg(0xb81b2320, 0xb8131917, a.dp(20), a.dp(0.7f), 0x26ffffff);
+        GradientDrawable pressedBg =
+                glassBg(0xd825322d, 0xd81b2420, a.dp(20), a.dp(0.9f), 0x48ffffff);
+        row.setBackground(normalBg);
+        bindCardTouchFeedback(a, row, normalBg, pressedBg);
+
+        SettingIconView icon = new SettingIconView(a, iconKind);
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(a.dp(38), a.dp(38));
+        iconLp.rightMargin = a.dp(14);
+        row.addView(icon, iconLp);
+
+        LinearLayout textCol = a.vertical();
+        TextView t = a.text(title, 15f, MainActivity.WHITE);
+        t.setTypeface(null, Typeface.BOLD);
+        textCol.addView(t);
+
+        final TextView s =
+                a.text(initialChecked ? onSubtitle : offSubtitle, 12.5f, MainActivity.MUTED);
+        s.setPadding(0, a.dp(4), 0, 0);
+        s.setSingleLine(true);
+        s.setEllipsize(TextUtils.TruncateAt.END);
+        textCol.addView(s);
+
+        row.addView(textCol, new LinearLayout.LayoutParams(0, -2, 1));
+
+        final IosSwitchView toggleSwitch = new IosSwitchView(a, initialChecked);
+        LinearLayout.LayoutParams switchLp = new LinearLayout.LayoutParams(a.dp(50), a.dp(30));
+        switchLp.leftMargin = a.dp(12);
+        row.addView(toggleSwitch, switchLp);
+
+        row.setOnClickListener(
+                v -> {
+                    boolean next = !toggleSwitch.isChecked();
+                    toggleSwitch.setChecked(next, !a.reduced);
+                    s.setText(next ? onSubtitle : offSubtitle);
+                    if (onToggle != null) onToggle.onToggle(next);
+                });
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.bottomMargin = a.dp(15);
+        parent.addView(row, lp);
+    }
+
+    /** iOS-style capsule toggle switch (`50dp × 30dp`, emerald/iOS-green track + sliding white thumb). */
+    static final class IosSwitchView extends View {
+        private final MainActivity a;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private boolean checked;
+        private float progress;
+        private android.animation.ValueAnimator animator;
+
+        IosSwitchView(MainActivity activity, boolean initialChecked) {
+            super(activity);
+            this.a = activity;
+            this.checked = initialChecked;
+            this.progress = initialChecked ? 1f : 0f;
+            setClickable(false);
+            setFocusable(false);
+        }
+
+        boolean isChecked() {
+            return checked;
+        }
+
+        void setChecked(boolean next, boolean animate) {
+            this.checked = next;
+            float target = next ? 1f : 0f;
+            if (animator != null) {
+                animator.cancel();
+                animator = null;
+            }
+            if (!animate || Math.abs(progress - target) < 0.01f) {
+                progress = target;
+                invalidate();
+                return;
+            }
+            animator = android.animation.ValueAnimator.ofFloat(progress, target);
+            animator.setDuration(160);
+            animator.setInterpolator(new android.view.animation.DecelerateInterpolator());
+            animator.addUpdateListener(
+                    anim -> {
+                        progress = (Float) anim.getAnimatedValue();
+                        invalidate();
+                    });
+            animator.start();
+        }
+
+        private static int blendColor(int c1, int c2, float ratio) {
+            float r = Math.max(0f, Math.min(1f, ratio));
+            int a1 = (c1 >>> 24) & 0xff,
+                    r1 = (c1 >> 16) & 0xff,
+                    g1 = (c1 >> 8) & 0xff,
+                    b1 = c1 & 0xff;
+            int a2 = (c2 >>> 24) & 0xff,
+                    r2 = (c2 >> 16) & 0xff,
+                    g2 = (c2 >> 8) & 0xff,
+                    b2 = c2 & 0xff;
+            int oa = Math.round(a1 + (a2 - a1) * r);
+            int or = Math.round(r1 + (r2 - r1) * r);
+            int og = Math.round(g1 + (g2 - g1) * r);
+            int ob = Math.round(b1 + (b2 - b1) * r);
+            return (oa << 24) | (or << 16) | (og << 8) | ob;
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            float w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float radius = h / 2f;
+            int trackColor = blendColor(0x58787880, 0xff30d158, progress);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(trackColor);
+            RectF trackRect = new RectF(0, 0, w, h);
+            c.drawRoundRect(trackRect, radius, radius, paint);
+
+            if (progress < 0.95f) {
+                paint.setStyle(Paint.Style.STROKE);
+                paint.setStrokeWidth(Math.max(1f, a.dp(0.8f)));
+                paint.setColor(blendColor(0x2effffff, 0x00ffffff, progress));
+                float inset = paint.getStrokeWidth() / 2f;
+                c.drawRoundRect(
+                        new RectF(inset, inset, w - inset, h - inset), radius, radius, paint);
+            }
+
+            float pad = a.dp(2f);
+            float thumbRadius = (h - pad * 2f) / 2f;
+            float minCx = pad + thumbRadius;
+            float maxCx = w - pad - thumbRadius;
+            float cx = minCx + (maxCx - minCx) * progress;
+            float cy = h / 2f;
+
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0x33000000);
+            c.drawCircle(cx, cy + a.dp(0.8f), thumbRadius, paint);
+
+            paint.setColor(Color.WHITE);
+            c.drawCircle(cx, cy, thumbRadius, paint);
+        }
     }
 
     /** Clean vector icon badge for Settings cards (replaces emojis). */

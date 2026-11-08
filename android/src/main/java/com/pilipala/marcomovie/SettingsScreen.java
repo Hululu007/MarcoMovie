@@ -76,7 +76,11 @@ final class SettingsScreen {
                             true,
                             1.008f);
                 });
-        a.pressFeedback(row);
+        if (tv) {
+            a.pressFeedback(row);
+        } else {
+            MobileShell.bindCardTouchFeedback(a, row, a.bg(0xff222226, 14), a.bg(0xff303038, 14));
+        }
         row.setOnClickListener(v -> action.run());
         LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, -2);
         size.bottomMargin = a.dp(14);
@@ -446,7 +450,9 @@ final class SettingsScreen {
                                     a.recreate();
                                 }));
         a.paragraph(
-                "Marco Movie 0.5.5 · 作者 Pilipala · github.com/Pilipala9919/MarcoMovie。本产品仅为工具，不含任何影视资源；内容与配置请自行合法获取。播放能力取决于服务授权和设备支持。");
+                "Marco Movie "
+                        + UpdateManager.installedVersion(a)
+                        + " · 作者 Pilipala · github.com/Pilipala9919/MarcoMovie。本产品仅为工具，不含任何影视资源；内容与配置请自行合法获取。播放能力取决于服务授权和设备支持。");
     }
 
     void confirm(String title, Runnable action) {
@@ -473,48 +479,70 @@ final class SettingsScreen {
     }
 
     void toggle(String title, String key, boolean defaultValue, Runnable after) {
-        link(
-                title,
-                a.prefs.getBoolean(key, defaultValue) ? "开启" : "关闭",
-                "setting-" + key,
-                () -> {
-                    boolean current = a.prefs.getBoolean(key, defaultValue);
-                    if (!a.isTvDevice()) {
-                        MobileShell.showDrawerPicker(
+        boolean tv = a.isTvDevice();
+        boolean initial = a.prefs.getBoolean(key, defaultValue);
+        LinearLayout row = a.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(a.dp(20), a.dp(15), a.dp(20), a.dp(15));
+        LinearLayout copy = a.vertical();
+        copy.addView(a.text(title, 17, MainActivity.WHITE));
+        final TextView caption = a.text(initial ? "开启" : "关闭", 12, MainActivity.MUTED);
+        caption.setPadding(0, a.dp(4), 0, 0);
+        copy.addView(caption);
+        row.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
+
+        final MobileShell.IosSwitchView toggleSwitch = new MobileShell.IosSwitchView(a, initial);
+        LinearLayout.LayoutParams switchLp = new LinearLayout.LayoutParams(a.dp(50), a.dp(30));
+        switchLp.leftMargin = a.dp(12);
+        row.addView(toggleSwitch, switchLp);
+
+        row.setTag("setting-" + key);
+        row.setId(View.generateViewId());
+        row.setFocusable(tv);
+        row.setFocusableInTouchMode(tv);
+        row.setClickable(true);
+        row.setBackground(a.bg(0xff222226, 14));
+        row.setOnFocusChangeListener(
+                (v, f) ->
+                        FocusMotion.style(
                                 a,
-                                title,
-                                "在下方抽屉中选择启用或关闭此项",
-                                new String[] {"开启", "关闭"},
-                                current ? 0 : 1,
-                                idx -> {
-                                    boolean nextVal = idx == 0;
-                                    Runnable applyNext =
-                                            () -> {
-                                                a.prefs.edit().putBoolean(key, nextVal).apply();
-                                                if (after != null) after.run();
-                                                a.refresh();
-                                            };
-                                    if (key.equals(Prefs.EXPERIMENTAL_CSP) && nextVal && !current) {
-                                        confirm("运行配置源提供的扩展？请仅使用你信任的配置。", applyNext);
-                                    } else {
-                                        applyNext.run();
-                                    }
-                                });
-                        return;
-                    }
-                    Runnable change =
+                                row,
+                                f,
+                                0xff222226,
+                                0xff37373e,
+                                14,
+                                MainActivity.WHITE,
+                                MainActivity.WHITE,
+                                true,
+                                1.008f));
+        if (tv) {
+            a.pressFeedback(row);
+        } else {
+            MobileShell.bindCardTouchFeedback(a, row, a.bg(0xff222226, 14), a.bg(0xff303038, 14));
+        }
+        row.setOnClickListener(
+                v -> {
+                    final boolean current = a.prefs.getBoolean(key, defaultValue);
+                    final boolean nextVal = !current;
+                    Runnable applyChange =
                             () -> {
-                                a.prefs
-                                        .edit()
-                                        .putBoolean(key, !a.prefs.getBoolean(key, defaultValue))
-                                        .apply();
+                                a.prefs.edit().putBoolean(key, nextVal).apply();
+                                toggleSwitch.setChecked(nextVal, !a.reduced);
+                                caption.setText(nextVal ? "开启" : "关闭");
                                 if (after != null) after.run();
-                                a.refresh();
+                                if (key.equals(Prefs.WALLPAPER_ENABLED)) {
+                                    a.refresh();
+                                }
                             };
-                    if (key.equals(Prefs.EXPERIMENTAL_CSP) && !a.prefs.getBoolean(key, false))
-                        confirm("运行配置源提供的扩展？请仅使用你信任的配置。", change);
-                    else change.run();
+                    if (key.equals(Prefs.EXPERIMENTAL_CSP) && nextVal && !current) {
+                        confirm("运行配置源提供的扩展？请仅使用你信任的配置。", applyChange);
+                    } else {
+                        applyChange.run();
+                    }
                 });
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, -2);
+        size.bottomMargin = a.dp(14);
+        a.body.addView(row, size);
     }
 
     void ints(String title, String key, String[] labels, int[] values, int fallback) {

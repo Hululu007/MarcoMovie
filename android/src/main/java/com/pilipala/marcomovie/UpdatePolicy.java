@@ -76,9 +76,7 @@ final class UpdatePolicy {
                 || (primary.startsWith("https://github.com/") && !primary.equals(github)))
             throw new IllegalArgumentException("Invalid release download URL");
         String mirror = MIRROR + file;
-        return primary.equals(github)
-                ? new String[] {github, mirror}
-                : new String[] {mirror, github};
+        return new String[] {mirror, github};
     }
 
     static String[] downloads(String version) {
@@ -187,6 +185,7 @@ final class UpdatePolicy {
             throws java.io.IOException {
         if (requested < 0 || requested >= size) throw new java.io.IOException("invalid offset");
         if (status == 200) return 0;
+        if (status == 404) throw new java.io.IOException("http 404");
         if (status != 206 || requested == 0 || range == null)
             throw new java.io.IOException("invalid range response");
         java.util.regex.Matcher m =

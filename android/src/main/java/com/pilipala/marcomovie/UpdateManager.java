@@ -321,6 +321,7 @@ final class UpdateManager {
                     } catch (IOException e) {
                         failure = e;
                         if (cancel) throw new InterruptedIOException();
+                        if (e.getMessage() != null && e.getMessage().contains("404")) break;
                     }
                 }
                 if (part.length() == r.size) {

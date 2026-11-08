@@ -83,10 +83,11 @@ public final class UpdateEditionChecks {
                     "preview channel accepts preview");
             JSONObject github = feed(mobile, "0.5.7", 57);
             github.put("url", github.getString("githubUrl"));
+            UpdateRelease mirrorFirst = new UpdateRelease(github, "stable", mobile);
             check(
-                    new UpdateRelease(github, "stable", mobile)
-                            .downloads[0].equals(github.getString("url")),
-                    "large asset remains GitHub first");
+                    mirrorFirst.downloads[0].startsWith(UpdatePolicy.MIRROR)
+                            && mirrorFirst.downloads[1].equals(github.getString("githubUrl")),
+                    "mirror prioritized first with GitHub fallback");
             JSONObject missingTag = feed(mobile, "0.5.7", 57);
             missingTag.remove("githubUrl");
             rejects(

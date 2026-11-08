@@ -156,18 +156,15 @@ final class PlayerChrome {
                             Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
             track.bottomMargin = a.dp(94);
         } else {
-            int dockReserve = a.dp(mobileLandscape ? 86 : 90);
-            int leftMargin = a.dp(mobileLandscape ? 18 : 20);
+            int trackSideMargin = a.dp(mobileLandscape ? 20 : 22);
             track =
                     new FrameLayout.LayoutParams(
-                            Math.min(
-                                    a.dp(720),
-                                    Math.max(a.dp(140), width - leftMargin - dockReserve)),
+                            Math.max(a.dp(140), width - trackSideMargin * 2),
                             -2,
-                            Gravity.BOTTOM | Gravity.LEFT);
-            track.leftMargin = leftMargin;
-            track.rightMargin = dockReserve;
-            track.bottomMargin = a.dp(mobileLandscape ? 16 : 22);
+                            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            track.leftMargin = trackSideMargin;
+            track.rightMargin = trackSideMargin;
+            track.bottomMargin = a.dp(mobileLandscape ? 12 : 20);
         }
         // Browsing live channels leaves a live session available for returning.
         // Only the currently playing source decides whether seeking is hidden.
@@ -179,7 +176,7 @@ final class PlayerChrome {
         if (a.isTvDevice()) {
             dock.setPadding(a.dp(6), a.dp(5), a.dp(6), a.dp(5));
         } else {
-            dock.setPadding(a.dp(4), a.dp(6), a.dp(4), a.dp(6));
+            dock.setPadding(a.dp(3), a.dp(5), a.dp(3), a.dp(5));
         }
         dock.setClipChildren(true);
         dock.setClipToPadding(true);
@@ -197,10 +194,11 @@ final class PlayerChrome {
         } else {
             dockLp =
                     new FrameLayout.LayoutParams(
-                            a.dp(mobileLandscape ? 66 : 70),
-                            a.dp(mobileLandscape ? 236 : 284),
-                            Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-            dockLp.rightMargin = a.dp(8);
+                            a.dp(mobileLandscape ? 48 : 52),
+                            a.dp(mobileLandscape ? 276 : 356),
+                            Gravity.RIGHT | Gravity.BOTTOM);
+            dockLp.rightMargin = a.dp(10);
+            dockLp.bottomMargin = a.dp(mobileLandscape ? 66 : 82);
         }
         overlay.addView(dock, dockLp);
 
@@ -255,6 +253,10 @@ final class PlayerChrome {
         a.playerOverlay = overlay;
         a.controlsVisible = true;
         dock.addOnLayoutChangeListener(
+                (view, l, t, r, b, ol, ot, or, ob) -> {
+                    if (b - t != ob - ot) scheduleLayout();
+                });
+        progress.addOnLayoutChangeListener(
                 (view, l, t, r, b, ol, ot, or, ob) -> {
                     if (b - t != ob - ot) scheduleLayout();
                 });
@@ -421,46 +423,44 @@ final class PlayerChrome {
             int side = Math.min(a.dp(44), width / 8);
             place(heading, -1, -2, Gravity.TOP, side, Math.min(a.dp(24), height / 8), side, 0);
         } else {
-            dock.setPadding(a.dp(4), a.dp(compact ? 4 : 6), a.dp(4), a.dp(compact ? 4 : 6));
-            int dockWidth = a.dp(compact ? 66 : 70);
-            int dockRight = Math.min(a.dp(8), Math.max(a.dp(4), width / 24));
-            int dockHeight =
-                    Math.max(a.dp(110), Math.min(a.dp(compact ? 236 : 292), height - a.dp(24)));
-            place(
-                    dock,
-                    dockWidth,
-                    dockHeight,
-                    Gravity.RIGHT | Gravity.CENTER_VERTICAL,
-                    0,
-                    0,
-                    dockRight,
-                    0);
-            int left = Math.min(a.dp(compact ? 16 : 20), Math.max(a.dp(8), width / 16));
-            int rightReserve = dockWidth + dockRight + a.dp(12);
-            int trackWidth =
-                    Math.max(
-                            a.dp(110),
-                            Math.min(a.dp(720), Math.max(0, width - left - rightReserve)));
-            int progressHeight = Math.max(progress.getMeasuredHeight(), a.dp(compact ? 48 : 58));
-            int bottom = Math.min(a.dp(compact ? 12 : 20), Math.max(0, height - progressHeight));
+            int sideMargin = Math.min(a.dp(compact ? 20 : 22), Math.max(a.dp(12), width / 16));
+            int trackWidth = Math.max(a.dp(120), width - sideMargin * 2);
+            int progressHeight = Math.max(progress.getMeasuredHeight(), a.dp(compact ? 46 : 56));
+            int bottom = Math.min(a.dp(compact ? 10 : 18), Math.max(0, height - progressHeight));
             place(
                     progress,
                     trackWidth,
                     -2,
-                    Gravity.BOTTOM | Gravity.LEFT,
-                    left,
+                    Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL,
+                    sideMargin,
                     0,
-                    rightReserve,
+                    sideMargin,
                     bottom);
-            int side = Math.min(a.dp(portrait ? 20 : (compact ? 20 : 36)), width / 10);
-            int headingRight = Math.max(side, rightReserve);
+            dock.setPadding(a.dp(3), a.dp(compact ? 4 : 6), a.dp(3), a.dp(compact ? 4 : 6));
+            int dockWidth = a.dp(compact ? 48 : 52);
+            int dockRight = Math.min(a.dp(10), Math.max(a.dp(6), width / 24));
+            int dockBottom = bottom + progressHeight + a.dp(8);
+            int dockTop = a.dp(compact ? 12 : 52);
+            int availDockH = Math.max(a.dp(96), height - dockBottom - dockTop);
+            int dockHeight = Math.min(a.dp(compact ? 286 : 368), availDockH);
+            place(
+                    dock,
+                    dockWidth,
+                    dockHeight,
+                    Gravity.RIGHT | Gravity.BOTTOM,
+                    0,
+                    0,
+                    dockRight,
+                    dockBottom);
+            int side = sideMargin;
+            int headingRight = Math.max(side, dockWidth + dockRight + a.dp(12));
             place(
                     heading,
                     -1,
                     -2,
                     Gravity.TOP,
                     side,
-                    Math.min(a.dp(compact ? 8 : 24), height / 8),
+                    Math.min(a.dp(compact ? 8 : 22), height / 8),
                     headingRight,
                     0);
         }

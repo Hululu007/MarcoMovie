@@ -155,31 +155,34 @@ final class SourcePicker {
                     if (anchor != null && anchor.isAttachedToWindow()) anchor.requestFocus();
                 });
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        boolean tv = a.isTvDevice();
         LinearLayout panel = a.vertical();
         panel.setTag("source-picker");
-        panel.setPadding(a.dp(24), a.dp(22), a.dp(24), a.dp(18));
+        panel.setPadding(
+                a.dp(tv ? 22 : 16), a.dp(tv ? 18 : 16), a.dp(tv ? 22 : 16), a.dp(tv ? 16 : 14));
         a.glass(panel, 22);
-        TextView title = a.text("选择片源", 24, MainActivity.WHITE);
+
+        LinearLayout headerRow = a.row();
+        headerRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout titleCol = a.vertical();
+        LinearLayout titleBadgeRow = a.row();
+        titleBadgeRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title = a.text("选择片源", tv ? 22 : 19, MainActivity.WHITE);
         title.setTypeface(null, Typeface.BOLD);
-        panel.addView(title);
-        a.gap(panel, 4);
-        TextView hint = a.text("选择后返回首页，显示该片源的内容", 13, MainActivity.MUTED);
-        panel.addView(hint);
-        a.gap(panel, 12);
-        LinearLayout topActions = a.row();
-        if (a.config.depots.length() > 0) {
-            Button depotBtn =
-                    a.navButton(
-                            "切换子仓库",
-                            "warehouse-switch",
-                            () -> {
-                                dialog.dismiss();
-                                showWarehouses(a);
-                            });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, a.dp(38), 1);
-            lp.rightMargin = a.dp(6);
-            topActions.addView(depotBtn, lp);
-        }
+        titleBadgeRow.addView(title);
+        TextView count = a.text(a.config.sites.size() + " 个片源", 11.5f, 0xff9ca3af);
+        count.setPadding(a.dp(8), a.dp(2), a.dp(8), a.dp(2));
+        count.setBackground(a.bg(0x22ffffff, 999));
+        LinearLayout.LayoutParams countLp = new LinearLayout.LayoutParams(-2, -2);
+        countLp.leftMargin = a.dp(8);
+        titleBadgeRow.addView(count, countLp);
+        titleCol.addView(titleBadgeRow);
+        TextView hint = a.text("选择后返回首页，显示该片源的内容", 12, MainActivity.MUTED);
+        hint.setPadding(0, a.dp(2), 0, 0);
+        titleCol.addView(hint);
+        headerRow.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        boolean hasExtraTopActions = a.config.depots.length() > 0 || CatPawSettings.available(a);
         Button prefBtn =
                 a.navButton(
                         "默认偏好源",
@@ -188,26 +191,52 @@ final class SourcePicker {
                             dialog.dismiss();
                             SourcePreferences.choose(a);
                         });
-        LinearLayout.LayoutParams prefLp = new LinearLayout.LayoutParams(0, a.dp(38), 1);
-        if (CatPawSettings.available(a)) prefLp.rightMargin = a.dp(6);
-        topActions.addView(prefBtn, prefLp);
-        if (CatPawSettings.available(a)) {
-            Button catBtn =
-                    a.navButton(
-                            "CatPaw 配置",
-                            "catpaw-settings",
-                            () -> {
-                                dialog.dismiss();
-                                CatPawSettings.choose(a);
-                            });
-            topActions.addView(catBtn, new LinearLayout.LayoutParams(0, a.dp(38), 1));
+        prefBtn.setTextSize(12.5f);
+        prefBtn.setPadding(a.dp(12), a.dp(4), a.dp(12), a.dp(4));
+        prefBtn.setMinHeight(a.dp(34));
+        prefBtn.setMinimumHeight(a.dp(34));
+        if (!hasExtraTopActions) {
+            headerRow.addView(prefBtn, new LinearLayout.LayoutParams(-2, a.dp(34)));
         }
-        panel.addView(topActions, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(panel, 10);
+        panel.addView(headerRow, new LinearLayout.LayoutParams(-1, -2));
+
+        if (hasExtraTopActions) {
+            a.gap(panel, 8);
+            LinearLayout topActions = a.row();
+            if (a.config.depots.length() > 0) {
+                Button depotBtn =
+                        a.navButton(
+                                "切换子仓库",
+                                "warehouse-switch",
+                                () -> {
+                                    dialog.dismiss();
+                                    showWarehouses(a);
+                                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, a.dp(34), 1);
+                lp.rightMargin = a.dp(6);
+                topActions.addView(depotBtn, lp);
+            }
+            LinearLayout.LayoutParams prefLp = new LinearLayout.LayoutParams(0, a.dp(34), 1);
+            if (CatPawSettings.available(a)) prefLp.rightMargin = a.dp(6);
+            topActions.addView(prefBtn, prefLp);
+            if (CatPawSettings.available(a)) {
+                Button catBtn =
+                        a.navButton(
+                                "CatPaw 配置",
+                                "catpaw-settings",
+                                () -> {
+                                    dialog.dismiss();
+                                    CatPawSettings.choose(a);
+                                });
+                topActions.addView(catBtn, new LinearLayout.LayoutParams(0, a.dp(34), 1));
+            }
+            panel.addView(topActions, new LinearLayout.LayoutParams(-1, -2));
+        }
+        a.gap(panel, 8);
         ScrollView scrolling = new TvScrollView(a);
         scrolling.setVerticalScrollBarEnabled(false);
         LinearLayout grid = a.vertical();
-        grid.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
+        grid.setPadding(a.dp(2), a.dp(2), a.dp(2), a.dp(2));
         scrolling.addView(grid);
         FrameLayout viewport =
                 new FrameLayout(a) {
@@ -223,19 +252,20 @@ final class SourcePicker {
         viewport.setClipChildren(true);
         viewport.setClipToPadding(true);
         viewport.addView(scrolling, new FrameLayout.LayoutParams(-1, -1));
-        panel.addView(viewport, new LinearLayout.LayoutParams(-1, a.dp(286)));
+        int defaultViewportH = a.dp(tv ? 330 : 370);
+        panel.addView(viewport, new LinearLayout.LayoutParams(-1, defaultViewportH));
         String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");
         Button selectedButton = null;
         LinearLayout row = null;
         float fontScale = a.getResources().getConfiguration().fontScale;
+        int availWidth = Math.min(a.windowWidth(), a.dp(740)) - a.dp(tv ? 52 : 36);
+        int targetColWidth = a.dp(tv ? 200 : 142);
         int columns =
                 Math.max(
-                        1,
+                        tv ? 2 : (fontScale > 1.35f ? 1 : 2),
                         Math.min(
                                 3,
-                                (int)
-                                        ((Math.min(a.windowWidth(), a.dp(720)) - a.dp(100))
-                                                / (a.dp(230) * Math.max(1f, fontScale)))));
+                                (int) (availWidth / (targetColWidth * Math.max(1f, fontScale)))));
         int index = 0;
         for (Cms.Site site : a.config.sites) {
             if (index % columns == 0) {
@@ -246,7 +276,7 @@ final class SourcePicker {
             boolean current = site.key.equals(selected);
             Button button =
                     a.button(
-                            (current ? "✓  " : "")
+                            (current ? "✓ " : "")
                                     + (SourcePreferences.isPreferred(a, site) ? "★ " : "")
                                     + site.name,
                             "source-choice:" + site.key,
@@ -272,13 +302,15 @@ final class SourcePicker {
                                 a.back.clear();
                                 a.open(new MainActivity.Screen(a::home), false);
                             });
-            button.setTextSize(14);
+            button.setTextSize(tv ? 13.5f : 12.8f);
             button.setSingleLine(false);
-            button.setMaxLines(Integer.MAX_VALUE);
-            button.setEllipsize(null);
+            button.setMaxLines(2);
+            button.setEllipsize(android.text.TextUtils.TruncateAt.END);
             button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-            button.setMinHeight(a.dp(56));
-            button.setPadding(a.dp(13), a.dp(10), a.dp(13), a.dp(10));
+            int cellH = a.dp(tv ? 44 : 40);
+            button.setMinHeight(cellH);
+            button.setMinimumHeight(cellH);
+            button.setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6));
             boolean enabled = a.available(site);
             button.setSelected(current);
             Runnable paint =
@@ -288,10 +320,12 @@ final class SourcePicker {
                                 a,
                                 button,
                                 focused,
-                                current ? 0xff35353f : 0xff242429,
+                                current ? 0xff2b384e : 0xff22252a,
                                 MainActivity.WHITE,
-                                12,
-                                enabled ? MainActivity.WHITE : MainActivity.MUTED,
+                                11,
+                                enabled
+                                        ? (current ? 0xff7dd3fc : MainActivity.WHITE)
+                                        : MainActivity.MUTED,
                                 MainActivity.DARK,
                                 false,
                                 1.02f);
@@ -299,18 +333,18 @@ final class SourcePicker {
             button.setOnFocusChangeListener((v, f) -> paint.run());
             paint.run();
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
-            lp.setMargins(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
+            lp.setMargins(a.dp(3), a.dp(3), a.dp(3), a.dp(3));
             row.addView(button, lp);
             if (current) selectedButton = button;
             index++;
         }
         if (row != null)
-            while (index++ % columns != 0)
-                row.addView(new View(a), new LinearLayout.LayoutParams(0, 1, 1));
-        a.gap(panel, 10);
-        TextView count = a.text(a.config.sites.size() + " 个片源", 12, MainActivity.MUTED);
-        panel.addView(count);
-        a.gap(panel, 6);
+            while (index++ % columns != 0) {
+                LinearLayout.LayoutParams blankLp = new LinearLayout.LayoutParams(0, 1, 1);
+                blankLp.setMargins(a.dp(3), a.dp(3), a.dp(3), a.dp(3));
+                row.addView(new View(a), blankLp);
+            }
+        a.gap(panel, 8);
         LinearLayout footer = a.row();
         a.addButton(
                 footer,
@@ -333,7 +367,7 @@ final class SourcePicker {
         a.addButton(footer, a.navButton("完成", "source-close", dialog::dismiss));
         for (int i = 0; i < footer.getChildCount(); i++) {
             View control = footer.getChildAt(i);
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, a.dp(40), 1);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, a.dp(38), 1);
             params.setMargins(a.dp(3), a.dp(2), a.dp(3), a.dp(2));
             control.setLayoutParams(params);
             if (control instanceof TextView) {
@@ -344,16 +378,19 @@ final class SourcePicker {
             }
         }
         panel.addView(footer, new LinearLayout.LayoutParams(-1, -2));
-        int marginH = a.isTvDevice() ? a.dp(48) : a.dp(28);
-        int panelWidth = Math.min(a.dp(720), a.windowWidth() - marginH);
-        int maxHeight = Math.max(a.dp(180), a.windowHeight() - a.dp(a.isTvDevice() ? 32 : 96));
+        int marginH = tv ? a.dp(48) : a.dp(20);
+        int panelWidth = Math.min(a.dp(740), a.windowWidth() - marginH);
+        int maxHeight = Math.max(a.dp(180), a.windowHeight() - a.dp(tv ? 32 : 84));
         panel.measure(
                 View.MeasureSpec.makeMeasureSpec(panelWidth, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        int controlsHeight = panel.getMeasuredHeight() - a.dp(286);
+        int controlsHeight = panel.getMeasuredHeight() - defaultViewportH;
         viewport.setLayoutParams(
                 new LinearLayout.LayoutParams(
-                        -1, Math.max(a.dp(96), Math.min(a.dp(320), maxHeight - controlsHeight))));
+                        -1,
+                        Math.max(
+                                a.dp(96),
+                                Math.min(a.dp(tv ? 360 : 410), maxHeight - controlsHeight))));
         panel.measure(
                 View.MeasureSpec.makeMeasureSpec(panelWidth, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));

@@ -630,21 +630,55 @@ public final class MainActivity extends Activity {
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         if (!layoutReady || root == null) return;
-        root.post(
-                () -> {
-                    if (isFinishing() || isDestroyed() || root == null) return;
-                    int w = root.getWidth(), h = root.getHeight();
-                    if (w > 0 && h > 0 && (w != usableWidth || h != usableHeight)) {
-                        usableWidth = w;
-                        usableHeight = h;
-                        if (current != null && current.player) {
-                            if (playerChrome != null) playerChrome.relayout();
-                            if (playbackControls != null)
-                                playbackControls.resize(
-                                        playbackControls.videoWidth, playbackControls.videoHeight);
-                        } else if (current != null) {
-                            refresh();
-                        }
+        if (!isTvDevice() && usableWidth > 0 && usableHeight > 0 && newConfig != null) {
+            boolean configPortrait =
+                    newConfig.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT;
+            boolean configLandscape =
+                    newConfig.orientation
+                            == android.content.res.Configuration.ORIENTATION_LANDSCAPE;
+            if ((configPortrait && usableWidth > usableHeight)
+                    || (configLandscape && usableWidth < usableHeight)) {
+                int tmp = usableWidth;
+                usableWidth = usableHeight;
+                usableHeight = tmp;
+                if (current != null && current.player) {
+                    if (playerChrome != null) playerChrome.scheduleLayout();
+                } else if (current != null) {
+                    refresh();
+                }
+            }
+        }
+        root.post(this::syncRootDimensions);
+        ui.postDelayed(this::syncRootDimensions, 140);
+    }
+
+    void syncRootDimensions() {
+        if (isFinishing() || isDestroyed() || root == null || !layoutReady) return;
+        int w = root.getWidth(), h = root.getHeight();
+        if (w <= 0 || h <= 0) return;
+        boolean orientationFlipped = (w < h) != (usableWidth < usableHeight);
+        if (w != usableWidth || h != usableHeight) {
+            usableWidth = w;
+            usableHeight = h;
+            if (current != null && current.player) {
+                if (playerChrome != null) playerChrome.relayout();
+                if (playbackControls != null)
+                    playbackControls.resize(
+                            playbackControls.videoWidth, playbackControls.videoHeight);
+            } else if (current != null && orientationFlipped) {
+                refresh();
+            }
+        }
+    }
+
+    void watchRootLayout(FrameLayout targetRoot) {
+        if (targetRoot == null) return;
+        targetRoot.addOnLayoutChangeListener(
+                (view, l, t, r, b, ol, ot, or, ob) -> {
+                    int w = r - l, h = b - t;
+                    if (w <= 0 || h <= 0 || !layoutReady || view != root) return;
+                    if (w != usableWidth || h != usableHeight) {
+                        ui.post(this::syncRootDimensions);
                     }
                 });
     }
@@ -880,6 +914,7 @@ public final class MainActivity extends Activity {
         scroll.addView(body, new ScrollView.LayoutParams(-1, -2));
         root.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
         setContentView(root);
+        watchRootLayout(root);
         homeDock = null;
         if (navigation) {
             if (useBottomDock()) {

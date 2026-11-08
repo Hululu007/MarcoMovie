@@ -6,10 +6,11 @@ The owner allows each platform to release independently after its own checks. Ve
 
 Desktop/Apple tags use `windows-vX.Y.Z`, `ios-vX.Y.Z` and `macos-vX.Y.Z`. They do not trigger the legacy `v*` all-platform publisher. Build the desired platform with the existing workflow dispatch, verify the artifact, and attach the package, SHA-256 file and corresponding source archive before publishing. Do not replace existing versioned assets. Keep the legacy all-platform release as GitHub's global latest so old clients are not directed to another platform's package.
 
-Android phone/tablet and TV editions now have separate update feeds and explicit
+Android phone/tablet and TV editions now have separate update feeds, independent
+per-edition version configuration (`android/edition-versions.json`), and explicit
 `android-mobile` / `android-tv` package names. See [Android update isolation](android-update-isolation.md)
 for the release tags, old-client migration aliases and runtime verification scope.
-Android phone/tablet and TV 0.5.5 were independently published on November 8;
+Android phone/tablet and TV 0.5.6 were independently published on November 8;
 see the platform-specific records below.
 
 See [installation package names](installation-package-names.md) for explicit
@@ -43,11 +44,10 @@ This website deployment did not replace any application installer.
 
 ## Published Android maintenance update
 
+[Android phone/tablet 0.5.6](releases/android-mobile-v0.5.6.md) and
+[Android TV/box 0.5.6](releases/android-tv-v0.5.6.md) (version code 56) build on
 [Android phone/tablet 0.5.5](releases/android-mobile-v0.5.5.md) and
-[Android TV/box 0.5.5](releases/android-tv-v0.5.5.md) use build commit
-`0fea7f35a403b7d59c9d33fdbdf20c259db15f9e` (version code 55), building on
-[Android phone/tablet 0.5.4](releases/android-mobile-v0.5.4.md) and
-[Android TV/box 0.5.4](releases/android-tv-v0.5.4.md) (`d014a7add909237da1b2d8ee95d2a81962a10ff9`).
+[Android TV/box 0.5.5](releases/android-tv-v0.5.5.md) (`162918594f96fc3d0725606a3faf564a72a98864`).
 The 0.5.3 release eliminates `PixelCopy` backdrop blur and full-screen hardware
 layer reallocations on the playback overlay to fix Dolby Vision / HDR toolbar
 pull-up stutter on TV, adds progress-only HUD during D-pad fast-forward/rewind,
@@ -68,7 +68,7 @@ support and the iPhone publication gate remain open.
 
 ## Published Windows and macOS updates
 
-[Windows 0.5.2](releases/windows-v0.5.2.md) (`windows-v0.5.2`) and [macOS 0.5.1](releases/macos-v0.5.1.md) (`macos-v0.5.1`) advance each desktop platform's version independently (Windows `0.5.1 -> 0.5.2`, macOS `0.5.0 -> 0.5.1`), synchronizing the cross-platform subscription, multi-depot, live catalogue (`LiveCatalogParser`, `lives[].api` script live sources, `proxy://?do=live&type=txt&ext=` directory unpacking, Base64/encrypted playlists), TVBox / Yingshicang (`jar` fallback, `parses` JSON parser fallback, `ua`/`ext.header` extraction, GZIP config payloads), HTTP T4, DRPY, CatVod JS, Python Spider session/proxy, ported Guard sources (`Dm84`, `Auete`, `Bttwoo`, `T4`, `FY`), and macOS native borderless fullscreen playback.
+[Windows 0.5.2](releases/windows-v0.5.2.md) (`windows-v0.5.2`) and [macOS 0.5.1](releases/macos-v0.5.1.md) (`macos-v0.5.1`) advance each desktop platform's version independently (Windows `0.5.1 -> 0.5.2`, macOS `0.5.0 -> 0.5.1`) from build commit `5c586d576103d23abb0c381b2e45acfa2d31e39d` ([build 42482977553](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42482977553)), synchronizing the cross-platform subscription, multi-depot, live catalogue (`LiveCatalogParser`, `lives[].api` script live sources, `proxy://?do=live&type=txt&ext=` directory unpacking, Base64/encrypted playlists), TVBox / Yingshicang (`jar` fallback, `parses` JSON parser fallback, `ua`/`ext.header` extraction, GZIP config payloads), HTTP T4, DRPY, CatVod JS, Python Spider session/proxy, ported Guard sources (`Dm84`, `Auete`, `Bttwoo`, `T4`, `FY`), and macOS native borderless fullscreen playback.
 
 Previously, [Windows 0.5.1](https://github.com/Pilipala9919/MarcoMovie/releases/tag/windows-v0.5.1) was published from `56b2eb80b93bae98b8754952d779bff1b7a9582a` after [build 42356451432](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42356451432) passed 83 Flutter tests and produced the installer/portable packages. Downloaded packages passed checksum/ZIP checks, the app and installer report 0.5.1, and all six uploaded package/source/checksum files match the local verified bytes. Native fullscreen UI evidence is recorded in `desktop-fullscreen-2026-11-07.md`.
 

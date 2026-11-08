@@ -105,6 +105,9 @@ final class PlaybackControls {
                                 false,
                                 1));
         UiCompat.tintSeekBar(timeline, 0xfff5f5f7, Color.WHITE);
+        if (!a.isTvDevice()) {
+            timeline.setPadding(a.dp(8), 0, a.dp(8), 0);
+        }
         timeline.setKeyProgressIncrement(15000);
         progress.addView(timeline, new LinearLayout.LayoutParams(-1, a.dp(32)));
         timeline.setOnSeekBarChangeListener(
@@ -231,8 +234,8 @@ final class PlaybackControls {
             add(row, "音轨", "audio-tracks", () -> tracks(1));
             add(row, "解码", "decoder", this::decoderMenu);
             add(row, "弹幕", "danmaku-tool", this::danmaku);
-            add(row, "跳片头", "skip-intro-tool", () -> skip(true));
-            add(row, "跳片尾", "skip-outro-tool", () -> skip(false));
+            add(row, "片头", "skip-intro-tool", () -> skip(true));
+            add(row, "片尾", "skip-outro-tool", () -> skip(false));
             add(row, "循环", "repeat-tool", this::repeat);
             add(
                     row,
@@ -308,12 +311,15 @@ final class PlaybackControls {
                     ((ViewGroup) b.getParent()).removeView(b);
                 }
                 b.setSingleLine(true);
-                int padH = a.dp(mobileLandscape ? 4 : 5);
+                b.setTextSize(11f);
+                b.setMinHeight(0);
+                b.setMinimumHeight(0);
+                int padH = a.dp(2);
                 b.setPadding(padH, 0, padH, 0);
-                int w = a.dp(mobileLandscape ? 56 : 60);
-                int h = a.dp(mobileLandscape ? 34 : 38);
+                int w = a.dp(mobileLandscape ? 40 : 44);
+                int h = a.dp(mobileLandscape ? 30 : 33);
                 LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(w, h);
-                size.setMargins(a.dp(2), a.dp(3), a.dp(2), a.dp(3));
+                size.setMargins(a.dp(1), a.dp(2), a.dp(1), a.dp(2));
                 col.addView(b, size);
             }
             ScrollView vScroller =
@@ -963,8 +969,14 @@ final class PlaybackControls {
                         Gravity.RIGHT | Gravity.CENTER_VERTICAL);
         sheetLp.setMargins(0, a.dp(20), a.dp(20), a.dp(20));
         root.addView(sheet, sheetLp);
-        drawer.setContentView(root);
+        drawer.setContentView(root, new ViewGroup.LayoutParams(a.windowWidth(), a.windowHeight()));
         drawer.show();
+        if (drawer.getWindow() != null) {
+            drawer.getWindow()
+                    .setLayout(
+                            WindowManager.LayoutParams.MATCH_PARENT,
+                            WindowManager.LayoutParams.MATCH_PARENT);
+        }
         if (initialFocus != null) initialFocus.requestFocus();
     }
 
@@ -1587,8 +1599,14 @@ final class PlaybackControls {
                         if (onChanged != null) onChanged.run();
                     }
                 });
-        dlg.setContentView(fullRoot);
+        dlg.setContentView(fullRoot, new ViewGroup.LayoutParams(a.windowWidth(), a.windowHeight()));
         dlg.show();
+        if (dlg.getWindow() != null) {
+            dlg.getWindow()
+                    .setLayout(
+                            WindowManager.LayoutParams.MATCH_PARENT,
+                            WindowManager.LayoutParams.MATCH_PARENT);
+        }
     }
 
     void tracks(int type) {
@@ -1971,12 +1989,12 @@ final class PlaybackControls {
         Button introBtn = buttons.get("skip-intro-tool");
         if (introBtn != null) {
             int s = a.prefs.getInt(Prefs.SKIP_INTRO, 0);
-            introBtn.setText(s > 0 ? "片头" + s + "s" : (a.isTvDevice() ? "片头" : "跳片头"));
+            introBtn.setText(s > 0 ? (a.isTvDevice() ? "片头" + s + "s" : s + "s") : "片头");
         }
         Button outroBtn = buttons.get("skip-outro-tool");
         if (outroBtn != null) {
             int s = a.prefs.getInt(Prefs.SKIP_OUTRO, 0);
-            outroBtn.setText(s > 0 ? "片尾" + s + "s" : (a.isTvDevice() ? "片尾" : "跳片尾"));
+            outroBtn.setText(s > 0 ? (a.isTvDevice() ? "片尾" + s + "s" : s + "s") : "片尾");
         }
     }
 

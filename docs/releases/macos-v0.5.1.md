@@ -10,6 +10,7 @@
 
 ### 验证与范围
 
+- 构建提交：`5c586d576103d23abb0c381b2e45acfa2d31e39d`，[GitHub Actions 构建与验证记录](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42482977553)。
 - 通过公开内容守卫、DRPY/CatVod/Python/Guard 本地宿主回归检查、Flutter 跨端单测以及 GitHub Actions macOS 应用包完整构建与签名校验。
 - 已知限制：其余尚未完成跨平台移植的 33 条 Android 专属 Guard / JAR 插件线路及通用实机播放未纳入本版已完成范围。
 - 0.5.0 客户端首次升级请从[下载页](https://marcotv.wlj9919.top/movie/)手动下载安装 macOS 0.5.1 应用包；自 0.5.1 起使用 macOS 平台独立更新通道。
