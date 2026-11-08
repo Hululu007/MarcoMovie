@@ -7,6 +7,7 @@ final class ListingRoute {
     /** Folder, source-action and cross-search cards open another page instead of a detail page. */
     static boolean isRedirect(String tag, String action, String id) {
         return "folder".equalsIgnoreCase(tag)
+                || "action".equalsIgnoreCase(tag)
                 || (action != null && !action.isEmpty())
                 || (id != null && id.startsWith("msearch:"));
     }
@@ -28,7 +29,8 @@ final class ListingRoute {
                 String cls = e.getClassName();
                 if (cls.startsWith("com.github.catvod.")
                         || cls.startsWith("com.github.tvbox.")
-                        || cls.startsWith("com.fongmi.")) return true;
+                        || cls.startsWith("com.fongmi.")
+                        || cls.startsWith("com.jar.")) return true;
             }
             if (t.getCause() == t) break;
         }

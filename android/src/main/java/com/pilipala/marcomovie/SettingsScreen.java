@@ -105,16 +105,26 @@ final class SettingsScreen {
     }
 
     void accountAction(String action) {
-        if (a.config != null)
-            for (Cms.Site site : a.config.sites)
+        if (a.config != null) {
+            Cms.Site fallback = null;
+            for (Cms.Site site : a.config.sites) {
                 if (site.api != null && site.api.contains("MyDrive")) {
-                    if (!a.available(site)) {
-                        a.notice("请先在“搜索与数据”中启用来源扩展。");
-                        return;
-                    }
-                    a.sourceAction(site, action);
+                    fallback = site;
+                    break;
+                }
+                if (fallback == null && SourceController.isConfigOrNetdiskSite(site)) {
+                    fallback = site;
+                }
+            }
+            if (fallback != null) {
+                if (!a.available(fallback)) {
+                    a.notice("请先在“搜索与数据”中启用来源扩展。");
                     return;
                 }
+                a.sourceAction(fallback, action);
+                return;
+            }
+        }
         a.notice("当前配置没有提供网盘账号入口，请先导入支持网盘的配置源。");
     }
 

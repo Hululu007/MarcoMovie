@@ -46,7 +46,7 @@ This website deployment did not replace any application installer.
 
 [Android phone/tablet 0.5.6](releases/android-mobile-v0.5.6.md) and
 [Android TV/box 0.5.6](releases/android-tv-v0.5.6.md) use build commit
-`e9032afb9299ec5df8925f0a128a06131cbca41f` (version code 56), building on
+`0effdccfba2b8636ea0d1b381b6f5974e36b8547` (version code 56), building on
 [Android phone/tablet 0.5.5](releases/android-mobile-v0.5.5.md) and
 [Android TV/box 0.5.5](releases/android-tv-v0.5.5.md) (`162918594f96fc3d0725606a3faf564a72a98864`).
 The 0.5.3 release eliminates `PixelCopy` backdrop blur and full-screen hardware

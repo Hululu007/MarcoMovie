@@ -303,6 +303,8 @@ public final class ReviewFixChecks {
         check(
                 ListingRoute.isRedirect("folder", null, "a")
                         && ListingRoute.isRedirect("FOLDER", "", "a")
+                        && ListingRoute.isRedirect("action", "", "login")
+                        && ListingRoute.isRedirect("ACTION", null, "clear_cookie")
                         && ListingRoute.isRedirect(null, "{\"action\":\"x\"}", "a")
                         && ListingRoute.isRedirect(null, null, "msearch:title")
                         && !ListingRoute.isRedirect(null, null, "vod-1")

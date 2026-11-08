@@ -198,12 +198,16 @@ public final class MainActivity extends Activity {
         final Thread main = android.os.Looper.getMainLooper().getThread();
         Thread.setDefaultUncaughtExceptionHandler(
                 (thread, error) -> {
+                    boolean pluginTrace =
+                            ListingRoute.hasPluginFrame(error) || hasDexClassLoaderFrame(error);
                     boolean bgPlugin =
                             isPluginBackgroundCrash(thread, error, main)
                                     || (thread != null
                                             && thread != main
-                                            && thread.getContextClassLoader()
-                                                    instanceof dalvik.system.DexClassLoader);
+                                            && (pluginTrace
+                                                    || thread.getContextClassLoader()
+                                                            instanceof
+                                                            dalvik.system.DexClassLoader));
                     if (bgPlugin) {
                         AppLog.w(
                                 "PluginGuard",
@@ -218,19 +222,14 @@ public final class MainActivity extends Activity {
                                     });
                         return;
                     }
-                    if (thread == main && ListingRoute.hasPluginFrame(error)) {
+                    if (thread == main && pluginTrace) {
                         AppLog.w("PluginGuard", "extension main-thread callback failed", error);
                         MainActivity activity = activeActivity;
                         if (activity != null && activity.prefs != null) {
-                            activity.prefs
-                                    .edit()
-                                    .putString(Prefs.LOADING_SITE, "")
-                                    .putString(Prefs.SELECTED_SITE, "")
-                                    .commit();
+                            activity.prefs.edit().putString(Prefs.LOADING_SITE, "").commit();
                             activity.ui.post(
                                     () -> {
-                                        if (!activity.isFinishing())
-                                            activity.toast("片源扩展异常已拦截，请切换其他片源");
+                                        if (!activity.isFinishing()) activity.toast("扩展操作未能完成，请重试");
                                     });
                         }
                         while (true) {
@@ -238,7 +237,8 @@ public final class MainActivity extends Activity {
                                 android.os.Looper.loop();
                                 return;
                             } catch (Throwable nextError) {
-                                if (!ListingRoute.hasPluginFrame(nextError)) {
+                                if (!ListingRoute.hasPluginFrame(nextError)
+                                        && !hasDexClassLoaderFrame(nextError)) {
                                     if (previous != null)
                                         previous.uncaughtException(thread, nextError);
                                     return;
@@ -264,11 +264,41 @@ public final class MainActivity extends Activity {
                 });
     }
 
+    static boolean hasDexClassLoaderFrame(Throwable error) {
+        if (error == null || CspEngine.LOADERS.isEmpty()) return false;
+        int depth = 0;
+        for (Throwable t = error; t != null && depth < 12; t = t.getCause(), depth++) {
+            for (StackTraceElement e : t.getStackTrace()) {
+                String cls = e.getClassName();
+                if (cls == null
+                        || cls.startsWith("android.")
+                        || cls.startsWith("java.")
+                        || cls.startsWith("javax.")
+                        || cls.startsWith("dalvik.")
+                        || cls.startsWith("com.android.")
+                        || cls.startsWith("com.pilipala.")) continue;
+                for (dalvik.system.DexClassLoader loader : CspEngine.LOADERS.values()) {
+                    try {
+                        Class<?> loaded = Class.forName(cls, false, loader);
+                        if (loaded.getClassLoader() == loader) return true;
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+            if (t.getCause() == t) break;
+        }
+        return false;
+    }
+
     /** Opens a list card without leaving an invisible redirect page in the back stack. */
     void openListing(Cms.Site s, Cms.Video v) {
         if (v == null) return;
         if (v.action != null && !v.action.isEmpty()) {
             sourceAction(s, v.action);
+            return;
+        }
+        if ("action".equalsIgnoreCase(v.tag) && v.id != null && !v.id.isEmpty()) {
+            sourceAction(s, v.id);
             return;
         }
         if ("folder".equalsIgnoreCase(v.tag)) {
@@ -277,6 +307,10 @@ public final class MainActivity extends Activity {
         }
         if (v.id != null && v.id.startsWith("msearch:")) {
             crossSearch(Cms.searchTitle(v));
+            return;
+        }
+        if (SourceController.isConfigOrNetdiskActionCard(s, v)) {
+            sourceAction(s, v.id);
             return;
         }
         open(new Screen(() -> detail(s, v)), true);
@@ -509,26 +543,6 @@ public final class MainActivity extends Activity {
             AppLog.w("MainActivity", "load saved config failed", e);
             config = null;
         }
-        if (!reduced && config != null) {
-            final String savedKey = prefs.getString(Prefs.SELECTED_SITE, "");
-            final String crashedKey = prefs.getString(Prefs.LOADING_SITE, "");
-            if (savedKey != null
-                    && !savedKey.isEmpty()
-                    && (crashedKey == null || crashedKey.isEmpty())) {
-                for (final Cms.Site s : config.sites) {
-                    if (s.key.equals(savedKey) && available(s)) {
-                        worker.execute(
-                                () -> {
-                                    try {
-                                        engine(s);
-                                    } catch (Throwable ignored) {
-                                    }
-                                });
-                        break;
-                    }
-                }
-            }
-        }
         // Phone / tablet only: restore the offline download queue (never started on TV).
         if (!isTvDevice()) DownloadManager.get(this);
         if (sharedPhonetic != null) {
@@ -613,6 +627,24 @@ public final class MainActivity extends Activity {
                                                 .putString(Prefs.LOADING_SITE, "")
                                                 .putString(Prefs.SELECTED_SITE, "")
                                                 .commit();
+                                    }
+                                    if (!reduced && config != null) {
+                                        final String savedKey =
+                                                prefs.getString(Prefs.SELECTED_SITE, "");
+                                        if (savedKey != null && !savedKey.isEmpty()) {
+                                            for (final Cms.Site s : config.sites) {
+                                                if (s.key.equals(savedKey) && available(s)) {
+                                                    worker.execute(
+                                                            () -> {
+                                                                try {
+                                                                    engine(s);
+                                                                } catch (Throwable ignored) {
+                                                                }
+                                                            });
+                                                    break;
+                                                }
+                                            }
+                                        }
                                     }
                                     open(new Screen(() -> home()), false);
                                     layoutReady = true;
@@ -1591,6 +1623,7 @@ public final class MainActivity extends Activity {
         super.onStart();
         activeActivity = this;
         foreground = true;
+        CspEngine.syncAllPluginActivities(this);
         UpdateManager.get(this)
                 .listen(
                         () -> {
@@ -1604,6 +1637,14 @@ public final class MainActivity extends Activity {
                         });
         ui.removeCallbacks(automaticUpdate);
         ui.postDelayed(automaticUpdate, 4000);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        activeActivity = this;
+        foreground = true;
+        CspEngine.syncAllPluginActivities(this);
     }
 
     @Override

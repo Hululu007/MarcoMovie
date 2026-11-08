@@ -1126,6 +1126,12 @@ public final class Cms {
         Object action = j.opt("action");
         v.action = action == null || action == JSONObject.NULL ? "" : action.toString();
         v.tag = j.optString("vod_tag");
+        if (v.action.isEmpty()
+                && "action".equalsIgnoreCase(v.tag)
+                && v.id != null
+                && !v.id.isEmpty()) {
+            v.action = v.id;
+        }
         v.year = j.optString("vod_year");
         v.area = j.optString("vod_area");
         v.genre = j.optString("vod_class", j.optString("type_name"));

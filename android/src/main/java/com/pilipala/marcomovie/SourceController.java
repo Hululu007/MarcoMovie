@@ -159,6 +159,51 @@ final class SourceController {
                     .start();
     }
 
+    static boolean isConfigOrNetdiskSite(Cms.Site site) {
+        if (site == null) return false;
+        String api = site.api == null ? "" : site.api;
+        String key = site.key == null ? "" : site.key;
+        String name = site.name == null ? "" : site.name;
+        return api.contains("MyDrive")
+                || api.contains("Config")
+                || key.contains("MyDrive")
+                || key.contains("Config")
+                || name.contains("我的云盘")
+                || (name.contains("云盘") && name.contains("配置"))
+                || (name.contains("网盘") && name.contains("配置"));
+    }
+
+    static boolean isConfigOrNetdiskActionCard(Cms.Site site, Cms.Video v) {
+        if (!isConfigOrNetdiskSite(site) || v == null) return false;
+        if ("folder".equalsIgnoreCase(v.tag)) return false;
+        if (v.lines != null && !v.lines.isEmpty()) return false;
+        String id = v.id == null ? "" : v.id.trim();
+        if (id.isEmpty() || id.startsWith("msearch:")) return false;
+        String title = v.title == null ? "" : v.title;
+        if (title.contains("登入")
+                || title.contains("登录")
+                || title.contains("清除")
+                || title.contains("配置")
+                || title.contains("顺序")
+                || title.contains("设置")
+                || title.contains("扫码")
+                || title.contains("Cookie")
+                || title.contains("token")
+                || title.contains("Token")) {
+            return true;
+        }
+        return id.startsWith("{")
+                || id.startsWith("action")
+                || id.contains("cookie")
+                || id.contains("Cookie")
+                || id.contains("token")
+                || id.contains("Token")
+                || id.contains("login")
+                || id.contains("Login")
+                || id.contains("clear")
+                || id.contains("Clear");
+    }
+
     static void prefetchDetail(MainActivity a, Cms.Site site, Cms.Video video) {
         if (a == null
                 || a.reduced
@@ -166,6 +211,7 @@ final class SourceController {
                 || video == null
                 || video.id == null
                 || video.id.isEmpty()) return;
+        if (isConfigOrNetdiskSite(site)) return;
         if (ListingRoute.isRedirect(video.tag, video.action, video.id)) return;
         if (video.lines != null
                 && !video.lines.isEmpty()
@@ -383,10 +429,12 @@ final class SourceController {
 
     static void sourceAction(MainActivity a, Cms.Site site, String action) {
         a.detailCache.clear();
+        CspEngine.syncAllPluginActivities(a);
         final int ticket = a.generation;
         a.worker.execute(
                 () -> {
                     try {
+                        CspEngine.syncAllPluginActivities(a);
                         String response = a.engine(site).action(action);
                         a.ui.post(
                                 () -> {

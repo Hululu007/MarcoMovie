@@ -77,7 +77,10 @@ public final class CspEngine implements SourceEngine {
     static synchronized DexClassLoader loader(Application app, File artifact, String sha)
             throws Exception {
         DexClassLoader existing = LOADERS.get(sha);
-        if (existing != null) return existing;
+        if (existing != null) {
+            syncPluginActivity(existing, MainActivity.activeActivity);
+            return existing;
+        }
         File optimized = new File(app.getCodeCacheDir(), "csp-opt");
         if (!optimized.exists() && !optimized.mkdirs()) throw new IOException("无法创建插件私有目录");
         DexClassLoader loader =
@@ -93,8 +96,108 @@ public final class CspEngine implements SourceEngine {
                 .invoke(null, app);
         syncPluginProxyPort(loader, ProxyAddress.port);
         replayForegroundActivity(app, before);
+        syncPluginActivity(loader, MainActivity.activeActivity);
         LOADERS.put(sha, loader);
         return loader;
+    }
+
+    static synchronized void syncAllPluginActivities(android.app.Activity activity) {
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+        for (DexClassLoader loader : LOADERS.values()) {
+            syncPluginActivity(loader, activity);
+        }
+    }
+
+    static void syncPluginActivity(ClassLoader loader, android.app.Activity activity) {
+        if (loader == null || activity == null || activity.isFinishing() || activity.isDestroyed())
+            return;
+        try {
+            final Class<?> initClass = loader.loadClass("com.github.catvod.spider.Init");
+            Object instance = null;
+            try {
+                Method getMethod = initClass.getDeclaredMethod("get");
+                getMethod.setAccessible(true);
+                instance = getMethod.invoke(null);
+            } catch (Throwable ignored) {
+            }
+            if (instance == null) {
+                for (Field f : initClass.getDeclaredFields()) {
+                    if (Modifier.isStatic(f.getModifiers())
+                            && initClass.isAssignableFrom(f.getType())) {
+                        f.setAccessible(true);
+                        instance = f.get(null);
+                        if (instance != null) break;
+                    }
+                }
+            }
+            if (instance == null) {
+                for (Class<?> inner : initClass.getDeclaredClasses()) {
+                    for (Field f : inner.getDeclaredFields()) {
+                        if (Modifier.isStatic(f.getModifiers())
+                                && initClass.isAssignableFrom(f.getType())) {
+                            f.setAccessible(true);
+                            instance = f.get(null);
+                            if (instance != null) break;
+                        }
+                    }
+                    if (instance != null) break;
+                }
+            }
+            bindActivityFields(initClass, null, activity);
+            if (instance != null) {
+                bindActivityFields(initClass, instance, activity);
+            }
+            if (instance instanceof Application.ActivityLifecycleCallbacks) {
+                final Application.ActivityLifecycleCallbacks cb =
+                        (Application.ActivityLifecycleCallbacks) instance;
+                Runnable replay =
+                        () -> {
+                            if (activity.isFinishing() || activity.isDestroyed()) return;
+                            try {
+                                cb.onActivityCreated(activity, null);
+                                cb.onActivityStarted(activity);
+                                cb.onActivityResumed(activity);
+                            } catch (Throwable ignored) {
+                            }
+                        };
+                if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+                    replay.run();
+                } else {
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(replay);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void bindActivityFields(
+            Class<?> clazz, Object target, android.app.Activity activity) {
+        if (clazz == null || activity == null) return;
+        for (Field f : clazz.getDeclaredFields()) {
+            try {
+                boolean isStatic = Modifier.isStatic(f.getModifiers());
+                if (target == null && !isStatic) continue;
+                if (target != null && isStatic) continue;
+                Class<?> type = f.getType();
+                if (android.app.Activity.class.isAssignableFrom(type)) {
+                    f.setAccessible(true);
+                    f.set(target, activity);
+                } else if (java.lang.ref.WeakReference.class.isAssignableFrom(type)) {
+                    f.setAccessible(true);
+                    Object current = f.get(target);
+                    Object refVal =
+                            current instanceof java.lang.ref.WeakReference
+                                    ? ((java.lang.ref.WeakReference<?>) current).get()
+                                    : null;
+                    if (refVal == null
+                            || refVal instanceof android.app.Activity
+                            || f.getName().toLowerCase(Locale.ROOT).contains("activity")) {
+                        f.set(target, new java.lang.ref.WeakReference<>(activity));
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     static void syncPluginProxyPort(ClassLoader loader, int port) {
@@ -120,7 +223,7 @@ public final class CspEngine implements SourceEngine {
 
     /**
      * Extensions written for TVBox-style hosts expect the usual private folders and a "tv"
-     * database to exist. Missing ones made the extension's own setup stop half way.
+     * database directory to exist. Missing ones made the extension's own setup stop half way.
      */
     static void prepareHostStorage(Application app) {
         try {
@@ -130,8 +233,6 @@ public final class CspEngine implements SourceEngine {
             File database = app.getDatabasePath("tv");
             File folder = database.getParentFile();
             if (folder != null && !folder.exists()) folder.mkdirs();
-            if (!database.exists())
-                app.openOrCreateDatabase("tv", Context.MODE_PRIVATE, null).close();
         } catch (Throwable error) {
             AppLog.w("CspEngine", "prepare host storage failed", error);
         }
@@ -180,12 +281,14 @@ public final class CspEngine implements SourceEngine {
                 .post(
                         () -> {
                             MainActivity activity = MainActivity.activeActivity;
-                            if (activity == null || activity.isFinishing()) return;
+                            if (activity == null
+                                    || activity.isFinishing()
+                                    || activity.isDestroyed()) return;
                             for (Application.ActivityLifecycleCallbacks callback : added)
                                 try {
                                     callback.onActivityCreated(activity, null);
                                     callback.onActivityStarted(activity);
-                                    if (activity.foreground) callback.onActivityResumed(activity);
+                                    callback.onActivityResumed(activity);
                                 } catch (Throwable error) {
                                     AppLog.w(
                                             "CspEngine",
@@ -227,6 +330,7 @@ public final class CspEngine implements SourceEngine {
 
             @Override
             public void onActivityPaused(android.app.Activity a) {
+                if (MainActivity.activeActivity != null && MainActivity.activeActivity != a) return;
                 try {
                     delegate.onActivityPaused(a);
                 } catch (Throwable e) {
@@ -236,6 +340,7 @@ public final class CspEngine implements SourceEngine {
 
             @Override
             public void onActivityStopped(android.app.Activity a) {
+                if (MainActivity.activeActivity != null && MainActivity.activeActivity != a) return;
                 try {
                     delegate.onActivityStopped(a);
                 } catch (Throwable e) {
@@ -254,6 +359,7 @@ public final class CspEngine implements SourceEngine {
 
             @Override
             public void onActivityDestroyed(android.app.Activity a) {
+                if (MainActivity.activeActivity != null && MainActivity.activeActivity != a) return;
                 try {
                     delegate.onActivityDestroyed(a);
                 } catch (Throwable e) {
@@ -306,6 +412,7 @@ public final class CspEngine implements SourceEngine {
     private String call(String operation, Call c, boolean cmsObject) throws Exception {
         synchronized (pluginLock) {
             try {
+                syncAllPluginActivities(MainActivity.activeActivity);
                 String result = c.run();
                 if (result == null || result.trim().isEmpty()) throw new IOException("插件返回空结果");
                 if (cmsObject) new JSONObject(result);
@@ -405,6 +512,7 @@ public final class CspEngine implements SourceEngine {
     public String action(String value) throws Exception {
         synchronized (pluginLock) {
             try {
+                syncAllPluginActivities(MainActivity.activeActivity);
                 return spider.action(value);
             } catch (Throwable error) {
                 throw new EngineException(

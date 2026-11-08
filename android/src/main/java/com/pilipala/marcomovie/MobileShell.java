@@ -1201,9 +1201,6 @@ final class MobileShell {
                                     a.learnTitles(finalList.videos);
                                     a.ui.post(
                                             () -> {
-                                                if (ticket != a.generation
-                                                        || a.isFinishing()
-                                                        || request != homeRequest) return;
                                                 a.prefs
                                                         .edit()
                                                         .putString(Prefs.LOADING_SITE, "")
@@ -1222,9 +1219,14 @@ final class MobileShell {
                                                 }
                                                 currentCategories = finalCats;
                                                 renderCategoryChips.run();
+                                                boolean configOrNetdisk =
+                                                        SourceController.isConfigOrNetdiskSite(
+                                                                siteSnapshot);
                                                 if (pageSnapshot == 1) currentVideos.clear();
                                                 for (Cms.Video v : filtered) {
-                                                    if (v.action == null || v.action.isEmpty()) {
+                                                    if (configOrNetdisk
+                                                            || v.action == null
+                                                            || v.action.isEmpty()) {
                                                         currentVideos.add(v);
                                                     }
                                                 }
@@ -1240,7 +1242,8 @@ final class MobileShell {
                                                                     : "当前筛选暂无匹配，可继续加载更多影片");
                                                 }
                                                 // Render Featured Hero Showcase on Recommend tab
-                                                if (catSnapshot.isEmpty()
+                                                if (!configOrNetdisk
+                                                        && catSnapshot.isEmpty()
                                                         && !currentVideos.isEmpty()) {
                                                     heroContainer.removeAllViews();
                                                     heroContainer.addView(

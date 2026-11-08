@@ -651,6 +651,7 @@ final class HomeScreen {
     }
 
     void renderSnapshot() {
+        a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
         state.snapshot = snapshot;
         boolean first = !state.initialized;
         if (first) {
