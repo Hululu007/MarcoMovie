@@ -5998,7 +5998,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   }
 
   static String get _currentAppVersion =>
-      !kIsWeb && Platform.isMacOS ? '0.5.1' : '0.5.2';
+      !kIsWeb && Platform.isWindows ? '0.5.3' : '0.5.2';
 
   static bool _isRemoteVersionNewer(String remote, String current) {
     List<int> parseParts(String v) => v

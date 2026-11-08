@@ -446,4 +446,38 @@ https://depot.example/config.json
     expect(groups[1].seasonLabel, '第 2 季');
     expect(groups[1].episodeIndexes, [2, 3, 4]);
   });
+  test('parses TVBox JSON with commented-out sites and #EXTINF ad rules without misrouting to M3U parser', () {
+    const commentedJsonWithExtinfRule = '''
+{
+  "spider": "https://cdn.example/custom_spider.jpg;md5;9d5f341aa5f3353b50cc3bc16b4f3e8a",
+  "sites": [
+    {"key": "active_vod", "name": "主力┃不卡", "type": 1, "api": "https://vod.example/api.php/provide/vod/"},
+//{"key": "commented_guard", "name": "原创┃不卡", "type": 3, "api": "csp_YCyzGuard", "timeout": 15},
+    {"key": "bttwoo_guard", "name": "比特┃不卡", "type": 3, "api": "csp_BttwooGuard"}
+  ],
+  "lives": [
+    {"name": "电视直播", "type": 0, "url": "https://live.example/tv.txt"}
+  ],
+  "rules": [
+    {"name": "lz", "hosts": ["vip.lz"], "regex": ["#EXT-X-DISCONTINUITY\\\\r*\\\\n*#EXTINF:5.480000,[\\\\s\\\\S]*?#EXT-X-DISCONTINUITY"]}
+  ]
+}
+''';
+    final packedCarrier = 'JFIF_HEADER**${base64Encode(utf8.encode(commentedJsonWithExtinfRule))}';
+    final cfg = CmsParser.parseConfig(
+      packedCarrier,
+      origin: 'https://depot.example/tv',
+      defaultGroup: '默认分组',
+    );
+    expect(cfg.spider, 'https://cdn.example/custom_spider.jpg;md5;9d5f341aa5f3353b50cc3bc16b4f3e8a');
+    expect(cfg.sites.map((s) => s.key), ['active_vod', 'bttwoo_guard']);
+    expect(cfg.lives.single.url, 'https://live.example/tv.txt');
+    expect(
+      CmsParser.detectSubscriptionFormat(
+        packedCarrier,
+        origin: 'https://depot.example/tv',
+      ),
+      'TVBox',
+    );
+  });
 }

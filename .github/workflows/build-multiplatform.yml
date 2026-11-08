@@ -264,8 +264,8 @@ jobs:
           cmake -S packages/quickjs_engine/native -B packages/quickjs_engine/native/build -DCMAKE_BUILD_TYPE=Release
           cmake --build packages/quickjs_engine/native/build --parallel 4
           flutter test
-          VERSION="0.5.1"
-          flutter build macos --release --build-name="$VERSION" --build-number=51
+          VERSION="0.5.2"
+          flutter build macos --release --build-name="$VERSION" --build-number=52
           APP=$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' -print -quit)
           python3 ../scripts/prepare_catpaw_runtime.py --platform macos --destination "$APP/Contents/Frameworks/node"
           codesign --force --deep --sign - --preserve-metadata=entitlements "$APP"

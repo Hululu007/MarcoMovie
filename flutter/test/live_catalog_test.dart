@@ -514,6 +514,23 @@ https://cdn.test/next.m3u8
       );
       expect(resolved.url, 'https://cdn.test/resolved.m3u8');
       expect(resolved.headers['Referer'], 'https://cdn.test/');
+
+      final commentedLiveGroups = CmsParser.parseLivePlaylist('''
+{
+  // commented group entry
+  "groups": [
+    {
+      "name": "央视频道",
+      "channels": [
+        // {"name": "Disabled", "urls": ["https://live.test/off.m3u8"]},
+        {"name": "CCTV-1", "urls": ["https://live.test/cctv1.m3u8"]}
+      ]
+    }
+  ]
+}
+''');
+      expect(commentedLiveGroups.single.name, '央视频道');
+      expect(commentedLiveGroups.single.channels.single.name, 'CCTV-1');
     },
   );
 }

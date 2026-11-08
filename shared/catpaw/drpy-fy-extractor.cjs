@@ -3,7 +3,10 @@
 // The imported plugin is data only: never evaluate its Python, DEX or native code.
 const crypto = require('node:crypto');
 const {zipMember, unwrapGuard, Dex, MAX} = require('./drpy-guard-extractor.cjs');
-const ARTIFACT = 'e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e';
+const ARTIFACTS = {
+  'e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e': 'f68c170d1f12077550eb3ec912e7ae004a57624f314db0e6280a2b1cc319ba5c',
+  'da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096': '7ae99a034ee2616f0b850ab0c1610d5d4d45d627677fa3e41c8e9809bd4b2a8d'
+};
 const PYTHON = 'cb2ac6239c973bd105be36643d68b1e72d6b8e8c85f29dd8b2428685a4b9de89';
 const fail = () => { throw Error('guard_artifact_invalid'); };
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -34,11 +37,12 @@ function normalizeConfig(config) {
 }
 function extractFy(bytes) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX) fail();
-  if (sha(bytes) !== ARTIFACT) throw Error('guard_artifact_unsupported');
+  const initHash = ARTIFACTS[sha(bytes)];
+  if (!initHash) throw Error('guard_artifact_unsupported');
   const budget = {bytes:0, entries:0};
   const dex = new Dex(zipMember(unwrapGuard(zipMember(bytes, 'assets/ftyshinidie.guard', budget)), 'classes.dex', budget));
   const source = dex.reviewedLiteral('Lcom/github/catvod/spider/Fy;', 'init',
-    'f68c170d1f12077550eb3ec912e7ae004a57624f314db0e6280a2b1cc319ba5c', 7);
+    initHash, 7);
   if (sha(source) !== PYTHON) fail();
   // These exact literal shapes belong to the reviewed source hash above. Do not
   // generalize them into an evaluator or guess endpoints in an unknown version.

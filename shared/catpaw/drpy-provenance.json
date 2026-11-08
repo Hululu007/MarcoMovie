@@ -309,7 +309,10 @@
       "adapter": "dm84-v1",
       "license": "GPL-3.0-only",
       "implementation": "Original endpoint-parameterized interoperability adapter and bounded ZIP/DEX data reader; no plugin binaries or endpoint constants distributed.",
-      "reviewedImportedArtifactSha256": "e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e",
+      "reviewedImportedArtifactSha256": [
+        "e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e",
+        "da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096"
+      ],
       "selection": "Exact reviewed artifact hash; unknown artifacts fail explicitly.",
       "execution": "Bootstrap never executes imported bytecode or native code."
     },
@@ -317,7 +320,10 @@
       "adapter": "auete-v1",
       "license": "GPL-3.0-only",
       "implementation": "Original endpoint-parameterized interoperability adapter; origin and media base read as data from exact reviewed DEX code positions. No page script, constructor or native code is executed.",
-      "reviewedImportedArtifactSha256": "e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e",
+      "reviewedImportedArtifactSha256": [
+        "e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e",
+        "da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096"
+      ],
       "literalLocations": [
         {
           "method": "Auete.<init>",
@@ -337,7 +343,10 @@
       "adapter": "bttwoo-v1",
       "license": "GPL-3.0-only",
       "implementation": "Original parameterized HTTP/HTML interoperability adapter. Host, user agent and data-encoding key are read from exact reviewed static short-array payloads. No imported bytecode, initializer or page script is executed.",
-      "reviewedImportedArtifactSha256": "e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e",
+      "reviewedImportedArtifactSha256": [
+        "e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e",
+        "da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096"
+      ],
       "literalLocations": [
         {
           "method": "Bttwoo.<clinit>",
@@ -385,9 +394,15 @@
       "adapter": "t4-v1",
       "status": "implemented-pending-upstream-and-device-acceptance",
       "license": "GPL-3.0-only",
-      "implementation": "Original CMS protocol adapter with data-only extraction of encrypted extension configuration from one reviewed user-supplied plugin. Imported native code is never executed.",
-      "reviewedImportedArtifactSha256": "e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e",
-      "reviewedNativeSha256": "fac9e3937d9928e437ebff79bc5164df418a6adb212494ef21c273579b045dcb",
+      "implementation": "Original CMS protocol adapter with data-only extraction of encrypted extension configuration from reviewed user-supplied plugins. Imported native code is never executed.",
+      "reviewedImportedArtifactSha256": [
+        "e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e",
+        "da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096"
+      ],
+      "reviewedNativeSha256": [
+        "fac9e3937d9928e437ebff79bc5164df418a6adb212494ef21c273579b045dcb",
+        "d5d8adee01e1bdc4c18b445e19ce7c94fb296ca6dce6f18a08786504fc961f01"
+      ],
       "verification": "Exact artifact and native fingerprints; per-source encrypted configuration; real pagination and source identity preserved. Verification challenges and unavailable media stay explicit. No physical-device playback claim."
     }
   ]

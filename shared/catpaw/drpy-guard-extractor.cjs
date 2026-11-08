@@ -4,7 +4,82 @@
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const MAX = 16 * 1024 * 1024;
-const REVIEWED = 'e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e';
+const PROFILES = {
+  'e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e': {
+    auete: {
+      init: '3841e63ceeae29689e3b5d5b7f92b4d8177278dad5084818c2476df489128c17',
+      player: '80e9d52800eae7b12c2278b2dd00e1d4677252d677e9185b594ef23ecd53b6b8'
+    },
+    bttwoo: {
+      init: 'c47d9c1c569855288c1bf15c852120bb3c99c9bee1ccba4d9c8d93088f61094b',
+      encodePlayKey: '5b7309680b6db8a307e62cb99b055d4130e71a278cbdf092c830542cad3cdb8e',
+      clinit: 'b4511e08ff36b2c803be31a2dd8021f2a049fbabc587e805919e15b45ca7c284',
+      headerClass: 'Lcom/github/catvod/spider/merge/ME;',
+      headerClinit: '3dc0b269b870de31f4fdfa39e54778e8cc5d9cfb6d83c8903dd80e935ae1227e',
+      originMask: 2303,
+      playKeyMask: 3066,
+      userAgentMask: 1121
+    },
+    appgz: {
+      methods: {
+        '<init>': 'e2ba5a4a37b1589bab71e7901d71d012f27e9c31230b39229752158d90907b4a',
+        'N': '2cb95ba3ee3db3f7d155ae38bdd39d8b2d4173889c8a1ee090ad9f243d620942',
+        'tF': 'b0a670647f413a02a78fc1629ae8bfe0b909da50978e7dc1d843f91f0e7a7210',
+        'init': 'e03aceb447f2bf177f591f8faa58665755fa1e93788d04f1bfcee0f8ac56c9c3',
+        'playerContent': '627d2eb2e82b2533258475479ed3757463116f4bf1283fe9f26da5bef49ee48a'
+      },
+      clinit: '73ceb72abb62d4326e733c8d9659e17aef072981e30718f346bf2f657bb83e6e',
+      count: 3104,
+      origin: [1206, 24, 2160],
+      privateKey: [16, 848, 1726],
+      publicKey: [864, 216, 1351],
+      signatureSuffix: [1508, 36, 604],
+      utdidKey: [1857, 44, 3163],
+      ua: [1090, 13, 2573],
+      version: [1110, 7, 2770],
+      pkg: [1128, 44, 1606],
+      ver: [1175, 7, 1803],
+      code: [1193, 6, 2818]
+    }
+  },
+  'da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096': {
+    auete: {
+      init: 'eb69d4f775b6daf51992de9cba679b08cbcc6cc74f41657cfc96abfd2e7c2e5d',
+      player: '234fc41df99212edabdb8daf29729d1fb81b7299e885f1f135e76b2525542978'
+    },
+    bttwoo: {
+      init: '29d4b86958e8938ae42d06b6ebea2f13ec7d7291f73b779f93d56dfa568c7f2d',
+      encodePlayKey: '54d96ca7f290c72e10fb937c412947aeae700065e6b39ab848804d0aec68b210',
+      clinit: '5e44de6d79539158b740b4bff09e870e337185a00108cb81eaa417fc4fc73c2d',
+      headerClass: 'Lcom/github/catvod/spider/merge/py;',
+      headerClinit: '4c3d41a2f28119ed234b8c07edbafcb68513e41bd38c2d738ec06accd7ff4fc0',
+      originMask: 2525,
+      playKeyMask: 814,
+      userAgentMask: 1314
+    },
+    appgz: {
+      methods: {
+        '<init>': '69949e59be4c3b400c84667662d3ef2dec13ec7408fcad679c7b85c995b4f608',
+        'N': 'ab20d133af30ac7d62e08689a2377d8b9f1c22959d1d16b0a307ca2bad8787b3',
+        'tF': '3264180889d97e76e7c47568aee1d42fb13161225d89230e6f76305c96867029',
+        'init': '470f47c3c9264cfee90a38c9c079b0d795a2f94a3cab46cdfb7524cc7f782cc9',
+        'playerContent': '1327ab293c7aecadd64b07161252611eb3dd0b88344a298c00191afb10e04c70'
+      },
+      clinit: '72fff7eb333499f0008bda15435b3507a40362ed4ce0eea84e6311cc29b5a860',
+      count: 3092,
+      origin: [1221, 21, 1146],
+      privateKey: [16, 848, 2169],
+      publicKey: [864, 216, 2699],
+      signatureSuffix: [1407, 36, 402],
+      utdidKey: [1860, 44, 3174],
+      ua: [1105, 13, 1843],
+      version: [1125, 7, 2625],
+      pkg: [1143, 44, 1861],
+      ver: [1190, 7, 1200],
+      code: [1208, 6, 2364]
+    }
+  }
+};
 const fail = () => { throw Error('invalid_artifact'); };
 const sha = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const crcTable = new Uint32Array(256);
@@ -240,7 +315,8 @@ class Dex {
 }
 function extractKnownPlugin(bytes, adapter = 'dm84-v1') {
   if (!Buffer.isBuffer(bytes) || bytes.length > MAX) fail();
-  if (sha(bytes) !== REVIEWED) throw Error('guard_artifact_unsupported');
+  const profile = PROFILES[sha(bytes)];
+  if (!profile) throw Error('guard_artifact_unsupported');
   const budget = { bytes: 0, entries: 0 };
   const payload = zipMember(bytes, 'assets/ftyshinidie.guard', budget);
   const dex = zipMember(unwrapGuard(payload), 'classes.dex', budget);
@@ -254,42 +330,37 @@ function extractKnownPlugin(bytes, adapter = 'dm84-v1') {
   if (adapter === 'auete-v1') {
     const className = 'Lcom/github/catvod/spider/Auete;';
     const origin = endpoint(reader.reviewedLiteral(className, '<init>',
-      '3841e63ceeae29689e3b5d5b7f92b4d8177278dad5084818c2476df489128c17', 3, 'yq'));
+      profile.auete.init, 3, 'yq'));
     const mediaBase = endpoint(reader.reviewedLiteral(className, 'playerContent',
-      '80e9d52800eae7b12c2278b2dd00e1d4677252d677e9185b594ef23ecd53b6b8', 299));
+      profile.auete.player, 299));
     if (origin.pathname !== '/' || origin.search || mediaBase.search || !mediaBase.pathname.endsWith('/')) fail();
     return { origin: origin.origin, mediaBase: mediaBase.href,
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36' };
   }
   if (adapter === 'appgz-v1') {
-    const className = 'Lcom/github/catvod/spider/Appgz;';
-    for (const [method, hash] of Object.entries({
-      '<init>':'e2ba5a4a37b1589bab71e7901d71d012f27e9c31230b39229752158d90907b4a',
-      'N':'2cb95ba3ee3db3f7d155ae38bdd39d8b2d4173889c8a1ee090ad9f243d620942',
-      'tF':'b0a670647f413a02a78fc1629ae8bfe0b909da50978e7dc1d843f91f0e7a7210',
-      'init':'e03aceb447f2bf177f591f8faa58665755fa1e93788d04f1bfcee0f8ac56c9c3',
-      'playerContent':'627d2eb2e82b2533258475479ed3757463116f4bf1283fe9f26da5bef49ee48a'
-    })) reader.reviewedCode(className, method, hash);
-    const values = reader.reviewedShortArray(className, '73ceb72abb62d4326e733c8d9659e17aef072981e30718f346bf2f657bb83e6e', 'short', 38, 3104);
-    const decode = (start, length, mask) => String.fromCharCode(...values.slice(start, start + length).map(value => value ^ mask));
-    const origin = endpoint(decode(1206,24,2160));
+    const className = 'Lcom/github/catvod/spider/Appgz;', g = profile.appgz;
+    for (const [method, hash] of Object.entries(g.methods)) reader.reviewedCode(className, method, hash);
+    const values = reader.reviewedShortArray(className, g.clinit, 'short', 38, g.count);
+    const decode = ([start, length, mask]) => String.fromCharCode(...values.slice(start, start + length).map(value => value ^ mask));
+    const origin = endpoint(decode(g.origin));
     if (origin.pathname !== '/' || origin.search) fail();
-    const config = {origin:origin.origin,privateKey:decode(16,848,1726),publicKey:decode(864,216,1351),
-      signatureSuffix:decode(1508,36,604),utdidKey:decode(1857,44,3163),headers:{
-        'User-Agent':decode(1090,13,2573),'Version':decode(1110,7,2770),'PackageName':decode(1128,44,1606),
-        'Ver':decode(1175,7,1803),'api-ver':decode(1175,7,1803),'code':decode(1193,6,2818)}};
+    const ver = decode(g.ver);
+    const config = {origin:origin.origin,privateKey:decode(g.privateKey),publicKey:decode(g.publicKey),
+      signatureSuffix:decode(g.signatureSuffix),utdidKey:decode(g.utdidKey),headers:{
+        'User-Agent':decode(g.ua),'Version':decode(g.version),'PackageName':decode(g.pkg),
+        'Ver':ver,'api-ver':ver,'code':decode(g.code)}};
     if (![config.privateKey,config.publicKey].every(v=>/^[A-Za-z0-9+/]+={0,2}$/.test(v)) ||
         Object.values(config.headers).some(v=>!v||/[\r\n\0]/.test(v))) fail();
     return config;
   }
   if (adapter === 'bttwoo-v1') {
-    const className = 'Lcom/github/catvod/spider/Bttwoo;';
-    reader.reviewedCode(className, '<init>', 'c47d9c1c569855288c1bf15c852120bb3c99c9bee1ccba4d9c8d93088f61094b');
-    reader.reviewedCode(className, 'encodePlayKey', '5b7309680b6db8a307e62cb99b055d4130e71a278cbdf092c830542cad3cdb8e');
-    const values = reader.reviewedShortArray(className, 'b4511e08ff36b2c803be31a2dd8021f2a049fbabc587e805919e15b45ca7c284', 'short', 10, 686);
-    const headerValues = reader.reviewedShortArray('Lcom/github/catvod/spider/merge/ME;', '3dc0b269b870de31f4fdfa39e54778e8cc5d9cfb6d83c8903dd80e935ae1227e', 'short', 316, 1667);
+    const className = 'Lcom/github/catvod/spider/Bttwoo;', b = profile.bttwoo;
+    reader.reviewedCode(className, '<init>', b.init);
+    reader.reviewedCode(className, 'encodePlayKey', b.encodePlayKey);
+    const values = reader.reviewedShortArray(className, b.clinit, 'short', 10, 686);
+    const headerValues = reader.reviewedShortArray(b.headerClass, b.headerClinit, 'short', 316, 1667);
     const decode = (array, start, length, mask) => String.fromCharCode(...array.slice(start, start + length).map(value => value ^ mask));
-    const origin = endpoint(decode(values, 0, 23, 2303)), playKey = decode(values, 24, 20, 3066), userAgent = decode(headerValues, 1048, 117, 1121);
+    const origin = endpoint(decode(values, 0, 23, b.originMask)), playKey = decode(values, 24, 20, b.playKeyMask), userAgent = decode(headerValues, 1048, 117, b.userAgentMask);
     if (origin.pathname !== '/' || origin.search || !/^[\x21-\x7e]{20}$/.test(playKey) || /[\r\n]/.test(userAgent)) fail();
     return { origin: origin.href, playKey, userAgent };
   }

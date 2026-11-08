@@ -482,9 +482,13 @@ class CmsClient {
       trimmedText = trimmedUrl;
       trimmedUrl = '';
     }
+    final strippedUrl = CmsParser.stripJsonComments(trimmedUrl);
+    final strippedText = CmsParser.stripJsonComments(trimmedText);
     if (trimmedText.isEmpty &&
         (trimmedUrl.startsWith('{') ||
             trimmedUrl.startsWith('[') ||
+            strippedUrl.startsWith('{') ||
+            strippedUrl.startsWith('[') ||
             trimmedUrl.startsWith('<') ||
             trimmedUrl.startsWith('#EXTM3U') ||
             trimmedUrl.contains('#EXTINF') ||
@@ -493,13 +497,15 @@ class CmsClient {
       trimmedUrl = '';
     } else if (trimmedUrl.isEmpty &&
         !CmsParser.looksLikeScript(trimmedText) &&
-        CmsParser.parseLivePlaylist(trimmedText).isEmpty &&
         !trimmedText.startsWith('{') &&
         !trimmedText.startsWith('[') &&
+        !strippedText.startsWith('{') &&
+        !strippedText.startsWith('[') &&
         !trimmedText.startsWith('<') &&
         !trimmedText.startsWith('#EXTM3U') &&
         !trimmedText.contains('#EXTINF') &&
         !trimmedText.contains(',#genre#') &&
+        CmsParser.parseLivePlaylist(trimmedText).isEmpty &&
         (trimmedText.contains('http://') ||
             trimmedText.contains('https://') ||
             (trimmedText.contains('.') && !trimmedText.contains('\n')))) {

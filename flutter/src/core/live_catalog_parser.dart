@@ -267,11 +267,11 @@ class LiveCatalogParser {
     }
     dynamic decoded;
     if (text.startsWith('[') || text.startsWith('{') || text.startsWith('"')) {
-      decoded = jsonDecode(text);
+      decoded = jsonDecode(CmsParser.stripJsonComments(text));
       if (decoded is String) {
         text = decoded.trim();
         decoded = text.startsWith('[') || text.startsWith('{')
-            ? jsonDecode(text)
+            ? jsonDecode(CmsParser.stripJsonComments(text))
             : null;
       }
     }

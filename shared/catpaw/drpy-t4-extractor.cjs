@@ -4,8 +4,16 @@
 const crypto = require('node:crypto');
 const { TextDecoder } = require('node:util');
 const { zipMember, MAX } = require('./drpy-guard-extractor.cjs');
-const REVIEWED = 'e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e';
-const NATIVE_SHA = 'fac9e3937d9928e437ebff79bc5164df418a6adb212494ef21c273579b045dcb';
+const PROFILES = {
+  'e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e': {
+    nativeSha: 'fac9e3937d9928e437ebff79bc5164df418a6adb212494ef21c273579b045dcb',
+    mask: 0xb7
+  },
+  'da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096': {
+    nativeSha: 'd5d8adee01e1bdc4c18b445e19ce7c94fb296ca6dce6f18a08786504fc961f01',
+    mask: 0x15
+  }
+};
 const fail = () => { throw Error('guard_artifact_invalid'); };
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 function bounds(bytes, offset, length) {
@@ -81,11 +89,12 @@ function decodeT4Ext(ext, key) {
 }
 function extractT4(bytes, ext) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX) fail();
-  if (sha(bytes) !== REVIEWED) throw Error('guard_artifact_unsupported');
+  const profile = PROFILES[sha(bytes)];
+  if (!profile) throw Error('guard_artifact_unsupported');
   const native = zipMember(bytes, 'assets/ftyguard_v8.so');
-  if (native.length !== 102440 || sha(native) !== NATIVE_SHA) throw Error('guard_artifact_integrity');
-  // Reviewed ELF initializer decodes this region with XOR 0xb7; it is data only.
-  const key = elfBytes(native, 0x19198, 13).map(value => value ^ 0xb7);
+  if (native.length !== 102440 || sha(native) !== profile.nativeSha) throw Error('guard_artifact_integrity');
+  // Reviewed ELF initializer decodes this region with the profile's XOR mask; it is data only.
+  const key = elfBytes(native, 0x19198, 13).map(value => value ^ profile.mask);
   return decodeT4Ext(ext, key);
 }
 module.exports = { extractT4, decodeT4Ext, normalizeConfig, elfBytes, rc4 };

@@ -766,7 +766,6 @@ class CmsParser {
     final unpacked = unpackConfigText(rawText).trim();
     final lowerOrigin = origin.trim().toLowerCase();
     if (unpacked.startsWith('#EXTM3U') ||
-        unpacked.contains('#EXTINF') ||
         lowerOrigin.endsWith('.m3u') ||
         lowerOrigin.endsWith('.m3u8')) {
       return 'M3U';
@@ -776,9 +775,6 @@ class CmsParser {
             unpacked.toLowerCase().contains('<list') ||
             unpacked.toLowerCase().contains('<video'))) {
       return 'VOD';
-    }
-    if (unpacked.contains(',#genre#')) {
-      return 'TXT';
     }
     try {
       final cleaned = stripJsonComments(unpacked);
@@ -799,11 +795,19 @@ class CmsParser {
         return 'JSON';
       }
     } catch (_) {}
-    if (_looksLikeVodEndpointUrl(origin)) return 'VOD';
-    final groups = parseLivePlaylist(unpacked);
-    if (groups.isNotEmpty) {
-      return unpacked.contains('#EXT') ? 'M3U' : 'TXT';
+    if (unpacked.contains('#EXTINF')) {
+      return 'M3U';
     }
+    if (unpacked.contains(',#genre#')) {
+      return 'TXT';
+    }
+    if (_looksLikeVodEndpointUrl(origin)) return 'VOD';
+    try {
+      final groups = parseLivePlaylist(unpacked);
+      if (groups.isNotEmpty) {
+        return unpacked.contains('#EXT') ? 'M3U' : 'TXT';
+      }
+    } catch (_) {}
     return 'JSON';
   }
 
@@ -816,9 +820,12 @@ class CmsParser {
       splitBatchSubscriptionUrls(String rawInput, {String defaultGroup = '默认分组'}) {
     final trimmed = rawInput.trim();
     if (trimmed.isEmpty) return const [];
+    final stripped = stripJsonComments(trimmed);
     // If it's a JSON/XML/M3U document rather than a list of URLs, return empty so caller treats as raw content.
     if (trimmed.startsWith('{') ||
         trimmed.startsWith('[') ||
+        stripped.startsWith('{') ||
+        stripped.startsWith('[') ||
         trimmed.startsWith('<') ||
         trimmed.startsWith('#EXTM3U') ||
         trimmed.contains('#EXTINF') ||
@@ -941,9 +948,15 @@ class CmsParser {
     }
 
     // 2. Check for M3U / M3U8 (`#EXTM3U`, `#EXTINF`) or TXT (`#genre#`) before JSON
-    final looksLikeM3uOrTxt = trimmedUnpacked.startsWith('#EXTM3U') ||
-        trimmedUnpacked.contains('#EXTINF') ||
-        trimmedUnpacked.contains(',#genre#');
+    final cleaned = stripJsonComments(unpacked);
+    if (cleaned.isEmpty) {
+      throw const FormatException('配置内容为空');
+    }
+    final isJsonRoot = cleaned.startsWith('{') || cleaned.startsWith('[');
+    final looksLikeM3uOrTxt = !isJsonRoot &&
+        (trimmedUnpacked.startsWith('#EXTM3U') ||
+            trimmedUnpacked.contains('#EXTINF') ||
+            trimmedUnpacked.contains(',#genre#'));
     if (looksLikeM3uOrTxt) {
       final m3uCfg = _tryParseM3uOrTxtConfig(
         trimmedUnpacked,
@@ -956,30 +969,28 @@ class CmsParser {
       if (m3uCfg != null) return m3uCfg;
     }
 
-    final cleaned = stripJsonComments(unpacked);
-    if (cleaned.isEmpty) {
-      throw const FormatException('配置内容为空');
-    }
     dynamic decoded;
     try {
       decoded = jsonDecode(cleaned);
     } catch (e) {
       // Fallback: check if plain text is M3U/TXT live channels or plain VOD URL lines
-      final fallbackCfg = _tryParseM3uOrTxtConfig(
-            trimmedUnpacked,
-            origin: origin,
-            groupLabel: groupLabel,
-            isPrivate: isPrivate,
-            subscriptionId: subscriptionId,
-            defaultName: defaultName,
-          ) ??
-          _tryParsePlainVodLinesConfig(
-            trimmedUnpacked,
-            groupLabel: groupLabel,
-            isPrivate: isPrivate,
-            subscriptionId: subscriptionId,
-          );
-      if (fallbackCfg != null) return fallbackCfg;
+      if (!isJsonRoot) {
+        final fallbackCfg = _tryParseM3uOrTxtConfig(
+              trimmedUnpacked,
+              origin: origin,
+              groupLabel: groupLabel,
+              isPrivate: isPrivate,
+              subscriptionId: subscriptionId,
+              defaultName: defaultName,
+            ) ??
+            _tryParsePlainVodLinesConfig(
+              trimmedUnpacked,
+              groupLabel: groupLabel,
+              isPrivate: isPrivate,
+              subscriptionId: subscriptionId,
+            );
+        if (fallbackCfg != null) return fallbackCfg;
+      }
       throw FormatException('不是有效的 JSON / VOD / M3U 配置格式：$e');
     }
 
@@ -1236,7 +1247,12 @@ class CmsParser {
     required String subscriptionId,
     required String defaultName,
   }) {
-    final groups = parseLivePlaylist(content, origin: origin);
+    final List<LiveGroup> groups;
+    try {
+      groups = parseLivePlaylist(content, origin: origin);
+    } on FormatException {
+      return null;
+    }
     if (groups.isEmpty) return null;
     final baseName = defaultName.trim().isNotEmpty
         ? defaultName.trim()
