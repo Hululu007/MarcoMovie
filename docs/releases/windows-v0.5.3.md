@@ -8,7 +8,7 @@
 
 ### 验证与范围
 
-- 构建提交：`912b924c72651e261e5ff061043affe1d53549e4`，[GitHub Actions 构建与验证记录](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42511738267)。
+- 构建提交：`d45af4422936ca9c4cf3446d8d23863eccbc4cce`，[GitHub Actions 构建与验证记录](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42512474479)。
 - 通过公开内容守卫、DRPY/CatVod/Python/Guard 本地宿主回归检查、Flutter 跨端单测（新增含 `//` 注释与 `#EXTINF` 去广告规则的 TVBox JSON 回归测试）以及 GitHub Actions Windows x64 安装包（`.exe`）与便携包（`.zip`）完整构建校验。
 - 已知限制：其余尚未完成跨平台移植的 33 条 Android 专属 Guard / JAR 插件线路及通用实机播放未纳入本版已完成范围。
 - 提供 Windows x64 安装版与便携版 ZIP，均附 SHA-256 校验值及对应源码归档。

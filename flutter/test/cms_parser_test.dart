@@ -477,7 +477,7 @@ https://depot.example/config.json
         packedCarrier,
         origin: 'https://depot.example/tv',
       ),
-      'TVBox',
+      'JSON',
     );
   });
 }
