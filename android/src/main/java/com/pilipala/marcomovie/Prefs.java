@@ -43,6 +43,8 @@ final class Prefs {
     static final String SUBTITLE_BOTTOM = "subtitle_bottom";
     static final String SUBTITLE_STYLE = "subtitle_style";
     static final String SUBTITLE_BG_STYLE = SUBTITLE_STYLE;
+    static final String SUBTITLE_WEIGHT = "subtitle_weight";
+    static final String SUBTITLE_OFFSET_X = "subtitle_offset_x";
     static final String SKIP_INTRO_SECONDS = SKIP_INTRO;
     static final String SKIP_OUTRO_SECONDS = SKIP_OUTRO;
     static final String TUNNELED_PLAYBACK = "tunneled_playback";
@@ -93,6 +95,9 @@ final class Prefs {
         SKIP_OUTRO,
         SUBTITLE_SIZE,
         SUBTITLE_BOTTOM,
+        SUBTITLE_STYLE,
+        SUBTITLE_WEIGHT,
+        SUBTITLE_OFFSET_X,
         DANMAKU_DEFAULT,
         PICTURE_EFFECT,
         AUDIO_EFFECT,
@@ -135,7 +140,9 @@ final class Prefs {
         ranges.put(SKIP_OUTRO, new int[] {0, 180});
         ranges.put(SUBTITLE_SIZE, new int[] {25, 65});
         ranges.put(SUBTITLE_BOTTOM, new int[] {0, 180});
-        ranges.put(SUBTITLE_STYLE, new int[] {0, 5});
+        ranges.put(SUBTITLE_STYLE, new int[] {0, 7});
+        ranges.put(SUBTITLE_WEIGHT, new int[] {0, 100});
+        ranges.put(SUBTITLE_OFFSET_X, new int[] {-100, 100});
         ranges.put(PICTURE_EFFECT, new int[] {0, 3});
         ranges.put(AUDIO_EFFECT, new int[] {0, 3});
         ranges.put(SEARCH_THREADS, new int[] {2, 6});
@@ -186,7 +193,15 @@ final class Prefs {
     }
 
     static int clampSubtitleStyle(int style) {
-        return Math.max(0, Math.min(5, style));
+        return Math.max(0, Math.min(7, style));
+    }
+
+    static int clampSubtitleWeight(int weight) {
+        return Math.max(0, Math.min(100, weight));
+    }
+
+    static int clampSubtitleOffsetX(int offset) {
+        return Math.max(-100, Math.min(100, offset));
     }
 
     static int clampNavScale(int percent) {

@@ -44,6 +44,7 @@ final class ImmersivePoster extends FrameLayout {
 
     private static final LruCache<String, Bitmap> WIDE_MEM_CACHE = new LruCache<>(18);
     private static final LruCache<String, Bitmap> PORTRAIT_HD_MEM_CACHE = new LruCache<>(18);
+    private static final LruCache<String, Double> DOUBAN_RATING_CACHE = new LruCache<>(64);
     private static final Pattern YEAR_PATTERN = Pattern.compile("((?:19|20)\\d{2})");
     private static final java.util.concurrent.ExecutorService HD_POOL =
             java.util.concurrent.Executors.newFixedThreadPool(
@@ -588,6 +589,13 @@ final class ImmersivePoster extends FrameLayout {
                             3800);
             if (rexxarJson != null && rexxarJson.trim().startsWith("{")) {
                 JSONObject obj = new JSONObject(rexxarJson);
+                JSONObject ratingObj = obj.optJSONObject("rating");
+                if (ratingObj != null) {
+                    double rv = ratingObj.optDouble("value", 0.0);
+                    if (rv >= 2.0 && rv <= 10.0) {
+                        DOUBAN_RATING_CACHE.put(normTarget + "#" + extractFourDigitYear(year), rv);
+                    }
+                }
                 JSONObject pic = obj.optJSONObject("pic");
                 if (pic != null) {
                     String large = pic.optString("large", "").trim();
@@ -602,6 +610,53 @@ final class ImmersivePoster extends FrameLayout {
             }
         } catch (Exception ignored) {
         }
+    }
+
+    static void resolveDoubanRating(
+            final MainActivity a,
+            final String rawTitle,
+            final String rawYear,
+            final MainActivity.Done<Double> onResolved) {
+        if (a == null || onResolved == null) return;
+        final String cleanTitle = normalizeTitleForBackdrop(rawTitle);
+        final String normTarget = normalizeForStrictCompare(cleanTitle);
+        if (normTarget.isEmpty()) return;
+        final String cleanYear = extractFourDigitYear(rawYear);
+        final String rKey = normTarget + "#" + cleanYear;
+        Double cached = DOUBAN_RATING_CACHE.get(rKey);
+        if (cached != null && cached >= 2.0) {
+            try {
+                onResolved.accept(cached);
+            } catch (Exception ignored) {
+            }
+            return;
+        }
+        final int generation = a.generation;
+        HD_POOL.execute(
+                () -> {
+                    if (generation != a.generation || a.isFinishing()) return;
+                    try {
+                        Double after = DOUBAN_RATING_CACHE.get(rKey);
+                        if (after == null) {
+                            Set<String> dummy = new LinkedHashSet<>();
+                            collectVerifiedDoubanPosters(cleanTitle, cleanYear, "", "", dummy);
+                            after = DOUBAN_RATING_CACHE.get(rKey);
+                        }
+                        if (after != null && after >= 2.0) {
+                            final Double val = after;
+                            a.ui.post(
+                                    () -> {
+                                        if (generation == a.generation && !a.isFinishing()) {
+                                            try {
+                                                onResolved.accept(val);
+                                            } catch (Exception ignored) {
+                                            }
+                                        }
+                                    });
+                        }
+                    } catch (Exception ignored) {
+                    }
+                });
     }
 
     private static void collectVerifiedBilibiliVerticalCovers(

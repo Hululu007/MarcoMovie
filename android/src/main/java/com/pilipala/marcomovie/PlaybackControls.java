@@ -292,6 +292,56 @@ final class PlaybackControls {
     private void rebuildToolDock(boolean mobileLandscape) {
         dockOverlay.removeAllViews();
         boolean tv = a.isTvDevice();
+        Button fsTool = buttons.get("fullscreen-tool");
+        if (fsTool != null) {
+            fsTool.setText(mobileLandscape ? "竖屏" : "全屏");
+        }
+        if (!tv) {
+            LinearLayout col = a.vertical();
+            col.setGravity(Gravity.CENTER_HORIZONTAL);
+            col.setClipChildren(false);
+            col.setClipToPadding(false);
+            col.setPadding(a.dp(1), a.dp(2), a.dp(1), a.dp(2));
+            for (Button b : buttons.values()) {
+                if (b.getVisibility() == View.GONE) continue;
+                if (b.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) b.getParent()).removeView(b);
+                }
+                b.setSingleLine(true);
+                int padH = a.dp(mobileLandscape ? 4 : 5);
+                b.setPadding(padH, 0, padH, 0);
+                int w = a.dp(mobileLandscape ? 56 : 60);
+                int h = a.dp(mobileLandscape ? 34 : 38);
+                LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(w, h);
+                size.setMargins(a.dp(2), a.dp(3), a.dp(2), a.dp(3));
+                col.addView(b, size);
+            }
+            ScrollView vScroller =
+                    new ScrollView(a) {
+                        @Override
+                        public boolean onInterceptTouchEvent(MotionEvent ev) {
+                            if (getParent() != null) {
+                                getParent().requestDisallowInterceptTouchEvent(true);
+                            }
+                            return super.onInterceptTouchEvent(ev);
+                        }
+
+                        @Override
+                        public boolean onTouchEvent(MotionEvent ev) {
+                            if (getParent() != null) {
+                                getParent().requestDisallowInterceptTouchEvent(true);
+                            }
+                            return super.onTouchEvent(ev);
+                        }
+                    };
+            vScroller.setVerticalScrollBarEnabled(false);
+            vScroller.setFillViewport(true);
+            vScroller.setClipChildren(true);
+            vScroller.setClipToPadding(true);
+            vScroller.addView(col, new ScrollView.LayoutParams(-1, -2));
+            dockOverlay.addView(vScroller, new LinearLayout.LayoutParams(-1, -1));
+            return;
+        }
         LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER);
         row.setClipChildren(false);
@@ -303,40 +353,30 @@ final class PlaybackControls {
                 ((ViewGroup) b.getParent()).removeView(b);
             }
             b.setSingleLine(true);
-            int padH = a.dp(mobileLandscape || tv ? 4 : 6);
+            int padH = a.dp(4);
             b.setPadding(padH, 0, padH, 0);
-            int w = a.dp(mobileLandscape ? 64 : (tv ? 58 : 68));
-            int h = a.dp(mobileLandscape ? 34 : 42);
+            int w = a.dp(58);
+            int h = a.dp(42);
             LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(w, h);
-            int mh = a.dp(mobileLandscape ? 3 : (tv ? 3 : 4));
-            int mv = a.dp(mobileLandscape ? 2 : 4);
-            size.setMargins(mh, mv, mh, mv);
+            size.setMargins(a.dp(3), a.dp(4), a.dp(3), a.dp(4));
             row.addView(b, size);
         }
-        Button fsTool = buttons.get("fullscreen-tool");
-        if (fsTool != null) {
-            fsTool.setText(mobileLandscape ? "竖屏" : "全屏");
-        }
-        if (false) {
-        } else {
-            HorizontalScrollView scroller =
-                    new HorizontalScrollView(a) {
-                        @Override
-                        protected void dispatchDraw(Canvas canvas) {
-                            int save = canvas.save();
-                            canvas.clipRect(
-                                    getScrollX(), 0, getScrollX() + getWidth(), getHeight());
-                            super.dispatchDraw(canvas);
-                            canvas.restoreToCount(save);
-                        }
-                    };
-            scroller.setHorizontalScrollBarEnabled(false);
-            scroller.setFillViewport(true);
-            scroller.setClipChildren(true);
-            scroller.setClipToPadding(true);
-            scroller.addView(row);
-            dockOverlay.addView(scroller, new LinearLayout.LayoutParams(-1, -2));
-        }
+        HorizontalScrollView scroller =
+                new HorizontalScrollView(a) {
+                    @Override
+                    protected void dispatchDraw(Canvas canvas) {
+                        int save = canvas.save();
+                        canvas.clipRect(getScrollX(), 0, getScrollX() + getWidth(), getHeight());
+                        super.dispatchDraw(canvas);
+                        canvas.restoreToCount(save);
+                    }
+                };
+        scroller.setHorizontalScrollBarEnabled(false);
+        scroller.setFillViewport(true);
+        scroller.setClipChildren(true);
+        scroller.setClipToPadding(true);
+        scroller.addView(row);
+        dockOverlay.addView(scroller, new LinearLayout.LayoutParams(-1, -2));
     }
 
     void registerHiddenAction(String key, Runnable action) {
@@ -790,9 +830,12 @@ final class PlaybackControls {
         int size = Prefs.clampSubtitleSize(a.prefs.getInt(Prefs.SUBTITLE_SIZE, 45));
         int bottomDp = Prefs.clampSubtitleBottom(a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24));
         int stylePreset = Prefs.clampSubtitleStyle(a.prefs.getInt(Prefs.SUBTITLE_STYLE, 0));
-        subtitle.applyStylePreset(stylePreset);
-        subtitle.setFractionalTextSize(size / 1000f);
-        subtitle.setBottomPaddingFraction(0.02f + (bottomDp / 650f));
+        int weight = Prefs.clampSubtitleWeight(a.prefs.getInt(Prefs.SUBTITLE_WEIGHT, 50));
+        int offsetX = Prefs.clampSubtitleOffsetX(a.prefs.getInt(Prefs.SUBTITLE_OFFSET_X, 0));
+        subtitle.applyStylePreset(stylePreset, weight);
+        subtitle.setSubtitleSizeValue(size);
+        subtitle.setSubtitleBottomDp(bottomDp);
+        subtitle.setHorizontalOffsetPercent(offsetX);
         visible(a.controlsVisible);
     }
 
@@ -825,6 +868,106 @@ final class PlaybackControls {
         showSubtitleAdjuster(a, subtitle, this::applySubtitleStyle);
     }
 
+    static void showSubtitleStyleDrawer(
+            MainActivity a, int selectedIndex, PlayerBubble.IntAction onSelect) {
+        if (!a.isTvDevice()) {
+            MobileShell.showDrawerPicker(
+                    a,
+                    "选择字幕颜色与样式",
+                    "选择后实时套用至全屏字幕预览与后续播放",
+                    SubtitleOverlayView.STYLE_LABELS,
+                    selectedIndex,
+                    onSelect);
+            return;
+        }
+        final Dialog drawer = new Dialog(a);
+        drawer.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        if (drawer.getWindow() != null) {
+            drawer.getWindow()
+                    .setBackgroundDrawable(
+                            new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+            drawer.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            drawer.getWindow()
+                    .setLayout(
+                            WindowManager.LayoutParams.MATCH_PARENT,
+                            WindowManager.LayoutParams.MATCH_PARENT);
+        }
+        FrameLayout root = new FrameLayout(a);
+        root.setBackgroundColor(0x55000000);
+        root.setOnClickListener(v -> drawer.dismiss());
+
+        LinearLayout sheet = a.vertical();
+        sheet.setPadding(a.dp(22), a.dp(24), a.dp(22), a.dp(24));
+        android.graphics.drawable.GradientDrawable bg = a.bg(0xf2151d1a, 24);
+        bg.setStroke(a.dp(1), 0x38ffffff);
+        sheet.setBackground(bg);
+        sheet.setClickable(true);
+
+        TextView head = a.text("字幕颜色与样式（抽屉菜单）", 18, MainActivity.WHITE);
+        head.setTypeface(null, android.graphics.Typeface.BOLD);
+        sheet.addView(head);
+        a.gap(sheet, 4);
+        sheet.addView(a.text("上下移动实时预览，按确认键完成选择", 12, MainActivity.MUTED));
+        a.gap(sheet, 14);
+
+        ScrollView scroll = new ScrollView(a);
+        scroll.setVerticalScrollBarEnabled(false);
+        LinearLayout list = a.vertical();
+        Button initialFocus = null;
+        for (int i = 0; i < SubtitleOverlayView.STYLE_LABELS.length; i++) {
+            final int idx = i;
+            String label =
+                    (i == selectedIndex ? "✓  " : "    ") + SubtitleOverlayView.STYLE_LABELS[i];
+            Button item =
+                    a.button(
+                            label,
+                            "sub-style-" + i,
+                            () -> {
+                                onSelect.accept(idx);
+                                drawer.dismiss();
+                            });
+            item.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+            item.setTextSize(14);
+            item.setMinHeight(a.dp(44));
+            item.setMinimumHeight(a.dp(44));
+            item.setTextColor(SubtitleOverlayView.STYLE_COLORS[i]);
+            item.setOnFocusChangeListener(
+                    (v, focused) -> {
+                        FocusMotion.style(
+                                a,
+                                item,
+                                focused,
+                                0xff202a26,
+                                MainActivity.WHITE,
+                                14,
+                                SubtitleOverlayView.STYLE_COLORS[idx],
+                                MainActivity.DARK,
+                                false,
+                                1.02f);
+                        if (focused) {
+                            onSelect.accept(idx);
+                        }
+                    });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, a.dp(44));
+            lp.bottomMargin = a.dp(8);
+            list.addView(item, lp);
+            if (i == selectedIndex) initialFocus = item;
+        }
+        scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
+        sheet.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        FrameLayout.LayoutParams sheetLp =
+                new FrameLayout.LayoutParams(
+                        a.dp(360),
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        sheetLp.setMargins(0, a.dp(20), a.dp(20), a.dp(20));
+        root.addView(sheet, sheetLp);
+        drawer.setContentView(root);
+        drawer.show();
+        if (initialFocus != null) initialFocus.requestFocus();
+    }
+
     static void showSubtitleAdjuster(
             MainActivity a, SubtitleOverlayView liveSub, Runnable onChanged) {
         final Dialog dlg = new Dialog(a);
@@ -834,185 +977,618 @@ final class PlaybackControls {
                     .setBackgroundDrawable(
                             new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
             dlg.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            dlg.getWindow()
+                    .setLayout(
+                            WindowManager.LayoutParams.MATCH_PARENT,
+                            WindowManager.LayoutParams.MATCH_PARENT);
         }
         if (liveSub != null) {
-            liveSub.setPreviewActive(true);
+            liveSub.setVisibility(View.INVISIBLE);
             if (a.controlsVisible) a.showControls(false);
         }
 
-        LinearLayout card = a.vertical();
-        card.setPadding(a.dp(22), a.dp(18), a.dp(22), a.dp(18));
-        android.graphics.drawable.GradientDrawable bg = a.bg(0xe8141c19, 22);
-        bg.setStroke(a.dp(1), 0x40ffffff);
-        card.setBackground(bg);
-        card.setFocusable(true);
-        card.setFocusableInTouchMode(true);
-
-        TextView title = a.text("字幕方向键直调（实时生效）", 17, MainActivity.WHITE);
-        title.setTypeface(null, android.graphics.Typeface.BOLD);
-        card.addView(title);
-        a.gap(card, 6);
-
-        TextView guide =
-                a.text(
-                        a.isTvDevice()
-                                ? "▲ ▼ 调整高度位置  ·  ◀ ▶ 调整字体大小  ·  确认键 切换字体颜色"
-                                : "可使用方向键或下方按钮实时调节高度位置、字体大小与字体颜色",
-                        12,
-                        MainActivity.MUTED);
-        card.addView(guide);
-        a.gap(card, 10);
-
-        final TextView statusView = a.text("", 14, 0xff2ad47a);
-        statusView.setTypeface(null, android.graphics.Typeface.BOLD);
-        card.addView(statusView);
-        a.gap(card, 12);
-
-        final SubtitleOverlayView previewBox;
+        FrameLayout fullRoot = new FrameLayout(a);
         if (liveSub == null) {
-            previewBox = new SubtitleOverlayView(a);
-            previewBox.setBackground(a.bg(0xff0b110f, 14));
-            previewBox.setPreviewActive(true);
-            card.addView(previewBox, new LinearLayout.LayoutParams(-1, a.dp(92)));
-            a.gap(card, 12);
+            fullRoot.setBackgroundColor(0xee080e0c);
         } else {
-            previewBox = null;
+            fullRoot.setBackgroundColor(0x28000000);
         }
+
+        final SubtitleOverlayView previewCanvas = new SubtitleOverlayView(a);
+        previewCanvas.setPreviewActive(true);
+        previewCanvas.setShowAxisGuides(true);
+        fullRoot.addView(previewCanvas, new FrameLayout.LayoutParams(-1, -1));
+
+        final SeekBar[] sizeBarRef = new SeekBar[1];
+        final SeekBar[] weightBarRef = new SeekBar[1];
+        final TextView[] sizeValRef = new TextView[1];
+        final TextView[] weightValRef = new TextView[1];
+        final TextView[] posValRef = new TextView[1];
+        final TextView[] styleBtnTextRef = new TextView[1];
+        final boolean[] internalSync = {false};
 
         final Runnable syncState =
                 () -> {
                     int sz = Prefs.clampSubtitleSize(a.prefs.getInt(Prefs.SUBTITLE_SIZE, 45));
                     int bt = Prefs.clampSubtitleBottom(a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24));
                     int st = Prefs.clampSubtitleStyle(a.prefs.getInt(Prefs.SUBTITLE_STYLE, 0));
-                    statusView.setText(
-                            "底部高度："
-                                    + bt
-                                    + "dp   ·   字体大小："
-                                    + sz
-                                    + "   ·   颜色样式："
-                                    + SubtitleOverlayView.STYLE_LABELS[st]);
-                    statusView.setTextColor(SubtitleOverlayView.STYLE_COLORS[st]);
-                    if (previewBox != null) {
-                        previewBox.applyStylePreset(st);
-                        previewBox.setFractionalTextSize(sz / 1000f);
-                        previewBox.setBottomPaddingFraction(0.02f + (bt / 650f));
+                    int wt = Prefs.clampSubtitleWeight(a.prefs.getInt(Prefs.SUBTITLE_WEIGHT, 50));
+                    int ox = Prefs.clampSubtitleOffsetX(a.prefs.getInt(Prefs.SUBTITLE_OFFSET_X, 0));
+
+                    previewCanvas.applyStylePreset(st, wt);
+                    previewCanvas.setSubtitleSizeValue(sz);
+                    previewCanvas.setSubtitleBottomDp(bt);
+                    previewCanvas.setHorizontalOffsetPercent(ox);
+
+                    internalSync[0] = true;
+                    if (sizeBarRef[0] != null) sizeBarRef[0].setProgress(sz - 25);
+                    if (weightBarRef[0] != null) weightBarRef[0].setProgress(wt);
+                    internalSync[0] = false;
+
+                    if (sizeValRef[0] != null) sizeValRef[0].setText(sz + "");
+                    if (weightValRef[0] != null) weightValRef[0].setText(wt + "");
+                    if (posValRef[0] != null) {
+                        posValRef[0].setText(
+                                "高度 "
+                                        + bt
+                                        + "dp · "
+                                        + (Math.abs(ox) <= 2
+                                                ? "中轴线居中 ✓"
+                                                : ("水平 " + (ox > 0 ? "+" : "") + ox)));
+                    }
+                    if (styleBtnTextRef[0] != null) {
+                        styleBtnTextRef[0].setText(
+                                "字幕颜色与样式  ·  " + SubtitleOverlayView.STYLE_LABELS[st] + "  ▸");
+                        styleBtnTextRef[0].setTextColor(SubtitleOverlayView.STYLE_COLORS[st]);
                     }
                     if (onChanged != null) onChanged.run();
                 };
-        syncState.run();
 
-        // java.util.function.IntConsumer is unavailable on Android 6 (API 23).
-        final PlayerBubble.IntAction stepSize =
-                delta -> {
-                    int cur = Prefs.clampSubtitleSize(a.prefs.getInt(Prefs.SUBTITLE_SIZE, 45));
-                    int next = Prefs.clampSubtitleSize(cur + delta);
-                    a.prefs.edit().putInt(Prefs.SUBTITLE_SIZE, next).apply();
-                    syncState.run();
-                };
-        final PlayerBubble.IntAction stepBottom =
-                delta -> {
-                    int cur = Prefs.clampSubtitleBottom(a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24));
-                    int next = Prefs.clampSubtitleBottom(cur + delta);
-                    a.prefs.edit().putInt(Prefs.SUBTITLE_BOTTOM, next).apply();
-                    syncState.run();
-                };
-        final Runnable cycleStyle =
+        final Runnable resetDefaults =
                 () -> {
-                    int cur = Prefs.clampSubtitleStyle(a.prefs.getInt(Prefs.SUBTITLE_STYLE, 0));
-                    int next = (cur + 1) % SubtitleOverlayView.STYLE_LABELS.length;
-                    a.prefs.edit().putInt(Prefs.SUBTITLE_STYLE, next).apply();
+                    a.prefs
+                            .edit()
+                            .putInt(Prefs.SUBTITLE_SIZE, 45)
+                            .putInt(Prefs.SUBTITLE_BOTTOM, 24)
+                            .putInt(Prefs.SUBTITLE_WEIGHT, 50)
+                            .putInt(Prefs.SUBTITLE_OFFSET_X, 0)
+                            .putInt(Prefs.SUBTITLE_STYLE, 0)
+                            .apply();
                     syncState.run();
                 };
 
-        if (a.isTvDevice()) {
-            TextView tvExitHint = a.text("✓ 每次调节均已实时保存  ·  按【返回键】或长按【确认键】完成退出", 12.5f, 0xffe5e7eb);
-            tvExitHint.setGravity(Gravity.CENTER);
-            tvExitHint.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
-            tvExitHint.setBackground(a.bg(0x28ffffff, 12));
-            card.addView(tvExitHint, new LinearLayout.LayoutParams(-1, -2));
-        } else {
-            LinearLayout controlsRow = a.row();
-            controlsRow.setGravity(Gravity.CENTER);
-            String[] btnLabels = {"字号 -", "字号 +", "▼ 下移", "▲ 上移", "切换颜色", "完成"};
-            Runnable[] btnActions = {
-                () -> stepSize.accept(-2),
-                () -> stepSize.accept(2),
-                () -> stepBottom.accept(-6),
-                () -> stepBottom.accept(6),
-                cycleStyle,
-                dlg::dismiss
+        if (!a.isTvDevice()) {
+            // =================================================================
+            // MOBILE FULL-SCREEN INTERACTIVE SUBTITLE DEBUGGER
+            // - Two-finger pinch-to-zoom for font size (25..65)
+            // - One-finger press & drag for 2D position with center-axis snap
+            // - Center-axis guide lines (中轴线指引)
+            // - Dedicated sliders & drawer picker for color/style
+            // =================================================================
+            final float[] pinchSize = {
+                Prefs.clampSubtitleSize(a.prefs.getInt(Prefs.SUBTITLE_SIZE, 45))
             };
-            for (int i = 0; i < btnLabels.length; i++) {
-                final Runnable act = btnActions[i];
-                TextView b = a.text(btnLabels[i], 12, MainActivity.WHITE);
-                b.setGravity(Gravity.CENTER);
-                b.setPadding(a.dp(10), a.dp(8), a.dp(10), a.dp(8));
-                b.setBackground(a.bg(i == btnLabels.length - 1 ? 0xff1f6f4a : 0x26ffffff, 12));
-                b.setOnClickListener(v -> act.run());
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-                lp.rightMargin = a.dp(6);
-                controlsRow.addView(b, lp);
-            }
-            HorizontalScrollView hScroll = new HorizontalScrollView(a);
-            hScroll.setHorizontalScrollBarEnabled(false);
-            hScroll.addView(controlsRow);
-            card.addView(hScroll, new LinearLayout.LayoutParams(-1, -2));
-        }
+            final boolean[] isScaling = {false};
+            final float[] downXY = new float[2];
+            final int[] startPos = new int[2];
 
-        dlg.setOnKeyListener(
-                (dialog, keyCode, event) -> {
-                    if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
-                    if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
-                        stepSize.accept(-2);
-                        return true;
-                    }
-                    if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
-                        stepSize.accept(2);
-                        return true;
-                    }
-                    if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-                        stepBottom.accept(6);
-                        return true;
-                    }
-                    if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                        stepBottom.accept(-6);
-                        return true;
-                    }
-                    if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER
-                            || keyCode == KeyEvent.KEYCODE_ENTER) {
-                        if (event.getRepeatCount() > 0) {
-                            dlg.dismiss();
+            final ScaleGestureDetector scaleDetector =
+                    new ScaleGestureDetector(
+                            a,
+                            new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                                @Override
+                                public boolean onScaleBegin(ScaleGestureDetector detector) {
+                                    isScaling[0] = true;
+                                    pinchSize[0] =
+                                            Prefs.clampSubtitleSize(
+                                                    a.prefs.getInt(Prefs.SUBTITLE_SIZE, 45));
+                                    return true;
+                                }
+
+                                @Override
+                                public boolean onScale(ScaleGestureDetector detector) {
+                                    pinchSize[0] =
+                                            Math.max(
+                                                    25f,
+                                                    Math.min(
+                                                            65f,
+                                                            pinchSize[0]
+                                                                    * detector.getScaleFactor()));
+                                    int nextSz = Prefs.clampSubtitleSize(Math.round(pinchSize[0]));
+                                    a.prefs.edit().putInt(Prefs.SUBTITLE_SIZE, nextSz).apply();
+                                    syncState.run();
+                                    return true;
+                                }
+
+                                @Override
+                                public void onScaleEnd(ScaleGestureDetector detector) {
+                                    isScaling[0] = false;
+                                }
+                            });
+
+            previewCanvas.setOnTouchListener(
+                    (v, event) -> {
+                        scaleDetector.onTouchEvent(event);
+                        int action = event.getActionMasked();
+                        if (action == MotionEvent.ACTION_DOWN) {
+                            downXY[0] = event.getRawX();
+                            downXY[1] = event.getRawY();
+                            startPos[0] =
+                                    Prefs.clampSubtitleOffsetX(
+                                            a.prefs.getInt(Prefs.SUBTITLE_OFFSET_X, 0));
+                            startPos[1] =
+                                    Prefs.clampSubtitleBottom(
+                                            a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24));
+                            previewCanvas.setShowAxisGuides(true);
                             return true;
                         }
-                        cycleStyle.run();
+                        if (action == MotionEvent.ACTION_POINTER_DOWN) {
+                            isScaling[0] = true;
+                            return true;
+                        }
+                        if (action == MotionEvent.ACTION_MOVE) {
+                            if (isScaling[0] || event.getPointerCount() > 1) return true;
+                            float dx = event.getRawX() - downXY[0];
+                            float dy = event.getRawY() - downXY[1];
+                            float maxShiftX = Math.max(a.dp(80), previewCanvas.getWidth() * 0.30f);
+                            int nextOx =
+                                    Prefs.clampSubtitleOffsetX(
+                                            startPos[0] + Math.round((dx / maxShiftX) * 100f));
+                            if (Math.abs(nextOx) <= 4) {
+                                nextOx = 0; // Magnetic snap to vertical center axis (中轴线吸附)
+                            }
+                            int nextBt =
+                                    Prefs.clampSubtitleBottom(
+                                            startPos[1]
+                                                    - Math.round(dy / Math.max(1f, a.dp(2.2f))));
+                            if (Math.abs(nextBt - 24) <= 2) {
+                                nextBt = 24;
+                            }
+                            a.prefs
+                                    .edit()
+                                    .putInt(Prefs.SUBTITLE_OFFSET_X, nextOx)
+                                    .putInt(Prefs.SUBTITLE_BOTTOM, nextBt)
+                                    .apply();
+                            syncState.run();
+                            return true;
+                        }
                         return true;
-                    }
-                    if (keyCode == KeyEvent.KEYCODE_BACK
-                            || keyCode == KeyEvent.KEYCODE_ESCAPE
-                            || keyCode == KeyEvent.KEYCODE_MENU) {
-                        dlg.dismiss();
-                        return true;
-                    }
-                    return false;
-                });
+                    });
+
+            // Top floating HUD bar
+            LinearLayout topBar = a.row();
+            topBar.setGravity(Gravity.CENTER_VERTICAL);
+            topBar.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
+            android.graphics.drawable.GradientDrawable topBg = a.bg(0xdd141c19, 20);
+            topBg.setStroke(a.dp(1), 0x33ffffff);
+            topBar.setBackground(topBg);
+
+            LinearLayout titleCol = a.vertical();
+            TextView t1 = a.text("全屏字幕触控调试", 14.5f, MainActivity.WHITE);
+            t1.setTypeface(null, android.graphics.Typeface.BOLD);
+            titleCol.addView(t1);
+            TextView t2 = a.text("单指按住拖拽位置（中轴线自动吸附） · 双指捏合缩放字号", 11.5f, 0xff9ca3af);
+            titleCol.addView(t2);
+            topBar.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1f));
+
+            TextView resetBtn = a.text("重置居中", 12, 0xffe5e7eb);
+            resetBtn.setGravity(Gravity.CENTER);
+            resetBtn.setPadding(a.dp(12), a.dp(7), a.dp(12), a.dp(7));
+            resetBtn.setBackground(a.bg(0x28ffffff, 999));
+            MobileDetailScreen.bindTouchFeedback(resetBtn);
+            resetBtn.setOnClickListener(v -> resetDefaults.run());
+            LinearLayout.LayoutParams resetLp = new LinearLayout.LayoutParams(-2, -2);
+            resetLp.rightMargin = a.dp(8);
+            topBar.addView(resetBtn, resetLp);
+
+            TextView doneBtn = a.text("完成", 12.5f, Color.WHITE);
+            doneBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+            doneBtn.setGravity(Gravity.CENTER);
+            doneBtn.setPadding(a.dp(15), a.dp(7), a.dp(15), a.dp(7));
+            doneBtn.setBackground(a.bg(0xff1f7a54, 999));
+            MobileDetailScreen.bindTouchFeedback(doneBtn);
+            doneBtn.setOnClickListener(v -> dlg.dismiss());
+            topBar.addView(doneBtn, new LinearLayout.LayoutParams(-2, -2));
+
+            FrameLayout.LayoutParams topLp =
+                    new FrameLayout.LayoutParams(-1, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            int topInset = a.statusBarHeight() + a.dp(8);
+            topLp.setMargins(a.dp(14), topInset, a.dp(14), 0);
+            fullRoot.addView(topBar, topLp);
+
+            // Compact floating control card at top-below-HUD (so bottom subtitle area stays clear)
+            LinearLayout ctrlCard = a.vertical();
+            ctrlCard.setPadding(a.dp(16), a.dp(12), a.dp(16), a.dp(12));
+            android.graphics.drawable.GradientDrawable ctrlBg = a.bg(0xdc141c19, 20);
+            ctrlBg.setStroke(a.dp(1), 0x2effffff);
+            ctrlCard.setBackground(ctrlBg);
+
+            // Size slider row
+            LinearLayout szRow = a.row();
+            szRow.setGravity(Gravity.CENTER_VERTICAL);
+            szRow.addView(a.text("字幕大小", 12.5f, MainActivity.WHITE));
+            SeekBar szBar = new SeekBar(a);
+            szBar.setMax(40);
+            UiCompat.tintSeekBar(szBar, 0xff34d399, Color.WHITE);
+            sizeBarRef[0] = szBar;
+            szRow.addView(szBar, new LinearLayout.LayoutParams(0, -2, 1f));
+            TextView szVal = a.text("45", 12.5f, 0xff34d399);
+            szVal.setGravity(Gravity.RIGHT);
+            sizeValRef[0] = szVal;
+            szRow.addView(szVal, new LinearLayout.LayoutParams(a.dp(32), -2));
+            ctrlCard.addView(szRow, new LinearLayout.LayoutParams(-1, -2));
+
+            a.gap(ctrlCard, 6);
+
+            // Weight slider row
+            LinearLayout wtRow = a.row();
+            wtRow.setGravity(Gravity.CENTER_VERTICAL);
+            wtRow.addView(a.text("字体粗细", 12.5f, MainActivity.WHITE));
+            SeekBar wtBar = new SeekBar(a);
+            wtBar.setMax(100);
+            UiCompat.tintSeekBar(wtBar, 0xff5ac8fa, Color.WHITE);
+            weightBarRef[0] = wtBar;
+            wtRow.addView(wtBar, new LinearLayout.LayoutParams(0, -2, 1f));
+            TextView wtVal = a.text("50", 12.5f, 0xff5ac8fa);
+            wtVal.setGravity(Gravity.RIGHT);
+            weightValRef[0] = wtVal;
+            wtRow.addView(wtVal, new LinearLayout.LayoutParams(a.dp(32), -2));
+            ctrlCard.addView(wtRow, new LinearLayout.LayoutParams(-1, -2));
+
+            a.gap(ctrlCard, 8);
+
+            // Drawer button for Subtitle Color & Style
+            TextView styleDrawerBtn = a.text("", 13, Color.WHITE);
+            styleDrawerBtn.setTypeface(null, android.graphics.Typeface.BOLD);
+            styleDrawerBtn.setGravity(Gravity.CENTER);
+            styleDrawerBtn.setPadding(a.dp(14), a.dp(9), a.dp(14), a.dp(9));
+            styleDrawerBtn.setBackground(a.bg(0x24ffffff, 14));
+            MobileDetailScreen.bindTouchFeedback(styleDrawerBtn);
+            styleBtnTextRef[0] = styleDrawerBtn;
+            styleDrawerBtn.setOnClickListener(
+                    v -> {
+                        int curSt =
+                                Prefs.clampSubtitleStyle(a.prefs.getInt(Prefs.SUBTITLE_STYLE, 0));
+                        showSubtitleStyleDrawer(
+                                a,
+                                curSt,
+                                idx -> {
+                                    a.prefs.edit().putInt(Prefs.SUBTITLE_STYLE, idx).apply();
+                                    syncState.run();
+                                });
+                    });
+            ctrlCard.addView(styleDrawerBtn, new LinearLayout.LayoutParams(-1, -2));
+
+            szBar.setOnSeekBarChangeListener(
+                    new SeekBar.OnSeekBarChangeListener() {
+                        @Override
+                        public void onProgressChanged(SeekBar b, int p, boolean fromUser) {
+                            if (!fromUser || internalSync[0]) return;
+                            a.prefs.edit().putInt(Prefs.SUBTITLE_SIZE, 25 + p).apply();
+                            syncState.run();
+                        }
+
+                        @Override
+                        public void onStartTrackingTouch(SeekBar b) {}
+
+                        @Override
+                        public void onStopTrackingTouch(SeekBar b) {}
+                    });
+            wtBar.setOnSeekBarChangeListener(
+                    new SeekBar.OnSeekBarChangeListener() {
+                        @Override
+                        public void onProgressChanged(SeekBar b, int p, boolean fromUser) {
+                            if (!fromUser || internalSync[0]) return;
+                            a.prefs.edit().putInt(Prefs.SUBTITLE_WEIGHT, p).apply();
+                            syncState.run();
+                        }
+
+                        @Override
+                        public void onStartTrackingTouch(SeekBar b) {}
+
+                        @Override
+                        public void onStopTrackingTouch(SeekBar b) {}
+                    });
+
+            FrameLayout.LayoutParams ctrlLp =
+                    new FrameLayout.LayoutParams(-1, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            ctrlLp.setMargins(a.dp(14), topInset + a.dp(62), a.dp(14), 0);
+            fullRoot.addView(ctrlCard, ctrlLp);
+        } else {
+            // =================================================================
+            // TV FULL-SCREEN SUBTITLE PREVIEW & ADJUSTER
+            // - D-Pad 2D position adjustment with center-axis guide lines
+            // - Dedicated SeekBar slider for Subtitle Size (字幕大小)
+            // - Dedicated SeekBar slider for Subtitle Weight (字体粗细)
+            // - Slide-in Drawer Menu for Subtitle Color & Style (字幕颜色与样式)
+            // =================================================================
+            LinearLayout tvPanel = a.vertical();
+            tvPanel.setPadding(a.dp(22), a.dp(16), a.dp(22), a.dp(16));
+            android.graphics.drawable.GradientDrawable bg = a.bg(0xe4141c19, 22);
+            bg.setStroke(a.dp(1), 0x40ffffff);
+            tvPanel.setBackground(bg);
+
+            LinearLayout headerRow = a.row();
+            headerRow.setGravity(Gravity.CENTER_VERTICAL);
+            TextView title = a.text("全屏字幕实时预览与调节", 17, MainActivity.WHITE);
+            title.setTypeface(null, android.graphics.Typeface.BOLD);
+            headerRow.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
+            TextView posStatus = a.text("", 12.5f, 0xff34d399);
+            posValRef[0] = posStatus;
+            headerRow.addView(posStatus);
+            tvPanel.addView(headerRow, new LinearLayout.LayoutParams(-1, -2));
+            a.gap(tvPanel, 10);
+
+            // 1. D-Pad Position Control Row (Interactive 2D D-Pad Mode + Quick Step Buttons)
+            final boolean[] posDpadActive = {false};
+            LinearLayout posRow = a.row();
+            posRow.setGravity(Gravity.CENTER_VERTICAL);
+            final Button posDpadBtn = a.button("十字方向键调位置（点击进入全向微调）", "tv-sub-pos-mode", () -> {});
+            posDpadBtn.setTextSize(13f);
+            posDpadBtn.setMinHeight(a.dp(40));
+            posDpadBtn.setMinimumHeight(a.dp(40));
+            posDpadBtn.setOnClickListener(
+                    v -> {
+                        posDpadActive[0] = !posDpadActive[0];
+                        posDpadBtn.setText(
+                                posDpadActive[0]
+                                        ? "● 正在用 ▲▼◀▶ 调节位置（按确认键退出位置模式）"
+                                        : "十字方向键调位置（点击进入全向微调）");
+                    });
+            posDpadBtn.setOnKeyListener(
+                    (v, keyCode, event) -> {
+                        if (!posDpadActive[0] || event.getAction() != KeyEvent.ACTION_DOWN) {
+                            return false;
+                        }
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                            int bt =
+                                    Prefs.clampSubtitleBottom(
+                                            a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24) + 4);
+                            a.prefs.edit().putInt(Prefs.SUBTITLE_BOTTOM, bt).apply();
+                            syncState.run();
+                            return true;
+                        }
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                            int bt =
+                                    Prefs.clampSubtitleBottom(
+                                            a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24) - 4);
+                            a.prefs.edit().putInt(Prefs.SUBTITLE_BOTTOM, bt).apply();
+                            syncState.run();
+                            return true;
+                        }
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
+                            int ox =
+                                    Prefs.clampSubtitleOffsetX(
+                                            a.prefs.getInt(Prefs.SUBTITLE_OFFSET_X, 0) - 4);
+                            if (Math.abs(ox) <= 2) ox = 0;
+                            a.prefs.edit().putInt(Prefs.SUBTITLE_OFFSET_X, ox).apply();
+                            syncState.run();
+                            return true;
+                        }
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                            int ox =
+                                    Prefs.clampSubtitleOffsetX(
+                                            a.prefs.getInt(Prefs.SUBTITLE_OFFSET_X, 0) + 4);
+                            if (Math.abs(ox) <= 2) ox = 0;
+                            a.prefs.edit().putInt(Prefs.SUBTITLE_OFFSET_X, ox).apply();
+                            syncState.run();
+                            return true;
+                        }
+                        if (keyCode == KeyEvent.KEYCODE_BACK) {
+                            posDpadActive[0] = false;
+                            posDpadBtn.setText("十字方向键调位置（点击进入全向微调）");
+                            return true;
+                        }
+                        return false;
+                    });
+            LinearLayout.LayoutParams posBtnLp = new LinearLayout.LayoutParams(0, a.dp(40), 1f);
+            posBtnLp.rightMargin = a.dp(8);
+            posRow.addView(posDpadBtn, posBtnLp);
+
+            Button upBtn =
+                    a.button(
+                            "▲ 上移",
+                            "tv-sub-up",
+                            () -> {
+                                int bt =
+                                        Prefs.clampSubtitleBottom(
+                                                a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24) + 6);
+                                a.prefs.edit().putInt(Prefs.SUBTITLE_BOTTOM, bt).apply();
+                                syncState.run();
+                            });
+            upBtn.setTextSize(12.5f);
+            upBtn.setMinHeight(a.dp(40));
+            upBtn.setMinimumHeight(a.dp(40));
+            LinearLayout.LayoutParams upLp = new LinearLayout.LayoutParams(-2, a.dp(40));
+            upLp.rightMargin = a.dp(6);
+            posRow.addView(upBtn, upLp);
+
+            Button downBtn =
+                    a.button(
+                            "▼ 下移",
+                            "tv-sub-down",
+                            () -> {
+                                int bt =
+                                        Prefs.clampSubtitleBottom(
+                                                a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24) - 6);
+                                a.prefs.edit().putInt(Prefs.SUBTITLE_BOTTOM, bt).apply();
+                                syncState.run();
+                            });
+            downBtn.setTextSize(12.5f);
+            downBtn.setMinHeight(a.dp(40));
+            downBtn.setMinimumHeight(a.dp(40));
+            posRow.addView(downBtn, new LinearLayout.LayoutParams(-2, a.dp(40)));
+            tvPanel.addView(posRow, new LinearLayout.LayoutParams(-1, -2));
+
+            a.gap(tvPanel, 8);
+
+            // 2. Dedicated SeekBar Slider for Subtitle Size (字幕大小)
+            LinearLayout sizeRow = a.row();
+            sizeRow.setGravity(Gravity.CENTER_VERTICAL);
+            sizeRow.setPadding(a.dp(12), a.dp(6), a.dp(12), a.dp(6));
+            sizeRow.setBackground(a.bg(0x1fffffff, 12));
+            TextView sizeLbl = a.text("字幕大小（◀ ▶ 滑动）", 13.5f, MainActivity.WHITE);
+            sizeRow.addView(sizeLbl, new LinearLayout.LayoutParams(a.dp(150), -2));
+            final SeekBar tvSizeBar = new SeekBar(a);
+            tvSizeBar.setMax(40);
+            tvSizeBar.setKeyProgressIncrement(2);
+            tvSizeBar.setFocusable(true);
+            UiCompat.tintSeekBar(tvSizeBar, 0xff34d399, Color.WHITE);
+            tvSizeBar.setOnFocusChangeListener(
+                    (v, f) ->
+                            FocusMotion.style(
+                                    a,
+                                    sizeRow,
+                                    f,
+                                    0x1fffffff,
+                                    0x3834d399,
+                                    12,
+                                    MainActivity.WHITE,
+                                    MainActivity.WHITE,
+                                    false,
+                                    1.01f));
+            sizeBarRef[0] = tvSizeBar;
+            sizeRow.addView(tvSizeBar, new LinearLayout.LayoutParams(0, -2, 1f));
+            TextView tvSizeVal = a.text("45", 13.5f, 0xff34d399);
+            tvSizeVal.setGravity(Gravity.RIGHT);
+            sizeValRef[0] = tvSizeVal;
+            sizeRow.addView(tvSizeVal, new LinearLayout.LayoutParams(a.dp(40), -2));
+            tvPanel.addView(sizeRow, new LinearLayout.LayoutParams(-1, -2));
+
+            a.gap(tvPanel, 8);
+
+            // 3. Dedicated SeekBar Slider for Subtitle Weight / Thickness (字体粗细)
+            LinearLayout weightRow = a.row();
+            weightRow.setGravity(Gravity.CENTER_VERTICAL);
+            weightRow.setPadding(a.dp(12), a.dp(6), a.dp(12), a.dp(6));
+            weightRow.setBackground(a.bg(0x1fffffff, 12));
+            TextView weightLbl = a.text("字体粗细（◀ ▶ 滑动）", 13.5f, MainActivity.WHITE);
+            weightRow.addView(weightLbl, new LinearLayout.LayoutParams(a.dp(150), -2));
+            final SeekBar tvWeightBar = new SeekBar(a);
+            tvWeightBar.setMax(100);
+            tvWeightBar.setKeyProgressIncrement(5);
+            tvWeightBar.setFocusable(true);
+            UiCompat.tintSeekBar(tvWeightBar, 0xff5ac8fa, Color.WHITE);
+            tvWeightBar.setOnFocusChangeListener(
+                    (v, f) ->
+                            FocusMotion.style(
+                                    a,
+                                    weightRow,
+                                    f,
+                                    0x1fffffff,
+                                    0x385ac8fa,
+                                    12,
+                                    MainActivity.WHITE,
+                                    MainActivity.WHITE,
+                                    false,
+                                    1.01f));
+            weightBarRef[0] = tvWeightBar;
+            weightRow.addView(tvWeightBar, new LinearLayout.LayoutParams(0, -2, 1f));
+            TextView tvWeightVal = a.text("50", 13.5f, 0xff5ac8fa);
+            tvWeightVal.setGravity(Gravity.RIGHT);
+            weightValRef[0] = tvWeightVal;
+            weightRow.addView(tvWeightVal, new LinearLayout.LayoutParams(a.dp(40), -2));
+            tvPanel.addView(weightRow, new LinearLayout.LayoutParams(-1, -2));
+
+            tvSizeBar.setOnSeekBarChangeListener(
+                    new SeekBar.OnSeekBarChangeListener() {
+                        @Override
+                        public void onProgressChanged(SeekBar b, int p, boolean fromUser) {
+                            if (internalSync[0]) return;
+                            a.prefs.edit().putInt(Prefs.SUBTITLE_SIZE, 25 + p).apply();
+                            syncState.run();
+                        }
+
+                        @Override
+                        public void onStartTrackingTouch(SeekBar b) {}
+
+                        @Override
+                        public void onStopTrackingTouch(SeekBar b) {}
+                    });
+            tvWeightBar.setOnSeekBarChangeListener(
+                    new SeekBar.OnSeekBarChangeListener() {
+                        @Override
+                        public void onProgressChanged(SeekBar b, int p, boolean fromUser) {
+                            if (internalSync[0]) return;
+                            a.prefs.edit().putInt(Prefs.SUBTITLE_WEIGHT, p).apply();
+                            syncState.run();
+                        }
+
+                        @Override
+                        public void onStartTrackingTouch(SeekBar b) {}
+
+                        @Override
+                        public void onStopTrackingTouch(SeekBar b) {}
+                    });
+
+            a.gap(tvPanel, 8);
+
+            // 4. Drawer Menu Button for Subtitle Color & Style + Reset & Done Buttons
+            LinearLayout bottomRow = a.row();
+            bottomRow.setGravity(Gravity.CENTER_VERTICAL);
+            Button styleDrawerBtn =
+                    a.button(
+                            "字幕颜色与样式",
+                            "tv-sub-style-drawer",
+                            () -> {
+                                int curSt =
+                                        Prefs.clampSubtitleStyle(
+                                                a.prefs.getInt(Prefs.SUBTITLE_STYLE, 0));
+                                showSubtitleStyleDrawer(
+                                        a,
+                                        curSt,
+                                        idx -> {
+                                            a.prefs
+                                                    .edit()
+                                                    .putInt(Prefs.SUBTITLE_STYLE, idx)
+                                                    .apply();
+                                            syncState.run();
+                                        });
+                            });
+            styleDrawerBtn.setTextSize(13f);
+            styleDrawerBtn.setMinHeight(a.dp(42));
+            styleDrawerBtn.setMinimumHeight(a.dp(42));
+            styleBtnTextRef[0] = styleDrawerBtn;
+            LinearLayout.LayoutParams styleLp = new LinearLayout.LayoutParams(0, a.dp(42), 1f);
+            styleLp.rightMargin = a.dp(8);
+            bottomRow.addView(styleDrawerBtn, styleLp);
+
+            Button resetBtn = a.button("恢复默认", "tv-sub-reset", resetDefaults);
+            resetBtn.setTextSize(13f);
+            resetBtn.setMinHeight(a.dp(42));
+            resetBtn.setMinimumHeight(a.dp(42));
+            LinearLayout.LayoutParams resetLp = new LinearLayout.LayoutParams(-2, a.dp(42));
+            resetLp.rightMargin = a.dp(8);
+            bottomRow.addView(resetBtn, resetLp);
+
+            Button doneBtn = a.button("完成", "tv-sub-done", dlg::dismiss);
+            doneBtn.setTextSize(13f);
+            doneBtn.setMinHeight(a.dp(42));
+            doneBtn.setMinimumHeight(a.dp(42));
+            bottomRow.addView(doneBtn, new LinearLayout.LayoutParams(-2, a.dp(42)));
+            tvPanel.addView(bottomRow, new LinearLayout.LayoutParams(-1, -2));
+
+            FrameLayout.LayoutParams panelLp =
+                    new FrameLayout.LayoutParams(
+                            Math.min(a.windowWidth() - a.dp(48), a.dp(660)),
+                            -2,
+                            Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            panelLp.topMargin = a.dp(24);
+            fullRoot.addView(tvPanel, panelLp);
+        }
+
+        syncState.run();
+
         dlg.setOnDismissListener(
                 d -> {
                     if (liveSub != null) {
                         liveSub.setPreviewActive(false);
+                        liveSub.setVisibility(View.VISIBLE);
                         if (onChanged != null) onChanged.run();
                     }
                 });
-        FrameLayout wrapper = new FrameLayout(a);
-        FrameLayout.LayoutParams wlp =
-                new FrameLayout.LayoutParams(
-                        Math.min(a.windowWidth() - a.dp(32), a.dp(560)),
-                        -2,
-                        Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        wlp.topMargin = a.dp(32);
-        wrapper.addView(card, wlp);
-        dlg.setContentView(wrapper);
+        dlg.setContentView(fullRoot);
         dlg.show();
-        card.requestFocus();
     }
 
     void tracks(int type) {

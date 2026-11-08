@@ -21,7 +21,7 @@ final class SettingsScreen {
         if (!a.isTvDevice()) {
             LinearLayout topNav = a.row();
             topNav.setGravity(Gravity.CENTER_VERTICAL);
-            topNav.setPadding(0, 0, 0, a.dp(10));
+            topNav.setPadding(0, 0, 0, a.dp(14));
             TextView backBtn = a.text("‹", 22, MainActivity.WHITE);
             backBtn.setGravity(Gravity.CENTER);
             backBtn.setBackground(
@@ -37,14 +37,18 @@ final class SettingsScreen {
             a.body.addView(topNav, new LinearLayout.LayoutParams(-1, -2));
         } else {
             a.body.addView(a.text(title, 28, MainActivity.WHITE));
-            a.gap(a.body, 8);
+            a.gap(a.body, 10);
         }
-        if (!note.isEmpty()) a.paragraph(note);
+        if (!note.isEmpty()) {
+            a.paragraph(note);
+            a.gap(a.body, 6);
+        }
     }
 
     void link(String title, String detail, String key, Runnable action) {
+        boolean tv = a.isTvDevice();
         LinearLayout row = a.row();
-        row.setPadding(a.dp(18), a.dp(12), a.dp(18), a.dp(12));
+        row.setPadding(a.dp(20), a.dp(15), a.dp(20), a.dp(15));
         LinearLayout copy = a.vertical();
         copy.addView(a.text(title, 17, MainActivity.WHITE));
         TextView caption = a.text(detail, 12, MainActivity.MUTED);
@@ -54,10 +58,10 @@ final class SettingsScreen {
         row.addView(a.text("›", 23, MainActivity.MUTED));
         row.setTag(key);
         row.setId(View.generateViewId());
-        row.setFocusable(true);
-        row.setFocusableInTouchMode(true);
+        row.setFocusable(tv);
+        row.setFocusableInTouchMode(tv);
         row.setClickable(true);
-        row.setBackground(a.bg(0xff222226, 12));
+        row.setBackground(a.bg(0xff222226, 14));
         row.setOnFocusChangeListener(
                 (v, f) -> {
                     FocusMotion.style(
@@ -66,7 +70,7 @@ final class SettingsScreen {
                             f,
                             0xff222226,
                             0xff37373e,
-                            12,
+                            14,
                             MainActivity.WHITE,
                             MainActivity.WHITE,
                             true,
@@ -75,7 +79,7 @@ final class SettingsScreen {
         a.pressFeedback(row);
         row.setOnClickListener(v -> action.run());
         LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, -2);
-        size.bottomMargin = a.dp(8);
+        size.bottomMargin = a.dp(14);
         a.body.addView(row, size);
     }
 
@@ -117,28 +121,45 @@ final class SettingsScreen {
                 TvLayoutPolicy.percent(a.prefs.getInt(Prefs.UI_SCALE_PERCENT, 100))
                         + "% · 按钮、文字与图标一起调整",
                 "setting-ui_scale_percent",
-                () ->
-                        new AppDialog.Builder(a)
-                                .setTitle("界面大小")
-                                .setMessage("标准会自动适配屏幕分辨率。观看距离较远时可放大；选择后界面重新载入。")
-                                .setSingleChoiceItems(
-                                        new String[] {"标准 · 自动适配", "放大 · 110%", "更大 · 120%"},
-                                        a.prefs.getInt(Prefs.UI_SCALE_PERCENT, 100) == 120
-                                                ? 2
-                                                : a.prefs.getInt(Prefs.UI_SCALE_PERCENT, 100) == 110
-                                                        ? 1
-                                                        : 0,
-                                        (d, n) -> {
-                                            a.prefs
-                                                    .edit()
-                                                    .putInt(
-                                                            Prefs.UI_SCALE_PERCENT,
-                                                            new int[] {100, 110, 120}[n])
-                                                    .commit();
-                                            a.recreate();
-                                        })
-                                .setNegativeButton("返回", null)
-                                .show());
+                () -> {
+                    String[] scaleLabels = new String[] {"标准 · 自动适配", "放大 · 110%", "更大 · 120%"};
+                    int[] scaleValues = new int[] {100, 110, 120};
+                    int curScale =
+                            a.prefs.getInt(Prefs.UI_SCALE_PERCENT, 100) == 120
+                                    ? 2
+                                    : a.prefs.getInt(Prefs.UI_SCALE_PERCENT, 100) == 110 ? 1 : 0;
+                    if (!a.isTvDevice()) {
+                        MobileShell.showDrawerPicker(
+                                a,
+                                "界面大小",
+                                "标准会自动适配屏幕分辨率；选择后界面重新载入",
+                                scaleLabels,
+                                curScale,
+                                n -> {
+                                    a.prefs
+                                            .edit()
+                                            .putInt(Prefs.UI_SCALE_PERCENT, scaleValues[n])
+                                            .commit();
+                                    a.recreate();
+                                });
+                        return;
+                    }
+                    new AppDialog.Builder(a)
+                            .setTitle("界面大小")
+                            .setMessage("标准会自动适配屏幕分辨率。观看距离较远时可放大；选择后界面重新载入。")
+                            .setSingleChoiceItems(
+                                    scaleLabels,
+                                    curScale,
+                                    (d, n) -> {
+                                        a.prefs
+                                                .edit()
+                                                .putInt(Prefs.UI_SCALE_PERCENT, scaleValues[n])
+                                                .commit();
+                                        a.recreate();
+                                    })
+                            .setNegativeButton("返回", null)
+                            .show();
+                });
         ints(
                 "导航栏字体与按钮大小",
                 Prefs.NAV_SCALE_PERCENT,
@@ -235,24 +256,44 @@ final class SettingsScreen {
                 "默认速度",
                 a.prefs.getFloat(Prefs.PLAY_SPEED, 1) + "×",
                 "setting-play_speed",
-                () ->
-                        new AppDialog.Builder(a)
-                                .setTitle("播放速度")
-                                .setItems(
-                                        new String[] {"0.5×", "0.75×", "1×", "1.25×", "1.5×", "2×"},
-                                        (d, i) -> {
-                                            a.prefs
-                                                    .edit()
-                                                    .putFloat(
-                                                            Prefs.PLAY_SPEED,
-                                                            new float[] {
-                                                                        .5f, .75f, 1, 1.25f, 1.5f, 2
-                                                                    }
-                                                                    [i])
-                                                    .apply();
-                                            a.refresh();
-                                        })
-                                .show());
+                () -> {
+                    String[] speedLabels =
+                            new String[] {"0.5×", "0.75×", "1×", "1.25×", "1.5×", "2×"};
+                    float[] speedVals = new float[] {.5f, .75f, 1f, 1.25f, 1.5f, 2f};
+                    float curSpeed = a.prefs.getFloat(Prefs.PLAY_SPEED, 1f);
+                    int curIdx = 2;
+                    for (int i = 0; i < speedVals.length; i++) {
+                        if (Math.abs(curSpeed - speedVals[i]) < 0.05f) {
+                            curIdx = i;
+                            break;
+                        }
+                    }
+                    if (!a.isTvDevice()) {
+                        MobileShell.showDrawerPicker(
+                                a,
+                                "默认播放速度",
+                                "作为之后进入播放时的初始倍速",
+                                speedLabels,
+                                curIdx,
+                                i -> {
+                                    a.prefs.edit().putFloat(Prefs.PLAY_SPEED, speedVals[i]).apply();
+                                    a.refresh();
+                                });
+                        return;
+                    }
+                    new AppDialog.Builder(a)
+                            .setTitle("播放速度")
+                            .setItems(
+                                    speedLabels,
+                                    (d, i) -> {
+                                        a.prefs
+                                                .edit()
+                                                .putFloat(Prefs.PLAY_SPEED, speedVals[i])
+                                                .apply();
+                                        a.refresh();
+                                    })
+                            .show();
+                });
         toggle("自动播放下一集", Prefs.AUTO_NEXT, true, null);
         ints("循环", Prefs.REPEAT_MODE, new String[] {"关闭", "单集循环", "列表循环"}, new int[] {0, 1, 2}, 0);
         int skipIntroSec = Prefs.clampSkipSeconds(a.prefs.getInt(Prefs.SKIP_INTRO, 0));
@@ -281,7 +322,7 @@ final class SettingsScreen {
         int subBottom = Prefs.clampSubtitleBottom(a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24));
         int subStyle = Prefs.clampSubtitleStyle(a.prefs.getInt(Prefs.SUBTITLE_STYLE, 0));
         link(
-                "字幕大小与位置（方向键直调）",
+                a.isTvDevice() ? "字幕大小与位置（全屏预览调校）" : "字幕全屏调试（双指缩放 · 按住拖拽）",
                 "字号 "
                         + subSize
                         + " · 底部高度 "
@@ -294,7 +335,7 @@ final class SettingsScreen {
                 "字幕样式",
                 Prefs.SUBTITLE_STYLE,
                 SubtitleOverlayView.STYLE_LABELS,
-                new int[] {0, 1, 2, 3, 4, 5},
+                new int[] {0, 1, 2, 3, 4, 5, 6, 7},
                 0);
         toggle("自动加载来源弹幕", Prefs.DANMAKU_DEFAULT, true, null);
         ints(
@@ -405,7 +446,7 @@ final class SettingsScreen {
                                     a.recreate();
                                 }));
         a.paragraph(
-                "Marco Movie 0.5.4 · 作者 Pilipala · github.com/Pilipala9919/MarcoMovie。本产品仅为工具，不含任何影视资源；内容与配置请自行合法获取。播放能力取决于服务授权和设备支持。");
+                "Marco Movie 0.5.5 · 作者 Pilipala · github.com/Pilipala9919/MarcoMovie。本产品仅为工具，不含任何影视资源；内容与配置请自行合法获取。播放能力取决于服务授权和设备支持。");
     }
 
     void confirm(String title, Runnable action) {
@@ -437,6 +478,30 @@ final class SettingsScreen {
                 a.prefs.getBoolean(key, defaultValue) ? "开启" : "关闭",
                 "setting-" + key,
                 () -> {
+                    boolean current = a.prefs.getBoolean(key, defaultValue);
+                    if (!a.isTvDevice()) {
+                        MobileShell.showDrawerPicker(
+                                a,
+                                title,
+                                "在下方抽屉中选择启用或关闭此项",
+                                new String[] {"开启", "关闭"},
+                                current ? 0 : 1,
+                                idx -> {
+                                    boolean nextVal = idx == 0;
+                                    Runnable applyNext =
+                                            () -> {
+                                                a.prefs.edit().putBoolean(key, nextVal).apply();
+                                                if (after != null) after.run();
+                                                a.refresh();
+                                            };
+                                    if (key.equals(Prefs.EXPERIMENTAL_CSP) && nextVal && !current) {
+                                        confirm("运行配置源提供的扩展？请仅使用你信任的配置。", applyNext);
+                                    } else {
+                                        applyNext.run();
+                                    }
+                                });
+                        return;
+                    }
                     Runnable change =
                             () -> {
                                 a.prefs
@@ -460,19 +525,33 @@ final class SettingsScreen {
                 title,
                 labels[selected],
                 "setting-" + key,
-                () ->
-                        new AppDialog.Builder(a)
-                                .setTitle(title)
-                                .setSingleChoiceItems(
-                                        labels,
-                                        choice,
-                                        (dialog, index) -> {
-                                            a.prefs.edit().putInt(key, values[index]).apply();
-                                            dialog.dismiss();
-                                            a.refresh();
-                                        })
-                                .setNegativeButton("取消", null)
-                                .show());
+                () -> {
+                    if (!a.isTvDevice()) {
+                        MobileShell.showDrawerPicker(
+                                a,
+                                title,
+                                "在下方抽屉中选择预设选项",
+                                labels,
+                                choice,
+                                index -> {
+                                    a.prefs.edit().putInt(key, values[index]).apply();
+                                    a.refresh();
+                                });
+                        return;
+                    }
+                    new AppDialog.Builder(a)
+                            .setTitle(title)
+                            .setSingleChoiceItems(
+                                    labels,
+                                    choice,
+                                    (dialog, index) -> {
+                                        a.prefs.edit().putInt(key, values[index]).apply();
+                                        dialog.dismiss();
+                                        a.refresh();
+                                    })
+                            .setNegativeButton("取消", null)
+                            .show();
+                });
     }
 
     void pick(int request, String mime, boolean create) {

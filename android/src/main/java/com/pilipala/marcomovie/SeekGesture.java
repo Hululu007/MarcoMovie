@@ -29,6 +29,30 @@ final class SeekGesture {
         return (int) Math.max(0L, Math.min(durationMs, (long) startPositionMs + delta));
     }
 
+    /**
+     * Computes a linear seek speed multiplier from horizontal swipe speed (pixels per second
+     * normalized by screen width). Slow drags scrub finely (~0.75x) while faster swipes scale
+     * linearly up to 4.5x.
+     */
+    static float linearSeekSpeedMultiplier(float velocityPxPerSec, float width) {
+        if (width <= 0f) return 1f;
+        float screensPerSec = Math.abs(velocityPxPerSec) / width;
+        return Math.max(0.75f, Math.min(4.5f, 0.75f + 1.5f * screensPerSec));
+    }
+
+    static int stepLinearSeekTarget(
+            int currentTargetMs,
+            int durationMs,
+            float stepDx,
+            float velocityPxPerSec,
+            float width) {
+        if (durationMs <= 0 || width <= 0) return 0;
+        int baseSpan = Math.max(60000, Math.min(300000, durationMs / 5));
+        float speedMul = linearSeekSpeedMultiplier(velocityPxPerSec, width);
+        long delta = Math.round((stepDx / width) * baseSpan * speedMul);
+        return (int) Math.max(0L, Math.min(durationMs, (long) currentTargetMs + delta));
+    }
+
     static float dragVerticalLevel(float startLevel, float dy, float height) {
         float clampedStart = Math.max(0f, Math.min(1f, startLevel));
         if (height <= 0) return clampedStart;

@@ -1116,8 +1116,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
         origin.setEllipsize(android.text.TextUtils.TruncateAt.END);
         card.addView(origin);
         card.setTag("global-result:" + source.site.key + ":" + video.id);
-        card.setFocusable(true);
-        card.setFocusableInTouchMode(true);
+        card.setFocusable(a.isTvDevice());
+        card.setFocusableInTouchMode(a.isTvDevice());
         card.setClickable(true);
         a.pressFeedback(card);
         final String query = submitted;

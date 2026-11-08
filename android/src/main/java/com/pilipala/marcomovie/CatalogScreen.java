@@ -124,8 +124,8 @@ final class CatalogScreen {
                         remark.setMaxLines(1);
                         remark.setEllipsize(TextUtils.TruncateAt.END);
                         card.addView(remark);
-                        card.setFocusable(true);
-                        card.setFocusableInTouchMode(true);
+                        card.setFocusable(a.isTvDevice());
+                        card.setFocusableInTouchMode(a.isTvDevice());
                         card.setClickable(true);
                         card.setTag(i == 0 ? "primary" : "video:" + v.id);
                         card.setOnClickListener(view -> a.openListing(s, v));

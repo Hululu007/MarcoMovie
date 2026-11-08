@@ -164,6 +164,124 @@ final class MobileShell {
         return gd;
     }
 
+    /**
+     * Bottom-sheet drawer selector for all customizable settings on mobile (replaces tap-to-toggle
+     * and modal dialogs with a unified slide-up drawer).
+     */
+    static void showDrawerPicker(
+            MainActivity a,
+            String title,
+            String subtitle,
+            String[] options,
+            int selectedIndex,
+            PlayerBubble.IntAction onSelect) {
+        final android.app.Dialog dlg = new android.app.Dialog(a);
+        dlg.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
+        if (dlg.getWindow() != null) {
+            dlg.getWindow()
+                    .setBackgroundDrawable(
+                            new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+            dlg.getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            dlg.getWindow()
+                    .setLayout(
+                            android.view.WindowManager.LayoutParams.MATCH_PARENT,
+                            android.view.WindowManager.LayoutParams.MATCH_PARENT);
+        }
+
+        FrameLayout backdrop = new FrameLayout(a);
+        backdrop.setBackgroundColor(0x88000000);
+        backdrop.setOnClickListener(v -> dlg.dismiss());
+
+        LinearLayout sheet = a.vertical();
+        sheet.setClickable(true);
+        sheet.setPadding(a.dp(20), a.dp(12), a.dp(20), a.dp(28));
+        GradientDrawable sheetBg =
+                new GradientDrawable(
+                        GradientDrawable.Orientation.TOP_BOTTOM,
+                        new int[] {0xf619221f, 0xfa101614});
+        float r = a.dp(26);
+        sheetBg.setCornerRadii(new float[] {r, r, r, r, 0, 0, 0, 0});
+        sheetBg.setStroke(Math.max(1, a.dp(1)), 0x33ffffff);
+        sheet.setBackground(sheetBg);
+
+        // Top drag handle pill
+        View handle = new View(a);
+        handle.setBackground(a.bg(0x48ffffff, 999));
+        LinearLayout.LayoutParams handleLp = new LinearLayout.LayoutParams(a.dp(40), a.dp(4));
+        handleLp.gravity = Gravity.CENTER_HORIZONTAL;
+        handleLp.bottomMargin = a.dp(14);
+        sheet.addView(handle, handleLp);
+
+        LinearLayout headerRow = a.row();
+        headerRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout titleCol = a.vertical();
+        TextView titleView = a.text(title, 18, Color.WHITE);
+        titleView.setTypeface(null, Typeface.BOLD);
+        titleCol.addView(titleView);
+        if (subtitle != null && !subtitle.isEmpty()) {
+            TextView subView = a.text(subtitle, 12.5f, MainActivity.MUTED);
+            subView.setPadding(0, a.dp(4), 0, 0);
+            titleCol.addView(subView);
+        }
+        headerRow.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        TextView closeBtn = a.text("关闭", 12.5f, 0xffe5e7eb);
+        closeBtn.setGravity(Gravity.CENTER);
+        closeBtn.setPadding(a.dp(13), a.dp(6), a.dp(13), a.dp(6));
+        closeBtn.setBackground(a.bg(0x24ffffff, 999));
+        MobileDetailScreen.bindTouchFeedback(closeBtn);
+        closeBtn.setOnClickListener(v -> dlg.dismiss());
+        headerRow.addView(closeBtn, new LinearLayout.LayoutParams(-2, -2));
+        sheet.addView(headerRow, new LinearLayout.LayoutParams(-1, -2));
+
+        a.gap(sheet, 16);
+
+        ScrollView scroll = new ScrollView(a);
+        scroll.setVerticalScrollBarEnabled(false);
+        LinearLayout list = a.vertical();
+        for (int i = 0; i < options.length; i++) {
+            final int idx = i;
+            boolean active = (i == selectedIndex);
+            LinearLayout optRow = a.row();
+            optRow.setGravity(Gravity.CENTER_VERTICAL);
+            optRow.setPadding(a.dp(16), a.dp(15), a.dp(16), a.dp(15));
+            optRow.setBackground(
+                    active
+                            ? glassBg(0x380a84ff, 0x260a84ff, a.dp(16), a.dp(1f), 0x885ac8fa)
+                            : glassBg(0xb8202926, 0xb818201d, a.dp(16), a.dp(0.7f), 0x22ffffff));
+            MobileDetailScreen.bindTouchFeedback(optRow);
+
+            TextView label = a.text(options[i], 14.5f, active ? Color.WHITE : 0xffe5e7eb);
+            label.setTypeface(null, active ? Typeface.BOLD : Typeface.NORMAL);
+            optRow.addView(label, new LinearLayout.LayoutParams(0, -2, 1f));
+
+            TextView check = a.text(active ? "✓" : "", 16, 0xff5ac8fa);
+            check.setTypeface(null, Typeface.BOLD);
+            optRow.addView(check, new LinearLayout.LayoutParams(-2, -2));
+
+            optRow.setOnClickListener(
+                    v -> {
+                        dlg.dismiss();
+                        if (onSelect != null) onSelect.accept(idx);
+                    });
+
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            lp.bottomMargin = a.dp(10);
+            list.addView(optRow, lp);
+        }
+        scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
+        int maxSheetHeight = Math.round(a.windowHeight() * 0.72f);
+        sheet.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+
+        FrameLayout.LayoutParams sheetLp =
+                new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        sheetLp.topMargin = Math.max(a.dp(80), a.windowHeight() - maxSheetHeight);
+        backdrop.addView(sheet, sheetLp);
+
+        dlg.setContentView(backdrop);
+        dlg.show();
+    }
+
     static void showMobileImportDialog(MainActivity a) {
         LinearLayout panel = a.vertical();
         panel.setPadding(a.dp(4), a.dp(6), a.dp(4), a.dp(4));
@@ -2724,7 +2842,7 @@ final class MobileShell {
                                 : "当前直播源：" + savedLiveUrl,
                         () -> SourceController.showLiveImportDialog(a));
 
-                a.gap(body, 12);
+                a.gap(body, 18);
                 addSectionHeader(body, "片源选择与扩展引擎");
                 addSettingCard(
                         body,
@@ -2737,60 +2855,104 @@ final class MobileShell {
                         body,
                         1,
                         "启用第三方扩展片源 (JAR / JS / PY)",
-                        cspEnabled ? "当前状态：已开启" : "当前状态：已关闭（点击开启）",
-                        () -> {
-                            a.prefs.edit().putBoolean(Prefs.EXPERIMENTAL_CSP, !cspEnabled).apply();
-                            a.closeEngines();
-                            refreshInPlace.run();
-                            a.toast(!cspEnabled ? "已开启扩展片源支持" : "已关闭扩展片源支持");
-                        });
+                        cspEnabled ? "当前状态：已开启（抽屉选择）" : "当前状态：已关闭（抽屉选择）",
+                        () ->
+                                showDrawerPicker(
+                                        a,
+                                        "第三方扩展片源 (JAR / JS / PY)",
+                                        "控制是否允许运行配置源提供的 JAR、JS 与 Python 扩展脚本",
+                                        new String[] {"开启扩展片源支持（推荐）", "关闭扩展片源支持"},
+                                        cspEnabled ? 0 : 1,
+                                        idx -> {
+                                            boolean next = (idx == 0);
+                                            a.prefs
+                                                    .edit()
+                                                    .putBoolean(Prefs.EXPERIMENTAL_CSP, next)
+                                                    .apply();
+                                            a.closeEngines();
+                                            refreshInPlace.run();
+                                            a.toast(next ? "已开启扩展片源支持" : "已关闭扩展片源支持");
+                                        }));
             } else if (settingsSubPage == 2) {
                 addSectionHeader(body, "播放器与解码器");
                 final int engine = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+                final String[] engineNames = {"Media3（自带软解与字幕增强）", "Android 系统播放器"};
                 addSettingCard(
                         body,
                         3,
                         "播放器内核",
-                        engine == 0 ? "Media3（自带软解与字幕增强）" : "Android 系统播放器",
-                        () -> {
-                            int next = engine == 0 ? 1 : 0;
-                            a.prefs.edit().putInt(Prefs.PLAYER_ENGINE, next).apply();
-                            refreshInPlace.run();
-                        });
+                        engineNames[engine == 0 ? 0 : 1],
+                        () ->
+                                showDrawerPicker(
+                                        a,
+                                        "播放器内核",
+                                        "作为后续播放的默认内核，播放页内也可随时切换",
+                                        engineNames,
+                                        engine == 0 ? 0 : 1,
+                                        idx -> {
+                                            a.prefs.edit().putInt(Prefs.PLAYER_ENGINE, idx).apply();
+                                            refreshInPlace.run();
+                                        }));
                 final int decoder = a.prefs.getInt(Prefs.DECODER_MODE, 0);
-                final String[] decNames = {"自动选择（推荐）", "硬件解码优先", "软件解码优先"};
+                final String[] decNames = {"自动选择（推荐）", "硬件解码优先 (HW)", "软件解码优先 (SW)"};
                 addSettingCard(
                         body,
                         3,
                         "视频解码方式",
                         decNames[Math.max(0, Math.min(2, decoder))],
-                        () -> {
-                            int next = (decoder + 1) % 3;
-                            a.prefs.edit().putInt(Prefs.DECODER_MODE, next).apply();
-                            refreshInPlace.run();
-                        });
+                        () ->
+                                showDrawerPicker(
+                                        a,
+                                        "视频解码方式",
+                                        "高码率 4K 视频建议使用自动或硬件解码",
+                                        decNames,
+                                        Math.max(0, Math.min(2, decoder)),
+                                        idx -> {
+                                            a.prefs.edit().putInt(Prefs.DECODER_MODE, idx).apply();
+                                            refreshInPlace.run();
+                                        }));
                 final boolean tunnel = a.prefs.getBoolean(Prefs.TUNNELED_PLAYBACK, false);
                 addSettingCard(
                         body,
                         3,
                         "4K HDR 隧道模式",
-                        tunnel ? "已开启（部分设备可降低高码率掉帧）" : "已关闭（兼容模式）",
-                        () -> {
-                            a.prefs.edit().putBoolean(Prefs.TUNNELED_PLAYBACK, !tunnel).apply();
-                            refreshInPlace.run();
-                        });
+                        tunnel ? "已开启（硬件隧道直通）" : "已关闭（默认兼容模式）",
+                        () ->
+                                showDrawerPicker(
+                                        a,
+                                        "4K HDR 隧道模式",
+                                        "部分支持硬件隧道的设备可降低高码率掉帧",
+                                        new String[] {"关闭（默认兼容模式）", "开启（硬件隧道直通）"},
+                                        tunnel ? 1 : 0,
+                                        idx -> {
+                                            a.prefs
+                                                    .edit()
+                                                    .putBoolean(Prefs.TUNNELED_PLAYBACK, idx == 1)
+                                                    .apply();
+                                            refreshInPlace.run();
+                                        }));
                 final boolean autoNext = a.prefs.getBoolean(Prefs.AUTO_NEXT, true);
                 addSettingCard(
                         body,
                         3,
                         "自动连播下一集",
                         autoNext ? "已开启" : "已关闭",
-                        () -> {
-                            a.prefs.edit().putBoolean(Prefs.AUTO_NEXT, !autoNext).apply();
-                            refreshInPlace.run();
-                        });
+                        () ->
+                                showDrawerPicker(
+                                        a,
+                                        "自动连播下一集",
+                                        "当前剧集播放完毕后自动切换到下一集",
+                                        new String[] {"开启自动连播", "关闭自动连播"},
+                                        autoNext ? 0 : 1,
+                                        idx -> {
+                                            a.prefs
+                                                    .edit()
+                                                    .putBoolean(Prefs.AUTO_NEXT, idx == 0)
+                                                    .apply();
+                                            refreshInPlace.run();
+                                        }));
 
-                a.gap(body, 12);
+                a.gap(body, 18);
                 addSectionHeader(body, "片头片尾与字幕样式");
                 int introSec = a.prefs.getInt(Prefs.SKIP_INTRO_SECONDS, 0);
                 int outroSec = a.prefs.getInt(Prefs.SKIP_OUTRO_SECONDS, 0);
@@ -2811,50 +2973,83 @@ final class MobileShell {
                                 PlaybackControls.showSkipAdjuster(
                                         a, true, introSec, 0, refreshInPlace));
 
-                int subSize = Prefs.clampSubtitleSize(a.prefs.getInt(Prefs.SUBTITLE_SIZE_SP, 40));
+                int subSize = Prefs.clampSubtitleSize(a.prefs.getInt(Prefs.SUBTITLE_SIZE_SP, 45));
+                int subWeight =
+                        Prefs.clampSubtitleWeight(a.prefs.getInt(Prefs.SUBTITLE_WEIGHT, 50));
                 int subBg = Prefs.clampSubtitleBgStyle(a.prefs.getInt(Prefs.SUBTITLE_BG_STYLE, 0));
                 addSettingCard(
                         body,
                         3,
-                        "字幕大小、位置与样式",
+                        "全屏字幕触控调试（大小、粗细、位置与样式）",
                         "字号 "
                                 + subSize
+                                + " · 粗细 "
+                                + subWeight
                                 + " · "
                                 + SubtitleOverlayView.bgStyleLabel(subBg)
-                                + "（支持方向键与触控调节）",
+                                + "（双指缩放 · 按住拖拽 · 中轴线指引）",
                         () -> PlaybackControls.showSubtitleAdjuster(a, null, refreshInPlace));
             } else if (settingsSubPage == 3) {
                 addSectionHeader(body, "界面显示与交互");
                 final int scale = a.prefs.getInt(Prefs.UI_SCALE_PERCENT, 100);
+                final int[] scaleVals = {90, 100, 110, 120};
+                final String[] scaleLabels = {
+                    "紧凑 · 90%", "标准 · 100%（默认）", "放大 · 110%", "特大 · 120%"
+                };
+                int curScaleIdx = 1;
+                for (int i = 0; i < scaleVals.length; i++) {
+                    if (scaleVals[i] == scale) curScaleIdx = i;
+                }
+                final int finalScaleIdx = curScaleIdx;
                 addSettingCard(
                         body,
                         4,
                         "界面整体缩放比例",
-                        "当前：" + scale + "%（点击切换 90% / 100% / 110%）",
-                        () -> {
-                            int next = scale == 100 ? 110 : (scale == 110 ? 90 : 100);
-                            a.prefs.edit().putInt(Prefs.UI_SCALE_PERCENT, next).apply();
-                            a.recreate();
-                        });
+                        "当前：" + scaleLabels[finalScaleIdx],
+                        () ->
+                                showDrawerPicker(
+                                        a,
+                                        "界面整体缩放比例",
+                                        "调整按钮、文字与卡片整体显示比例",
+                                        scaleLabels,
+                                        finalScaleIdx,
+                                        idx -> {
+                                            a.prefs
+                                                    .edit()
+                                                    .putInt(Prefs.UI_SCALE_PERCENT, scaleVals[idx])
+                                                    .apply();
+                                            a.recreate();
+                                        }));
                 final int navScalePct =
                         Prefs.clampNavScale(a.prefs.getInt(Prefs.NAV_SCALE_PERCENT, 100));
+                final int[] navVals = {85, 100, 115, 130, 140};
+                final String[] navLabels = {
+                    "紧凑 · 85%", "标准 · 100%（默认）", "偏大 · 115%", "大号 · 130%", "特大 · 140%"
+                };
+                int curNavIdx = 1;
+                for (int i = 0; i < navVals.length; i++) {
+                    if (navVals[i] == navScalePct) curNavIdx = i;
+                }
+                final int finalNavIdx = curNavIdx;
                 addSettingCard(
                         body,
                         4,
                         "导航栏字体与按钮大小",
-                        "当前：" + navScalePct + "%（自适应排版 · 点击切换紧凑 / 标准 / 放大 / 特大）",
-                        () -> {
-                            int next =
-                                    navScalePct < 100
-                                            ? 100
-                                            : navScalePct == 100
-                                                    ? 115
-                                                    : navScalePct == 115
-                                                            ? 130
-                                                            : navScalePct == 130 ? 140 : 85;
-                            a.prefs.edit().putInt(Prefs.NAV_SCALE_PERCENT, next).apply();
-                            a.recreate();
-                        });
+                        "当前：" + navLabels[finalNavIdx] + "（自适应排版）",
+                        () ->
+                                showDrawerPicker(
+                                        a,
+                                        "导航栏字体与按钮大小",
+                                        "调整导航栏文字与按钮尺寸，排版自动适应",
+                                        navLabels,
+                                        finalNavIdx,
+                                        idx -> {
+                                            a.prefs
+                                                    .edit()
+                                                    .putInt(Prefs.NAV_SCALE_PERCENT, navVals[idx])
+                                                    .apply();
+                                            a.recreate();
+                                        }));
                 final boolean reduced = a.prefs.getBoolean(Prefs.REDUCED, false);
                 final boolean reducedTransparency =
                         a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
@@ -2862,37 +3057,70 @@ final class MobileShell {
                         body,
                         4,
                         "减少透明效果",
-                        reducedTransparency ? "已开启（使用实色面板）" : "已关闭（背景玻璃材质）",
-                        () -> {
-                            a.prefs
-                                    .edit()
-                                    .putBoolean(Prefs.REDUCED_TRANSPARENCY, !reducedTransparency)
-                                    .apply();
-                            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
-                            refreshInPlace.run();
-                        });
+                        reducedTransparency ? "已开启（使用实色面板）" : "已关闭（背景液态毛玻璃材质）",
+                        () ->
+                                showDrawerPicker(
+                                        a,
+                                        "减少透明效果",
+                                        "控制导航栏与卡片是否使用毛玻璃透明材质",
+                                        new String[] {"关闭（使用液态毛玻璃材质）", "开启（使用高对比实色面板）"},
+                                        reducedTransparency ? 1 : 0,
+                                        idx -> {
+                                            a.prefs
+                                                    .edit()
+                                                    .putBoolean(
+                                                            Prefs.REDUCED_TRANSPARENCY, idx == 1)
+                                                    .apply();
+                                            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(
+                                                    a.root);
+                                            refreshInPlace.run();
+                                        }));
                 addSettingCard(
                         body,
                         4,
                         "精简界面动画",
                         reduced ? "已开启（减少过渡动画，提升响应速度）" : "已关闭（保留完整流畅动效）",
-                        () -> {
-                            a.reduced = !reduced;
-                            a.prefs.edit().putBoolean(Prefs.REDUCED, !reduced).apply();
-                            refreshInPlace.run();
-                        });
+                        () ->
+                                showDrawerPicker(
+                                        a,
+                                        "精简界面动画",
+                                        "控制页面切换与控件过渡动效",
+                                        new String[] {"关闭（保留完整流畅动效）", "开启（减少过渡动画，提升响应速度）"},
+                                        reduced ? 1 : 0,
+                                        idx -> {
+                                            boolean nextRed = (idx == 1);
+                                            a.reduced = nextRed;
+                                            a.prefs
+                                                    .edit()
+                                                    .putBoolean(Prefs.REDUCED, nextRed)
+                                                    .apply();
+                                            refreshInPlace.run();
+                                        }));
                 addSettingCard(
                         body,
                         4,
                         "清空搜索历史记录",
                         "清除搜索页保存的全部历史关键词",
-                        () -> {
-                            a.prefs.edit().putString(Prefs.GLOBAL_SEARCH_HISTORY, "[]").apply();
-                            cachedSearchKeyword = "";
-                            cachedSearchStatus = "";
-                            cachedSearchHits.clear();
-                            a.toast("已清空搜索历史记录");
-                        });
+                        () ->
+                                showDrawerPicker(
+                                        a,
+                                        "清空搜索历史记录",
+                                        "确认清除搜索页保存的全部历史关键词？",
+                                        new String[] {"确认清空全部搜索历史", "取消"},
+                                        1,
+                                        idx -> {
+                                            if (idx == 0) {
+                                                a.prefs
+                                                        .edit()
+                                                        .putString(
+                                                                Prefs.GLOBAL_SEARCH_HISTORY, "[]")
+                                                        .apply();
+                                                cachedSearchKeyword = "";
+                                                cachedSearchStatus = "";
+                                                cachedSearchHits.clear();
+                                                a.toast("已清空搜索历史记录");
+                                            }
+                                        }));
             } else {
                 addSectionHeader(body, "更新、备份与诊断");
                 addSettingCard(
@@ -2933,7 +3161,7 @@ final class MobileShell {
         pageTitle.setTypeface(null, Typeface.BOLD);
         body.addView(pageTitle);
 
-        a.gap(body, 14);
+        a.gap(body, 18);
         final String[] categories = {"片源与直播配置", "播放、解码与字幕", "界面外观与偏好", "备份、更新与诊断"};
         final int[] icons = {1, 3, 4, 5};
         for (int i = 0; i < categories.length; i++) {
@@ -2955,7 +3183,7 @@ final class MobileShell {
     private void addSectionHeader(LinearLayout parent, String title) {
         TextView h = a.text(title, 12.5f, 0xff5ac8fa);
         h.setTypeface(null, Typeface.BOLD);
-        h.setPadding(a.dp(4), a.dp(6), a.dp(4), a.dp(6));
+        h.setPadding(a.dp(6), a.dp(10), a.dp(6), a.dp(10));
         parent.addView(h);
     }
 
@@ -2963,23 +3191,23 @@ final class MobileShell {
             LinearLayout parent, int iconKind, String title, String subtitle, Runnable action) {
         LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(a.dp(14), a.dp(13), a.dp(14), a.dp(13));
-        row.setBackground(glassBg(0xb81b2320, 0xb8131917, a.dp(18), a.dp(0.7f), 0x26ffffff));
+        row.setPadding(a.dp(18), a.dp(16), a.dp(18), a.dp(16));
+        row.setBackground(glassBg(0xb81b2320, 0xb8131917, a.dp(20), a.dp(0.7f), 0x26ffffff));
         MobileDetailScreen.bindTouchFeedback(row);
         row.setOnClickListener(v -> action.run());
 
         SettingIconView icon = new SettingIconView(a, iconKind);
-        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(a.dp(36), a.dp(36));
-        iconLp.rightMargin = a.dp(12);
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(a.dp(38), a.dp(38));
+        iconLp.rightMargin = a.dp(14);
         row.addView(icon, iconLp);
 
         LinearLayout textCol = a.vertical();
-        TextView t = a.text(title, 14.5f, MainActivity.WHITE);
+        TextView t = a.text(title, 15f, MainActivity.WHITE);
         t.setTypeface(null, Typeface.BOLD);
         textCol.addView(t);
 
-        TextView s = a.text(subtitle, 12, MainActivity.MUTED);
-        s.setPadding(0, a.dp(3), 0, 0);
+        TextView s = a.text(subtitle, 12.5f, MainActivity.MUTED);
+        s.setPadding(0, a.dp(4), 0, 0);
         s.setSingleLine(true);
         s.setEllipsize(TextUtils.TruncateAt.END);
         if (!subtitle.isEmpty()) textCol.addView(s);
@@ -2988,7 +3216,7 @@ final class MobileShell {
         row.addView(a.text("›", 20, MainActivity.MUTED));
 
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.bottomMargin = a.dp(10);
+        lp.bottomMargin = a.dp(15);
         parent.addView(row, lp);
     }
 

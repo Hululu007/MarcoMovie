@@ -95,6 +95,13 @@ public final class SeekGestureChecks {
                         && SeekGesture.dragSeekTarget(60000, 600000, -1000f, 1000f) == 0,
                 "touch seek target scales by swipe fraction and clamps to [0, duration]");
         check(
+                SeekGesture.linearSeekSpeedMultiplier(2000f, 1000f)
+                                > SeekGesture.linearSeekSpeedMultiplier(500f, 1000f)
+                        && SeekGesture.stepLinearSeekTarget(60000, 600000, 100f, 2000f, 1000f)
+                                > SeekGesture.stepLinearSeekTarget(
+                                        60000, 600000, 100f, 500f, 1000f),
+                "touch seek speed scales linearly with horizontal swipe velocity");
+        check(
                 Math.abs(SeekGesture.dragVerticalLevel(0.5f, -325f, 1000f) - 1.0f) < 0.001f
                         && SeekGesture.dragVerticalLevel(0.2f, 500f, 1000f) == 0f,
                 "vertical swipe level adjusts and clamps to [0, 1]");

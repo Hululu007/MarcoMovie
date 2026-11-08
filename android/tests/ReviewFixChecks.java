@@ -185,8 +185,18 @@ public final class ReviewFixChecks {
                 "image memory cache budget scales within 10MB..32MB bounds");
 
         check(
-                Prefs.KEYS.length == 31,
-                "backup settings key table includes reduced transparency and nav scale");
+                Prefs.KEYS.length == 34,
+                "backup settings key table includes reduced transparency, nav scale, and subtitle geometry");
+        check(
+                Prefs.clampSubtitleWeight(-10) == 0
+                        && Prefs.clampSubtitleWeight(120) == 100
+                        && Prefs.clampSubtitleOffsetX(-200) == -100
+                        && Prefs.clampSubtitleOffsetX(200) == 100
+                        && Integer.valueOf(65)
+                                .equals(Prefs.sanitizeSetting(Prefs.SUBTITLE_WEIGHT, 65))
+                        && Integer.valueOf(-25)
+                                .equals(Prefs.sanitizeSetting(Prefs.SUBTITLE_OFFSET_X, -25)),
+                "subtitle weight and horizontal offset clamp and validate within bounds");
         check(
                 Prefs.clampNavScale(50) == 85
                         && Prefs.clampNavScale(100) == 100

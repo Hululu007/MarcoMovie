@@ -36,8 +36,8 @@ final class FavoritesScreen {
             card.setGravity(Gravity.CENTER_HORIZONTAL);
             card.setId(View.generateViewId());
             card.setTag("favorite:" + e.key());
-            card.setFocusable(true);
-            card.setFocusableInTouchMode(true);
+            card.setFocusable(a.isTvDevice());
+            card.setFocusableInTouchMode(a.isTvDevice());
             card.setClickable(true);
             ImageView poster = new ImageView(a);
             poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
