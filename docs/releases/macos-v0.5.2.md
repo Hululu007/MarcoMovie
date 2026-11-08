@@ -8,7 +8,7 @@
 
 ### 验证与范围
 
-- 构建提交：`d45af4422936ca9c4cf3446d8d23863eccbc4cce`，[GitHub Actions 构建与验证记录](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42512474479)。
+- 构建提交：`6233f553666d2e1b0e8ad98d64f79621d0f8eb36`，[GitHub Actions 构建与验证记录](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42513080513)。
 - 通过公开内容守卫、DRPY/CatVod/Python/Guard 本地宿主回归检查、Flutter 跨端单测（新增含 `//` 注释与 `#EXTINF` 去广告规则的 TVBox JSON 回归测试）以及 GitHub Actions macOS 应用包完整构建与签名校验。
 - 已知限制：其余尚未完成跨平台移植的 33 条 Android 专属 Guard / JAR 插件线路及通用实机播放未纳入本版已完成范围。
 - 0.5.0 客户端首次升级请从[下载页](https://marcotv.wlj9919.top/movie/)手动下载安装 macOS 0.5.2 应用包；0.5.1 客户端可通过应用内 macOS 独立更新通道直接检测升级。
