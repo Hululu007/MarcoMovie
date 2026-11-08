@@ -12,6 +12,25 @@ Android 手机/平板与电视的已验证升级与修复已随下方 0.5.5 独�
 
 iPhone 仍需完成指定订阅及插件线路的独立运行、实际播放验收后再发包。详见 [iPhone 发布条件](docs/ios-source-acceptance.md)。
 
+## Windows 0.5.2 — 2026-11-08
+
+完整说明：[Windows 0.5.2](docs/releases/windows-v0.5.2.md)。
+
+- 同步订阅源与多仓兼容增强：支持 GZIP 压缩配置、图片隐写（`**`+Base64）、`2423` Hex-AES 加密配置、顶层 `jar` 与 `parses` JSON 解析列表回退、站点 `ua` 与 `ext.header`/`ext.headers` 请求头提取，以及本地 `.zip` 离线订阅包导入。
+- 同步脚本与扩展片源运行能力：支持 HTTP T4（`type: 4`）、本地 DRPY 规则（保留规则编码）、CatVod JS Spider（ES Module / CommonJS 词法依赖预载）、Python Spider 会话保持与本机代理，以及已移植 Guard 源（`Dm84`、`Auete`、`Bttwoo`、`T4`、`FY` 及图形验证码弹窗）。
+- 同步直播目录与直播源增强：新增 `LiveCatalogParser`，支持 TVBox `proxy://?do=live&type=txt&ext=` 直播目录解包、`lives[].api` 脚本直播源（`liveContent`）、嵌套 `groups`/`channels` JSON 直播结构、`#EXTVLCOPT:` / `#EXTGRP:` / `|Referer=...` 频道请求头及 Base64 / `**`+Base64 / Hex-AES 编码直播列表。
+- 切换分类筛选、切换直播源或离开详情页时主动取消过期请求；延续 0.5.1 原生无边框真全屏与平台独立更新通道。
+- 限制：其余尚未完成跨平台移植的 33 条 Guard / Android 插件线路不属于本版已完成范围。
+
+## macOS 0.5.1 — 2026-11-08
+
+完整说明：[macOS 0.5.1](docs/releases/macos-v0.5.1.md)。
+
+- 新增桌面端原生无边框真全屏播放：双击播放画面、`F`/`F11` 和全屏按钮统一切换真全屏，`Esc` 先退出全屏并恢复原窗口状态。
+- 同步订阅源、多仓、脚本源（HTTP T4、DRPY、CatVod JS、Python Spider、已移植 Guard 源）与直播目录（`LiveCatalogParser`、`lives[].api`、`proxy://?do=live&type=txt&ext=`、Base64 直播列表、`parses` 解析回退）完整适配。
+- 切换为按 macOS 独立检查更新（`updates/macos.json`），切换筛选、直播源或离开详情页时主动取消过期请求。
+- 0.5.0 客户端首次升级请从下载页手动下载 macOS 0.5.1 应用包；限制同上，未完成的 33 条插件移植不计为已支持。
+
 ## Android 手机 / 平板 0.5.5 — 2026-11-08
 
 完整说明：[Android 手机 / 平板 0.5.5](docs/releases/android-mobile-v0.5.5.md)。

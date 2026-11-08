@@ -66,9 +66,11 @@ Automated/emulator/package checks are not universal physical-device playback
 acceptance. The 33 outstanding plugin-route acceptances, full native Python
 support and the iPhone publication gate remain open.
 
-## Published Windows update
+## Published Windows and macOS updates
 
-[Windows 0.5.1](https://github.com/Pilipala9919/MarcoMovie/releases/tag/windows-v0.5.1) was published from `56b2eb80b93bae98b8754952d779bff1b7a9582a` after [build 42356451432](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42356451432) passed 83 Flutter tests and produced the installer/portable packages. Downloaded packages passed checksum/ZIP checks, the app and installer report 0.5.1, and all six uploaded package/source/checksum files match the local verified bytes. Native fullscreen UI evidence is recorded in `desktop-fullscreen-2026-11-07.md`.
+[Windows 0.5.2](releases/windows-v0.5.2.md) (`windows-v0.5.2`) and [macOS 0.5.1](releases/macos-v0.5.1.md) (`macos-v0.5.1`) advance each desktop platform's version independently (Windows `0.5.1 -> 0.5.2`, macOS `0.5.0 -> 0.5.1`), synchronizing the cross-platform subscription, multi-depot, live catalogue (`LiveCatalogParser`, `lives[].api` script live sources, `proxy://?do=live&type=txt&ext=` directory unpacking, Base64/encrypted playlists), TVBox / Yingshicang (`jar` fallback, `parses` JSON parser fallback, `ua`/`ext.header` extraction, GZIP config payloads), HTTP T4, DRPY, CatVod JS, Python Spider session/proxy, ported Guard sources (`Dm84`, `Auete`, `Bttwoo`, `T4`, `FY`), and macOS native borderless fullscreen playback.
+
+Previously, [Windows 0.5.1](https://github.com/Pilipala9919/MarcoMovie/releases/tag/windows-v0.5.1) was published from `56b2eb80b93bae98b8754952d779bff1b7a9582a` after [build 42356451432](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42356451432) passed 83 Flutter tests and produced the installer/portable packages. Downloaded packages passed checksum/ZIP checks, the app and installer report 0.5.1, and all six uploaded package/source/checksum files match the local verified bytes. Native fullscreen UI evidence is recorded in `desktop-fullscreen-2026-11-07.md`.
 
 The mirror deployment at commit `fe533ad` passed Cloudflare Pages checks. Live checks confirmed the two Windows download URLs, SHA-256 files and platform update feed. Existing CSS, the iPhone 0.5.0 download and legacy Android update channel are unchanged. No iPhone 0.5.1 release was created; its workflow artifact remains validation-only under the gate above.
 

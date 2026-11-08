@@ -385,7 +385,7 @@ class StorageService {
       if (site != null) sites.add(site);
     }
     return CmsConfig(sites: [...sites, ...byId.values], lives: config.lives,
-        depots: config.depots, spider: config.spider);
+        depots: config.depots, parses: config.parses, spider: config.spider);
   }
 
   CmsConfig? _loadImportedConfig() {
@@ -397,7 +397,9 @@ class StorageService {
       final mergedSites = <CmsSite>[];
       final mergedLives = <LiveSource>[];
       final mergedDepots = <CmsDepot>[];
+      final mergedParses = <CmsParse>[];
       final seenDepotUrls = <String>{};
+      final seenParseUrls = <String>{};
       final legacyOwners = subs.where((s) => !s.isEffectivelyPrivate &&
           s.url == configOrigin && (s.format == '多仓' || s.id == 'legacy_primary'));
       if (legacyOwners.isNotEmpty) {
@@ -424,6 +426,11 @@ class StorageService {
           );
           if (spider.isEmpty && parsed.spider.isNotEmpty) {
             spider = parsed.spider;
+          }
+          for (final p in parsed.parses) {
+            if (seenParseUrls.add(p.url) && mergedParses.length < 100) {
+              mergedParses.add(p);
+            }
           }
           for (final d in [...sub.depots, ...parsed.depots]) {
             if (!sub.isEffectivelyPrivate && seenDepotUrls.add('${sub.id}|${d.url}')) {
@@ -461,6 +468,7 @@ class StorageService {
           sites: mergedSites,
           lives: mergedLives,
           depots: mergedDepots,
+          parses: mergedParses,
           spider: spider,
         );
       }
@@ -475,6 +483,7 @@ class StorageService {
           sites: parsed.sites,
           lives: parsed.lives,
           depots: savedDepots,
+          parses: parsed.parses,
           spider: parsed.spider,
         );
       }
@@ -535,6 +544,7 @@ class StorageService {
           sites: parsed.sites,
           lives: parsed.lives,
           depots: effectiveDepots,
+          parses: parsed.parses,
           spider: parsed.spider,
         );
     final visibleSites =
@@ -874,6 +884,7 @@ class StorageService {
         if (value['api'] != null && privateItem(value)) return '{"sites":[]}';
         for (final key in ['sites', 'lives']) {
           if (value[key] is List) value[key] = (value[key] as List).where((entry) => !privateItem(entry)).toList();
+          else if (value[key] is Map && privateItem(value[key])) value[key] = [];
         }
         return jsonEncode(value);
       }
@@ -885,7 +896,14 @@ class StorageService {
         'playUrl': s.playUrl, 'ext': s.rawExtension ?? s.ext, 'header': s.headers, 'group': s.group, 'searchable': s.searchable,
         if (s.pluginReference.isNotEmpty) 'jar': s.pluginReference,
       }],
-      'lives': [for (final l in parsed.publicLives) {'name': l.name, 'url': l.url, 'header': l.headers, 'group': l.group}],
+      'lives': [for (final l in parsed.publicLives) {
+        'name': l.name, 'url': l.url, 'header': l.headers, 'group': l.group,
+        if (l.inlineContent.isNotEmpty) ...jsonDecode(l.inlineContent) as Map,
+        if (l.plugin != null) ...{
+          'api': l.plugin!.api, 'ext': l.plugin!.rawExtension ?? l.plugin!.ext,
+          if (l.plugin!.pluginReference.isNotEmpty) 'jar': l.plugin!.pluginReference,
+        },
+      }],
     });
   }
 

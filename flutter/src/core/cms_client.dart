@@ -27,6 +27,43 @@ class CmsClient {
   static const String safariUserAgent =
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.15';
   static final Object _cancelKey = Object();
+
+  /// Bind a screen-owned operation to its actual CMS/script requests. Leaving
+  /// the screen stops the UI wait and cancels supported I/O; a late result is
+  /// discarded even for a backend that cannot interrupt its current work.
+  Future<T> runSourceOperation<T>(Future<T> Function() operation,
+      {required Completer<void> cancellation}) async {
+    if (cancellation.isCompleted) throw StateError('片源加载已取消');
+    final parent = Zone.current[_cancelKey] as Completer<void>?;
+    if (parent?.isCompleted == true) throw StateError('片源加载已取消');
+    final abort = Completer<void>();
+    final interrupted = Completer<T>();
+    void cancel() {
+      if (!abort.isCompleted) abort.complete();
+      if (!interrupted.isCompleted) interrupted.completeError(StateError('片源加载已取消'));
+    }
+    final listeners = <StreamSubscription<void>>[
+      cancellation.future.asStream().listen((_) => cancel()),
+      if (parent != null && !identical(parent, cancellation))
+        parent.future.asStream().listen((_) => cancel()),
+    ];
+    try {
+      // Register the error observer before beginning an operation which may
+      // synchronously cancel itself or fail to create its backend.
+      final work = Future<T>.sync(() => runZoned(operation,
+          zoneValues: {_cancelKey: abort}));
+      final value = await Future.any([work, interrupted.future]);
+      if (abort.isCompleted || cancellation.isCompleted || parent?.isCompleted == true) {
+        throw StateError('片源加载已取消');
+      }
+      return value;
+    } finally {
+      // Future-backed subscriptions stop delivering synchronously on cancel.
+      // Their completion future may belong to another zone; it must not delay
+      // a finished screen operation or its loading/error state update.
+      for (final listener in listeners) { unawaited(listener.cancel()); }
+    }
+  }
   final http.Client? _http;
   final Duration timeout;
   final CatPawHost _scriptHost;
@@ -69,6 +106,7 @@ class CmsClient {
     String defaultUa = tvBoxUserAgent,
     int byteLimit = maxResponseBytes,
     Map<String, String>? form,
+    void Function(Uri, Map<String, String>)? onResponse,
   }) async {
     final normalized = CmsParser.normalizeUrl(url);
     final uri = Uri.parse(normalized);
@@ -132,6 +170,7 @@ class CmsClient {
         }
         data.add(bytes);
       }
+      onResponse?.call(current, Map<String, String>.of(requestHeaders));
       return data.takeBytes();
     } finally {
       deadline.cancel();
@@ -326,8 +365,13 @@ class CmsClient {
         final entryPath = _archivePath(file.name);
         final base = Uri(scheme: 'pkg', host: 'archive', path: '/$entryPath');
         var total = file.size;
-        final sites = doc['sites'];
-        if (sites is List) {
+        final liveEntries = doc['lives'];
+        final sites = <dynamic>[
+          if (doc['sites'] is List) ...doc['sites'] as List,
+          if (liveEntries is List) ...liveEntries
+          else if (liveEntries is Map) liveEntries,
+        ];
+        if (sites.isNotEmpty) {
           final scripts = <String, String>{};
           final scriptFile = RegExp(r'\.(?:m?js|py)$', caseSensitive: false);
           var expanded = file.size;
@@ -360,7 +404,9 @@ class CmsClient {
           }
         }
         final lives = doc['lives'];
-        for (final live in (lives is List ? lives : const []).whereType<Map>()) {
+        for (final live in (lives is List ? lives : lives is Map ? [lives] : const []).whereType<Map>()) {
+          // A script owns its opaque argument; it is not an archive filename.
+          if ((live['api'] ?? '').toString().isNotEmpty) continue;
           final url = live['url'];
           if (url is! String || url.isEmpty || Uri.parse(url).hasScheme) continue;
           final ref = Uri.parse(url);
@@ -379,7 +425,8 @@ class CmsClient {
       }
       final config = CmsParser.parseConfig(decoded);
       if (config.sites.any((s) => !s.isHttpApi && !s.isM3uVodApi && !s.api.startsWith('csp_')) ||
-          config.lives.any((s) => !s.url.startsWith('http') && !s.url.startsWith('data:'))) {
+          config.lives.any((s) => s.plugin == null && s.inlineContent.isEmpty &&
+              !s.url.startsWith('http') && !s.url.startsWith('data:'))) {
         throw const FormatException('本地包包含相对路径的资源，当前客户端需要可访问的完整接口地址');
       }
       return decoded;
@@ -544,7 +591,8 @@ class CmsClient {
     final depots = discovered.values.toList();
     return (rawConfig: leaf.raw, origin: leaf.origin, activeDepotName: leaf.name,
       depots: depots, config: CmsConfig(sites: leaf.config.sites,
-        lives: leaf.config.lives, depots: depots, spider: leaf.config.spider));
+        lives: leaf.config.lives, depots: depots, parses: leaf.config.parses,
+        spider: leaf.config.spider));
   }
 
   Future<SubscriptionEntry> switchSubscriptionDepot(SubscriptionEntry owner, CmsDepot depot) async {
@@ -705,7 +753,8 @@ class CmsClient {
       _usesJs(site) ? JsSourceHost.pinForPlayback(_scriptSessionKey(site)) : () {};
 
   static bool canVerifySource(CmsSite site) =>
-      GuardSource.supports(site) && CspBridge.guardAdapterFor(site) == 'fy-v1';
+      GuardSource.supports(site) &&
+      const {'fy-v1', 'auete-v1'}.contains(CspBridge.guardAdapterFor(site));
 
   static bool needsSourceVerification(CmsSite site, Object? error) =>
       canVerifySource(site) && error is DrpySourceException &&
@@ -1208,6 +1257,52 @@ class CmsClient {
     final origin = raw is String ? Uri.tryParse(raw) : null;
     return origin != null && ['http', 'https'].contains(origin.scheme) ? origin : null;
   }
+  static bool _isDirectStreamUrl(String value) {
+    final uri = Uri.tryParse(value.trim());
+    if (uri == null) return false;
+    if (const {'rtsp', 'rtmp', 'mms', 'udp', 'rtp'}.contains(uri.scheme.toLowerCase())) {
+      return true;
+    }
+    if (!const {'http', 'https'}.contains(uri.scheme.toLowerCase())) return false;
+    return RegExp(
+      r'\.(?:m3u8?|mp4|flv|mkv|ts|webm|mpd|mov|avi)$',
+      caseSensitive: false,
+    ).hasMatch(uri.path);
+  }
+
+  Future<Map<String, dynamic>?> _tryResolveJsonParser(
+    CmsSite site,
+    String playPrefix,
+    String targetUrl,
+  ) async {
+    final prefix = playPrefix.trim();
+    final target = targetUrl.trim();
+    if (prefix.isEmpty ||
+        target.isEmpty ||
+        (!prefix.startsWith('http://') && !prefix.startsWith('https://'))) {
+      return null;
+    }
+    try {
+      final resp = await _getText(
+        '$prefix${Uri.encodeComponent(target)}',
+        headers: site.headers,
+      );
+      final trimmed = resp.trim();
+      if (!trimmed.startsWith('{')) return null;
+      final decoded = jsonDecode(trimmed);
+      if (decoded is Map) {
+        final mediaUrl = (decoded['url'] ?? '').toString().trim();
+        final mediaUri = Uri.tryParse(mediaUrl);
+        if (mediaUri != null &&
+            const {'http', 'https', 'rtsp', 'rtmp'}.contains(mediaUri.scheme) &&
+            mediaUri.host.isNotEmpty) {
+          return Map<String, dynamic>.from(decoded)..['parse'] = 0;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
   Future<CmsEpisode> resolveEpisodeForPlayback(
     CmsSite site,
     CmsEpisode episode,
@@ -1238,6 +1333,17 @@ class CmsClient {
       if (url != null && ['http', 'https', 'rtsp', 'rtmp'].contains(url.scheme) &&
           RegExp(r'\.(mp4|m3u8|mpd|webm|flv)$', caseSensitive: false).hasMatch(url.path)) {
         payload['parse'] = 0;
+      } else if ('${payload['parse'] ?? 0}' != '0' || '${payload['jx'] ?? 0}' != '0') {
+        final parsed = await _tryResolveJsonParser(
+          site,
+          (payload['playUrl'] ?? site.playUrl).toString(),
+          (payload['url'] ?? '').toString(),
+        );
+        if (parsed != null) {
+          payload
+            ..addAll(parsed)
+            ..['parse'] = 0;
+        }
       }
       final resolved = await SourcePlayback.decode(payload, episode,
           localUrl: _scriptHost.resolve,
@@ -1247,7 +1353,19 @@ class CmsClient {
           sourceOrigin: GuardSource.supports(site) ? null : _sourceCredentialOrigin(site));
       return _localScriptPlaybackHeaders(site, resolved);
     }
-    final resolved = await CspBridge.resolveEpisodeForPlayback(site, episode, _getText);
+    var resolved = await CspBridge.resolveEpisodeForPlayback(site, episode, _getText);
+    if (site.playUrl.isNotEmpty && !_isDirectStreamUrl(resolved.url)) {
+      final parsed = await _tryResolveJsonParser(site, site.playUrl, resolved.url);
+      if (parsed != null) {
+        resolved = await SourcePlayback.decode(
+          parsed,
+          resolved,
+          localUrl: _scriptHost.resolve,
+          sourceHeaders: site.headers,
+          sourceOrigin: _sourceCredentialOrigin(site),
+        );
+      }
+    }
     return SourcePlayback.inheritSourceHeaders(resolved,
         sourceHeaders: site.headers, sourceOrigin: _sourceCredentialOrigin(site));
   }
@@ -1279,18 +1397,40 @@ class CmsClient {
         playbackSession: episode.playbackSession, externalAudioUrl: episode.externalAudioUrl,
         variants: episode.variants.map((e) => _localScriptPlaybackHeaders(site, e)).toList());
   }
+  CmsEpisode resolveLiveEpisodeForPlayback(CmsSite site, CmsEpisode episode) =>
+      _localScriptPlaybackHeaders(site, SourcePlayback.inheritSourceHeaders(episode,
+        sourceHeaders: site.headers, sourceOrigin: _sourceCredentialOrigin(site)));
+
   Future<List<LiveGroup>> fetchLiveGroups(LiveSource source) async {
     final u = source.url.trim();
-    if (u.startsWith('data:')) {
-      final b64Idx = u.indexOf('base64,');
-      if (b64Idx >= 0) {
-        final b64 = u.substring(b64Idx + 7).trim();
-        final text = utf8.decode(base64Decode(b64), allowMalformed: true);
-        return CmsParser.parseLivePlaylist(text);
+    String raw;
+    String origin = source.origin;
+    var playbackHeaders = source.headers;
+    if (source.inlineContent.isNotEmpty) {
+      raw = source.inlineContent;
+    } else if (source.plugin != null) {
+      if (!_usesJs(source.playbackSite)) {
+        throw const FormatException('这条直播线路的插件尚未适配当前设备，请选择其他直播来源');
       }
+      raw = await _callJs(source.playbackSite, 'liveContent', [u]);
+      origin = _sourceCredentialOrigin(source.playbackSite)?.toString() ?? origin;
+    } else if (u.startsWith('data:')) {
+      final b64Idx = u.indexOf('base64,');
+      if (b64Idx < 0) throw const FormatException('内嵌直播列表格式无效');
+      final b64 = u.substring(b64Idx + 7).trim();
+      if (b64.length > maxResponseBytes * 4 ~/ 3 + 4) throw const FormatException('直播列表超过 6 MB');
+      raw = utf8.decode(base64Decode(b64), allowMalformed: true);
+    } else {
+      raw = CmsParser.decodeTextDocument(await _getBytes(u, headers: source.headers,
+        onResponse: (uri, headers) {
+          origin = uri.toString();
+          playbackHeaders = headers..removeWhere((key, _) =>
+              key.toLowerCase() == 'accept' && !source.headers.keys.any((k) => k.toLowerCase() == 'accept'));
+        }));
     }
-    final raw = await _getText(u, headers: source.headers);
-    return CmsParser.parseLivePlaylist(raw, origin: u);
+    final groups = CmsParser.parseLivePlaylist(raw, origin: origin, headers: playbackHeaders);
+    if (groups.isEmpty) throw const FormatException('来源未返回可播放的直播频道，请重试或切换直播来源');
+    return groups;
   }
   Stream<(CmsSite, List<CmsVideo>)> searchAcrossSites(
     List<CmsSite> sites,
