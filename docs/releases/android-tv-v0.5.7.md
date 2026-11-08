@@ -3,7 +3,7 @@
 - 发布平台：Android 电视 / 盒子（`android-tv`）
 - 版本：`0.5.7`（`versionCode 57`）
 - 发布日期：2026-11-08
-- 构建提交：`PENDING_COMMIT`
+- 构建提交：`d2f7c51ef08216c0eed8a6184828c4fc09a2d513`
 - 安装包：`MarcoMovie-0.5.7-android-tv.apk`（兼容旧名：`MarcoMovie-0.5.7-preview.apk`）
 
 ## 本次修复与改进
