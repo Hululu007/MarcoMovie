@@ -44,7 +44,8 @@ This website deployment did not replace any application installer.
 ## Published Android maintenance update
 
 [Android phone/tablet 0.5.5](releases/android-mobile-v0.5.5.md) and
-[Android TV/box 0.5.5](releases/android-tv-v0.5.5.md) (version code 55) build on
+[Android TV/box 0.5.5](releases/android-tv-v0.5.5.md) use build commit
+`0fea7f35a403b7d59c9d33fdbdf20c259db15f9e` (version code 55), building on
 [Android phone/tablet 0.5.4](releases/android-mobile-v0.5.4.md) and
 [Android TV/box 0.5.4](releases/android-tv-v0.5.4.md) (`d014a7add909237da1b2d8ee95d2a81962a10ff9`).
 The 0.5.3 release eliminates `PixelCopy` backdrop blur and full-screen hardware
