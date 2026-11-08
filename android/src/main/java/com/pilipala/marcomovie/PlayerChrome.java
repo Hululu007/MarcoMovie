@@ -13,6 +13,9 @@ final class PlayerChrome {
     final LinearLayout dock, progress, heading;
     final LinearLayout loadingPill;
     final LinearLayout centerRow;
+    final LinearLayout topActions;
+    final Button backBtn;
+    final TextView rewindBtn, forwardBtn;
     final TextView loadingText, episodeLabel, titleView, seekHint;
     final Button fsBtn;
     final StateGlyph state;
@@ -41,23 +44,31 @@ final class PlayerChrome {
                     if (l != ol || t != ot || r != or || b != ob) scheduleLayout();
                 });
         topShade = new View(a);
-        topShade.setBackground(
-                new GradientDrawable(
-                        GradientDrawable.Orientation.TOP_BOTTOM,
-                        new int[] {0xc4000000, 0x00000000}));
+        if (a.isTvDevice()) {
+            topShade.setBackground(
+                    new GradientDrawable(
+                            GradientDrawable.Orientation.TOP_BOTTOM,
+                            new int[] {0xc4000000, 0x00000000}));
+        } else {
+            topShade.setBackgroundColor(Color.TRANSPARENT);
+        }
         overlay.addView(topShade, new FrameLayout.LayoutParams(-1, a.dp(160), Gravity.TOP));
         bottomShade = new View(a);
-        bottomShade.setBackground(
-                new GradientDrawable(
-                        GradientDrawable.Orientation.BOTTOM_TOP,
-                        new int[] {0xb8000000, 0x00000000}));
+        if (a.isTvDevice()) {
+            bottomShade.setBackground(
+                    new GradientDrawable(
+                            GradientDrawable.Orientation.BOTTOM_TOP,
+                            new int[] {0xb8000000, 0x00000000}));
+        } else {
+            bottomShade.setBackgroundColor(Color.TRANSPARENT);
+        }
         overlay.addView(bottomShade, new FrameLayout.LayoutParams(-1, a.dp(210), Gravity.BOTTOM));
         heading = a.vertical();
         heading.setTag("player-heading");
         if (!a.isTvDevice()) {
-            LinearLayout topActions = a.row();
+            topActions = a.row();
             topActions.setPadding(0, 0, 0, a.dp(8));
-            Button backBtn = a.navButton("‹ 返回", "player-back", a::leavePlayback);
+            backBtn = a.navButton("‹ 返回", "player-back", a::leavePlayback);
             backBtn.setTextColor(MainActivity.WHITE);
             backBtn.setBackground(chromeSurface(0xcc22222a, 17, 0x33ffffff));
             topActions.addView(backBtn, new LinearLayout.LayoutParams(-2, a.dp(34)));
@@ -65,6 +76,9 @@ final class PlayerChrome {
             topActions.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1));
             // Orientation toggle lives only on the progress row ("全屏横屏 / 退出全屏").
             heading.addView(topActions, new LinearLayout.LayoutParams(-1, -2));
+        } else {
+            topActions = null;
+            backBtn = null;
         }
         LinearLayout titleRow = a.row();
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -137,11 +151,10 @@ final class PlayerChrome {
                 new FrameLayout.LayoutParams(
                         Math.min(
                                 a.dp(760),
-                                Math.max(a.dp(220), width - a.dp(mobileLandscape ? 120 : 48))),
+                                Math.max(a.dp(220), width - a.dp(mobileLandscape ? 64 : 48))),
                         -2,
                         Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        track.bottomMargin = a.dp(mobileLandscape ? 20 : 94);
-        if (mobileLandscape) track.rightMargin = a.dp(36);
+        track.bottomMargin = a.dp(mobileLandscape ? 68 : 94);
         // Browsing live channels leaves a live session available for returning.
         // Only the currently playing source decides whether seeking is hidden.
         progress.setVisibility(live ? View.GONE : View.VISIBLE);
@@ -150,29 +163,25 @@ final class PlayerChrome {
         dock = a.vertical();
         dock.setTag("player-dock");
         dock.setPadding(
-                a.dp(mobileLandscape ? 4 : 6), a.dp(5), a.dp(mobileLandscape ? 4 : 6), a.dp(5));
+                a.dp(mobileLandscape ? 5 : 6),
+                a.dp(mobileLandscape ? 3 : 5),
+                a.dp(mobileLandscape ? 5 : 6),
+                a.dp(mobileLandscape ? 3 : 5));
         dock.setClipChildren(true);
         dock.setClipToPadding(true);
         dock.setClipToOutline(true);
-        dock.setBackground(chromeSurface(0xd81c1c22, 26, 0x2affffff));
+        dock.setBackground(chromeSurface(0xd81c1c22, mobileLandscape ? 22 : 26, 0x2affffff));
         UiCompat.setElevation(dock, a.dp(10));
         FrameLayout.LayoutParams bottom =
-                mobileLandscape
-                        ? new FrameLayout.LayoutParams(
-                                a.dp(76),
-                                Math.min(
-                                        a.dp(360),
-                                        Math.max(a.dp(180), a.windowHeight() - a.dp(40))),
-                                Gravity.RIGHT | Gravity.CENTER_VERTICAL)
-                        : new FrameLayout.LayoutParams(
-                                a.isTvDevice()
-                                        ? Math.min(a.dp(612), Math.max(a.dp(240), width - a.dp(32)))
-                                        : Math.min(
-                                                a.dp(552), Math.max(a.dp(240), width - a.dp(32))),
-                                -2,
-                                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        if (mobileLandscape) bottom.rightMargin = a.dp(8);
-        else bottom.bottomMargin = a.dp(16);
+                new FrameLayout.LayoutParams(
+                        a.isTvDevice()
+                                ? Math.min(a.dp(612), Math.max(a.dp(240), width - a.dp(32)))
+                                : Math.min(
+                                        a.dp(mobileLandscape ? 600 : 552),
+                                        Math.max(a.dp(240), width - a.dp(32))),
+                        -2,
+                        Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        bottom.bottomMargin = a.dp(mobileLandscape ? 10 : 16);
         overlay.addView(dock, bottom);
 
         state = new StateGlyph();
@@ -187,8 +196,8 @@ final class PlayerChrome {
         if (!a.isTvDevice()) {
             centerRow = a.row();
             centerRow.setGravity(Gravity.CENTER);
-            TextView rewindBtn = buildSeekCircle("↺ 15s", -15000);
-            TextView forwardBtn = buildSeekCircle("15s ↻", 15000);
+            rewindBtn = buildSeekCircle("↺ 15s", -15000);
+            forwardBtn = buildSeekCircle("15s ↻", 15000);
             LinearLayout.LayoutParams sideLp = new LinearLayout.LayoutParams(a.dp(58), a.dp(58));
             LinearLayout.LayoutParams centerLp = new LinearLayout.LayoutParams(a.dp(76), a.dp(76));
             centerLp.leftMargin = a.dp(28);
@@ -199,6 +208,8 @@ final class PlayerChrome {
             overlay.addView(centerRow, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
         } else {
             centerRow = null;
+            rewindBtn = null;
+            forwardBtn = null;
             overlay.addView(
                     state, new FrameLayout.LayoutParams(a.dp(72), a.dp(72), Gravity.CENTER));
         }
@@ -281,6 +292,7 @@ final class PlayerChrome {
         // embedded playback can all leave this layer smaller than the display.
         int measuredWidth = overlay.getWidth(), measuredHeight = overlay.getHeight();
         if (measuredWidth <= 0 || measuredHeight <= 0) return;
+        boolean portrait = measuredWidth < measuredHeight;
         Rect safe = new Rect(0, 0, measuredWidth, measuredHeight);
         Rect visible = new Rect();
         if (overlay.getLocalVisibleRect(visible)) safe.intersect(visible);
@@ -288,11 +300,36 @@ final class PlayerChrome {
             int[] location = new int[2];
             overlay.getLocationInWindow(location);
             View decor = a.getWindow().getDecorView();
-            safe.left = Math.max(safe.left, windowInsets.left - location[0]);
-            safe.top = Math.max(safe.top, windowInsets.top - location[1]);
-            safe.right = Math.min(safe.right, decor.getWidth() - windowInsets.right - location[0]);
-            safe.bottom =
-                    Math.min(safe.bottom, decor.getHeight() - windowInsets.bottom - location[1]);
+            if (portrait) {
+                safe.left = Math.max(safe.left, windowInsets.left - location[0]);
+                safe.top =
+                        Math.max(
+                                safe.top,
+                                Math.min(a.dp(48), Math.max(0, windowInsets.top - location[1])));
+                safe.right =
+                        Math.min(safe.right, decor.getWidth() - windowInsets.right - location[0]);
+                safe.bottom =
+                        Math.min(
+                                safe.bottom,
+                                decor.getHeight()
+                                        - Math.min(a.dp(48), windowInsets.bottom)
+                                        - location[1]);
+            } else {
+                int leftCutout = Math.min(a.dp(24), Math.max(0, windowInsets.left - location[0]));
+                int rightCutout =
+                        Math.min(
+                                a.dp(24),
+                                Math.max(
+                                        0,
+                                        windowInsets.right
+                                                - Math.max(
+                                                        0,
+                                                        decor.getWidth()
+                                                                - location[0]
+                                                                - measuredWidth)));
+                safe.left = Math.max(safe.left, leftCutout);
+                safe.right = Math.min(safe.right, measuredWidth - rightCutout);
+            }
         }
         safe.left = Math.max(0, Math.min(measuredWidth, safe.left));
         safe.top = Math.max(0, Math.min(measuredHeight, safe.top));
@@ -301,68 +338,72 @@ final class PlayerChrome {
         overlay.setPadding(
                 safe.left, safe.top, measuredWidth - safe.right, measuredHeight - safe.bottom);
         int width = safe.width(), height = safe.height();
-        boolean portrait = measuredWidth < measuredHeight;
         boolean mobileLandscape = !a.isTvDevice() && !portrait;
-        boolean compact = mobileLandscape && height < a.dp(420);
-        if (titleView != null) {
-            titleView.setTextSize(portrait || compact ? 20 : 26);
+        boolean compact = !a.isTvDevice() && (mobileLandscape || height < a.dp(440));
+        if (topActions != null && backBtn != null) {
+            topActions.setPadding(0, 0, 0, a.dp(compact ? 4 : 8));
+            ViewGroup.LayoutParams backLp = backBtn.getLayoutParams();
+            int backH = a.dp(compact ? 28 : 34);
+            if (backLp != null && backLp.height != backH) {
+                backLp.height = backH;
+                backBtn.setLayoutParams(backLp);
+            }
         }
-        episodeLabel.setVisibility(compact && height < a.dp(320) ? View.GONE : View.VISIBLE);
+        if (titleView != null) {
+            titleView.setTextSize(compact ? 17 : (portrait ? 20 : 26));
+        }
+        episodeLabel.setVisibility(compact ? View.GONE : View.VISIBLE);
         if (a.playStatus != null) a.playStatus.setVisibility(compact ? View.GONE : View.VISIBLE);
         if (fsBtn != null) {
             fsBtn.setText(portrait ? "⛶ 全屏横屏" : "⛶ 退出全屏");
         }
-        dock.setPadding(
-                a.dp(mobileLandscape ? 4 : 6), a.dp(5), a.dp(mobileLandscape ? 4 : 6), a.dp(5));
-        int edge = Math.min(a.dp(16), width / 8);
-        int dockWidth;
-        if (mobileLandscape) {
-            dockWidth = Math.min(a.dp(76), Math.max(0, width - edge * 2));
-            place(
-                    dock,
-                    dockWidth,
-                    Math.max(0, Math.min(a.dp(360), height - a.dp(16))),
-                    Gravity.RIGHT | Gravity.CENTER_VERTICAL,
-                    0,
-                    0,
-                    Math.min(a.dp(8), edge),
-                    0);
-        } else {
-            int maxDock = a.isTvDevice() ? a.dp(612) : a.dp(552);
-            dockWidth = Math.max(0, Math.min(maxDock, width - edge * 2));
-            place(
-                    dock,
-                    dockWidth,
-                    -2,
-                    Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL,
-                    0,
-                    0,
-                    0,
-                    a.dp(16));
+        if (centerRow != null && rewindBtn != null && forwardBtn != null) {
+            int sideSz = a.dp(compact ? 44 : 54);
+            int centerSz = a.dp(compact ? 56 : 70);
+            int gap = a.dp(compact ? 20 : 26);
+            LinearLayout.LayoutParams rLp = (LinearLayout.LayoutParams) rewindBtn.getLayoutParams();
+            LinearLayout.LayoutParams fLp =
+                    (LinearLayout.LayoutParams) forwardBtn.getLayoutParams();
+            LinearLayout.LayoutParams cLp = (LinearLayout.LayoutParams) state.getLayoutParams();
+            if (rLp.width != sideSz || cLp.width != centerSz || cLp.leftMargin != gap) {
+                rLp.width = rLp.height = sideSz;
+                fLp.width = fLp.height = sideSz;
+                cLp.width = cLp.height = centerSz;
+                cLp.leftMargin = cLp.rightMargin = gap;
+                rewindBtn.setLayoutParams(rLp);
+                forwardBtn.setLayoutParams(fLp);
+                state.setLayoutParams(cLp);
+            }
         }
-        int left = Math.min(a.dp(mobileLandscape ? 20 : 24), width / 8);
-        int right = mobileLandscape ? dockWidth + Math.min(a.dp(8), edge) + a.dp(12) : left;
+        dock.setPadding(a.dp(6), a.dp(compact ? 3 : 5), a.dp(6), a.dp(compact ? 3 : 5));
+        int edge = Math.min(a.dp(16), width / 8);
+        int maxDock = a.isTvDevice() ? a.dp(612) : a.dp(552);
+        int dockWidth = Math.max(0, Math.min(maxDock, width - edge * 2));
+        int dockBottom = a.dp(compact ? 8 : 16);
+        place(dock, dockWidth, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, 0, 0, dockBottom);
+        int left = Math.min(a.dp(compact ? 20 : 24), width / 8);
+        int right = left;
         int trackWidth = Math.max(0, Math.min(a.dp(760), width - left - right));
         left += Math.max(0, (width - left - right - trackWidth) / 2);
-        int progressHeight = Math.max(progress.getMeasuredHeight(), a.dp(62));
+        int progressHeight = Math.max(progress.getMeasuredHeight(), a.dp(compact ? 50 : 62));
         int bottom =
-                mobileLandscape
-                        ? a.dp(20)
+                compact
+                        ? Math.max(a.dp(58), dock.getMeasuredHeight() + a.dp(14))
                         : Math.max(a.dp(94), dock.getMeasuredHeight() + a.dp(28));
         bottom = Math.max(0, Math.min(bottom, height - progressHeight));
         place(progress, trackWidth, -2, Gravity.BOTTOM | Gravity.LEFT, left, 0, right, bottom);
-        int side = Math.min(a.dp(portrait ? 20 : 44), width / 8);
+        int side = Math.min(a.dp(portrait ? 20 : (compact ? 24 : 44)), width / 8);
         place(
                 heading,
                 -1,
                 -2,
                 Gravity.TOP,
                 side,
-                Math.min(a.dp(compact ? 12 : 24), height / 8),
-                mobileLandscape ? Math.max(side, right) : side,
+                Math.min(a.dp(compact ? 8 : 24), height / 8),
+                side,
                 0);
         if (a.playbackControls != null) {
-            a.playbackControls.relayout(mobileLandscape);
+            a.playbackControls.relayout(compact);
         }
     }
 

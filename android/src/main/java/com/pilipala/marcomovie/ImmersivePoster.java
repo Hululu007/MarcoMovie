@@ -43,6 +43,7 @@ final class ImmersivePoster extends FrameLayout {
     }
 
     private static final LruCache<String, Bitmap> WIDE_MEM_CACHE = new LruCache<>(18);
+    private static final LruCache<String, Bitmap> PORTRAIT_HD_MEM_CACHE = new LruCache<>(18);
     private static final Pattern YEAR_PATTERN = Pattern.compile("((?:19|20)\\d{2})");
     private static final java.util.concurrent.ExecutorService HD_POOL =
             java.util.concurrent.Executors.newFixedThreadPool(
@@ -396,6 +397,259 @@ final class ImmersivePoster extends FrameLayout {
             return out.toByteArray();
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    static void resolveHdPortraitPoster(
+            final MainActivity a,
+            final String rawTitle,
+            final String rawYear,
+            final String rawActor,
+            final String rawDirector,
+            final String rawPosterUrl,
+            final MainActivity.Done<Bitmap> onResolved) {
+        if (a == null || onResolved == null) return;
+        final String cleanTitle = normalizeTitleForBackdrop(rawTitle);
+        final String cleanYear = extractFourDigitYear(rawYear);
+        final String upgradedDirect =
+                rawPosterUrl == null || rawPosterUrl.isEmpty()
+                        ? ""
+                        : ImageLoader.upgradePosterUrl(rawPosterUrl, true);
+        if (cleanTitle.isEmpty() && upgradedDirect.isEmpty()) return;
+
+        final String cacheKey =
+                "portrait_v2|"
+                        + normalizeForStrictCompare(cleanTitle)
+                        + "|"
+                        + cleanYear
+                        + "|"
+                        + upgradedDirect;
+        Bitmap mem = PORTRAIT_HD_MEM_CACHE.get(cacheKey);
+        if (mem != null && !mem.isRecycled()) {
+            try {
+                onResolved.accept(mem);
+            } catch (Exception ignored) {
+            }
+            return;
+        }
+
+        final int generation = a.generation;
+        HD_POOL.execute(
+                () -> {
+                    if (generation != a.generation || a.isFinishing()) return;
+                    try {
+                        File diskFile =
+                                new File(
+                                        a.getCacheDir(),
+                                        "mob_hd_poster_v2_"
+                                                + Integer.toHexString(cacheKey.hashCode())
+                                                + ".img");
+                        if (diskFile.exists() && diskFile.length() > 12288) {
+                            Bitmap diskBmp = decodePortraitHdBytes(readFileBytes(diskFile));
+                            if (diskBmp != null) {
+                                PORTRAIT_HD_MEM_CACHE.put(cacheKey, diskBmp);
+                                a.ui.post(
+                                        () -> {
+                                            if (generation == a.generation && !a.isFinishing()) {
+                                                try {
+                                                    onResolved.accept(diskBmp);
+                                                } catch (Exception ignored) {
+                                                }
+                                            }
+                                        });
+                                return;
+                            }
+                        }
+
+                        Set<String> candidates = new LinkedHashSet<>();
+                        if (!upgradedDirect.isEmpty()
+                                && (!upgradedDirect.equals(rawPosterUrl)
+                                        || upgradedDirect.contains("/l_ratio_poster/")
+                                        || upgradedDirect.contains("/t/p/w780/"))) {
+                            candidates.add(upgradedDirect);
+                        }
+                        if (!cleanTitle.isEmpty()) {
+                            collectVerifiedDoubanPosters(
+                                    cleanTitle, cleanYear, rawActor, rawDirector, candidates);
+                            collectVerifiedBilibiliVerticalCovers(
+                                    cleanTitle, cleanYear, candidates);
+                        }
+
+                        for (String candidate : candidates) {
+                            if (generation != a.generation || a.isFinishing()) return;
+                            byte[] data = downloadImageBytes(candidate, 5500);
+                            if (data == null || data.length < 12288) continue;
+                            Bitmap hdBmp = decodePortraitHdBytes(data);
+                            if (hdBmp != null) {
+                                try (FileOutputStream fos = new FileOutputStream(diskFile)) {
+                                    fos.write(data);
+                                } catch (Exception ignored) {
+                                }
+                                PORTRAIT_HD_MEM_CACHE.put(cacheKey, hdBmp);
+                                a.ui.post(
+                                        () -> {
+                                            if (generation == a.generation && !a.isFinishing()) {
+                                                try {
+                                                    onResolved.accept(hdBmp);
+                                                } catch (Exception ignored) {
+                                                }
+                                            }
+                                        });
+                                return;
+                            }
+                        }
+                    } catch (Exception ignored) {
+                    }
+                });
+    }
+
+    private static Bitmap decodePortraitHdBytes(byte[] bytes) {
+        if (bytes == null || bytes.length < 12288) return null;
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+        if (bounds.outWidth < 460 || bounds.outHeight < 620) {
+            return null;
+        }
+        BitmapFactory.Options opts = new BitmapFactory.Options();
+        int sample = 1;
+        while ((bounds.outWidth / (sample * 2)) >= 1080
+                && (bounds.outHeight / (sample * 2)) >= 1620) {
+            sample *= 2;
+        }
+        opts.inSampleSize = sample;
+        opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
+    }
+
+    private static void collectVerifiedDoubanPosters(
+            String title, String year, String actor, String director, Set<String> out) {
+        try {
+            String suggestUrl =
+                    "https://movie.douban.com/j/subject_suggest?q="
+                            + URLEncoder.encode(title, "UTF-8");
+            String json = httpGetText(suggestUrl, "https://movie.douban.com/", false, 4000);
+            if (json == null || !json.trim().startsWith("[")) return;
+            JSONArray arr = new JSONArray(json);
+            if (arr.length() == 0) return;
+
+            String normTarget = normalizeForStrictCompare(title);
+            if (normTarget.isEmpty()) return;
+
+            int targetYear = parseYearInt(year);
+            String bestId = "";
+            String bestImg = "";
+            int bestScore = -1;
+
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject item = arr.optJSONObject(i);
+                if (item == null) continue;
+                String id = item.optString("id").trim();
+                if (id.isEmpty()) continue;
+
+                String itTitle = normalizeForStrictCompare(item.optString("title"));
+                String itSub = normalizeForStrictCompare(item.optString("sub_title"));
+                if (!normTarget.equals(itTitle) && !normTarget.equals(itSub)) {
+                    continue;
+                }
+
+                String itYearStr = extractFourDigitYear(item.optString("year"));
+                int itYear = parseYearInt(itYearStr);
+                int score = 0;
+                if (targetYear > 0) {
+                    if (itYear > 0) {
+                        int diff = Math.abs(targetYear - itYear);
+                        if (diff == 0) score = 100;
+                        else if (diff == 1) score = 60;
+                        else continue;
+                    } else {
+                        score = 15;
+                    }
+                } else {
+                    score = itYear > 0 ? 40 : 20;
+                }
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestId = id;
+                    bestImg = item.optString("img", "").trim();
+                }
+            }
+
+            if (bestId.isEmpty()) return;
+            if (!bestImg.isEmpty()) {
+                out.add(ImageLoader.upgradePosterUrl(bestImg, true));
+            }
+            String rexxarUrl = "https://m.douban.com/rexxar/api/v2/movie/" + bestId;
+            String rexxarJson =
+                    httpGetText(
+                            rexxarUrl,
+                            "https://m.douban.com/movie/subject/" + bestId + "/",
+                            true,
+                            3800);
+            if (rexxarJson != null && rexxarJson.trim().startsWith("{")) {
+                JSONObject obj = new JSONObject(rexxarJson);
+                JSONObject pic = obj.optJSONObject("pic");
+                if (pic != null) {
+                    String large = pic.optString("large", "").trim();
+                    if (!large.isEmpty()) {
+                        out.add(ImageLoader.upgradePosterUrl(large, true));
+                    }
+                    String normal = pic.optString("normal", "").trim();
+                    if (!normal.isEmpty()) {
+                        out.add(ImageLoader.upgradePosterUrl(normal, true));
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static void collectVerifiedBilibiliVerticalCovers(
+            String title, String year, Set<String> out) {
+        String normTarget = normalizeForStrictCompare(title);
+        if (normTarget.isEmpty()) return;
+        int targetYear = parseYearInt(year);
+
+        String[] types = {"media_bangumi", "media_ft"};
+        for (String type : types) {
+            try {
+                String url =
+                        "https://api.bilibili.com/x/web-interface/search/type?search_type="
+                                + type
+                                + "&keyword="
+                                + URLEncoder.encode(title, "UTF-8");
+                String json = httpGetText(url, "https://www.bilibili.com/", false, 3800);
+                if (json == null || json.isEmpty()) continue;
+                JSONObject root = new JSONObject(json);
+                JSONObject data = root.optJSONObject("data");
+                if (data == null) continue;
+                JSONArray results = data.optJSONArray("result");
+                if (results == null || results.length() == 0) continue;
+
+                for (int i = 0; i < Math.min(4, results.length()); i++) {
+                    JSONObject item = results.optJSONObject(i);
+                    if (item == null) continue;
+                    String itemTitle = normalizeForStrictCompare(item.optString("title"));
+                    if (!normTarget.equals(itemTitle)) continue;
+
+                    if (targetYear > 0) {
+                        long pubtime = item.optLong("pubtime", 0L);
+                        if (pubtime > 0) {
+                            Calendar cal = Calendar.getInstance();
+                            cal.setTimeInMillis(pubtime * 1000L);
+                            int pubYear = cal.get(Calendar.YEAR);
+                            if (Math.abs(pubYear - targetYear) > 1) continue;
+                        }
+                    }
+
+                    String vCover = normalizeCoverUrl(item.optString("cover"));
+                    if (!vCover.isEmpty()) {
+                        out.add(vCover);
+                        return;
+                    }
+                }
+            } catch (Exception ignored) {
+            }
         }
     }
 

@@ -292,12 +292,11 @@ final class PlaybackControls {
     private void rebuildToolDock(boolean mobileLandscape) {
         dockOverlay.removeAllViews();
         boolean tv = a.isTvDevice();
-        LinearLayout row = mobileLandscape ? a.vertical() : a.row();
-        row.setGravity(
-                mobileLandscape ? (Gravity.CENTER_HORIZONTAL | Gravity.TOP) : Gravity.CENTER);
+        LinearLayout row = a.row();
+        row.setGravity(Gravity.CENTER);
         row.setClipChildren(false);
         row.setClipToPadding(false);
-        row.setPadding(a.dp(1), a.dp(2), a.dp(1), a.dp(2));
+        row.setPadding(a.dp(1), a.dp(1), a.dp(1), a.dp(1));
         for (Button b : buttons.values()) {
             if (b.getVisibility() == View.GONE) continue;
             if (b.getParent() instanceof ViewGroup) {
@@ -307,10 +306,10 @@ final class PlaybackControls {
             int padH = a.dp(mobileLandscape || tv ? 4 : 6);
             b.setPadding(padH, 0, padH, 0);
             int w = a.dp(mobileLandscape ? 64 : (tv ? 58 : 68));
-            int h = a.dp(mobileLandscape ? 40 : 42);
+            int h = a.dp(mobileLandscape ? 34 : 42);
             LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(w, h);
-            int mh = a.dp(mobileLandscape ? 2 : (tv ? 3 : 4));
-            int mv = a.dp(mobileLandscape ? 3 : 4);
+            int mh = a.dp(mobileLandscape ? 3 : (tv ? 3 : 4));
+            int mv = a.dp(mobileLandscape ? 2 : 4);
             size.setMargins(mh, mv, mh, mv);
             row.addView(b, size);
         }
@@ -318,24 +317,7 @@ final class PlaybackControls {
         if (fsTool != null) {
             fsTool.setText(mobileLandscape ? "竖屏" : "全屏");
         }
-        if (mobileLandscape) {
-            ScrollView vScroller =
-                    new ScrollView(a) {
-                        @Override
-                        protected void dispatchDraw(Canvas canvas) {
-                            int save = canvas.save();
-                            canvas.clipRect(
-                                    0, getScrollY(), getWidth(), getScrollY() + getHeight());
-                            super.dispatchDraw(canvas);
-                            canvas.restoreToCount(save);
-                        }
-                    };
-            vScroller.setVerticalScrollBarEnabled(false);
-            vScroller.setFillViewport(false);
-            vScroller.setClipChildren(true);
-            vScroller.setClipToPadding(true);
-            vScroller.addView(row, new FrameLayout.LayoutParams(-1, -2));
-            dockOverlay.addView(vScroller, new LinearLayout.LayoutParams(-1, -1));
+        if (false) {
         } else {
             HorizontalScrollView scroller =
                     new HorizontalScrollView(a) {

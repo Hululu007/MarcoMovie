@@ -149,15 +149,7 @@ final class MobileShell {
     }
 
     private int statusBarHeight() {
-        try {
-            int resId = a.getResources().getIdentifier("status_bar_height", "dimen", "android");
-            if (resId > 0) {
-                int h = a.getResources().getDimensionPixelSize(resId);
-                if (h > 0) return h;
-            }
-        } catch (Exception ignored) {
-        }
-        return a.dp(28);
+        return a.statusBarHeight();
     }
 
     static GradientDrawable glassBg(
@@ -2650,7 +2642,7 @@ final class MobileShell {
         contentContainer.addView(sv, new FrameLayout.LayoutParams(-1, -1));
 
         final LinearLayout body = a.vertical();
-        body.setPadding(a.dp(16), statusBarHeight() + a.dp(10), a.dp(16), a.dp(108));
+        body.setPadding(a.dp(16), statusBarHeight() + a.dp(14), a.dp(16), a.dp(108));
         sv.addView(body, new ScrollView.LayoutParams(-1, -2));
 
         populateSettingsBody(body, sv);

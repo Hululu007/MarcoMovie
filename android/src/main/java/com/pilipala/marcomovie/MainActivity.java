@@ -790,6 +790,43 @@ public final class MainActivity extends Activity {
         p.addView(b, lp);
     }
 
+    int statusBarHeight() {
+        int best = isTvDevice() ? 0 : dp(38);
+        try {
+            if (getWindow() != null && getWindow().getDecorView() != null) {
+                WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
+                if (insets != null) {
+                    best = Math.max(best, insets.getSystemWindowInsetTop());
+                    if (Build.VERSION.SDK_INT >= 28 && insets.getDisplayCutout() != null) {
+                        best = Math.max(best, insets.getDisplayCutout().getSafeInsetTop());
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            int resId =
+                    android.content.res.Resources.getSystem()
+                            .getIdentifier("status_bar_height", "dimen", "android");
+            if (resId > 0) {
+                best =
+                        Math.max(
+                                best,
+                                android.content.res.Resources.getSystem()
+                                        .getDimensionPixelSize(resId));
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            int resId = getResources().getIdentifier("status_bar_height", "dimen", "android");
+            if (resId > 0) {
+                best = Math.max(best, getResources().getDimensionPixelSize(resId));
+            }
+        } catch (Exception ignored) {
+        }
+        return best;
+    }
+
     void renderPage(String title, String eyebrow) {
         renderPage(title, eyebrow, false);
     }
@@ -834,8 +871,9 @@ public final class MainActivity extends Activity {
         body = vertical();
         body.setClipChildren(false);
         body.setClipToPadding(false);
-        if (isPortrait() && !isTvDevice()) {
-            body.setPadding(dp(18), dp(18), dp(18), dp(36));
+        if (!isTvDevice()) {
+            int sidePad = isPortrait() ? dp(18) : dp(28);
+            body.setPadding(sidePad, statusBarHeight() + dp(16), sidePad, dp(48));
         } else {
             body.setPadding(dp(46), dp(26), dp(46), dp(44));
         }
@@ -845,7 +883,7 @@ public final class MainActivity extends Activity {
         homeDock = null;
         if (navigation) {
             if (useBottomDock()) {
-                body.setPadding(dp(18), dp(16), dp(18), dp(86));
+                body.setPadding(dp(18), statusBarHeight() + dp(14), dp(18), dp(86));
             } else {
                 body.setPadding(dp(34), dp(18), dp(100), dp(36));
             }

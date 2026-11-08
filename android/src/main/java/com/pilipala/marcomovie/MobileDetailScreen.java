@@ -74,12 +74,7 @@ final class MobileDetailScreen {
     }
 
     static int getStatusBarHeight(MainActivity a) {
-        int resId = a.getResources().getIdentifier("status_bar_height", "dimen", "android");
-        if (resId > 0) {
-            int px = a.getResources().getDimensionPixelSize(resId);
-            if (px > 0) return px;
-        }
-        return a.dp(28);
+        return a.statusBarHeight();
     }
 
     static int defaultAmbientForTitle(String title) {
@@ -171,6 +166,25 @@ final class MobileDetailScreen {
             s = "E" + String.format(Locale.US, "%02d", epNumber);
         }
         return new EpisodeDisplay(s, badge);
+    }
+
+    static String formatPlayEpisodeLabel(String rawName, int epNumber) {
+        EpisodeDisplay disp = parseEpisodeDisplay(rawName, epNumber);
+        String clean = disp.cleanTitle == null ? "" : disp.cleanTitle.trim();
+        Matcher mEp = Pattern.compile("第\\s*([一二三四五六七八九十百零两\\d]+)\\s*([集话期篇])").matcher(clean);
+        if (mEp.find()) {
+            return "第 " + mEp.group(1) + " " + mEp.group(2);
+        }
+        if (clean.matches("(?i)^[Ee]\\d+$")) {
+            return "第 " + epNumber + " 集";
+        }
+        if (clean.length() > 10
+                || clean.contains(".")
+                || clean.matches(
+                        "(?i).*(1080|2160|720|4k|web|h264|h265|x264|x265|ddp|aac|hdr|dv|remux|bluray).*")) {
+            return "第 " + epNumber + " 集";
+        }
+        return clean.isEmpty() ? ("第 " + epNumber + " 集") : clean;
     }
 
     /**
@@ -279,6 +293,10 @@ final class MobileDetailScreen {
 
         int getAmbientColor() {
             return ambientColor;
+        }
+
+        Bitmap getPosterBitmap() {
+            return rawBitmap;
         }
 
         private void configureCenterCropMatrix(Bitmap bmp, int targetW, int targetH) {
@@ -395,14 +413,16 @@ final class MobileDetailScreen {
     static final class PosterHookImageView extends ImageView {
         private final PortraitBackdropView target;
         private final Runnable onLoaded;
+        final int targetW;
+        final int targetH;
 
         PosterHookImageView(MainActivity a, PortraitBackdropView target, Runnable onLoaded) {
             super(a);
             this.target = target;
             this.onLoaded = onLoaded;
             setScaleType(ScaleType.CENTER_CROP);
-            int targetW = Math.max(1080, a.windowWidth());
-            int targetH = Math.max(1620, Math.round(targetW * 1.5f));
+            this.targetW = Math.max(1080, a.windowWidth());
+            this.targetH = Math.max(1620, Math.round(targetW * 1.5f));
             setLayoutParams(new FrameLayout.LayoutParams(targetW, targetH));
             layout(0, 0, targetW, targetH);
         }
@@ -411,6 +431,20 @@ final class MobileDetailScreen {
         public void setImageBitmap(Bitmap bm) {
             super.setImageBitmap(bm);
             target.setPosterBitmap(bm, onLoaded);
+        }
+    }
+
+    static void refreshEpisodeStillBitmaps(View v, Bitmap hdBmp) {
+        if (v == null || hdBmp == null || hdBmp.isRecycled()) return;
+        if (v instanceof EpisodeStillCropView) {
+            ((EpisodeStillCropView) v).setImageBitmap(hdBmp);
+            return;
+        }
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup vg = (android.view.ViewGroup) v;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                refreshEpisodeStillBitmaps(vg.getChildAt(i), hdBmp);
+            }
         }
     }
 
@@ -506,10 +540,22 @@ final class MobileDetailScreen {
                         });
         posterHook.setTag("detail-cover");
         posterHook.setVisibility(View.GONE);
-        a.root.addView(posterHook, new FrameLayout.LayoutParams(1, 1));
+        a.root.addView(
+                posterHook, new FrameLayout.LayoutParams(posterHook.targetW, posterHook.targetH));
         if (listing.poster != null && !listing.poster.isEmpty()) {
             a.poster(listing.poster, posterHook, true);
         }
+        ImmersivePoster.resolveHdPortraitPoster(
+                a,
+                listing.title,
+                listing.year,
+                listing.actor,
+                listing.director,
+                listing.poster,
+                hdBmp -> {
+                    posterHook.setImageBitmap(hdBmp);
+                    refreshEpisodeStillBitmaps(a.root, hdBmp);
+                });
 
         // 2. Main Scrollable Foreground Content
         final ScrollView scrollView = new ScrollView(a);
@@ -676,6 +722,17 @@ final class MobileDetailScreen {
                             && !v.poster.isEmpty()) {
                         a.poster(v.poster, posterHook, true);
                     }
+                    ImmersivePoster.resolveHdPortraitPoster(
+                            a,
+                            v.title,
+                            v.year,
+                            v.actor,
+                            v.director,
+                            v.poster,
+                            hdBmp -> {
+                                posterHook.setImageBitmap(hdBmp);
+                                refreshEpisodeStillBitmaps(a.root, hdBmp);
+                            });
                     lowerBody.removeView(loadingState);
                     synopsisWrap.removeAllViews();
                     playBtnWrap.removeAllViews();
@@ -769,40 +826,41 @@ final class MobileDetailScreen {
                     }
                     final WatchHistory.Entry remembered = bookmark;
 
-                    // Full-Width White Capsule Play Button (matches iPhone `▶ 播放 · 第 1 季 · E01`)
+                    // Full-Width White Capsule Play Button (shows clean episode label only;
+                    // resume time and line are shown in the small subtitle below)
                     SeasonMeta curSeason = parseSeasonMeta(v.title);
-                    EpisodeDisplay firstDisp =
-                            parseEpisodeDisplay(
-                                    v.lines
-                                            .get(SourcePreferences.lineIndex(a, v))
-                                            .episodes
-                                            .get(0)
-                                            .name,
-                                    1);
-                    String playLabel;
+                    int remEpNum = 1;
                     if (remembered != null) {
-                        EpisodeDisplay remDisp = parseEpisodeDisplay(remembered.episode, 1);
-                        int resumePos = remembered.resume();
-                        playLabel =
-                                resumePos > 0
-                                        ? "▶   播放 · "
-                                                + remDisp.cleanTitle
-                                                + " · 续播 "
-                                                + PlaybackController.formatTime(resumePos)
-                                        : "▶   播放 · " + remDisp.cleanTitle;
-                    } else if (v.lines.get(SourcePreferences.lineIndex(a, v)).episodes.size() > 1) {
-                        playLabel =
-                                "▶   播放 · " + curSeason.seasonLabel + " · " + firstDisp.cleanTitle;
-                    } else {
-                        playLabel = "▶   播放 · " + firstDisp.cleanTitle;
+                        for (Cms.Line l : v.lines) {
+                            if (l.name.equals(remembered.line)) {
+                                for (int idx = 0; idx < l.episodes.size(); idx++) {
+                                    if (l.episodes.get(idx).name.equals(remembered.episode)) {
+                                        remEpNum = idx + 1;
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                        }
                     }
+                    String playEpLabel =
+                            remembered != null
+                                    ? formatPlayEpisodeLabel(remembered.episode, remEpNum)
+                                    : formatPlayEpisodeLabel(
+                                            v.lines
+                                                    .get(SourcePreferences.lineIndex(a, v))
+                                                    .episodes
+                                                    .get(0)
+                                                    .name,
+                                            1);
+                    String playLabel = "▶   播放 · " + playEpLabel;
 
                     Button playBtn = new Button(a);
                     playBtn.setTag("detail-play");
                     playBtn.setAllCaps(false);
-                    playBtn.setSingleLine(true);
                     playBtn.setMaxLines(1);
-                    playBtn.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+                    playBtn.setSingleLine(true);
+                    playBtn.setEllipsize(TextUtils.TruncateAt.END);
                     playBtn.setGravity(Gravity.CENTER);
                     playBtn.setIncludeFontPadding(false);
                     playBtn.setTextSize(14.5f);
@@ -828,16 +886,16 @@ final class MobileDetailScreen {
                     playBtnWrap.addView(playBtn, new LinearLayout.LayoutParams(-1, a.dp(48)));
 
                     if (remembered != null) {
-                        EpisodeDisplay bmDisp = parseEpisodeDisplay(remembered.episode, 1);
+                        String bmEpTitle = formatPlayEpisodeLabel(remembered.episode, remEpNum);
                         String bmSummary =
                                 remembered.position > 0
                                         ? "已观看 ["
-                                                + bmDisp.cleanTitle
+                                                + bmEpTitle
                                                 + "] 至 "
                                                 + PlaybackController.formatTime(remembered.position)
                                                 + " · 线路："
                                                 + remembered.line
-                                        : "已观看 [" + bmDisp.cleanTitle + "] · 线路：" + remembered.line;
+                                        : "已观看 [" + bmEpTitle + "] · 线路：" + remembered.line;
                         TextView bmInfo = a.text(bmSummary, 12, 0xccffffff);
                         bmInfo.setSingleLine(true);
                         bmInfo.setEllipsize(TextUtils.TruncateAt.MIDDLE);
@@ -957,25 +1015,37 @@ final class MobileDetailScreen {
         panel.removeAllViews();
 
         final Cms.Line line = video.lines.get(lineIndex);
-        panel.addView(
-                a.navButton(
-                        "默认播放线路", "line-preferred", () -> SourcePreferences.chooseLine(a, video)));
         final boolean descending = a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false);
         final SeasonMeta curSeason = parseSeasonMeta(video.title);
         final int total = line.episodes.size();
+
+        int activeEpIdx = 0;
+        if (remembered != null && line.name.equals(remembered.line)) {
+            for (int i = 0; i < total; i++) {
+                if (line.episodes.get(i).name.equals(remembered.episode)) {
+                    activeEpIdx = i;
+                    break;
+                }
+            }
+        }
 
         // Update Top-Right Floating Source Button, Play Button & Download Button
         if (a.root != null) {
             View playBtnView = a.root.findViewWithTag("detail-play");
             if (playBtnView instanceof Button && !line.episodes.isEmpty()) {
                 Button playBtn = (Button) playBtnView;
+                final int targetEpIdx = activeEpIdx;
+                playBtn.setText(
+                        "▶   播放 · "
+                                + formatPlayEpisodeLabel(
+                                        line.episodes.get(targetEpIdx).name, targetEpIdx + 1));
                 playBtn.setOnClickListener(
                         v -> {
                             if (remembered != null && line.name.equals(remembered.line)) {
                                 a.playBookmark(site, video, remembered);
                             } else {
                                 a.resumeAt = 0;
-                                a.resolvePlayer(site, video, line, line.episodes.get(0));
+                                a.resolvePlayer(site, video, line, line.episodes.get(targetEpIdx));
                             }
                         });
             }
@@ -1004,6 +1074,12 @@ final class MobileDetailScreen {
                                             lineIndex,
                                             (dialog, which) -> {
                                                 dialog.dismiss();
+                                                a.prefs
+                                                        .edit()
+                                                        .putString(
+                                                                Prefs.PREFERRED_LINE,
+                                                                video.lines.get(which).name)
+                                                        .apply();
                                                 renderMobileEpisodes(
                                                         a,
                                                         site,
@@ -1122,17 +1198,6 @@ final class MobileDetailScreen {
                     discoveredLabels);
         }
 
-        // Determine current active episode index
-        int activeEpIdx = 0;
-        if (remembered != null && line.name.equals(remembered.line)) {
-            for (int i = 0; i < total; i++) {
-                if (line.episodes.get(i).name.equals(remembered.episode)) {
-                    activeEpIdx = i;
-                    break;
-                }
-            }
-        }
-
         int start = page * 50;
         int end = Math.min(start + 50, total);
 
@@ -1209,7 +1274,14 @@ final class MobileDetailScreen {
 
             EpisodeStillCropView stillImg = new EpisodeStillCropView(a, posIdx);
             frame.addView(stillImg, new FrameLayout.LayoutParams(-1, -1));
-            if (video.poster != null && !video.poster.isEmpty()) {
+            View bdView = a.root != null ? a.root.findViewWithTag("detail-backdrop") : null;
+            Bitmap currentBackdropBmp =
+                    bdView instanceof PortraitBackdropView
+                            ? ((PortraitBackdropView) bdView).getPosterBitmap()
+                            : null;
+            if (currentBackdropBmp != null && !currentBackdropBmp.isRecycled()) {
+                stillImg.setImageBitmap(currentBackdropBmp);
+            } else if (video.poster != null && !video.poster.isEmpty()) {
                 a.poster(video.poster, stillImg, true);
             }
 

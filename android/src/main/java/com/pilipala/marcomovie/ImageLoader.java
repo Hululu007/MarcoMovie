@@ -314,10 +314,6 @@ final class ImageLoader {
         if (rawUrl == null || rawUrl.isEmpty()) return "";
         String url = rawUrl;
         if (url.contains("doubanio.com")) {
-            url =
-                    url.replace("img9.doubanio.com", "img3.doubanio.com")
-                            .replace("img1.doubanio.com", "img3.doubanio.com")
-                            .replace("img2.doubanio.com", "img3.doubanio.com");
             if (detail) {
                 url =
                         url.replace("/s_ratio_poster/", "/l_ratio_poster/")

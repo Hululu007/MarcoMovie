@@ -18,8 +18,27 @@ final class SettingsScreen {
 
     void page(String title, String note) {
         a.renderPage("", "");
-        a.body.addView(a.text(title, 28, MainActivity.WHITE));
-        a.gap(a.body, 8);
+        if (!a.isTvDevice()) {
+            LinearLayout topNav = a.row();
+            topNav.setGravity(Gravity.CENTER_VERTICAL);
+            topNav.setPadding(0, 0, 0, a.dp(10));
+            TextView backBtn = a.text("‹", 22, MainActivity.WHITE);
+            backBtn.setGravity(Gravity.CENTER);
+            backBtn.setBackground(
+                    MobileShell.glassBg(0xb034343a, 0xc01e1e22, a.dp(999), a.dp(0.8f), 0x38ffffff));
+            MobileDetailScreen.bindTouchFeedback(backBtn);
+            backBtn.setOnClickListener(v -> a.onBackPressed());
+            LinearLayout.LayoutParams backLp = new LinearLayout.LayoutParams(a.dp(38), a.dp(38));
+            backLp.rightMargin = a.dp(10);
+            topNav.addView(backBtn, backLp);
+            TextView heading = a.text(title, 22, MainActivity.WHITE);
+            heading.setTypeface(null, Typeface.BOLD);
+            topNav.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+            a.body.addView(topNav, new LinearLayout.LayoutParams(-1, -2));
+        } else {
+            a.body.addView(a.text(title, 28, MainActivity.WHITE));
+            a.gap(a.body, 8);
+        }
         if (!note.isEmpty()) a.paragraph(note);
     }
 
@@ -386,7 +405,7 @@ final class SettingsScreen {
                                     a.recreate();
                                 }));
         a.paragraph(
-                "Marco Movie 0.5.3 · 作者 Pilipala · github.com/Pilipala9919/MarcoMovie。本产品仅为工具，不含任何影视资源；内容与配置请自行合法获取。播放能力取决于服务授权和设备支持。");
+                "Marco Movie 0.5.4 · 作者 Pilipala · github.com/Pilipala9919/MarcoMovie。本产品仅为工具，不含任何影视资源；内容与配置请自行合法获取。播放能力取决于服务授权和设备支持。");
     }
 
     void confirm(String title, Runnable action) {

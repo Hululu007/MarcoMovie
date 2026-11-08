@@ -942,6 +942,7 @@ final class PlaybackController {
                         if (w != a.usableWidth || h != a.usableHeight) {
                             a.usableWidth = w;
                             a.usableHeight = h;
+                            view.requestApplyInsets();
                             view.post(
                                     () -> {
                                         if (ticket != a.generation || a.isFinishing()) return;
