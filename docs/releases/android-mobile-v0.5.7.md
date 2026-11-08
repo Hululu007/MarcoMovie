@@ -3,7 +3,7 @@
 - 发布平台：Android 手机 / 平板（`android-mobile`）
 - 版本：`0.5.7`（`versionCode 57`）
 - 发布日期：2026-11-08
-- 构建提交：`PENDING_COMMIT`
+- 构建提交：`37e4b123c74dd8104b6805985d7141179e448fa0`
 - 安装包：`MarcoMovie-0.5.7-android-mobile.apk`（兼容旧名：`MarcoMovie-0.5.7-mobile.apk`）
 
 ## 本次修复与改进
