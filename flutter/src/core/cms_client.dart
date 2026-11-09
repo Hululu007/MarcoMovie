@@ -1352,35 +1352,20 @@ class CmsClient {
       return CspBridge.fetchDetail(site, fallback, _getText);
     }
     if (fallback.lines.isNotEmpty) return fallback;
-    try {
-      final raw = await _getText(
-        _appendQuery(
-          site.api,
-          {
-            'ac': _detailAction(site),
-            'ids': fallback.id,
-          },
-          ext: site.ext,
-        ).toString(),
-        headers: site.headers,
-      );
-      final listing = CmsParser.parseListing(raw);
-      if (listing.videos.isNotEmpty) {
-        final detailed = listing.videos.first;
-        if (detailed.lines.isNotEmpty) {
-          return _mergeDetail(detailed, fallback);
-        }
-      }
-    } catch (_) {}
-    if (fallback.title.trim().isNotEmpty) {
-      return CspBridge.resolveCrossSourceVideo(
-        fallback,
-        fallback.title.trim(),
-        _getText,
-        siteHint: site.api,
-      );
-    }
-    return fallback;
+    final raw = await _getText(
+      _appendQuery(
+        site.api,
+        {
+          'ac': _detailAction(site),
+          'ids': fallback.id,
+        },
+        ext: site.ext,
+      ).toString(),
+      headers: site.headers,
+    );
+    final listing = CmsParser.parseListing(raw);
+    if (listing.videos.isEmpty) return fallback;
+    return _mergeDetail(listing.videos.first, fallback);
   }
   CmsVideo _mergeDetail(CmsVideo detailed, CmsVideo fallback) => CmsVideo(
     id: detailed.id.isEmpty ? fallback.id : detailed.id,

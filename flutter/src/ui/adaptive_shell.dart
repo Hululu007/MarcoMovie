@@ -5175,6 +5175,125 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
         : '片头 ${skipIntro}s · 片尾 ${skipOutro}s';
   }
 
+  Widget _buildSettingsQuickActionRow({
+    required IconData icon,
+    required Color iconBgColor,
+    required String title,
+    String? subtitle,
+    String? trailingText,
+    Widget? trailing,
+    VoidCallback? onTap,
+  }) {
+    final rowContent = ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 58),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+        child: Row(
+          children: [
+            DecoratedBox(
+              decoration: ShapeDecoration(
+                color: iconBgColor,
+                shape: ContinuousRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                shadows: [
+                  BoxShadow(
+                    color: iconBgColor.withValues(alpha: 0.28),
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: SizedBox(
+                width: 30,
+                height: 30,
+                child: Icon(icon, size: 17, color: Colors.white),
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppleColors.labelPrimary,
+                      fontSize: 15.5,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.1,
+                      height: 1.28,
+                    ),
+                  ),
+                  if (subtitle != null && subtitle.isNotEmpty) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppleColors.labelSecondary,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w400,
+                        letterSpacing: 0.1,
+                        height: 1.35,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+            if (trailing != null)
+              trailing
+            else ...[
+              if (trailingText != null && trailingText.isNotEmpty)
+                Flexible(
+                  flex: 0,
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 168),
+                    child: Text(
+                      trailingText,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(
+                        color: AppleColors.labelSecondary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w400,
+                        letterSpacing: 0.1,
+                      ),
+                    ),
+                  ),
+                ),
+              if (onTap != null) ...[
+                const SizedBox(width: 6),
+                Icon(
+                  CupertinoIcons.chevron_forward,
+                  size: 15,
+                  color: Colors.white.withValues(alpha: 0.30),
+                ),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+    if (onTap == null) return rowContent;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        highlightColor: Colors.white.withValues(alpha: 0.08),
+        splashColor: Colors.white.withValues(alpha: 0.04),
+        child: rowContent,
+      ),
+    );
+  }
+
   /// Main Settings Tab (Level 1): Authentic iOS System Settings inset-grouped layout
   /// with vivid squircle badges, inline linear Liquid Glass refraction slider, and
   /// clean category navigation rows.
@@ -5208,10 +5327,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                 ),
               ),
               AppleGroupedSection(
-                header: '外观与界面效果',
-                footer: '拖动滑块可调节界面毛玻璃通透度与边缘高光效果。',
+                header: '核心偏好设置',
                 children: [
                   AppleGroupedTile(
+                    minHeight: 88,
                     icon: CupertinoIcons.paintbrush_fill,
                     iconBgColor: AppleColors.systemPurple,
                     title: '外观与视觉风格',
@@ -5224,29 +5343,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                     ),
                   ),
                   AppleGroupedTile(
-                    icon: CupertinoIcons.sparkles,
-                    iconBgColor: AppleColors.systemIndigo,
-                    title: '动态流光背景',
-                    subtitle: '开启柔和极光背景与海报环境光晕',
-                    trailing: CupertinoSwitch(
-                      value: widget.storage.ambientGlowEnabled,
-                      activeTrackColor: AppleColors.systemGreen,
-                      onChanged: (v) async {
-                        await widget.storage.setAmbientGlowEnabled(v);
-                        if (mounted) setState(() {});
-                      },
-                    ),
-                  ),
-                  _buildLiquidGlassSliderRow(() {
-                    if (mounted) setState(() {});
-                  }),
-                ],
-              ),
-              const SizedBox(height: 22),
-              AppleGroupedSection(
-                header: '浏览与播放偏好',
-                children: [
-                  AppleGroupedTile(
+                    minHeight: 88,
                     icon: CupertinoIcons.square_grid_2x2_fill,
                     iconBgColor: AppleColors.systemBlue,
                     title: '首页与排版布局',
@@ -5259,6 +5356,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                     ),
                   ),
                   AppleGroupedTile(
+                    minHeight: 88,
                     icon: CupertinoIcons.play_rectangle_fill,
                     iconBgColor: AppleColors.systemOrange,
                     title: '播放与画质偏好',
@@ -5270,18 +5368,32 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                       sectionBuilder: _buildPlaybackSettingsSection,
                     ),
                   ),
+                  AppleGroupedTile(
+                    minHeight: 88,
+                    icon: CupertinoIcons.folder_fill,
+                    iconBgColor: AppleColors.systemGreen,
+                    title: '订阅与数据维护',
+                    subtitle: '网盘扫码登录、点播直播订阅源管理与缓存清理',
+                    trailingText: '${publicSites.length} 可用',
+                    onTap: () => _openSettingsSubPage(
+                      title: '订阅与数据维护',
+                      subtitle: '集中管理云盘扫码授权、点播与直播订阅源、多仓切换及跨端数据备份',
+                      sectionBuilder: _buildCloudAndDataSettingsSection,
+                    ),
+                  ),
                 ],
               ),
               const SizedBox(height: 22),
               AppleGroupedSection(
-                header: '片源订阅与数据',
+                header: '云盘与快捷工具',
+                footer: '拖动滑块可实时调节全局界面毛玻璃通透度。',
                 children: [
                   Builder(
                     builder: (context) {
                       final loggedCount = NetdiskService.drives
                           .where((d) => widget.storage.isNetdiskLoggedIn(d.key))
                           .length;
-                      return AppleGroupedTile(
+                      return _buildSettingsQuickActionRow(
                         icon: CupertinoIcons.qrcode_viewfinder,
                         iconBgColor: const Color(0xFF0A84FF),
                         title: '我的云盘 · 网盘扫码与账号中心',
@@ -5298,19 +5410,24 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                       );
                     },
                   ),
-                  AppleGroupedTile(
-                    icon: CupertinoIcons.folder_fill,
-                    iconBgColor: AppleColors.systemGreen,
-                    title: '订阅与数据维护',
-                    subtitle: '管理点播源、直播源、多仓切换与缓存清理',
-                    trailingText: '${publicSites.length} 可用',
-                    onTap: () => _openSettingsSubPage(
-                      title: '订阅与数据维护',
-                      subtitle: '集中管理 TVBox / 影视仓点播源、直播源、多仓切换、跨端备份与海报缓存',
-                      sectionBuilder: _buildCloudAndDataSettingsSection,
+                  _buildSettingsQuickActionRow(
+                    icon: CupertinoIcons.sparkles,
+                    iconBgColor: AppleColors.systemIndigo,
+                    title: '动态流光背景',
+                    subtitle: '开启柔和极光背景与海报环境光晕',
+                    trailing: CupertinoSwitch(
+                      value: widget.storage.ambientGlowEnabled,
+                      activeTrackColor: AppleColors.systemGreen,
+                      onChanged: (v) async {
+                        await widget.storage.setAmbientGlowEnabled(v);
+                        if (mounted) setState(() {});
+                      },
                     ),
                   ),
-                  AppleGroupedTile(
+                  _buildLiquidGlassSliderRow(() {
+                    if (mounted) setState(() {});
+                  }),
+                  _buildSettingsQuickActionRow(
                     icon: CupertinoIcons.cloud_upload_fill,
                     iconBgColor: AppleColors.systemTeal,
                     title: '跨平台备份与恢复',
@@ -5318,7 +5435,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                     trailingText: 'JSON 互通',
                     onTap: _showBackupRestoreDialog,
                   ),
-                  AppleGroupedTile(
+                  _buildSettingsQuickActionRow(
                     icon: CupertinoIcons.arrow_down_circle_fill,
                     iconBgColor: AppleColors.systemBlue,
                     title: '软件更新与版本',
