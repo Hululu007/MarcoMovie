@@ -27,7 +27,7 @@ import org.json.JSONObject;
  * Loopback HTTP media proxy for Android 4.x (API 14+) TVs.
  *
  * <p>Bridges modern HTTPS (TLS 1.2 via Conscrypt), SNI, custom Referer/User-Agent headers, and HLS
- * (.m3u8) segment playlists into a local {@code http://127.0.0.1} stream consumable by legacy
+ * (.m3u8) segment playlists into a local {@code http://127.0.0.1/} stream consumable by legacy
  * Stagefright {@code MediaPlayer} and {@code IjkMediaPlayer}. Never disables certificate or
  * hostname verification.
  */
