@@ -3,7 +3,7 @@
 - 发布平台：Android 电视 / 盒子（`android-tv`）
 - 版本：`0.5.8`（`versionCode 58`）
 - 发布日期：2026-11-09
-- 构建提交：`PENDING_COMMIT`
+- 构建提交：`43084c56dc6b42c56884566f7792090268c18d71`
 - 安装包：`MarcoMovie-0.5.8-android-tv.apk`（兼容旧名：`MarcoMovie-0.5.8-preview.apk`）
 
 ## 本次修复与改进
