@@ -41,6 +41,7 @@ class StorageService {
   static const String keyCardSubtitleMode = 'card_subtitle_mode';
   static const String keyPreferredQuality = 'preferred_quality';
   static const String keyDefaultAspectMode = 'default_aspect_mode';
+  static const String keyPlayerKernel = 'player_kernel';
   final SharedPreferences _prefs;
   static final Expando<QuarkAccountProvider> _quarkProviders = Expando();
   QuarkAccountProvider get quarkAccounts => _quarkProviders[_prefs] ??=
@@ -97,6 +98,8 @@ class StorageService {
       _prefs.getString(keyPreferredQuality) ?? '4k_netdisk';
   String get defaultAspectMode =>
       _prefs.getString(keyDefaultAspectMode) ?? 'contain';
+  String get playerKernel =>
+      _prefs.getString(keyPlayerKernel) ?? 'exo';
   String get quarkCookie => _prefs.getString(keyQuarkCookie) ?? '';
   String get ucCookie => _prefs.getString(keyUcCookie) ?? '';
   String get baiduCookie => _prefs.getString(keyBaiduCookie) ?? '';
@@ -663,6 +666,9 @@ class StorageService {
   }
   Future<void> setDefaultAspectMode(String mode) async {
     await _prefs.setString(keyDefaultAspectMode, mode.trim());
+  }
+  Future<void> setPlayerKernel(String kernel) async {
+    await _prefs.setString(keyPlayerKernel, kernel.trim());
   }
   /// Selects the recommended line index from [lines] based on [preferredQuality]
   /// and the user's configured Netdisk drive order.

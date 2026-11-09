@@ -507,6 +507,13 @@ class CspBridge {
     if (isBiliSite(site)) {
       return _fetchBiliSearch(keyword, page, fetchText);
     }
+    if (isTuxiaobeiSite(site)) {
+      final (_, homeListing) = await _fetchTuxiaobeiHome(fetchText);
+      final filtered = homeListing.videos
+          .where((v) => v.title.toLowerCase().contains(keyword.toLowerCase()))
+          .toList(growable: false);
+      return CmsListing(page: 1, pageCount: 1, videos: filtered);
+    }
     if (isFirstAidSite(site)) {
       final (_, homeListing) = await _fetchFirstAidHome(fetchText);
       final filtered = homeListing.videos
@@ -592,74 +599,120 @@ class CspBridge {
 
     // Standard VOD detail or cross-source resolution (for Douban / msearch / multi-line)
     if (!isDoubanSite(site) && !fallback.id.startsWith('msearch:')) {
-      final directBackends = backendsForSite(site);
-      final all = directBackends.isNotEmpty
-          ? directBackends
-          : (guardAdapterFor(site) != null ? _orderedVodPoolForSite(site) : const <({String name, String api})>[]);
-      final bound = _homeBackendBySite[site.key];
-      final backends = [
-        if (bound != null) ...all.where((b) => b.api == bound),
-        ...all.where((b) => b.api != bound),
+      final fallbackDirectLines = [
+        for (final l in fallback.lines)
+          if (l.episodes.any((e) => e.isDirectPlayable))
+            CmsLine(
+              name: l.name,
+              episodes: l.episodes.where((e) => e.isDirectPlayable).toList(growable: false),
+            ),
       ];
-      for (final backend in backends.take(2)) {
-        try {
-          final isAppV2 = _isAppV2Endpoint(backend.api);
-          final baseApi = backend.api.endsWith('/') ? backend.api : '${backend.api}/';
-          final uri = isAppV2
-              ? Uri.parse('${baseApi}video_detail').replace(queryParameters: {'id': fallback.id})
-              : Uri.parse(backend.api).replace(queryParameters: {'ac': 'detail', 'ids': fallback.id});
-          final raw = await fetchText(uri.toString(), headers: site.headers);
-          final listing = CmsParser.parseListing(raw);
-          if (listing.videos.isNotEmpty && listing.videos.first.lines.isNotEmpty) {
-            final v = listing.videos.first;
-            final targetTitle = v.title.isEmpty ? fallback.title : v.title;
-            if (wantNetdiskLines && targetTitle.trim().isNotEmpty) {
-              final cross = await resolveCrossSourceVideo(
-                CmsVideo(
-                  id: v.id.isEmpty ? fallback.id : v.id,
-                  title: targetTitle,
-                  poster: CmsParser.isBrokenPosterUrl(v.poster) ? fallback.poster : v.poster,
-                  remarks: v.remarks.isEmpty ? fallback.remarks : v.remarks,
-                  year: v.year.isEmpty ? fallback.year : v.year,
-                  area: v.area.isEmpty ? fallback.area : v.area,
-                  actor: v.actor.isEmpty ? fallback.actor : v.actor,
-                  description: v.description.isEmpty ? fallback.description : v.description,
-                  tag: v.tag.isEmpty ? fallback.tag : v.tag,
-                  lines: v.lines,
-                ),
-                targetTitle,
-                fetchText,
-                siteHint: site.name,
-              );
-              if (cross.lines.isNotEmpty) return cross;
-            }
-            // Also enrich with additional lines from cross-source search if title is present
-            final extraLines = await resolveCrossSourceLines(
-              targetTitle,
-              fetchText,
-              excludeLineNames: v.lines.map((l) => l.name).toSet(),
+      CmsVideo? matchedDetail;
+      if (fallbackDirectLines.isNotEmpty) {
+        matchedDetail = CmsVideo(
+          id: fallback.id,
+          title: fallback.title,
+          poster: fallback.poster,
+          remarks: fallback.remarks,
+          year: fallback.year,
+          area: fallback.area,
+          actor: fallback.actor,
+          description: fallback.description,
+          tag: fallback.tag,
+          lines: fallbackDirectLines,
+        );
+      } else {
+        final directBackends = backendsForSite(site);
+        final all = directBackends.isNotEmpty
+            ? directBackends
+            : (guardAdapterFor(site) != null ? _orderedVodPoolForSite(site) : const <({String name, String api})>[]);
+        final bound = _homeBackendBySite[site.key];
+        final backends = [
+          if (bound != null) ...all.where((b) => b.api == bound),
+          ...all.where((b) => b.api != bound),
+        ];
+        final normFallbackTitle = _normalizeTitleForMatch(fallback.title);
+        for (final backend in backends.take(2)) {
+          try {
+            final isAppV2 = _isAppV2Endpoint(backend.api);
+            final baseApi = backend.api.endsWith('/') ? backend.api : '${backend.api}/';
+            final uri = isAppV2
+                ? Uri.parse('${baseApi}video_detail').replace(queryParameters: {'id': fallback.id})
+                : Uri.parse(backend.api).replace(queryParameters: {'ac': 'detail', 'ids': fallback.id});
+            final raw = await fetchText(
+              uri.toString(),
+              headers: site.headers,
+              requestTimeout: const Duration(seconds: 6),
             );
-            String validPoster = CmsParser.isBrokenPosterUrl(v.poster) ? fallback.poster : v.poster;
-            if (CmsParser.isBrokenPosterUrl(validPoster) && targetTitle.trim().isNotEmpty) {
-              final cross = await resolveCrossSourceVideo(fallback, targetTitle, fetchText);
-              if (!CmsParser.isBrokenPosterUrl(cross.poster)) {
-                validPoster = cross.poster;
+            final listing = CmsParser.parseListing(raw);
+            if (listing.videos.isNotEmpty && listing.videos.first.lines.isNotEmpty) {
+              final candidate = listing.videos.first;
+              if (normFallbackTitle.isNotEmpty &&
+                  candidate.title.trim().isNotEmpty &&
+                  _normalizeTitleForMatch(candidate.title) != normFallbackTitle) {
+                continue;
               }
+              final directOnly = [
+                for (final l in candidate.lines)
+                  if (l.episodes.any((e) => e.isDirectPlayable))
+                    CmsLine(
+                      name: l.name,
+                      episodes: l.episodes.where((e) => e.isDirectPlayable).toList(growable: false),
+                    ),
+              ];
+              matchedDetail = CmsVideo(
+                id: candidate.id.isEmpty ? fallback.id : candidate.id,
+                title: candidate.title.isEmpty ? fallback.title : candidate.title,
+                poster: CmsParser.isBrokenPosterUrl(candidate.poster) ? fallback.poster : candidate.poster,
+                remarks: candidate.remarks.isEmpty ? fallback.remarks : candidate.remarks,
+                year: candidate.year.isEmpty ? fallback.year : candidate.year,
+                area: candidate.area.isEmpty ? fallback.area : candidate.area,
+                actor: candidate.actor.isEmpty ? fallback.actor : candidate.actor,
+                description: candidate.description.isEmpty ? fallback.description : candidate.description,
+                tag: candidate.tag.isEmpty ? fallback.tag : candidate.tag,
+                lines: directOnly.isNotEmpty ? directOnly : candidate.lines,
+              );
+              break;
             }
-            return CmsVideo(
-              id: v.id.isEmpty ? fallback.id : v.id,
-              title: targetTitle,
-              poster: validPoster,
-              remarks: v.remarks.isEmpty ? fallback.remarks : v.remarks,
-              year: v.year.isEmpty ? fallback.year : v.year,
-              area: v.area.isEmpty ? fallback.area : v.area,
-              actor: v.actor.isEmpty ? fallback.actor : v.actor,
-              description: v.description.isEmpty ? fallback.description : v.description,
-              tag: v.tag.isEmpty ? fallback.tag : v.tag,
-              lines: [...v.lines, ...extraLines],
-            );
+          } catch (_) {}
+        }
+      }
+      if (matchedDetail != null) {
+        final v = matchedDetail;
+        final targetTitle = v.title.isEmpty ? fallback.title : v.title;
+        if (wantNetdiskLines && targetTitle.trim().isNotEmpty) {
+          final cross = await resolveCrossSourceVideo(
+            v,
+            targetTitle,
+            fetchText,
+            siteHint: site.name,
+          );
+          if (cross.lines.isNotEmpty) return cross;
+        }
+        final extraLines = await resolveCrossSourceLines(
+          targetTitle,
+          fetchText,
+          excludeLineNames: v.lines.map((l) => l.name).toSet(),
+        );
+        String validPoster = CmsParser.isBrokenPosterUrl(v.poster) ? fallback.poster : v.poster;
+        if (CmsParser.isBrokenPosterUrl(validPoster) && targetTitle.trim().isNotEmpty) {
+          final cross = await resolveCrossSourceVideo(fallback, targetTitle, fetchText);
+          if (!CmsParser.isBrokenPosterUrl(cross.poster)) {
+            validPoster = cross.poster;
           }
-        } catch (_) {}
+        }
+        return CmsVideo(
+          id: v.id,
+          title: targetTitle,
+          poster: validPoster,
+          remarks: v.remarks,
+          year: v.year,
+          area: v.area,
+          actor: v.actor,
+          description: v.description,
+          tag: v.tag,
+          lines: [...v.lines, ...extraLines],
+        );
       }
     }
 
@@ -1623,8 +1676,16 @@ class CspBridge {
             ? Uri.parse('${baseApi}video').replace(queryParameters: {'pg': '1'})
             : Uri.parse(backend.api).replace(queryParameters: {'ac': 'detail'});
         final results = await Future.wait([
-          fetchText(listUri.toString(), headers: site.headers),
-          fetchText(detailUri.toString(), headers: site.headers),
+          fetchText(
+            listUri.toString(),
+            headers: site.headers,
+            requestTimeout: const Duration(seconds: 5),
+          ),
+          fetchText(
+            detailUri.toString(),
+            headers: site.headers,
+            requestTimeout: const Duration(seconds: 5),
+          ),
         ]);
         final categories = CmsParser.parseCategories(results[0]);
         final listing = CmsParser.parseListing(results[1]);
@@ -1660,7 +1721,13 @@ class CspBridge {
         final uri = Uri.parse('${baseApi}video').replace(
           queryParameters: {'pg': pgStr, if (id.isNotEmpty) 'tid': id},
         );
-        return CmsParser.parseListing(await fetchText(uri.toString(), headers: site.headers));
+        return CmsParser.parseListing(
+          await fetchText(
+            uri.toString(),
+            headers: site.headers,
+            requestTimeout: const Duration(seconds: 5),
+          ),
+        );
       }
       final params = <String, String>{
         'ac': 'detail',
@@ -1670,7 +1737,13 @@ class CspBridge {
         params['t'] = id;
       }
       final uri = Uri.parse(api).replace(queryParameters: params);
-      return CmsParser.parseListing(await fetchText(uri.toString(), headers: site.headers));
+      return CmsParser.parseListing(
+        await fetchText(
+          uri.toString(),
+          headers: site.headers,
+          requestTimeout: const Duration(seconds: 5),
+        ),
+      );
     }
     for (final backend in backends.take(3)) {
       try {
@@ -1720,7 +1793,11 @@ class CspBridge {
                   'pg': pgStr,
                 },
               );
-        final raw = await fetchText(uri.toString(), headers: site.headers);
+        final raw = await fetchText(
+          uri.toString(),
+          headers: site.headers,
+          requestTimeout: const Duration(seconds: 4),
+        );
         final listing = CmsParser.parseListing(raw);
         if (listing.videos.isNotEmpty) return listing;
       } catch (_) {}
@@ -1831,17 +1908,6 @@ class CspBridge {
           }
         }
       }
-      if (matched == null) {
-        for (final v in videos) {
-          final nv = _normalizeTitleForMatch(v.title);
-          if (nv.isNotEmpty &&
-              normTarget.isNotEmpty &&
-              (nv.contains(normTarget) || normTarget.contains(nv))) {
-            matched = v;
-            break;
-          }
-        }
-      }
       if (matched == null) continue;
       if (bestPoster.isEmpty && !CmsParser.isBrokenPosterUrl(matched.poster)) {
         bestPoster = matched.poster;
@@ -1888,9 +1954,9 @@ class CspBridge {
       for (final l in directLines) {
         if (l.episodes.length > maxEpCount) maxEpCount = l.episodes.length;
       }
-      final fullLengthLines = maxEpCount > 3
+      final fullLengthLines = maxEpCount > 1
           ? directLines
-              .where((l) => l.episodes.length >= (maxEpCount * 0.6).floor())
+              .where((l) => l.episodes.length == maxEpCount)
               .toList(growable: false)
           : directLines;
       final netdiskPool = fullLengthLines.isNotEmpty ? fullLengthLines : directLines;

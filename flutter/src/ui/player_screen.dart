@@ -66,6 +66,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   late int _skipOutroSec;
   late bool _autoNext;
   late String _repeatMode;
+  late String _playerKernel;
 
   bool _allowHistory = false;
   bool _controlsVisible = true;
@@ -108,9 +109,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   String _activeStreamUrl = '';
   String _activeMediaUri = '';
   bool get _matchesActiveMedia {
+    if (_activeMediaUri.isEmpty) return false;
     final playlist = _player.state.playlist;
-    return _activeMediaUri.isNotEmpty &&
-        playlist.index >= 0 &&
+    if (playlist.medias.isEmpty) return _allowEvents;
+    return playlist.index >= 0 &&
         playlist.index < playlist.medias.length &&
         playlist.medias[playlist.index].uri == _activeMediaUri;
   }
@@ -146,6 +148,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _skipOutroSec = widget.storage.skipOutroSec;
     _autoNext = widget.storage.autoNext;
     _repeatMode = widget.storage.repeatMode;
+    _playerKernel = widget.storage.playerKernel;
     _fit = switch (widget.storage.defaultAspectMode) {
       'cover' => BoxFit.cover,
       'fill' => BoxFit.fill,
@@ -157,6 +160,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _desktopWindow!.initialize().catchError(_windowError);
     }
     _player = Player();
+    unawaited(_applyPlayerKernel(_playerKernel));
     // Keep one source lease for this page, including pause and overlapping
     // episode/quality transitions. Release only after the decoder is disposed.
     _releaseSourceSession = _client.pinPlaybackSource(widget.site);
@@ -228,15 +232,6 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _player.stream.duration.listen((dur) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
-      if (!_isLiveStream &&
-          !_currentEpisode.isLocalFile &&
-          dur.inMilliseconds > 0 &&
-          dur.inSeconds <= 12 &&
-          widget.video.lines.length > 1) {
-        if (_tryAutoSwitchLine(reason: '当前线路资源异常')) {
-          return;
-        }
-      }
       setState(() {
         if (dur.inMilliseconds > 0) {
           if (dur.inMilliseconds > _lastKnownDurationMs) {
@@ -325,8 +320,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     });
 
     _player.stream.error.listen((message) {
-      if (mounted && _allowEvents && _matchesActiveMedia && message.isNotEmpty)
+      if (mounted &&
+          _allowEvents &&
+          _matchesActiveMedia &&
+          message.isNotEmpty &&
+          !_playing &&
+          _duration <= Duration.zero &&
+          _position <= Duration.zero) {
         _failPlayback();
+      }
     });
 
     _openCurrentEpisode(resumeMs: widget.initialPositionMs);
@@ -575,6 +577,19 @@ class _PlayerScreenState extends State<PlayerScreen>
           headers['User-Agent'] =
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
         }
+        try {
+          final dyn = _player.platform as dynamic;
+          await dyn.setProperty('tls-verify', 'no');
+          final ua = headers.entries
+              .firstWhere(
+                (e) => e.key.toLowerCase() == 'user-agent',
+                orElse: () => const MapEntry('User-Agent', ''),
+              )
+              .value;
+          if (ua.isNotEmpty) {
+            await dyn.setProperty('user-agent', ua);
+          }
+        } catch (_) {}
         await _player.open(
           Media(
             safePlayUrl,
@@ -754,6 +769,60 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_repeatMode == 'one') return '单集';
     if (_repeatMode == 'all') return '列表';
     return '关闭';
+  }
+
+  String get _kernelShortLabel => switch (_playerKernel) {
+    'ijk' => 'IJK',
+    'mpv' => 'MPV',
+    _ => 'EXO',
+  };
+
+  double _desktopScale(Size size) {
+    if (!_desktop || size.width <= 1200) return 1.0;
+    return (1.0 + (size.width - 1200) / 1400.0).clamp(1.0, 1.38);
+  }
+
+  Future<void> _applyPlayerKernel(String kernel) async {
+    try {
+      final dyn = _player.platform as dynamic;
+      await dyn.setProperty('tls-verify', 'no');
+      switch (kernel) {
+        case 'ijk':
+          await dyn.setProperty('hwdec', 'auto-copy');
+          await dyn.setProperty('cache', 'yes');
+          await dyn.setProperty('demuxer-max-bytes', '67108864');
+          await dyn.setProperty('demuxer-readahead-secs', '20');
+          await dyn.setProperty('network-timeout', '25');
+          await dyn.setProperty(
+            'demuxer-lavf-o',
+            'reconnect=1,reconnect_delay_max=5,analyzeduration=2000000,probesize=2000000',
+          );
+          break;
+        case 'mpv':
+          await dyn.setProperty('hwdec', 'auto-safe');
+          await dyn.setProperty('cache', 'yes');
+          await dyn.setProperty('demuxer-max-bytes', '134217728');
+          await dyn.setProperty('demuxer-readahead-secs', '30');
+          await dyn.setProperty('network-timeout', '20');
+          await dyn.setProperty(
+            'demuxer-lavf-o',
+            'reconnect=1,reconnect_delay_max=4',
+          );
+          break;
+        case 'exo':
+        default:
+          await dyn.setProperty('hwdec', 'auto');
+          await dyn.setProperty('cache', 'yes');
+          await dyn.setProperty('demuxer-max-bytes', '67108864');
+          await dyn.setProperty('demuxer-readahead-secs', '15');
+          await dyn.setProperty('network-timeout', '15');
+          await dyn.setProperty(
+            'demuxer-lavf-o',
+            'reconnect=1,reconnect_delay_max=4,fflags=+discardcorrupt+genpts',
+          );
+          break;
+      }
+    } catch (_) {}
   }
 
   String get _videoSpecsLabel {
@@ -1089,8 +1158,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   Widget _buildAppleChromeOverlay(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
     final isLandscape = size.width > size.height;
-    final leftInset = isLandscape ? 16.0 : 14.0;
-    final rightDockEdge = isLandscape ? 8.0 : 14.0;
+    final scale = _desktopScale(size);
+    final leftInset = (isLandscape ? 16.0 : 14.0) * scale;
+    final rightDockEdge = (isLandscape ? 8.0 : 14.0) * scale;
+    final dockReserve = 64.0 * scale;
 
     return SizedBox.expand(
       child: SafeArea(
@@ -1100,17 +1171,17 @@ class _PlayerScreenState extends State<PlayerScreen>
             // 1. Top Header Bar (Back + Title + Live Badge / Orientation Button)
             Positioned(
               left: leftInset,
-              right: isLandscape ? rightDockEdge + 64 : 14,
-              top: 10,
-              child: _buildTopHeader(context, isLandscape),
+              right: isLandscape ? rightDockEdge + dockReserve : 14 * scale,
+              top: 10 * scale,
+              child: _buildTopHeader(context, isLandscape, scale),
             ),
 
             // 2. Large Center Transport Buttons (Rewind 15s / Play-Pause / Fast-Forward 15s)
             if (!_loading && !_buffering)
               Center(
                 child: Padding(
-                  padding: EdgeInsets.only(right: isLandscape ? 32 : 0),
-                  child: _buildCenterTransportButtons(),
+                  padding: EdgeInsets.only(right: isLandscape ? 32 * scale : 0),
+                  child: _buildCenterTransportButtons(scale),
                 ),
               ),
 
@@ -1118,10 +1189,10 @@ class _PlayerScreenState extends State<PlayerScreen>
             if (isLandscape)
               Positioned(
                 right: rightDockEdge,
-                top: 14,
-                bottom: 14,
+                top: 14 * scale,
+                bottom: 14 * scale,
                 child: Center(
-                  child: _buildScrollableToolDock(isLandscape: true),
+                  child: _buildScrollableToolDock(isLandscape: true, scale: scale),
                 ),
               ),
 
@@ -1129,16 +1200,16 @@ class _PlayerScreenState extends State<PlayerScreen>
             //    + Bottom Scrollable Tool Dock in Portrait
             Positioned(
               left: leftInset,
-              right: isLandscape ? rightDockEdge + 64 : 14,
-              bottom: 10,
+              right: isLandscape ? rightDockEdge + dockReserve : 14 * scale,
+              bottom: 10 * scale,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   if (!_isLiveStream)
-                    _buildProgressBarCapsule(context, isLandscape),
+                    _buildProgressBarCapsule(context, isLandscape, scale),
                   if (!isLandscape) ...[
-                    if (!_isLiveStream) const SizedBox(height: 10),
-                    _buildScrollableToolDock(isLandscape: false),
+                    if (!_isLiveStream) SizedBox(height: 10 * scale),
+                    _buildScrollableToolDock(isLandscape: false, scale: scale),
                   ],
                 ],
               ),
@@ -1149,30 +1220,33 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  Widget _buildTopHeader(BuildContext context, bool isLandscape) {
+  Widget _buildTopHeader(BuildContext context, bool isLandscape, double scale) {
     return Row(
       children: [
         CupertinoButton(
           padding: EdgeInsets.zero,
-          minSize: 36,
+          minSize: 36 * scale,
           onPressed: () => Navigator.of(context).maybePop(),
-          child: const AppleGlassSurface(
-            padding: EdgeInsets.symmetric(horizontal: 13, vertical: 7.5),
-            borderRadius: BorderRadius.all(Radius.circular(999)),
+          child: AppleGlassSurface(
+            padding: EdgeInsets.symmetric(
+              horizontal: 13 * scale,
+              vertical: 7.5 * scale,
+            ),
+            borderRadius: const BorderRadius.all(Radius.circular(999)),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
                   CupertinoIcons.chevron_back,
                   color: AppleColors.labelPrimary,
-                  size: 16,
+                  size: 16 * scale,
                 ),
-                SizedBox(width: 4),
+                SizedBox(width: 4 * scale),
                 Text(
                   '返回',
                   style: TextStyle(
                     color: AppleColors.labelPrimary,
-                    fontSize: 13,
+                    fontSize: 13 * scale,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -1180,7 +1254,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             ),
           ),
         ),
-        const SizedBox(width: 12),
+        SizedBox(width: 12 * scale),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1192,51 +1266,51 @@ class _PlayerScreenState extends State<PlayerScreen>
                       widget.video.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         color: AppleColors.labelPrimary,
-                        fontSize: 16.5,
+                        fontSize: 16.5 * scale,
                         fontWeight: FontWeight.w700,
                         letterSpacing: -0.3,
                       ),
                     ),
                   ),
                   if (_videoSpecsLabel.isNotEmpty) ...[
-                    const SizedBox(width: 8),
+                    SizedBox(width: 8 * scale),
                     AppleGlassSurface(
                       key: const Key('player-video-specs'),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 7.5,
-                        vertical: 2.5,
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 7.5 * scale,
+                        vertical: 2.5 * scale,
                       ),
                       borderRadius: BorderRadius.circular(999),
                       child: Text(
                         _videoSpecsLabel,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Color(0xFFE5E7EB),
-                          fontSize: 10.5,
+                        style: TextStyle(
+                          color: const Color(0xFFE5E7EB),
+                          fontSize: 10.5 * scale,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
                   ],
                   if (_isLiveStream) ...[
-                    const SizedBox(width: 8),
+                    SizedBox(width: 8 * scale),
                     Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 7,
-                        vertical: 2,
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 7 * scale,
+                        vertical: 2 * scale,
                       ),
                       decoration: BoxDecoration(
                         color: AppleColors.systemRed.withValues(alpha: 0.85),
                         borderRadius: BorderRadius.circular(999),
                       ),
-                      child: const Text(
+                      child: Text(
                         '直播中',
                         style: TextStyle(
                           color: Colors.white,
-                          fontSize: 10.5,
+                          fontSize: 10.5 * scale,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
@@ -1244,28 +1318,31 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ],
                 ],
               ),
-              const SizedBox(height: 2),
+              SizedBox(height: 2 * scale),
               Text(
                 '${_currentEpisode.name} · ${_currentLine.name}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
+                style: TextStyle(
                   color: AppleColors.labelSecondary,
-                  fontSize: 12,
+                  fontSize: 12 * scale,
                 ),
               ),
             ],
           ),
         ),
         if (_isLiveStream) ...[
-          const SizedBox(width: 10),
+          SizedBox(width: 10 * scale),
           CupertinoButton(
             key: const Key('player-fullscreen-toggle'),
             padding: EdgeInsets.zero,
-            minSize: 34,
+            minSize: 34 * scale,
             onPressed: _toggleOrientation,
             child: AppleGlassSurface(
-              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+              padding: EdgeInsets.symmetric(
+                horizontal: 11 * scale,
+                vertical: 7 * scale,
+              ),
               borderRadius: BorderRadius.circular(999),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -1275,14 +1352,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                         ? CupertinoIcons.fullscreen_exit
                         : CupertinoIcons.fullscreen,
                     color: AppleColors.labelPrimary,
-                    size: 15,
+                    size: 15 * scale,
                   ),
-                  const SizedBox(width: 4),
+                  SizedBox(width: 4 * scale),
                   Text(
                     _fullscreenLabel(isLandscape),
-                    style: const TextStyle(
+                    style: TextStyle(
                       color: AppleColors.labelPrimary,
-                      fontSize: 12,
+                      fontSize: 12 * scale,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -1297,13 +1374,13 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// Large center screen transport controls: Rewind 15s, Play/Pause, Fast-Forward 15s.
   /// For Live TV streams, only the central Play/Pause button is shown.
-  Widget _buildCenterTransportButtons() {
+  Widget _buildCenterTransportButtons([double scale = 1.0]) {
     if (_isLiveStream) {
       return _buildCenterCircleButton(
         key: const Key('player-center-play-pause'),
         icon: _playing ? CupertinoIcons.pause_fill : CupertinoIcons.play_fill,
-        size: 78,
-        iconSize: 36,
+        size: 78 * scale,
+        iconSize: 36 * scale,
         hero: true,
         onTap: () {
           _player.playOrPause();
@@ -1317,29 +1394,29 @@ class _PlayerScreenState extends State<PlayerScreen>
         _buildCenterCircleButton(
           key: const Key('player-center-rewind'),
           icon: CupertinoIcons.gobackward_15,
-          size: 60,
-          iconSize: 26,
+          size: 60 * scale,
+          iconSize: 26 * scale,
           hero: false,
           onTap: () => _seekRelative(-15),
         ),
-        const SizedBox(width: 30),
+        SizedBox(width: 30 * scale),
         _buildCenterCircleButton(
           key: const Key('player-center-play-pause'),
           icon: _playing ? CupertinoIcons.pause_fill : CupertinoIcons.play_fill,
-          size: 78,
-          iconSize: 36,
+          size: 78 * scale,
+          iconSize: 36 * scale,
           hero: true,
           onTap: () {
             _player.playOrPause();
             _scheduleHide();
           },
         ),
-        const SizedBox(width: 30),
+        SizedBox(width: 30 * scale),
         _buildCenterCircleButton(
           key: const Key('player-center-forward'),
           icon: CupertinoIcons.goforward_15,
-          size: 60,
-          iconSize: 26,
+          size: 60 * scale,
+          iconSize: 26 * scale,
           hero: false,
           onTap: () => _seekRelative(15),
         ),
@@ -1383,7 +1460,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   /// Standalone floating Progress Bar capsule with Fullscreen / Orientation toggle button.
-  Widget _buildProgressBarCapsule(BuildContext context, bool isLandscape) {
+  Widget _buildProgressBarCapsule(
+    BuildContext context,
+    bool isLandscape, [
+    double scale = 1.0,
+  ]) {
     final effectiveDurationMs = _duration.inMilliseconds > 0
         ? _duration.inMilliseconds
         : _lastKnownDurationMs;
@@ -1401,30 +1482,33 @@ class _PlayerScreenState extends State<PlayerScreen>
     final totalDuration = Duration(milliseconds: effectiveDurationMs);
 
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 740),
+      constraints: BoxConstraints(maxWidth: 740 * scale),
       child: AppleGlassSurface(
         key: const Key('player-progress-bar'),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        borderRadius: BorderRadius.circular(22),
+        padding: EdgeInsets.symmetric(
+          horizontal: 16 * scale,
+          vertical: 8 * scale,
+        ),
+        borderRadius: BorderRadius.circular(22 * scale),
         child: Row(
           children: [
             Text(
               _formatDuration(activeDuration),
-              style: const TextStyle(
+              style: TextStyle(
                 color: AppleColors.labelSecondary,
-                fontSize: 12,
-                fontFeatures: [FontFeature.tabularFigures()],
+                fontSize: 12 * scale,
+                fontFeatures: const [FontFeature.tabularFigures()],
               ),
             ),
             Expanded(
               child: SliderTheme(
                 data: SliderTheme.of(context).copyWith(
-                  trackHeight: 4.5,
-                  thumbShape: const RoundSliderThumbShape(
-                    enabledThumbRadius: 6.5,
+                  trackHeight: 4.5 * scale,
+                  thumbShape: RoundSliderThumbShape(
+                    enabledThumbRadius: 6.5 * scale,
                   ),
-                  overlayShape: const RoundSliderOverlayShape(
-                    overlayRadius: 13,
+                  overlayShape: RoundSliderOverlayShape(
+                    overlayRadius: 13 * scale,
                   ),
                   activeTrackColor: AppleColors.labelPrimary,
                   inactiveTrackColor: const Color(0x44FFFFFF),
@@ -1470,22 +1554,22 @@ class _PlayerScreenState extends State<PlayerScreen>
             ),
             Text(
               hasDuration ? _formatDuration(totalDuration) : '--:--',
-              style: const TextStyle(
+              style: TextStyle(
                 color: AppleColors.labelSecondary,
-                fontSize: 12,
-                fontFeatures: [FontFeature.tabularFigures()],
+                fontSize: 12 * scale,
+                fontFeatures: const [FontFeature.tabularFigures()],
               ),
             ),
-            const SizedBox(width: 10),
+            SizedBox(width: 10 * scale),
             CupertinoButton(
               key: const Key('player-fullscreen-toggle'),
               padding: EdgeInsets.zero,
-              minSize: 34,
+              minSize: 34 * scale,
               onPressed: _toggleOrientation,
               child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 6,
+                padding: EdgeInsets.symmetric(
+                  horizontal: 10 * scale,
+                  vertical: 6 * scale,
                 ),
                 decoration: BoxDecoration(
                   color: const Color(0x28FFFFFF),
@@ -1503,14 +1587,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                           ? CupertinoIcons.fullscreen_exit
                           : CupertinoIcons.fullscreen,
                       color: AppleColors.labelPrimary,
-                      size: 15,
+                      size: 15 * scale,
                     ),
-                    const SizedBox(width: 4),
+                    SizedBox(width: 4 * scale),
                     Text(
                       _fullscreenLabel(isLandscape),
-                      style: const TextStyle(
+                      style: TextStyle(
                         color: AppleColors.labelPrimary,
-                        fontSize: 12,
+                        fontSize: 12 * scale,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
@@ -1530,7 +1614,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// Exposes all adjustable playback controls (omitting VOD-only items during
   /// Live TV). The orientation toggle lives only on the progress bar (or the
   /// header during Live TV), so it is intentionally not duplicated here.
-  Widget _buildScrollableToolDock({required bool isLandscape}) {
+  Widget _buildScrollableToolDock({
+    required bool isLandscape,
+    double scale = 1.0,
+  }) {
     final live = _isLiveStream;
     final actions = <_PlayerAction>[
       if (_episodeIndex > 0)
@@ -1553,6 +1640,13 @@ class _PlayerScreenState extends State<PlayerScreen>
         ),
       if (widget.video.lines.length > 1 || !live)
         _PlayerAction(CupertinoIcons.layers_alt_fill, '线路', _showLinesSheet),
+      _PlayerAction(
+        CupertinoIcons.cpu,
+        '内核·$_kernelShortLabel',
+        _showKernelSheet,
+        shortLabel: _kernelShortLabel,
+        active: _playerKernel != 'exo',
+      ),
       if (!live)
         _PlayerAction(
           CupertinoIcons.speedometer,
@@ -1620,28 +1714,30 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (isLandscape) {
       return LayoutBuilder(
         builder: (context, constraints) {
-          const itemExtent = 50.0;
-          final contentH = actions.length * itemExtent + 16;
+          final itemExtent = 50.0 * scale;
+          final vertPad = 8.0 * scale;
+          final contentH = actions.length * itemExtent + vertPad * 2;
           final maxH = constraints.maxHeight.isFinite
               ? constraints.maxHeight
               : contentH;
           final scrollable = contentH > maxH;
+          final dockWidth = 54.0 * scale;
           return LiquidGlass(
             key: const Key('player-tool-dock-landscape'),
-            width: 54,
+            width: dockWidth,
             height: math.min(contentH, maxH),
-            borderRadius: 27,
+            borderRadius: dockWidth / 2,
             tint: const Color(0x47141418),
             blur: 18,
             child: AppleEdgeFade(
               axis: Axis.vertical,
-              fadeWidth: scrollable ? 18 : 0,
+              fadeWidth: scrollable ? 18 * scale : 0,
               child: ListView.builder(
-                padding: const EdgeInsets.symmetric(vertical: 8),
+                padding: EdgeInsets.symmetric(vertical: vertPad),
                 physics: const BouncingScrollPhysics(),
                 itemExtent: itemExtent,
                 itemCount: actions.length,
-                itemBuilder: (ctx, i) => _buildRailButton(actions[i]),
+                itemBuilder: (ctx, i) => _buildRailButton(actions[i], scale),
               ),
             ),
           );
@@ -1650,24 +1746,27 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
 
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 740),
+      constraints: BoxConstraints(maxWidth: 740 * scale),
       child: LiquidGlass(
         key: const Key('player-tool-dock-portrait'),
-        borderRadius: 24,
+        borderRadius: 24 * scale,
         tint: const Color(0x47141418),
         blur: 18,
         child: AppleEdgeFade(
-          fadeWidth: 14,
+          fadeWidth: 14 * scale,
           child: SingleChildScrollView(
             physics: const BouncingScrollPhysics(),
             scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            padding: EdgeInsets.symmetric(
+              horizontal: 10 * scale,
+              vertical: 7 * scale,
+            ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 for (int i = 0; i < actions.length; i++) ...[
-                  if (i > 0) const SizedBox(width: 7),
-                  _buildToolTile(actions[i]),
+                  if (i > 0) SizedBox(width: 7 * scale),
+                  _buildToolTile(actions[i], scale),
                 ],
               ],
             ),
@@ -1679,13 +1778,13 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// Landscape rail button: icon in a soft circular glass well with a short
   /// caption underneath; active toggles take the system tint.
-  Widget _buildRailButton(_PlayerAction action) {
+  Widget _buildRailButton(_PlayerAction action, [double scale = 1.0]) {
     final tint = action.active
         ? const Color(0xFF3E9BFF)
         : AppleColors.labelPrimary;
     return CupertinoButton(
       padding: EdgeInsets.zero,
-      minSize: 44,
+      minSize: 44 * scale,
       pressedOpacity: 0.6,
       onPressed: () {
         _scheduleHide();
@@ -1695,8 +1794,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Container(
-            width: 30,
-            height: 30,
+            width: 30 * scale,
+            height: 30 * scale,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: action.active
@@ -1704,9 +1803,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                   : const Color(0x1FFFFFFF),
             ),
             alignment: Alignment.center,
-            child: Icon(action.icon, color: tint, size: 15),
+            child: Icon(action.icon, color: tint, size: 15 * scale),
           ),
-          const SizedBox(height: 3),
+          SizedBox(height: 3 * scale),
           Text(
             action.shortLabel ?? action.label,
             maxLines: 1,
@@ -1714,7 +1813,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             softWrap: false,
             style: TextStyle(
               color: action.active ? tint : AppleColors.labelSecondary,
-              fontSize: 9,
+              fontSize: 9 * scale,
               fontWeight: FontWeight.w600,
               letterSpacing: -0.1,
             ),
@@ -1724,19 +1823,22 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  Widget _buildToolTile(_PlayerAction action) {
+  Widget _buildToolTile(_PlayerAction action, [double scale = 1.0]) {
     final tint = action.active
         ? const Color(0xFF3E9BFF)
         : AppleColors.labelPrimary;
     return CupertinoButton(
       padding: EdgeInsets.zero,
-      minSize: 34,
+      minSize: 34 * scale,
       onPressed: () {
         _scheduleHide();
         action.onTap();
       },
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6.5),
+        padding: EdgeInsets.symmetric(
+          horizontal: 11 * scale,
+          vertical: 6.5 * scale,
+        ),
         decoration: BoxDecoration(
           color: action.active
               ? const Color(0x2E3E9BFF)
@@ -1746,13 +1848,13 @@ class _PlayerScreenState extends State<PlayerScreen>
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(action.icon, color: tint, size: 14),
-            const SizedBox(width: 5),
+            Icon(action.icon, color: tint, size: 14 * scale),
+            SizedBox(width: 5 * scale),
             Text(
               action.label,
               style: TextStyle(
                 color: tint,
-                fontSize: 12,
+                fontSize: 12 * scale,
                 fontWeight: FontWeight.w600,
               ),
             ),
@@ -2107,6 +2209,73 @@ class _PlayerScreenState extends State<PlayerScreen>
                 );
               }),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showKernelSheet() {
+    const kernels = <({String key, String title, String subtitle})>[
+      (
+        key: 'exo',
+        title: 'EXO 超速内核 (推荐)',
+        subtitle: '硬件加速解码与分片断点容错，适合绝大多数 4K 与 HLS 线路',
+      ),
+      (
+        key: 'ijk',
+        title: 'IJK 兼容内核',
+        subtitle: '开启帧缓冲拷贝与深度探测，适合音画不同步或特殊封装片源',
+      ),
+      (
+        key: 'mpv',
+        title: 'MPV 原画内核',
+        subtitle: '超大内存缓冲与原画直通输出，适合高码率 4K Remux 蓝光原盘',
+      ),
+    ];
+    showAppleModalSheet<void>(
+      context: context,
+      title: '切换播放内核',
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          AppleGroupedSection(
+            children: kernels.map((k) {
+              final selected = _playerKernel == k.key;
+              return AppleGroupedTile(
+                icon: CupertinoIcons.cpu,
+                iconBgColor: selected
+                    ? AppleColors.systemBlue
+                    : AppleColors.groupedTertiary,
+                title: k.title,
+                subtitle: k.subtitle,
+                trailing: selected
+                    ? const Icon(
+                        CupertinoIcons.checkmark_alt,
+                        color: AppleColors.systemBlue,
+                        size: 18,
+                      )
+                    : null,
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  if (_playerKernel == k.key) return;
+                  final keepPos = _position.inMilliseconds >= 1000
+                      ? _position.inMilliseconds
+                      : _lastKnownPositionMs;
+                  setState(() => _playerKernel = k.key);
+                  widget.storage.setPlayerKernel(k.key);
+                  unawaited(
+                    _applyPlayerKernel(k.key).then((_) {
+                      if (mounted) {
+                        _showHud('已切换至 ${k.title}');
+                        _openCurrentEpisode(resumeMs: keepPos);
+                      }
+                    }),
+                  );
+                },
+              );
+            }).toList(),
           ),
         ],
       ),

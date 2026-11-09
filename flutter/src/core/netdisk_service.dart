@@ -156,8 +156,13 @@ class NetdiskService {
         final token = members['token'];
         if (token is String && _validQuarkToken(token)) {
           final qrContent = Uri.https('su.quark.cn', '/4_eMHBJ', {
-            'token': token, 'client_id': '532', 'ssb': 'weblogin',
-            'uc_param_str': '', 'uc_biz_str': 'S:custom|C:titlebar_hover_2',
+            'token': token,
+            'client_id': '532',
+            'ssb': 'weblogin',
+            'uc_param_str':
+                'dsdnfrpfbivesscpgimibtbmnijblauputogpintnwktprchmt',
+            'uc_biz_str':
+                'S:custom|OPT:SAREA@0|OPT:IMMERSIVE@1|OPT:BACK_BTN_STYLE@0',
           }).toString();
           return NetdiskQrSession(
             driveKey: driveKey,
@@ -271,10 +276,8 @@ class NetdiskService {
     final ts = DateTime.now().millisecondsSinceEpoch;
     try {
       if (session.driveKey == 'quark') {
-        // The reviewed Quark login contract creates with 532 and exchanges
-        // with 386. Never guess another client ID after a failed exchange.
         final map = await _quarkPassport('/cas/ajax/getServiceTicketByQrcodeToken',
-            {'client_id': '386', 'v': '1.2', 'token': session.token, 'request_id': '$ts'});
+            {'client_id': '532', 'v': '1.2', 'token': session.token, 'request_id': '$ts'});
         final status = map['status'];
         if (status == 2000000) {
           final st = ((map['data'] as Map?)?['members'] as Map?)?['service_ticket'];

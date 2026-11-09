@@ -291,6 +291,35 @@ if (!isMainThread) {
     return session.open();
   }
 
+  function requestBackend(backend, method, reqPath, bodyObj) {
+    return new Promise((resolve, reject) => {
+      const payload = bodyObj !== undefined ? Buffer.from(JSON.stringify(bodyObj), 'utf8') : null;
+      const headers = { host: new URL(backend).host };
+      if (payload) {
+        headers['content-type'] = 'application/json; charset=utf-8';
+        headers['content-length'] = String(payload.length);
+      }
+      const r = http.request(backend + reqPath, { method, headers }, resp => {
+        let size = 0; const chunks = [];
+        resp.on('data', c => {
+          size += c.length;
+          if (size > 16 * 1024 * 1024) { resp.destroy(); reject(Error('too_large')); }
+          else chunks.push(c);
+        });
+        resp.on('end', () => resolve({
+          status: resp.statusCode || 500,
+          headers: resp.headers,
+          text: Buffer.concat(chunks).toString('utf8'),
+        }));
+        resp.on('error', reject);
+      });
+      r.setTimeout(25000, () => r.destroy(Error('timeout')));
+      r.on('error', reject);
+      if (payload) r.write(payload);
+      r.end();
+    });
+  }
+
   const server = http.createServer(async (req, res) => {
     if (closing || req.headers.origin || !req.url.startsWith('/' + secret + '/')) {
       return respond(res, 403, { error: 'forbidden' });
@@ -331,7 +360,7 @@ if (!isMainThread) {
     // Check the normalized path, so dot segments cannot turn this into an admin route.
     const normalizedPath = new URL('http://127.0.0.1' + resource).pathname;
     const spiderProxy = ['GET','HEAD'].includes(req.method) &&
-      /^\/spider\/[A-Za-z0-9_-]+\/[0-9]+\/proxy\/[A-Za-z0-9._~/-]+$/.test(normalizedPath);
+      /^\/spider\/[A-Za-z0-9_-]+\/[0-9]+\/proxy(?:\/[A-Za-z0-9._~/-]+)?$/.test(normalizedPath);
     if (!spiderProxy && !/^\/(t4(?:\?|$)|api\/|proxy(?:\/|\?)|videos\/|stream\.)/.test(resource)) {
       return respond(res, 403, { error: 'route_not_exposed' });
     }
@@ -358,6 +387,116 @@ if (!isMainThread) {
     const publicBase = `http://127.0.0.1:${server.address().port}/${secret}/${hash}`;
     const rewrite = text => text.split(backend).join(publicBase)
       .split(`http://localhost:${instance.port}`).join(publicBase);
+    if (req.method === 'GET' && /^\/t4(?:\?|$)/.test(resource)) {
+      try {
+        const t4Resp = await requestBackend(backend, 'GET', resource);
+        if (t4Resp.status === 404) {
+          let cfgResp = await requestBackend(backend, 'GET', '/config');
+          if (cfgResp.status !== 200) cfgResp = await requestBackend(backend, 'GET', '/full-config');
+          if (cfgResp.status === 200) {
+            const cfg = JSON.parse(cfgResp.text);
+            const rawSites = Array.isArray(cfg?.video?.sites)
+              ? cfg.video.sites
+              : (Array.isArray(cfg?.sites) ? cfg.sites : null);
+            if (rawSites) {
+              const skipKeys = new Set(['nodejs_baseset', 'nodejs_gengxin', 'nodejs_mypan']);
+              const sites = rawSites
+                .filter(s => s && typeof s === 'object' && typeof s.api === 'string' && s.api.startsWith('/spider/') && !skipKeys.has(s.key))
+                .map(s => {
+                  const isDouban = s.key === 'nodejs_douban' || /\/douban\//i.test(s.api);
+                  return {
+                    ...s,
+                    type: 4,
+                    searchable: isDouban ? 0 : (s.searchable ?? 1),
+                    quickSearch: isDouban ? 0 : (s.quickSearch ?? 1),
+                    api: `${publicBase}/api${s.api}`,
+                  };
+                });
+              if (sites.length > 0 && !res.destroyed) {
+                return respond(res, 200, { sites });
+              }
+            }
+          }
+        }
+        if (!res.destroyed) {
+          res.writeHead(t4Resp.status, {
+            'Content-Type': t4Resp.headers['content-type'] || 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+          });
+          res.end(rewrite(t4Resp.text));
+        }
+      } catch (_) {
+        if (!res.headersSent) respond(res, 502, { error: 'source_request_failed' });
+        else res.destroy();
+      }
+      return;
+    }
+    if (req.method === 'GET' && /^\/api\/spider\/[A-Za-z0-9_-]+\/[0-9]+(?:\?|$)/.test(resource)) {
+      const parsedUrl = new URL('http://127.0.0.1' + resource);
+      const spiderPath = parsedUrl.pathname.slice(4);
+      const params = parsedUrl.searchParams;
+      if (!instance.initedSpiders) instance.initedSpiders = new Set();
+      if (!instance.initedSpiders.has(spiderPath)) {
+        instance.initedSpiders.add(spiderPath);
+        try { await requestBackend(backend, 'POST', spiderPath + '/init', {}); } catch (_) {}
+      }
+      try {
+        let resp;
+        if (params.has('play')) {
+          resp = await requestBackend(backend, 'POST', spiderPath + '/play', {
+            flag: params.get('flag') || '',
+            id: params.get('play') || '',
+            flags: [],
+          });
+        } else if (params.has('ids')) {
+          resp = await requestBackend(backend, 'POST', spiderPath + '/detail', {
+            id: params.get('ids') || '',
+          });
+        } else if (params.has('wd')) {
+          const pg = parseInt(params.get('pg') || '1', 10) || 1;
+          const wd = params.get('wd') || '';
+          resp = await requestBackend(backend, 'POST', spiderPath + '/search', {
+            wd, key: wd, quick: false, page: pg, pg,
+          });
+        } else if (params.has('t') || params.has('pg')) {
+          const tid = params.get('t') || '';
+          const pg = parseInt(params.get('pg') || '1', 10) || 1;
+          const extend = {};
+          for (const k of ['class', 'area', 'year', 'by', 'lang']) {
+            if (params.get(k)) extend[k] = params.get(k);
+          }
+          resp = await requestBackend(backend, 'POST', spiderPath + '/category', {
+            id: tid, tid, page: pg, pg, filter: true, extend,
+          });
+        } else {
+          resp = await requestBackend(backend, 'POST', spiderPath + '/home', { filter: true });
+          try {
+            const homeObj = JSON.parse(resp.text);
+            if (homeObj && typeof homeObj === 'object' && (!Array.isArray(homeObj.list) || homeObj.list.length === 0)) {
+              const vodResp = await requestBackend(backend, 'POST', spiderPath + '/homeVod', {});
+              if (vodResp.status === 200) {
+                const vodObj = JSON.parse(vodResp.text);
+                if (Array.isArray(vodObj?.list) && vodObj.list.length > 0) {
+                  homeObj.list = vodObj.list;
+                  resp.text = JSON.stringify(homeObj);
+                }
+              }
+            }
+          } catch (_) {}
+        }
+        if (!res.destroyed) {
+          res.writeHead(resp.status, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+          });
+          res.end(rewrite(resp.text));
+        }
+      } catch (_) {
+        if (!res.headersSent) respond(res, 502, { error: 'source_request_failed' });
+        else res.destroy();
+      }
+      return;
+    }
     const headers = { ...req.headers, host: `127.0.0.1:${instance.port}` };
     delete headers.authorization; delete headers.cookie; delete headers.origin;
     delete headers['accept-encoding'];

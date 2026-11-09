@@ -5900,6 +5900,29 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
               },
             ),
             _buildExpandableChoiceDrawerTile<String>(
+              settingKey: 'player_kernel',
+              icon: CupertinoIcons.cpu,
+              iconBgColor: AppleColors.systemTeal,
+              title: '默认播放内核',
+              subtitle: '选择内置播放器的解码与网络缓冲引擎（EXO / IJK / MPV）',
+              trailingText: switch (widget.storage.playerKernel) {
+                'ijk' => 'IJK 兼容内核',
+                'mpv' => 'MPV 原画内核',
+                _ => 'EXO 超速内核',
+              },
+              currentValue: widget.storage.playerKernel,
+              onStateChanged: refreshBoth,
+              options: const [
+                ('exo', 'EXO 超速内核（推荐）', '硬件加速解码与分片断点容错，适合绝大多数 4K 与 HLS 线路'),
+                ('ijk', 'IJK 兼容内核', '开启帧缓冲拷贝与深度探测，适合音画不同步或特殊封装片源'),
+                ('mpv', 'MPV 原画内核', '超大内存缓冲与原画直通输出，适合高码率 4K Remux 蓝光原盘'),
+              ],
+              onSelected: (val) async {
+                await widget.storage.setPlayerKernel(val);
+                refreshBoth();
+              },
+            ),
+            _buildExpandableChoiceDrawerTile<String>(
               settingKey: 'aspect_mode',
               icon: CupertinoIcons.viewfinder,
               iconBgColor: AppleColors.systemPurple,

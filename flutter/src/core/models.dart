@@ -493,6 +493,13 @@ class CmsEpisode {
         pathOnly.contains('/share/')) {
       return false;
     }
+    if (pathOnly.contains('/play/') &&
+        !RegExp(
+          r'\.(?:m3u8?|mp4|flv|mkv|ts|webm|mpd|mov|avi)$',
+          caseSensitive: false,
+        ).hasMatch(pathOnly)) {
+      return false;
+    }
     return true;
   }
 }

@@ -996,6 +996,12 @@ class CmsClient {
 
   String _detailAction(CmsSite site) => site.type == 0 ? 'videolist' : 'detail';
 
+  bool _hasFastCspFallback(CmsSite site) {
+    if (!_canFallbackToCspBridge(site)) return false;
+    final ref = '${site.api} ${site.ext} ${site.pluginReference}'.toLowerCase();
+    return !ref.contains('127.0.0.1') && !ref.contains('localhost');
+  }
+
   Future<(List<CmsCategory>, CmsListing)> fetchHome(CmsSite site) async {
     if (_isHttpT4(site)) {
       final raw = await _callT4(site, {'filter': 'true'});
@@ -1016,12 +1022,19 @@ class CmsClient {
     if (site.isEmby) return (await EmbyLibrary.open(site)).home();
     if (_usesJs(site)) {
       try {
-        final raw = await _callJs(site, 'home', [false]);
+        final homeCall = _callJs(site, 'home', [false]);
+        final raw = await (_hasFastCspFallback(site)
+            ? homeCall.timeout(const Duration(seconds: 6))
+            : homeCall);
         final categories = CmsParser.parseCategories(raw);
         var listing = CmsParser.parseListing(raw);
         if (listing.videos.isEmpty) {
-          try { listing = CmsParser.parseListing(await _callJs(site, 'homeVod', [])); }
-          catch (error) {
+          try {
+            final vodCall = _callJs(site, 'homeVod', []);
+            listing = CmsParser.parseListing(await (_hasFastCspFallback(site)
+                ? vodCall.timeout(const Duration(seconds: 6))
+                : vodCall));
+          } catch (error) {
             if (categories.isEmpty || needsSourceVerification(site, error)) rethrow;
           }
           if (listing.videos.isEmpty && categories.isNotEmpty) {
@@ -1106,7 +1119,10 @@ class CmsClient {
         if (filter != null && filter.year.isNotEmpty) 'year': filter.year,
       };
       try {
-        final listing = CmsParser.parseListing(await _callJs(site, 'category', [categoryId, page, extend.isNotEmpty, extend]));
+        final catCall = _callJs(site, 'category', [categoryId, page, extend.isNotEmpty, extend]);
+        final listing = CmsParser.parseListing(await (_hasFastCspFallback(site)
+            ? catCall.timeout(const Duration(seconds: 6))
+            : catCall));
         if (listing.videos.isNotEmpty || !_canFallbackToCspBridge(site)) {
           if (filter == null || !filter.hasSubFilter || extend.isEmpty) return listing;
           return CmsListing(page: listing.page, pageCount: listing.pageCount,
@@ -1212,7 +1228,10 @@ class CmsClient {
     if (site.isEmby) return (await EmbyLibrary.open(site)).list('', keyword, page);
     if (_usesJs(site)) {
       try {
-        final listing = CmsParser.parseListing(await _callJs(site, 'search', [keyword, false, page]));
+        final searchCall = _callJs(site, 'search', [keyword, false, page]);
+        final listing = CmsParser.parseListing(await (_hasFastCspFallback(site)
+            ? searchCall.timeout(const Duration(seconds: 4))
+            : searchCall));
         if (listing.videos.isNotEmpty || !_canFallbackToCspBridge(site)) return listing;
       } catch (error) {
         if (!_canFallbackToCspBridge(site, error)) rethrow;
@@ -1325,6 +1344,7 @@ class CmsClient {
       return listing.videos.isEmpty ? fallback : _mergeDetail(listing.videos.first, fallback);
     }
     if (site.isCatPaw) {
+      if (CspBridge.isDoubanSite(site)) return fallback;
       final raw = await _getText(_appendQuery(site.api, {'ac':'detail','ids':fallback.id}).toString());
       final listing = CmsParser.parseListing(_wrapJsEpisodeIds(raw,scheme:'mmpaw'));
       return listing.videos.isEmpty ? fallback : _mergeDetail(listing.videos.first, fallback);
@@ -1332,7 +1352,10 @@ class CmsClient {
     if (site.isEmby) return (await EmbyLibrary.open(site)).detail(fallback.id);
     if (_usesJs(site)) {
       try {
-        final raw = await _callJs(site, 'detail', [fallback.id]);
+        final detailCall = _callJs(site, 'detail', [fallback.id]);
+        final raw = await (_hasFastCspFallback(site)
+            ? detailCall.timeout(const Duration(seconds: 6))
+            : detailCall);
         final listing = CmsParser.parseListing(_wrapJsEpisodeIds(raw));
         if (listing.videos.isNotEmpty && listing.videos.first.lines.isNotEmpty) {
           return _mergeDetail(listing.videos.first, fallback);
@@ -1591,17 +1614,28 @@ class CmsClient {
     final runnableSites = <CmsSite>[];
     for (final s in sites) {
       if (!s.supported || !s.searchable) continue;
+      if (CspBridge.isDoubanSite(s) ||
+          CspBridge.isMyDriveSite(s) ||
+          CspBridge.isHuyaSite(s) ||
+          CspBridge.isDouyuSite(s)) {
+        continue;
+      }
       if (CspBridge.canHandleSite(s)) {
-        if (CspBridge.isDoubanSite(s) ||
-            CspBridge.isMyDriveSite(s) ||
-            CspBridge.isHuyaSite(s) ||
-            CspBridge.isDouyuSite(s)) {
-          continue;
-        }
         final backends = CspBridge.backendsForSite(s);
         final nativeAdapter = _usesJs(s) || CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s);
         if (!nativeAdapter && backends.isEmpty) continue;
-        final sig = nativeAdapter ? s.key : backends.first.api;
+        final String sig;
+        if (_usesJs(s)) {
+          sig = s.key;
+        } else if (CspBridge.isBiliSite(s)) {
+          sig = 'csp_bili_search';
+        } else if (CspBridge.isFirstAidSite(s)) {
+          sig = 'csp_firstaid_search';
+        } else if (CspBridge.isTuxiaobeiSite(s)) {
+          sig = 'csp_tuxiaobei_search';
+        } else {
+          sig = backends.first.api;
+        }
         if (!seenBackends.add(sig)) continue;
       } else {
         if (!seenBackends.add(s.api)) continue;
