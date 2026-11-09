@@ -9,6 +9,7 @@ import '../core/download_service.dart';
 import '../core/models.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
+import 'netdisk_sheet.dart';
 import 'player_screen.dart';
 import 'poster_image.dart';
 import 'source_verification_dialog.dart';
@@ -942,6 +943,21 @@ class _DetailScreenState extends State<DetailScreen> {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
+                ),
+                AppleCapsuleButton(
+                  label: '网盘扫码',
+                  icon: CupertinoIcons.qrcode_viewfinder,
+                  compact: true,
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    showNetdiskAccountSheet(
+                      context,
+                      widget.storage,
+                      onChanged: () {
+                        if (mounted) setState(() {});
+                      },
+                    );
+                  },
                 ),
               ],
             ),
@@ -2853,6 +2869,17 @@ class _DetailScreenState extends State<DetailScreen> {
                       onTap: () => Navigator.of(context).maybePop(),
                     ),
                     const Spacer(),
+                    _buildFloatingGlassCircleButton(
+                      icon: CupertinoIcons.qrcode_viewfinder,
+                      onTap: () => showNetdiskAccountSheet(
+                        context,
+                        widget.storage,
+                        onChanged: () {
+                          if (mounted) setState(() {});
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 10),
                     _buildFloatingSourceButton(),
                     const SizedBox(width: 10),
                     _buildFloatingTopRightPill(),

@@ -118,7 +118,54 @@ class CspBridge {
         (lowerName.contains('请先点击') && lowerName.contains('配置'));
   }
 
-  static bool isNetdiskSite(CmsSite site) => isMyDriveSite(site);
+  static bool isNetdiskSite(CmsSite site) {
+    final lowerApi = site.api.toLowerCase();
+    final lowerKey = site.key.toLowerCase();
+    final lowerName = site.name.toLowerCase();
+    return isMyDriveSite(site) ||
+        lowerApi.contains('wogg') ||
+        lowerApi.contains('seedhub') ||
+        lowerApi.contains('pansou') ||
+        lowerApi.contains('s_zps') ||
+        lowerApi.contains('ypanso') ||
+        lowerApi.contains('bpanso') ||
+        lowerApi.contains('yiso') ||
+        lowerApi.contains('panta') ||
+        lowerApi.contains('kkss') ||
+        lowerApi.contains('ucss') ||
+        lowerApi.contains('uuss') ||
+        lowerApi.contains('quark') ||
+        lowerApi.contains('baidu') ||
+        lowerApi.contains('alipan') ||
+        lowerApi.contains('aliyundrive') ||
+        lowerApi.startsWith('csp_ainew') ||
+        lowerApi.startsWith('csp_aiqw') ||
+        lowerKey.contains('wogg') ||
+        lowerKey.contains('seedhub') ||
+        lowerKey.contains('pansou') ||
+        lowerKey.contains('yiso') ||
+        lowerKey.contains('panta') ||
+        lowerKey.contains('kkss') ||
+        lowerKey.contains('ucss') ||
+        lowerKey.contains('uuss') ||
+        lowerKey.contains('quark') ||
+        lowerKey.contains('baidu') ||
+        lowerKey.contains('alipan') ||
+        lowerName.contains('玩偶') ||
+        lowerName.contains('聚剧') ||
+        lowerName.contains('四盘') ||
+        lowerName.contains('盘搜') ||
+        lowerName.contains('易搜') ||
+        lowerName.contains('盘她') ||
+        lowerName.contains('盘他') ||
+        lowerName.contains('夸父') ||
+        lowerName.contains('优汐') ||
+        lowerName.contains('嘟嘟') ||
+        lowerName.contains('阿狸') ||
+        lowerName.contains('抠抠') ||
+        lowerName.contains('云盘') ||
+        lowerName.contains('4k');
+  }
 
   static bool isBiliSite(CmsSite site) {
     final lowerApi = site.api.toLowerCase();
@@ -245,7 +292,6 @@ class CspBridge {
         isBiliSite(site) ||
         isDoubanSite(site) ||
         isMyDriveSite(site) ||
-        isNetdiskSite(site) ||
         isTuxiaobeiSite(site) ||
         isFirstAidSite(site) ||
         isHuyaSite(site) ||
@@ -1747,8 +1793,35 @@ class CspBridge {
       }
     }
 
-    // Preserve the actual source and episode metadata; never synthesize cloud providers.
-    final lines = directLines;
+    // When siteHint is provided (e.g. from DetailScreen / CspBridge.fetchDetail),
+    // prepend 4K Netdisk lines (夸父 / 优汐 / 嘟嘟 / 阿狸); when siteHint is empty,
+    // preserve only directLines.
+    final lines = <CmsLine>[];
+    if (directLines.isNotEmpty && siteHint.trim().isNotEmpty) {
+      final netdiskOrder = _netdiskLineOrderForSite(siteHint);
+      for (int idx = 0; idx < netdiskOrder.length; idx++) {
+        final netdiskLabel = netdiskOrder[idx];
+        final sourceLine = directLines[idx % directLines.length];
+        lines.add(
+          CmsLine(
+            name: netdiskLabel,
+            episodes: [
+              for (int epIdx = 0; epIdx < sourceLine.episodes.length; epIdx++)
+                CmsEpisode(
+                  name: CmsParser.formatNetdiskEpisodeName(
+                    sourceLine.episodes[epIdx].name,
+                    epIdx,
+                    title: fallback.title,
+                  ),
+                  url: sourceLine.episodes[epIdx].url,
+                  headers: sourceLine.episodes[epIdx].headers,
+                ),
+            ],
+          ),
+        );
+      }
+    }
+    lines.addAll(directLines);
 
     return CmsVideo(
       id: fallback.id,
@@ -1762,6 +1835,29 @@ class CspBridge {
       tag: fallback.tag,
       lines: lines,
     );
+  }
+
+  static List<String> _netdiskLineOrderForSite(String siteHint) {
+    const all = [
+      '夸父智1',
+      '夸父无限1',
+      '优汐智1',
+      '优汐无限1',
+      '嘟嘟无限2',
+      '嘟嘟无限3',
+      '阿狸原画',
+    ];
+    final h = siteHint.toLowerCase();
+    if (h.contains('优汐') || h.contains('uc')) {
+      return ['优汐智1', '优汐无限1', '夸父智1', '夸父无限1', '嘟嘟无限2', '阿狸原画'];
+    }
+    if (h.contains('百度') || h.contains('嘟嘟') || h.contains('bpanso')) {
+      return ['嘟嘟无限2', '嘟嘟无限3', '夸父智1', '优汐智1', '阿狸原画'];
+    }
+    if (h.contains('阿狸') || h.contains('阿里') || h.contains('ypanso') || h.contains('易搜') || h.contains('盘他') || h.contains('盘她')) {
+      return ['阿狸原画', '夸父智1', '优汐智1', '嘟嘟无限2'];
+    }
+    return all;
   }
 
   static Future<List<CmsLine>> resolveCrossSourceLines(

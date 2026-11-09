@@ -85,6 +85,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   final Map<String, String> _searchNotices = {};
   final Map<String, CmsSite> _searchVerificationSites = {};
   String _searchKeyword = '';
+  String _searchSiteFilterKey = '';
   bool _searchPerformed = false;
   bool _searching = false;
   int _searchEpoch = 0;
@@ -126,6 +127,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   @override
   void initState() {
     super.initState();
+    GlassworkBackdrop.reduceTransparency.value =
+        widget.storage.glassBlurLevel == 'solid' ||
+            widget.storage.glassBlurStrength <= 0.02;
+    GlassworkBackdrop.intensity.value = widget.storage.glassBlurStrength;
     _reloadSavedConfig();
   }
   @override
@@ -176,7 +181,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
               ? widget.storage.preferredSiteKey : widget.storage.selectedSiteKey);
       _activeSite = availableSites.firstWhere(
         (s) => s.key == preferredKey,
-        orElse: () => availableSites.first,
+        orElse: () => availableSites.firstWhere(
+          (s) => !CspBridge.isBannerNoticeSite(s),
+          orElse: () => availableSites.first,
+        ),
       );
       if (_privateSessionUnlocked) {
         _selectedPrivateSiteKey = _activeSite!.key;
@@ -451,18 +459,28 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
       forPrivate: _privateSessionUnlocked,
     );
     if (!mounted || epoch != _searchEpoch) return;
+    final allSites = _visibleSupportedSites;
+    final hasSelectedSite = _searchSiteFilterKey.isNotEmpty &&
+        allSites.any((s) => '${s.subscriptionId}:${s.key}' == _searchSiteFilterKey);
+    final orderedSites = hasSelectedSite
+        ? <CmsSite>[
+            ...allSites.where((s) => '${s.subscriptionId}:${s.key}' == _searchSiteFilterKey),
+            ...allSites.where((s) => '${s.subscriptionId}:${s.key}' != _searchSiteFilterKey),
+          ]
+        : allSites;
     setState(() {
       _searching = true;
       _searchResults.clear();
       _searchNotices.clear();
       _searchVerificationSites.clear();
+      if (!hasSelectedSite) _searchSiteFilterKey = '';
       _searchKeyword = trimmed;
       _searchPerformed = true;
     });
     _searchSheetListener?.call();
     _searchSubscription = widget.client
         .searchAcrossSites(
-          _visibleSupportedSites,
+          orderedSites,
           trimmed,
           onSourceError: (site, error) {
             if (!mounted || epoch != _searchEpoch) return;
@@ -562,6 +580,18 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     }
   }
   void _openVideoDetail(CmsSite site, CmsVideo video) {
+    if (video.id.startsWith('netdisk_qr:')) {
+      final driveKey = video.id.substring('netdisk_qr:'.length).trim();
+      showNetdiskAccountSheet(
+        context,
+        widget.storage,
+        initialDriveKey: driveKey.isEmpty ? null : driveKey,
+        onChanged: () {
+          if (mounted) setState(() {});
+        },
+      );
+      return;
+    }
     Navigator.of(context)
         .push(
           CupertinoPageRoute<void>(
@@ -922,6 +952,66 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                         const SizedBox(width: 8),
                         Expanded(child: sourceControls),
                         const SizedBox(width: 6),
+                        Builder(
+                          builder: (context) {
+                            final loggedCount = NetdiskService.drives
+                                .where((d) =>
+                                    widget.storage.isNetdiskLoggedIn(d.key))
+                                .length;
+                            return ApplePressableScale(
+                              key: const ValueKey('home-netdisk-button'),
+                              pressedScale: 0.93,
+                              pressedOpacity: 0.86,
+                              onTap: () => showNetdiskAccountSheet(
+                                context,
+                                widget.storage,
+                                onChanged: () {
+                                  if (mounted) setState(() {});
+                                },
+                              ),
+                              child: LiquidGlass(
+                                borderRadius: 999,
+                                elevated: false,
+                                rimStrength: 0.9,
+                                tint: loggedCount > 0
+                                    ? const Color(0x33165B33)
+                                    : const Color(0x281E1E24),
+                                padding: EdgeInsets.symmetric(
+                                  horizontal: compactHeader ? 8.5 : 11,
+                                  vertical: 8.5,
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      loggedCount > 0
+                                          ? CupertinoIcons.cloud_fill
+                                          : CupertinoIcons.qrcode_viewfinder,
+                                      color: loggedCount > 0
+                                          ? AppleColors.systemGreen
+                                          : const Color(0xFF5AC8FA),
+                                      size: 13.5,
+                                    ),
+                                    if (!compactHeader) ...[
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        loggedCount > 0
+                                            ? '网盘 · $loggedCount'
+                                            : '网盘',
+                                        style: const TextStyle(
+                                          color: AppleColors.labelPrimary,
+                                          fontSize: 12.5,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        const SizedBox(width: 6),
                         CupertinoButton(
                           key: const ValueKey('home-search-button'),
                           padding: EdgeInsets.zero,
@@ -992,16 +1082,18 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                       ),
                       const SizedBox(height: 10),
                       AppleEdgeFade(
-                        fadeWidth: horizontalPad + 6,
+                        fadeStart: false,
+                        fadeEnd: true,
+                        fadeWidth: 18,
                         child: SizedBox(
-                          height: 90,
+                          height: 96,
                           child: ListView.separated(
                             scrollDirection: Axis.horizontal,
                             clipBehavior: Clip.none,
                             physics: const BouncingScrollPhysics(),
                             padding: EdgeInsets.symmetric(
                               horizontal: horizontalPad,
-                              vertical: 2,
+                              vertical: 3,
                             ),
                             itemCount: history.length.clamp(0, 8),
                             separatorBuilder: (_, __) =>
@@ -1014,6 +1106,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                     ],
                     // Featured Hero Showcase Card on first page when videos exist
                     if (widget.storage.showHeroBanner &&
+                        !CspBridge.isMyDriveSite(_activeSite!) &&
                         _homeVideos.isNotEmpty &&
                         _primaryTab == 'recommend' &&
                         !_currentFilter.hasSubFilter &&
@@ -1027,6 +1120,14 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                           _homeVideos.first,
                           wide: useSidebar,
                         ),
+                      ),
+                    ],
+                    if (CspBridge.isMyDriveSite(_activeSite!)) ...[
+                      const SizedBox(height: 16),
+                      Padding(
+                        padding:
+                            EdgeInsets.symmetric(horizontal: horizontalPad),
+                        child: _buildMyDriveNetdiskBanner(_activeSite!),
                       ),
                     ],
                     // Fixed 5 Primary Category Tabs (推荐、电影、剧集、动漫、综艺) + Filter Button
@@ -1498,7 +1599,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     required String label,
     required VoidCallback onTap,
   }) {
-    return GestureDetector(
+    return ApplePressableScale(
+      pressedScale: 0.93,
+      pressedOpacity: 0.86,
       onTap: onTap,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 176),
@@ -1555,187 +1658,201 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     final infoLine = featured.description.trim().isNotEmpty
         ? featured.description.trim()
         : (featured.actor.trim().isNotEmpty ? '主演：${featured.actor.trim()}' : '');
-    return GestureDetector(
+    return ApplePressableScale(
+      pressedScale: 0.965,
+      pressedOpacity: 0.92,
       onTap: () => _openVideoDetail(site, featured),
-      child: Container(
-        height: wide ? 256 : 210,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(24),
-          color: const Color(0xFF111114),
-          border: Border.all(color: AppleColors.glassBorder, width: 0.75),
+      child: SizedBox(
+        height: wide ? 256 : 212,
+        child: AppleSmoothClipCard(
+          borderRadius: 30,
+          backgroundColor: const Color(0xFF111114),
+          rimStrength: 1.05,
           boxShadow: const [
             BoxShadow(
-              color: Color(0x55000000),
-              blurRadius: 24,
-              offset: Offset(0, 10),
+              color: Color(0x59000000),
+              blurRadius: 26,
+              offset: Offset(0, 12),
             ),
           ],
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            ImageFiltered(
-              imageFilter: ImageFilter.blur(sigmaX: 36, sigmaY: 36),
-              child: PosterImage(
-                url: featured.poster,
-                title: featured.title,
-                highRes: true,
-                placeholder: const SizedBox.shrink(),
-              ),
-            ),
-            Container(
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    Color(0x55000000),
-                    Color(0xAD07080C),
-                    Color(0xEB050508),
-                  ],
-                  stops: [0.0, 0.55, 1.0],
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              ImageFiltered(
+                imageFilter: ImageFilter.blur(
+                  sigmaX: 36,
+                  sigmaY: 36,
+                  tileMode: TileMode.mirror,
+                ),
+                child: PosterImage(
+                  url: featured.poster,
+                  title: featured.title,
+                  highRes: true,
+                  placeholder: const SizedBox.shrink(),
                 ),
               ),
-            ),
-            Padding(
-              padding: EdgeInsets.all(wide ? 22 : 16),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(14),
-                    child: AspectRatio(
+              Container(
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Color(0x55000000),
+                      Color(0xAD07080C),
+                      Color(0xEB050508),
+                    ],
+                    stops: [0.0, 0.55, 1.0],
+                  ),
+                ),
+              ),
+              Padding(
+                padding: EdgeInsets.all(wide ? 22 : 16),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    AspectRatio(
                       aspectRatio: 2 / 3,
-                      child: PosterImage(
-                        url: featured.poster,
-                        title: featured.title,
-                        highRes: true,
-                        placeholder: _buildPosterPlaceholder(),
+                      child: AppleSmoothClipCard(
+                        borderRadius: 18,
+                        backgroundColor: const Color(0xFF1A1A20),
+                        rimStrength: 0.88,
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x48000000),
+                            blurRadius: 14,
+                            offset: Offset(0, 6),
+                          ),
+                        ],
+                        child: PosterImage(
+                          url: featured.poster,
+                          title: featured.title,
+                          highRes: true,
+                          placeholder: _buildPosterPlaceholder(),
+                        ),
                       ),
                     ),
-                  ),
-                  SizedBox(width: wide ? 20 : 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // Top badge
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8.5,
-                            vertical: 3.5,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0x38FFFFFF),
-                            borderRadius: BorderRadius.circular(999),
-                            border: Border.all(
-                              color: const Color(0x30FFFFFF),
-                              width: 0.5,
+                    SizedBox(width: wide ? 20 : 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Top badge
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8.5,
+                              vertical: 3.5,
                             ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                CupertinoIcons.sparkles,
-                                color: Color(0xFF5AC8FA),
-                                size: 11,
+                            decoration: BoxDecoration(
+                              color: const Color(0x38FFFFFF),
+                              borderRadius: BorderRadius.circular(999),
+                              border: Border.all(
+                                color: const Color(0x30FFFFFF),
+                                width: 0.5,
                               ),
-                              const SizedBox(width: 4),
-                              Flexible(
-                                child: Text(
-                                  '今日首推 · ${site.name}',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: AppleColors.labelPrimary,
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                    letterSpacing: 0.1,
-                                  ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  CupertinoIcons.sparkles,
+                                  color: Color(0xFF5AC8FA),
+                                  size: 11,
                                 ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        // Title
-                        Text(
-                          featured.title,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: AppleColors.labelPrimary,
-                            fontSize: wide ? 23 : 18.5,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: -0.4,
-                            height: 1.2,
-                          ),
-                        ),
-                        if (tagChips.isNotEmpty) ...[
-                          const SizedBox(height: 7),
-                          Wrap(
-                            spacing: 6,
-                            runSpacing: 4,
-                            children: [
-                              for (final chip in tagChips)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 7,
-                                    vertical: 2.5,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0x29FFFFFF),
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
+                                const SizedBox(width: 4),
+                                Flexible(
                                   child: Text(
-                                    chip,
+                                    '今日首推 · ${site.name}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
-                                      color: AppleColors.labelSecondary,
+                                      color: AppleColors.labelPrimary,
                                       fontSize: 11,
                                       fontWeight: FontWeight.w600,
+                                      letterSpacing: 0.1,
                                     ),
                                   ),
                                 ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          // Title
+                          Text(
+                            featured.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: AppleColors.labelPrimary,
+                              fontSize: wide ? 23 : 18.5,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: -0.4,
+                              height: 1.2,
+                            ),
+                          ),
+                          if (tagChips.isNotEmpty) ...[
+                            const SizedBox(height: 7),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              children: [
+                                for (final chip in tagChips)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 7,
+                                      vertical: 2.5,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0x29FFFFFF),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: Text(
+                                      chip,
+                                      style: const TextStyle(
+                                        color: AppleColors.labelSecondary,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ],
+                          if (infoLine.isNotEmpty) ...[
+                            const SizedBox(height: 7),
+                            Text(
+                              infoLine,
+                              maxLines: wide ? 2 : 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppleColors.labelSecondary,
+                                fontSize: 12,
+                                height: 1.35,
+                              ),
+                            ),
+                          ],
+                          const Spacer(),
+                          // Bottom row: Watch Now button anchored at bottom-right corner
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              AppleCapsuleButton(
+                                key: const ValueKey('hero-watch-now-button'),
+                                label: '立即观看',
+                                icon: CupertinoIcons.play_fill,
+                                primary: true,
+                                compact: true,
+                                onPressed: () => _openVideoDetail(site, featured),
+                              ),
                             ],
                           ),
                         ],
-                        if (infoLine.isNotEmpty) ...[
-                          const SizedBox(height: 7),
-                          Text(
-                            infoLine,
-                            maxLines: wide ? 2 : 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: AppleColors.labelSecondary,
-                              fontSize: 12,
-                              height: 1.35,
-                            ),
-                          ),
-                        ],
-                        const Spacer(),
-                        // Bottom row: Watch Now button anchored at bottom-right corner
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                            AppleCapsuleButton(
-                              key: const ValueKey('hero-watch-now-button'),
-                              label: '立即观看',
-                              icon: CupertinoIcons.play_fill,
-                              primary: true,
-                              compact: true,
-                              onPressed: () => _openVideoDetail(site, featured),
-                            ),
-                          ],
-                        ),
-                      ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1938,7 +2055,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     required bool selected,
     required VoidCallback onTap,
   }) {
-    return GestureDetector(
+    return ApplePressableScale(
+      pressedScale: 0.92,
+      pressedOpacity: 0.86,
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
@@ -1982,9 +2101,31 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
       ),
     );
   }
+  String _resolveHistoryPoster(WatchHistoryEntry entry) {
+    final direct = entry.poster.trim();
+    if (direct.isNotEmpty) return direct;
+    for (final v in _homeVideos) {
+      if ((v.id == entry.id || v.title == entry.title) &&
+          v.poster.trim().isNotEmpty) {
+        return v.poster.trim();
+      }
+    }
+    for (final f in widget.storage.getFavorites()) {
+      if ((f.id == entry.id || f.title == entry.title) &&
+          f.poster.trim().isNotEmpty) {
+        return f.poster.trim();
+      }
+    }
+    return '';
+  }
+
   Widget _buildContinueWatchingCard(WatchHistoryEntry entry) {
-    return GestureDetector(
+    final resolvedPoster = _resolveHistoryPoster(entry);
+    final pct = (entry.progressFraction * 100).round();
+    return ApplePressableScale(
       key: ValueKey('cw_${entry.site}_${entry.id}'),
+      pressedScale: 0.955,
+      pressedOpacity: 0.90,
       onTap: () {
         if (_config == null) return;
         final site = _config!.supportedSites.firstWhere(
@@ -1996,31 +2137,60 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
           CmsVideo(
             id: entry.id,
             title: entry.title,
-            poster: entry.poster,
+            poster: resolvedPoster,
           ),
         );
       },
       child: AppleGlassSurface(
-        borderRadius: BorderRadius.circular(18),
-        padding: const EdgeInsets.all(10),
+        borderRadius: BorderRadius.circular(22),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
         blurSigma: 32,
         child: SizedBox(
-          width: 214,
+          width: 228,
           child: Row(
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: SizedBox(
-                  width: 48,
-                  height: 66,
-                  child: PosterImage(
-                    url: entry.poster,
-                    title: entry.title,
-                    placeholder: _buildPosterPlaceholder(),
+              SizedBox(
+                width: 52,
+                height: 72,
+                child: AppleSmoothClipCard(
+                  borderRadius: 12,
+                  backgroundColor: const Color(0xFF1A1A20),
+                  rimStrength: 0.85,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      PosterImage(
+                        url: resolvedPoster,
+                        title: entry.title,
+                        placeholder: _buildPosterPlaceholder(),
+                      ),
+                      Positioned(
+                        right: 4,
+                        bottom: 4,
+                        child: Container(
+                          width: 18,
+                          height: 18,
+                          decoration: BoxDecoration(
+                            color: const Color(0xB8000000),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: const Color(0x66FFFFFF),
+                              width: 0.6,
+                            ),
+                          ),
+                          alignment: Alignment.center,
+                          child: const Icon(
+                            CupertinoIcons.play_fill,
+                            color: Colors.white,
+                            size: 9.5,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 11),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -2034,11 +2204,14 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                         color: AppleColors.labelPrimary,
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
+                        letterSpacing: -0.2,
                       ),
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      entry.episode.isEmpty ? '继续观看' : entry.episode,
+                      entry.episode.isEmpty
+                          ? (pct > 0 ? '已看 $pct%' : '继续观看')
+                          : entry.episode,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -2048,12 +2221,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                     ),
                     const SizedBox(height: 8),
                     ClipRRect(
-                      borderRadius: BorderRadius.circular(2),
+                      borderRadius: BorderRadius.circular(999),
                       child: LinearProgressIndicator(
                         value: entry.progressFraction > 0
                             ? entry.progressFraction
                             : 0.15,
-                        minHeight: 3,
+                        minHeight: 3.5,
                         backgroundColor: AppleColors.groupedTertiary,
                         valueColor: const AlwaysStoppedAnimation<Color>(
                           AppleColors.systemBlue,
@@ -2074,7 +2247,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     required bool selected,
     required VoidCallback onTap,
   }) {
-    return GestureDetector(
+    return ApplePressableScale(
+      pressedScale: 0.92,
+      pressedOpacity: 0.86,
       onTap: onTap,
       child: selected
           ? Container(
@@ -2291,51 +2466,58 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   }) {
     final cardKey =
         'vcard_${site.key}_${video.id.isNotEmpty ? video.id : video.title}_${badge ?? ""}';
-    return GestureDetector(
+    return ApplePressableScale(
       key: ValueKey(cardKey),
-      behavior: HitTestBehavior.opaque,
+      pressedScale: 0.945,
+      pressedOpacity: 0.90,
       onTap: onTap ?? () => _openVideoDetail(site, video),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Expanded(
-            child: Container(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
-                color: const Color(0xFF1C1C1E),
-                border: Border.all(
-                  color: AppleColors.glassBorder,
-                  width: 0.5,
+            child: AppleSmoothClipCard(
+              borderRadius: 20,
+              backgroundColor: const Color(0xFF1C1C20),
+              rimStrength: 0.86,
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x36000000),
+                  blurRadius: 12,
+                  offset: Offset(0, 5),
                 ),
-              ),
-              clipBehavior: Clip.antiAlias,
+              ],
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  PosterImage(
-                    url: video.poster,
-                    title: video.title,
-                    placeholder: _buildPosterPlaceholder(),
-                  ),
+                  video.id.startsWith('netdisk_qr:')
+                      ? _buildNetdiskCardPoster(
+                          video.id.substring('netdisk_qr:'.length).trim(),
+                          video.title,
+                        )
+                      : PosterImage(
+                          url: video.poster,
+                          title: video.title,
+                          placeholder: _buildPosterPlaceholder(),
+                        ),
                   if (badge != null && badge.isNotEmpty)
                     Positioned(
-                      top: 6,
-                      left: 6,
-                      right: 6,
+                      top: 7,
+                      left: 7,
+                      right: 7,
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: ClipRRect(
-                          borderRadius: BorderRadius.circular(6),
+                          borderRadius: BorderRadius.circular(8),
                           child: GlassworkBackdrop(
-                            radius: 6,
+                            radius: 8,
                             child: Container(
                               padding: const EdgeInsets.symmetric(
-                                horizontal: 7,
-                                vertical: 2.5,
+                                horizontal: 7.5,
+                                vertical: 3,
                               ),
                               decoration: BoxDecoration(
                                 color: const Color(0x701E1E22),
-                                borderRadius: BorderRadius.circular(6),
+                                borderRadius: BorderRadius.circular(8),
                                 border: Border.all(
                                   color: const Color(0x3DFFFFFF),
                                   width: 0.5,
@@ -2362,12 +2544,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                       right: 0,
                       bottom: 0,
                       child: Container(
-                        padding: const EdgeInsets.fromLTRB(7, 14, 7, 5),
+                        padding: const EdgeInsets.fromLTRB(8, 16, 8, 6),
                         decoration: const BoxDecoration(
                           gradient: LinearGradient(
                             begin: Alignment.topCenter,
                             end: Alignment.bottomCenter,
-                            colors: [Color(0x00000000), Color(0xB3000000)],
+                            colors: [Color(0x00000000), Color(0xBD000000)],
                           ),
                         ),
                         child: Text(
@@ -2461,30 +2643,50 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
             final history = widget.storage.getSearchHistory(forPrivate: isPriv);
             final size = MediaQuery.sizeOf(ctx);
             final wide = size.width > 640;
+            final siteCounts = <String, int>{};
+            final siteByKey = <String, CmsSite>{};
+            for (final s in _visibleSupportedSites) {
+              siteByKey['${s.subscriptionId}:${s.key}'] = s;
+            }
+            for (final (site, _) in _searchResults) {
+              final k = '${site.subscriptionId}:${site.key}';
+              siteByKey[k] = site;
+              siteCounts[k] = (siteCounts[k] ?? 0) + 1;
+            }
+            if (_searchSiteFilterKey.isNotEmpty &&
+                !siteByKey.containsKey(_searchSiteFilterKey)) {
+              _searchSiteFilterKey = '';
+            }
+            final filterSiteEntries = siteByKey.entries.toList()
+              ..sort((a, b) {
+                final ca = siteCounts[a.key] ?? 0;
+                final cb = siteCounts[b.key] ?? 0;
+                if (ca != cb) return cb.compareTo(ca);
+                return 0;
+              });
+            final filteredSearchResults = _searchSiteFilterKey.isEmpty
+                ? _searchResults
+                : _searchResults
+                    .where(
+                      (r) =>
+                          '${r.$1.subscriptionId}:${r.$1.key}' ==
+                          _searchSiteFilterKey,
+                    )
+                    .toList(growable: false);
             return SizedBox(
-              height: (size.height * 0.72).clamp(380.0, 620.0),
+              height: (size.height * 0.75).clamp(400.0, 640.0),
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
                       children: [
                         Expanded(
-                          child: CupertinoSearchTextField(
+                          child: AppleSearchField(
                             controller: _searchController,
-                            autofocus: _searchResults.isEmpty &&
-                                _searchController.text.isEmpty,
+                            autofocus: true,
                             placeholder: '搜索片名、演员或导演…',
-                            backgroundColor: AppleColors.groupedSecondary,
-                            style: const TextStyle(
-                              color: AppleColors.labelPrimary,
-                              fontSize: 15,
-                            ),
-                            placeholderStyle: const TextStyle(
-                              color: AppleColors.labelSecondary,
-                              fontSize: 15,
-                            ),
                             onSubmitted: (kw) {
                               _runGlobalSearch(kw);
                               setSheetState(() {});
@@ -2509,11 +2711,13 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                         height: 30,
                         child: ListView.separated(
                           scrollDirection: Axis.horizontal,
+                          physics: const BouncingScrollPhysics(),
                           itemCount: history.length,
                           separatorBuilder: (_, __) => const SizedBox(width: 8),
                           itemBuilder: (ctx, i) {
                             final kw = history[i];
-                            return GestureDetector(
+                            return ApplePressableScale(
+                              pressedScale: 0.92,
                               onTap: () {
                                 _searchController.text = kw;
                                 _runGlobalSearch(kw);
@@ -2549,107 +2753,327 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                       ),
                     ],
                     const SizedBox(height: 12),
-                    if (_searching)
-                      const Padding(
-                        padding: EdgeInsets.only(bottom: 10),
-                        child: Row(
-                          children: [
-                            CupertinoActivityIndicator(radius: 9),
-                            SizedBox(width: 8),
-                            Text(
-                              '正在并发检索所有可用片源…',
-                              style: TextStyle(
-                                color: AppleColors.labelSecondary,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    if (_searchNotices.isNotEmpty)
-                      ConstrainedBox(
-                        constraints: BoxConstraints(
-                          maxHeight: (size.height * 0.20).clamp(72.0, 156.0),
-                        ),
-                        child: SingleChildScrollView(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(
-                            _searchNotices.values.join('\n'),
-                            key: const ValueKey('search-source-notices'),
-                            style: const TextStyle(
-                              color: AppleColors.labelSecondary,
-                              fontSize: 12,
-                            ),
-                          ),
-                            for (final site in _searchVerificationSites.values)
-                              Padding(padding: const EdgeInsets.only(top: 8),
-                                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                  Text(site.name, style: const TextStyle(color: AppleColors.labelSecondary, fontSize: 12)),
-                                  const SizedBox(height: 4),
-                                  SourceVerificationButton(
-                                    key: ValueKey('$_searchEpoch:${site.subscriptionId}:${site.key}'),
-                                    client: widget.client, site: site,
-                                    onVerified: () => _retryVerifiedSearch(site)),
-                                ])),
-                          ]),
-                        ),
-                      ),
                     Expanded(
-                      child: _searchResults.isEmpty && !_searching
-                          ? Center(
-                              child: SingleChildScrollView(
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(
-                                      CupertinoIcons.search,
-                                      color: AppleColors.labelTertiary,
-                                      size: 42,
-                                    ),
-                                    const SizedBox(height: 10),
-                                    Text(
-                                      !_searchPerformed
-                                          ? '输入关键词，并发检索全部已启用片源'
-                                          : _searchNotices.isEmpty
-                                          ? '没有找到匹配影片'
-                                          : '本次搜索未返回影片，请查看上方片源提示',
-                                      textAlign: TextAlign.center,
-                                      style: const TextStyle(
-                                        color: AppleColors.labelSecondary,
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                                  ],
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (filterSiteEntries.isNotEmpty) ...[
+                            Container(
+                              key: const ValueKey('search-site-filter-bar'),
+                              width: wide ? 138 : 106,
+                              decoration: BoxDecoration(
+                                color: const Color(0x4018181E),
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(
+                                  color: AppleColors.glassBorder,
+                                  width: 0.6,
                                 ),
                               ),
-                            )
-                          : GridView.builder(
-                              keyboardDismissBehavior:
-                                  ScrollViewKeyboardDismissBehavior.onDrag,
-                              padding: const EdgeInsets.only(bottom: 16),
-                              gridDelegate:
-                                  SliverGridDelegateWithMaxCrossAxisExtent(
-                                maxCrossAxisExtent: wide ? 160 : 124,
-                                mainAxisSpacing: 14,
-                                crossAxisSpacing: 12,
-                                childAspectRatio: 0.56,
-                              ),
-                              itemCount: _searchResults.length,
-                              itemBuilder: (ctx, i) {
-                                final (site, video) = _searchResults[i];
-                                return _buildVideoCard(
-                                  site,
-                                  video,
-                                  badge: site.name,
-                                  onTap: () {
-                                    // Keep the search modal sheet resident underneath DetailScreen
-                                    // so returning from DetailScreen lands directly back on search results.
-                                    FocusScope.of(ctx).unfocus();
-                                    _openVideoDetail(site, video);
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(16),
+                                child: ListView.separated(
+                                  scrollDirection: Axis.vertical,
+                                  physics: const BouncingScrollPhysics(),
+                                  padding: const EdgeInsets.all(6),
+                                  itemCount: filterSiteEntries.length + 1,
+                                  separatorBuilder: (_, __) =>
+                                      const SizedBox(height: 6),
+                                  itemBuilder: (ctx, idx) {
+                                    final isAll = idx == 0;
+                                    final key = isAll
+                                        ? ''
+                                        : filterSiteEntries[idx - 1].key;
+                                    final site = isAll
+                                        ? null
+                                        : filterSiteEntries[idx - 1].value;
+                                    final count = isAll
+                                        ? _searchResults.length
+                                        : (siteCounts[key] ?? 0);
+                                    final selected =
+                                        _searchSiteFilterKey == key;
+                                    final titleText =
+                                        isAll ? '全部线路' : site!.name;
+                                    return ApplePressableScale(
+                                      pressedScale: 0.94,
+                                      pressedOpacity: 0.88,
+                                      onTap: () {
+                                        setSheetState(() {
+                                          _searchSiteFilterKey =
+                                              selected && !isAll ? '' : key;
+                                        });
+                                      },
+                                      child: AnimatedContainer(
+                                        duration:
+                                            const Duration(milliseconds: 180),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 9,
+                                          vertical: 9,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          gradient: selected
+                                              ? const LinearGradient(
+                                                  begin: Alignment.topLeft,
+                                                  end: Alignment.bottomRight,
+                                                  colors: [
+                                                    Color(0xFF2E96FF),
+                                                    Color(0xFF0A84FF),
+                                                  ],
+                                                )
+                                              : null,
+                                          color: selected
+                                              ? null
+                                              : (count > 0
+                                                  ? const Color(0x283E9BFF)
+                                                  : const Color(0x3826262E)),
+                                          borderRadius:
+                                              BorderRadius.circular(11),
+                                          border: Border.all(
+                                            color: selected
+                                                ? const Color(0x99FFFFFF)
+                                                : (count > 0
+                                                    ? const Color(0x553E9BFF)
+                                                    : const Color(0x1FFFFFFF)),
+                                            width: 0.65,
+                                          ),
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            Expanded(
+                                              child: Text(
+                                                titleText,
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                  color: selected
+                                                      ? Colors.white
+                                                      : (count > 0
+                                                          ? AppleColors
+                                                              .labelPrimary
+                                                          : AppleColors
+                                                              .labelSecondary),
+                                                  fontSize: 12,
+                                                  fontWeight:
+                                                      selected || count > 0
+                                                          ? FontWeight.w600
+                                                          : FontWeight.w500,
+                                                  height: 1.2,
+                                                ),
+                                              ),
+                                            ),
+                                            if (count > 0) ...[
+                                              const SizedBox(width: 4),
+                                              Container(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                  horizontal: 5.5,
+                                                  vertical: 2,
+                                                ),
+                                                decoration: BoxDecoration(
+                                                  color: selected
+                                                      ? const Color(0x38FFFFFF)
+                                                      : const Color(0x380A84FF),
+                                                  borderRadius:
+                                                      BorderRadius.circular(
+                                                          999),
+                                                ),
+                                                child: Text(
+                                                  '$count',
+                                                  style: TextStyle(
+                                                    color: selected
+                                                        ? Colors.white
+                                                        : const Color(
+                                                            0xFF70B8FF),
+                                                    fontSize: 10.5,
+                                                    fontWeight: FontWeight.w700,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ],
+                                        ),
+                                      ),
+                                    );
                                   },
-                                );
-                              },
+                                ),
+                              ),
                             ),
+                            const SizedBox(width: 11),
+                          ],
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                if (_searching)
+                                  const Padding(
+                                    padding: EdgeInsets.only(bottom: 10),
+                                    child: Row(
+                                      children: [
+                                        CupertinoActivityIndicator(radius: 9),
+                                        SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            '正在并发检索所有可用片源…',
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              color: AppleColors.labelSecondary,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                if (_searchNotices.isNotEmpty)
+                                  ConstrainedBox(
+                                    constraints: BoxConstraints(
+                                      maxHeight: (size.height * 0.18)
+                                          .clamp(68.0, 144.0),
+                                    ),
+                                    child: SingleChildScrollView(
+                                      padding:
+                                          const EdgeInsets.only(bottom: 10),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            _searchNotices.values.join('\n'),
+                                            key: const ValueKey(
+                                                'search-source-notices'),
+                                            style: const TextStyle(
+                                              color: AppleColors.labelSecondary,
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                          for (final site
+                                              in _searchVerificationSites
+                                                  .values)
+                                            Padding(
+                                              padding:
+                                                  const EdgeInsets.only(top: 8),
+                                              child: Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(
+                                                    site.name,
+                                                    style: const TextStyle(
+                                                      color: AppleColors
+                                                          .labelSecondary,
+                                                      fontSize: 12,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(height: 4),
+                                                  SourceVerificationButton(
+                                                    key: ValueKey(
+                                                        '$_searchEpoch:${site.subscriptionId}:${site.key}'),
+                                                    client: widget.client,
+                                                    site: site,
+                                                    onVerified: () =>
+                                                        _retryVerifiedSearch(
+                                                            site),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                Expanded(
+                                  child: filteredSearchResults.isEmpty &&
+                                          !_searching
+                                      ? Center(
+                                          child: SingleChildScrollView(
+                                            child: Column(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                const Icon(
+                                                  CupertinoIcons.search,
+                                                  color:
+                                                      AppleColors.labelTertiary,
+                                                  size: 42,
+                                                ),
+                                                const SizedBox(height: 10),
+                                                Text(
+                                                  !_searchPerformed
+                                                      ? '输入关键词，并发检索全部已启用片源'
+                                                      : (_searchSiteFilterKey
+                                                                  .isNotEmpty &&
+                                                              _searchResults
+                                                                  .isNotEmpty)
+                                                          ? '当前所选线路暂无匹配影片'
+                                                          : _searchNotices
+                                                                  .isEmpty
+                                                              ? '没有找到匹配影片'
+                                                              : '本次搜索未返回影片，请查看上方片源提示',
+                                                  textAlign: TextAlign.center,
+                                                  style: const TextStyle(
+                                                    color: AppleColors
+                                                        .labelSecondary,
+                                                    fontSize: 14,
+                                                  ),
+                                                ),
+                                                if (_searchSiteFilterKey
+                                                        .isNotEmpty &&
+                                                    _searchResults
+                                                        .isNotEmpty) ...[
+                                                  const SizedBox(height: 12),
+                                                  AppleCapsuleButton(
+                                                    label:
+                                                        '查看全部线路 (${_searchResults.length})',
+                                                    compact: true,
+                                                    onPressed: () {
+                                                      setSheetState(() {
+                                                        _searchSiteFilterKey =
+                                                            '';
+                                                      });
+                                                    },
+                                                  ),
+                                                ],
+                                              ],
+                                            ),
+                                          ),
+                                        )
+                                      : GridView.builder(
+                                          keyboardDismissBehavior:
+                                              ScrollViewKeyboardDismissBehavior
+                                                  .onDrag,
+                                          padding:
+                                              const EdgeInsets.only(bottom: 16),
+                                          gridDelegate:
+                                              SliverGridDelegateWithMaxCrossAxisExtent(
+                                            maxCrossAxisExtent:
+                                                wide ? 156 : 120,
+                                            mainAxisSpacing: 14,
+                                            crossAxisSpacing: 10,
+                                            childAspectRatio: 0.56,
+                                          ),
+                                          itemCount:
+                                              filteredSearchResults.length,
+                                          itemBuilder: (ctx, i) {
+                                            final (site, video) =
+                                                filteredSearchResults[i];
+                                            return _buildVideoCard(
+                                              site,
+                                              video,
+                                              badge: site.name,
+                                              onTap: () {
+                                                // Keep the search modal sheet resident underneath DetailScreen
+                                                // so returning from DetailScreen lands directly back on search results.
+                                                FocusScope.of(ctx).unfocus();
+                                                _openVideoDetail(site, video);
+                                              },
+                                            );
+                                          },
+                                        ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -3473,20 +3897,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                     maxWidth: useSidebar ? 260 : 185,
                   ),
                   child: SizedBox(
-                    height: 34,
-                    child: CupertinoSearchTextField(
+                    height: 36,
+                    child: AppleSearchField(
                       controller: _liveSearchController,
                       placeholder: '搜索频道…',
-                      style: const TextStyle(
-                        color: AppleColors.labelPrimary,
-                        fontSize: 13,
-                      ),
-                      placeholderStyle: const TextStyle(
-                        color: AppleColors.labelTertiary,
-                        fontSize: 12.5,
-                      ),
-                      backgroundColor: const Color(0x24FFFFFF),
-                      borderRadius: BorderRadius.circular(999),
                       onChanged: (v) => setState(() => _liveSearchQuery = v),
                       onSuffixTap: () {
                         _liveSearchController.clear();
@@ -4104,9 +4518,11 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                     separatorBuilder: (_, __) => const SizedBox(height: 8),
                     itemBuilder: (ctx, idx) {
                       final h = history[idx];
+                      final resolvedPoster = _resolveHistoryPoster(h);
                       return _SwipeToDeleteHistoryTile(
                         key: ValueKey('sheet_hist_${h.site}_${h.id}'),
                         entry: h,
+                        posterUrl: resolvedPoster,
                         onTap: () {
                           Navigator.of(ctx).pop();
                           if (_config == null) return;
@@ -4126,7 +4542,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                             CmsVideo(
                               id: h.id,
                               title: h.title,
-                              poster: h.poster,
+                              poster: resolvedPoster,
                             ),
                           );
                         },
@@ -4386,9 +4802,11 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                                   );
                                 }
                                 final h = history[idx - 1];
+                                final resolvedPoster = _resolveHistoryPoster(h);
                                 return _SwipeToDeleteHistoryTile(
                                   key: ValueKey('lib_hist_${h.site}_${h.id}'),
                                   entry: h,
+                                  posterUrl: resolvedPoster,
                                   onTap: () {
                                     if (_config == null) return;
                                     final site =
@@ -4401,7 +4819,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                                       CmsVideo(
                                         id: h.id,
                                         title: h.title,
-                                        poster: h.poster,
+                                        poster: resolvedPoster,
                                       ),
                                     );
                                   },
@@ -4757,104 +5175,280 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
         : '片头 ${skipIntro}s · 片尾 ${skipOutro}s';
   }
 
-  /// Main Settings Tab (Level 1): Clean, airy iOS 27 Glasswork directory page
-  /// with 4 independent breathing cards (`保持呼吸感，一级页面简洁`), delegating
-  /// controls and detailed options to Level 2 sub-pages and Level 3 drawers.
+  /// Main Settings Tab (Level 1): Authentic iOS System Settings inset-grouped layout
+  /// with vivid squircle badges, inline linear Liquid Glass refraction slider, and
+  /// clean category navigation rows.
   Widget _buildSettingsTab(BuildContext context, {required bool useSidebar}) {
     final pad = useSidebar ? 28.0 : 16.0;
     final publicSites = _config?.publicSupportedSites ?? const [];
     return SafeArea(
       bottom: useSidebar,
-      child: ListView(
-        padding: EdgeInsets.fromLTRB(
-          pad,
-          useSidebar && _isMacOS ? 28 : 14,
-          pad,
-          useSidebar ? 32 : 24,
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 860),
+          child: ListView(
+            padding: EdgeInsets.fromLTRB(
+              pad,
+              useSidebar && _isMacOS ? 28 : 16,
+              pad,
+              useSidebar ? 36 : 28,
+            ),
+            children: [
+              const Padding(
+                padding: EdgeInsets.only(left: 4, bottom: 16),
+                child: Text(
+                  '设置',
+                  style: TextStyle(
+                    color: AppleColors.labelPrimary,
+                    fontSize: 30,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+              ),
+              AppleGroupedSection(
+                header: '外观与界面效果',
+                footer: '拖动滑块可调节界面毛玻璃通透度与边缘高光效果。',
+                children: [
+                  AppleGroupedTile(
+                    icon: CupertinoIcons.paintbrush_fill,
+                    iconBgColor: AppleColors.systemPurple,
+                    title: '外观与视觉风格',
+                    subtitle: '自定义影院主题配色、高清壁纸与毛玻璃档位',
+                    trailingText: _wallpaperPresetLabel,
+                    onTap: () => _openSettingsSubPage(
+                      title: '外观与视觉风格',
+                      subtitle: '自定义影院主题配色、动态流光背景与毛玻璃通透效果',
+                      sectionBuilder: _buildAppearanceSettingsSection,
+                    ),
+                  ),
+                  AppleGroupedTile(
+                    icon: CupertinoIcons.sparkles,
+                    iconBgColor: AppleColors.systemIndigo,
+                    title: '动态流光背景',
+                    subtitle: '开启柔和极光背景与海报环境光晕',
+                    trailing: CupertinoSwitch(
+                      value: widget.storage.ambientGlowEnabled,
+                      activeTrackColor: AppleColors.systemGreen,
+                      onChanged: (v) async {
+                        await widget.storage.setAmbientGlowEnabled(v);
+                        if (mounted) setState(() {});
+                      },
+                    ),
+                  ),
+                  _buildLiquidGlassSliderRow(() {
+                    if (mounted) setState(() {});
+                  }),
+                ],
+              ),
+              const SizedBox(height: 22),
+              AppleGroupedSection(
+                header: '浏览与播放偏好',
+                children: [
+                  AppleGroupedTile(
+                    icon: CupertinoIcons.square_grid_2x2_fill,
+                    iconBgColor: AppleColors.systemBlue,
+                    title: '首页与排版布局',
+                    subtitle: '设置海报列数密度、卡片副标题与首页推荐模块',
+                    trailingText: _gridDensityLabel,
+                    onTap: () => _openSettingsSubPage(
+                      title: '首页与排版布局',
+                      subtitle: '调整首页展示模块开关、海报列数密度与卡片副标题样式',
+                      sectionBuilder: _buildLayoutSettingsSection,
+                    ),
+                  ),
+                  AppleGroupedTile(
+                    icon: CupertinoIcons.play_rectangle_fill,
+                    iconBgColor: AppleColors.systemOrange,
+                    title: '播放与画质偏好',
+                    subtitle: '设置默认优选画质、起播倍速与片头片尾自动跳过',
+                    trailingText: _preferredQualityLabel,
+                    onTap: () => _openSettingsSubPage(
+                      title: '播放与画质偏好',
+                      subtitle: '进入影视详情页与播放器时自动按首选画质、倍速与片头片尾规则起播',
+                      sectionBuilder: _buildPlaybackSettingsSection,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 22),
+              AppleGroupedSection(
+                header: '片源订阅与数据',
+                children: [
+                  Builder(
+                    builder: (context) {
+                      final loggedCount = NetdiskService.drives
+                          .where((d) => widget.storage.isNetdiskLoggedIn(d.key))
+                          .length;
+                      return AppleGroupedTile(
+                        icon: CupertinoIcons.qrcode_viewfinder,
+                        iconBgColor: const Color(0xFF0A84FF),
+                        title: '我的云盘 · 网盘扫码与账号中心',
+                        subtitle: '夸克（我的夸父）/ UC（我的优汐）/ 百度（我的嘟嘟）/ 阿里（我的阿狸）',
+                        trailingText:
+                            loggedCount > 0 ? '已登录 $loggedCount 个' : '去扫码',
+                        onTap: () => showNetdiskAccountSheet(
+                          context,
+                          widget.storage,
+                          onChanged: () {
+                            if (mounted) setState(() {});
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                  AppleGroupedTile(
+                    icon: CupertinoIcons.folder_fill,
+                    iconBgColor: AppleColors.systemGreen,
+                    title: '订阅与数据维护',
+                    subtitle: '管理点播源、直播源、多仓切换与缓存清理',
+                    trailingText: '${publicSites.length} 可用',
+                    onTap: () => _openSettingsSubPage(
+                      title: '订阅与数据维护',
+                      subtitle: '集中管理 TVBox / 影视仓点播源、直播源、多仓切换、跨端备份与海报缓存',
+                      sectionBuilder: _buildCloudAndDataSettingsSection,
+                    ),
+                  ),
+                  AppleGroupedTile(
+                    icon: CupertinoIcons.cloud_upload_fill,
+                    iconBgColor: AppleColors.systemTeal,
+                    title: '跨平台备份与恢复',
+                    subtitle: '导出或恢复全平台通用 JSON 备份配置',
+                    trailingText: 'JSON 互通',
+                    onTap: _showBackupRestoreDialog,
+                  ),
+                  AppleGroupedTile(
+                    icon: CupertinoIcons.arrow_down_circle_fill,
+                    iconBgColor: AppleColors.systemBlue,
+                    title: '软件更新与版本',
+                    subtitle: '检查最新版本更新与发行说明',
+                    trailingText: 'v$_currentAppVersion',
+                    onTap: _showUpdateCheckSheet,
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
-        children: [
-          const Text(
-            '设置',
-            style: TextStyle(
-              color: AppleColors.labelPrimary,
-              fontSize: 28,
-              fontWeight: FontWeight.w700,
-              letterSpacing: -0.6,
+      ),
+    );
+  }
+
+  Widget _buildLiquidGlassSliderRow(VoidCallback refreshBoth) {
+    return RepaintBoundary(
+      child: ValueListenableBuilder<double>(
+        valueListenable: GlassworkBackdrop.intensity,
+        builder: (context, rawStrength, _) {
+          final strength = rawStrength.clamp(0.0, 1.0);
+          final pct = (strength * 100).round();
+          final levelLabel = strength < 0.05
+              ? '关闭'
+              : strength < 0.48
+                  ? '轻柔'
+                  : strength < 0.80
+                      ? '标准'
+                      : '深邃';
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(16, 11, 16, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    DecoratedBox(
+                      decoration: ShapeDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Color.alphaBlend(
+                              const Color(0x28FFFFFF),
+                              AppleColors.systemTeal,
+                            ),
+                            AppleColors.systemTeal,
+                          ],
+                        ),
+                        shape: RoundedSuperellipseBorder(
+                          borderRadius: BorderRadius.circular(7.5),
+                          side: const BorderSide(
+                            color: Color(0x33FFFFFF),
+                            width: 0.5,
+                          ),
+                        ),
+                      ),
+                      child: const SizedBox(
+                        width: 30,
+                        height: 30,
+                        child: Icon(
+                          CupertinoIcons.drop_fill,
+                          color: Colors.white,
+                          size: 17,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        '毛玻璃通透度',
+                        style: TextStyle(
+                          color: AppleColors.labelPrimary,
+                          fontSize: 15.5,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.1,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '$pct% · $levelLabel',
+                      style: const TextStyle(
+                        color: AppleColors.labelSecondary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w400,
+                        letterSpacing: 0.1,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    const Icon(
+                      CupertinoIcons.drop,
+                      size: 15,
+                      color: AppleColors.labelSecondary,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: CupertinoSlider(
+                        key: const ValueKey('settings-liquid-glass-slider'),
+                        value: strength,
+                        min: 0.0,
+                        max: 1.0,
+                        activeColor: AppleColors.systemBlue,
+                        onChanged: (v) {
+                          GlassworkBackdrop.intensity.value = v;
+                          GlassworkBackdrop.reduceTransparency.value =
+                              v <= 0.02;
+                        },
+                        onChangeEnd: (v) async {
+                          await widget.storage.setGlassBlurStrength(v);
+                          refreshBoth();
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Icon(
+                      CupertinoIcons.drop_fill,
+                      size: 18,
+                      color: AppleColors.systemBlue,
+                    ),
+                  ],
+                ),
+              ],
             ),
-          ),
-          const SizedBox(height: 6),
-          const Text(
-            '个性化影院视觉、排版密度、起播规则与多仓订阅源',
-            style: TextStyle(
-              color: AppleColors.labelSecondary,
-              fontSize: 13,
-            ),
-          ),
-          const SizedBox(height: 20),
-          _buildBreathingSettingCard(
-            child: AppleGroupedTile(
-              minHeight: 88,
-              icon: CupertinoIcons.paintbrush_fill,
-              iconBgColor: AppleColors.systemPurple,
-              title: '外观与视觉风格',
-              subtitle: '影院主题壁纸 · 液态玻璃折射层级',
-              trailingText: _wallpaperPresetLabel,
-              onTap: () => _openSettingsSubPage(
-                title: '外观与视觉风格',
-                subtitle: '定制暗黑影院主题色调、高清壁纸与 Glasswork 液态玻璃光学折射',
-                sectionBuilder: _buildAppearanceSettingsSection,
-              ),
-            ),
-          ),
-          const SizedBox(height: 14),
-          _buildBreathingSettingCard(
-            child: AppleGroupedTile(
-              minHeight: 88,
-              icon: CupertinoIcons.square_grid_2x2_fill,
-              iconBgColor: AppleColors.systemBlue,
-              title: '首页与排版布局',
-              subtitle: '海报网格密度 · 首推巨幕与历史栏',
-              trailingText: _gridDensityLabel,
-              onTap: () => _openSettingsSubPage(
-                title: '首页与排版布局',
-                subtitle: '调整首页展示模块开关、海报列数密度与卡片副标题样式',
-                sectionBuilder: _buildLayoutSettingsSection,
-              ),
-            ),
-          ),
-          const SizedBox(height: 14),
-          _buildBreathingSettingCard(
-            child: AppleGroupedTile(
-              minHeight: 88,
-              icon: CupertinoIcons.play_rectangle_fill,
-              iconBgColor: AppleColors.systemOrange,
-              title: '播放与画质偏好',
-              subtitle: '默认画质线路 · 倍速 · 片头片尾跳过',
-              trailingText: _preferredQualityLabel,
-              onTap: () => _openSettingsSubPage(
-                title: '播放与画质偏好',
-                subtitle: '进入影视详情页与播放器时自动按首选画质、倍速与片头片尾规则起播',
-                sectionBuilder: _buildPlaybackSettingsSection,
-              ),
-            ),
-          ),
-          const SizedBox(height: 14),
-          _buildBreathingSettingCard(
-            child: AppleGroupedTile(
-              minHeight: 88,
-              icon: CupertinoIcons.folder_fill,
-              iconBgColor: AppleColors.systemGreen,
-              title: '订阅与数据维护',
-              subtitle: 'TVBox / 影视仓多仓源 · 跨端备份与缓存',
-              trailingText: '${publicSites.length} 可用',
-              onTap: () => _openSettingsSubPage(
-                title: '订阅与数据维护',
-                subtitle: '集中管理 TVBox / 影视仓点播源、直播源、多仓切换、跨端备份与海报缓存',
-                sectionBuilder: _buildCloudAndDataSettingsSection,
-              ),
-            ),
-          ),
-        ],
+          );
+        },
       ),
     );
   }
@@ -4865,11 +5459,8 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   }) {
     return Padding(
       padding: EdgeInsets.only(bottom: bottomSpacing),
-      child: LiquidGlass(
-        borderRadius: 22,
-        elevated: false,
-        rimStrength: 0.92,
-        tint: const Color(0x221C1C24),
+      child: AppleSettingsGlassCard(
+        borderRadius: BorderRadius.circular(16),
         child: child,
       ),
     );
@@ -4887,8 +5478,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
             builder: (routeCtx) => StatefulBuilder(
               builder: (subCtx, setSubState) {
                 void refreshBoth() {
-                  if (mounted) setState(() {});
-                  setSubState(() {});
+                  if (subCtx.mounted) setSubState(() {});
                 }
 
                 final topPad = MediaQuery.paddingOf(subCtx).top;
@@ -4901,35 +5491,45 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                     children: [
                       AppleAmbientBackground(
                         preset: widget.storage.wallpaperPreset,
-                        showAmbientArtwork: false,
+                        showAmbientArtwork: widget.storage.ambientGlowEnabled,
                         blurSigma: 60,
+                        animate: false,
                       ),
                       SafeArea(
-                        child: ListView(
-                          physics: const BouncingScrollPhysics(),
-                          padding: EdgeInsets.fromLTRB(hPad, 58, hPad, 48),
-                          children: [
-                            Text(
-                              title,
-                              style: const TextStyle(
-                                color: AppleColors.labelPrimary,
-                                fontSize: 26,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: -0.5,
+                        child: RepaintBoundary(
+                          child: Align(
+                            alignment: Alignment.topCenter,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 860),
+                              child: ListView(
+                                physics: const BouncingScrollPhysics(),
+                                padding: EdgeInsets.fromLTRB(hPad, 58, hPad, 48),
+                                children: [
+                                  Text(
+                                    title,
+                                    style: const TextStyle(
+                                      color: AppleColors.labelPrimary,
+                                      fontSize: 25,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 0.2,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    subtitle,
+                                    style: const TextStyle(
+                                      color: AppleColors.labelSecondary,
+                                      fontSize: 13,
+                                      height: 1.45,
+                                      letterSpacing: 0.1,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 20),
+                                  sectionBuilder(subCtx, refreshBoth),
+                                ],
                               ),
                             ),
-                            const SizedBox(height: 6),
-                            Text(
-                              subtitle,
-                              style: const TextStyle(
-                                color: AppleColors.labelSecondary,
-                                fontSize: 13,
-                                height: 1.4,
-                              ),
-                            ),
-                            const SizedBox(height: 20),
-                            sectionBuilder(subCtx, refreshBoth),
-                          ],
+                          ),
                         ),
                       ),
                       Positioned(
@@ -4937,27 +5537,26 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                         left: hPad,
                         child: GestureDetector(
                           onTap: () => Navigator.of(subCtx).maybePop(),
-                          child: const LiquidGlass(
-                            height: 38,
-                            borderRadius: 999,
-                            elevated: false,
-                            rimStrength: 0.92,
-                            tint: Color(0x281E1E24),
-                            padding: EdgeInsets.symmetric(horizontal: 14),
-                            child: Row(
+                          child: AppleSettingsGlassCard(
+                            borderRadius: BorderRadius.circular(999),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 13,
+                              vertical: 8,
+                            ),
+                            child: const Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Icon(
                                   CupertinoIcons.chevron_back,
-                                  color: AppleColors.labelPrimary,
+                                  color: AppleColors.systemBlue,
                                   size: 17,
                                 ),
-                                SizedBox(width: 4),
+                                SizedBox(width: 3),
                                 Text(
-                                  '返回设置',
+                                  '设置',
                                   style: TextStyle(
-                                    color: AppleColors.labelPrimary,
-                                    fontSize: 13.5,
+                                    color: AppleColors.systemBlue,
+                                    fontSize: 14,
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
@@ -4985,60 +5584,68 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: _buildSettingDrawerContainer(
-            settingKey: 'wallpaper_preset',
-            icon: CupertinoIcons.photo_fill_on_rectangle_fill,
-            iconBgColor: AppleColors.systemPurple,
-            title: '背景壁纸与主题风格',
-            subtitle: widget.storage.customWallpaperUrl.isNotEmpty
-                ? '已启用自定义高清壁纸'
-                : '选择暗黑影院主题底色或自定义壁纸',
-            trailingText: _wallpaperPresetLabel,
-            onStateChanged: refreshBoth,
-            drawerChild: _buildWallpaperDrawerBody(onStateChanged: refreshBoth),
-          ),
+        AppleGroupedSection(
+          header: '壁纸与动态流光氛围',
+          footer: '开启呼吸式动态流光后，背景极光色块将以约 8 秒周期柔和呼吸律动，并透过液态玻璃产生实时折射。',
+          children: [
+            _buildSettingDrawerContainer(
+              settingKey: 'wallpaper_preset',
+              icon: CupertinoIcons.photo_fill_on_rectangle_fill,
+              iconBgColor: AppleColors.systemPurple,
+              title: '背景壁纸与主题风格',
+              subtitle: widget.storage.customWallpaperUrl.isNotEmpty
+                  ? '已启用自定义高清壁纸'
+                  : '选择暗黑影院主题底色或自定义壁纸',
+              trailingText: _wallpaperPresetLabel,
+              onStateChanged: refreshBoth,
+              drawerChild: _buildWallpaperDrawerBody(onStateChanged: refreshBoth),
+            ),
+            AppleGroupedTile(
+              icon: CupertinoIcons.sparkles,
+              iconBgColor: AppleColors.systemIndigo,
+              title: '呼吸式流光氛围背景',
+              subtitle: '渲染动态呼吸流光与海报主色调光晕',
+              trailing: CupertinoSwitch(
+                value: widget.storage.ambientGlowEnabled,
+                activeTrackColor: AppleColors.systemGreen,
+                onChanged: (v) async {
+                  await widget.storage.setAmbientGlowEnabled(v);
+                  refreshBoth();
+                },
+              ),
+            ),
+          ],
         ),
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: AppleGroupedTile(
-            icon: CupertinoIcons.sparkles,
-            iconBgColor: AppleColors.systemIndigo,
-            title: '海报流光氛围背景',
-            subtitle: '提取当前海报主色调渲染沉浸式环境光晕',
-            trailing: CupertinoSwitch(
-              value: widget.storage.ambientGlowEnabled,
-              activeTrackColor: AppleColors.systemGreen,
-              onChanged: (v) async {
-                await widget.storage.setAmbientGlowEnabled(v);
+        const SizedBox(height: 22),
+        AppleGroupedSection(
+          header: '毛玻璃与通透度',
+          footer: '支持 0%–100% 连续调节，也可点击下方预设档位快速切换。',
+          children: [
+            _buildLiquidGlassSliderRow(refreshBoth),
+            _buildExpandableChoiceDrawerTile<String>(
+              settingKey: 'glass_blur',
+              icon: CupertinoIcons.drop_fill,
+              iconBgColor: AppleColors.systemBlue,
+              title: '毛玻璃效果档位',
+              subtitle: '快速切换四档磨砂与通透配置',
+              trailingText: _glassBlurLabel,
+              currentValue: widget.storage.glassBlurLevel,
+              onStateChanged: refreshBoth,
+              options: const [
+                ('light', '轻盈通透 (35%)', '轻量高斯模糊，保留更多背景色彩细节'),
+                ('standard', '标准液态 (68%)', '细腻边缘高光与背景折射'),
+                ('deep', '深邃毛玻璃 (100%)', '高浓度深邃磨砂，强化前景文字对比'),
+                ('solid', '减少透明度 (0%)', '使用实色面板，提升阅读清晰度'),
+              ],
+              onSelected: (val) async {
+                await widget.storage.setGlassBlurLevel(val);
+                GlassworkBackdrop.reduceTransparency.value = val == 'solid';
+                GlassworkBackdrop.intensity.value =
+                    widget.storage.glassBlurStrength;
                 refreshBoth();
               },
             ),
-          ),
-        ),
-        _buildBreathingSettingCard(
-          child: _buildExpandableChoiceDrawerTile<String>(
-            settingKey: 'glass_blur',
-            icon: CupertinoIcons.drop_fill,
-            iconBgColor: AppleColors.systemBlue,
-            title: '液态玻璃模糊浓度',
-            subtitle: '调节全局 Glasswork 光学折射与磨砂层级',
-            trailingText: _glassBlurLabel,
-            currentValue: widget.storage.glassBlurLevel,
-            onStateChanged: refreshBoth,
-            options: const [
-              ('light', '轻盈通透', '轻量高斯模糊，保留更多背景色彩细节'),
-              ('standard', '标准液态', '细腻边缘高光与背景折射'),
-              ('solid', '减少透明度', '使用实色面板，提升阅读清晰度'),
-              ('deep', '深邃毛玻璃', '高浓度深邃磨砂，强化前景文字对比'),
-            ],
-            onSelected: (val) async {
-              await widget.storage.setGlassBlurLevel(val);
-              GlassworkBackdrop.reduceTransparency.value = val == 'solid';
-              refreshBoth();
-            },
-          ),
+          ],
         ),
       ],
     );
@@ -5051,83 +5658,83 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: _buildExpandableChoiceDrawerTile<String>(
-            settingKey: 'grid_density',
-            icon: CupertinoIcons.square_grid_3x2_fill,
-            iconBgColor: AppleColors.systemBlue,
-            title: '海报网格排版密度',
-            subtitle: '选择舒展大卡、标准均衡或紧凑多列',
-            trailingText: _gridDensityLabel,
-            currentValue: widget.storage.gridDensity,
-            onStateChanged: refreshBoth,
-            options: const [
-              ('comfortable', '舒展大卡', '减少单行卡片列数，放大海报尺寸与视觉呼吸感'),
-              ('standard', '标准均衡', '默认黄金比例网格密度，兼顾浏览视野与效率'),
-              ('compact', '紧凑多列', '同屏展示更多海报卡片，适合快速浏览检索'),
-            ],
-            onSelected: (val) async {
-              await widget.storage.setGridDensity(val);
-              refreshBoth();
-            },
-          ),
-        ),
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: AppleGroupedTile(
-            icon: CupertinoIcons.rectangle_on_rectangle_angled,
-            iconBgColor: AppleColors.systemOrange,
-            title: '首页「今日首推」巨幕卡片',
-            subtitle: '在首页推荐顶部展示焦点海报横幅',
-            trailing: CupertinoSwitch(
-              value: widget.storage.showHeroBanner,
-              activeTrackColor: AppleColors.systemGreen,
-              onChanged: (v) async {
-                await widget.storage.setShowHeroBanner(v);
+        AppleGroupedSection(
+          header: '海报网格与卡片信息',
+          children: [
+            _buildExpandableChoiceDrawerTile<String>(
+              settingKey: 'grid_density',
+              icon: CupertinoIcons.square_grid_3x2_fill,
+              iconBgColor: AppleColors.systemBlue,
+              title: '海报网格排版密度',
+              subtitle: '选择舒展大卡、标准均衡或紧凑多列',
+              trailingText: _gridDensityLabel,
+              currentValue: widget.storage.gridDensity,
+              onStateChanged: refreshBoth,
+              options: const [
+                ('comfortable', '舒展大卡', '减少单行卡片列数，放大海报尺寸与视觉呼吸感'),
+                ('standard', '标准均衡', '默认黄金比例网格密度，兼顾浏览视野与效率'),
+                ('compact', '紧凑多列', '同屏展示更多海报卡片，适合快速浏览检索'),
+              ],
+              onSelected: (val) async {
+                await widget.storage.setGridDensity(val);
                 refreshBoth();
               },
             ),
-          ),
-        ),
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: AppleGroupedTile(
-            icon: CupertinoIcons.play_rectangle_fill,
-            iconBgColor: AppleColors.systemGreen,
-            title: '首页「历史记录」快捷栏',
-            subtitle: '在首页顶部显示最近观看进度以便一键续播',
-            trailing: CupertinoSwitch(
-              value: widget.storage.showContinueWatching,
-              activeTrackColor: AppleColors.systemGreen,
-              onChanged: (v) async {
-                await widget.storage.setShowContinueWatching(v);
+            _buildExpandableChoiceDrawerTile<String>(
+              settingKey: 'card_subtitle',
+              icon: CupertinoIcons.text_badge_checkmark,
+              iconBgColor: AppleColors.systemIndigo,
+              title: '影视卡片副标题展示',
+              subtitle: '选择海报下方展示的辅助信息类型',
+              trailingText: _cardSubtitleModeLabel,
+              currentValue: widget.storage.cardSubtitleMode,
+              onStateChanged: refreshBoth,
+              options: const [
+                ('remarks', '更新集数与备注', '展示「更新至第X集 / 4K / HD中字」等状态信息'),
+                ('year_area', '年份与地区', '展示「2026 · 中国大陆」等发行年份与地区'),
+                ('site', '所属片源名称', '展示当前影片所属的订阅源站点名称'),
+                ('none', '极简隐藏', '仅展示影片标题，隐藏下方副标题行'),
+              ],
+              onSelected: (val) async {
+                await widget.storage.setCardSubtitleMode(val);
                 refreshBoth();
               },
             ),
-          ),
+          ],
         ),
-        _buildBreathingSettingCard(
-          child: _buildExpandableChoiceDrawerTile<String>(
-            settingKey: 'card_subtitle',
-            icon: CupertinoIcons.text_badge_checkmark,
-            iconBgColor: AppleColors.systemIndigo,
-            title: '影视卡片副标题展示',
-            subtitle: '选择海报下方展示的辅助信息类型',
-            trailingText: _cardSubtitleModeLabel,
-            currentValue: widget.storage.cardSubtitleMode,
-            onStateChanged: refreshBoth,
-            options: const [
-              ('remarks', '更新集数与备注', '展示「更新至第X集 / 4K / HD中字」等状态信息'),
-              ('year_area', '年份与地区', '展示「2026 · 中国大陆」等发行年份与地区'),
-              ('site', '所属片源名称', '展示当前影片所属的订阅源站点名称'),
-              ('none', '极简隐藏', '仅展示影片标题，隐藏下方副标题行'),
-            ],
-            onSelected: (val) async {
-              await widget.storage.setCardSubtitleMode(val);
-              refreshBoth();
-            },
-          ),
+        const SizedBox(height: 22),
+        AppleGroupedSection(
+          header: '首页焦点模块',
+          children: [
+            AppleGroupedTile(
+              icon: CupertinoIcons.rectangle_on_rectangle_angled,
+              iconBgColor: AppleColors.systemOrange,
+              title: '首页「今日首推」巨幕卡片',
+              subtitle: '在首页推荐顶部展示焦点海报横幅',
+              trailing: CupertinoSwitch(
+                value: widget.storage.showHeroBanner,
+                activeTrackColor: AppleColors.systemGreen,
+                onChanged: (v) async {
+                  await widget.storage.setShowHeroBanner(v);
+                  refreshBoth();
+                },
+              ),
+            ),
+            AppleGroupedTile(
+              icon: CupertinoIcons.play_rectangle_fill,
+              iconBgColor: AppleColors.systemGreen,
+              title: '首页「历史记录」快捷栏',
+              subtitle: '在首页顶部显示最近观看进度以便一键续播',
+              trailing: CupertinoSwitch(
+                value: widget.storage.showContinueWatching,
+                activeTrackColor: AppleColors.systemGreen,
+                onChanged: (v) async {
+                  await widget.storage.setShowContinueWatching(v);
+                  refreshBoth();
+                },
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -5140,126 +5747,120 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: _buildExpandableChoiceDrawerTile<String>(
-            settingKey: 'preferred_quality',
-            icon: CupertinoIcons.tv_music_note_fill,
-            iconBgColor: AppleColors.systemBlue,
-            title: '默认画质与线路推荐',
-            subtitle: '进入详情页时自动优选匹配的画质与线路',
-            trailingText: _preferredQualityLabel,
-            currentValue: widget.storage.preferredQuality,
-            onStateChanged: refreshBoth,
-            options: const [
-              ('4k_netdisk', '4K 超清原画优先', '优先匹配 4K HDR / 杜比视界超清线路'),
-              ('1080p_direct', '1080P 高清直连优先', '优先选择高码率 1080P 直连点播线路'),
-              ('fast_hls', '极速 M3U8 流媒体优先', '优先选择秒开 M3U8 切片流媒体线路'),
-              ('default', '站点默认顺序', '保持采集站原始线路排序'),
-            ],
-            onSelected: (val) async {
-              await widget.storage.setPreferredQuality(val);
-              refreshBoth();
-            },
-          ),
-        ),
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: _buildExpandableChoiceDrawerTile<String>(
-            settingKey: 'aspect_mode',
-            icon: CupertinoIcons.viewfinder,
-            iconBgColor: AppleColors.systemPurple,
-            title: '默认画面比例',
-            subtitle: '播放器启动时的默认画面缩放模式',
-            trailingText: _defaultAspectLabel,
-            currentValue: widget.storage.defaultAspectMode,
-            onStateChanged: refreshBoth,
-            options: const [
-              ('contain', '适应屏幕', '保持原始视频宽高比完整显示画面'),
-              ('cover', '铺满裁剪', '等比放大铺满全屏区域，自动裁切黑边'),
-              ('fill', '拉伸全屏', '拉伸画面填满整个屏幕显示区域'),
-            ],
-            onSelected: (val) async {
-              await widget.storage.setDefaultAspectMode(val);
-              refreshBoth();
-            },
-          ),
-        ),
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: _buildExpandableChoiceDrawerTile<double>(
-            settingKey: 'play_speed',
-            icon: CupertinoIcons.speedometer,
-            iconBgColor: AppleColors.systemOrange,
-            title: '默认起播倍速',
-            subtitle: '选择播放器起播时的默认倍速',
-            trailingText: '${widget.storage.playSpeed}x',
-            currentValue: widget.storage.playSpeed,
-            onStateChanged: refreshBoth,
-            options: const [
-              (0.75, '0.75x 慢速', '放慢语速与动作细节'),
-              (1.0, '1.0x 正常原速', '标准原片播放速度'),
-              (1.25, '1.25x 轻快倍速', '轻微提速，不损台词听感'),
-              (1.5, '1.5x 高效倍速', '适合快速浏览剧情推进'),
-              (2.0, '2.0x 二倍速播放', '高速刷剧模式'),
-            ],
-            onSelected: (val) async {
-              await widget.storage.setPlaySpeed(val);
-              refreshBoth();
-            },
-          ),
-        ),
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: _buildSettingDrawerContainer(
-            settingKey: 'skip_intro_outro',
-            icon: CupertinoIcons.forward_fill,
-            iconBgColor: AppleColors.systemIndigo,
-            title: '片头 / 片尾自动跳过',
-            subtitle: '设置剧集统一的片头起播与片尾跳过秒数',
-            trailingText: _skipIntroOutroSummary,
-            onStateChanged: refreshBoth,
-            drawerChild:
-                _buildSkipIntroOutroDrawerBody(onStateChanged: refreshBoth),
-          ),
-        ),
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: _buildExpandableChoiceDrawerTile<bool>(
-            settingKey: 'episodes_order',
-            icon: CupertinoIcons.sort_down,
-            iconBgColor: AppleColors.systemGreen,
-            title: '默认剧集排序方式',
-            subtitle: '详情页与选集列表的默认排列顺序',
-            trailingText:
-                widget.storage.episodesDescending ? '倒序（最新集）' : '正序（第 1 集起）',
-            currentValue: widget.storage.episodesDescending,
-            onStateChanged: refreshBoth,
-            options: const [
-              (false, '正序（第 1 集起）', '从第 1 集开始依次排列，适合从头追剧'),
-              (true, '倒序（最新集起）', '最新更新的集数排在最前，适合追更连载剧集'),
-            ],
-            onSelected: (val) async {
-              await widget.storage.setEpisodesDescending(val);
-              refreshBoth();
-            },
-          ),
-        ),
-        _buildBreathingSettingCard(
-          child: AppleGroupedTile(
-            icon: CupertinoIcons.forward_end_fill,
-            iconBgColor: AppleColors.systemBlue,
-            title: '自动连播下一集',
-            subtitle: '当前剧集播放完毕后无缝切换下一集',
-            trailing: CupertinoSwitch(
-              value: widget.storage.autoNext,
-              activeTrackColor: AppleColors.systemGreen,
-              onChanged: (v) async {
-                await widget.storage.setAutoNext(v);
+        AppleGroupedSection(
+          header: '画质与画面比例',
+          children: [
+            _buildExpandableChoiceDrawerTile<String>(
+              settingKey: 'preferred_quality',
+              icon: CupertinoIcons.tv_music_note_fill,
+              iconBgColor: AppleColors.systemBlue,
+              title: '默认画质与线路推荐',
+              subtitle: '进入详情页时自动优选匹配的画质与线路',
+              trailingText: _preferredQualityLabel,
+              currentValue: widget.storage.preferredQuality,
+              onStateChanged: refreshBoth,
+              options: const [
+                ('4k_netdisk', '4K 超清原画优先', '优先匹配 4K HDR / 杜比视界超清线路'),
+                ('1080p_direct', '1080P 高清直连优先', '优先选择高码率 1080P 直连点播线路'),
+                ('fast_hls', '极速 M3U8 流媒体优先', '优先选择秒开 M3U8 切片流媒体线路'),
+                ('default', '站点默认顺序', '保持采集站原始线路排序'),
+              ],
+              onSelected: (val) async {
+                await widget.storage.setPreferredQuality(val);
                 refreshBoth();
               },
             ),
-          ),
+            _buildExpandableChoiceDrawerTile<String>(
+              settingKey: 'aspect_mode',
+              icon: CupertinoIcons.viewfinder,
+              iconBgColor: AppleColors.systemPurple,
+              title: '默认画面比例',
+              subtitle: '播放器启动时的默认画面缩放模式',
+              trailingText: _defaultAspectLabel,
+              currentValue: widget.storage.defaultAspectMode,
+              onStateChanged: refreshBoth,
+              options: const [
+                ('contain', '适应屏幕', '保持原始视频宽高比完整显示画面'),
+                ('cover', '铺满裁剪', '等比放大铺满全屏区域，自动裁切黑边'),
+                ('fill', '拉伸全屏', '拉伸画面填满整个屏幕显示区域'),
+              ],
+              onSelected: (val) async {
+                await widget.storage.setDefaultAspectMode(val);
+                refreshBoth();
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 22),
+        AppleGroupedSection(
+          header: '起播规则与选集',
+          children: [
+            _buildExpandableChoiceDrawerTile<double>(
+              settingKey: 'play_speed',
+              icon: CupertinoIcons.speedometer,
+              iconBgColor: AppleColors.systemOrange,
+              title: '默认起播倍速',
+              subtitle: '选择播放器起播时的默认倍速',
+              trailingText: '${widget.storage.playSpeed}x',
+              currentValue: widget.storage.playSpeed,
+              onStateChanged: refreshBoth,
+              options: const [
+                (0.75, '0.75x 慢速', '放慢语速与动作细节'),
+                (1.0, '1.0x 正常原速', '标准原片播放速度'),
+                (1.25, '1.25x 轻快倍速', '轻微提速，不损台词听感'),
+                (1.5, '1.5x 高效倍速', '适合快速浏览剧情推进'),
+                (2.0, '2.0x 二倍速播放', '高速刷剧模式'),
+              ],
+              onSelected: (val) async {
+                await widget.storage.setPlaySpeed(val);
+                refreshBoth();
+              },
+            ),
+            _buildSettingDrawerContainer(
+              settingKey: 'skip_intro_outro',
+              icon: CupertinoIcons.forward_fill,
+              iconBgColor: AppleColors.systemIndigo,
+              title: '片头 / 片尾自动跳过',
+              subtitle: '设置剧集统一的片头起播与片尾跳过秒数',
+              trailingText: _skipIntroOutroSummary,
+              onStateChanged: refreshBoth,
+              drawerChild:
+                  _buildSkipIntroOutroDrawerBody(onStateChanged: refreshBoth),
+            ),
+            _buildExpandableChoiceDrawerTile<bool>(
+              settingKey: 'episodes_order',
+              icon: CupertinoIcons.sort_down,
+              iconBgColor: AppleColors.systemGreen,
+              title: '默认剧集排序方式',
+              subtitle: '详情页与选集列表的默认排列顺序',
+              trailingText:
+                  widget.storage.episodesDescending ? '倒序（最新集）' : '正序（第 1 集起）',
+              currentValue: widget.storage.episodesDescending,
+              onStateChanged: refreshBoth,
+              options: const [
+                (false, '正序（第 1 集起）', '从第 1 集开始依次排列，适合从头追剧'),
+                (true, '倒序（最新集起）', '最新更新的集数排在最前，适合追更连载剧集'),
+              ],
+              onSelected: (val) async {
+                await widget.storage.setEpisodesDescending(val);
+                refreshBoth();
+              },
+            ),
+            AppleGroupedTile(
+              icon: CupertinoIcons.forward_end_fill,
+              iconBgColor: AppleColors.systemBlue,
+              title: '自动连播下一集',
+              subtitle: '当前剧集播放完毕后无缝切换下一集',
+              trailing: CupertinoSwitch(
+                value: widget.storage.autoNext,
+                activeTrackColor: AppleColors.systemGreen,
+                onChanged: (v) async {
+                  await widget.storage.setAutoNext(v);
+                  refreshBoth();
+                },
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -5273,88 +5874,111 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     final subs = widget.storage.getSubscriptions();
     final publicSubs = subs.where((s) => !s.isEffectivelyPrivate).toList();
     final publicSites = _config?.publicSupportedSites ?? const [];
+    final loggedDriveCount = NetdiskService.drives
+        .where((d) => widget.storage.isNetdiskLoggedIn(d.key))
+        .length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (publicSites.any((s) => s.isCatPaw))
-          _buildBreathingSettingCard(
-            bottomSpacing: 14,
-            child: AppleGroupedTile(
-              icon: CupertinoIcons.slider_horizontal_3,
-              iconBgColor: AppleColors.systemBlue,
-              title: 'CatPaw 本机配置',
-              subtitle: '管理该订阅的启用线路与来源设置',
-              onTap: _showCatPawSettings,
+        AppleGroupedSection(
+          header: '云盘扫码与 4K 原画账号',
+          footer: '扫码或粘贴 Cookie / Token 绑定后，玩偶哥哥、聚剧四盘、盘搜等 4K 原画线路将自动启用。',
+          children: [
+            AppleGroupedTile(
+              icon: CupertinoIcons.qrcode_viewfinder,
+              iconBgColor: const Color(0xFF0A84FF),
+              title: '我的云盘 · 网盘扫码与账号中心',
+              subtitle: '夸克（我的夸父）/ UC（我的优汐）/ 百度（我的嘟嘟）/ 阿里（我的阿狸）',
+              trailingText:
+                  loggedDriveCount > 0 ? '已登录 $loggedDriveCount 个' : '去扫码',
+              onTap: () => showNetdiskAccountSheet(
+                context,
+                widget.storage,
+                onChanged: () {
+                  refreshBoth();
+                  if (mounted) setState(() {});
+                },
+              ),
             ),
-          ),
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: AppleGroupedTile(
-            icon: CupertinoIcons.folder_fill,
-            iconBgColor: AppleColors.systemPurple,
-            title: '订阅源与分组管理中心',
-            subtitle: publicSubs.isEmpty
-                ? '批量导入、多仓切换与自定义分组（当前 ${publicSites.length} 可用片源）'
-                : '已导入 ${publicSubs.length} 个订阅 · ${publicSites.length} 个可用片源${depots.isNotEmpty ? " · ${depots.length} 个子仓库" : ""}',
-            trailingText: '${publicSubs.length} 订阅',
-            onTap: () async {
-              await _showSubscriptionManagerSheet();
-              if (context.mounted) refreshBoth();
-            },
-          ),
+          ],
         ),
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: AppleGroupedTile(
-            icon: CupertinoIcons.arrow_2_circlepath,
-            iconBgColor: AppleColors.systemGreen,
-            title: '跨平台备份导出 / 恢复',
-            subtitle: '与 Android、Windows、Mac、iPad 双向互通备份',
-            onTap: _showBackupRestoreDialog,
-          ),
+        const SizedBox(height: 22),
+        AppleGroupedSection(
+          header: '片源仓库与备份',
+          children: [
+            if (publicSites.any((s) => s.isCatPaw))
+              AppleGroupedTile(
+                icon: CupertinoIcons.slider_horizontal_3,
+                iconBgColor: AppleColors.systemBlue,
+                title: 'CatPaw 本机配置',
+                subtitle: '管理该订阅的启用线路与来源设置',
+                onTap: _showCatPawSettings,
+              ),
+            AppleGroupedTile(
+              icon: CupertinoIcons.folder_fill,
+              iconBgColor: AppleColors.systemPurple,
+              title: '订阅源与分组管理中心',
+              subtitle: publicSubs.isEmpty
+                  ? '批量导入、多仓切换与自定义分组（当前 ${publicSites.length} 可用片源）'
+                  : '已导入 ${publicSubs.length} 个订阅 · ${publicSites.length} 个可用片源${depots.isNotEmpty ? " · ${depots.length} 个子仓库" : ""}',
+              trailingText: '${publicSubs.length} 订阅',
+              onTap: () async {
+                await _showSubscriptionManagerSheet();
+                if (context.mounted) refreshBoth();
+              },
+            ),
+            AppleGroupedTile(
+              icon: CupertinoIcons.arrow_2_circlepath,
+              iconBgColor: AppleColors.systemGreen,
+              title: '跨平台备份导出 / 恢复',
+              subtitle: '与 Android、Windows、Mac、iPad 双向互通备份',
+              onTap: _showBackupRestoreDialog,
+            ),
+          ],
         ),
-        _buildBreathingSettingCard(
-          bottomSpacing: 14,
-          child: AppleGroupedTile(
-            icon: CupertinoIcons.arrow_down_circle_fill,
-            iconBgColor: AppleColors.systemOrange,
-            title: '检查版本更新',
-            subtitle: '当前正式版 $_currentAppVersion · 按当前设备检查更新',
-            trailingText: '检测更新',
-            onTap: _showUpdateCheckSheet,
-          ),
-        ),
-        _buildBreathingSettingCard(
-          child: AppleGroupedTile(
-            icon: CupertinoIcons.trash_fill,
-            iconBgColor: AppleColors.systemRed,
-            title: '清理海报与搜索缓存',
-            subtitle:
-                '海报内存缓存：${PosterLoader.memoryCacheSizeLabel} · 搜索历史 ${widget.storage.getSearchHistory(forPrivate: _privateSessionUnlocked).length} 条',
-            trailingText: '一键清理',
-            onTap: () async {
-              await PosterLoader.clearCache();
-              await widget.storage.clearSearchHistory(
-                forPrivate: _privateSessionUnlocked,
-              );
-              refreshBoth();
-              if (!context.mounted) return;
-              showCupertinoDialog<void>(
-                context: context,
-                barrierDismissible: true,
-                builder: (ctx) => CupertinoAlertDialog(
-                  title: const Text('缓存已清理'),
-                  content: const Text('已清空内存与磁盘海报缓存及搜索历史记录。'),
-                  actions: [
-                    CupertinoDialogAction(
-                      onPressed: () => Navigator.of(ctx).pop(),
-                      child: const Text('好的'),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
+        const SizedBox(height: 22),
+        AppleGroupedSection(
+          header: '系统更新与缓存存储',
+          children: [
+            AppleGroupedTile(
+              icon: CupertinoIcons.arrow_down_circle_fill,
+              iconBgColor: AppleColors.systemOrange,
+              title: '检查版本更新',
+              subtitle: '当前正式版 $_currentAppVersion · 按当前设备检查更新',
+              trailingText: '检测更新',
+              onTap: _showUpdateCheckSheet,
+            ),
+            AppleGroupedTile(
+              icon: CupertinoIcons.trash_fill,
+              iconBgColor: AppleColors.systemRed,
+              title: '清理海报与搜索缓存',
+              subtitle:
+                  '海报内存缓存：${PosterLoader.memoryCacheSizeLabel} · 搜索历史 ${widget.storage.getSearchHistory(forPrivate: _privateSessionUnlocked).length} 条',
+              trailingText: '一键清理',
+              onTap: () async {
+                await PosterLoader.clearCache();
+                await widget.storage.clearSearchHistory(
+                  forPrivate: _privateSessionUnlocked,
+                );
+                refreshBoth();
+                if (!context.mounted) return;
+                showCupertinoDialog<void>(
+                  context: context,
+                  barrierDismissible: true,
+                  builder: (ctx) => CupertinoAlertDialog(
+                    title: const Text('缓存已清理'),
+                    content: const Text('已清空内存与磁盘海报缓存及搜索历史记录。'),
+                    actions: [
+                      CupertinoDialogAction(
+                        onPressed: () => Navigator.of(ctx).pop(),
+                        child: const Text('好的'),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
         ),
       ],
     );
@@ -5421,34 +6045,34 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
             }
           },
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
             child: Row(
               children: [
                 DecoratedBox(
                   decoration: ShapeDecoration(
                     gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
                       colors: [
-                        iconBgColor.withValues(alpha: 0.24),
-                        iconBgColor.withValues(alpha: 0.12),
+                        Color.alphaBlend(const Color(0x28FFFFFF), iconBgColor),
+                        iconBgColor,
                       ],
                     ),
                     shape: RoundedSuperellipseBorder(
-                      borderRadius: BorderRadius.circular(11),
-                      side: BorderSide(
-                        color: iconBgColor.withValues(alpha: 0.45),
-                        width: 0.85,
+                      borderRadius: BorderRadius.circular(7.5),
+                      side: const BorderSide(
+                        color: Color(0x33FFFFFF),
+                        width: 0.5,
                       ),
                     ),
                   ),
                   child: SizedBox(
-                    width: 38,
-                    height: 38,
-                    child: Icon(icon, size: 18.5, color: iconBgColor),
+                    width: 30,
+                    height: 30,
+                    child: Icon(icon, size: 17, color: Colors.white),
                   ),
                 ),
-                const SizedBox(width: 14),
+                const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -5459,7 +6083,8 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                           color: AppleColors.labelPrimary,
                           fontSize: 15.5,
                           fontWeight: FontWeight.w600,
-                          letterSpacing: -0.2,
+                          letterSpacing: 0.1,
+                          height: 1.28,
                         ),
                       ),
                       const SizedBox(height: 3),
@@ -5469,58 +6094,42 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                           color: AppleColors.labelSecondary,
-                          fontSize: 12,
+                          fontSize: 12.5,
+                          height: 1.35,
+                          letterSpacing: 0.1,
                         ),
                       ),
                     ],
                   ),
                 ),
                 const SizedBox(width: 10),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 11,
-                    vertical: 5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: expanded
-                        ? const Color(0x330A84FF)
-                        : const Color(0x1CFFFFFF),
-                    borderRadius: BorderRadius.circular(999),
-                    border: Border.all(
-                      color: expanded
-                          ? const Color(0x885AC8FA)
-                          : const Color(0x28FFFFFF),
-                      width: 0.7,
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      trailingText,
+                      style: TextStyle(
+                        color: expanded
+                            ? AppleColors.systemBlue
+                            : AppleColors.labelSecondary,
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w400,
+                      ),
                     ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        trailingText,
-                        style: TextStyle(
-                          color: expanded
-                              ? const Color(0xFF5AC8FA)
-                              : const Color(0xE6F5F5F7),
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w600,
-                        ),
+                    const SizedBox(width: 5),
+                    AnimatedRotation(
+                      turns: expanded ? 0.5 : 0.0,
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeOutCubic,
+                      child: Icon(
+                        CupertinoIcons.chevron_down,
+                        size: 13.5,
+                        color: expanded
+                            ? AppleColors.systemBlue
+                            : AppleColors.labelTertiary,
                       ),
-                      const SizedBox(width: 5),
-                      AnimatedRotation(
-                        turns: expanded ? 0.5 : 0.0,
-                        duration: const Duration(milliseconds: 220),
-                        curve: Curves.easeOutCubic,
-                        child: Icon(
-                          CupertinoIcons.chevron_down,
-                          size: 12.5,
-                          color: expanded
-                              ? const Color(0xFF5AC8FA)
-                              : AppleColors.labelSecondary,
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -5847,10 +6456,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
             children: [
               const Expanded(
                 child: Text(
-                  '跳过片头精准时间节点',
+                  '跳过片头时长',
                   style: TextStyle(
                     color: AppleColors.labelSecondary,
-                    fontSize: 12,
+                    fontSize: 12.5,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -5939,10 +6548,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
             children: [
               const Expanded(
                 child: Text(
-                  '跳过片尾精准时间节点',
+                  '跳过片尾时长',
                   style: TextStyle(
                     color: AppleColors.labelSecondary,
-                    fontSize: 12,
+                    fontSize: 12.5,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -6031,9 +6640,34 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     );
   }
 
-  static String get _currentAppVersion => !kIsWeb && Platform.isWindows
-      ? '0.5.5'
-      : (!kIsWeb && Platform.isMacOS ? '0.5.4' : '0.5.5');
+  static const String _currentAppVersion = '0.5.6';
+
+  static String _formatCleanReleaseNotes(String raw) {
+    final lines = raw.split(RegExp(r'\r?\n'));
+    final out = <String>[];
+    for (var line in lines) {
+      var trimmed = line.trim();
+      if (trimmed.isEmpty) continue;
+      trimmed = trimmed
+          .replaceFirst(RegExp(r'^#{1,6}\s*'), '')
+          .replaceAll('**', '')
+          .replaceAll('`', '')
+          .trim();
+      if (trimmed.startsWith('- Platform:') ||
+          trimmed.startsWith('Platform:') ||
+          trimmed.startsWith('- Commit:') ||
+          trimmed.startsWith('Commit:')) {
+        continue;
+      }
+      if (trimmed.toLowerCase() == 'changes') {
+        trimmed = '本次更新内容：';
+      } else if (trimmed.startsWith('- ')) {
+        trimmed = '• ${trimmed.substring(2).trim()}';
+      }
+      out.add(trimmed);
+    }
+    return out.join('\n');
+  }
 
   static bool _isRemoteVersionNewer(String remote, String current) {
     List<int> parseParts(String v) => v
@@ -6075,7 +6709,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
               try {
                 release = await AppUpdate.check();
                 latestVersion = release!.version;
-                releaseNotes = release!.notes;
+                releaseNotes = _formatCleanReleaseNotes(release!.notes);
                 downloadUrl = release!.windowsUrl?.toString() ?? '';
                 hasNewer = _isRemoteVersionNewer(latestVersion, _currentAppVersion);
                 statusText = hasNewer ? '发现新版本 v$latestVersion（当前 v$_currentAppVersion）'
@@ -7131,18 +7765,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                   Row(
                     children: [
                       Expanded(
-                        child: CupertinoSearchTextField(
+                        child: AppleSearchField(
                           controller: searchCtrl,
                           placeholder: '快速筛选片源名称或分组…',
-                          backgroundColor: AppleColors.groupedSecondary,
-                          style: const TextStyle(
-                            color: AppleColors.labelPrimary,
-                            fontSize: 14,
-                          ),
-                          placeholderStyle: const TextStyle(
-                            color: AppleColors.labelSecondary,
-                            fontSize: 13.5,
-                          ),
                           onChanged: (v) => setPickerState(() => searchQuery = v),
                         ),
                       ),
@@ -7926,12 +8551,14 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
 /// and also supports full swipe or tapping the red delete button to remove a single watch history item.
 class _SwipeToDeleteHistoryTile extends StatefulWidget {
   final WatchHistoryEntry entry;
+  final String? posterUrl;
   final VoidCallback onTap;
   final VoidCallback onDelete;
 
   const _SwipeToDeleteHistoryTile({
     super.key,
     required this.entry,
+    this.posterUrl,
     required this.onTap,
     required this.onDelete,
   });
@@ -7979,12 +8606,33 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
     }
   }
 
+  Widget _buildFallbackPosterPlaceholder() {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFF26262C), Color(0xFF17171B)],
+        ),
+      ),
+      alignment: Alignment.center,
+      child: const Icon(
+        CupertinoIcons.film,
+        color: AppleColors.labelTertiary,
+        size: 22,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final h = widget.entry;
+    final effectivePoster = (widget.posterUrl ?? h.poster).trim();
+    final pct = (h.progressFraction * 100).round();
+    final epLabel = h.episode.isEmpty ? '第 ${h.index + 1} 集' : h.episode;
     final revealProgress = (-_dragOffset / _actionWidth).clamp(0.0, 1.0);
     return ClipRRect(
-      borderRadius: BorderRadius.circular(14),
+      borderRadius: BorderRadius.circular(18),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onHorizontalDragStart: _handleDragStart,
@@ -8016,7 +8664,7 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                             Color(0xFFFF453A),
                           ],
                         ),
-                        borderRadius: BorderRadius.circular(14),
+                        borderRadius: BorderRadius.circular(18),
                       ),
                       child: const Column(
                         mainAxisAlignment: MainAxisAlignment.center,
@@ -8049,23 +8697,15 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                   : const Duration(milliseconds: 220),
               curve: Curves.easeOutCubic,
               transform: Matrix4.translationValues(_dragOffset, 0, 0),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1C1C23),
-                borderRadius: BorderRadius.circular(14),
-              ),
               child: Listener(
                 onPointerDown: (_) {
                   if (_dragOffset <= -10) {
                     _closeIfOpen();
                   }
                 },
-                child: AppleGroupedTile(
-                  icon: CupertinoIcons.play_circle_fill,
-                  iconBgColor: AppleColors.systemBlue,
-                  title: h.title,
-                  subtitle:
-                      '${h.episode.isEmpty ? "第 ${h.index + 1} 集" : h.episode} · 已看 ${(h.progressFraction * 100).round()}%',
-                  trailingText: '继续播放',
+                child: ApplePressableScale(
+                  pressedScale: 0.97,
+                  pressedOpacity: 0.88,
                   onTap: () {
                     if (_dragOffset <= -10) {
                       _closeIfOpen();
@@ -8073,6 +8713,138 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                     }
                     widget.onTap();
                   },
+                  child: AppleSettingsGlassCard(
+                    borderRadius: BorderRadius.circular(18),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 52,
+                          height: 72,
+                          child: AppleSmoothClipCard(
+                            borderRadius: 12,
+                            backgroundColor: const Color(0xFF1A1A20),
+                            rimStrength: 0.85,
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                PosterImage(
+                                  url: effectivePoster,
+                                  title: h.title,
+                                  placeholder:
+                                      _buildFallbackPosterPlaceholder(),
+                                ),
+                                Positioned(
+                                  right: 4,
+                                  bottom: 4,
+                                  child: Container(
+                                    width: 18,
+                                    height: 18,
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xB8000000),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: const Color(0x66FFFFFF),
+                                        width: 0.6,
+                                      ),
+                                    ),
+                                    alignment: Alignment.center,
+                                    child: const Icon(
+                                      CupertinoIcons.play_fill,
+                                      color: Colors.white,
+                                      size: 9.5,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 13),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                h.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: AppleColors.labelPrimary,
+                                  fontSize: 15.5,
+                                  fontWeight: FontWeight.w600,
+                                  letterSpacing: -0.25,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                '$epLabel · 已看 $pct%',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: AppleColors.labelSecondary,
+                                  fontSize: 12.5,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(999),
+                                child: LinearProgressIndicator(
+                                  value: h.progressFraction > 0
+                                      ? h.progressFraction
+                                      : 0.12,
+                                  minHeight: 3.5,
+                                  backgroundColor: AppleColors.groupedTertiary,
+                                  valueColor:
+                                      const AlwaysStoppedAnimation<Color>(
+                                    AppleColors.systemBlue,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0x260A84FF),
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: const Color(0x550A84FF),
+                              width: 0.6,
+                            ),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                '继续播放',
+                                style: TextStyle(
+                                  color: Color(0xFF5AC8FA),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              SizedBox(width: 3),
+                              Icon(
+                                CupertinoIcons.chevron_right,
+                                color: Color(0xFF5AC8FA),
+                                size: 12,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               ),
             ),

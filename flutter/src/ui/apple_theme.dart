@@ -20,6 +20,7 @@ class AppleColors {
   static const Color fillStrong = Color(0x59787884);
   static const Color systemBlue = Color(0xFF0A84FF);
   static const Color systemCyan = Color(0xFF64D2FF);
+  static const Color systemTeal = Color(0xFF5AC8FA);
   static const Color systemIndigo = Color(0xFF5E5CE6);
   static const Color systemPurple = Color(0xFFBF5AF2);
   static const Color systemGreen = Color(0xFF30D158);
@@ -229,6 +230,7 @@ class _LiquidRimPainter extends CustomPainter {
 /// renderers that cannot sample the backdrop through a fragment shader.
 class GlassworkBackdrop extends StatefulWidget {
   static final reduceTransparency = ValueNotifier<bool>(false);
+  static final intensity = ValueNotifier<double>(0.68);
   final double radius;
   final Widget child;
   const GlassworkBackdrop({super.key, required this.radius, required this.child});
@@ -239,6 +241,10 @@ class GlassworkBackdrop extends StatefulWidget {
 class _GlassworkBackdropState extends State<GlassworkBackdrop> {
   static Future<FragmentProgram>? _program;
   FragmentShader? _shader;
+  late final Listenable _mergedListenable = Listenable.merge([
+    GlassworkBackdrop.reduceTransparency,
+    GlassworkBackdrop.intensity,
+  ]);
   @override
   void initState() {
     super.initState();
@@ -259,20 +265,38 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
   }
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: GlassworkBackdrop.reduceTransparency,
-      builder: (context, reduce, _) {
-        if (reduce || MediaQuery.highContrastOf(context) || MediaQuery.disableAnimationsOf(context)) {
+    return AnimatedBuilder(
+      animation: _mergedListenable,
+      builder: (context, _) {
+        final reduce = GlassworkBackdrop.reduceTransparency.value;
+        final strength = GlassworkBackdrop.intensity.value.clamp(0.0, 1.0);
+        if (reduce ||
+            strength <= 0.02 ||
+            MediaQuery.highContrastOf(context) ||
+            MediaQuery.disableAnimationsOf(context)) {
           return ColoredBox(color: const Color(0xF51E1E22), child: widget.child);
         }
         final shader = _shader;
         if (shader != null) {
           shader.setFloat(2, widget.radius);
-          shader.setFloat(3, MediaQuery.devicePixelRatioOf(context));
+          shader.setFloat(
+            3,
+            MediaQuery.devicePixelRatioOf(context) * (0.25 + 1.35 * strength),
+          );
         }
         return BackdropFilter(
-          filter: shader == null ? liquidGlassFilter(blur: 2, saturation: 1.6) : ImageFilter.shader(shader),
-          child: shader == null ? ColoredBox(color: const Color(0xb31e1e22), child: widget.child) : widget.child,
+          filter: shader == null
+              ? liquidGlassFilter(
+                  blur: 1.0 + 18.0 * strength,
+                  saturation: 1.05 + 0.80 * strength,
+                )
+              : ImageFilter.shader(shader),
+          child: shader == null
+              ? ColoredBox(
+                  color: Color.fromRGBO(30, 30, 34, (0.88 - 0.34 * strength).clamp(0.45, 0.92)),
+                  child: widget.child,
+                )
+              : widget.child,
         );
       },
     );
@@ -366,33 +390,41 @@ class LiquidGlass extends StatelessWidget {
               )
             : GlassworkBackdrop(
                 radius: borderRadius,
-                child: CustomPaint(
-                  foregroundPainter:
-                      _LiquidRimPainter(shape: shape, strength: rimStrength),
-                  child: Container(
-                    width: width,
-                    height: height,
-                    decoration: ShapeDecoration(
-                      shape: shape,
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          Color.alphaBlend(
-                            const Color(0x12FFFFFF),
-                            tint.withValues(alpha: math.min(tint.a, 0.08)),
-                          ),
-                          tint.withValues(alpha: math.min(tint.a, 0.04)),
-                          Color.alphaBlend(
-                            const Color(0x08FFFFFF),
-                            tint.withValues(alpha: math.min(tint.a, 0.06)),
-                          ),
-                        ],
-                        stops: const [0.0, 0.52, 1.0],
+                child: ValueListenableBuilder<double>(
+                  valueListenable: GlassworkBackdrop.intensity,
+                  builder: (context, strength, _) {
+                    final s = strength.clamp(0.0, 1.0);
+                    return CustomPaint(
+                      foregroundPainter: _LiquidRimPainter(
+                        shape: shape,
+                        strength: rimStrength * (0.28 + 0.92 * s),
                       ),
-                    ),
-                    child: content,
-                  ),
+                      child: Container(
+                        width: width,
+                        height: height,
+                        decoration: ShapeDecoration(
+                          shape: shape,
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              Color.alphaBlend(
+                                Color.fromRGBO(255, 255, 255, 0.03 + 0.08 * s),
+                                tint.withValues(alpha: math.min(tint.a, 0.08)),
+                              ),
+                              tint.withValues(alpha: math.min(tint.a, 0.04)),
+                              Color.alphaBlend(
+                                Color.fromRGBO(255, 255, 255, 0.015 + 0.045 * s),
+                                tint.withValues(alpha: math.min(tint.a, 0.06)),
+                              ),
+                            ],
+                            stops: const [0.0, 0.52, 1.0],
+                          ),
+                        ),
+                        child: content,
+                      ),
+                    );
+                  },
                 ),
               ),
       ),
@@ -526,31 +558,40 @@ class AppleGlassSurface extends StatelessWidget {
               )
             : GlassworkBackdrop(
                 radius: radius.topLeft.x,
-                child: CustomPaint(
-                  foregroundPainter: border == null
-                      ? _LiquidRimPainter(shape: shape, strength: 0.92)
-                      : null,
-                  child: Container(
-                    width: width,
-                    height: height,
-                    padding: padding,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: [
-                          Color.alphaBlend(
-                            const Color(0x10FFFFFF),
-                            effectiveColor.withValues(alpha: math.min(effectiveColor.a, .04)),
+                child: ValueListenableBuilder<double>(
+                  valueListenable: GlassworkBackdrop.intensity,
+                  builder: (context, strength, _) {
+                    final s = strength.clamp(0.0, 1.0);
+                    return CustomPaint(
+                      foregroundPainter: border == null
+                          ? _LiquidRimPainter(
+                              shape: shape,
+                              strength: 0.25 + 0.85 * s,
+                            )
+                          : null,
+                      child: Container(
+                        width: width,
+                        height: height,
+                        padding: padding,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              Color.alphaBlend(
+                                Color.fromRGBO(255, 255, 255, 0.02 + 0.07 * s),
+                                effectiveColor.withValues(alpha: math.min(effectiveColor.a, .04)),
+                              ),
+                              effectiveColor.withValues(alpha: math.min(effectiveColor.a, .02)),
+                            ],
                           ),
-                          effectiveColor.withValues(alpha: math.min(effectiveColor.a, .02)),
-                        ],
+                          borderRadius: radius,
+                          border: border,
+                        ),
+                        child: child,
                       ),
-                      borderRadius: radius,
-                      border: border,
-                    ),
-                    child: child,
-                  ),
+                    );
+                  },
                 ),
               ),
       ),
@@ -912,6 +953,231 @@ class _DockItemState extends State<_DockItem> {
   }
 }
 
+/// Tactile iOS 27 spring-physics press animation wrapper (`整体点击动效`):
+/// smoothly compresses on touch-down, holds briefly even on quick taps so the
+/// depression is always perceptible, and rebounds with an authentic Apple
+/// spring overshoot curve (`Cubic(0.22, 1.38, 0.36, 1.0)`).
+class ApplePressableScale extends StatefulWidget {
+  final Widget child;
+  final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
+  final double pressedScale;
+  final double pressedOpacity;
+  final bool enableHaptic;
+  final HitTestBehavior behavior;
+
+  const ApplePressableScale({
+    super.key,
+    required this.child,
+    this.onTap,
+    this.onLongPress,
+    this.pressedScale = 0.95,
+    this.pressedOpacity = 0.90,
+    this.enableHaptic = true,
+    this.behavior = HitTestBehavior.opaque,
+  });
+
+  @override
+  State<ApplePressableScale> createState() => _ApplePressableScaleState();
+}
+
+class _ApplePressableScaleState extends State<ApplePressableScale>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 110),
+      reverseDuration: const Duration(milliseconds: 280),
+      value: 0.0,
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _handleTapDown(TapDownDetails _) {
+    if (widget.onTap == null && widget.onLongPress == null) return;
+    _controller.animateTo(
+      1.0,
+      duration: const Duration(milliseconds: 105),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  void _rebound() {
+    if (!mounted) return;
+    if (_controller.value < 0.48) {
+      _controller
+          .animateTo(
+            0.82,
+            duration: const Duration(milliseconds: 55),
+            curve: Curves.easeOut,
+          )
+          .then((_) {
+            if (mounted) {
+              _controller.animateTo(
+                0.0,
+                duration: const Duration(milliseconds: 290),
+                curve: const Cubic(0.22, 1.38, 0.36, 1.0),
+              );
+            }
+          });
+    } else {
+      _controller.animateTo(
+        0.0,
+        duration: const Duration(milliseconds: 290),
+        curve: const Cubic(0.22, 1.38, 0.36, 1.0),
+      );
+    }
+  }
+
+  void _handleTapUp(TapUpDetails _) => _rebound();
+
+  void _handleTapCancel() {
+    if (!mounted) return;
+    _controller.animateTo(
+      0.0,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  void _handleTap() {
+    if (widget.onTap == null) return;
+    if (widget.enableHaptic) {
+      HapticFeedback.selectionClick();
+    }
+    widget.onTap!();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.onTap == null && widget.onLongPress == null) {
+      return widget.child;
+    }
+    return GestureDetector(
+      behavior: widget.behavior,
+      onTapDown: _handleTapDown,
+      onTapUp: _handleTapUp,
+      onTapCancel: _handleTapCancel,
+      onTap: widget.onTap != null ? _handleTap : null,
+      onLongPress: widget.onLongPress,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) {
+          final t = _controller.value.clamp(0.0, 1.2);
+          final scale = 1.0 - (1.0 - widget.pressedScale) * t;
+          final opacity =
+              (1.0 - (1.0 - widget.pressedOpacity) * t.clamp(0.0, 1.0))
+                  .clamp(0.0, 1.0);
+          return Transform.scale(
+            scale: scale,
+            alignment: Alignment.center,
+            child: Opacity(
+              opacity: opacity,
+              child: child,
+            ),
+          );
+        },
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+/// Anti-aliased rounded card container that clips its [child] first and paints
+/// a dual-stop specular anti-aliased rim stroke OVER (and outside) the clip
+/// boundary so high-contrast posters/backdrops never exhibit corner jaggies
+/// (`交界处锯齿`) or subpixel bleed.
+class AppleSmoothClipCard extends StatelessWidget {
+  final Widget child;
+  final double borderRadius;
+  final Color? backgroundColor;
+  final List<BoxShadow>? boxShadow;
+  final double rimStrength;
+  final Color? borderColor;
+
+  const AppleSmoothClipCard({
+    super.key,
+    required this.child,
+    this.borderRadius = 20,
+    this.backgroundColor,
+    this.boxShadow,
+    this.rimStrength = 0.90,
+    this.borderColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = BorderRadius.circular(borderRadius);
+    final shape = RoundedRectangleBorder(borderRadius: radius);
+    Widget inner = child;
+    if (backgroundColor != null) {
+      inner = ColoredBox(color: backgroundColor!, child: inner);
+    }
+    final clipped = ClipRRect(
+      borderRadius: radius,
+      clipBehavior: Clip.antiAlias,
+      child: inner,
+    );
+    final rimmed = CustomPaint(
+      foregroundPainter: borderColor != null
+          ? _SolidSmoothRimPainter(
+              radius: borderRadius,
+              color: borderColor!,
+            )
+          : _LiquidRimPainter(
+              shape: shape,
+              strength: rimStrength,
+            ),
+      child: clipped,
+    );
+    if (boxShadow == null || boxShadow!.isEmpty) {
+      return rimmed;
+    }
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: radius,
+        boxShadow: boxShadow,
+      ),
+      child: rimmed,
+    );
+  }
+}
+
+class _SolidSmoothRimPainter extends CustomPainter {
+  final double radius;
+  final Color color;
+  const _SolidSmoothRimPainter({required this.radius, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) return;
+    final rect = Offset.zero & size;
+    final rrect = RRect.fromRectAndRadius(
+      rect.deflate(0.45),
+      Radius.circular(math.max(0.0, radius - 0.45)),
+    );
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.15
+      ..isAntiAlias = true
+      ..color = color;
+    canvas.drawRRect(rrect, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _SolidSmoothRimPainter old) =>
+      old.radius != radius || old.color != color;
+}
+
 /// iOS 27 Liquid Glass capsule button: pearl-white primary lens or translucent
 /// specular Glasswork glass for secondary actions.
 class AppleCapsuleButton extends StatelessWidget {
@@ -1020,15 +1286,86 @@ class AppleCapsuleButton extends StatelessWidget {
           ? surface
           : GlassworkBackdrop(radius: 999, child: surface);
     }
-    return CupertinoButton(
-      padding: EdgeInsets.zero,
-      minSize: compact ? 32 : 42,
-      pressedOpacity: 0.72,
-      onPressed: onPressed,
+    return ApplePressableScale(
+      pressedScale: compact ? 0.93 : 0.95,
+      pressedOpacity: 0.86,
+      onTap: onPressed,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(minHeight: compact ? 32 : 42),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(999),
+          clipBehavior: Clip.antiAlias,
+          child: buttonBody,
+        ),
+      ),
+    );
+  }
+}
+
+/// High-frame-rate (120fps) Liquid Glass card surface for scrollable Settings groups
+/// and expandable drawers: reacts live to [GlassworkBackdrop.intensity] with the same
+/// Glasswork dual-rim specular optics and refractive gradient sheen, without allocating
+/// per-card GPU `BackdropFilter` saveLayers that thrash during route transitions or `AnimatedSize`.
+class AppleSettingsGlassCard extends StatelessWidget {
+  final Widget child;
+  final BorderRadius? borderRadius;
+  final EdgeInsetsGeometry? padding;
+
+  const AppleSettingsGlassCard({
+    super.key,
+    required this.child,
+    this.borderRadius,
+    this.padding,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final radius = borderRadius ?? BorderRadius.circular(16);
+    final shape = RoundedRectangleBorder(borderRadius: radius);
+    return RepaintBoundary(
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: radius,
         clipBehavior: Clip.antiAlias,
-        child: buttonBody,
+        child: ValueListenableBuilder<double>(
+          valueListenable: GlassworkBackdrop.intensity,
+          builder: (context, strength, _) {
+            final s = strength.clamp(0.0, 1.0);
+            final topSheen = Color.fromRGBO(255, 255, 255, 0.04 + 0.12 * s);
+            final baseTop = Color.fromRGBO(
+              34,
+              36,
+              46,
+              (0.84 - 0.30 * s).clamp(0.46, 0.88),
+            );
+            final baseBottom = Color.fromRGBO(
+              22,
+              23,
+              30,
+              (0.88 - 0.28 * s).clamp(0.52, 0.92),
+            );
+            return CustomPaint(
+              foregroundPainter: _LiquidRimPainter(
+                shape: shape,
+                strength: 0.28 + 0.82 * s,
+              ),
+              child: Container(
+                padding: padding,
+                decoration: BoxDecoration(
+                  borderRadius: radius,
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Color.alphaBlend(topSheen, baseTop),
+                      baseBottom,
+                    ],
+                  ),
+                ),
+                child: child,
+              ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -1054,8 +1391,8 @@ class AppleGroupedSection extends StatelessWidget {
         separated.add(
           Container(
             height: 0.5,
-            margin: const EdgeInsets.only(left: 64, right: 16),
-            color: const Color(0x22FFFFFF),
+            margin: const EdgeInsets.only(left: 58),
+            color: const Color(0x24FFFFFF),
           ),
         );
       }
@@ -1065,21 +1402,20 @@ class AppleGroupedSection extends StatelessWidget {
       children: [
         if (header != null && header!.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(left: 14, bottom: 9),
+            padding: const EdgeInsets.only(left: 16, bottom: 8),
             child: Text(
-              header!.toUpperCase(),
+              header!,
               style: const TextStyle(
-                color: AppleColors.labelSecondary,
-                fontSize: 12,
+                color: Color(0xFFD6D6E0),
+                fontSize: 13,
                 fontWeight: FontWeight.w600,
-                letterSpacing: 0.4,
+                letterSpacing: 0.3,
               ),
             ),
           ),
-        AppleGlassSurface(
-          borderRadius: BorderRadius.circular(20),
+        AppleSettingsGlassCard(
+          borderRadius: BorderRadius.circular(16),
           padding: EdgeInsets.zero,
-          color: const Color(0xB81C1C22),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: separated,
@@ -1087,13 +1423,14 @@ class AppleGroupedSection extends StatelessWidget {
         ),
         if (footer != null && footer!.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(left: 14, top: 8, right: 14),
+            padding: const EdgeInsets.only(left: 16, top: 8, right: 16),
             child: Text(
               footer!,
               style: const TextStyle(
                 color: AppleColors.labelSecondary,
-                fontSize: 12,
+                fontSize: 12.5,
                 height: 1.45,
+                letterSpacing: 0.1,
               ),
             ),
           ),
@@ -1102,7 +1439,7 @@ class AppleGroupedSection extends StatelessWidget {
   }
 }
 
-/// Settings-style list row with a translucent Glasswork icon badge, title, subtitle and capsule trailing badge.
+/// iOS System Settings list row: vivid superellipse icon badge, crisp title, optional subtitle, and clean right-hand value.
 class AppleGroupedTile extends StatelessWidget {
   final IconData icon;
   final double minHeight;
@@ -1115,7 +1452,7 @@ class AppleGroupedTile extends StatelessWidget {
   const AppleGroupedTile({
     super.key,
     required this.icon,
-    this.minHeight = 70,
+    this.minHeight = 52,
     this.iconBgColor = AppleColors.systemBlue,
     required this.title,
     this.subtitle,
@@ -1128,36 +1465,37 @@ class AppleGroupedTile extends StatelessWidget {
     final content = ConstrainedBox(
       constraints: BoxConstraints(minHeight: minHeight),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
         child: Row(
           children: [
             DecoratedBox(
               decoration: ShapeDecoration(
                 gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
                   colors: [
-                    iconBgColor.withValues(alpha: 0.24),
-                    iconBgColor.withValues(alpha: 0.12),
+                    Color.alphaBlend(const Color(0x28FFFFFF), iconBgColor),
+                    iconBgColor,
                   ],
                 ),
                 shape: RoundedSuperellipseBorder(
-                  borderRadius: BorderRadius.circular(11),
-                  side: BorderSide(
-                    color: iconBgColor.withValues(alpha: 0.45),
-                    width: 0.85,
+                  borderRadius: BorderRadius.circular(7.5),
+                  side: const BorderSide(
+                    color: Color(0x33FFFFFF),
+                    width: 0.5,
                   ),
                 ),
               ),
               child: SizedBox(
-                width: 38,
-                height: 38,
-                child: Icon(icon, color: iconBgColor, size: 18.5),
+                width: 30,
+                height: 30,
+                child: Icon(icon, color: Colors.white, size: 17),
               ),
             ),
-            const SizedBox(width: 14),
+            const SizedBox(width: 12),
             Expanded(
               child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
@@ -1166,7 +1504,8 @@ class AppleGroupedTile extends StatelessWidget {
                       color: AppleColors.labelPrimary,
                       fontSize: 15.5,
                       fontWeight: FontWeight.w600,
-                      letterSpacing: -0.2,
+                      letterSpacing: 0.1,
+                      height: 1.28,
                     ),
                   ),
                   if (subtitle != null && subtitle!.isNotEmpty) ...[
@@ -1177,8 +1516,9 @@ class AppleGroupedTile extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: AppleColors.labelSecondary,
-                        fontSize: 12,
-                        height: 1.35,
+                        fontSize: 12.5,
+                        height: 1.38,
+                        letterSpacing: 0.1,
                       ),
                     ),
                   ],
@@ -1187,22 +1527,20 @@ class AppleGroupedTile extends StatelessWidget {
             ),
             if (trailingText != null && trailingText!.isNotEmpty) ...[
               const SizedBox(width: 10),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4.5),
-                decoration: BoxDecoration(
-                  color: const Color(0x1CFFFFFF),
-                  borderRadius: BorderRadius.circular(999),
-                  border: Border.all(
-                    color: const Color(0x28FFFFFF),
-                    width: 0.7,
-                  ),
-                ),
-                child: Text(
-                  trailingText!,
-                  style: const TextStyle(
-                    color: Color(0xE6F5F5F7),
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w500,
+              Flexible(
+                flex: 0,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 160),
+                  child: Text(
+                    trailingText!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: AppleColors.labelSecondary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w400,
+                      letterSpacing: 0.1,
+                    ),
                   ),
                 ),
               ),
@@ -1223,14 +1561,11 @@ class AppleGroupedTile extends StatelessWidget {
       ),
     );
     if (onTap == null) return content;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        highlightColor: Colors.white10,
-        splashColor: Colors.transparent,
-        child: content,
-      ),
+    return ApplePressableScale(
+      pressedScale: 0.982,
+      pressedOpacity: 0.84,
+      onTap: onTap,
+      child: content,
     );
   }
 }
@@ -1346,13 +1681,15 @@ Future<T?> showAppleModalSheet<T>({
 }
 
 /// iOS 27 Liquid Glass ambient app background: deep obsidian or themed canvas with
-/// optional custom wallpaper, soft refractive ambient light, and blurred artwork bleed.
-class AppleAmbientBackground extends StatelessWidget {
+/// breathing dynamic flowing-light aurora orbs (`呼吸式动态流光氛围`), optional custom
+/// wallpaper, and blurred artwork bleed.
+class AppleAmbientBackground extends StatefulWidget {
   final Widget? artwork;
   final Widget? customWallpaper;
   final String preset;
   final bool showAmbientArtwork;
   final double blurSigma;
+  final bool animate;
 
   const AppleAmbientBackground({
     super.key,
@@ -1361,55 +1698,114 @@ class AppleAmbientBackground extends StatelessWidget {
     this.preset = 'obsidian',
     this.showAmbientArtwork = true,
     this.blurSigma = 60,
+    this.animate = true,
   });
 
-  (List<Color>, Color) _resolveThemeColors() {
-    switch (preset) {
+  @override
+  State<AppleAmbientBackground> createState() => _AppleAmbientBackgroundState();
+}
+
+class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _breathController;
+
+  bool get _shouldAnimate {
+    if (!widget.animate || !widget.showAmbientArtwork) return false;
+    if (!kIsWeb && Platform.environment.containsKey('FLUTTER_TEST')) {
+      return false;
+    }
+    return true;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _breathController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 7800),
+      value: 0.45,
+    );
+    if (_shouldAnimate) {
+      _breathController.repeat(reverse: true);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant AppleAmbientBackground oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_shouldAnimate && !_breathController.isAnimating) {
+      _breathController.repeat(reverse: true);
+    } else if (!_shouldAnimate && _breathController.isAnimating) {
+      _breathController.stop();
+      _breathController.value = 0.45;
+    }
+  }
+
+  @override
+  void dispose() {
+    _breathController.dispose();
+    super.dispose();
+  }
+
+  (List<Color>, Color, Color, Color) _resolveThemeColors() {
+    switch (widget.preset) {
       case 'midnight':
         return (
           const [Color(0xFF10203B), Color(0xFF091122), Color(0xFF03050A)],
-          const Color(0x260A84FF),
+          const Color(0x340A84FF),
+          const Color(0x2864D2FF),
+          const Color(0x245E5CE6),
         );
       case 'aurora':
         return (
           const [Color(0xFF231338), Color(0xFF120A1E), Color(0xFF05020A)],
-          const Color(0x26BF5AF2),
+          const Color(0x36BF5AF2),
+          const Color(0x28FF375F),
+          const Color(0x245AC8FA),
         );
       case 'amber':
         return (
           const [Color(0xFF2D1D12), Color(0xFF150D08), Color(0xFF060402)],
-          const Color(0x24FF9F0A),
+          const Color(0x32FF9F0A),
+          const Color(0x24FF453A),
+          const Color(0x20FFD60A),
         );
       case 'emerald':
         return (
           const [Color(0xFF102A24), Color(0xFF081613), Color(0xFF020706)],
-          const Color(0x2230D158),
+          const Color(0x3030D158),
+          const Color(0x2464D2FF),
+          const Color(0x2034C759),
         );
       default:
         return (
-          const [Color(0xFF15161E), Color(0xFF0A0B0F), Color(0xFF000000)],
-          const Color(0x1864D2FF),
+          const [Color(0xFF15161E), Color(0xFF0A0B0F), Color(0xFF020305)],
+          const Color(0x2A5AC8FA),
+          const Color(0x225E5CE6),
+          const Color(0x1E0A84FF),
         );
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final (gradientColors, radialGlow) = _resolveThemeColors();
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        DecoratedBox(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: gradientColors,
-              stops: const [0.0, 0.38, 0.82],
+    final (gradientColors, primaryGlow, secondaryGlow, accentGlow) =
+        _resolveThemeColors();
+    return RepaintBoundary(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: gradientColors,
+                stops: const [0.0, 0.38, 0.82],
+              ),
             ),
           ),
-        ),
-        if (customWallpaper != null)
+        if (widget.customWallpaper != null)
           Positioned.fill(
             child: IgnorePointer(
               child: Stack(
@@ -1417,11 +1813,11 @@ class AppleAmbientBackground extends StatelessWidget {
                 children: [
                   ImageFiltered(
                     imageFilter: ImageFilter.blur(
-                      sigmaX: (blurSigma * 0.35).clamp(8.0, 36.0),
-                      sigmaY: (blurSigma * 0.35).clamp(8.0, 36.0),
+                      sigmaX: (widget.blurSigma * 0.35).clamp(8.0, 36.0),
+                      sigmaY: (widget.blurSigma * 0.35).clamp(8.0, 36.0),
                       tileMode: TileMode.decal,
                     ),
-                    child: customWallpaper,
+                    child: widget.customWallpaper,
                   ),
                   const DecoratedBox(
                     decoration: BoxDecoration(
@@ -1440,7 +1836,7 @@ class AppleAmbientBackground extends StatelessWidget {
               ),
             ),
           ),
-                if (artwork != null && showAmbientArtwork)
+        if (widget.artwork != null && widget.showAmbientArtwork)
           Positioned(
             top: 0,
             left: 0,
@@ -1464,37 +1860,272 @@ class AppleAmbientBackground extends StatelessWidget {
                     child: ImageFiltered(
                       imageFilter: ImageFilter.blur(
                         sigmaX: _isWindowsDesktop
-                            ? math.min(blurSigma, 24.0)
-                            : blurSigma,
+                            ? math.min(widget.blurSigma, 24.0)
+                            : widget.blurSigma,
                         sigmaY: _isWindowsDesktop
-                            ? math.min(blurSigma, 24.0)
-                            : blurSigma,
+                            ? math.min(widget.blurSigma, 24.0)
+                            : widget.blurSigma,
                         tileMode: TileMode.decal,
                       ),
-                      child: artwork,
+                      child: widget.artwork,
                     ),
                   ),
                 ),
               ),
             ),
           ),
-        Positioned(
-          top: -240,
-          left: -80,
-          right: -80,
-          height: 540,
+        Positioned.fill(
           child: IgnorePointer(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: RadialGradient(
-                  radius: 0.75,
-                  colors: [radialGlow, const Color(0x00000000)],
-                ),
-              ),
+            child: AnimatedBuilder(
+              animation: _breathController,
+              builder: (context, _) {
+                final t = Curves.easeInOutSine.transform(_breathController.value);
+                final active = widget.showAmbientArtwork ? 1.0 : 0.45;
+                final pAlpha = (primaryGlow.a * (0.72 + 0.34 * t) * active).clamp(0.0, 1.0);
+                final sAlpha = (secondaryGlow.a * (1.02 - 0.32 * t) * active).clamp(0.0, 1.0);
+                final aAlpha = (accentGlow.a * (0.68 + 0.32 * math.sin(t * math.pi)) * active).clamp(0.0, 1.0);
+                return Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          center: Alignment(-0.35 + 0.70 * t, -0.78 + 0.16 * t),
+                          radius: 0.78 + 0.22 * t,
+                          colors: [
+                            primaryGlow.withValues(alpha: pAlpha),
+                            const Color(0x00000000),
+                          ],
+                        ),
+                      ),
+                    ),
+                    DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          center: Alignment(0.55 - 0.75 * t, 0.05 + 0.25 * (1.0 - t)),
+                          radius: 0.82 + 0.18 * (1.0 - t),
+                          colors: [
+                            secondaryGlow.withValues(alpha: sAlpha),
+                            const Color(0x00000000),
+                          ],
+                        ),
+                      ),
+                    ),
+                    DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: RadialGradient(
+                          center: Alignment(-0.20 + 0.45 * (1.0 - t), 0.88 - 0.12 * t),
+                          radius: 0.70 + 0.20 * t,
+                          colors: [
+                            accentGlow.withValues(alpha: aAlpha),
+                            const Color(0x00000000),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ),
         ),
-      ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Desktop & Windows IME-safe search field styled after iOS 27 Liquid Glass search pills.
+/// Keeps a stable [FocusNode] across parent [StatefulBuilder] rebuilds, avoids rebuilding
+/// the underlying [CupertinoTextField] during Win32 CJK IME composition, and retains keyboard
+/// focus when clearing text or completing modal sheet transitions.
+class AppleSearchField extends StatefulWidget {
+  final TextEditingController controller;
+  final FocusNode? focusNode;
+  final String placeholder;
+  final bool autofocus;
+  final ValueChanged<String>? onChanged;
+  final ValueChanged<String>? onSubmitted;
+  final VoidCallback? onSuffixTap;
+
+  const AppleSearchField({
+    super.key,
+    required this.controller,
+    this.focusNode,
+    this.placeholder = '搜索',
+    this.autofocus = false,
+    this.onChanged,
+    this.onSubmitted,
+    this.onSuffixTap,
+  });
+
+  @override
+  State<AppleSearchField> createState() => _AppleSearchFieldState();
+}
+
+class _AppleSearchFieldState extends State<AppleSearchField> {
+  FocusNode? _internalFocusNode;
+  Animation<double>? _routeAnimation;
+  DateTime? _lastSubmitAt;
+
+  FocusNode get _effectiveFocusNode =>
+      widget.focusNode ?? (_internalFocusNode ??= FocusNode());
+
+  @override
+  void initState() {
+    super.initState();
+    _effectiveFocusNode.onKeyEvent = _handleKeyEvent;
+    if (widget.autofocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _effectiveFocusNode.requestFocus();
+        }
+      });
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final routeAnim = ModalRoute.of(context)?.animation;
+    if (routeAnim != _routeAnimation) {
+      _routeAnimation?.removeStatusListener(_onRouteAnimationStatus);
+      _routeAnimation = routeAnim;
+      _routeAnimation?.addStatusListener(_onRouteAnimationStatus);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant AppleSearchField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.focusNode != widget.focusNode) {
+      oldWidget.focusNode?.onKeyEvent = null;
+      _effectiveFocusNode.onKeyEvent = _handleKeyEvent;
+    }
+  }
+
+  void _onRouteAnimationStatus(AnimationStatus status) {
+    if (status == AnimationStatus.completed && widget.autofocus && mounted) {
+      _effectiveFocusNode.requestFocus();
+    }
+  }
+
+  void _submit(String value) {
+    final cb = widget.onSubmitted;
+    if (cb == null) return;
+    final now = DateTime.now();
+    if (_lastSubmitAt != null &&
+        now.difference(_lastSubmitAt!) < const Duration(milliseconds: 120)) {
+      return;
+    }
+    _lastSubmitAt = now;
+    cb(value);
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is KeyDownEvent &&
+        (event.logicalKey == LogicalKeyboardKey.enter ||
+            event.logicalKey == LogicalKeyboardKey.numpadEnter)) {
+      if (!widget.controller.value.isComposingRangeValid &&
+          widget.onSubmitted != null) {
+        _submit(widget.controller.text);
+        return KeyEventResult.handled;
+      }
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  void dispose() {
+    _routeAnimation?.removeStatusListener(_onRouteAnimationStatus);
+    if (widget.focusNode != null) {
+      widget.focusNode!.onKeyEvent = null;
+    }
+    _internalFocusNode?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: () => _effectiveFocusNode.requestFocus(),
+      child: Container(
+        constraints: const BoxConstraints(minHeight: 38),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+        decoration: BoxDecoration(
+          color: const Color(0x40787884),
+          borderRadius: BorderRadius.circular(11),
+          border: Border.all(
+            color: const Color(0x24FFFFFF),
+            width: 0.65,
+          ),
+        ),
+        child: Row(
+          children: [
+            const Icon(
+              CupertinoIcons.search,
+              size: 17,
+              color: AppleColors.labelSecondary,
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: CupertinoTextField.borderless(
+                controller: widget.controller,
+                focusNode: _effectiveFocusNode,
+                autofocus: widget.autofocus,
+                placeholder: widget.placeholder,
+                placeholderStyle: const TextStyle(
+                  color: AppleColors.labelSecondary,
+                  fontSize: 15,
+                ),
+                style: const TextStyle(
+                  color: AppleColors.labelPrimary,
+                  fontSize: 15,
+                ),
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                cursorColor: AppleColors.systemBlue,
+                textInputAction: TextInputAction.search,
+                onChanged: widget.onChanged,
+                onSubmitted: _submit,
+              ),
+            ),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: widget.controller,
+              builder: (context, value, _) {
+                if (value.text.isEmpty) return const SizedBox.shrink();
+                return ExcludeFocus(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      if (widget.onSuffixTap != null) {
+                        widget.onSuffixTap!();
+                      } else {
+                        widget.controller.clear();
+                        widget.onChanged?.call('');
+                      }
+                      _effectiveFocusNode.requestFocus();
+                    },
+                    child: const Padding(
+                      padding: EdgeInsets.only(
+                        left: 6,
+                        right: 2,
+                        top: 4,
+                        bottom: 4,
+                      ),
+                      child: Icon(
+                        CupertinoIcons.clear_thick_circled,
+                        size: 17,
+                        color: AppleColors.labelSecondary,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

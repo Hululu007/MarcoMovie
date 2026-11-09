@@ -19,6 +19,8 @@ import 'guard_source.dart';
 import 'source_playback.dart';
 import 'source_verification.dart';
 import 'models.dart';
+import 'quark_drive.dart';
+import 'storage_service.dart';
 /// HTTP CMS client with TVBox `okhttp/3.15` User-Agent parity, system certificate validation for third-party
 /// CMS hosts, multi-depot (`urls`/`storeHouse`) resolution, and bounded concurrent search.
 class CmsClient {
@@ -68,6 +70,7 @@ class CmsClient {
   final http.Client? _http;
   final Duration timeout;
   final CatPawHost _scriptHost;
+  final QuarkDriveClient? _quark;
   final Expando<Future<String>> _t4Extensions = Expando<Future<String>>();
   late final DrpySource _drpy = DrpySource(host: _scriptHost,
       read: (url, headers) => _getText(url, headers: headers));
@@ -76,8 +79,9 @@ class CmsClient {
   CmsClient({
     http.Client? client,
     CatPawHost? scriptHost,
+    QuarkDriveClient? quark,
     this.timeout = const Duration(seconds: 15),
-  }) : _http = client, _scriptHost = scriptHost ?? CatPawHost.instance;
+  }) : _http = client, _quark = quark, _scriptHost = scriptHost ?? CatPawHost.instance;
   static http.Client _createDefaultClient() {
     final ioHttp = HttpClient()
       ..connectionTimeout = const Duration(seconds: 12);
@@ -1309,6 +1313,12 @@ class CmsClient {
   }
 
   Future<CmsVideo> fetchDetail(CmsSite site, CmsVideo fallback) async {
+    if (fallback.id.startsWith('mmquark://owned?')) {
+      return _mergeDetail(CmsVideo(id: fallback.id, title: fallback.title,
+          lines: [CmsLine(name: '夸克网盘', episodes: [
+            CmsEpisode(name: fallback.title, url: fallback.id),
+          ])]), fallback);
+    }
     if (_isHttpT4(site)) {
       final raw = await _callT4(site, {'ac': 'detail', 'ids': fallback.id});
       final listing = CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmt4'));
@@ -1362,6 +1372,14 @@ class CmsClient {
         }
       }
     } catch (_) {}
+    if (fallback.title.trim().isNotEmpty) {
+      return CspBridge.resolveCrossSourceVideo(
+        fallback,
+        fallback.title.trim(),
+        _getText,
+        siteHint: site.api,
+      );
+    }
     return fallback;
   }
   CmsVideo _mergeDetail(CmsVideo detailed, CmsVideo fallback) => CmsVideo(
@@ -1434,6 +1452,12 @@ class CmsClient {
     CmsSite site,
     CmsEpisode episode,
   ) async {
+    if (episode.url.startsWith('mmquark://')) {
+      final drive = _quark ?? QuarkDriveClient(
+          accounts: (await StorageService.init()).quarkAccounts, httpClient: _http);
+      try { return await drive.resolve(episode); }
+      finally { if (_quark == null) drive.close(); }
+    }
     if (_isHttpT4(site) && episode.url.startsWith('mmt4://play?')) {
       final parameters = Uri.parse(episode.url).queryParameters;
       final raw = jsonDecode(await _callT4(site,

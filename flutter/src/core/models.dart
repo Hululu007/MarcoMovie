@@ -295,8 +295,7 @@ class CmsSite {
   bool get isEmby => api.startsWith('emby://account/');
   bool get isCatPaw => api.startsWith('catpaw://');
   bool get canBrowse =>
-      !CspBridge.isMyDriveSite(this) &&
-      !CspBridge.isNetdiskSite(this) &&
+      key != 'mydrive' &&
       (isEmby ||
           isCatPaw ||
           (type == 4 && isHttpApi) ||
@@ -464,7 +463,7 @@ class CmsEpisode {
   });
   bool get isScriptEpisode => url.startsWith('mmjs://play?');
   bool get needsSourceResolution =>
-      isScriptEpisode || url.startsWith('mmemby://play?') || url.startsWith('mmpaw://play?') || url.startsWith('mmt4://play?');
+      isScriptEpisode || url.startsWith('mmemby://play?') || url.startsWith('mmpaw://play?') || url.startsWith('mmt4://play?') || url.startsWith('mmquark://owned?');
 
   /// Whether [url] points to an already-downloaded local file (offline playback).
   bool get isLocalFile {
