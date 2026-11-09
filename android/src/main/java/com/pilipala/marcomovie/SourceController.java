@@ -250,7 +250,7 @@ final class SourceController {
                 || video == null
                 || video.id == null
                 || video.id.isEmpty()) return;
-        if (isConfigOrNetdiskSite(site)) return;
+        if (isConfigOrNetdiskSite(site) || isConfigOrNetdiskActionCard(site, video)) return;
         if (ListingRoute.isRedirect(video.tag, video.action, video.id)) return;
         if (video.lines != null
                 && !video.lines.isEmpty()
@@ -335,6 +335,9 @@ final class SourceController {
                                 if (!timing.cached && epoch == a.engineEpoch)
                                     a.detailCache.put(key, raw);
                                 Cms.Video video = listing.videos.get(0);
+                                if ((video.id == null || video.id.trim().isEmpty()) && id != null) {
+                                    video.id = id.trim();
+                                }
                                 a.ui.post(
                                         () -> {
                                             if (a.isFinishing() || ticket != a.generation) return;
@@ -523,7 +526,57 @@ final class SourceController {
                 || "[]".equals(trimmed);
     }
 
+    static void invokeConfigPlayerAction(MainActivity a, Cms.Site site, String flag, String id) {
+        lastConfigActionAt = SystemClock.elapsedRealtime();
+        pendingConfigRefreshOnFocus = false;
+        CspEngine.syncAllPluginActivities(a);
+        final int ticket = a.generation;
+        a.worker.execute(
+                () -> {
+                    try {
+                        CspEngine.syncAllPluginActivities(a);
+                        SourceEngine eng = a.engine(site);
+                        CspEngine.syncAllPluginActivities(a);
+                        final String resp = eng.player(flag, id);
+                        a.ui.post(
+                                () -> {
+                                    if (ticket != a.generation || a.isFinishing()) return;
+                                    a.ui.postDelayed(
+                                            () -> {
+                                                if (a.isFinishing() || ticket != a.generation)
+                                                    return;
+                                                if (!a.hasWindowFocus()) {
+                                                    pendingConfigRefreshOnFocus = true;
+                                                } else {
+                                                    refreshCurrentConfigCategory(a, site);
+                                                }
+                                            },
+                                            550);
+                                    if (resp == null || resp.trim().isEmpty()) return;
+                                    try {
+                                        org.json.JSONObject obj = new org.json.JSONObject(resp);
+                                        String msg =
+                                                obj.optString("msg", obj.optString("message", ""));
+                                        if (!msg.isEmpty() && !isInternalActionCode(msg, id)) {
+                                            a.notice(msg);
+                                        }
+                                    } catch (Throwable ignored) {
+                                    }
+                                });
+                    } catch (Throwable error) {
+                        a.ui.post(
+                                () -> {
+                                    if (ticket == a.generation) a.notice(a.message(error));
+                                });
+                    }
+                });
+    }
+
     static void sourceAction(MainActivity a, Cms.Site site, String action) {
+        sourceAction(a, site, action, false);
+    }
+
+    static void sourceAction(MainActivity a, Cms.Site site, String action, boolean preferDetail) {
         a.detailCache.clear();
         lastConfigActionAt = SystemClock.elapsedRealtime();
         pendingConfigRefreshOnFocus = false;
@@ -564,8 +617,61 @@ final class SourceController {
                                         org.json.JSONObject result =
                                                 new org.json.JSONObject(response);
                                         if (result.has("list")) {
-                                            if (usedDetailFallback) return;
                                             Cms.Listing list = Cms.listing(response);
+                                            if (usedDetailFallback) {
+                                                if (list.videos.size() == 1) {
+                                                    Cms.Video v = list.videos.get(0);
+                                                    for (Cms.Line line : v.lines) {
+                                                        if ("Config".equalsIgnoreCase(line.name)
+                                                                && !line.episodes.isEmpty()) {
+                                                            if (line.episodes.size() == 1) {
+                                                                invokeConfigPlayerAction(
+                                                                        a,
+                                                                        site,
+                                                                        line.name,
+                                                                        line.episodes.get(0).url);
+                                                            } else {
+                                                                String[] epNames =
+                                                                        new String
+                                                                                [line.episodes
+                                                                                        .size()];
+                                                                for (int i = 0;
+                                                                        i < line.episodes.size();
+                                                                        i++) {
+                                                                    epNames[i] =
+                                                                            line.episodes.get(i)
+                                                                                    .name;
+                                                                }
+                                                                new AppDialog.Builder(a)
+                                                                        .setTitle(
+                                                                                v.title != null
+                                                                                                && !v
+                                                                                                        .title
+                                                                                                        .isEmpty()
+                                                                                        ? v.title
+                                                                                        : site.name)
+                                                                        .setItems(
+                                                                                epNames,
+                                                                                (d, idx) ->
+                                                                                        invokeConfigPlayerAction(
+                                                                                                a,
+                                                                                                site,
+                                                                                                line.name,
+                                                                                                line
+                                                                                                        .episodes
+                                                                                                        .get(
+                                                                                                                idx)
+                                                                                                        .url))
+                                                                        .setNegativeButton(
+                                                                                "关闭", null)
+                                                                        .show();
+                                                            }
+                                                            return;
+                                                        }
+                                                    }
+                                                }
+                                                return;
+                                            }
                                             if (list.videos.size() == 1
                                                     && (list.videos.get(0).title.contains("刷新配置中心")
                                                             || "配置中心"

@@ -878,9 +878,20 @@ final class PlaybackController {
                 // Check-in setup must not prevent an already resolved video from playing.
             }
         }
+        String bookmarkId =
+                v != null && v.id != null && !v.id.trim().isEmpty()
+                        ? v.id.trim()
+                        : (a.activeEpisode != null
+                                        && a.activeEpisode.url != null
+                                        && !a.activeEpisode.url.trim().isEmpty()
+                                ? a.activeEpisode.url.trim()
+                                : (v != null && v.title != null ? v.title.trim() : ""));
+        if (v != null && !bookmarkId.isEmpty() && (v.id == null || v.id.trim().isEmpty())) {
+            v.id = bookmarkId;
+        }
         if (s.key != null
                 && !s.key.equals("live")
-                && v.id != null
+                && !bookmarkId.isEmpty()
                 && a.activeLine != null
                 && a.activeEpisode != null) {
             WatchHistory.Entry saved = lookupSavedBookmark(a, s, v, a.activeLine, a.activeEpisode);
@@ -890,7 +901,7 @@ final class PlaybackController {
                             : (a.resumeAt < 0 ? 0 : (saved != null ? saved.resume() : 0));
             a.playingBookmark = new WatchHistory.Entry();
             a.playingBookmark.site = s.key;
-            a.playingBookmark.id = v.id;
+            a.playingBookmark.id = bookmarkId;
             a.playingBookmark.title = v.title;
             a.playingBookmark.poster = v.poster;
             a.playingBookmark.line = a.activeLine.name;
@@ -1017,15 +1028,25 @@ final class PlaybackController {
                                         Map<String, String> mediaHeaders =
                                                 Cms.inheritedHeaders(s.api, ep.url, s.headers);
                                         Cms.mergeHeaders(mediaHeaders, ep.headers);
+                                        int engPref = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+                                        int spiderPlayerType = ep.media.optInt("playerType", -1);
+                                        if (engPref == 0
+                                                && (spiderPlayerType == 1 || ep.media.has("ijk"))) {
+                                            engPref = 2;
+                                        }
                                         candidate =
-                                                a.prefs.getInt(Prefs.PLAYER_ENGINE, 0) == 1
+                                                engPref == 1
                                                         ? new SystemPlayer(a)
-                                                        : ep.media.optBoolean("_softwareFallback")
-                                                                ? new MoviePlayer(
-                                                                        a,
-                                                                        ep.media.optInt(
-                                                                                "_fallbackMode", 2))
-                                                                : new MoviePlayer(a);
+                                                        : engPref == 2
+                                                                ? MoviePlayer.createIjk(a)
+                                                                : ep.media.optBoolean(
+                                                                                "_softwareFallback")
+                                                                        ? new MoviePlayer(
+                                                                                a,
+                                                                                ep.media.optInt(
+                                                                                        "_fallbackMode",
+                                                                                        2))
+                                                                        : new MoviePlayer(a);
                                         candidate.configureDefaultAudio();
                                         candidate.setDataSource(
                                                 a,
@@ -1112,6 +1133,19 @@ final class PlaybackController {
                                                     ready.setOnCompletionListener(
                                                             mp -> {
                                                                 if (ticket != a.generation) return;
+                                                                if (a.playingBookmark != null) {
+                                                                    int dur = ready.getDuration();
+                                                                    if (dur > 0) {
+                                                                        a.playingBookmark.duration =
+                                                                                dur;
+                                                                        a.playingBookmark.position =
+                                                                                Math.max(
+                                                                                        a.playingBookmark
+                                                                                                .position,
+                                                                                        dur);
+                                                                    }
+                                                                }
+                                                                savePlaybackHistory(a, true);
                                                                 a.playing = false;
                                                                 stopEmbySession(a);
                                                                 a.playStatus.setText("播放结束");

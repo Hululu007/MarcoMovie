@@ -320,7 +320,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (SourceController.isConfigOrNetdiskActionCard(s, v)) {
-            sourceAction(s, v.id);
+            SourceController.sourceAction(this, s, v.id, true);
             return;
         }
         open(new Screen(() -> detail(s, v)), true);
@@ -344,7 +344,9 @@ public final class MainActivity extends Activity {
      * re-opening the folder in a loop.
      */
     boolean redirectListing(Cms.Site s, Cms.Video v) {
-        if (!isRedirectListing(v)) return false;
+        if (!isRedirectListing(v) && !SourceController.isConfigOrNetdiskActionCard(s, v)) {
+            return false;
+        }
         if (current != null) current.redirect = true;
         if (back.isEmpty() && "folder".equalsIgnoreCase(v.tag)) {
             open(new Screen(() -> videos(s, v.id, v.title, 1, null)), false);

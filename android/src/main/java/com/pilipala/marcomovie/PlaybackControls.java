@@ -690,13 +690,21 @@ final class PlaybackControls {
     }
 
     void engine() {
+        int cur = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+        int selected = cur == 2 ? 1 : (cur == 1 ? 2 : 0);
+        final int[] vals = {0, 2, 1};
         choose(
-                "选择播放器",
-                new String[] {"Media3 · 网络与字幕优先", "系统播放器"},
-                a.prefs.getInt(Prefs.PLAYER_ENGINE, 0),
+                "选择播放器内核",
+                new String[] {
+                    "Exo 播放器 (Media3 · 默认)", "IJK 播放器 (FFmpeg · 兼容)", "系统播放器 (Android Native)"
+                },
+                selected,
                 i -> {
-                    a.prefs.edit().putInt(Prefs.PLAYER_ENGINE, i).apply();
-                    reload(true);
+                    if (i >= 0 && i < vals.length) {
+                        a.prefs.edit().putInt(Prefs.PLAYER_ENGINE, vals[i]).apply();
+                        updateLabels();
+                        reload(true);
+                    }
                 });
     }
 
@@ -727,25 +735,32 @@ final class PlaybackControls {
         int decMode = a.prefs.getInt(Prefs.DECODER_MODE, 0);
         int engMode = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
         int outMode = a.prefs.getInt(Prefs.VIDEO_OUTPUT, 0);
+        String engLabel = engMode == 2 ? "IJK" : (engMode == 1 ? "系统" : "Exo");
         String[] items = {
-            (decMode == 0 ? "✓ " : "") + "自动解码（默认）",
-            (decMode == 1 ? "✓ " : "") + "设备硬件解码 (HW)",
-            (decMode == 2 ? "✓ " : "") + "软件解码优先 (SW)",
-            "播放器内核 · " + (engMode == 0 ? "Media3" : "系统播放器"),
+            (engMode == 0 ? "✓ " : "") + "播放器内核 · Exo (Media3)",
+            (engMode == 2 ? "✓ " : "") + "播放器内核 · IJK (FFmpeg)",
+            (engMode == 1 ? "✓ " : "") + "播放器内核 · 系统播放器",
+            (decMode == 0 ? "✓ " : "") + "解码方式 · 自动解码（默认）",
+            (decMode == 1 ? "✓ " : "") + "解码方式 · 设备硬件解码 (HW)",
+            (decMode == 2 ? "✓ " : "") + "解码方式 · 软件解码优先 (SW)",
             "画面输出 · " + (outMode == 0 ? "保真输出 (HDR)" : "兼容输出 (调色)")
         };
+        int curIdx = engMode == 2 ? 1 : (engMode == 1 ? 2 : 0);
         choose(
-                "解码与播放器",
+                "播放器与解码 (" + engLabel + ")",
                 items,
-                decMode >= 0 && decMode <= 2 ? decMode : 0,
+                curIdx,
                 i -> {
-                    if (i >= 0 && i <= 2) {
-                        a.prefs.edit().putInt(Prefs.DECODER_MODE, i).apply();
+                    if (i == 0 || i == 1 || i == 2) {
+                        int nextEng = i == 1 ? 2 : (i == 2 ? 1 : 0);
+                        a.prefs.edit().putInt(Prefs.PLAYER_ENGINE, nextEng).apply();
                         updateLabels();
                         reload(true);
-                    } else if (i == 3) {
-                        engine();
-                    } else if (i == 4) {
+                    } else if (i >= 3 && i <= 5) {
+                        a.prefs.edit().putInt(Prefs.DECODER_MODE, i - 3).apply();
+                        updateLabels();
+                        reload(true);
+                    } else if (i == 6) {
                         output();
                     }
                 });
@@ -2082,6 +2097,11 @@ final class PlaybackControls {
         if (outroBtn != null) {
             int s = a.prefs.getInt(Prefs.SKIP_OUTRO, 0);
             outroBtn.setText(s > 0 ? (a.isTvDevice() ? "片尾" + s + "s" : s + "s") : "片尾");
+        }
+        Button decBtn = buttons.get("decoder");
+        if (decBtn != null) {
+            int eng = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+            decBtn.setText(eng == 2 ? "IJK" : (eng == 1 ? "系统" : "Exo"));
         }
     }
 

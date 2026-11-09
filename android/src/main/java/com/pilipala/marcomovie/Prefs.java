@@ -133,7 +133,7 @@ final class Prefs {
         ranges.put(HOME_ROWS, new int[] {1, 4});
         ranges.put(HOME_SECTIONS, new int[] {0, 5});
         ranges.put(WALLPAPER_DIM, new int[] {0, 100});
-        ranges.put(PLAYER_ENGINE, new int[] {0, 1});
+        ranges.put(PLAYER_ENGINE, new int[] {0, 2});
         ranges.put(VIDEO_OUTPUT, new int[] {0, 1});
         ranges.put(DECODER_MODE, new int[] {0, 2});
         ranges.put(REPEAT_MODE, new int[] {0, 2});

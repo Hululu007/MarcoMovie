@@ -145,6 +145,9 @@ final class DetailScreen {
 
         MainActivity.Done<Cms.Video> present =
                 v -> {
+                    if ((v.id == null || v.id.trim().isEmpty()) && listing.id != null) {
+                        v.id = listing.id.trim();
+                    }
                     if (v.poster == null || v.poster.isEmpty()) v.poster = listing.poster;
                     if (v.title == null || v.title.isEmpty()) v.title = listing.title;
                     if (info.getChildCount() > 0 && a.current != null) {

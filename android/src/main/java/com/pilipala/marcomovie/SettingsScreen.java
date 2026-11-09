@@ -606,7 +606,12 @@ final class SettingsScreen {
                 new String[] {"保真输出 · HDR 与流畅度优先", "兼容输出 · 支持应用内调色"},
                 new int[] {0, 1},
                 0);
-        ints("播放器", Prefs.PLAYER_ENGINE, new String[] {"Media3", "系统播放器"}, new int[] {0, 1}, 0);
+        ints(
+                "播放器",
+                Prefs.PLAYER_ENGINE,
+                new String[] {"Exo (Media3)", "IJK (FFmpeg)", "系统播放器"},
+                new int[] {0, 2, 1},
+                0);
         ints(
                 "解码方式",
                 Prefs.DECODER_MODE,

@@ -69,6 +69,7 @@ public class MoviePlayer {
     private DefaultMediaSourceFactory mediaSourceFactory;
     private String mediaMime;
     private boolean hlsFallbackAttempted;
+    private final boolean ijkMode;
 
     public interface SubtitleListener {
         void text(CharSequence text);
@@ -82,29 +83,37 @@ public class MoviePlayer {
 
     private CueListener cueListener;
 
+    public static MoviePlayer createIjk(Context context) {
+        return new MoviePlayer(context, true, -1, true);
+    }
+
     public MoviePlayer(Context context) {
-        this(context, true, -1);
+        this(context, true, -1, false);
     }
 
     public MoviePlayer(Context context, int decoderMode) {
-        this(context, true, decoderMode);
+        this(context, true, decoderMode, false);
     }
 
     protected MoviePlayer(Context context, boolean initializeExo) {
-        this(context, initializeExo, -1);
+        this(context, initializeExo, -1, false);
     }
 
-    private MoviePlayer(Context context, boolean initializeExo, int requestedDecoder) {
+    private MoviePlayer(
+            Context context, boolean initializeExo, int requestedDecoder, boolean forceIjk) {
         this.context = context.getApplicationContext();
+        this.ijkMode = forceIjk;
         if (!initializeExo) return;
         onMain(
                 () -> {
+                    int userDecoder =
+                            this.context
+                                    .getSharedPreferences(Prefs.FILE, 0)
+                                    .getInt(Prefs.DECODER_MODE, 0);
                     int decoderMode =
-                            requestedDecoder < 0
-                                    ? this.context
-                                            .getSharedPreferences(Prefs.FILE, 0)
-                                            .getInt(Prefs.DECODER_MODE, 0)
-                                    : requestedDecoder;
+                            requestedDecoder >= 0
+                                    ? requestedDecoder
+                                    : (this.ijkMode && userDecoder == 0 ? 3 : userDecoder);
                     DefaultRenderersFactory renderers =
                             new DecoderRenderersFactory(this.context, decoderMode);
                     renderers.setMediaCodecSelector(
@@ -173,13 +182,18 @@ public class MoviePlayer {
                                     * 1000;
                     int minBuffer = Math.min(12000, buffer);
                     int maxBuffer = Math.max(20000, buffer);
+                    int startBufferMs = this.ijkMode ? 500 : 800;
+                    int rebufferMs = this.ijkMode ? 1200 : 1600;
                     exo =
                             new ExoPlayer.Builder(this.context, renderers)
                                     .setLoadControl(
                                             new androidx.media3.exoplayer.DefaultLoadControl
                                                             .Builder()
                                                     .setBufferDurationsMs(
-                                                            minBuffer, maxBuffer, 800, 1600)
+                                                            minBuffer,
+                                                            maxBuffer,
+                                                            startBufferMs,
+                                                            rebufferMs)
                                                     .setPrioritizeTimeOverSizeThresholds(true)
                                                     .setTargetBufferBytes(64 * 1024 * 1024)
                                                     .build())
@@ -278,26 +292,44 @@ public class MoviePlayer {
                                 @Override
                                 public void onPlayerError(PlaybackException error) {
                                     if (released) return;
-                                    if ((error.errorCode
-                                                            == PlaybackException
-                                                                    .ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED
-                                                    || error.errorCode
-                                                            == PlaybackException
-                                                                    .ERROR_CODE_PARSING_CONTAINER_MALFORMED)
-                                            && mediaMime == null
-                                            && !hlsFallbackAttempted
+                                    if (!hlsFallbackAttempted
                                             && uri != null
                                             && mediaSourceFactory != null) {
                                         String scheme = uri.getScheme();
                                         if ("http".equalsIgnoreCase(scheme)
                                                 || "https".equalsIgnoreCase(scheme)) {
-                                            hlsFallbackAttempted = true;
-                                            mediaMime = MimeTypes.APPLICATION_M3U8;
-                                            try {
-                                                exo.setMediaSource(playbackSource(uri));
-                                                exo.prepare();
-                                                return;
-                                            } catch (Exception ignored) {
+                                            if ((error.errorCode
+                                                                    == PlaybackException
+                                                                            .ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED
+                                                            || error.errorCode
+                                                                    == PlaybackException
+                                                                            .ERROR_CODE_PARSING_CONTAINER_MALFORMED)
+                                                    && mediaMime == null) {
+                                                hlsFallbackAttempted = true;
+                                                mediaMime = MimeTypes.APPLICATION_M3U8;
+                                                try {
+                                                    exo.setMediaSource(playbackSource(uri));
+                                                    exo.prepare();
+                                                    return;
+                                                } catch (Exception ignored) {
+                                                }
+                                            } else if (ijkMode
+                                                    && MimeTypes.APPLICATION_M3U8.equalsIgnoreCase(
+                                                            mediaMime)
+                                                    && (error.errorCode
+                                                                    == PlaybackException
+                                                                            .ERROR_CODE_PARSING_MANIFEST_MALFORMED
+                                                            || error.errorCode
+                                                                    == PlaybackException
+                                                                            .ERROR_CODE_PARSING_CONTAINER_MALFORMED)) {
+                                                hlsFallbackAttempted = true;
+                                                mediaMime = null;
+                                                try {
+                                                    exo.setMediaSource(playbackSource(uri));
+                                                    exo.prepare();
+                                                    return;
+                                                } catch (Exception ignored) {
+                                                }
                                             }
                                         }
                                     }
@@ -570,8 +602,14 @@ public class MoviePlayer {
                                                                                 requestHeaders)
                                                                         .setAllowCrossProtocolRedirects(
                                                                                 true)
-                                                                        .setConnectTimeoutMs(15000)
-                                                                        .setReadTimeoutMs(30000);
+                                                                        .setConnectTimeoutMs(
+                                                                                ijkMode
+                                                                                        ? 20000
+                                                                                        : 15000)
+                                                                        .setReadTimeoutMs(
+                                                                                ijkMode
+                                                                                        ? 45000
+                                                                                        : 30000);
                                                         DefaultDataSource.Factory data =
                                                                 new DefaultDataSource.Factory(
                                                                         context, http);
@@ -582,8 +620,47 @@ public class MoviePlayer {
                                                                         new androidx.media3
                                                                                         .extractor
                                                                                         .DefaultExtractorsFactory()
+                                                                                .setConstantBitrateSeekingEnabled(
+                                                                                        true)
                                                                                 .setTsExtractorTimestampSearchBytes(
-                                                                                        1500 * 188);
+                                                                                        (ijkMode
+                                                                                                        ? 3600
+                                                                                                        : 1500)
+                                                                                                * 188);
+                                                        if (ijkMode) {
+                                                            extractors
+                                                                    .setConstantBitrateSeekingAlwaysEnabled(
+                                                                            true)
+                                                                    .setTsExtractorFlags(
+                                                                            androidx.media3
+                                                                                            .extractor
+                                                                                            .ts
+                                                                                            .DefaultTsPayloadReaderFactory
+                                                                                            .FLAG_ALLOW_NON_IDR_KEYFRAMES
+                                                                                    | androidx
+                                                                                            .media3
+                                                                                            .extractor
+                                                                                            .ts
+                                                                                            .DefaultTsPayloadReaderFactory
+                                                                                            .FLAG_DETECT_ACCESS_UNITS
+                                                                                    | androidx
+                                                                                            .media3
+                                                                                            .extractor
+                                                                                            .ts
+                                                                                            .DefaultTsPayloadReaderFactory
+                                                                                            .FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS
+                                                                                    | androidx
+                                                                                            .media3
+                                                                                            .extractor
+                                                                                            .ts
+                                                                                            .DefaultTsPayloadReaderFactory
+                                                                                            .FLAG_IGNORE_SPLICE_INFO_STREAM)
+                                                                    .setMp4ExtractorFlags(
+                                                                            androidx.media3
+                                                                                    .extractor.mp4
+                                                                                    .Mp4Extractor
+                                                                                    .FLAG_WORKAROUND_IGNORE_EDIT_LISTS);
+                                                        }
                                                         mediaSourceFactory =
                                                                 new DefaultMediaSourceFactory(
                                                                         data, extractors);
@@ -904,7 +981,7 @@ public class MoviePlayer {
 
     public String playbackInfo() {
         org.json.JSONObject d = decoderDiagnostics();
-        return "Media3\n视频："
+        return (ijkMode ? "IJK (FFmpeg)\n视频：" : "Exo (Media3)\n视频：")
                 + d.optString("video_mime", "尚未识别")
                 + " · "
                 + d.optString("video_decoder", "尚未启动")

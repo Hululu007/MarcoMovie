@@ -3317,22 +3317,33 @@ final class MobileShell {
             } else if (settingsSubPage == 2) {
                 addSectionHeader(body, "播放器与解码器");
                 final int engine = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
-                final String[] engineNames = {"Media3（自带软解与字幕增强）", "Android 系统播放器"};
+                final String[] engineNames = {
+                    "Exo 播放器（Media3 · 4K HDR 与字幕增强）", "IJK 播放器（FFmpeg · 直播与特殊封装兼容）", "Android 系统播放器"
+                };
+                final int[] engineVals = {0, 2, 1};
+                final int curEngIdx = engine == 2 ? 1 : (engine == 1 ? 2 : 0);
                 addSettingCard(
                         body,
                         SettingIconView.ICON_ENGINE_CORE,
                         "播放器内核",
-                        engineNames[engine == 0 ? 0 : 1],
+                        engineNames[curEngIdx],
                         () ->
                                 showDrawerPicker(
                                         a,
                                         "播放器内核",
                                         "作为后续播放的默认内核，播放页内也可随时切换",
                                         engineNames,
-                                        engine == 0 ? 0 : 1,
+                                        curEngIdx,
                                         idx -> {
-                                            a.prefs.edit().putInt(Prefs.PLAYER_ENGINE, idx).apply();
-                                            refreshInPlace.run();
+                                            if (idx >= 0 && idx < engineVals.length) {
+                                                a.prefs
+                                                        .edit()
+                                                        .putInt(
+                                                                Prefs.PLAYER_ENGINE,
+                                                                engineVals[idx])
+                                                        .apply();
+                                                refreshInPlace.run();
+                                            }
                                         }));
                 final int decoder = a.prefs.getInt(Prefs.DECODER_MODE, 0);
                 final String[] decNames = {"自动选择（推荐）", "硬件解码优先 (HW)", "软件解码优先 (SW)"};

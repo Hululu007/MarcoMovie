@@ -184,6 +184,31 @@ public final class CspEngine implements SourceEngine {
                     } catch (Throwable ignored) {
                     }
                 }
+                for (Class<?> dc : initClass.getDeclaredClasses()) {
+                    for (Field f : dc.getDeclaredFields()) {
+                        try {
+                            if (Modifier.isStatic(f.getModifiers())) {
+                                f.setAccessible(true);
+                                Object holder = f.get(null);
+                                if (holder instanceof ClassLoader) {
+                                    found.add((ClassLoader) holder);
+                                } else if (holder != null) {
+                                    for (Field hf : holder.getClass().getDeclaredFields()) {
+                                        try {
+                                            hf.setAccessible(true);
+                                            Object v = hf.get(holder);
+                                            if (v instanceof ClassLoader) {
+                                                found.add((ClassLoader) v);
+                                            }
+                                        } catch (Throwable ignored) {
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
             } catch (Throwable ignored) {
             }
         }
@@ -207,6 +232,34 @@ public final class CspEngine implements SourceEngine {
                             }
                         }
                     } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
+        MainActivity active = MainActivity.activeActivity;
+        if (active != null) {
+            List<Object> cbs = lifecycleCallbacks(active.getApplication());
+            if (cbs != null) {
+                for (Object cb : cbs) {
+                    if (cb == null) continue;
+                    ClassLoader cbCl = cb.getClass().getClassLoader();
+                    if (cbCl instanceof dalvik.system.BaseDexClassLoader
+                            && cbCl != CspEngine.class.getClassLoader()) {
+                        found.add(cbCl);
+                    }
+                    for (Field f : cb.getClass().getDeclaredFields()) {
+                        try {
+                            f.setAccessible(true);
+                            Object innerCb = f.get(cb);
+                            if (innerCb != null) {
+                                ClassLoader icl = innerCb.getClass().getClassLoader();
+                                if (icl instanceof dalvik.system.BaseDexClassLoader
+                                        && icl != CspEngine.class.getClassLoader()) {
+                                    found.add(icl);
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                        }
                     }
                 }
             }
@@ -439,6 +492,13 @@ public final class CspEngine implements SourceEngine {
 
     private static Application.ActivityLifecycleCallbacks wrapLifecycleCallback(
             final Application.ActivityLifecycleCallbacks delegate) {
+        if (delegate != null) {
+            ClassLoader dcl = delegate.getClass().getClassLoader();
+            if (dcl instanceof dalvik.system.BaseDexClassLoader
+                    && dcl != CspEngine.class.getClassLoader()) {
+                ALL_PLUGIN_LOADERS.add(dcl);
+            }
+        }
         return new Application.ActivityLifecycleCallbacks() {
             @Override
             public void onActivityCreated(android.app.Activity a, android.os.Bundle b) {
@@ -632,7 +692,25 @@ public final class CspEngine implements SourceEngine {
     }
 
     public String detail(String id) throws Exception {
-        return call("detail", () -> spider.detailContent(Collections.singletonList(id)));
+        return call(
+                "detail",
+                () -> {
+                    try {
+                        return spider.detailContent(Collections.singletonList(id));
+                    } catch (Throwable t) {
+                        Throwable cause = unwrap(t);
+                        if (SourceController.isConfigOrNetdiskSite(site)
+                                && cause.getClass().getSimpleName().contains("JsonSyntax")) {
+                            String act = spider.action(id);
+                            if (act == null || act.trim().isEmpty()) {
+                                return "{\"list\":[]}";
+                            }
+                            return act;
+                        }
+                        if (t instanceof Exception) throw (Exception) t;
+                        throw new RuntimeException(t);
+                    }
+                });
     }
 
     public String search(String keyword, int page) throws Exception {
@@ -709,13 +787,42 @@ public final class CspEngine implements SourceEngine {
     @Override
     public boolean supportsCustomAction() {
         try {
+            String apiLower =
+                    site != null && site.api != null ? site.api.toLowerCase(Locale.ROOT) : "";
+            if (apiLower.contains("mydrive")
+                    || apiLower.contains("wexokconfig")
+                    || apiLower.contains("amns")) {
+                return true;
+            }
+            if (apiLower.contains("panconfig") || apiLower.contains("wexconfig")) {
+                return false;
+            }
             Spider target = unwrapSpiderDelegate(spider);
             if (target == null) return false;
             Method m = target.getClass().getMethod("action", String.class);
             Class<?> declaring = m.getDeclaringClass();
             if (declaring == Spider.class) return false;
             String declName = declaring.getName();
-            if (declName.endsWith("BaseSpiderGuard")) return false;
+            if (declName.endsWith("BaseSpiderGuard")) {
+                String clsName = target.getClass().getName();
+                String innerName =
+                        clsName.endsWith("Guard")
+                                ? clsName.substring(0, clsName.length() - 5)
+                                : clsName;
+                for (ClassLoader cl :
+                        collectPluginLoaders(target.getClass().getClassLoader(), spider)) {
+                    try {
+                        Class<?> innerCls = Class.forName(innerName, false, cl);
+                        if (innerCls != target.getClass()) {
+                            Method im = innerCls.getMethod("action", String.class);
+                            Class<?> idc = im.getDeclaringClass();
+                            return idc != Spider.class && !idc.getName().endsWith(".Spider");
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                return true;
+            }
             return true;
         } catch (Throwable ignored) {
             return false;
@@ -732,6 +839,12 @@ public final class CspEngine implements SourceEngine {
                 diagnostic("detail_action_ok", site.api, null);
                 return res == null ? "" : res;
             } catch (Throwable error) {
+                try {
+                    String fallback = spider.action(id);
+                    diagnostic("detail_action_fallback_ok", site.api, null);
+                    return fallback == null ? "" : fallback;
+                } catch (Throwable ignored) {
+                }
                 Throwable cause = unwrap(error);
                 diagnostic("detail_action_failed", site.api, cause);
                 throw new EngineException("来源交互失败：" + cause.getClass().getSimpleName(), cause);

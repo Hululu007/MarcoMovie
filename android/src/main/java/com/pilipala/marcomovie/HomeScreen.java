@@ -854,10 +854,7 @@ final class HomeScreen {
         button.setOnFocusChangeListener(
                 (v, f) -> {
                     styleTab(button);
-                    if (f
-                            && a.isTvDevice()
-                            && android.os.SystemClock.uptimeMillis() - lastCategoryDpadTime < 450
-                            && !id.equals(state.category)) {
+                    if (f && a.isTvDevice() && !id.equals(state.category)) {
                         button.postDelayed(
                                 () -> {
                                     if (button.hasFocus()
@@ -866,7 +863,7 @@ final class HomeScreen {
                                         choose(id, true);
                                     }
                                 },
-                                130);
+                                120);
                     }
                 });
         addTabView(button);
