@@ -112,7 +112,8 @@ final class DanmakuData {
                 list = (JSONArray) root;
             } else if (root instanceof JSONObject) {
                 JSONObject obj = (JSONObject) root;
-                for (String key : new String[] {"danmuku", "danmaku", "danmu", "comments", "data", "list"}) {
+                for (String key :
+                        new String[] {"danmuku", "danmaku", "danmu", "comments", "data", "list"}) {
                     list = obj.optJSONArray(key);
                     if (list != null) break;
                 }

@@ -239,9 +239,7 @@ final class LiveController {
         video.title = channel.name;
         Cms.Episode ep = new Cms.Episode();
         ep.name =
-                chosen.label != null && !chosen.label.trim().isEmpty()
-                        ? chosen.label.trim()
-                        : "直播";
+                chosen.label != null && !chosen.label.trim().isEmpty() ? chosen.label.trim() : "直播";
         ep.url = resolvedUrl;
         ep.headers.putAll(chosen.headers);
         try {

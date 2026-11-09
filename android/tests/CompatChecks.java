@@ -177,7 +177,9 @@ public final class CompatChecks {
         check(
                 comments.size() == 2 && comments.get(0).text.contains("A & B"),
                 "fault-tolerant XML danmaku recovers from unescaped ampersand and control chars");
-        comments = DanmakuData.parse("{\"code\":0,\"data\":{\"danmuku\":[[5,1,16777215,\"nested\"]]}}");
+        comments =
+                DanmakuData.parse(
+                        "{\"code\":0,\"data\":{\"danmuku\":[[5,1,16777215,\"nested\"]]}}");
         check(
                 comments.size() == 1 && comments.get(0).time == 5000,
                 "nested data.danmuku JSON schema supported");

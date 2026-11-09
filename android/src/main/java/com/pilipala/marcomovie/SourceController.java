@@ -196,6 +196,11 @@ final class SourceController {
         if (v.lines != null && !v.lines.isEmpty()) return false;
         String id = v.id == null ? "" : v.id.trim();
         if (id.isEmpty() || id.startsWith("msearch:")) return false;
+        String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
+        String key = site.key == null ? "" : site.key.toLowerCase(java.util.Locale.ROOT);
+        if ((api.contains("mydrive") || key.contains("mydrive")) && id.startsWith("{")) {
+            return false;
+        }
         if (isDedicatedConfigSite(site)
                 && !id.contains("/")
                 && !id.startsWith("http://")
@@ -504,6 +509,20 @@ final class SourceController {
         }
     }
 
+    static boolean isInternalActionCode(String s, String action) {
+        if (s == null) return true;
+        String trimmed = s.trim();
+        if (trimmed.isEmpty()) return true;
+        if (action != null && trimmed.equalsIgnoreCase(action.trim())) return true;
+        return "LoginShow".equalsIgnoreCase(trimmed)
+                || "pushCkShow".equalsIgnoreCase(trimmed)
+                || "panSortShow".equalsIgnoreCase(trimmed)
+                || "panSourceSortShow".equalsIgnoreCase(trimmed)
+                || "null".equalsIgnoreCase(trimmed)
+                || "{}".equals(trimmed)
+                || "[]".equals(trimmed);
+    }
+
     static void sourceAction(MainActivity a, Cms.Site site, String action) {
         a.detailCache.clear();
         lastConfigActionAt = SystemClock.elapsedRealtime();
@@ -516,11 +535,12 @@ final class SourceController {
                         CspEngine.syncAllPluginActivities(a);
                         SourceEngine eng = a.engine(site);
                         CspEngine.syncAllPluginActivities(a);
-                        String actResp = eng.action(action);
+                        String actResp;
                         boolean detailFallback = false;
-                        if (actResp == null || actResp.trim().isEmpty()) {
-                            CspEngine.syncAllPluginActivities(a);
-                            actResp = eng.detail(action);
+                        if (eng.supportsCustomAction()) {
+                            actResp = eng.action(action);
+                        } else {
+                            actResp = eng.detailAction(action);
                             detailFallback = true;
                         }
                         final String response = actResp;
@@ -571,11 +591,19 @@ final class SourceController {
                                             String msg =
                                                     result.optString(
                                                             "msg", result.optString("message", ""));
-                                            if (!msg.isEmpty()) a.notice(msg);
-                                            else if (!usedDetailFallback) a.notice(response);
+                                            if (!msg.isEmpty()
+                                                    && !isInternalActionCode(msg, action)) {
+                                                a.notice(msg);
+                                            } else if (!usedDetailFallback
+                                                    && !isInternalActionCode(response, action)) {
+                                                a.notice(response);
+                                            }
                                         }
                                     } catch (Throwable ignored) {
-                                        if (!usedDetailFallback) a.notice(response);
+                                        if (!usedDetailFallback
+                                                && !isInternalActionCode(response, action)) {
+                                            a.notice(response);
+                                        }
                                     }
                                 });
                     } catch (Throwable error) {

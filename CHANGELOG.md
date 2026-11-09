@@ -2,7 +2,7 @@
 
 ## 未发布 — 订阅兼容修复中
 
-Android 手机/平板（0.5.10）与电视（0.5.10）的已验证升级与修复已按各平台独立版本号发布。以下跨端验证及实验仍在继续，不能视为 iPhone 或其他端已更新。
+Android 手机/平板（0.5.11）与电视（0.5.11）的已验证升级与修复已按各平台独立版本号发布。以下跨端验证及实验仍在继续，不能视为 iPhone 或其他端已更新。
 
 - Python 请求保留二进制内容，修复 Session Cookie 属性与同名 Cookie 的域隔离。
 - 为指定版本 T4 插件加入本机配置解析和共享适配，保留真实分页、影片及剧集标识；两条样例已取得目录、详情和 HLS 清单，其中一条搜索仍要求网站验证。
@@ -78,6 +78,21 @@ iPhone 仍需完成指定订阅及插件线路的独立运行、实际播放验�
 - 同步订阅源、多仓、脚本源（HTTP T4、DRPY、CatVod JS、Python Spider、已移植 Guard 源）与直播目录（`LiveCatalogParser`、`lives[].api`、`proxy://?do=live&type=txt&ext=`、Base64 直播列表、`parses` 解析回退）完整适配。
 - 切换为按 macOS 独立检查更新（`updates/macos.json`），切换筛选、直播源或离开详情页时主动取消过期请求。
 - 0.5.0 客户端首次升级请从下载页手动下载 macOS 0.5.1 应用包；限制同上，未完成的 33 条插件移植不计为已支持。
+
+## Android 电视 / 盒子 0.5.11 — 2026-11-09
+
+完整说明：[Android 电视 / 盒子 0.5.11](docs/releases/android-tv-v0.5.11.md)。
+
+- 修复云盘配置中心（`csp_MyDriveGuard` / `csp_MyDrive`）点击「登入自己网盘」或右侧导航栏「网盘」按钮时弹出 `扩展来源请求失败：JsonSyntaxException` 或 `IOException` 错误框的问题：在 `CspEngine` 中通过反射解包 `BaseSpiderGuard` 内层 `Spider` 实例并精确检测是否覆写 `Spider.action(String)`（`supportsCustomAction()`），对原生实现 `action` 的网盘扩展不再于返回空串后误调用 `detailContent`，并在首次触发交互前自动预热 `homeContent(true)`。
+- 修复 `PanConfig`、`Wexconfig`、`Config` 等通过 `detailContent` 触发弹窗的配置中心在返回空串时被 `CspEngine.detail` 判定为 `IOException("插件返回空结果")` 的问题：新增独立 `CspEngine.detailAction(String)` 接口，允许配置扩展静默弹出原生二维码/凭据对话框并返回空串。
+- 修复在 `csp_WexconfigGuard`、`csp_WexokconfigGuard`、`csp_Config` 等非 `MyDrive` 订阅下点击右侧「网盘」面板中的「网盘登录与启用」「网盘优先顺序」「网盘搜索顺序」时直接弹出 `LoginShow`、`panSortShow`、`panSourceSortShow` 字符串提示框的问题：为 `Wexconfig`/`Wexokconfig` 映射真实动作码（`quarkcookie`、`ucpancookie`、`aliyuntoken`、`panpaixu` 等），为 `csp_Config` 等通用配置中心动态读取分类与操作卡片列表供用户点选，并在 `SourceController.sourceAction` 拦截内部动作标识符回显。
+- 修复在 `MyDrive` 已登录网盘分类（如夸父、优汐、阿狸）下点击 JSON `vod_id`（`{...}`）云盘视频文件时被误判为配置动作卡片的问题。
+
+## Android 手机 / 平板 0.5.11 — 2026-11-09
+
+完整说明：[Android 手机 / 平板 0.5.11](docs/releases/android-mobile-v0.5.11.md)。
+
+- 同步修复 `csp_MyDriveGuard`、`csp_PanConfigGuard`、`csp_WexconfigGuard`、`csp_WexokconfigGuard` 与 `csp_Config` 等全系列云盘配置中心的交互报错（`JsonSyntaxException` / `IOException`）与内部动作码（`LoginShow` / `panSortShow` / `panSourceSortShow`）弹窗问题，支持底部抽屉动态拉取各配置中心的网盘扫码与排序操作。
 
 ## Android 手机 / 平板 0.5.10 — 2026-11-09
 

@@ -111,16 +111,230 @@ final class SettingsScreen {
         a.paragraph(DecoderSupport.description());
     }
 
+    void openConfigSiteHome(Cms.Site targetSite) {
+        a.prefs.edit().putString(Prefs.SELECTED_SITE, targetSite.key).apply();
+        MobileShell.activeTab = 0;
+        a.back.clear();
+        a.open(new MainActivity.Screen(a::home), false);
+    }
+
+    void showAccountActionPicker(
+            String title,
+            String subtitle,
+            String[] labels,
+            java.util.function.IntConsumer handleChoice) {
+        if (!a.isTvDevice()) {
+            MobileShell.showDrawerPicker(a, title, subtitle, labels, -1, handleChoice::accept);
+        } else {
+            new AppDialog.Builder(a)
+                    .setTitle(title)
+                    .setItems(labels, (d, which) -> handleChoice.accept(which))
+                    .setNegativeButton("关闭", null)
+                    .show();
+        }
+    }
+
+    static Cms.Video findSortCard(java.util.List<Cms.Video> videos) {
+        if (videos == null) return null;
+        for (Cms.Video v : videos) {
+            if (v == null) continue;
+            String id = v.id == null ? "" : v.id.toLowerCase(java.util.Locale.ROOT);
+            String act = v.action == null ? "" : v.action.toLowerCase(java.util.Locale.ROOT);
+            String title = v.title == null ? "" : v.title;
+            if (id.contains("pan_order")
+                    || id.contains("panorder")
+                    || id.contains("panpaixu")
+                    || act.contains("pan_order")
+                    || act.contains("panorder")
+                    || act.contains("panpaixu")
+                    || title.contains("优先顺序")
+                    || title.contains("搜索顺序")
+                    || title.contains("网盘排序")
+                    || title.contains("网盘顺序")
+                    || title.contains("盘序")) {
+                return v;
+            }
+        }
+        return null;
+    }
+
+    void showDynamicVideoPicker(
+            Cms.Site targetSite, String title, java.util.List<Cms.Video> videos) {
+        if (videos == null || videos.isEmpty()) {
+            openConfigSiteHome(targetSite);
+            return;
+        }
+        String[] labels = new String[videos.size() + 1];
+        for (int i = 0; i < videos.size(); i++) {
+            Cms.Video v = videos.get(i);
+            String name = v.title == null ? "" : v.title.trim();
+            String rem = v.remarks == null ? "" : v.remarks.trim();
+            if (!rem.isEmpty() && !rem.equals(name)) {
+                labels[i] = name + " · " + rem;
+            } else {
+                labels[i] = name;
+            }
+        }
+        labels[videos.size()] = "打开完整配置中心";
+        showAccountActionPicker(
+                title,
+                "选择需要执行的网盘配置操作",
+                labels,
+                idx -> {
+                    if (idx < 0 || idx > videos.size()) return;
+                    if (idx == videos.size()) {
+                        openConfigSiteHome(targetSite);
+                    } else {
+                        a.openListing(targetSite, videos.get(idx));
+                    }
+                });
+    }
+
+    void openDynamicConfigCategory(Cms.Site targetSite, Cms.Category cat) {
+        final int ticket = a.generation;
+        a.worker.execute(
+                () -> {
+                    try {
+                        CspEngine.syncAllPluginActivities(a);
+                        SourceEngine eng = a.engine(targetSite);
+                        Cms.Listing list = Cms.listing(eng.category(cat.id, 1));
+                        a.ui.post(
+                                () -> {
+                                    if (a.isFinishing() || ticket != a.generation) return;
+                                    showDynamicVideoPicker(targetSite, cat.name, list.videos);
+                                });
+                    } catch (Throwable error) {
+                        a.ui.post(
+                                () -> {
+                                    if (a.isFinishing() || ticket != a.generation) return;
+                                    openConfigSiteHome(targetSite);
+                                });
+                    }
+                });
+    }
+
+    void openDynamicConfigSiteAction(Cms.Site targetSite, String action) {
+        final int ticket = a.generation;
+        final boolean wantSort = "panSortShow".equals(action) || "panSourceSortShow".equals(action);
+        a.worker.execute(
+                () -> {
+                    try {
+                        CspEngine.syncAllPluginActivities(a);
+                        SourceEngine eng = a.engine(targetSite);
+                        String homeRaw = eng.home();
+                        java.util.List<Cms.Category> cats = Cms.categories(homeRaw);
+                        Cms.Listing homeList = null;
+                        try {
+                            homeList = Cms.listing(homeRaw);
+                        } catch (Throwable ignored) {
+                        }
+                        if (wantSort) {
+                            Cms.Video sortCard =
+                                    findSortCard(homeList != null ? homeList.videos : null);
+                            if (sortCard == null && cats != null) {
+                                for (Cms.Category c : cats) {
+                                    String cid =
+                                            c.id == null
+                                                    ? ""
+                                                    : c.id.toLowerCase(java.util.Locale.ROOT);
+                                    String cname = c.name == null ? "" : c.name;
+                                    if (cid.contains("pan")
+                                            || cid.contains("config")
+                                            || cname.contains("网盘")
+                                            || cname.contains("配置")) {
+                                        try {
+                                            Cms.Listing cl = Cms.listing(eng.category(c.id, 1));
+                                            sortCard = findSortCard(cl.videos);
+                                            if (sortCard != null) break;
+                                        } catch (Throwable ignored) {
+                                        }
+                                    }
+                                }
+                            }
+                            if (sortCard != null) {
+                                final Cms.Video found = sortCard;
+                                a.ui.post(
+                                        () -> {
+                                            if (a.isFinishing() || ticket != a.generation) return;
+                                            a.openListing(targetSite, found);
+                                        });
+                                return;
+                            }
+                        }
+                        if (cats != null && !cats.isEmpty()) {
+                            final java.util.List<Cms.Category> categoryList = cats;
+                            a.ui.post(
+                                    () -> {
+                                        if (a.isFinishing() || ticket != a.generation) return;
+                                        String[] labels = new String[categoryList.size() + 1];
+                                        for (int i = 0; i < categoryList.size(); i++) {
+                                            labels[i] = categoryList.get(i).name;
+                                        }
+                                        labels[categoryList.size()] = "打开完整配置中心";
+                                        showAccountActionPicker(
+                                                targetSite.name,
+                                                "选择需要配置的网盘或功能分类",
+                                                labels,
+                                                idx -> {
+                                                    if (idx < 0 || idx > categoryList.size())
+                                                        return;
+                                                    if (idx == categoryList.size()) {
+                                                        openConfigSiteHome(targetSite);
+                                                    } else {
+                                                        openDynamicConfigCategory(
+                                                                targetSite, categoryList.get(idx));
+                                                    }
+                                                });
+                                    });
+                            return;
+                        }
+                        if (homeList != null && !homeList.videos.isEmpty()) {
+                            final java.util.List<Cms.Video> videos = homeList.videos;
+                            a.ui.post(
+                                    () -> {
+                                        if (a.isFinishing() || ticket != a.generation) return;
+                                        showDynamicVideoPicker(targetSite, targetSite.name, videos);
+                                    });
+                            return;
+                        }
+                        a.ui.post(
+                                () -> {
+                                    if (a.isFinishing() || ticket != a.generation) return;
+                                    openConfigSiteHome(targetSite);
+                                });
+                    } catch (Throwable error) {
+                        a.ui.post(
+                                () -> {
+                                    if (a.isFinishing() || ticket != a.generation) return;
+                                    openConfigSiteHome(targetSite);
+                                });
+                    }
+                });
+    }
+
     void accountAction(String action) {
         if (a.config != null) {
             Cms.Site fallback = null;
-            for (Cms.Site site : a.config.sites) {
-                if (site.api != null && site.api.contains("MyDrive")) {
-                    fallback = site;
-                    break;
+            String currentKey = a.prefs.getString(Prefs.SELECTED_SITE, "");
+            if (currentKey != null && !currentKey.isEmpty()) {
+                for (Cms.Site site : a.config.sites) {
+                    if (currentKey.equals(site.key)
+                            && SourceController.isDedicatedConfigSite(site)) {
+                        fallback = site;
+                        break;
+                    }
                 }
-                if (fallback == null && SourceController.isDedicatedConfigSite(site)) {
-                    fallback = site;
+            }
+            if (fallback == null) {
+                for (Cms.Site site : a.config.sites) {
+                    if (site.api != null
+                            && site.api.toLowerCase(java.util.Locale.ROOT).contains("mydrive")) {
+                        fallback = site;
+                        break;
+                    }
+                    if (fallback == null && SourceController.isDedicatedConfigSite(site)) {
+                        fallback = site;
+                    }
                 }
             }
             if (fallback == null) {
@@ -145,10 +359,12 @@ final class SettingsScreen {
                         targetSite.key == null
                                 ? ""
                                 : targetSite.key.toLowerCase(java.util.Locale.ROOT);
-                boolean isPanConfig =
-                        api.contains("panconfig")
-                                || key.contains("panconfig")
-                                || key.contains("wexconfig");
+                boolean isMyDrive = api.contains("mydrive") || key.contains("mydrive");
+                if (isMyDrive) {
+                    a.sourceAction(targetSite, action);
+                    return;
+                }
+                boolean isPanConfig = api.contains("panconfig") || key.contains("panconfig");
                 if (isPanConfig) {
                     if ("LoginShow".equals(action)) {
                         final String[] labels =
@@ -183,37 +399,19 @@ final class SettingsScreen {
                                     "pan123manual",
                                     "__open_config__"
                                 };
-                        java.util.function.IntConsumer handleChoice =
+                        showAccountActionPicker(
+                                "网盘扫码与账号登录",
+                                "选择需要扫码或配置凭据的网盘服务",
+                                labels,
                                 idx -> {
                                     if (idx < 0 || idx >= codes.length) return;
                                     String code = codes[idx];
                                     if ("__open_config__".equals(code)) {
-                                        a.prefs
-                                                .edit()
-                                                .putString(Prefs.SELECTED_SITE, targetSite.key)
-                                                .apply();
-                                        MobileShell.activeTab = 0;
-                                        a.back.clear();
-                                        a.open(new MainActivity.Screen(a::home), false);
+                                        openConfigSiteHome(targetSite);
                                     } else {
                                         a.sourceAction(targetSite, code);
                                     }
-                                };
-                        if (!a.isTvDevice()) {
-                            MobileShell.showDrawerPicker(
-                                    a,
-                                    "网盘扫码与账号登录",
-                                    "选择需要扫码或配置凭据的网盘服务",
-                                    labels,
-                                    -1,
-                                    handleChoice::accept);
-                        } else {
-                            new AppDialog.Builder(a)
-                                    .setTitle("网盘扫码与账号登录")
-                                    .setItems(labels, (d, which) -> handleChoice.accept(which))
-                                    .setNegativeButton("关闭", null)
-                                    .show();
-                        }
+                                });
                         return;
                     }
                     if ("pushCkShow".equals(action)) {
@@ -225,7 +423,64 @@ final class SettingsScreen {
                         return;
                     }
                 }
-                a.sourceAction(targetSite, action);
+                boolean isWexConfig =
+                        api.contains("wexconfig")
+                                || api.contains("wexokconfig")
+                                || key.contains("wexconfig")
+                                || key.contains("wexokconfig");
+                if (isWexConfig) {
+                    if ("panSortShow".equals(action) || "panSourceSortShow".equals(action)) {
+                        a.sourceAction(targetSite, "panpaixu");
+                        return;
+                    }
+                    final String[] labels =
+                            new String[] {
+                                "夸克网盘扫码 / Cookie 设置",
+                                "UC网盘扫码 / Cookie 设置①",
+                                "UC网盘 TV 扫码设置②",
+                                "阿里云盘扫码 / Token 设置",
+                                "百度网盘扫码登录",
+                                "115网盘扫码 / Cookie 设置",
+                                "天翼云盘账号登录",
+                                "移动云盘 Cookie 设置",
+                                "123云盘账号登录",
+                                "迅雷云盘账号登录",
+                                "哔哩哔哩扫码 / Cookie 设置",
+                                "网盘启用开关设置",
+                                "打开完整配置中心"
+                            };
+                    final String[] codes =
+                            new String[] {
+                                "quarkcookie",
+                                "ucpancookie",
+                                "uctvpancookie",
+                                "aliyuntoken",
+                                "baidupanlogin",
+                                "115pancookie",
+                                "tianyilogin",
+                                "ydyuncookie",
+                                "pan123login",
+                                "panxunleiuser",
+                                "bilicookie",
+                                "pankaiguan",
+                                "__open_config__"
+                            };
+                    showAccountActionPicker(
+                            "网盘扫码与账号登录",
+                            "选择需要扫码或配置凭据的网盘服务",
+                            labels,
+                            idx -> {
+                                if (idx < 0 || idx >= codes.length) return;
+                                String code = codes[idx];
+                                if ("__open_config__".equals(code)) {
+                                    openConfigSiteHome(targetSite);
+                                } else {
+                                    a.sourceAction(targetSite, code);
+                                }
+                            });
+                    return;
+                }
+                openDynamicConfigSiteAction(targetSite, action);
                 return;
             }
         }

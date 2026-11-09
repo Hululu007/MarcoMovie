@@ -33,6 +33,14 @@ public interface SourceEngine {
         throw new java.io.IOException("此来源没有提供交互接口");
     }
 
+    default boolean supportsCustomAction() {
+        return true;
+    }
+
+    default String detailAction(String id) throws Exception {
+        return detail(id);
+    }
+
     default void close() {}
 
     default boolean isClosed() {

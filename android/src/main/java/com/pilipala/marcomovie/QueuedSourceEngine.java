@@ -54,6 +54,15 @@ final class QueuedSourceEngine implements SourceEngine {
         return gate.call(true, () -> delegate.action(value));
     }
 
+    public boolean supportsCustomAction() {
+        return delegate.supportsCustomAction();
+    }
+
+    public String detailAction(String id) throws Exception {
+        if (!delegate.requiresExternalRuntime()) return delegate.detailAction(id);
+        return gate.call(true, () -> delegate.detailAction(id));
+    }
+
     public boolean requiresExternalRuntime() {
         return delegate.requiresExternalRuntime();
     }

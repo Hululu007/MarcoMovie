@@ -2094,8 +2094,7 @@ final class PlaybackControls {
         String candidate = rawUrl.trim();
         if (candidate.startsWith("[") || candidate.startsWith("{")) {
             try {
-                org.json.JSONObject wrapper =
-                        new org.json.JSONObject().put("danmaku", candidate);
+                org.json.JSONObject wrapper = new org.json.JSONObject().put("danmaku", candidate);
                 String extracted = MediaOptions.extractDanmakuUrl(wrapper);
                 if (!extracted.isEmpty()) candidate = extracted;
             } catch (Exception ignored) {

@@ -1905,10 +1905,7 @@ final class MobileShell {
                                             hitSites.entrySet()) {
                                         String k = entry.getKey();
                                         Cms.Site s = entry.getValue();
-                                        int c =
-                                                siteCounts.containsKey(k)
-                                                        ? siteCounts.get(k)
-                                                        : 0;
+                                        int c = siteCounts.containsKey(k) ? siteCounts.get(k) : 0;
                                         if (k.equals(cachedSearchSiteFilter)) {
                                             currentIdx = keys.size();
                                         }
