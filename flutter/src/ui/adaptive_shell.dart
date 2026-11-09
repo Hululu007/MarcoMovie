@@ -5901,7 +5901,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
             ),
             _buildExpandableChoiceDrawerTile<String>(
               settingKey: 'player_kernel',
-              icon: CupertinoIcons.cpu,
+              icon: CupertinoIcons.slider_horizontal_3,
               iconBgColor: AppleColors.systemTeal,
               title: '默认播放内核',
               subtitle: '选择内置播放器的解码与网络缓冲引擎（EXO / IJK / MPV）',

@@ -1641,7 +1641,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (widget.video.lines.length > 1 || !live)
         _PlayerAction(CupertinoIcons.layers_alt_fill, '线路', _showLinesSheet),
       _PlayerAction(
-        CupertinoIcons.cpu,
+        CupertinoIcons.slider_horizontal_3,
         '内核·$_kernelShortLabel',
         _showKernelSheet,
         shortLabel: _kernelShortLabel,
@@ -2244,7 +2244,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: kernels.map((k) {
               final selected = _playerKernel == k.key;
               return AppleGroupedTile(
-                icon: CupertinoIcons.cpu,
+                icon: CupertinoIcons.slider_horizontal_3,
                 iconBgColor: selected
                     ? AppleColors.systemBlue
                     : AppleColors.groupedTertiary,
