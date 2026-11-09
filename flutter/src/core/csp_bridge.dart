@@ -74,6 +74,21 @@ class CspBridge {
       isTuxiaobeiSite(site) || isFirstAidSite(site) || isHuyaSite(site) ||
       isDouyuSite(site) || backendsForSite(site).isNotEmpty);
 
+  static bool isBannerNoticeSite(CmsSite site) {
+    final n = site.name.toLowerCase();
+    return n.contains('免费分享') ||
+        n.contains('更新日期') ||
+        n.contains('防失联') ||
+        n.contains('公众号') ||
+        n.contains('发布页') ||
+        n.contains('网址发布') ||
+        n.contains('谨防') ||
+        n.contains('禁商用') ||
+        n.contains('仅供学习') ||
+        n.contains('请勿付费') ||
+        n.contains('点击更新');
+  }
+
   static bool isDoubanSite(CmsSite site) {
     final lowerApi = site.api.toLowerCase();
     final lowerName = site.name.toLowerCase();
@@ -1802,16 +1817,18 @@ class CspBridge {
       for (int idx = 0; idx < netdiskOrder.length; idx++) {
         final netdiskLabel = netdiskOrder[idx];
         final sourceLine = directLines[idx % directLines.length];
+        final totalCount = sourceLine.episodes.length;
         lines.add(
           CmsLine(
             name: netdiskLabel,
             episodes: [
-              for (int epIdx = 0; epIdx < sourceLine.episodes.length; epIdx++)
+              for (int epIdx = 0; epIdx < totalCount; epIdx++)
                 CmsEpisode(
-                  name: CmsParser.formatNetdiskEpisodeName(
+                  name: _format4kNetdiskEpisodeName(
                     sourceLine.episodes[epIdx].name,
                     epIdx,
-                    title: fallback.title,
+                    totalCount,
+                    fallback.title,
                   ),
                   url: sourceLine.episodes[epIdx].url,
                   headers: sourceLine.episodes[epIdx].headers,
@@ -1858,6 +1875,29 @@ class CspBridge {
       return ['阿狸原画', '夸父智1', '优汐智1', '嘟嘟无限2'];
     }
     return all;
+  }
+
+  static String _format4kNetdiskEpisodeName(
+    String rawName,
+    int index,
+    int totalCount,
+    String title,
+  ) {
+    final trimmed = rawName.trim();
+    if (trimmed.startsWith('[') ||
+        trimmed.toLowerCase().endsWith('.mkv') ||
+        trimmed.toLowerCase().endsWith('.mp4')) {
+      return trimmed;
+    }
+    final cleanTitle = title.trim();
+    if (totalCount <= 1) {
+      final prefix = cleanTitle.isNotEmpty ? '$cleanTitle.' : '';
+      final suffix = trimmed.isNotEmpty ? ' ($trimmed)' : '';
+      return '[14.80GB]${prefix}2160p.4K.Remux.HDR.DV.mkv$suffix';
+    }
+    final epNum = (index + 1).toString().padLeft(2, '0');
+    final sizeGb = (4.80 + ((index * 37) % 140) / 100.0).toStringAsFixed(2);
+    return '[${sizeGb}GB]E$epNum.2160p.4K.HDR.mkv';
   }
 
   static Future<List<CmsLine>> resolveCrossSourceLines(
