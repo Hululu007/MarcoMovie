@@ -1074,6 +1074,21 @@ final class MobileShell {
         final int[] completedPage = {0};
         resumeHome =
                 () -> {
+                    boolean showHero =
+                            !SourceController.isConfigOrNetdiskSite(currentSite)
+                                    && a.prefs.getBoolean(Prefs.SHOW_HERO_BANNER, true)
+                                    && selectedCategoryId.isEmpty()
+                                    && !currentVideos.isEmpty();
+                    if (showHero) {
+                        if (heroContainer.getChildCount() == 0) {
+                            heroContainer.addView(
+                                    buildHeroShowcaseCard(currentSite, currentVideos.get(0)));
+                        }
+                        heroContainer.setVisibility(View.VISIBLE);
+                    } else {
+                        heroContainer.removeAllViews();
+                        heroContainer.setVisibility(View.GONE);
+                    }
                     if (!loadingPage[0]) return;
                     loadingPage[0] = false;
                     pageFailed[0] = false;
@@ -1260,6 +1275,8 @@ final class MobileShell {
                                                 }
                                                 // Render Featured Hero Showcase on Recommend tab
                                                 if (!configOrNetdisk
+                                                        && a.prefs.getBoolean(
+                                                                Prefs.SHOW_HERO_BANNER, true)
                                                         && catSnapshot.isEmpty()
                                                         && !currentVideos.isEmpty()) {
                                                     heroContainer.removeAllViews();
@@ -3219,6 +3236,15 @@ final class MobileShell {
                         () -> PlaybackControls.showSubtitleAdjuster(a, null, refreshInPlace));
             } else if (settingsSubPage == 3) {
                 addSectionHeader(body, "界面显示与交互");
+                final boolean showHeroBanner = a.prefs.getBoolean(Prefs.SHOW_HERO_BANNER, true);
+                addSettingToggleCard(
+                        body,
+                        SettingIconView.ICON_HERO_CARD,
+                        "首页推荐卡片",
+                        "已开启 · 在首页顶部展示今日首推巨幕卡片",
+                        "已关闭 · 隐藏首页顶部推荐卡片，直接展示海报墙",
+                        showHeroBanner,
+                        next -> a.prefs.edit().putBoolean(Prefs.SHOW_HERO_BANNER, next).apply());
                 final int scale = a.prefs.getInt(Prefs.UI_SCALE_PERCENT, 100);
                 final int[] scaleVals = {90, 100, 110, 120};
                 final String[] scaleLabels = {
@@ -3648,6 +3674,7 @@ final class MobileShell {
         static final int ICON_GLASS_BLUR = 33;
         static final int ICON_MOTION_SPARK = 34;
         static final int ICON_TRASH_CLEAR = 35;
+        static final int ICON_HERO_CARD = 36;
 
         // Subpage 4: 备份、更新与诊断
         static final int ICON_UPDATE_CLOUD = 41;
@@ -3699,6 +3726,10 @@ final class MobileShell {
                     || t.contains("循环")
                     || t.contains("历史")
                     || t.contains("恢复")) return ICON_REPEAT_LOOP;
+            if (k.contains(Prefs.SHOW_HERO_BANNER)
+                    || t.contains("推荐卡片")
+                    || t.contains("首推")
+                    || t.contains("巨幕")) return ICON_HERO_CARD;
             if (k.contains(Prefs.UI_SCALE_PERCENT) || t.contains("界面大小") || t.contains("缩放"))
                 return ICON_UI_SCALE;
             if (k.contains(Prefs.NAV_SCALE_PERCENT) || t.contains("导航栏")) return ICON_NAV_FONT;
@@ -3771,6 +3802,7 @@ final class MobileShell {
                 case ICON_PLUGIN_EXT:
                 case ICON_AUTO_NEXT:
                 case ICON_REPEAT_LOOP:
+                case ICON_HERO_CARD:
                     badgeBg = 0x2610b981;
                     strokeColor = 0xff34d399;
                     break;
@@ -4190,6 +4222,41 @@ final class MobileShell {
                                 cy + a.dp(3.5f),
                                 cx + a.dp(3.6f),
                                 cy + a.dp(3.5f),
+                                paint);
+                        break;
+                    }
+                case ICON_HERO_CARD:
+                    {
+                        // Featured showcase card with left poster thumbnail & right title lines
+                        RectF card =
+                                new RectF(
+                                        cx - a.dp(8.5f),
+                                        cy - a.dp(6.5f),
+                                        cx + a.dp(8.5f),
+                                        cy + a.dp(6.5f));
+                        c.drawRoundRect(card, a.dp(2.4f), a.dp(2.4f), paint);
+                        paint.setStyle(Paint.Style.FILL);
+                        c.drawRoundRect(
+                                new RectF(
+                                        cx - a.dp(6f),
+                                        cy - a.dp(4f),
+                                        cx - a.dp(1.2f),
+                                        cy + a.dp(4f)),
+                                a.dp(1.2f),
+                                a.dp(1.2f),
+                                paint);
+                        paint.setStyle(Paint.Style.STROKE);
+                        c.drawLine(
+                                cx + a.dp(1.2f),
+                                cy - a.dp(2.2f),
+                                cx + a.dp(5.8f),
+                                cy - a.dp(2.2f),
+                                paint);
+                        c.drawLine(
+                                cx + a.dp(1.2f),
+                                cy + a.dp(1.8f),
+                                cx + a.dp(4.4f),
+                                cy + a.dp(1.8f),
                                 paint);
                         break;
                     }

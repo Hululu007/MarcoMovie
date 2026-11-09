@@ -552,6 +552,9 @@ final class SettingsScreen {
                         : a.prefs.getBoolean(Prefs.HOME_AMBIENT, true) ? "海报配色柔光" : "纯深色",
                 "settings-wallpaper",
                 () -> open(this::wallpaper));
+        if (!a.isTvDevice()) {
+            toggle("首页推荐卡片", Prefs.SHOW_HERO_BANNER, true, null);
+        }
         toggle(
                 "减少透明效果",
                 Prefs.REDUCED_TRANSPARENCY,

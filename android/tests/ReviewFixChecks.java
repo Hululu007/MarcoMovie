@@ -185,8 +185,8 @@ public final class ReviewFixChecks {
                 "image memory cache budget scales within 10MB..32MB bounds");
 
         check(
-                Prefs.KEYS.length == 34,
-                "backup settings key table includes reduced transparency, nav scale, and subtitle geometry");
+                Prefs.KEYS.length == 35,
+                "backup settings key table includes show_hero_banner, reduced transparency, nav scale, and subtitle geometry");
         check(
                 Prefs.clampSubtitleWeight(-10) == 0
                         && Prefs.clampSubtitleWeight(120) == 100
@@ -207,8 +207,11 @@ public final class ReviewFixChecks {
                 "nav_scale_percent clamps and validates within 85..140 range");
         check(
                 Boolean.TRUE.equals(Prefs.sanitizeSetting(Prefs.AUTO_NEXT, true))
+                        && Boolean.FALSE.equals(
+                                Prefs.sanitizeSetting(Prefs.SHOW_HERO_BANNER, false))
                         && Boolean.TRUE.equals(
                                 Prefs.sanitizeSetting(Prefs.REDUCED_TRANSPARENCY, true))
+                        && Prefs.sanitizeSetting(Prefs.SHOW_HERO_BANNER, "false") == null
                         && Prefs.sanitizeSetting(Prefs.REDUCED_TRANSPARENCY, "true") == null
                         && Prefs.sanitizeSetting(Prefs.AUTO_NEXT, "true") == null
                         && Prefs.sanitizeSetting(Prefs.EXPERIMENTAL_CSP, true) == null

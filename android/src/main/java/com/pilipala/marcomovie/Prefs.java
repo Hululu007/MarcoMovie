@@ -18,6 +18,7 @@ final class Prefs {
     static final String UI_SCALE_PERCENT = "ui_scale_percent";
     static final String NAV_SCALE_PERCENT = "nav_scale_percent";
     static final String STARTUP_ANIMATION = "startup_animation";
+    static final String SHOW_HERO_BANNER = "show_hero_banner";
     static final String HOME_AMBIENT = "home_ambient";
     static final String HOME_COLUMNS = "home_columns";
     static final String HOME_ROWS = "home_rows";
@@ -73,6 +74,7 @@ final class Prefs {
         UI_SCALE_PERCENT,
         NAV_SCALE_PERCENT,
         STARTUP_ANIMATION,
+        SHOW_HERO_BANNER,
         HOME_AMBIENT,
         HOME_COLUMNS,
         HOME_ROWS,
@@ -111,6 +113,7 @@ final class Prefs {
                     new HashSet<>(
                             Arrays.asList(
                                     STARTUP_ANIMATION,
+                                    SHOW_HERO_BANNER,
                                     HOME_AMBIENT,
                                     WALLPAPER_ENABLED,
                                     REDUCED,
