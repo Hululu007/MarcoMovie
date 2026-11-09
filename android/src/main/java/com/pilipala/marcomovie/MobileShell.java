@@ -2860,13 +2860,13 @@ final class MobileShell {
                 addSectionHeader(body, "配置与直播源导入");
                 addSettingCard(
                         body,
-                        1,
+                        SettingIconView.ICON_CLIPBOARD,
                         "从剪贴板一键粘贴配置",
                         "直接读取手机剪贴板中的 JSON、JS、PY、TXT/M3U 或配置网址",
                         () -> pasteConfigFromClipboard(a));
                 addSettingCard(
                         body,
-                        1,
+                        SettingIconView.ICON_LINK_CODE,
                         "输入或修改配置网址与源码",
                         a.configOrigin.isEmpty()
                                 ? "支持 JSON / JS / PY / TXT / M3U / ZIP 地址"
@@ -2874,14 +2874,14 @@ final class MobileShell {
                         () -> showMobileImportDialog(a));
                 addSettingCard(
                         body,
-                        1,
+                        SettingIconView.ICON_FOLDER_FILE,
                         "选择本地配置或本地包",
                         "支持导入 .json / .js / .py / .txt / .m3u / .zip 本地文件",
                         a::pickConfig);
                 String savedLiveUrl = a.prefs.getString(Prefs.LIVE_URL, "");
                 addSettingCard(
                         body,
-                        1,
+                        SettingIconView.ICON_LIVE_TV,
                         "导入或管理电视直播源",
                         savedLiveUrl.isEmpty()
                                 ? "支持 M3U、TXT (#genre#)、JSON 及本地直播文件"
@@ -2892,14 +2892,14 @@ final class MobileShell {
                 addSectionHeader(body, "片源选择与扩展引擎");
                 addSettingCard(
                         body,
-                        1,
+                        SettingIconView.ICON_SWITCH_SOURCE,
                         "切换默认片源",
                         currentSite == null ? "未选择" : "当前：" + currentSite.name,
                         a::chooseSources);
                 final boolean cspEnabled = a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true);
                 addSettingToggleCard(
                         body,
-                        1,
+                        SettingIconView.ICON_PLUGIN_EXT,
                         "启用第三方扩展片源 (JAR / JS / PY)",
                         "已开启 · 允许运行配置源中的 JAR、JS 与 PY 扩展",
                         "已关闭 · 仅使用内置标准解析",
@@ -2914,7 +2914,7 @@ final class MobileShell {
                 final String[] engineNames = {"Media3（自带软解与字幕增强）", "Android 系统播放器"};
                 addSettingCard(
                         body,
-                        3,
+                        SettingIconView.ICON_ENGINE_CORE,
                         "播放器内核",
                         engineNames[engine == 0 ? 0 : 1],
                         () ->
@@ -2932,7 +2932,7 @@ final class MobileShell {
                 final String[] decNames = {"自动选择（推荐）", "硬件解码优先 (HW)", "软件解码优先 (SW)"};
                 addSettingCard(
                         body,
-                        3,
+                        SettingIconView.ICON_DECODER_CHIP,
                         "视频解码方式",
                         decNames[Math.max(0, Math.min(2, decoder))],
                         () ->
@@ -2949,7 +2949,7 @@ final class MobileShell {
                 final boolean tunnel = a.prefs.getBoolean(Prefs.TUNNELED_PLAYBACK, false);
                 addSettingToggleCard(
                         body,
-                        3,
+                        SettingIconView.ICON_HDR_TUNNEL,
                         "4K HDR 隧道模式",
                         "已开启 · 硬件音视频隧道直通",
                         "已关闭 · 默认兼容渲染模式",
@@ -2958,7 +2958,7 @@ final class MobileShell {
                 final boolean autoNext = a.prefs.getBoolean(Prefs.AUTO_NEXT, true);
                 addSettingToggleCard(
                         body,
-                        3,
+                        SettingIconView.ICON_AUTO_NEXT,
                         "自动连播下一集",
                         "已开启 · 当前剧集播放完毕自动切换下一集",
                         "已关闭 · 单集播放完毕后停止",
@@ -2979,7 +2979,7 @@ final class MobileShell {
                                         : "片尾关闭");
                 addSettingCard(
                         body,
-                        3,
+                        SettingIconView.ICON_SKIP_TIMELINE,
                         "片头片尾跳过时间节点",
                         skipDesc + "（支持手动拖动滑块精准设定）",
                         () ->
@@ -2992,7 +2992,7 @@ final class MobileShell {
                 int subBg = Prefs.clampSubtitleBgStyle(a.prefs.getInt(Prefs.SUBTITLE_BG_STYLE, 0));
                 addSettingCard(
                         body,
-                        3,
+                        SettingIconView.ICON_SUBTITLE,
                         "全屏字幕触控调试（大小、粗细、位置与样式）",
                         "字号 "
                                 + subSize
@@ -3016,7 +3016,7 @@ final class MobileShell {
                 final int finalScaleIdx = curScaleIdx;
                 addSettingCard(
                         body,
-                        4,
+                        SettingIconView.ICON_UI_SCALE,
                         "界面整体缩放比例",
                         "当前：" + scaleLabels[finalScaleIdx],
                         () ->
@@ -3046,7 +3046,7 @@ final class MobileShell {
                 final int finalNavIdx = curNavIdx;
                 addSettingCard(
                         body,
-                        4,
+                        SettingIconView.ICON_NAV_FONT,
                         "导航栏字体与按钮大小",
                         "当前：" + navLabels[finalNavIdx] + "（自适应排版）",
                         () ->
@@ -3068,7 +3068,7 @@ final class MobileShell {
                         a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
                 addSettingToggleCard(
                         body,
-                        4,
+                        SettingIconView.ICON_GLASS_BLUR,
                         "减少透明效果",
                         "已开启 · 使用高对比实色面板",
                         "已关闭 · 使用背景液态毛玻璃材质",
@@ -3079,7 +3079,7 @@ final class MobileShell {
                         });
                 addSettingToggleCard(
                         body,
-                        4,
+                        SettingIconView.ICON_MOTION_SPARK,
                         "精简界面动画",
                         "已开启 · 减少过渡动画，提升响应速度",
                         "已关闭 · 保留完整流畅动效",
@@ -3090,7 +3090,7 @@ final class MobileShell {
                         });
                 addSettingCard(
                         body,
-                        4,
+                        SettingIconView.ICON_TRASH_CLEAR,
                         "清空搜索历史记录",
                         "清除搜索页保存的全部历史关键词",
                         () ->
@@ -3117,7 +3117,7 @@ final class MobileShell {
                 addSectionHeader(body, "更新、备份与诊断");
                 addSettingCard(
                         body,
-                        5,
+                        SettingIconView.ICON_UPDATE_CLOUD,
                         "检查软件更新",
                         "当前版本：" + UpdateManager.installedVersion(a) + " · 正式版",
                         () ->
@@ -3126,13 +3126,13 @@ final class MobileShell {
                                         true));
                 addSettingCard(
                         body,
-                        5,
+                        SettingIconView.ICON_DIAGNOSTIC_LOG,
                         "查看运行诊断日志",
                         "排查片源网络请求、代理与播放解码日志",
                         () -> new SettingsScreen(a).diagnostics());
                 addSettingCard(
                         body,
-                        5,
+                        SettingIconView.ICON_BACKUP_SAFE,
                         "完整高级设置与备份恢复",
                         "配置备份导出、恢复及完整系统参数页面",
                         () ->
@@ -3399,8 +3399,54 @@ final class MobileShell {
         }
     }
 
-    /** Clean vector icon badge for Settings cards (replaces emojis). */
+    /**
+     * Semantic vector icon badge for Settings cards (`38dp × 38dp` rounded-square tinted badge +
+     * bespoke vector glyph per setting item).
+     */
     static final class SettingIconView extends View {
+        // Level-1 Primary Categories
+        static final int ICON_SOURCES = 1;
+        static final int ICON_NETDISK = 2;
+        static final int ICON_PLAYBACK = 3;
+        static final int ICON_APPEARANCE = 4;
+        static final int ICON_SYSTEM = 5;
+
+        // Subpage 1: 片源与直播配置
+        static final int ICON_CLIPBOARD = 11;
+        static final int ICON_LINK_CODE = 12;
+        static final int ICON_FOLDER_FILE = 13;
+        static final int ICON_LIVE_TV = 14;
+        static final int ICON_SWITCH_SOURCE = 15;
+        static final int ICON_PLUGIN_EXT = 16;
+
+        // Subpage 2: 播放、解码与字幕
+        static final int ICON_ENGINE_CORE = 21;
+        static final int ICON_DECODER_CHIP = 22;
+        static final int ICON_HDR_TUNNEL = 23;
+        static final int ICON_AUTO_NEXT = 24;
+        static final int ICON_SKIP_TIMELINE = 25;
+        static final int ICON_SUBTITLE = 26;
+
+        // Subpage 3: 界面外观与偏好
+        static final int ICON_UI_SCALE = 31;
+        static final int ICON_NAV_FONT = 32;
+        static final int ICON_GLASS_BLUR = 33;
+        static final int ICON_MOTION_SPARK = 34;
+        static final int ICON_TRASH_CLEAR = 35;
+
+        // Subpage 4: 备份、更新与诊断
+        static final int ICON_UPDATE_CLOUD = 41;
+        static final int ICON_DIAGNOSTIC_LOG = 42;
+        static final int ICON_BACKUP_SAFE = 43;
+
+        // Additional TV / Advanced Settings Icons
+        static final int ICON_WALLPAPER = 51;
+        static final int ICON_GRID_COLS = 52;
+        static final int ICON_AUDIO_WAVE = 53;
+        static final int ICON_ASPECT_RATIO = 54;
+        static final int ICON_SPEED_GAUGE = 55;
+        static final int ICON_REPEAT_LOOP = 56;
+
         private final MainActivity a;
         private final int kind;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -3411,31 +3457,163 @@ final class MobileShell {
             this.kind = kind;
         }
 
+        static int kindForSetting(String key, String title) {
+            String k = key == null ? "" : key;
+            String t = title == null ? "" : title;
+            if (k.contains("settings-appearance")) return ICON_APPEARANCE;
+            if (k.contains("settings-playback")) return ICON_PLAYBACK;
+            if (k.contains("settings-data")) return ICON_SOURCES;
+            if (k.contains("settings-updates")) return ICON_UPDATE_CLOUD;
+            if (k.contains("settings-accounts") || t.contains("网盘")) return ICON_NETDISK;
+            if (k.contains("settings-live-import") || t.contains("直播")) return ICON_LIVE_TV;
+            if (k.contains("settings-import") || t.contains("配置源")) return ICON_LINK_CODE;
+            if (k.contains("settings-depots") || t.contains("线路") || t.contains("切换"))
+                return ICON_SWITCH_SOURCE;
+            if (k.contains(Prefs.EXPERIMENTAL_CSP) || t.contains("扩展")) return ICON_PLUGIN_EXT;
+            if (k.contains("settings-backup")
+                    || k.contains("settings-restore")
+                    || t.contains("备份")
+                    || t.contains("还原")) return ICON_BACKUP_SAFE;
+            if (k.contains("settings-logs") || t.contains("日志")) return ICON_DIAGNOSTIC_LOG;
+            if (k.contains("clear-history") || t.contains("清除") || t.contains("清空"))
+                return ICON_TRASH_CLEAR;
+            if (k.contains("settings-history")
+                    || k.contains("clear-images")
+                    || k.contains("settings-reset")
+                    || k.contains(Prefs.REPEAT_MODE)
+                    || t.contains("循环")
+                    || t.contains("历史")
+                    || t.contains("恢复")) return ICON_REPEAT_LOOP;
+            if (k.contains(Prefs.UI_SCALE_PERCENT) || t.contains("界面大小") || t.contains("缩放"))
+                return ICON_UI_SCALE;
+            if (k.contains(Prefs.NAV_SCALE_PERCENT) || t.contains("导航栏")) return ICON_NAV_FONT;
+            if (k.contains(Prefs.HOME_COLUMNS) || t.contains("每行海报")) return ICON_GRID_COLS;
+            if (k.contains("wallpaper")
+                    || k.contains(Prefs.HOME_AMBIENT)
+                    || t.contains("壁纸")
+                    || t.contains("图片")
+                    || t.contains("柔光")
+                    || t.contains("压暗")) return ICON_WALLPAPER;
+            if (k.contains(Prefs.REDUCED_TRANSPARENCY) || t.contains("透明")) return ICON_GLASS_BLUR;
+            if (k.contains(Prefs.REDUCED)
+                    || k.contains(Prefs.STARTUP_ANIMATION)
+                    || t.contains("动画")
+                    || t.contains("动态")) return ICON_MOTION_SPARK;
+            if (k.contains(Prefs.VIDEO_OUTPUT)
+                    || k.contains(Prefs.TUNNELED_PLAYBACK)
+                    || t.contains("HDR")
+                    || t.contains("画面输出")) return ICON_HDR_TUNNEL;
+            if (k.contains(Prefs.PLAYER_ENGINE) || t.contains("播放器")) return ICON_ENGINE_CORE;
+            if (k.contains(Prefs.DECODER_MODE) || k.contains("decoders") || t.contains("解码"))
+                return ICON_DECODER_CHIP;
+            if (k.contains(Prefs.SOFTWARE_AUDIO)
+                    || k.contains(Prefs.PREFER_AAC)
+                    || k.contains(Prefs.AUDIO_EFFECT)
+                    || t.contains("音轨")
+                    || t.contains("音效")
+                    || t.contains("音频")) return ICON_AUDIO_WAVE;
+            if (k.contains(Prefs.ASPECT)
+                    || k.contains(Prefs.PICTURE_EFFECT)
+                    || t.contains("画面比例")
+                    || t.contains("色彩")) return ICON_ASPECT_RATIO;
+            if (k.contains(Prefs.PLAY_SPEED)
+                    || k.contains(Prefs.BUFFER_SECONDS)
+                    || k.contains(Prefs.SEARCH_THREADS)
+                    || k.contains(Prefs.SEARCH_TIMEOUT)
+                    || t.contains("速度")
+                    || t.contains("缓冲")) return ICON_SPEED_GAUGE;
+            if (k.contains(Prefs.AUTO_NEXT) || t.contains("下一集")) return ICON_AUTO_NEXT;
+            if (k.contains(Prefs.SKIP_INTRO) || k.contains(Prefs.SKIP_OUTRO) || t.contains("跳过片"))
+                return ICON_SKIP_TIMELINE;
+            if (k.contains(Prefs.SUBTITLE_SIZE)
+                    || k.contains(Prefs.SUBTITLE_STYLE)
+                    || k.contains(Prefs.DANMAKU_DEFAULT)
+                    || t.contains("字幕")
+                    || t.contains("弹幕")) return ICON_SUBTITLE;
+            return ICON_SOURCES;
+        }
+
+        int iconKind() {
+            return kind;
+        }
+
         @Override
         protected void onDraw(Canvas c) {
             float w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
             float cx = w / 2f, cy = h / 2f;
             int badgeBg;
             int strokeColor;
             switch (kind) {
-                case 1:
-                    badgeBg = 0x260a84ff;
-                    strokeColor = 0xff5ac8fa;
+                case ICON_SOURCES:
+                case ICON_CLIPBOARD:
+                case ICON_DECODER_CHIP:
+                case ICON_GLASS_BLUR:
+                    badgeBg = 0x2606b6d4;
+                    strokeColor = 0xff22d3ee;
                     break;
-                case 2:
-                    badgeBg = 0x2630d158;
+                case ICON_NETDISK:
+                case ICON_PLUGIN_EXT:
+                case ICON_AUTO_NEXT:
+                case ICON_REPEAT_LOOP:
+                    badgeBg = 0x2610b981;
                     strokeColor = 0xff34d399;
                     break;
-                case 3:
-                    badgeBg = 0x26ff9f0a;
+                case ICON_PLAYBACK:
+                case ICON_ENGINE_CORE:
+                case ICON_SPEED_GAUGE:
+                    badgeBg = 0x26f59e0b;
                     strokeColor = 0xfffbbf24;
                     break;
-                case 4:
-                    badgeBg = 0x26bf5af2;
+                case ICON_FOLDER_FILE:
+                case ICON_SKIP_TIMELINE:
+                    badgeBg = 0x26f97316;
+                    strokeColor = 0xfffb923c;
+                    break;
+                case ICON_APPEARANCE:
+                case ICON_HDR_TUNNEL:
+                case ICON_UI_SCALE:
+                case ICON_GRID_COLS:
+                    badgeBg = 0x26a855f7;
                     strokeColor = 0xffc084fc;
                     break;
+                case ICON_NAV_FONT:
+                    badgeBg = 0x26ec4899;
+                    strokeColor = 0xfff472b6;
+                    break;
+                case ICON_LIVE_TV:
+                case ICON_AUDIO_WAVE:
+                    badgeBg = 0x26f43f5e;
+                    strokeColor = 0xfffb7185;
+                    break;
+                case ICON_TRASH_CLEAR:
+                    badgeBg = 0x26ef4444;
+                    strokeColor = 0xfff87171;
+                    break;
+                case ICON_MOTION_SPARK:
+                    badgeBg = 0x26eab308;
+                    strokeColor = 0xfffacc15;
+                    break;
+                case ICON_DIAGNOSTIC_LOG:
+                case ICON_WALLPAPER:
+                    badgeBg = 0x2614b8a6;
+                    strokeColor = 0xff2dd4bf;
+                    break;
+                case ICON_SWITCH_SOURCE:
+                case ICON_BACKUP_SAFE:
+                    badgeBg = 0x266366f1;
+                    strokeColor = 0xff818cf8;
+                    break;
+                case ICON_SUBTITLE:
+                case ICON_ASPECT_RATIO:
+                    badgeBg = 0x260ea5e9;
+                    strokeColor = 0xff38bdf8;
+                    break;
+                case ICON_SYSTEM:
+                case ICON_LINK_CODE:
+                case ICON_UPDATE_CLOUD:
                 default:
-                    badgeBg = 0x265ac8fa;
+                    badgeBg = 0x263b82f6;
                     strokeColor = 0xff60a5fa;
                     break;
             }
@@ -3445,60 +3623,707 @@ final class MobileShell {
 
             paint.setStyle(Paint.Style.STROKE);
             paint.setColor(strokeColor);
-            paint.setStrokeWidth(a.dp(1.6f));
+            paint.setStrokeWidth(a.dp(1.65f));
             paint.setStrokeCap(Paint.Cap.ROUND);
             paint.setStrokeJoin(Paint.Join.ROUND);
 
-            if (kind == 1) {
-                // Layers / source cube icon
-                Path top = new Path();
-                top.moveTo(cx, a.dp(8.5f));
-                top.lineTo(w - a.dp(8.5f), cy - a.dp(2f));
-                top.lineTo(cx, cy + a.dp(2.5f));
-                top.lineTo(a.dp(8.5f), cy - a.dp(2f));
-                top.close();
-                c.drawPath(top, paint);
-                c.drawLine(a.dp(8.5f), cy + a.dp(2.5f), cx, h - a.dp(8.5f), paint);
-                c.drawLine(w - a.dp(8.5f), cy + a.dp(2.5f), cx, h - a.dp(8.5f), paint);
-            } else if (kind == 2) {
-                // Cloud / netdisk icon
-                RectF base = new RectF(a.dp(8.5f), cy - a.dp(2f), w - a.dp(8.5f), h - a.dp(9.5f));
-                c.drawRoundRect(base, a.dp(4.5f), a.dp(4.5f), paint);
-                c.drawArc(
-                        new RectF(cx - a.dp(5f), a.dp(9f), cx + a.dp(5f), cy + a.dp(3f)),
-                        190,
-                        160,
-                        false,
-                        paint);
-            } else if (kind == 3) {
-                // Play circle + sliders icon
-                c.drawCircle(cx, cy, a.dp(8.5f), paint);
-                paint.setStyle(Paint.Style.FILL);
-                Path tri = new Path();
-                tri.moveTo(cx - a.dp(2.2f), cy - a.dp(3.4f));
-                tri.lineTo(cx + a.dp(3.6f), cy);
-                tri.lineTo(cx - a.dp(2.2f), cy + a.dp(3.4f));
-                tri.close();
-                c.drawPath(tri, paint);
-            } else if (kind == 4) {
-                // Sliders / tuning icon
-                float x1 = a.dp(9.5f), x2 = w - a.dp(9.5f);
-                c.drawLine(x1, cy - a.dp(5f), x2, cy - a.dp(5f), paint);
-                c.drawLine(x1, cy + a.dp(5f), x2, cy + a.dp(5f), paint);
-                paint.setStyle(Paint.Style.FILL);
-                c.drawCircle(cx - a.dp(3f), cy - a.dp(5f), a.dp(2.3f), paint);
-                c.drawCircle(cx + a.dp(3f), cy + a.dp(5f), a.dp(2.3f), paint);
-            } else {
-                // Shield / update arrow icon
-                c.drawArc(
-                        new RectF(a.dp(9.5f), a.dp(9.5f), w - a.dp(9.5f), h - a.dp(9.5f)),
-                        -30,
-                        300,
-                        false,
-                        paint);
-                c.drawLine(cx, a.dp(13f), cx, cy + a.dp(3.5f), paint);
-                c.drawLine(cx - a.dp(2.8f), cy + a.dp(0.8f), cx, cy + a.dp(3.6f), paint);
-                c.drawLine(cx + a.dp(2.8f), cy + a.dp(0.8f), cx, cy + a.dp(3.6f), paint);
+            switch (kind) {
+                case ICON_SOURCES:
+                    {
+                        // 3D stacked layers
+                        Path top = new Path();
+                        top.moveTo(cx, cy - a.dp(8f));
+                        top.lineTo(cx + a.dp(8f), cy - a.dp(3.2f));
+                        top.lineTo(cx, cy + a.dp(1.6f));
+                        top.lineTo(cx - a.dp(8f), cy - a.dp(3.2f));
+                        top.close();
+                        c.drawPath(top, paint);
+                        c.drawLine(cx - a.dp(8f), cy + a.dp(0.8f), cx, cy + a.dp(5.2f), paint);
+                        c.drawLine(cx + a.dp(8f), cy + a.dp(0.8f), cx, cy + a.dp(5.2f), paint);
+                        c.drawLine(cx - a.dp(8f), cy + a.dp(4.4f), cx, cy + a.dp(8.8f), paint);
+                        c.drawLine(cx + a.dp(8f), cy + a.dp(4.4f), cx, cy + a.dp(8.8f), paint);
+                        break;
+                    }
+                case ICON_NETDISK:
+                    {
+                        // Cloud drive with upward sync arrow
+                        RectF base =
+                                new RectF(
+                                        cx - a.dp(8.2f),
+                                        cy - a.dp(1.5f),
+                                        cx + a.dp(8.2f),
+                                        cy + a.dp(6.8f));
+                        c.drawRoundRect(base, a.dp(4.2f), a.dp(4.2f), paint);
+                        c.drawArc(
+                                new RectF(
+                                        cx - a.dp(5.2f),
+                                        cy - a.dp(7.5f),
+                                        cx + a.dp(5.2f),
+                                        cy + a.dp(2.5f)),
+                                185,
+                                170,
+                                false,
+                                paint);
+                        c.drawLine(cx, cy + a.dp(4.2f), cx, cy - a.dp(1.2f), paint);
+                        c.drawLine(cx - a.dp(2.3f), cy + a.dp(1f), cx, cy - a.dp(1.4f), paint);
+                        c.drawLine(cx + a.dp(2.3f), cy + a.dp(1f), cx, cy - a.dp(1.4f), paint);
+                        break;
+                    }
+                case ICON_PLAYBACK:
+                    {
+                        // Cinema play screen
+                        RectF scr =
+                                new RectF(
+                                        cx - a.dp(8.5f),
+                                        cy - a.dp(6.5f),
+                                        cx + a.dp(8.5f),
+                                        cy + a.dp(6.5f));
+                        c.drawRoundRect(scr, a.dp(2.8f), a.dp(2.8f), paint);
+                        paint.setStyle(Paint.Style.FILL);
+                        Path tri = new Path();
+                        tri.moveTo(cx - a.dp(2.2f), cy - a.dp(3.2f));
+                        tri.lineTo(cx + a.dp(3.4f), cy);
+                        tri.lineTo(cx - a.dp(2.2f), cy + a.dp(3.2f));
+                        tri.close();
+                        c.drawPath(tri, paint);
+                        break;
+                    }
+                case ICON_APPEARANCE:
+                    {
+                        // Dual tuning sliders
+                        float x1 = cx - a.dp(8f), x2 = cx + a.dp(8f);
+                        c.drawLine(x1, cy - a.dp(4.5f), x2, cy - a.dp(4.5f), paint);
+                        c.drawLine(x1, cy + a.dp(4.5f), x2, cy + a.dp(4.5f), paint);
+                        paint.setStyle(Paint.Style.FILL);
+                        c.drawCircle(cx - a.dp(2.8f), cy - a.dp(4.5f), a.dp(2.4f), paint);
+                        c.drawCircle(cx + a.dp(2.8f), cy + a.dp(4.5f), a.dp(2.4f), paint);
+                        break;
+                    }
+                case ICON_CLIPBOARD:
+                    {
+                        // Clipboard with top clip & lines
+                        RectF board =
+                                new RectF(
+                                        cx - a.dp(6.8f),
+                                        cy - a.dp(6.2f),
+                                        cx + a.dp(6.8f),
+                                        cy + a.dp(8.2f));
+                        c.drawRoundRect(board, a.dp(2.2f), a.dp(2.2f), paint);
+                        RectF clip =
+                                new RectF(
+                                        cx - a.dp(3.2f),
+                                        cy - a.dp(8.4f),
+                                        cx + a.dp(3.2f),
+                                        cy - a.dp(4.8f));
+                        paint.setStyle(Paint.Style.FILL);
+                        c.drawRoundRect(clip, a.dp(1.4f), a.dp(1.4f), paint);
+                        paint.setStyle(Paint.Style.STROKE);
+                        c.drawLine(
+                                cx - a.dp(3.6f),
+                                cy - a.dp(0.8f),
+                                cx + a.dp(3.6f),
+                                cy - a.dp(0.8f),
+                                paint);
+                        c.drawLine(
+                                cx - a.dp(3.6f),
+                                cy + a.dp(3.4f),
+                                cx + a.dp(2.2f),
+                                cy + a.dp(3.4f),
+                                paint);
+                        break;
+                    }
+                case ICON_LINK_CODE:
+                    {
+                        // Code brackets </>
+                        c.drawLine(cx - a.dp(3.8f), cy - a.dp(4.5f), cx - a.dp(8.2f), cy, paint);
+                        c.drawLine(cx - a.dp(8.2f), cy, cx - a.dp(3.8f), cy + a.dp(4.5f), paint);
+                        c.drawLine(cx + a.dp(3.8f), cy - a.dp(4.5f), cx + a.dp(8.2f), cy, paint);
+                        c.drawLine(cx + a.dp(8.2f), cy, cx + a.dp(3.8f), cy + a.dp(4.5f), paint);
+                        c.drawLine(
+                                cx + a.dp(1.8f),
+                                cy - a.dp(6.2f),
+                                cx - a.dp(1.8f),
+                                cy + a.dp(6.2f),
+                                paint);
+                        break;
+                    }
+                case ICON_FOLDER_FILE:
+                    {
+                        // Folder with top tab
+                        Path folder = new Path();
+                        folder.moveTo(cx - a.dp(8.2f), cy - a.dp(6.8f));
+                        folder.lineTo(cx - a.dp(2.2f), cy - a.dp(6.8f));
+                        folder.lineTo(cx + a.dp(0.2f), cy - a.dp(4.2f));
+                        folder.lineTo(cx + a.dp(8.2f), cy - a.dp(4.2f));
+                        folder.lineTo(cx + a.dp(8.2f), cy + a.dp(7.2f));
+                        folder.lineTo(cx - a.dp(8.2f), cy + a.dp(7.2f));
+                        folder.close();
+                        c.drawPath(folder, paint);
+                        c.drawLine(
+                                cx - a.dp(8f),
+                                cy - a.dp(0.8f),
+                                cx + a.dp(8f),
+                                cy - a.dp(0.8f),
+                                paint);
+                        break;
+                    }
+                case ICON_LIVE_TV:
+                    {
+                        // TV monitor with dual antenna rabbit ears & live dot
+                        RectF tv =
+                                new RectF(
+                                        cx - a.dp(8f),
+                                        cy - a.dp(3.8f),
+                                        cx + a.dp(8f),
+                                        cy + a.dp(7.5f));
+                        c.drawRoundRect(tv, a.dp(2.4f), a.dp(2.4f), paint);
+                        c.drawLine(cx - a.dp(4.5f), cy - a.dp(8.5f), cx, cy - a.dp(3.8f), paint);
+                        c.drawLine(cx + a.dp(4.5f), cy - a.dp(8.5f), cx, cy - a.dp(3.8f), paint);
+                        paint.setStyle(Paint.Style.FILL);
+                        c.drawCircle(cx, cy + a.dp(1.8f), a.dp(2f), paint);
+                        break;
+                    }
+                case ICON_SWITCH_SOURCE:
+                    {
+                        // Two opposite horizontal swap arrows
+                        float lx = cx - a.dp(7.5f), rx = cx + a.dp(7.5f);
+                        float ty = cy - a.dp(3.5f), by = cy + a.dp(3.5f);
+                        c.drawLine(lx, ty, rx, ty, paint);
+                        c.drawLine(rx - a.dp(3f), ty - a.dp(2.6f), rx, ty, paint);
+                        c.drawLine(rx - a.dp(3f), ty + a.dp(2.6f), rx, ty, paint);
+                        c.drawLine(rx, by, lx, by, paint);
+                        c.drawLine(lx + a.dp(3f), by - a.dp(2.6f), lx, by, paint);
+                        c.drawLine(lx + a.dp(3f), by + a.dp(2.6f), lx, by, paint);
+                        break;
+                    }
+                case ICON_PLUGIN_EXT:
+                    {
+                        // 2x2 modular plugin grid with popped top-right module
+                        float s = a.dp(5.6f), g = a.dp(1.4f);
+                        c.drawRoundRect(
+                                new RectF(cx - g - s, cy - g - s, cx - g, cy - g),
+                                a.dp(1.5f),
+                                a.dp(1.5f),
+                                paint);
+                        c.drawRoundRect(
+                                new RectF(cx - g - s, cy + g, cx - g, cy + g + s),
+                                a.dp(1.5f),
+                                a.dp(1.5f),
+                                paint);
+                        c.drawRoundRect(
+                                new RectF(cx + g, cy + g, cx + g + s, cy + g + s),
+                                a.dp(1.5f),
+                                a.dp(1.5f),
+                                paint);
+                        paint.setStyle(Paint.Style.FILL);
+                        c.drawRoundRect(
+                                new RectF(
+                                        cx + g + a.dp(0.8f),
+                                        cy - g - s - a.dp(0.8f),
+                                        cx + g + s + a.dp(0.8f),
+                                        cy - g - a.dp(0.8f)),
+                                a.dp(1.5f),
+                                a.dp(1.5f),
+                                paint);
+                        break;
+                    }
+                case ICON_ENGINE_CORE:
+                    {
+                        // Play circle core
+                        c.drawCircle(cx, cy, a.dp(8.5f), paint);
+                        paint.setStyle(Paint.Style.FILL);
+                        Path tri = new Path();
+                        tri.moveTo(cx - a.dp(2.2f), cy - a.dp(3.4f));
+                        tri.lineTo(cx + a.dp(3.6f), cy);
+                        tri.lineTo(cx - a.dp(2.2f), cy + a.dp(3.4f));
+                        tri.close();
+                        c.drawPath(tri, paint);
+                        break;
+                    }
+                case ICON_DECODER_CHIP:
+                    {
+                        // Hardware CPU/GPU decoder chip with pins
+                        RectF chip =
+                                new RectF(
+                                        cx - a.dp(5.5f),
+                                        cy - a.dp(5.5f),
+                                        cx + a.dp(5.5f),
+                                        cy + a.dp(5.5f));
+                        c.drawRoundRect(chip, a.dp(1.8f), a.dp(1.8f), paint);
+                        float p = a.dp(2.4f), in = a.dp(5.5f), out = a.dp(8.5f);
+                        c.drawLine(cx - p, cy - out, cx - p, cy - in, paint);
+                        c.drawLine(cx + p, cy - out, cx + p, cy - in, paint);
+                        c.drawLine(cx - p, cy + in, cx - p, cy + out, paint);
+                        c.drawLine(cx + p, cy + in, cx + p, cy + out, paint);
+                        c.drawLine(cx - out, cy - p, cx - in, cy - p, paint);
+                        c.drawLine(cx - out, cy + p, cx - in, cy + p, paint);
+                        c.drawLine(cx + in, cy - p, cx + out, cy - p, paint);
+                        c.drawLine(cx + in, cy + p, cx + out, cy + p, paint);
+                        paint.setStyle(Paint.Style.FILL);
+                        c.drawRoundRect(
+                                new RectF(
+                                        cx - a.dp(2.2f),
+                                        cy - a.dp(2.2f),
+                                        cx + a.dp(2.2f),
+                                        cy + a.dp(2.2f)),
+                                a.dp(0.8f),
+                                a.dp(0.8f),
+                                paint);
+                        break;
+                    }
+                case ICON_HDR_TUNNEL:
+                    {
+                        // HDR display with sun & rays
+                        RectF scr =
+                                new RectF(
+                                        cx - a.dp(8.5f),
+                                        cy - a.dp(6.5f),
+                                        cx + a.dp(8.5f),
+                                        cy + a.dp(6.5f));
+                        c.drawRoundRect(scr, a.dp(2.5f), a.dp(2.5f), paint);
+                        c.drawCircle(cx, cy, a.dp(2.4f), paint);
+                        c.drawLine(cx, cy - a.dp(4.6f), cx, cy - a.dp(3.8f), paint);
+                        c.drawLine(cx, cy + a.dp(3.8f), cx, cy + a.dp(4.6f), paint);
+                        c.drawLine(cx - a.dp(4.8f), cy, cx - a.dp(3.8f), cy, paint);
+                        c.drawLine(cx + a.dp(3.8f), cy, cx + a.dp(4.8f), cy, paint);
+                        break;
+                    }
+                case ICON_AUTO_NEXT:
+                    {
+                        // Fast-forward double-triangle + vertical bar (⏭)
+                        paint.setStyle(Paint.Style.FILL);
+                        Path t1 = new Path();
+                        t1.moveTo(cx - a.dp(7.5f), cy - a.dp(4.5f));
+                        t1.lineTo(cx - a.dp(1.2f), cy);
+                        t1.lineTo(cx - a.dp(7.5f), cy + a.dp(4.5f));
+                        t1.close();
+                        c.drawPath(t1, paint);
+                        Path t2 = new Path();
+                        t2.moveTo(cx - a.dp(1.2f), cy - a.dp(4.5f));
+                        t2.lineTo(cx + a.dp(5.2f), cy);
+                        t2.lineTo(cx - a.dp(1.2f), cy + a.dp(4.5f));
+                        t2.close();
+                        c.drawPath(t2, paint);
+                        paint.setStyle(Paint.Style.STROKE);
+                        c.drawLine(
+                                cx + a.dp(6.8f),
+                                cy - a.dp(4.5f),
+                                cx + a.dp(6.8f),
+                                cy + a.dp(4.5f),
+                                paint);
+                        break;
+                    }
+                case ICON_SKIP_TIMELINE:
+                    {
+                        // Timeline bar with curved skip-over arc arrow
+                        c.drawLine(
+                                cx - a.dp(8f), cy + a.dp(5f), cx + a.dp(8f), cy + a.dp(5f), paint);
+                        c.drawLine(
+                                cx - a.dp(5f),
+                                cy + a.dp(2.5f),
+                                cx - a.dp(5f),
+                                cy + a.dp(7.2f),
+                                paint);
+                        c.drawLine(
+                                cx + a.dp(5f),
+                                cy + a.dp(2.5f),
+                                cx + a.dp(5f),
+                                cy + a.dp(7.2f),
+                                paint);
+                        c.drawArc(
+                                new RectF(
+                                        cx - a.dp(6.5f),
+                                        cy - a.dp(6.5f),
+                                        cx + a.dp(6.5f),
+                                        cy + a.dp(3.5f)),
+                                195,
+                                150,
+                                false,
+                                paint);
+                        c.drawLine(
+                                cx + a.dp(3.6f),
+                                cy - a.dp(3.2f),
+                                cx + a.dp(6.5f),
+                                cy - a.dp(1f),
+                                paint);
+                        c.drawLine(
+                                cx + a.dp(3.2f),
+                                cy - a.dp(0.4f),
+                                cx + a.dp(6.5f),
+                                cy - a.dp(1f),
+                                paint);
+                        break;
+                    }
+                case ICON_SUBTITLE:
+                    {
+                        // Subtitle caption frame with bottom caption bars
+                        RectF box =
+                                new RectF(
+                                        cx - a.dp(8.5f),
+                                        cy - a.dp(6.5f),
+                                        cx + a.dp(8.5f),
+                                        cy + a.dp(6.5f));
+                        c.drawRoundRect(box, a.dp(2.5f), a.dp(2.5f), paint);
+                        c.drawLine(
+                                cx - a.dp(5.2f),
+                                cy + a.dp(0.5f),
+                                cx + a.dp(5.2f),
+                                cy + a.dp(0.5f),
+                                paint);
+                        c.drawLine(
+                                cx - a.dp(3.6f),
+                                cy + a.dp(3.5f),
+                                cx + a.dp(3.6f),
+                                cy + a.dp(3.5f),
+                                paint);
+                        break;
+                    }
+                case ICON_UI_SCALE:
+                    {
+                        // Four outward expansion corners
+                        float d = a.dp(7.5f), s = a.dp(3.4f);
+                        c.drawLine(cx - d, cy - d, cx - d + s, cy - d, paint);
+                        c.drawLine(cx - d, cy - d, cx - d, cy - d + s, paint);
+                        c.drawLine(cx + d, cy - d, cx + d - s, cy - d, paint);
+                        c.drawLine(cx + d, cy - d, cx + d, cy - d + s, paint);
+                        c.drawLine(cx - d, cy + d, cx - d + s, cy + d, paint);
+                        c.drawLine(cx - d, cy + d, cx - d, cy + d - s, paint);
+                        c.drawLine(cx + d, cy + d, cx + d - s, cy + d, paint);
+                        c.drawLine(cx + d, cy + d, cx + d, cy + d - s, paint);
+                        c.drawLine(
+                                cx - a.dp(3f),
+                                cy - a.dp(3f),
+                                cx - d + a.dp(0.6f),
+                                cy - d + a.dp(0.6f),
+                                paint);
+                        c.drawLine(
+                                cx + a.dp(3f),
+                                cy + a.dp(3f),
+                                cx + d - a.dp(0.6f),
+                                cy + d - a.dp(0.6f),
+                                paint);
+                        break;
+                    }
+                case ICON_NAV_FONT:
+                    {
+                        // Typography 'A' + nav pill bar
+                        c.drawLine(
+                                cx - a.dp(3.5f),
+                                cy - a.dp(6.5f),
+                                cx - a.dp(7.2f),
+                                cy + a.dp(3f),
+                                paint);
+                        c.drawLine(
+                                cx - a.dp(3.5f),
+                                cy - a.dp(6.5f),
+                                cx + a.dp(0.2f),
+                                cy + a.dp(3f),
+                                paint);
+                        c.drawLine(
+                                cx - a.dp(6f),
+                                cy - a.dp(0.2f),
+                                cx - a.dp(1f),
+                                cy - a.dp(0.2f),
+                                paint);
+                        c.drawCircle(cx + a.dp(4.8f), cy + a.dp(0.2f), a.dp(2.6f), paint);
+                        c.drawLine(
+                                cx + a.dp(7.4f),
+                                cy - a.dp(2.4f),
+                                cx + a.dp(7.4f),
+                                cy + a.dp(3f),
+                                paint);
+                        c.drawLine(
+                                cx - a.dp(7.5f),
+                                cy + a.dp(7f),
+                                cx + a.dp(7.5f),
+                                cy + a.dp(7f),
+                                paint);
+                        break;
+                    }
+                case ICON_GLASS_BLUR:
+                    {
+                        // Overlapping translucent glass circles
+                        c.drawCircle(cx - a.dp(2.6f), cy - a.dp(2.2f), a.dp(5.4f), paint);
+                        paint.setAlpha(110);
+                        paint.setStyle(Paint.Style.FILL);
+                        c.drawCircle(cx + a.dp(2.8f), cy + a.dp(2.4f), a.dp(5.4f), paint);
+                        paint.setAlpha(255);
+                        paint.setStyle(Paint.Style.STROKE);
+                        c.drawCircle(cx + a.dp(2.8f), cy + a.dp(2.4f), a.dp(5.4f), paint);
+                        break;
+                    }
+                case ICON_MOTION_SPARK:
+                    {
+                        // Lightning flash / dynamic animation
+                        Path bolt = new Path();
+                        bolt.moveTo(cx + a.dp(1.2f), cy - a.dp(8.2f));
+                        bolt.lineTo(cx - a.dp(5.2f), cy + a.dp(0.6f));
+                        bolt.lineTo(cx + a.dp(0.2f), cy + a.dp(0.6f));
+                        bolt.lineTo(cx - a.dp(1.2f), cy + a.dp(8.2f));
+                        bolt.lineTo(cx + a.dp(5.2f), cy - a.dp(0.6f));
+                        bolt.lineTo(cx - a.dp(0.2f), cy - a.dp(0.6f));
+                        bolt.close();
+                        c.drawPath(bolt, paint);
+                        break;
+                    }
+                case ICON_TRASH_CLEAR:
+                    {
+                        // Trash can
+                        c.drawLine(
+                                cx - a.dp(7.2f),
+                                cy - a.dp(5.2f),
+                                cx + a.dp(7.2f),
+                                cy - a.dp(5.2f),
+                                paint);
+                        c.drawLine(
+                                cx - a.dp(2.4f),
+                                cy - a.dp(7.5f),
+                                cx + a.dp(2.4f),
+                                cy - a.dp(7.5f),
+                                paint);
+                        RectF bin =
+                                new RectF(
+                                        cx - a.dp(5.2f),
+                                        cy - a.dp(5.2f),
+                                        cx + a.dp(5.2f),
+                                        cy + a.dp(7.8f));
+                        c.drawRoundRect(bin, a.dp(1.8f), a.dp(1.8f), paint);
+                        c.drawLine(
+                                cx - a.dp(1.8f),
+                                cy - a.dp(1.8f),
+                                cx - a.dp(1.8f),
+                                cy + a.dp(4.5f),
+                                paint);
+                        c.drawLine(
+                                cx + a.dp(1.8f),
+                                cy - a.dp(1.8f),
+                                cx + a.dp(1.8f),
+                                cy + a.dp(4.5f),
+                                paint);
+                        break;
+                    }
+                case ICON_DIAGNOSTIC_LOG:
+                    {
+                        // Diagnostic pulse monitor
+                        RectF box =
+                                new RectF(
+                                        cx - a.dp(8.5f),
+                                        cy - a.dp(6.8f),
+                                        cx + a.dp(8.5f),
+                                        cy + a.dp(6.8f));
+                        c.drawRoundRect(box, a.dp(2.4f), a.dp(2.4f), paint);
+                        Path pulse = new Path();
+                        pulse.moveTo(cx - a.dp(5.8f), cy + a.dp(0.5f));
+                        pulse.lineTo(cx - a.dp(2.6f), cy + a.dp(0.5f));
+                        pulse.lineTo(cx - a.dp(1f), cy - a.dp(3.8f));
+                        pulse.lineTo(cx + a.dp(1.2f), cy + a.dp(3.8f));
+                        pulse.lineTo(cx + a.dp(2.8f), cy + a.dp(0.5f));
+                        pulse.lineTo(cx + a.dp(5.8f), cy + a.dp(0.5f));
+                        c.drawPath(pulse, paint);
+                        break;
+                    }
+                case ICON_BACKUP_SAFE:
+                    {
+                        // Archive / backup box
+                        RectF lid =
+                                new RectF(
+                                        cx - a.dp(8.2f),
+                                        cy - a.dp(6.5f),
+                                        cx + a.dp(8.2f),
+                                        cy - a.dp(2.2f));
+                        c.drawRoundRect(lid, a.dp(1.5f), a.dp(1.5f), paint);
+                        RectF body =
+                                new RectF(
+                                        cx - a.dp(7f),
+                                        cy - a.dp(2.2f),
+                                        cx + a.dp(7f),
+                                        cy + a.dp(7.5f));
+                        c.drawRoundRect(body, a.dp(2f), a.dp(2f), paint);
+                        c.drawLine(
+                                cx - a.dp(2.4f),
+                                cy + a.dp(1.8f),
+                                cx + a.dp(2.4f),
+                                cy + a.dp(1.8f),
+                                paint);
+                        break;
+                    }
+                case ICON_WALLPAPER:
+                    {
+                        // Landscape image frame with sun & mountains
+                        RectF frame =
+                                new RectF(
+                                        cx - a.dp(8.5f),
+                                        cy - a.dp(6.5f),
+                                        cx + a.dp(8.5f),
+                                        cy + a.dp(6.5f));
+                        c.drawRoundRect(frame, a.dp(2.4f), a.dp(2.4f), paint);
+                        paint.setStyle(Paint.Style.FILL);
+                        c.drawCircle(cx - a.dp(3.8f), cy - a.dp(2.2f), a.dp(1.6f), paint);
+                        paint.setStyle(Paint.Style.STROKE);
+                        Path mtn = new Path();
+                        mtn.moveTo(cx - a.dp(6.5f), cy + a.dp(5.2f));
+                        mtn.lineTo(cx - a.dp(1.5f), cy + a.dp(0.2f));
+                        mtn.lineTo(cx + a.dp(1.8f), cy + a.dp(3.2f));
+                        mtn.lineTo(cx + a.dp(4.2f), cy + a.dp(1f));
+                        mtn.lineTo(cx + a.dp(6.8f), cy + a.dp(5.2f));
+                        c.drawPath(mtn, paint);
+                        break;
+                    }
+                case ICON_GRID_COLS:
+                    {
+                        // 2x2 poster grid
+                        float s = a.dp(5.8f), g = a.dp(1.4f);
+                        c.drawRoundRect(
+                                new RectF(cx - g - s, cy - g - s, cx - g, cy - g),
+                                a.dp(1.4f),
+                                a.dp(1.4f),
+                                paint);
+                        c.drawRoundRect(
+                                new RectF(cx + g, cy - g - s, cx + g + s, cy - g),
+                                a.dp(1.4f),
+                                a.dp(1.4f),
+                                paint);
+                        c.drawRoundRect(
+                                new RectF(cx - g - s, cy + g, cx - g, cy + g + s),
+                                a.dp(1.4f),
+                                a.dp(1.4f),
+                                paint);
+                        c.drawRoundRect(
+                                new RectF(cx + g, cy + g, cx + g + s, cy + g + s),
+                                a.dp(1.4f),
+                                a.dp(1.4f),
+                                paint);
+                        break;
+                    }
+                case ICON_AUDIO_WAVE:
+                    {
+                        // Equalizer sound wave bars
+                        c.drawLine(
+                                cx - a.dp(6.8f),
+                                cy - a.dp(3f),
+                                cx - a.dp(6.8f),
+                                cy + a.dp(3f),
+                                paint);
+                        c.drawLine(
+                                cx - a.dp(3.4f),
+                                cy - a.dp(7f),
+                                cx - a.dp(3.4f),
+                                cy + a.dp(7f),
+                                paint);
+                        c.drawLine(cx, cy - a.dp(4.5f), cx, cy + a.dp(4.5f), paint);
+                        c.drawLine(
+                                cx + a.dp(3.4f),
+                                cy - a.dp(8f),
+                                cx + a.dp(3.4f),
+                                cy + a.dp(8f),
+                                paint);
+                        c.drawLine(
+                                cx + a.dp(6.8f),
+                                cy - a.dp(3.5f),
+                                cx + a.dp(6.8f),
+                                cy + a.dp(3.5f),
+                                paint);
+                        break;
+                    }
+                case ICON_ASPECT_RATIO:
+                    {
+                        // 16:9 frame with inner corner brackets
+                        RectF frame =
+                                new RectF(
+                                        cx - a.dp(8.8f),
+                                        cy - a.dp(6f),
+                                        cx + a.dp(8.8f),
+                                        cy + a.dp(6f));
+                        c.drawRoundRect(frame, a.dp(2.2f), a.dp(2.2f), paint);
+                        c.drawLine(
+                                cx - a.dp(5.8f),
+                                cy - a.dp(3.2f),
+                                cx - a.dp(2.8f),
+                                cy - a.dp(3.2f),
+                                paint);
+                        c.drawLine(
+                                cx - a.dp(5.8f),
+                                cy - a.dp(3.2f),
+                                cx - a.dp(5.8f),
+                                cy - a.dp(0.4f),
+                                paint);
+                        c.drawLine(
+                                cx + a.dp(5.8f),
+                                cy + a.dp(3.2f),
+                                cx + a.dp(2.8f),
+                                cy + a.dp(3.2f),
+                                paint);
+                        c.drawLine(
+                                cx + a.dp(5.8f),
+                                cy + a.dp(3.2f),
+                                cx + a.dp(5.8f),
+                                cy + a.dp(0.4f),
+                                paint);
+                        break;
+                    }
+                case ICON_SPEED_GAUGE:
+                    {
+                        // Speedometer gauge
+                        c.drawArc(
+                                new RectF(
+                                        cx - a.dp(8f),
+                                        cy - a.dp(6.5f),
+                                        cx + a.dp(8f),
+                                        cy + a.dp(9.5f)),
+                                155,
+                                230,
+                                false,
+                                paint);
+                        c.drawLine(cx, cy + a.dp(2f), cx + a.dp(4.2f), cy - a.dp(3.2f), paint);
+                        paint.setStyle(Paint.Style.FILL);
+                        c.drawCircle(cx, cy + a.dp(2f), a.dp(1.6f), paint);
+                        break;
+                    }
+                case ICON_REPEAT_LOOP:
+                    {
+                        // Circular history / repeat arrow
+                        c.drawArc(
+                                new RectF(
+                                        cx - a.dp(7.5f),
+                                        cy - a.dp(7.5f),
+                                        cx + a.dp(7.5f),
+                                        cy + a.dp(7.5f)),
+                                -45,
+                                290,
+                                false,
+                                paint);
+                        c.drawLine(
+                                cx + a.dp(2.5f),
+                                cy - a.dp(7.5f),
+                                cx + a.dp(6f),
+                                cy - a.dp(4.5f),
+                                paint);
+                        c.drawLine(
+                                cx + a.dp(6.5f),
+                                cy - a.dp(8.2f),
+                                cx + a.dp(6f),
+                                cy - a.dp(4.5f),
+                                paint);
+                        c.drawLine(cx, cy - a.dp(3.5f), cx, cy + a.dp(0.5f), paint);
+                        c.drawLine(cx, cy + a.dp(0.5f), cx + a.dp(2.8f), cy + a.dp(2.2f), paint);
+                        break;
+                    }
+                case ICON_SYSTEM:
+                case ICON_UPDATE_CLOUD:
+                default:
+                    {
+                        // Circular update ring + arrow
+                        c.drawArc(
+                                new RectF(a.dp(9.5f), a.dp(9.5f), w - a.dp(9.5f), h - a.dp(9.5f)),
+                                -30,
+                                300,
+                                false,
+                                paint);
+                        c.drawLine(cx, a.dp(13f), cx, cy + a.dp(3.5f), paint);
+                        c.drawLine(cx - a.dp(2.8f), cy + a.dp(0.8f), cx, cy + a.dp(3.6f), paint);
+                        c.drawLine(cx + a.dp(2.8f), cy + a.dp(0.8f), cx, cy + a.dp(3.6f), paint);
+                        break;
+                    }
             }
         }
     }

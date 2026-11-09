@@ -10,7 +10,7 @@ Android phone/tablet and TV editions now have separate update feeds, independent
 per-edition version configuration (`android/edition-versions.json`), and explicit
 `android-mobile` / `android-tv` package names. See [Android update isolation](android-update-isolation.md)
 for the release tags, old-client migration aliases and runtime verification scope.
-Android phone/tablet 0.5.7 and TV 0.5.7 were independently published on November 8;
+Android phone/tablet 0.5.8 and TV 0.5.8 were independently published on November 9;
 see the platform-specific records below.
 
 See [installation package names](installation-package-names.md) for explicit
@@ -44,7 +44,7 @@ This website deployment did not replace any application installer.
 
 ## Published Android maintenance update
 
-[Android TV/box 0.5.7](releases/android-tv-v0.5.7.md) and [Android phone/tablet 0.5.7](releases/android-mobile-v0.5.7.md) (version code 57),
+[Android phone/tablet 0.5.8](releases/android-mobile-v0.5.8.md) and [Android TV/box 0.5.8](releases/android-tv-v0.5.8.md) (version code 58), [Android TV/box 0.5.7](releases/android-tv-v0.5.7.md) and [Android phone/tablet 0.5.7](releases/android-mobile-v0.5.7.md) (version code 57),
 [Android phone/tablet 0.5.6](releases/android-mobile-v0.5.6.md) and
 [Android TV/box 0.5.6](releases/android-tv-v0.5.6.md) use build commit
 `95121d25c30972170a3e1d94e7dcc73b5cced690` (version code 56), building on

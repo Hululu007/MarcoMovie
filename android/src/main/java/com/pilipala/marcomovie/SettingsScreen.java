@@ -48,7 +48,14 @@ final class SettingsScreen {
     void link(String title, String detail, String key, Runnable action) {
         boolean tv = a.isTvDevice();
         LinearLayout row = a.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(a.dp(20), a.dp(15), a.dp(20), a.dp(15));
+        MobileShell.SettingIconView icon =
+                new MobileShell.SettingIconView(
+                        a, MobileShell.SettingIconView.kindForSetting(key, title));
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(a.dp(38), a.dp(38));
+        iconLp.rightMargin = a.dp(14);
+        row.addView(icon, iconLp);
         LinearLayout copy = a.vertical();
         copy.addView(a.text(title, 17, MainActivity.WHITE));
         TextView caption = a.text(detail, 12, MainActivity.MUTED);
@@ -494,6 +501,12 @@ final class SettingsScreen {
         LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(a.dp(20), a.dp(15), a.dp(20), a.dp(15));
+        MobileShell.SettingIconView icon =
+                new MobileShell.SettingIconView(
+                        a, MobileShell.SettingIconView.kindForSetting(key, title));
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(a.dp(38), a.dp(38));
+        iconLp.rightMargin = a.dp(14);
+        row.addView(icon, iconLp);
         LinearLayout copy = a.vertical();
         copy.addView(a.text(title, 17, MainActivity.WHITE));
         final TextView caption = a.text(initial ? "开启" : "关闭", 12, MainActivity.MUTED);
