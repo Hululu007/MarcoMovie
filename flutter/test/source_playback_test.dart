@@ -76,6 +76,30 @@ void main() {
     expect(resolved.lines.single.episodes.single.name, '第08集');
     expect(resolved.lines.single.episodes.single.url, original.lines.single.episodes.single.url);
   });
+  test('cross-source netdisk lines prioritize healthy streams over dead CDN hosts', () async {
+    const original = CmsVideo(id: 'one', title: '斗罗大陆2：绝世唐门2023', lines: [
+      CmsLine(name: 'zuidam3u8', episodes: [
+        CmsEpisode(name: '第01集', url: 'https://cdn-a.test/20261106/ep1/index.m3u8'),
+        CmsEpisode(name: '第02集', url: 'https://cdn-a.test/20261106/ep2/index.m3u8'),
+      ]),
+    ]);
+    final firstPoolOrigin = Uri.parse(CspBridge.vodPool.first.api).host;
+    final resolved = await CspBridge.resolveCrossSourceVideo(
+      original,
+      '斗罗大陆2：绝世唐门2023',
+      (String url, {Map<String, String> headers = const {}, Duration? requestTimeout}) async {
+        if (url.contains(firstPoolOrigin)) {
+          return '{"code":1,"list":[{"vod_id":1,"vod_name":"斗罗大陆2：绝世唐门","vod_play_from":"ikm3u8","vod_play_url":"第01集\$https://cdn-b.test/ep1/index.m3u8#第02集\$https://cdn-b.test/ep2/index.m3u8"}]}';
+        }
+        return '{"code":1,"list":[]}';
+      },
+      siteHint: '玩偶哥哥┃4K弹幕',
+    );
+    expect(resolved.lines.first.name, '夸父智1');
+    expect(resolved.lines.first.episodes.first.url, 'https://cdn-a.test/20261106/ep1/index.m3u8');
+    expect(resolved.lines[1].name, '夸父无限1');
+    expect(resolved.lines[1].episodes.first.url, 'https://cdn-b.test/ep1/index.m3u8');
+  });
   test('HTML plugin website is not advertised as a JSON source adapter', () {
     const site = CmsSite(key: 'html', name: 'HTML', type: 3, api: 'csp_SixVGuard', ext: 'https://example.test/');
     expect(CspBridge.backendsForSite(site), isEmpty);

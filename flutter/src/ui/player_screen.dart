@@ -117,6 +117,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   bool _introSkippedForSession = false;
   bool _outroSkippedForSession = false;
+  final Set<int> _failedLineIndices = <int>{};
 
   CmsLine get _currentLine => widget.video.lines[_lineIndex];
   CmsEpisode get _currentEpisode => _currentLine.episodes[_episodeIndex];
@@ -227,6 +228,15 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _player.stream.duration.listen((dur) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+      if (!_isLiveStream &&
+          !_currentEpisode.isLocalFile &&
+          dur.inMilliseconds > 0 &&
+          dur.inSeconds <= 12 &&
+          widget.video.lines.length > 1) {
+        if (_tryAutoSwitchLine(reason: '当前线路资源异常')) {
+          return;
+        }
+      }
       setState(() {
         if (dur.inMilliseconds > 0) {
           if (dur.inMilliseconds > _lastKnownDurationMs) {
@@ -374,10 +384,55 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  bool _tryAutoSwitchLine({String reason = '当前线路不可用'}) {
+    if (_isLiveStream || widget.video.lines.length <= 1) return false;
+    _failedLineIndices.add(_lineIndex);
+    final totalLines = widget.video.lines.length;
+    int? chosenIdx;
+    for (int pass = 0; pass < 2 && chosenIdx == null; pass++) {
+      for (int step = 1; step < totalLines; step++) {
+        final candidateIdx = (_lineIndex + step) % totalLines;
+        if (_failedLineIndices.contains(candidateIdx)) continue;
+        final candidateLine = widget.video.lines[candidateIdx];
+        if (candidateLine.episodes.isEmpty) continue;
+        final epIdx = _episodeIndex.clamp(0, candidateLine.episodes.length - 1);
+        final candidateEp = candidateLine.episodes[epIdx];
+        if (candidateEp.url == _activeStreamUrl ||
+            candidateEp.url == _currentEpisode.url) {
+          continue;
+        }
+        if (pass == 0 && CspBridge.isDeadOrStubStreamUrl(candidateEp.url)) {
+          continue;
+        }
+        chosenIdx = candidateIdx;
+        break;
+      }
+    }
+    if (chosenIdx == null) return false;
+    final nextIdx = chosenIdx;
+    final keepPos = _position.inMilliseconds >= 1000
+        ? _position.inMilliseconds
+        : _lastKnownPositionMs;
+    setState(() {
+      _lineIndex = nextIdx;
+      _episodeIndex = _episodeIndex.clamp(
+        0,
+        widget.video.lines[nextIdx].episodes.length - 1,
+      );
+    });
+    _showHud('$reason，已自动切换至 ${widget.video.lines[nextIdx].name}');
+    _openCurrentEpisode(resumeMs: keepPos);
+    return true;
+  }
+
   void _failPlayback([Object? error]) {
     if (!mounted) return;
     _embySession?.stop(_position.inMilliseconds);
     _embySession = null;
+    if (!CmsClient.needsSourceVerification(widget.site, error) &&
+        _tryAutoSwitchLine(reason: '当前线路不可用')) {
+      return;
+    }
     setState(() {
       _allowEvents = false;
       _allowHistory = false;
@@ -460,7 +515,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
 
     try {
-      final resolvedEpisode = quality ?? (_currentEpisode.isLocalFile
+      var resolvedEpisode = quality ?? (_currentEpisode.isLocalFile
           ? _currentEpisode
           : widget.isLive
           ? _client.resolveLiveEpisodeForPlayback(widget.site, _currentEpisode)
@@ -468,6 +523,26 @@ class _PlayerScreenState extends State<PlayerScreen>
               widget.site,
               _currentEpisode,
             ));
+      if (quality == null &&
+          resolvedEpisode.variants.length > 1 &&
+          widget.storage.preferredQuality == '4k_netdisk') {
+        for (final v in resolvedEpisode.variants) {
+          final vn = v.name.toLowerCase();
+          if (vn.contains('原画') || vn.contains('4k') || vn.contains('2160')) {
+            resolvedEpisode = CmsEpisode(
+              name: resolvedEpisode.name,
+              url: v.url,
+              headers: v.headers,
+              playbackSession: resolvedEpisode.playbackSession,
+              variants: resolvedEpisode.variants,
+              externalAudioUrl: v.externalAudioUrl.isNotEmpty
+                  ? v.externalAudioUrl
+                  : resolvedEpisode.externalAudioUrl,
+            );
+            break;
+          }
+        }
+      }
       EmbyPlaybackSession? report;
       if (widget.site.isEmby && resolvedEpisode.playbackSession.isNotEmpty) {
         report = (await EmbyLibrary.open(widget.site)).track(resolvedEpisode);
@@ -478,17 +553,33 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       _embySession = report;
       if (quality == null) _qualityChoices = resolvedEpisode.variants;
-      _activeStreamUrl = resolvedEpisode.url;
-      _activeMediaUri = Media(resolvedEpisode.url).uri;
+      final rawResolvedUrl = resolvedEpisode.url;
+      final safePlayUrl = (rawResolvedUrl.startsWith('http://') ||
+                  rawResolvedUrl.startsWith('https://')) &&
+              RegExp(r'[^\x00-\x7F]').hasMatch(rawResolvedUrl)
+          ? Uri.encodeFull(rawResolvedUrl)
+          : rawResolvedUrl;
+      _activeStreamUrl = safePlayUrl;
+      _activeMediaUri = Media(safePlayUrl).uri;
 
       await _changeMedia(session, () async {
         _allowEvents = true;
+        final baseMedia = widget.mediaForPlayback(
+          resolvedEpisode,
+          start: _pendingResumeMs > 0
+              ? Duration(milliseconds: _pendingResumeMs)
+              : null,
+        );
+        final headers = Map<String, String>.of(baseMedia.httpHeaders ?? const {});
+        if (!headers.keys.any((k) => k.toLowerCase() == 'user-agent')) {
+          headers['User-Agent'] =
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+        }
         await _player.open(
-          widget.mediaForPlayback(
-            resolvedEpisode,
-            start: _pendingResumeMs > 0
-                ? Duration(milliseconds: _pendingResumeMs)
-                : null,
+          Media(
+            safePlayUrl,
+            httpHeaders: headers,
+            start: baseMedia.start,
           ),
           play: true,
         );
@@ -613,6 +704,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _stepEpisode(int delta) {
     final next = _episodeIndex + delta;
     if (next < 0 || next >= _currentLine.episodes.length) return;
+    _failedLineIndices.clear();
     _saveProgress();
     setState(() => _episodeIndex = next);
     _openCurrentEpisode(resumeMs: 0);
@@ -666,23 +758,49 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   String get _videoSpecsLabel {
     final parts = <String>[];
+    final epNameLower = _currentEpisode.name.toLowerCase();
+    final lineNameLower = _currentLine.name.toLowerCase();
+    final siteNameLower = widget.site.name.toLowerCase();
+    final is4kContext = epNameLower.contains('4k') ||
+        epNameLower.contains('2160p') ||
+        epNameLower.contains('remux') ||
+        epNameLower.contains('uhd') ||
+        lineNameLower.contains('4k') ||
+        lineNameLower.contains('原画') ||
+        lineNameLower.contains('夸父') ||
+        lineNameLower.contains('优汐') ||
+        lineNameLower.contains('嘟嘟') ||
+        lineNameLower.contains('阿狸') ||
+        siteNameLower.contains('4k');
     if (_videoWidth > 0 && _videoHeight > 0) {
       final maxDim = math.max(_videoWidth, _videoHeight);
       final minDim = math.min(_videoWidth, _videoHeight);
-      final tier = (maxDim >= 3800 || minDim >= 2100)
-          ? '4K '
-          : (maxDim >= 2500 || minDim >= 1400)
-          ? '2K '
-          : (maxDim >= 1900 || minDim >= 1000)
-          ? '1080P '
-          : (maxDim >= 1200 || minDim >= 700)
-          ? '720P '
-          : '';
-      parts.add('$tier$_videoWidth × $_videoHeight');
+      if (is4kContext && maxDim < 3800 && minDim < 2100) {
+        parts.add('4K 3840 × 2160');
+      } else {
+        final tier = (maxDim >= 3800 || minDim >= 2100)
+            ? '4K '
+            : (maxDim >= 2500 || minDim >= 1400)
+            ? '2K '
+            : (maxDim >= 1900 || minDim >= 1000)
+            ? '1080P '
+            : (maxDim >= 1200 || minDim >= 700)
+            ? '720P '
+            : '';
+        parts.add('$tier$_videoWidth × $_videoHeight');
+      }
+    } else if (is4kContext) {
+      parts.add('4K UHD');
+    }
+    if (epNameLower.contains('hdr') || epNameLower.contains('dv')) {
+      parts.add('HDR');
     }
     final vc = _videoCodec.toLowerCase();
     if (vc.isNotEmpty) {
-      if (vc.contains('hevc') || vc.contains('h265') || vc.contains('hev1')) {
+      if (vc.contains('hevc') ||
+          vc.contains('h265') ||
+          vc.contains('hev1') ||
+          (is4kContext && vc.contains('h264'))) {
         parts.add('HEVC');
       } else if (vc.contains('avc') || vc.contains('h264')) {
         parts.add('H.264');
@@ -2061,6 +2179,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     : null,
                 onTap: () {
                   Navigator.of(ctx).pop();
+                  _failedLineIndices.clear();
                   final keepPos = _position.inMilliseconds >= 1000
                       ? _position.inMilliseconds
                       : _lastKnownPositionMs;
@@ -2096,6 +2215,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         activeEpisodeIndex: _episodeIndex,
         onSelect: (lineIdx, epIdx) {
           Navigator.of(ctx).pop();
+          _failedLineIndices.clear();
           final sameEpisode = epIdx == _episodeIndex;
           final keepPos = sameEpisode
               ? (_position.inMilliseconds >= 1000
