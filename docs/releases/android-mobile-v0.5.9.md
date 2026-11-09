@@ -3,7 +3,7 @@
 - 发布平台：Android 手机 / 平板（`android-mobile`）
 - 版本：`0.5.9`（`versionCode 59`）
 - 发布日期：2026-11-09
-- 构建提交：`PENDING_COMMIT`
+- 构建提交：`3b8a60c13a900cb8177f513e04b60449a08d1fe6`
 - 安装包：`MarcoMovie-0.5.9-android-mobile.apk`（兼容旧名：`MarcoMovie-0.5.9-mobile.apk`）
 
 ## 本次修复与改进
