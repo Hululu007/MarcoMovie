@@ -40,7 +40,7 @@ class CspBridge {
   ];
 
   static final RegExp _supportedVodCspPattern = RegExp(
-    r'^csp_(?!(?:local|unknown$|unknownguard$|test|guard$|live$|push|mydrive|mypan|panconfig|config$|configcenter$|fakeai115))[a-z0-9_]+$',
+    r'^csp_(?!(?:local|unknown$|unknownguard$|test|guard$|live$|sixv|push|mydrive|mypan|panconfig|config$|configcenter$|fakeai115))[a-z0-9_]+$',
     caseSensitive: false,
   );
 
