@@ -84,15 +84,17 @@ final class MobileShell {
     private static final String[] TAB_NAMES = {"主页", "搜索", "直播", "片库", "设置"};
     private static final int[] DOCK_TAB_INDICES = {0, 2, 3, 4};
 
-    // Home tab state
+    // Home tab state (persisted across MobileShell re-renders for the same active site)
     private Cms.Site currentSite;
-    private String selectedCategoryId = "";
+    static String cachedCategorySiteKey = "";
+    static String selectedCategoryId = "";
     private int currentPage = 1;
     private int totalPages = 1;
     private final List<Cms.Video> currentVideos = new ArrayList<>();
-    private List<Cms.Category> currentCategories = new ArrayList<>();
-    private String filterSchema = "{}";
-    private final java.util.Map<String, String> selectedFilters = new java.util.LinkedHashMap<>();
+    static List<Cms.Category> currentCategories = new ArrayList<>();
+    static String filterSchema = "{}";
+    static final java.util.Map<String, String> selectedFilters = new java.util.LinkedHashMap<>();
+    static int cachedCatScrollX = 0;
     private int homeRequest;
     private boolean homeReady;
     private Runnable resumeHome;
@@ -605,20 +607,32 @@ final class MobileShell {
 
     private void resolveActiveSite() {
         currentSite = null;
-        if (a.config == null || a.config.sites.isEmpty()) return;
-        String wanted = a.prefs.getString(Prefs.SELECTED_SITE, "");
-        for (Cms.Site s : a.config.sites) {
-            if (s.key.equals(wanted) && a.available(s)) {
-                currentSite = s;
-                return;
+        if (a.config != null && !a.config.sites.isEmpty()) {
+            String wanted = a.prefs.getString(Prefs.SELECTED_SITE, "");
+            for (Cms.Site s : a.config.sites) {
+                if (s.key.equals(wanted) && a.available(s)) {
+                    currentSite = s;
+                    break;
+                }
+            }
+            if (currentSite == null) {
+                for (Cms.Site s : a.config.sites) {
+                    if (a.available(s)) {
+                        currentSite = s;
+                        a.prefs.edit().putString(Prefs.SELECTED_SITE, s.key).apply();
+                        break;
+                    }
+                }
             }
         }
-        for (Cms.Site s : a.config.sites) {
-            if (a.available(s)) {
-                currentSite = s;
-                a.prefs.edit().putString(Prefs.SELECTED_SITE, s.key).apply();
-                return;
-            }
+        String nextSiteKey = currentSite != null ? currentSite.key : "";
+        if (!nextSiteKey.equals(cachedCategorySiteKey)) {
+            cachedCategorySiteKey = nextSiteKey;
+            selectedCategoryId = "";
+            currentCategories = new ArrayList<>();
+            filterSchema = "{}";
+            selectedFilters.clear();
+            cachedCatScrollX = 0;
         }
     }
 
@@ -900,7 +914,97 @@ final class MobileShell {
             return;
         }
 
-        final ScrollView scrollView = new ScrollView(a);
+        final Runnable[] triggerPullRefresh = new Runnable[1];
+        final TextView pullRefreshBadge = a.text("↓ 下拉刷新当前内容", 12.5f, MainActivity.WHITE);
+        pullRefreshBadge.setTypeface(null, Typeface.BOLD);
+        pullRefreshBadge.setGravity(Gravity.CENTER);
+        pullRefreshBadge.setPadding(a.dp(16), a.dp(8), a.dp(16), a.dp(8));
+        pullRefreshBadge.setBackground(
+                glassBg(0xd81e2824, 0xd8141b18, a.dp(999), a.dp(0.8f), 0x40ffffff));
+        pullRefreshBadge.setElevation(a.dp(12));
+        pullRefreshBadge.setVisibility(View.GONE);
+
+        final LinearLayout body = a.vertical();
+        final int pullSlop = a.dp(10);
+        final int pullThreshold = a.dp(44);
+        final int pullMaxOffset = a.dp(76);
+        final ScrollView scrollView =
+                new ScrollView(a) {
+                    private float startX;
+                    private float startY;
+                    private boolean trackingTopPull;
+                    private boolean pullingDown;
+                    private float currentPullOffset;
+
+                    @Override
+                    public boolean dispatchTouchEvent(android.view.MotionEvent ev) {
+                        int action = ev.getActionMasked();
+                        if (action == android.view.MotionEvent.ACTION_DOWN) {
+                            startX = ev.getRawX();
+                            startY = ev.getRawY();
+                            trackingTopPull = getScrollY() <= 0;
+                            pullingDown = false;
+                            currentPullOffset = 0f;
+                        } else if (action == android.view.MotionEvent.ACTION_MOVE) {
+                            if (!trackingTopPull && getScrollY() <= 0) {
+                                startX = ev.getRawX();
+                                startY = ev.getRawY();
+                                trackingTopPull = true;
+                            } else if (getScrollY() > 0 && !pullingDown) {
+                                trackingTopPull = false;
+                            }
+                            if (trackingTopPull) {
+                                float dx = ev.getRawX() - startX;
+                                float dy = ev.getRawY() - startY;
+                                if (!pullingDown
+                                        && dy > pullSlop
+                                        && dy > Math.abs(dx) * 1.2f
+                                        && getScrollY() <= 0) {
+                                    pullingDown = true;
+                                }
+                                if (pullingDown) {
+                                    currentPullOffset =
+                                            Math.max(
+                                                    0f,
+                                                    Math.min(
+                                                            pullMaxOffset,
+                                                            (dy - pullSlop) * 0.42f));
+                                    body.setTranslationY(currentPullOffset);
+                                    pullRefreshBadge.setVisibility(View.VISIBLE);
+                                    pullRefreshBadge.setAlpha(
+                                            Math.min(1f, currentPullOffset / pullThreshold));
+                                    pullRefreshBadge.setText(
+                                            currentPullOffset >= pullThreshold
+                                                    ? "↑ 松开刷新当前内容"
+                                                    : "↓ 下拉刷新当前内容");
+                                    return true;
+                                }
+                            }
+                        } else if (action == android.view.MotionEvent.ACTION_UP
+                                || action == android.view.MotionEvent.ACTION_CANCEL) {
+                            if (pullingDown) {
+                                boolean shouldRefresh =
+                                        action == android.view.MotionEvent.ACTION_UP
+                                                && currentPullOffset >= pullThreshold;
+                                pullingDown = false;
+                                trackingTopPull = false;
+                                currentPullOffset = 0f;
+                                body.animate().translationY(0f).setDuration(180).start();
+                                if (shouldRefresh && triggerPullRefresh[0] != null) {
+                                    pullRefreshBadge.setVisibility(View.VISIBLE);
+                                    pullRefreshBadge.setAlpha(1f);
+                                    pullRefreshBadge.setText("正在刷新…");
+                                    triggerPullRefresh[0].run();
+                                } else {
+                                    pullRefreshBadge.setVisibility(View.GONE);
+                                }
+                                return true;
+                            }
+                            trackingTopPull = false;
+                        }
+                        return super.dispatchTouchEvent(ev);
+                    }
+                };
         homeScroll = scrollView;
         scrollView.post(() -> scrollView.scrollTo(0, homeScrollY));
         scrollView.setFillViewport(true);
@@ -908,8 +1012,11 @@ final class MobileShell {
         scrollView.setClipToPadding(false);
         a.scroll = scrollView;
         contentContainer.addView(scrollView, new FrameLayout.LayoutParams(-1, -1));
+        FrameLayout.LayoutParams badgeLp =
+                new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        badgeLp.topMargin = statusBarHeight() + a.dp(10);
+        contentContainer.addView(pullRefreshBadge, badgeLp);
 
-        final LinearLayout body = a.vertical();
         a.body = body;
         homeBody = body;
         body.setPadding(0, statusBarHeight() + a.dp(8), 0, a.dp(106));
@@ -1024,6 +1131,14 @@ final class MobileShell {
         catScroll.setClipChildren(true);
         catScroll.setClipToPadding(false);
         catScroll.setPadding(a.dp(16), a.dp(14), a.dp(8), a.dp(10));
+        catScroll
+                .getViewTreeObserver()
+                .addOnScrollChangedListener(
+                        () -> {
+                            if (catScroll.getWidth() > 0) {
+                                cachedCatScrollX = catScroll.getScrollX();
+                            }
+                        });
         final LinearLayout catRow = a.row();
         catRow.setGravity(Gravity.CENTER_VERTICAL);
         catScroll.addView(catRow);
@@ -1099,7 +1214,21 @@ final class MobileShell {
         final Runnable[] fetchCategoryPage = new Runnable[1];
         reloadCategory =
                 () -> {
-                    if (currentSite != null) a.homeData.remove(currentSite.key);
+                    if (currentSite != null && selectedCategoryId.isEmpty()) {
+                        a.homeData.remove(currentSite.key);
+                    }
+                    currentPage = 1;
+                    if (fetchCategoryPage[0] != null) fetchCategoryPage[0].run();
+                };
+        triggerPullRefresh[0] =
+                () -> {
+                    if (loadingPage[0]) {
+                        pullRefreshBadge.setVisibility(View.GONE);
+                        return;
+                    }
+                    if (currentSite != null && selectedCategoryId.isEmpty()) {
+                        a.homeData.remove(currentSite.key);
+                    }
                     currentPage = 1;
                     if (fetchCategoryPage[0] != null) fetchCategoryPage[0].run();
                 };
@@ -1107,6 +1236,10 @@ final class MobileShell {
                 new Runnable() {
                     @Override
                     public void run() {
+                        final int savedCatX =
+                                catScroll.getScrollX() > 0
+                                        ? catScroll.getScrollX()
+                                        : cachedCatScrollX;
                         boolean configSite = SourceController.isConfigOrNetdiskSite(currentSite);
                         filterButton.setVisibility(configSite ? View.GONE : View.VISIBLE);
                         filterButton.setText(
@@ -1125,6 +1258,10 @@ final class MobileShell {
                         for (Cms.Category c : currentCategories) {
                             addCategoryChip(catRow, c.name, c.id, this, fetchCategoryPage[0]);
                         }
+                        if (savedCatX > 0) {
+                            catScroll.scrollTo(savedCatX, 0);
+                            catScroll.post(() -> catScroll.scrollTo(savedCatX, 0));
+                        }
                     }
                 };
 
@@ -1136,8 +1273,10 @@ final class MobileShell {
                                 selectedFilters,
                                 () -> {
                                     if (selectedCategoryId.isEmpty()
-                                            && !currentCategories.isEmpty())
+                                            && !currentCategories.isEmpty()) {
                                         selectedCategoryId = currentCategories.get(0).id;
+                                        renderCategoryChips.run();
+                                    }
                                     currentPage = 1;
                                     filterButton.setText(
                                             selectedFilters.isEmpty()
@@ -1150,6 +1289,10 @@ final class MobileShell {
                     final int request = ++homeRequest;
                     loadingPage[0] = true;
                     if (currentPage == 1) {
+                        if (!selectedCategoryId.isEmpty()) {
+                            heroContainer.removeAllViews();
+                            heroContainer.setVisibility(View.GONE);
+                        }
                         statusText.setVisibility(View.VISIBLE);
                         statusText.setText("正在加载…");
                         loadMoreBtn.setVisibility(View.GONE);
@@ -1211,6 +1354,24 @@ final class MobileShell {
                                         saved.filterSchema = raw;
                                         homeSnapshot = saved;
                                     } else {
+                                        if (cats.isEmpty()) {
+                                            if (cached != null
+                                                    && cached.categories != null
+                                                    && !cached.categories.isEmpty()) {
+                                                cats = new ArrayList<>(cached.categories);
+                                            } else {
+                                                try {
+                                                    String rawHome = eng.home();
+                                                    cats = Cms.categories(rawHome);
+                                                    if (filterSchema == null
+                                                            || filterSchema.isEmpty()
+                                                            || "{}".equals(filterSchema)) {
+                                                        filterSchema = rawHome;
+                                                    }
+                                                } catch (Throwable ignored) {
+                                                }
+                                            }
+                                        }
                                         String targetCat =
                                                 catSnapshot.isEmpty() && !cats.isEmpty()
                                                         ? cats.get(0).id
@@ -1244,13 +1405,16 @@ final class MobileShell {
                                                 pageFailed[0] = false;
                                                 completedPage[0] = pageSnapshot;
                                                 homeReady = true;
+                                                pullRefreshBadge.setVisibility(View.GONE);
                                                 if (finalHomeSnapshot != null) {
                                                     filterSchema = finalHomeSnapshot.filterSchema;
                                                     a.homeData.put(
                                                             siteSnapshot.key, finalHomeSnapshot);
                                                 }
                                                 currentCategories = finalCats;
-                                                renderCategoryChips.run();
+                                                if (pageSnapshot == 1) {
+                                                    renderCategoryChips.run();
+                                                }
                                                 boolean configOrNetdisk =
                                                         SourceController.isConfigOrNetdiskSite(
                                                                 siteSnapshot);
@@ -1289,8 +1453,16 @@ final class MobileShell {
                                                     heroContainer.removeAllViews();
                                                     heroContainer.setVisibility(View.GONE);
                                                 }
+                                                final int savedScrollY = scrollView.getScrollY();
                                                 renderVideoGrid(
                                                         gridContainer, siteSnapshot, currentVideos);
+                                                if (pageSnapshot > 1 && savedScrollY > 0) {
+                                                    scrollView.scrollTo(0, savedScrollY);
+                                                    scrollView.post(
+                                                            () ->
+                                                                    scrollView.scrollTo(
+                                                                            0, savedScrollY));
+                                                }
                                                 if (currentPage < totalPages) {
                                                     loadMoreBtn.setVisibility(View.VISIBLE);
                                                     loadMoreBtn.setText(
@@ -1320,6 +1492,7 @@ final class MobileShell {
                                                 loadingPage[0] = false;
                                                 pageFailed[0] = true;
                                                 homeReady = !currentVideos.isEmpty();
+                                                pullRefreshBadge.setVisibility(View.GONE);
                                                 statusText.setVisibility(View.VISIBLE);
                                                 statusText.setText("加载失败：" + a.message(e));
                                                 loadMoreBtn.setVisibility(View.VISIBLE);
@@ -1502,6 +1675,7 @@ final class MobileShell {
                     selectedCategoryId = catId;
                     selectedFilters.clear();
                     currentPage = 1;
+                    homeScrollY = 0;
                     refreshChips.run();
                     loadPage.run();
                 });

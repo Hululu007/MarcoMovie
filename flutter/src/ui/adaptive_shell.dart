@@ -259,6 +259,18 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
       });
     }
   }
+  Future<void> _refreshCurrentHomeView() async {
+    if (_primaryTab == 'recommend' &&
+        _selectedCategoryId.isEmpty &&
+        _filterSubCategoryId.isEmpty &&
+        _filterGenreLabel.isEmpty &&
+        _filterArea.isEmpty &&
+        _filterYear.isEmpty) {
+      await _loadSiteHome();
+      return;
+    }
+    await _reloadFilteredListing(page: 1);
+  }
   Future<void> _selectPrimaryTab(String tabKey) async {
     if (tabKey == 'recommend') {
       setState(() {
@@ -868,7 +880,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                 SliverPadding(
                   padding: EdgeInsets.only(top: topSafePad),
                   sliver: CupertinoSliverRefreshControl(
-                    onRefresh: _loadSiteHome,
+                    onRefresh: _refreshCurrentHomeView,
                   ),
                 ),
                 // Horizontal padding is applied per block so the horizontal shelves
