@@ -565,6 +565,7 @@ https://depot.example/config.json
       'fy',
       'auete',
       'dm84',
+      'zpan',
     ]);
     expect(parsedWithRules.lives.length, 1);
     expect(parsedWithRules.lives.first.name, '综合直播');

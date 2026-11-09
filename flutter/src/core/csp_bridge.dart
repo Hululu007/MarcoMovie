@@ -40,7 +40,7 @@ class CspBridge {
   ];
 
   static final RegExp _supportedVodCspPattern = RegExp(
-    r'^csp_(?:newcz|czzy|czsapp|hmys|libvio|appgz|gz360|nmyswv|nmys|nmvod|jpys|wencai|apptt|rebovod|app99|moli|appsx|juquan|gugu|jpj|jianpian|aidj|duanju|appysv2|appys|appv2|xbpq|xyqhiker|xyqbiu|xpathmac|xpathmacfilter|biubiu|nangua|liteapple|apple|diduan|ddys|kuaikan|zxzj|sp360|voflix|subaibai|saohuo|nongmin|qiyou|jumi|xifan|freeok|maoli|wwys|nkdy|lgyy|mayi|klys|ikanbot|heti|dyg|xunlei8)(?:guard)?$',
+    r'^csp_(?!(?:local|unknown$|unknownguard$|test|guard$|live$|push|mydrive|mypan|panconfig|config$|configcenter$|fakeai115))[a-z0-9_]+$',
     caseSensitive: false,
   );
 
@@ -87,62 +87,38 @@ class CspBridge {
     final lowerApi = site.api.toLowerCase();
     final lowerName = site.name.toLowerCase();
     final lowerKey = site.key.toLowerCase();
+    final hasHttpExt = site.ext.toLowerCase().contains('http');
     return lowerApi.contains('mydrive') ||
+        lowerApi.contains('mypan') ||
+        lowerApi.contains('panconfig') ||
         lowerApi.contains('panwebshare') ||
         lowerApi == 'csp_config' ||
         lowerApi == 'csp_configcenter' ||
         lowerApi.startsWith('csp_push') ||
+        lowerApi.startsWith('csp_fakeai115') ||
+        (!hasHttpExt &&
+            (lowerApi.startsWith('csp_alist') ||
+                lowerApi.startsWith('csp_webdav') ||
+                lowerApi.startsWith('csp_emby') ||
+                lowerApi.startsWith('csp_diyvod') ||
+                lowerApi.startsWith('csp_xpath'))) ||
         lowerKey.contains('mydrive') ||
+        lowerKey.contains('mypan') ||
+        lowerKey.contains('wexconfig') ||
         lowerKey == 'config' ||
         lowerKey == 'push_agent' ||
         lowerName.contains('我的云盘') ||
         lowerName.contains('我的网盘') ||
+        lowerName.contains('我的┃网盘') ||
         lowerName.contains('云盘配置') ||
         lowerName.contains('网盘配置') ||
         lowerName.contains('配置中心') ||
+        lowerName.contains('配置┃中心') ||
+        lowerName.contains('请勿信视频中任何广告') ||
         (lowerName.contains('请先点击') && lowerName.contains('配置'));
   }
 
-  static bool isNetdiskSite(CmsSite site) {
-    if (isMyDriveSite(site)) return true;
-    final lowerApi = site.api.toLowerCase();
-    final lowerName = site.name.toLowerCase();
-    final lowerKey = site.key.toLowerCase();
-    return lowerApi.contains('wogg') ||
-        lowerApi.contains('seedhub') ||
-        lowerApi.contains('pansou') ||
-        lowerApi.contains('s_zps') ||
-        lowerApi.contains('ypanso') ||
-        lowerApi.contains('bpanso') ||
-        lowerApi.contains('yiso') ||
-        lowerApi.contains('panta') ||
-        lowerApi.contains('kkss') ||
-        lowerApi.contains('ucss') ||
-        lowerApi.contains('uuss') ||
-        lowerApi.contains('quark') ||
-        lowerApi.contains('baidu') ||
-        lowerApi.contains('alipan') ||
-        lowerApi.contains('aliyundrive') ||
-        lowerName.contains('玩偶') ||
-        lowerName.contains('聚剧') ||
-        lowerName.contains('四盘') ||
-        lowerName.contains('盘搜') ||
-        lowerName.contains('易搜') ||
-        lowerName.contains('盘她') ||
-        lowerName.contains('盘他') ||
-        lowerName.contains('夸父') ||
-        lowerName.contains('优汐') ||
-        lowerName.contains('嘟嘟') ||
-        lowerName.contains('阿狸') ||
-        lowerName.contains('抠抠') ||
-        lowerName.contains('云盘') ||
-        lowerKey.contains('wogg') ||
-        lowerKey.contains('seedhub') ||
-        lowerKey.contains('zpan') ||
-        lowerKey.contains('yiso') ||
-        lowerKey.contains('ypanso') ||
-        lowerKey.contains('bpanso');
-  }
+  static bool isNetdiskSite(CmsSite site) => isMyDriveSite(site);
 
   static bool isBiliSite(CmsSite site) {
     final lowerApi = site.api.toLowerCase();
@@ -152,17 +128,22 @@ class CspBridge {
         lowerApi.startsWith('csp_music') ||
         lowerApi.startsWith('csp_tingshu') ||
         lowerApi.startsWith('csp_yueting') ||
+        lowerApi.startsWith('csp_book') ||
         lowerApi.startsWith('csp_kanqiu') ||
         lowerApi.startsWith('csp_doubao') ||
-        lowerApi.startsWith('csp_livegz');
+        lowerApi.startsWith('csp_livegz') ||
+        lowerApi.startsWith('csp_sport');
   }
 
   static bool isTuxiaobeiSite(CmsSite site) {
+    final lowerApi = site.api.toLowerCase();
     final lowerKey = site.key.toLowerCase();
     final lowerName = site.name.toLowerCase();
     final lowerExt = site.ext.toLowerCase();
-    return lowerKey.contains('兔小贝') ||
+    return lowerApi.startsWith('csp_children') ||
+        lowerKey.contains('兔小贝') ||
         lowerName.contains('儿童') ||
+        lowerName.contains('儿歌') ||
         lowerExt.contains('tuxiaobei') ||
         lowerExt.contains('兔小贝') ||
         lowerExt.contains('%e5%85%94%e5%b0%8f%e8%b4%9d');
@@ -206,8 +187,12 @@ class CspBridge {
     final lowerKey = site.key.toLowerCase();
     final name = site.name;
     int offset;
-    if (name.contains('动漫') || lowerKey.contains('gugu') || lowerApi.contains('dm84')) {
+    if (name.contains('动漫') || lowerKey.contains('gugu') || lowerApi.contains('dm84') || lowerApi.contains('anime')) {
       offset = 13; // 魔都动漫
+    } else if (lowerApi.contains('wogg') || name.contains('玩偶')) {
+      offset = 0; // 非凡
+    } else if (lowerApi.contains('seedhub') || name.contains('聚剧') || name.contains('四盘')) {
+      offset = 5; // 索尼
     } else if (lowerApi.contains('newcz') || name.contains('厂长')) {
       offset = 2; // 暴风
     } else if (lowerApi.contains('hmys') || name.contains('海绵')) {
@@ -218,7 +203,7 @@ class CspBridge {
       offset = 9; // 爱坤
     } else if (lowerApi.contains('nmys') || name.contains('糯米')) {
       offset = 10; // 速播
-    } else if (lowerApi.contains('jpys') || name.contains('文采')) {
+    } else if (lowerApi.contains('jpys') || name.contains('文采') || name.contains('文才')) {
       offset = 4; // 量子
     } else if (lowerApi.contains('apptt') || name.contains('热播')) {
       offset = 0; // 非凡
@@ -226,9 +211,9 @@ class CspBridge {
       offset = 1; // 天涯
     } else if (lowerApi.contains('appsx') || name.contains('剧圈')) {
       offset = 5; // 索尼
-    } else if (lowerApi.contains('jpj') || name.contains('荐片')) {
+    } else if (lowerApi.contains('jpj') || name.contains('荐片') || name.contains('贱片')) {
       offset = 8; // 极速
-    } else if (lowerApi.contains('aidj') || name.contains('短漫') || name.contains('短剧')) {
+    } else if (lowerApi.contains('aidj') || lowerApi.contains('manju') || lowerApi.contains('duanju') || name.contains('短漫') || name.contains('漫短') || name.contains('漫剧') || name.contains('短剧')) {
       offset = 12; // 红牛
     } else if (lowerApi.contains('bttwoo') || name.contains('比特') || name.contains('光影')) {
       offset = 3; // 电影天堂
@@ -269,14 +254,9 @@ class CspBridge {
       return [];
     }
     final trimmedApi = site.api.trim();
-    if (RegExp(
-      r'^csp_(?:sixv|s_zps|wogg|seedhub|ypanso|bpanso|kkss|uuss|push)(?:guard)?$',
-      caseSensitive: false,
-    ).hasMatch(trimmedApi)) {
-      return [];
-    }
+    final isCspSpider = trimmedApi.toLowerCase().startsWith('csp_');
     final isHtmlSiteExt = RegExp(
-      r'^csp_(?:libvio|newcz)(?:guard)?$',
+      r'^csp_(?:libvio|newcz|sixv|s_zps|wogg|seedhub|ypanso|bpanso|kkss|uuss)(?:guard)?$',
       caseSensitive: false,
     ).hasMatch(trimmedApi);
     final endpoints = <({String name, String api})>[];
@@ -289,6 +269,13 @@ class CspBridge {
           lower.endsWith('.js') ||
           lower.endsWith('.py') ||
           lower.endsWith('.txt')) {
+        return;
+      }
+      if (isCspSpider &&
+          !lower.contains('api.php') &&
+          !lower.contains('provide/vod') &&
+          !lower.contains('/api') &&
+          !lower.contains('cms.')) {
         return;
       }
       if (seen.add(t)) {
@@ -1272,7 +1259,31 @@ class CspBridge {
 
   static List<CmsCategory> _defaultBiliCategoriesForSite(CmsSite site) {
     final name = site.name;
-    if (name.contains('MV') || name.contains('音乐')) {
+    if (name.contains('跳舞') || name.contains('舞蹈')) {
+      return const [
+        CmsCategory(id: '广场舞教学超清', name: '广场舞教学'),
+        CmsCategory(id: '健身操燃脂教学', name: '燃脂健身操'),
+        CmsCategory(id: '古典舞教学完整版', name: '古典舞'),
+        CmsCategory(id: '现代舞流行舞教学', name: '流行现代舞'),
+      ];
+    }
+    if (name.contains('戏曲')) {
+      return const [
+        CmsCategory(id: '经典戏曲名段超清', name: '戏曲名段'),
+        CmsCategory(id: '京剧经典全集超清', name: '京剧精选'),
+        CmsCategory(id: '黄梅戏经典选段', name: '黄梅戏'),
+        CmsCategory(id: '越剧豫剧经典全集', name: '越剧豫剧'),
+      ];
+    }
+    if (name.contains('电台') || name.contains('蜻蜓')) {
+      return const [
+        CmsCategory(id: '深夜情感电台', name: '情感电台'),
+        CmsCategory(id: '相声小品精选全集', name: '相声小品'),
+        CmsCategory(id: '历史故事广播剧', name: '历史故事'),
+        CmsCategory(id: '睡前故事助眠电台', name: '助眠电台'),
+      ];
+    }
+    if (name.contains('MV') || name.contains('音乐') || name.contains('KTV') || name.contains('舞曲') || name.contains('歌曲')) {
       return const [
         CmsCategory(id: '华语MV超清', name: '华语MV'),
         CmsCategory(id: '抖音热歌MV', name: '抖音热歌'),
@@ -1295,6 +1306,13 @@ class CspBridge {
         CmsCategory(id: '悬疑推理有声小说', name: '悬疑推理'),
         CmsCategory(id: '仙侠玄幻有声小说', name: '仙侠玄幻'),
         CmsCategory(id: '历史评书全集', name: '历史评书'),
+      ];
+    }
+    if (name.toUpperCase().contains('WWE')) {
+      return const [
+        CmsCategory(id: 'WWE经典比赛超清', name: 'WWE精选'),
+        CmsCategory(id: 'WWE摔角狂热大赛', name: '摔角狂热'),
+        CmsCategory(id: 'UFC格斗比赛集锦', name: '格斗集锦'),
       ];
     }
     if (name.contains('看球') || name.contains('回放') || name.contains('球迷') || name.contains('体育')) {
