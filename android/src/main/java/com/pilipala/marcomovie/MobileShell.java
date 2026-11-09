@@ -95,6 +95,7 @@ final class MobileShell {
     private int homeRequest;
     private boolean homeReady;
     private Runnable resumeHome;
+    Runnable reloadCategory;
     private FrameLayout retainedRoot;
     private int retainedWidth, retainedHeight, retainedEpoch;
     private boolean renderedPortrait = true;
@@ -1080,16 +1081,31 @@ final class MobileShell {
                     loadMoreBtn.setText("加载更多影片 (" + currentPage + "/" + totalPages + ")");
                 };
         final Runnable[] fetchCategoryPage = new Runnable[1];
+        reloadCategory =
+                () -> {
+                    if (currentSite != null) a.homeData.remove(currentSite.key);
+                    currentPage = 1;
+                    if (fetchCategoryPage[0] != null) fetchCategoryPage[0].run();
+                };
         final Runnable renderCategoryChips =
                 new Runnable() {
                     @Override
                     public void run() {
+                        boolean configSite = SourceController.isConfigOrNetdiskSite(currentSite);
+                        filterButton.setVisibility(configSite ? View.GONE : View.VISIBLE);
                         filterButton.setText(
                                 selectedFilters.isEmpty()
                                         ? "筛选"
                                         : "筛选 · " + selectedFilters.size());
+                        if (configSite
+                                && selectedCategoryId.isEmpty()
+                                && !currentCategories.isEmpty()) {
+                            selectedCategoryId = currentCategories.get(0).id;
+                        }
                         catRow.removeAllViews();
-                        addCategoryChip(catRow, "推荐", "", this, fetchCategoryPage[0]);
+                        if (!configSite || currentCategories.isEmpty()) {
+                            addCategoryChip(catRow, "推荐", "", this, fetchCategoryPage[0]);
+                        }
                         for (Cms.Category c : currentCategories) {
                             addCategoryChip(catRow, c.name, c.id, this, fetchCategoryPage[0]);
                         }

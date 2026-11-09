@@ -119,8 +119,16 @@ final class SettingsScreen {
                     fallback = site;
                     break;
                 }
-                if (fallback == null && SourceController.isConfigOrNetdiskSite(site)) {
+                if (fallback == null && SourceController.isDedicatedConfigSite(site)) {
                     fallback = site;
+                }
+            }
+            if (fallback == null) {
+                for (Cms.Site site : a.config.sites) {
+                    if (SourceController.isConfigOrNetdiskSite(site)) {
+                        fallback = site;
+                        break;
+                    }
                 }
             }
             if (fallback != null) {
@@ -128,7 +136,96 @@ final class SettingsScreen {
                     a.notice("请先在“搜索与数据”中启用来源扩展。");
                     return;
                 }
-                a.sourceAction(fallback, action);
+                final Cms.Site targetSite = fallback;
+                String api =
+                        targetSite.api == null
+                                ? ""
+                                : targetSite.api.toLowerCase(java.util.Locale.ROOT);
+                String key =
+                        targetSite.key == null
+                                ? ""
+                                : targetSite.key.toLowerCase(java.util.Locale.ROOT);
+                boolean isPanConfig =
+                        api.contains("panconfig")
+                                || key.contains("panconfig")
+                                || key.contains("wexconfig");
+                if (isPanConfig) {
+                    if ("LoginShow".equals(action)) {
+                        final String[] labels =
+                                new String[] {
+                                    "夸克网盘扫码登录",
+                                    "UC网盘 Cookie 扫码登录",
+                                    "UC网盘 TV Token 扫码登录",
+                                    "百度网盘扫码登录",
+                                    "115网盘扫码登录",
+                                    "天翼网盘扫码登录",
+                                    "天翼网盘账号密码登录",
+                                    "移动云盘扫码登录",
+                                    "光鸭网盘扫码登录",
+                                    "迅雷云盘扫码登录",
+                                    "哔哩哔哩扫码登录",
+                                    "123网盘账号密码设置",
+                                    "打开完整配置中心"
+                                };
+                        final String[] codes =
+                                new String[] {
+                                    "quark",
+                                    "uccookie",
+                                    "uctoken",
+                                    "baidu",
+                                    "pan115",
+                                    "pan189",
+                                    "pan189account",
+                                    "pan139",
+                                    "guangya",
+                                    "thunder",
+                                    "bili",
+                                    "pan123manual",
+                                    "__open_config__"
+                                };
+                        java.util.function.IntConsumer handleChoice =
+                                idx -> {
+                                    if (idx < 0 || idx >= codes.length) return;
+                                    String code = codes[idx];
+                                    if ("__open_config__".equals(code)) {
+                                        a.prefs
+                                                .edit()
+                                                .putString(Prefs.SELECTED_SITE, targetSite.key)
+                                                .apply();
+                                        MobileShell.activeTab = 0;
+                                        a.back.clear();
+                                        a.open(new MainActivity.Screen(a::home), false);
+                                    } else {
+                                        a.sourceAction(targetSite, code);
+                                    }
+                                };
+                        if (!a.isTvDevice()) {
+                            MobileShell.showDrawerPicker(
+                                    a,
+                                    "网盘扫码与账号登录",
+                                    "选择需要扫码或配置凭据的网盘服务",
+                                    labels,
+                                    -1,
+                                    handleChoice::accept);
+                        } else {
+                            new AppDialog.Builder(a)
+                                    .setTitle("网盘扫码与账号登录")
+                                    .setItems(labels, (d, which) -> handleChoice.accept(which))
+                                    .setNegativeButton("关闭", null)
+                                    .show();
+                        }
+                        return;
+                    }
+                    if ("pushCkShow".equals(action)) {
+                        a.sourceAction(targetSite, "web");
+                        return;
+                    }
+                    if ("panSortShow".equals(action) || "panSourceSortShow".equals(action)) {
+                        a.sourceAction(targetSite, "panorder");
+                        return;
+                    }
+                }
+                a.sourceAction(targetSite, action);
                 return;
             }
         }

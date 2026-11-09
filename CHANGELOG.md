@@ -2,7 +2,7 @@
 
 ## 未发布 — 订阅兼容修复中
 
-Android 手机/平板（0.5.8）与电视（0.5.8）的已验证升级与修复已按各平台独立版本号发布。以下跨端验证及实验仍在继续，不能视为 iPhone 或其他端已更新。
+Android 手机/平板（0.5.9）与电视（0.5.9）的已验证升级与修复已按各平台独立版本号发布。以下跨端验证及实验仍在继续，不能视为 iPhone 或其他端已更新。
 
 - Python 请求保留二进制内容，修复 Session Cookie 属性与同名 Cookie 的域隔离。
 - 为指定版本 T4 插件加入本机配置解析和共享适配，保留真实分页、影片及剧集标识；两条样例已取得目录、详情和 HLS 清单，其中一条搜索仍要求网站验证。
@@ -30,6 +30,20 @@ iPhone 仍需完成指定订阅及插件线路的独立运行、实际播放验�
 - 同步订阅源、多仓、脚本源（HTTP T4、DRPY、CatVod JS、Python Spider、已移植 Guard 源）与直播目录（`LiveCatalogParser`、`lives[].api`、`proxy://?do=live&type=txt&ext=`、Base64 直播列表、`parses` 解析回退）完整适配。
 - 切换为按 macOS 独立检查更新（`updates/macos.json`），切换筛选、直播源或离开详情页时主动取消过期请求。
 - 0.5.0 客户端首次升级请从下载页手动下载 macOS 0.5.1 应用包；限制同上，未完成的 33 条插件移植不计为已支持。
+
+## Android 电视 / 盒子 0.5.9 — 2026-11-09
+
+完整说明：[Android 电视 / 盒子 0.5.9](docs/releases/android-tv-v0.5.9.md)。
+
+- 修复双层加载器（`Init.loader()` + `InitOrigin`）网盘配置中心（`csp_PanConfigGuard` / `csp_PanConfig`）点击网盘配置偶发闪退的问题：在 `CspEngine` 中递归穿透内层 `DexClassLoader` 并将当前 `MainActivity` 绑定至 `InitOrigin.get().d`，将 `Application.mActivityLifecycleCallbacks` 注册及首次生命周期回放收敛至主线程执行，移除每次扩展请求重复重放 `onActivityCreated`/`onActivityStarted`/`onActivityResumed` 导致的 `android.R.id.content` 视图树并发修改，并在 `MainActivity.requestPermissions` 拦截插件后台线程发起的权限请求与扩展异常帧（`com.wexfnw.*` 及内层 `BaseDexClassLoader`）。
+- 修复点击网盘扫码登录及配置中心卡片无反应、不弹二维码的问题：`SourceController.sourceAction` 在扩展 `Spider.action(id)` 返回空串时自动回退调用 `detailContent(id)` 以触发 `PanConfig` 系插件内置的扫码/凭据弹窗，屏蔽占位详情 JSON 覆盖插件二维码弹窗，并在扫码弹窗关闭或切换开关后自动刷新当前配置分类状态；同时支持顶部“网盘与账号”面板（`AccountPanel`）直接唤起夸克、UC、百度、115、天翼、移动、光鸭、迅雷、123、哔哩等网盘扫码登录、网页配置中心推送与网盘线路排序，且电视端配置中心直接平铺展示全部 12 个网盘分类标签。
+
+## Android 手机 / 平板 0.5.9 — 2026-11-09
+
+完整说明：[Android 手机 / 平板 0.5.9](docs/releases/android-mobile-v0.5.9.md)。
+
+- 同步修复 `csp_PanConfigGuard` / `csp_PanConfig` 网盘配置中心点击网盘扫码登录、手动输入 Cookie/Token、清空凭据、网页配置中心及代理加速开关无反应的问题，支持 `action` 空响应自动回退 `detailContent` 触发插件原生弹窗，并在弹窗关闭后自动刷新当前网盘分类卡片状态。
+- 同步增强内层 `DexClassLoader`（`InitOrigin`）的 `Activity` 上下文绑定、主线程生命周期回调安全封装与顶栏“网盘与账号”抽屉面板全网盘扫码入口适配。
 
 ## Android 手机 / 平板 0.5.8 — 2026-11-09
 

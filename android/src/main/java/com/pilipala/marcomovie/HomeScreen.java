@@ -656,7 +656,17 @@ final class HomeScreen {
         boolean first = !state.initialized;
         if (first) {
             state.initialized = true;
-            state.category = "";
+            if (SourceController.isConfigOrNetdiskSite(site) && !snapshot.skip.isEmpty()) {
+                state.category = snapshot.skip;
+                if (!snapshot.videos.isEmpty()) {
+                    Cms.Listing initial = new Cms.Listing();
+                    initial.videos.addAll(snapshot.videos);
+                    initial.pageCount = snapshot.pages;
+                    state.categoryCache.put(snapshot.skip, initial);
+                }
+            } else {
+                state.category = "";
+            }
         }
         buildTabs();
         if (first && a.current != null && a.current.focus == null) {
@@ -669,16 +679,39 @@ final class HomeScreen {
         } else choose(state.category, false);
     }
 
+    void reloadCurrentCategory() {
+        if (!active() || site == null) return;
+        a.homeData.remove(site.key);
+        state.categoryCache.clear();
+        if (state.category.isEmpty() && snapshot != null && !snapshot.skip.isEmpty()) {
+            state.category = snapshot.skip;
+        }
+        if (state.category.isEmpty()) {
+            a.refresh();
+            return;
+        }
+        state.ready = false;
+        busy = false;
+        choose(state.category, false);
+    }
+
     void buildTabs() {
         filters.removeAllViews();
         filters.lines.clear();
         tabs.clear();
         tabIds.clear();
-        addTab("推荐", "", 0);
-        int visible = Math.min(4, snapshot.categories.size());
+        boolean configSite = SourceController.isConfigOrNetdiskSite(site);
+        int tabIdx = 0;
+        if (!configSite || snapshot.skip.isEmpty()) {
+            addTab("推荐", "", tabIdx++);
+        }
+        int visible =
+                configSite
+                        ? Math.min(16, snapshot.categories.size())
+                        : Math.min(4, snapshot.categories.size());
         for (int i = 0; i < visible; i++) {
             Cms.Category c = snapshot.categories.get(i);
-            addTab(c.name, c.id, i + 1);
+            addTab(c.name, c.id, tabIdx++);
         }
         if (snapshot.categories.size() > visible) {
             TextView extra =
@@ -708,7 +741,9 @@ final class HomeScreen {
                     (v, f) -> outline(extra, f, 17, extra.isSelected() ? 0xffededf2 : 0xff24242b));
             addTabView(extra);
         }
-        addTabView(pill("筛选", "home-filters", this::showFilters));
+        if (!configSite) {
+            addTabView(pill("筛选", "home-filters", this::showFilters));
+        }
         updateTabs();
         wireNavigation();
     }
@@ -878,7 +913,11 @@ final class HomeScreen {
             } else {
                 boolean hidden = false;
                 String name = "更多分类";
-                for (int i = 4; i < snapshot.categories.size(); i++)
+                int visibleLimit =
+                        SourceController.isConfigOrNetdiskSite(site)
+                                ? Math.min(16, snapshot.categories.size())
+                                : 4;
+                for (int i = visibleLimit; i < snapshot.categories.size(); i++)
                     if (snapshot.categories.get(i).id.equals(state.category)) {
                         hidden = true;
                         name = snapshot.categories.get(i).name;

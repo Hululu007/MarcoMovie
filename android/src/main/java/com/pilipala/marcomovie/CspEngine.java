@@ -15,6 +15,8 @@ import org.json.*;
 /** Experimental ordinary CSP host. Never unwraps, patches, or bypasses plugin protection. */
 public final class CspEngine implements SourceEngine {
     static final Map<String, DexClassLoader> LOADERS = new HashMap<>();
+    static final Set<ClassLoader> ALL_PLUGIN_LOADERS =
+            Collections.synchronizedSet(new LinkedHashSet<>());
     static volatile String activeJarDeclaration = "";
     final Application app;
     final Cms.Site site;
@@ -65,6 +67,8 @@ public final class CspEngine implements SourceEngine {
                 }
                 spider.init(app, site.ext == null ? "" : site.ext.toString());
             }
+            collectPluginLoaders(loader, spider);
+            syncPluginActivity(loader, MainActivity.activeActivity);
             diagnostic("loaded", className, null);
         } catch (Throwable error) {
             Throwable cause = unwrap(error);
@@ -78,6 +82,7 @@ public final class CspEngine implements SourceEngine {
             throws Exception {
         DexClassLoader existing = LOADERS.get(sha);
         if (existing != null) {
+            collectPluginLoaders(existing, null);
             syncPluginActivity(existing, MainActivity.activeActivity);
             return existing;
         }
@@ -89,11 +94,13 @@ public final class CspEngine implements SourceEngine {
                         optimized.getAbsolutePath(),
                         null,
                         app.getClassLoader());
+        ALL_PLUGIN_LOADERS.add(loader);
         prepareHostStorage(app);
         List<Object> before = lifecycleCallbacks(app);
         loader.loadClass("com.github.catvod.spider.Init")
                 .getMethod("init", Context.class)
                 .invoke(null, app);
+        collectPluginLoaders(loader, null);
         syncPluginProxyPort(loader, ProxyAddress.port);
         replayForegroundActivity(app, before);
         syncPluginActivity(loader, MainActivity.activeActivity);
@@ -101,9 +108,74 @@ public final class CspEngine implements SourceEngine {
         return loader;
     }
 
+    static Set<ClassLoader> collectPluginLoaders(ClassLoader rootLoader, Object spiderInstance) {
+        LinkedHashSet<ClassLoader> found = new LinkedHashSet<>();
+        if (rootLoader != null) {
+            found.add(rootLoader);
+            try {
+                Class<?> initClass =
+                        Class.forName("com.github.catvod.spider.Init", false, rootLoader);
+                for (String methodName : new String[] {"loader", "classLoader", "getClassLoader"}) {
+                    try {
+                        Method m = initClass.getDeclaredMethod(methodName);
+                        if (Modifier.isStatic(m.getModifiers())
+                                && ClassLoader.class.isAssignableFrom(m.getReturnType())) {
+                            m.setAccessible(true);
+                            Object inner = m.invoke(null);
+                            if (inner instanceof ClassLoader) found.add((ClassLoader) inner);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                for (Field f : initClass.getDeclaredFields()) {
+                    try {
+                        if (Modifier.isStatic(f.getModifiers())
+                                && ClassLoader.class.isAssignableFrom(f.getType())) {
+                            f.setAccessible(true);
+                            Object inner = f.get(null);
+                            if (inner instanceof ClassLoader) found.add((ClassLoader) inner);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (spiderInstance != null) {
+            ClassLoader sc = spiderInstance.getClass().getClassLoader();
+            if (sc != null) found.add(sc);
+            for (Class<?> c = spiderInstance.getClass();
+                    c != null && c != Object.class;
+                    c = c.getSuperclass()) {
+                for (Field f : c.getDeclaredFields()) {
+                    try {
+                        f.setAccessible(true);
+                        Object val = f.get(spiderInstance);
+                        if (val instanceof ClassLoader) {
+                            found.add((ClassLoader) val);
+                        } else if (val != null) {
+                            ClassLoader vc = val.getClass().getClassLoader();
+                            if (vc instanceof dalvik.system.BaseDexClassLoader
+                                    && vc != CspEngine.class.getClassLoader()) {
+                                found.add(vc);
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        }
+        ALL_PLUGIN_LOADERS.addAll(found);
+        return found;
+    }
+
     static synchronized void syncAllPluginActivities(android.app.Activity activity) {
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
-        for (DexClassLoader loader : LOADERS.values()) {
+        LinkedHashSet<ClassLoader> snapshot = new LinkedHashSet<>(LOADERS.values());
+        synchronized (ALL_PLUGIN_LOADERS) {
+            snapshot.addAll(ALL_PLUGIN_LOADERS);
+        }
+        for (ClassLoader loader : snapshot) {
             syncPluginActivity(loader, activity);
         }
     }
@@ -111,62 +183,79 @@ public final class CspEngine implements SourceEngine {
     static void syncPluginActivity(ClassLoader loader, android.app.Activity activity) {
         if (loader == null || activity == null || activity.isFinishing() || activity.isDestroyed())
             return;
-        try {
-            final Class<?> initClass = loader.loadClass("com.github.catvod.spider.Init");
-            Object instance = null;
-            try {
-                Method getMethod = initClass.getDeclaredMethod("get");
-                getMethod.setAccessible(true);
-                instance = getMethod.invoke(null);
-            } catch (Throwable ignored) {
+        for (ClassLoader cl : collectPluginLoaders(loader, null)) {
+            for (String initName :
+                    new String[] {
+                        "com.github.catvod.spider.Init",
+                        "com.github.catvod.spider.InitOrigin",
+                        "com.github.catvod.spider.AwInit"
+                    }) {
+                try {
+                    Class<?> initClass = Class.forName(initName, false, cl);
+                    syncSingleInitClass(initClass, activity);
+                } catch (Throwable ignored) {
+                }
             }
-            if (instance == null) {
-                for (Field f : initClass.getDeclaredFields()) {
+        }
+    }
+
+    private static void syncSingleInitClass(Class<?> initClass, android.app.Activity activity) {
+        if (initClass == null || activity == null) return;
+        Object instance = null;
+        try {
+            Method getMethod = initClass.getDeclaredMethod("get");
+            getMethod.setAccessible(true);
+            instance = getMethod.invoke(null);
+        } catch (Throwable ignored) {
+        }
+        if (instance == null) {
+            for (Field f : initClass.getDeclaredFields()) {
+                try {
                     if (Modifier.isStatic(f.getModifiers())
                             && initClass.isAssignableFrom(f.getType())) {
                         f.setAccessible(true);
                         instance = f.get(null);
                         if (instance != null) break;
                     }
+                } catch (Throwable ignored) {
                 }
             }
-            if (instance == null) {
-                for (Class<?> inner : initClass.getDeclaredClasses()) {
-                    for (Field f : inner.getDeclaredFields()) {
+        }
+        if (instance == null) {
+            for (Class<?> inner : initClass.getDeclaredClasses()) {
+                for (Field f : inner.getDeclaredFields()) {
+                    try {
                         if (Modifier.isStatic(f.getModifiers())
                                 && initClass.isAssignableFrom(f.getType())) {
                             f.setAccessible(true);
                             instance = f.get(null);
                             if (instance != null) break;
                         }
+                    } catch (Throwable ignored) {
                     }
-                    if (instance != null) break;
                 }
+                if (instance != null) break;
             }
-            bindActivityFields(initClass, null, activity);
-            if (instance != null) {
-                bindActivityFields(initClass, instance, activity);
-            }
-            if (instance instanceof Application.ActivityLifecycleCallbacks) {
-                final Application.ActivityLifecycleCallbacks cb =
-                        (Application.ActivityLifecycleCallbacks) instance;
-                Runnable replay =
-                        () -> {
-                            if (activity.isFinishing() || activity.isDestroyed()) return;
-                            try {
-                                cb.onActivityCreated(activity, null);
-                                cb.onActivityStarted(activity);
-                                cb.onActivityResumed(activity);
-                            } catch (Throwable ignored) {
-                            }
-                        };
-                if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-                    replay.run();
-                } else {
-                    new android.os.Handler(android.os.Looper.getMainLooper()).post(replay);
+        }
+        bindActivityFields(initClass, null, activity);
+        if (instance != null) {
+            bindActivityFields(initClass, instance, activity);
+        }
+        for (Method m : initClass.getDeclaredMethods()) {
+            try {
+                Class<?>[] params = m.getParameterTypes();
+                if (params.length == 1
+                        && params[0].isAssignableFrom(android.app.Activity.class)
+                        && m.getName().toLowerCase(Locale.ROOT).contains("activity")) {
+                    m.setAccessible(true);
+                    if (Modifier.isStatic(m.getModifiers())) {
+                        m.invoke(null, activity);
+                    } else if (instance != null) {
+                        m.invoke(instance, activity);
+                    }
                 }
+            } catch (Throwable ignored) {
             }
-        } catch (Throwable ignored) {
         }
     }
 
@@ -202,22 +291,24 @@ public final class CspEngine implements SourceEngine {
 
     static void syncPluginProxyPort(ClassLoader loader, int port) {
         if (loader == null || port <= 0) return;
-        try {
-            Class<?> proxyClass = loader.loadClass("com.github.catvod.spider.Proxy");
+        for (ClassLoader cl : collectPluginLoaders(loader, null)) {
             try {
-                proxyClass.getMethod("set", int.class).invoke(null, port);
-                return;
+                Class<?> proxyClass = Class.forName("com.github.catvod.spider.Proxy", false, cl);
+                try {
+                    proxyClass.getMethod("set", int.class).invoke(null, port);
+                    continue;
+                } catch (Throwable ignored) {
+                }
+                for (Field f : proxyClass.getDeclaredFields()) {
+                    if (Modifier.isStatic(f.getModifiers())
+                            && (f.getType() == int.class || f.getType() == Integer.class)
+                            && f.getName().toLowerCase(Locale.ROOT).contains("port")) {
+                        f.setAccessible(true);
+                        f.setInt(null, port);
+                    }
+                }
             } catch (Throwable ignored) {
             }
-            for (Field f : proxyClass.getDeclaredFields()) {
-                if (Modifier.isStatic(f.getModifiers())
-                        && (f.getType() == int.class || f.getType() == Integer.class)
-                        && f.getName().toLowerCase(Locale.ROOT).contains("port")) {
-                    f.setAccessible(true);
-                    f.setInt(null, port);
-                }
-            }
-        } catch (Throwable ignored) {
         }
     }
 
@@ -262,40 +353,41 @@ public final class CspEngine implements SourceEngine {
         if (before == null) return;
         List<Object> after = lifecycleCallbacks(app);
         if (after == null) return;
-        final List<Application.ActivityLifecycleCallbacks> added = new ArrayList<>();
+        final List<Application.ActivityLifecycleCallbacks> rawCallbacks = new ArrayList<>();
         for (Object callback : after)
             if (!before.contains(callback)
                     && callback instanceof Application.ActivityLifecycleCallbacks) {
-                Application.ActivityLifecycleCallbacks rawCb =
-                        (Application.ActivityLifecycleCallbacks) callback;
-                Application.ActivityLifecycleCallbacks safeCb = wrapLifecycleCallback(rawCb);
-                try {
-                    app.unregisterActivityLifecycleCallbacks(rawCb);
-                    app.registerActivityLifecycleCallbacks(safeCb);
-                } catch (Throwable ignored) {
-                }
-                added.add(safeCb);
+                rawCallbacks.add((Application.ActivityLifecycleCallbacks) callback);
             }
-        if (added.isEmpty()) return;
-        new android.os.Handler(android.os.Looper.getMainLooper())
-                .post(
-                        () -> {
-                            MainActivity activity = MainActivity.activeActivity;
-                            if (activity == null
-                                    || activity.isFinishing()
-                                    || activity.isDestroyed()) return;
-                            for (Application.ActivityLifecycleCallbacks callback : added)
-                                try {
-                                    callback.onActivityCreated(activity, null);
-                                    callback.onActivityStarted(activity);
-                                    callback.onActivityResumed(activity);
-                                } catch (Throwable error) {
-                                    AppLog.w(
-                                            "CspEngine",
-                                            "extension lifecycle replay failed",
-                                            error);
-                                }
-                        });
+        android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+        if (!rawCallbacks.isEmpty()) {
+            mainHandler.post(
+                    () -> {
+                        List<Application.ActivityLifecycleCallbacks> added = new ArrayList<>();
+                        for (Application.ActivityLifecycleCallbacks rawCb : rawCallbacks) {
+                            Application.ActivityLifecycleCallbacks safeCb =
+                                    wrapLifecycleCallback(rawCb);
+                            try {
+                                app.unregisterActivityLifecycleCallbacks(rawCb);
+                                app.registerActivityLifecycleCallbacks(safeCb);
+                            } catch (Throwable ignored) {
+                            }
+                            added.add(safeCb);
+                        }
+                        MainActivity activity = MainActivity.activeActivity;
+                        if (activity == null || activity.isFinishing() || activity.isDestroyed())
+                            return;
+                        for (Application.ActivityLifecycleCallbacks callback : added)
+                            try {
+                                callback.onActivityCreated(activity, null);
+                                callback.onActivityStarted(activity);
+                                callback.onActivityResumed(activity);
+                            } catch (Throwable error) {
+                                AppLog.w("CspEngine", "extension lifecycle replay failed", error);
+                            }
+                    });
+        }
+        mainHandler.postDelayed(() -> syncAllPluginActivities(MainActivity.activeActivity), 350);
     }
 
     private static Application.ActivityLifecycleCallbacks wrapLifecycleCallback(

@@ -265,7 +265,12 @@ public final class MainActivity extends Activity {
     }
 
     static boolean hasDexClassLoaderFrame(Throwable error) {
-        if (error == null || CspEngine.LOADERS.isEmpty()) return false;
+        if (error == null) return false;
+        LinkedHashSet<ClassLoader> loaders = new LinkedHashSet<>(CspEngine.LOADERS.values());
+        synchronized (CspEngine.ALL_PLUGIN_LOADERS) {
+            loaders.addAll(CspEngine.ALL_PLUGIN_LOADERS);
+        }
+        if (loaders.isEmpty()) return false;
         int depth = 0;
         for (Throwable t = error; t != null && depth < 12; t = t.getCause(), depth++) {
             for (StackTraceElement e : t.getStackTrace()) {
@@ -277,10 +282,15 @@ public final class MainActivity extends Activity {
                         || cls.startsWith("dalvik.")
                         || cls.startsWith("com.android.")
                         || cls.startsWith("com.pilipala.")) continue;
-                for (dalvik.system.DexClassLoader loader : CspEngine.LOADERS.values()) {
+                for (ClassLoader loader : loaders) {
                     try {
                         Class<?> loaded = Class.forName(cls, false, loader);
-                        if (loaded.getClassLoader() == loader) return true;
+                        ClassLoader loadedCl = loaded.getClassLoader();
+                        if (loadedCl == loader
+                                || (loadedCl instanceof dalvik.system.BaseDexClassLoader
+                                        && loadedCl != MainActivity.class.getClassLoader())) {
+                            return true;
+                        }
                     } catch (Throwable ignored) {
                     }
                 }
@@ -1604,6 +1614,7 @@ public final class MainActivity extends Activity {
     public void onWindowFocusChanged(boolean focus) {
         super.onWindowFocusChanged(focus);
         if (!focus) finishSeek(false);
+        SourceController.onActivityFocusChanged(this, focus);
     }
 
     @Override

@@ -1,10 +1,10 @@
 {
   "android-tv": {
-    "versionName": "0.5.8",
-    "versionCode": 58
+    "versionName": "0.5.9",
+    "versionCode": 59
   },
   "android-mobile": {
-    "versionName": "0.5.8",
-    "versionCode": 58
+    "versionName": "0.5.9",
+    "versionCode": 59
   }
 }

@@ -159,18 +159,35 @@ final class SourceController {
                     .start();
     }
 
-    static boolean isConfigOrNetdiskSite(Cms.Site site) {
+    static volatile long lastConfigActionAt;
+    static volatile boolean pendingConfigRefreshOnFocus;
+
+    static boolean isDedicatedConfigSite(Cms.Site site) {
         if (site == null) return false;
-        String api = site.api == null ? "" : site.api;
-        String key = site.key == null ? "" : site.key;
+        String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
+        String key = site.key == null ? "" : site.key.toLowerCase(java.util.Locale.ROOT);
         String name = site.name == null ? "" : site.name;
-        return api.contains("MyDrive")
-                || api.contains("Config")
-                || key.contains("MyDrive")
-                || key.contains("Config")
-                || name.contains("我的云盘")
+        return api.contains("mydrive")
+                || api.contains("config")
+                || key.contains("mydrive")
+                || key.contains("config")
+                || name.contains("配置中心")
+                || name.contains("配置┃中心")
                 || (name.contains("云盘") && name.contains("配置"))
                 || (name.contains("网盘") && name.contains("配置"));
+    }
+
+    static boolean isConfigOrNetdiskSite(Cms.Site site) {
+        if (site == null) return false;
+        if (isDedicatedConfigSite(site)) return true;
+        String api = site.api == null ? "" : site.api.toLowerCase(java.util.Locale.ROOT);
+        String key = site.key == null ? "" : site.key.toLowerCase(java.util.Locale.ROOT);
+        String name = site.name == null ? "" : site.name;
+        return api.contains("mypan")
+                || key.contains("mypan")
+                || name.contains("我的云盘")
+                || name.contains("我的网盘")
+                || name.contains("我的┃网盘");
     }
 
     static boolean isConfigOrNetdiskActionCard(Cms.Site site, Cms.Video v) {
@@ -179,6 +196,12 @@ final class SourceController {
         if (v.lines != null && !v.lines.isEmpty()) return false;
         String id = v.id == null ? "" : v.id.trim();
         if (id.isEmpty() || id.startsWith("msearch:")) return false;
+        if (isDedicatedConfigSite(site)
+                && !id.contains("/")
+                && !id.startsWith("http://")
+                && !id.startsWith("https://")) {
+            return true;
+        }
         String title = v.title == null ? "" : v.title;
         if (title.contains("登入")
                 || title.contains("登录")
@@ -189,19 +212,30 @@ final class SourceController {
                 || title.contains("扫码")
                 || title.contains("Cookie")
                 || title.contains("token")
-                || title.contains("Token")) {
+                || title.contains("Token")
+                || title.contains("刷新")
+                || title.contains("注册")
+                || title.contains("输入")
+                || title.contains("代理")
+                || title.contains("加速")
+                || title.contains("适配")
+                || title.contains("DNS")
+                || title.contains("弹幕")
+                || title.contains("日志")
+                || title.contains("备份")
+                || title.contains("还原")
+                || title.contains("突破")) {
             return true;
         }
+        String lowerId = id.toLowerCase(java.util.Locale.ROOT);
         return id.startsWith("{")
-                || id.startsWith("action")
-                || id.contains("cookie")
-                || id.contains("Cookie")
-                || id.contains("token")
-                || id.contains("Token")
-                || id.contains("login")
-                || id.contains("Login")
-                || id.contains("clear")
-                || id.contains("Clear");
+                || lowerId.startsWith("action")
+                || lowerId.contains("cookie")
+                || lowerId.contains("token")
+                || lowerId.contains("login")
+                || lowerId.contains("clear")
+                || lowerId.contains("manual")
+                || lowerId.contains("register");
     }
 
     static void prefetchDetail(MainActivity a, Cms.Site site, Cms.Video video) {
@@ -427,26 +461,99 @@ final class SourceController {
                 });
     }
 
+    static void onActivityFocusChanged(MainActivity a, boolean focus) {
+        if (a == null) return;
+        if (!focus) {
+            if (SystemClock.elapsedRealtime() - lastConfigActionAt < 15000) {
+                pendingConfigRefreshOnFocus = true;
+            }
+            return;
+        }
+        if (pendingConfigRefreshOnFocus) {
+            pendingConfigRefreshOnFocus = false;
+            a.ui.postDelayed(() -> refreshCurrentConfigCategory(a, null), 250);
+        }
+    }
+
+    static void refreshCurrentConfigCategory(MainActivity a, Cms.Site targetSite) {
+        if (a == null
+                || a.isFinishing()
+                || a.current == null
+                || !a.current.home
+                || a.config == null) return;
+        String selKey = a.prefs.getString(Prefs.SELECTED_SITE, "");
+        Cms.Site currentSite = null;
+        for (Cms.Site s : a.config.sites) {
+            if (s.key.equals(selKey)) {
+                currentSite = s;
+                break;
+            }
+        }
+        if (currentSite == null || !isConfigOrNetdiskSite(currentSite)) return;
+        if (targetSite != null
+                && targetSite.key != null
+                && !targetSite.key.equals(currentSite.key)) {
+            return;
+        }
+        a.detailCache.clear();
+        a.homeData.remove(currentSite.key);
+        if (a.current.retainedHome != null) {
+            a.current.retainedHome.reloadCurrentCategory();
+        } else if (a.current.mobileHome != null && a.current.mobileHome.reloadCategory != null) {
+            a.current.mobileHome.reloadCategory.run();
+        }
+    }
+
     static void sourceAction(MainActivity a, Cms.Site site, String action) {
         a.detailCache.clear();
+        lastConfigActionAt = SystemClock.elapsedRealtime();
+        pendingConfigRefreshOnFocus = false;
         CspEngine.syncAllPluginActivities(a);
         final int ticket = a.generation;
         a.worker.execute(
                 () -> {
                     try {
                         CspEngine.syncAllPluginActivities(a);
-                        String response = a.engine(site).action(action);
+                        SourceEngine eng = a.engine(site);
+                        CspEngine.syncAllPluginActivities(a);
+                        String actResp = eng.action(action);
+                        boolean detailFallback = false;
+                        if (actResp == null || actResp.trim().isEmpty()) {
+                            CspEngine.syncAllPluginActivities(a);
+                            actResp = eng.detail(action);
+                            detailFallback = true;
+                        }
+                        final String response = actResp;
+                        final boolean usedDetailFallback = detailFallback;
                         a.ui.post(
                                 () -> {
-                                    if (ticket != a.generation
-                                            || a.isFinishing()
-                                            || response == null
-                                            || response.trim().isEmpty()) return;
+                                    if (ticket != a.generation || a.isFinishing()) return;
+                                    a.ui.postDelayed(
+                                            () -> {
+                                                if (a.isFinishing() || ticket != a.generation)
+                                                    return;
+                                                if (!a.hasWindowFocus()) {
+                                                    pendingConfigRefreshOnFocus = true;
+                                                } else if (usedDetailFallback) {
+                                                    refreshCurrentConfigCategory(a, site);
+                                                }
+                                            },
+                                            550);
+                                    if (response == null || response.trim().isEmpty()) return;
                                     try {
                                         org.json.JSONObject result =
                                                 new org.json.JSONObject(response);
                                         if (result.has("list")) {
+                                            if (usedDetailFallback) return;
                                             Cms.Listing list = Cms.listing(response);
+                                            if (list.videos.size() == 1
+                                                    && (list.videos.get(0).title.contains("刷新配置中心")
+                                                            || "配置中心"
+                                                                    .equals(
+                                                                            list.videos.get(0)
+                                                                                    .remarks))) {
+                                                return;
+                                            }
                                             String[] titles = new String[list.videos.size()];
                                             for (int i = 0; i < list.videos.size(); i++)
                                                 titles[i] = list.videos.get(i).title;
@@ -460,13 +567,15 @@ final class SourceController {
                                                                             list.videos.get(index)))
                                                     .setNegativeButton("关闭", null)
                                                     .show();
-                                        } else
-                                            a.notice(
+                                        } else {
+                                            String msg =
                                                     result.optString(
-                                                            "msg",
-                                                            result.optString("message", response)));
+                                                            "msg", result.optString("message", ""));
+                                            if (!msg.isEmpty()) a.notice(msg);
+                                            else if (!usedDetailFallback) a.notice(response);
+                                        }
                                     } catch (Throwable ignored) {
-                                        a.notice(response);
+                                        if (!usedDetailFallback) a.notice(response);
                                     }
                                 });
                     } catch (Throwable error) {

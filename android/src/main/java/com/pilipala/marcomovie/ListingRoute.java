@@ -30,7 +30,8 @@ final class ListingRoute {
                 if (cls.startsWith("com.github.catvod.")
                         || cls.startsWith("com.github.tvbox.")
                         || cls.startsWith("com.fongmi.")
-                        || cls.startsWith("com.jar.")) return true;
+                        || cls.startsWith("com.jar.")
+                        || cls.startsWith("com.wexfnw.")) return true;
             }
             if (t.getCause() == t) break;
         }
