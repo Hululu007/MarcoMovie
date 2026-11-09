@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'cms_parser.dart';
@@ -741,7 +742,7 @@ class CmsClient {
 
   bool _usesJs(CmsSite site) => GuardSource.supports(site) || site.isDrpySource || site.isPythonSource || (site.isJavaScriptSource || site.isRemoteScriptSource) &&
       !(CspBridge.isHuyaSite(site) || CspBridge.isDouyuSite(site) ||
-        CspBridge.isTuxiaobeiSite(site));
+        CspBridge.isTuxiaobeiSite(site) || CspBridge.isMyDriveSite(site));
 
   static String _scriptSessionKey(CmsSite site) => sha256.convert(utf8.encode(jsonEncode([
     site.subscriptionId, site.sourceKey, site.isEffectivelyPrivate,
@@ -765,6 +766,19 @@ class CmsClient {
   static bool needsSourceVerification(CmsSite site, Object? error) =>
       canVerifySource(site) && error is DrpySourceException &&
       error.code == 'drpy_verification_required';
+
+  bool _canFallbackToCspBridge(CmsSite site, [Object? error]) {
+    if (error != null && needsSourceVerification(site, error)) return false;
+    if (!GuardSource.supports(site)) return false;
+    final ref = site.pluginReference.toLowerCase();
+    if (ref.isEmpty ||
+        ref.contains('.invalid') ||
+        ref.contains('.test') ||
+        ref.contains('.example')) {
+      return false;
+    }
+    return true;
+  }
 
   Future<Map<String, dynamic>> sourceVerificationAction(
     CmsSite site, Map<String, Object?> action, {Completer<void>? cancellation}
@@ -809,6 +823,15 @@ class CmsClient {
         method: method, arguments: args, cancellation: cancellation);
     if (cachedScript != null) return cachedScript;
     var entry = site.api;
+    if (site.ext.trim().isNotEmpty &&
+        RegExp(r'(?:^|/)drpy2?(?:\.min)?\.m?js(?:[?#]|$)', caseSensitive: false)
+            .hasMatch(entry)) {
+      try {
+        return await _drpy.invoke(site, method, args, cancellation: cancellation);
+      } on FormatException catch (e) {
+        if (!e.message.contains('没有可用的 DRPY 规则')) rethrow;
+      }
+    }
     Object? extension = site.ext;
     var rawExtension = site.rawExtension ?? site.ext;
     final modules = <String, String>{};
@@ -836,6 +859,14 @@ class CmsClient {
     if (CmsParser.looksLikeDrpyRule(modules[entry]!)) {
       return _drpy.invoke(site, method, args, rule: modules[entry], origin: entry, cancellation: cancellation);
     }
+    if (site.ext.trim().isNotEmpty &&
+        modules[entry]!.contains('assets://js/lib/cheerio.min.js')) {
+      try {
+        return await _drpy.invoke(site, method, args, cancellation: cancellation);
+      } on FormatException catch (e) {
+        if (!e.message.contains('没有可用的 DRPY 规则')) rethrow;
+      }
+    }
     if (site.isRemoteScriptSource && !site.isJavaScriptSource &&
         !CmsParser.looksLikeScript(modules[entry]!)) {
       throw const FormatException('片源接口未返回可识别的脚本，请检查订阅中的接口类型');
@@ -860,10 +891,47 @@ class CmsClient {
           throw const FormatException('当前脚本需要 CatVod 宿主模块，该接口尚未适配');
         }
         final common = required.contains(ref);
-        if (common && !ref.startsWith('.') && !ref.startsWith('https://') && !ref.startsWith('http://')) {
+        if (common && !ref.startsWith('.') && !ref.startsWith('https://') && !ref.startsWith('http://') && !ref.startsWith('assets://')) {
           throw FormatException('不支持的 Node 模块：$ref');
         }
         var url = Uri.parse(parent).resolve(ref);
+        if (url.scheme == 'assets') {
+          final assetRef = url.toString();
+          if (!modules.containsKey(assetRef)) {
+            if (assetRef == 'assets://js/lib/cheerio.min.js') {
+              final deps = await rootBundle.loadString(
+                'assets/catpaw/drpy-dependencies.js',
+              );
+              modules[assetRef] =
+                  '$deps\nglobalThis.DRPYDeps = DRPYDeps;\nexport const load = DRPYDeps.cheerio.load;\nexport const jp = DRPYDeps.cheerio.jp;\nexport const jpo = DRPYDeps.cheerio.jpo;\nexport const jinja2 = DRPYDeps.cheerio.jinja2;\nexport default DRPYDeps.cheerio;\n';
+            } else if (assetRef == 'assets://js/lib/crypto-js.js') {
+              final cryptoSrc = await rootBundle.loadString(
+                'assets/js-host/crypto-js.js',
+              );
+              modules[assetRef] =
+                  'const module={exports:{}};let exports=module.exports;\n$cryptoSrc\nglobalThis.CryptoJS = module.exports;\nexport default module.exports;\n';
+            } else if (assetRef == 'assets://js/lib/cat.js') {
+              modules[assetRef] = 'export * from "catvod";\n';
+              queue.add(assetRef);
+            } else if (assetRef.startsWith('assets://js/lib/')) {
+              final relPath = assetRef.substring('assets://js/lib/'.length);
+              final entryUri = Uri.parse(entry);
+              if (entryUri.scheme == 'http' || entryUri.scheme == 'https') {
+                final remoteLib = entryUri.resolve(relPath);
+                modules[assetRef] = await _getText(
+                  remoteLib.toString(),
+                  headers: site.headers,
+                );
+                queue.add(assetRef);
+              } else {
+                throw FormatException('本地包缺少脚本模块：$ref');
+              }
+            } else {
+              throw FormatException('本地包缺少脚本模块：$ref');
+            }
+          }
+          continue;
+        }
         final candidates = [url, if (common && !RegExp(r'\.(?:m?js|json)$', caseSensitive: false).hasMatch(url.path)) ...[
           url.replace(path: '${url.path}.js'), url.replace(path: '${url.path}.json'),
           url.replace(path: '${url.path}/index.js'),
@@ -922,6 +990,8 @@ class CmsClient {
     return jsonEncode(doc);
   }
 
+  String _detailAction(CmsSite site) => site.type == 0 ? 'videolist' : 'detail';
+
   Future<(List<CmsCategory>, CmsListing)> fetchHome(CmsSite site) async {
     if (_isHttpT4(site)) {
       final raw = await _callT4(site, {'filter': 'true'});
@@ -941,19 +1011,26 @@ class CmsClient {
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).home();
     if (_usesJs(site)) {
-      final raw = await _callJs(site, 'home', [false]);
-      final categories = CmsParser.parseCategories(raw);
-      var listing = CmsParser.parseListing(raw);
-      if (listing.videos.isEmpty) {
-        try { listing = CmsParser.parseListing(await _callJs(site, 'homeVod', [])); }
-        catch (error) {
-          if (categories.isEmpty || needsSourceVerification(site, error)) rethrow;
+      try {
+        final raw = await _callJs(site, 'home', [false]);
+        final categories = CmsParser.parseCategories(raw);
+        var listing = CmsParser.parseListing(raw);
+        if (listing.videos.isEmpty) {
+          try { listing = CmsParser.parseListing(await _callJs(site, 'homeVod', [])); }
+          catch (error) {
+            if (categories.isEmpty || needsSourceVerification(site, error)) rethrow;
+          }
+          if (listing.videos.isEmpty && categories.isNotEmpty) {
+            listing = await fetchCategory(site, categories.first.id, 1);
+          }
         }
-        if (listing.videos.isEmpty && categories.isNotEmpty) {
-          listing = await fetchCategory(site, categories.first.id, 1);
+        if (categories.isNotEmpty || listing.videos.isNotEmpty || !_canFallbackToCspBridge(site)) {
+          return (categories, listing);
         }
+      } catch (error) {
+        if (!_canFallbackToCspBridge(site, error)) rethrow;
       }
-      return (categories, listing);
+      return CspBridge.fetchHome(site, _getText);
     }
     if (site.isM3uVodApi) {
       final content = await _resolveM3uVodPayload(site);
@@ -978,7 +1055,7 @@ class CmsClient {
         listing.videos.every((v) => v.poster.isEmpty)) {
       try {
         final detailRaw = await _getText(
-          _appendQuery(site.api, {'ac': 'detail'}, ext: site.ext).toString(),
+          _appendQuery(site.api, {'ac': _detailAction(site)}, ext: site.ext).toString(),
           headers: site.headers,
         );
         if (categories.isEmpty) {
@@ -1024,10 +1101,17 @@ class CmsClient {
         if (filter != null && filter.area.isNotEmpty) 'area': filter.area,
         if (filter != null && filter.year.isNotEmpty) 'year': filter.year,
       };
-      final listing = CmsParser.parseListing(await _callJs(site, 'category', [categoryId, page, extend.isNotEmpty, extend]));
-      if (filter == null || !filter.hasSubFilter || extend.isEmpty) return listing;
-      return CmsListing(page: listing.page, pageCount: listing.pageCount,
-          videos: listing.videos, sourceFiltered: true);
+      try {
+        final listing = CmsParser.parseListing(await _callJs(site, 'category', [categoryId, page, extend.isNotEmpty, extend]));
+        if (listing.videos.isNotEmpty || !_canFallbackToCspBridge(site)) {
+          if (filter == null || !filter.hasSubFilter || extend.isEmpty) return listing;
+          return CmsListing(page: listing.page, pageCount: listing.pageCount,
+              videos: listing.videos, sourceFiltered: true);
+        }
+      } catch (error) {
+        if (!_canFallbackToCspBridge(site, error)) rethrow;
+      }
+      return CspBridge.fetchCategory(site, categoryId, page, _getText, childIds: childIds);
     }
     if (site.isM3uVodApi) {
       final content = await _resolveM3uVodPayload(site);
@@ -1065,7 +1149,7 @@ class CmsClient {
     }
     Future<CmsListing> query(String id) async {
       final params = <String, String>{
-        'ac': 'detail',
+        'ac': _detailAction(site),
         'pg': page.toString(),
       };
       if (id.isNotEmpty) {
@@ -1122,7 +1206,15 @@ class CmsClient {
       return CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmt4'));
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).list('', keyword, page);
-    if (_usesJs(site)) return CmsParser.parseListing(await _callJs(site, 'search', [keyword, false, page]));
+    if (_usesJs(site)) {
+      try {
+        final listing = CmsParser.parseListing(await _callJs(site, 'search', [keyword, false, page]));
+        if (listing.videos.isNotEmpty || !_canFallbackToCspBridge(site)) return listing;
+      } catch (error) {
+        if (!_canFallbackToCspBridge(site, error)) rethrow;
+      }
+      return CspBridge.fetchSearch(site, keyword, page, _getText);
+    }
     if (site.isM3uVodApi) {
       final content = await _resolveM3uVodPayload(site);
       final (_, homeListing) = CmsParser.parseM3uVodHome(content, origin: site.api.substring('m3u_vod://'.length));
@@ -1139,7 +1231,7 @@ class CmsClient {
       _appendQuery(
         site.api,
         {
-          'ac': 'detail',
+          'ac': _detailAction(site),
           'wd': keyword.trim(),
           'pg': page.toString(),
         },
@@ -1158,19 +1250,45 @@ class CmsClient {
     if (detail.lines.any((l) => l.episodes.isNotEmpty)) return (source, detail);
     final title = detail.title.trim();
     if (title.isEmpty) return (source, detail);
-    final pool = candidates.where((s) => s.key != source.key &&
+    String normTitleOf(String raw) =>
+        raw.trim().toLowerCase().replaceAll(RegExp(r'[\s·:：,，.。!！?？\-_—()（）\[\]【】《》]+'), '');
+    final normTitle = normTitleOf(title);
+    final filtered = candidates.where((s) => s.key != source.key &&
         s.isEffectivelyPrivate == source.isEffectivelyPrivate && s.searchable &&
         s.canBrowse && !CspBridge.isDoubanSite(s) && !CspBridge.isMyDriveSite(s) &&
         (_usesJs(s) || !CspBridge.canHandleSite(s) || CspBridge.backendsForSite(s).isNotEmpty ||
-          CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s)));
+          CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s))).toList();
+    int sitePriority(CmsSite s) {
+      if (CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s)) {
+        return 2;
+      }
+      return 0;
+    }
+    final indexed = filtered.indexed.toList()
+      ..sort((a, b) {
+        final cmp = sitePriority(a.$2).compareTo(sitePriority(b.$2));
+        return cmp != 0 ? cmp : a.$1.compareTo(b.$1);
+      });
+    final pool = indexed.map((e) => e.$2);
     Future<(CmsSite, CmsVideo)?> match(CmsSite site) async {
       try {
         final results = await fetchSearch(site, title);
-        for (final found in results.videos.where((v) => v.title.trim() == title)) {
+        final exactMatches = results.videos.where((v) => v.title.trim() == title).toList();
+        final normMatches = normTitle.isEmpty
+            ? const <CmsVideo>[]
+            : results.videos
+                .where((v) =>
+                    v.title.trim() != title &&
+                    normTitleOf(v.title) == normTitle)
+                .toList();
+        for (final found in [...exactMatches, ...normMatches]) {
           if (detail.year.isNotEmpty && found.year.isNotEmpty && found.year != detail.year) continue;
           final video = await fetchDetail(site, found);
           if (detail.year.isNotEmpty && video.year.isNotEmpty && video.year != detail.year) continue;
-          if (video.title.trim() == title && video.lines.any((l) => l.episodes.any((e) => e.isDirectPlayable || e.needsSourceResolution))) {
+          final videoTitle = video.title.trim();
+          final titleMatches = videoTitle == title ||
+              (normTitle.isNotEmpty && normTitleOf(videoTitle) == normTitle);
+          if (titleMatches && video.lines.any((l) => l.episodes.any((e) => e.isDirectPlayable || e.needsSourceResolution))) {
             return (site, video);
           }
         }
@@ -1180,9 +1298,9 @@ class CmsClient {
       return null;
     }
     final sites = pool.take(12).toList();
-    for (int i = 0; i < sites.length; i += 4) {
-      final matches = await Future.wait(sites.skip(i).take(4).map(
-        (s) => match(s).timeout(const Duration(seconds: 5), onTimeout: () => null)));
+    for (int i = 0; i < sites.length; i += 2) {
+      final matches = await Future.wait(sites.skip(i).take(2).map(
+        (s) => match(s).timeout(const Duration(seconds: 12), onTimeout: () => null)));
       for (final result in matches) {
         if (result != null) return result;
       }
@@ -1203,9 +1321,19 @@ class CmsClient {
     }
     if (site.isEmby) return (await EmbyLibrary.open(site)).detail(fallback.id);
     if (_usesJs(site)) {
-      final raw = await _callJs(site, 'detail', [fallback.id]);
-      final listing = CmsParser.parseListing(_wrapJsEpisodeIds(raw));
-      return listing.videos.isEmpty ? fallback : _mergeDetail(listing.videos.first, fallback);
+      try {
+        final raw = await _callJs(site, 'detail', [fallback.id]);
+        final listing = CmsParser.parseListing(_wrapJsEpisodeIds(raw));
+        if (listing.videos.isNotEmpty && listing.videos.first.lines.isNotEmpty) {
+          return _mergeDetail(listing.videos.first, fallback);
+        }
+        if (!_canFallbackToCspBridge(site)) {
+          return listing.videos.isEmpty ? fallback : _mergeDetail(listing.videos.first, fallback);
+        }
+      } catch (error) {
+        if (!_canFallbackToCspBridge(site, error)) rethrow;
+      }
+      return CspBridge.fetchDetail(site, fallback, _getText);
     }
     if (site.isM3uVodApi) {
       return fallback;
@@ -1219,7 +1347,7 @@ class CmsClient {
         _appendQuery(
           site.api,
           {
-            'ac': 'detail',
+            'ac': _detailAction(site),
             'ids': fallback.id,
           },
           ext: site.ext,
@@ -1234,13 +1362,6 @@ class CmsClient {
         }
       }
     } catch (_) {}
-    if (fallback.title.trim().isNotEmpty) {
-      return CspBridge.resolveCrossSourceVideo(
-        fallback,
-        fallback.title.trim(),
-        _getText,
-      );
-    }
     return fallback;
   }
   CmsVideo _mergeDetail(CmsVideo detailed, CmsVideo fallback) => CmsVideo(
@@ -1337,8 +1458,9 @@ class CmsClient {
       final payload = Map.of(raw);
       final url = Uri.tryParse((raw['url'] ?? '').toString());
       if (url != null && ['http', 'https', 'rtsp', 'rtmp'].contains(url.scheme) &&
-          RegExp(r'\.(mp4|m3u8|mpd|webm|flv)$', caseSensitive: false).hasMatch(url.path)) {
+          RegExp(r'\.(mp4|m3u8|mpd|webm|flv|ts|mkv)$', caseSensitive: false).hasMatch(url.path)) {
         payload['parse'] = 0;
+        payload['jx'] = 0;
       } else if ('${payload['parse'] ?? 0}' != '0' || '${payload['jx'] ?? 0}' != '0') {
         final parsed = await _tryResolveJsonParser(
           site,
@@ -1348,7 +1470,8 @@ class CmsClient {
         if (parsed != null) {
           payload
             ..addAll(parsed)
-            ..['parse'] = 0;
+            ..['parse'] = 0
+            ..['jx'] = 0;
         }
       }
       final resolved = await SourcePlayback.decode(payload, episode,
@@ -1427,7 +1550,7 @@ class CmsClient {
       if (b64.length > maxResponseBytes * 4 ~/ 3 + 4) throw const FormatException('直播列表超过 6 MB');
       raw = utf8.decode(base64Decode(b64), allowMalformed: true);
     } else {
-      raw = CmsParser.decodeTextDocument(await _getBytes(u, headers: source.headers,
+      raw = CmsParser.decodeConfigDocument(await _getBytes(u, headers: source.headers,
         onResponse: (uri, headers) {
           origin = uri.toString();
           playbackHeaders = headers..removeWhere((key, _) =>

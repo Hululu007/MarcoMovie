@@ -295,18 +295,20 @@ class CmsSite {
   bool get isEmby => api.startsWith('emby://account/');
   bool get isCatPaw => api.startsWith('catpaw://');
   bool get canBrowse =>
-      isEmby ||
-      isCatPaw ||
-      (type == 4 && isHttpApi) ||
-      (isScriptOrJarApi
-          ? CspBridge.hasAdapter(this)
-          : isM3uVodApi ||
-                ((isHttpApi || isScriptOrJarApi) &&
-                    (type == 0 ||
-                        type == 1 ||
-                        type == 4 ||
-                        type == 3 ||
-                        type == -1)));
+      !CspBridge.isMyDriveSite(this) &&
+      !CspBridge.isNetdiskSite(this) &&
+      (isEmby ||
+          isCatPaw ||
+          (type == 4 && isHttpApi) ||
+          (isScriptOrJarApi
+              ? CspBridge.hasAdapter(this)
+              : isM3uVodApi ||
+                    ((isHttpApi || isScriptOrJarApi) &&
+                        (type == 0 ||
+                            type == 1 ||
+                            type == 4 ||
+                            type == 3 ||
+                            type == -1))));
   bool get isEffectivelyPrivate =>
       isPrivate || group.contains('隐私') || group.contains('私密');
   bool get requiresPluginRuntime => !canBrowse;
@@ -412,8 +414,16 @@ class CmsConfig {
       lives.where((l) => !l.isEffectivelyPrivate).toList(growable: false);
   List<LiveSource> get privateLives =>
       lives.where((l) => l.isEffectivelyPrivate).toList(growable: false);
-  List<CmsSite> get pluginOnlySites =>
-      sites.where((s) => !s.supported).toList(growable: false);
+  List<CmsSite> get pluginOnlySites => sites
+      .where(
+        (s) =>
+            !s.supported &&
+            !CspBridge.isMyDriveSite(s) &&
+            !CspBridge.isNetdiskSite(s) &&
+            !s.api.toLowerCase().startsWith('csp_sixv') &&
+            !(s.api.toLowerCase().startsWith('csp_xpathguard') && s.ext.trim().isEmpty),
+      )
+      .toList(growable: false);
   Iterable<CmsSite> get scriptOwners sync* {
     yield* sites;
     for (final live in lives) {

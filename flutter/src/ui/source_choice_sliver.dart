@@ -28,9 +28,9 @@ class SourceChoiceSliver extends StatelessWidget {
   Widget build(BuildContext context) => SliverLayoutBuilder(
     builder: (context, constraints) {
       final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
-      final columns = (constraints.crossAxisExtent / (280 * scale))
-          .floor()
-          .clamp(1, 3);
+      final columns = scale > 1.35
+          ? 1
+          : (constraints.crossAxisExtent / (155 * scale)).floor().clamp(1, 3);
       return SliverList.builder(
         itemCount: (sites.length / columns).ceil(),
         itemBuilder: (context, row) => Padding(
@@ -62,24 +62,24 @@ class SourceChoiceSliver extends StatelessWidget {
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(18),
           onTap: () => onSelected(site),
           child: Ink(
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10.5),
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
                 colors: selected
-                    ? const [Color(0x450A84FF), Color(0x280055B3)]
-                    : const [Color(0xCC24242C), Color(0xB818181E)],
+                    ? const [Color(0x4A0A84FF), Color(0x280055B3)]
+                    : const [Color(0x36FFFFFF), Color(0x1E1C1C24)],
               ),
-              borderRadius: BorderRadius.circular(16),
+              borderRadius: BorderRadius.circular(18),
               border: Border.all(
                 color: selected
-                    ? AppleColors.systemBlue
-                    : AppleColors.glassBorder,
-                width: selected ? 1.2 : .6,
+                    ? const Color(0xCC3E9BFF)
+                    : const Color(0x36FFFFFF),
+                width: selected ? 1.2 : 0.75,
               ),
             ),
             child: Column(
@@ -94,15 +94,21 @@ class SourceChoiceSliver extends StatelessWidget {
                         softWrap: true,
                         style: const TextStyle(
                           color: AppleColors.labelPrimary,
-                          fontSize: 14,
+                          fontSize: 13.5,
                           fontWeight: FontWeight.w700,
-                          height: 1.4,
+                          height: 1.35,
                         ),
                       ),
                     ),
                     if (onPreferred != null)
                       IconButton(
                         key: ValueKey('source-preference-${site.key}'),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 28,
+                          minHeight: 28,
+                        ),
+                        iconSize: 18,
                         tooltip: preferredKey == site.key
                             ? '取消默认偏好源'
                             : '设为默认偏好源',
@@ -135,16 +141,24 @@ class SourceChoiceSliver extends StatelessWidget {
                   children: [
                     Container(
                       padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
+                        horizontal: 7,
                         vertical: 3,
                       ),
                       decoration: BoxDecoration(
-                        color: color.withValues(alpha: .2),
-                        borderRadius: BorderRadius.circular(6),
+                        color: color.withValues(alpha: .22),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color: color.withValues(alpha: .45),
+                          width: 0.6,
+                        ),
                       ),
                       child: Text(
                         badgeLabel(site),
-                        style: TextStyle(color: color, fontSize: 11),
+                        style: TextStyle(
+                          color: color,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
                     Text(

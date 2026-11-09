@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/cms_parser.dart';
 import 'package:marco_movie/core/csp_bridge.dart';
@@ -445,39 +446,127 @@ https://depot.example/config.json
     expect(groups[1].seasonNumber, 2);
     expect(groups[1].seasonLabel, '第 2 季');
     expect(groups[1].episodeIndexes, [2, 3, 4]);
-  });
-  test('parses TVBox JSON with commented-out sites and #EXTINF ad rules without misrouting to M3U parser', () {
-    const commentedJsonWithExtinfRule = '''
+
+    final rawConfig = '''
 {
-  "spider": "https://cdn.example/custom_spider.jpg;md5;9d5f341aa5f3353b50cc3bc16b4f3e8a",
+  "jar": "./custom_spider.jar;md5;abcd",
+  "parses": [
+    {"name": "WebParse", "type": 0, "url": "https://parse.example/web?url="},
+    {"name": "JsonParse", "type": 1, "url": "https://parse.example/json?url="}
+  ],
   "sites": [
-    {"key": "active_vod", "name": "主力┃不卡", "type": 1, "api": "https://vod.example/api.php/provide/vod/"},
-//{"key": "commented_guard", "name": "原创┃不卡", "type": 3, "api": "csp_YCyzGuard", "timeout": 15},
-    {"key": "bttwoo_guard", "name": "比特┃不卡", "type": 3, "api": "csp_BttwooGuard"}
-  ],
-  "lives": [
-    {"name": "电视直播", "type": 0, "url": "https://live.example/tv.txt"}
-  ],
-  "rules": [
-    {"name": "lz", "hosts": ["vip.lz"], "regex": ["#EXT-X-DISCONTINUITY\\\\r*\\\\n*#EXTINF:5.480000,[\\\\s\\\\S]*?#EXT-X-DISCONTINUITY"]}
+    {
+      "key": "appv2_site",
+      "name": "AppV2站点",
+      "type": 3,
+      "api": "csp_AppYsV2",
+      "ext": {
+        "url": "https://cms.example/api.php/app/",
+        "ua": "CustomAppUA/1.0",
+        "headers": {"Referer": "https://cms.example/"}
+      }
+    },
+    {
+      "key": "mydrive",
+      "name": "🗂我的云盘┃配置",
+      "type": 3,
+      "api": "csp_MyDriveGuard"
+    }
   ]
 }
 ''';
-    final packedCarrier = 'JFIF_HEADER**${base64Encode(utf8.encode(commentedJsonWithExtinfRule))}';
-    final cfg = CmsParser.parseConfig(
-      packedCarrier,
-      origin: 'https://depot.example/tv',
-      defaultGroup: '默认分组',
+    final gzipped = const GZipEncoder().encode(utf8.encode(rawConfig))!;
+    final decodedGzip = CmsParser.decodeConfigDocument(gzipped);
+    final parsedBundle = CmsParser.parseConfig(
+      decodedGzip,
+      origin: 'https://sub.example/box/config.json',
     );
-    expect(cfg.spider, 'https://cdn.example/custom_spider.jpg;md5;9d5f341aa5f3353b50cc3bc16b4f3e8a');
-    expect(cfg.sites.map((s) => s.key), ['active_vod', 'bttwoo_guard']);
-    expect(cfg.lives.single.url, 'https://live.example/tv.txt');
     expect(
-      CmsParser.detectSubscriptionFormat(
-        packedCarrier,
-        origin: 'https://depot.example/tv',
-      ),
+      parsedBundle.spider,
+      'https://sub.example/box/custom_spider.jar;md5;abcd',
+    );
+    final appSite = parsedBundle.sites.firstWhere((s) => s.key == 'appv2_site');
+    expect(appSite.playUrl, 'https://parse.example/json?url=');
+    expect(appSite.headers['User-Agent'], 'CustomAppUA/1.0');
+    expect(appSite.headers['Referer'], 'https://cms.example/');
+    expect(appSite.canBrowse, isTrue);
+
+    final myDrive = parsedBundle.sites.firstWhere((s) => s.key == 'mydrive');
+    expect(myDrive.canBrowse, isFalse);
+
+    final livePlain = '#EXTM3U\n#EXTINF:-1 tvg-name="CCTV-1" group-title="央视",\nhttp://live.example/cctv1.m3u8';
+    final liveObfuscated = 'PNG_STEG**${base64Encode(utf8.encode(livePlain))}';
+    final liveGroups = CmsParser.parseLivePlaylist(liveObfuscated);
+    expect(liveGroups.length, 1);
+    expect(liveGroups.first.name, '央视');
+    expect(liveGroups.first.channels.first.name, 'CCTV-1');
+
+    final appV2HomeJson = '''
+{
+  "code": 1,
+  "msg": "ok",
+  "data": {
+    "list": [
+      {
+        "vod_id": "901",
+        "vod_name": "测试影片",
+        "vod_pic": "https://img.example/901.jpg",
+        "vod_url_with_player": [
+          {
+            "code": "lineA",
+            "name": "蓝光专线",
+            "url": "第1集\$https://cdn.example/901-1.m3u8#第2集\$https://cdn.example/901-2.m3u8"
+          }
+        ]
+      }
+    ]
+  }
+}
+''';
+    final appV2Listing = CmsParser.parseListing(appV2HomeJson);
+    expect(appV2Listing.videos.length, 1);
+    expect(appV2Listing.videos.first.title, '测试影片');
+    expect(appV2Listing.videos.first.lines.length, 1);
+    expect(appV2Listing.videos.first.lines.first.name, '蓝光专线');
+    expect(appV2Listing.videos.first.lines.first.episodes.length, 2);
+
+    const tvboxJsonWithCommentsAndExtinfRules = r'''
+{
+"spider":"https://cdn.example/posters/spider.jpg;md5;b3fb6f369726e9c688dd5a7ad017d0dd",
+"sites":[
+{"key":"doudou","name":"豆豆┃片单","type":3,"api":"csp_DouDouGuard","searchable":0},
+{"key":"t4_1","name":"光影┃不卡","type":3,"api":"csp_T4Guard","searchable":1,"ext":"Zmlyc3Q="},
+//{"key":"commented","name":"已注释站点","type":3,"api":"csp_YCyzGuard","searchable":1},
+{"key":"bttwoo","name":"比特┃不卡","type":3,"api":"csp_BttwooGuard","searchable":1},
+{"key":"fy","name":"风云┃多线","type":3,"api":"csp_FyGuard","searchable":1,"ext":{"type":"video","name":"Fy"}},
+{"key":"auete","name":"奥特┃多线","type":3,"api":"csp_AueteGuard","searchable":1},
+{"key":"dm84","name":"巴士┃动漫","type":3,"api":"csp_Dm84Guard","searchable":1},
+{"key":"zpan","name":"盘搜┃四盘","type":3,"api":"csp_S_zpsGuard","searchable":1,"ext":{"siteUrl":"https://so.example/"}}
+],
+"rules":[{"name":"ad_filter","hosts":["cdn.example"],"regex":["#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:5.480000,[\\s\\S]*?#EXT-X-DISCONTINUITY"]}],
+"lives":[
+{"name":"综合直播","type":0,"url":"https://live.example/iptv.m3u","ua":"okHttp/Mod-1.5.0.0"}
+]
+}
+''';
+    expect(
+      CmsParser.detectSubscriptionFormat(tvboxJsonWithCommentsAndExtinfRules),
       'JSON',
     );
+    final parsedWithRules = CmsParser.parseConfig(
+      tvboxJsonWithCommentsAndExtinfRules,
+      origin: 'https://sub.example/tv',
+    );
+    expect(parsedWithRules.sites.length, 7);
+    expect(parsedWithRules.supportedSites.map((s) => s.key).toList(), [
+      'doudou',
+      't4_1',
+      'bttwoo',
+      'fy',
+      'auete',
+      'dm84',
+    ]);
+    expect(parsedWithRules.lives.length, 1);
+    expect(parsedWithRules.lives.first.name, '综合直播');
   });
 }

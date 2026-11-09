@@ -1,6 +1,6 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
+import 'package:archive/archive.dart';
 import 'js_source_syntax.dart';
 import 'models.dart';
 import 'live_catalog_parser.dart';
@@ -163,14 +163,15 @@ class CmsParser {
   /// 3. Hex `$#...#$` (`2423...`) AES-128-CBC encrypted TVBox payload
   /// 4. Pure Base64 JSON
   /// 5. Standard UTF-8 JSON (with BOM, comments, or trailing commas)
-  static String decodeConfigDocument(List<int> bytes) {
-    if (bytes.length >= 2 &&
-        (bytes[0] & 0xff) == 0x1f &&
-        (bytes[1] & 0xff) == 0x8b) {
-      try {
-        bytes = gzip.decode(bytes);
-      } catch (_) {}
+  static List<int> _gunzipIfNeeded(List<int> bytes) {
+    if (bytes.length >= 2 && (bytes[0] & 0xFF) == 0x1F && (bytes[1] & 0xFF) == 0x8B) {
+      try { return const GZipDecoder().decodeBytes(bytes); } catch (_) {}
     }
+    return bytes;
+  }
+
+  static String decodeConfigDocument(List<int> rawBytes) {
+    final bytes = _gunzipIfNeeded(rawBytes);
     // Check for `**` marker in raw bytes (used by JPEG/PNG + ** + Base64 configs)
     int starMarker = -1;
     for (int i = bytes.length - 2; i >= 0; i--) {
@@ -192,7 +193,8 @@ class CmsParser {
   }
 
   /// Windows-exported text subscriptions often carry a UTF-16 BOM.
-  static String decodeTextDocument(List<int> bytes) {
+  static String decodeTextDocument(List<int> rawBytes) {
+    final bytes = _gunzipIfNeeded(rawBytes);
     if (bytes.length >= 2 &&
         (bytes[0] == 0xff && bytes[1] == 0xfe ||
          bytes[0] == 0xfe && bytes[1] == 0xff)) {
@@ -215,6 +217,8 @@ class CmsParser {
     // `exports...` happens to decode to a leading '{' as Base64. A known
     // script must remain source text rather than becoming corrupt pseudo-JSON.
     if (looksLikeScript(s)) return s;
+    final cleanedJson = stripJsonComments(s);
+    if (cleanedJson.startsWith('{') || cleanedJson.startsWith('[')) return s;
     // 1. Check for `**` + Base64 inside text
     final starIdx = s.lastIndexOf('**');
     if (starIdx >= 0 && starIdx + 2 < s.length) {
@@ -258,20 +262,21 @@ class CmsParser {
       b64 += '=';
     }
     try {
-      final decodedBytes = base64Decode(b64);
+      final decodedBytes = _gunzipIfNeeded(base64Decode(b64));
       final text = utf8.decode(decodedBytes, allowMalformed: true).trim();
       final stripped = text.startsWith('\uFEFF') ? text.substring(1).trim() : text;
       if (stripped.startsWith('{') ||
           stripped.startsWith('[') ||
-          stripped.startsWith('//') ||
-          stripped.startsWith('/*') ||
+          stripped.contains('"sites"') ||
+          stripped.contains('"urls"') ||
+          stripped.contains('"storeHouse"') ||
+          stripped.contains('"depots"') ||
+          stripped.contains('"lives"') ||
           stripped.startsWith('#EXTM3U') ||
           stripped.contains('#EXTINF:') ||
           stripped.contains(',#genre#') ||
-          stripped.contains('"sites"') ||
-          stripped.contains('"lives"') ||
-          stripped.contains('"urls"') ||
-          stripped.contains('"storeHouse"')) {
+          stripJsonComments(stripped).startsWith('{') ||
+          stripJsonComments(stripped).startsWith('[')) {
         return stripped;
       }
     } catch (_) {}
@@ -687,6 +692,26 @@ class CmsParser {
     });
     return result;
   }
+  static Map<String, String> _extractSiteHeaders(Map item) {
+    final result = <String, String>{};
+    dynamic extObj = item['ext'];
+    if (extObj is String && extObj.trim().startsWith('{')) {
+      try { extObj = jsonDecode(stripJsonComments(extObj)); } catch (_) {}
+    }
+    if (extObj is Map) {
+      result.addAll(_stringHeaders(extObj['headers'] ?? extObj['header']));
+      final extUa = (extObj['ua'] ?? extObj['User-Agent'] ?? '').toString().trim();
+      if (extUa.isNotEmpty && !extUa.contains('\r') && !extUa.contains('\n')) {
+        result['User-Agent'] = extUa;
+      }
+    }
+    result.addAll(_stringHeaders(item['headers'] ?? item['header']));
+    final ua = (item['ua'] ?? '').toString().trim();
+    if (ua.isNotEmpty && !ua.contains('\r') && !ua.contains('\n')) {
+      result['User-Agent'] = ua;
+    }
+    return result;
+  }
   static String _shortHash(String input) {
     int h = 0x811c9dc5;
     for (final code in input.codeUnits) {
@@ -765,7 +790,30 @@ class CmsParser {
   static String detectSubscriptionFormat(String rawText, {String origin = ''}) {
     final unpacked = unpackConfigText(rawText).trim();
     final lowerOrigin = origin.trim().toLowerCase();
+    final cleaned = stripJsonComments(unpacked);
+    if (cleaned.startsWith('{') || cleaned.startsWith('[')) {
+      try {
+        final decoded = jsonDecode(cleaned);
+        if (decoded is Map<String, dynamic>) {
+          if ((decoded['urls'] is List ||
+                  decoded['storeHouse'] is List ||
+                  decoded['depots'] is List) &&
+              decoded['sites'] == null) {
+            return '多仓';
+          }
+          if (decoded['list'] is List || decoded['class'] is List) {
+            return 'VOD';
+          }
+          return 'JSON';
+        }
+        if (decoded is List) {
+          return 'JSON';
+        }
+      } catch (_) {}
+      return 'JSON';
+    }
     if (unpacked.startsWith('#EXTM3U') ||
+        unpacked.contains('#EXTINF') ||
         lowerOrigin.endsWith('.m3u') ||
         lowerOrigin.endsWith('.m3u8')) {
       return 'M3U';
@@ -775,28 +823,6 @@ class CmsParser {
             unpacked.toLowerCase().contains('<list') ||
             unpacked.toLowerCase().contains('<video'))) {
       return 'VOD';
-    }
-    try {
-      final cleaned = stripJsonComments(unpacked);
-      final decoded = jsonDecode(cleaned);
-      if (decoded is Map<String, dynamic>) {
-        if ((decoded['urls'] is List ||
-                decoded['storeHouse'] is List ||
-                decoded['depots'] is List) &&
-            decoded['sites'] == null) {
-          return '多仓';
-        }
-        if (decoded['list'] is List || decoded['class'] is List) {
-          return 'VOD';
-        }
-        return 'JSON';
-      }
-      if (decoded is List) {
-        return 'JSON';
-      }
-    } catch (_) {}
-    if (unpacked.contains('#EXTINF')) {
-      return 'M3U';
     }
     if (unpacked.contains(',#genre#')) {
       return 'TXT';
@@ -820,12 +846,12 @@ class CmsParser {
       splitBatchSubscriptionUrls(String rawInput, {String defaultGroup = '默认分组'}) {
     final trimmed = rawInput.trim();
     if (trimmed.isEmpty) return const [];
-    final stripped = stripJsonComments(trimmed);
+    final cleaned = stripJsonComments(trimmed);
     // If it's a JSON/XML/M3U document rather than a list of URLs, return empty so caller treats as raw content.
-    if (trimmed.startsWith('{') ||
+    if (cleaned.startsWith('{') ||
+        cleaned.startsWith('[') ||
+        trimmed.startsWith('{') ||
         trimmed.startsWith('[') ||
-        stripped.startsWith('{') ||
-        stripped.startsWith('[') ||
         trimmed.startsWith('<') ||
         trimmed.startsWith('#EXTM3U') ||
         trimmed.contains('#EXTINF') ||
@@ -947,13 +973,14 @@ class CmsParser {
       );
     }
 
-    // 2. Check for M3U / M3U8 (`#EXTM3U`, `#EXTINF`) or TXT (`#genre#`) before JSON
     final cleaned = stripJsonComments(unpacked);
     if (cleaned.isEmpty) {
       throw const FormatException('配置内容为空');
     }
-    final isJsonRoot = cleaned.startsWith('{') || cleaned.startsWith('[');
-    final looksLikeM3uOrTxt = !isJsonRoot &&
+    final isJsonStructure = cleaned.startsWith('{') || cleaned.startsWith('[');
+
+    // 2. Check for non-JSON M3U / M3U8 (`#EXTM3U`, `#EXTINF`) or TXT (`#genre#`) before JSON
+    final looksLikeM3uOrTxt = !isJsonStructure &&
         (trimmedUnpacked.startsWith('#EXTM3U') ||
             trimmedUnpacked.contains('#EXTINF') ||
             trimmedUnpacked.contains(',#genre#'));
@@ -968,29 +995,26 @@ class CmsParser {
       );
       if (m3uCfg != null) return m3uCfg;
     }
-
     dynamic decoded;
     try {
       decoded = jsonDecode(cleaned);
     } catch (e) {
       // Fallback: check if plain text is M3U/TXT live channels or plain VOD URL lines
-      if (!isJsonRoot) {
-        final fallbackCfg = _tryParseM3uOrTxtConfig(
-              trimmedUnpacked,
-              origin: origin,
-              groupLabel: groupLabel,
-              isPrivate: isPrivate,
-              subscriptionId: subscriptionId,
-              defaultName: defaultName,
-            ) ??
-            _tryParsePlainVodLinesConfig(
-              trimmedUnpacked,
-              groupLabel: groupLabel,
-              isPrivate: isPrivate,
-              subscriptionId: subscriptionId,
-            );
-        if (fallbackCfg != null) return fallbackCfg;
-      }
+      final fallbackCfg = _tryParseM3uOrTxtConfig(
+            trimmedUnpacked,
+            origin: origin,
+            groupLabel: groupLabel,
+            isPrivate: isPrivate,
+            subscriptionId: subscriptionId,
+            defaultName: defaultName,
+          ) ??
+          _tryParsePlainVodLinesConfig(
+            trimmedUnpacked,
+            groupLabel: groupLabel,
+            isPrivate: isPrivate,
+            subscriptionId: subscriptionId,
+          );
+      if (fallbackCfg != null) return fallbackCfg;
       throw FormatException('不是有效的 JSON / VOD / M3U 配置格式：$e');
     }
 
@@ -1037,7 +1061,7 @@ class CmsParser {
         decoded['api'] != null &&
         (decoded['name'] != null || decoded['key'] != null)) {
       decoded = <String, dynamic>{
-        'spider': decoded['spider'] ?? '',
+        'spider': decoded['spider'] ?? decoded['jar'] ?? '',
         'sites': [decoded],
       };
     }
@@ -1079,31 +1103,28 @@ class CmsParser {
     }
     final sites = <CmsSite>[];
     final seenKeys = <String>{};
-    final rawSpider = (decoded['spider'] ?? '').toString().trim();
     final spider = normalizeJarDeclaration(
-        origin, rawSpider.isNotEmpty ? rawSpider : (decoded['jar'] ?? '').toString());
+        origin, (decoded['spider'] ?? decoded['jar'] ?? '').toString());
     final parses = <CmsParse>[];
-    final rawParses = decoded['parses'];
-    if (rawParses is List) {
-      for (int i = 0; i < rawParses.length && parses.length < 100; i++) {
-        final item = rawParses[i];
-        if (item is! Map) continue;
-        final rawUrl = resolveUrl(origin, (item['url'] ?? '').toString().trim());
-        if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) continue;
-        final name = (item['name'] ?? '解析 ${i + 1}').toString().trim();
-        final type = _asInt(item['type'], 0);
-        final pHeaders = LiveCatalogParser.merge([
-          if (item['ext'] is Map) LiveCatalogParser.headers(item['ext'] as Map),
-          LiveCatalogParser.headers(item),
-        ]);
-        parses.add(
-          CmsParse(
-            name: name.isEmpty ? '解析 ${i + 1}' : name,
-            url: rawUrl,
-            type: type,
-            headers: pHeaders,
-          ),
-        );
+    String defaultJsonParseUrl = '';
+    if (decoded['parses'] is List) {
+      for (final p in decoded['parses'] as List) {
+        if (p is! Map) continue;
+        final pUrl = (p['url'] ?? '').toString().trim();
+        final pType = _asInt(p['type'], 0);
+        if (pUrl.startsWith('http://') || pUrl.startsWith('https://')) {
+          parses.add(
+            CmsParse(
+              name: (p['name'] ?? '解析').toString().trim(),
+              url: pUrl,
+              type: pType,
+              headers: _extractSiteHeaders(p),
+            ),
+          );
+          if (defaultJsonParseUrl.isEmpty && (pType == 1 || pType == 2 || pType == 3)) {
+            defaultJsonParseUrl = pUrl;
+          }
+        }
       }
     }
     final rawSites = decoded['sites'];
@@ -1124,27 +1145,26 @@ class CmsParser {
         if (api.toLowerCase() == 'csp_drpy' && item['ext'] is String &&
             !looksLikeScript(extStr) && !extStr.trimLeft().startsWith('{')) {
           extStr = resolveUrl(origin, extStr);
+        } else if ((extStr.startsWith('./') || extStr.startsWith('../')) && origin.trim().isNotEmpty) {
+          extStr = resolveUrl(origin, extStr);
         }
         final itemGroup = (item['group'] ?? '').toString().trim();
         final itemPrivate = _asBool(item['isPrivate'] ?? item['hidden'], isPrivate);
-        final siteHeaders = LiveCatalogParser.merge([
-          if (item['ext'] is Map) LiveCatalogParser.headers(item['ext'] as Map),
-          _stringHeaders(item['headers'] ?? item['header']),
-          LiveCatalogParser.headers(item),
-        ]);
         sites.add(
           CmsSite(
             key: key,
             name: name.isEmpty ? key : name,
             type: type,
             api: api,
-            playUrl: (item['playUrl'] ?? '').toString().trim(),
+            playUrl: (item['playUrl'] ?? '').toString().trim().isNotEmpty
+                ? (item['playUrl'] ?? '').toString().trim()
+                : defaultJsonParseUrl,
             searchable: _asBool(item['searchable'], true),
             ext: extStr,
             rawExtension: item['ext'] is String ? item['ext'] as String : null,
             jar: normalizeJarDeclaration(origin, (item['jar'] ?? '').toString()),
             spider: spider,
-            headers: siteHeaders,
+            headers: _extractSiteHeaders(item),
             group: itemGroup.isEmpty ? groupLabel : itemGroup,
             isPrivate: itemPrivate,
             subscriptionId: subscriptionId,
@@ -1228,6 +1248,15 @@ class CmsParser {
       }
     }
     if (sites.isEmpty && lives.isEmpty && depots.isEmpty) {
+      final liveCatalogCfg = _tryParseM3uOrTxtConfig(
+        cleaned,
+        origin: origin,
+        groupLabel: groupLabel,
+        isPrivate: isPrivate,
+        subscriptionId: subscriptionId,
+        defaultName: defaultName,
+      );
+      if (liveCatalogCfg != null) return liveCatalogCfg;
       throw const FormatException('配置中未找到可用的 sites（片源）、lives（直播）或 urls（多仓列表）');
     }
     return CmsConfig(
@@ -1250,7 +1279,7 @@ class CmsParser {
     final List<LiveGroup> groups;
     try {
       groups = parseLivePlaylist(content, origin: origin);
-    } on FormatException {
+    } catch (_) {
       return null;
     }
     if (groups.isEmpty) return null;
@@ -1667,7 +1696,10 @@ class CmsParser {
     }
     final decoded = jsonDecode(stripJsonComments(rawJson));
     if (decoded is! Map<String, dynamic>) return const [];
-    final rawClass = decoded['class'];
+    final rawClass = decoded['class'] ??
+        (decoded['data'] is List
+            ? decoded['data']
+            : (decoded['data'] is Map ? (decoded['data'] as Map)['list'] ?? (decoded['data'] as Map)['class'] : null));
     if (rawClass is! List) return const [];
     final categories = <CmsCategory>[];
     for (final item in rawClass) {
@@ -1720,7 +1752,15 @@ class CmsParser {
     final page = int.tryParse((decoded['page'] ?? '1').toString()) ?? 1;
     final pageCount =
         int.tryParse((decoded['pagecount'] ?? '1').toString()) ?? 1;
-    final rawList = decoded['list'];
+    final dataField = decoded['data'];
+    final rawList = decoded['list'] ??
+        (dataField is List
+            ? dataField
+            : (dataField is Map
+                ? (dataField['list'] is List
+                    ? dataField['list']
+                    : (dataField['vod_id'] != null || dataField['vod_name'] != null ? [dataField] : null))
+                : null));
     if (rawList is! List) {
       return CmsListing(page: page, pageCount: pageCount);
     }
@@ -1729,6 +1769,21 @@ class CmsParser {
       if (item is! Map) continue;
       final id = (item['vod_id'] ?? '').toString().trim();
       final title = (item['vod_name'] ?? '').toString().trim();
+      var playFrom = (item['vod_play_from'] ?? '').toString();
+      var playUrl = (item['vod_play_url'] ?? '').toString();
+      if (playUrl.trim().isEmpty && item['vod_url_with_player'] is List) {
+        final froms = <String>[];
+        final urls = <String>[];
+        for (final p in item['vod_url_with_player'] as List) {
+          if (p is! Map) continue;
+          final u = (p['url'] ?? '').toString().trim();
+          if (u.isEmpty) continue;
+          froms.add((p['name'] ?? p['code'] ?? '默认线路').toString().trim());
+          urls.add(u);
+        }
+        playFrom = froms.join(r'$$$');
+        playUrl = urls.join(r'$$$');
+      }
       if (id.isEmpty && title.isEmpty) continue;
       videos.add(
         CmsVideo(
@@ -1742,8 +1797,8 @@ class CmsParser {
           description: _cleanHtml((item['vod_content'] ?? '').toString()),
           tag: (item['vod_tag'] ?? '').toString().trim(),
           lines: _parseLines(
-            (item['vod_play_from'] ?? '').toString(),
-            (item['vod_play_url'] ?? '').toString(),
+            playFrom,
+            playUrl,
           ),
         ),
       );
@@ -2028,15 +2083,8 @@ class CmsParser {
   }
   static List<LiveGroup> parseLivePlaylist(String content, {
     String origin = '', Map<String, String> headers = const {},
-  }) {
-    final trimmed = content.trim();
-    final unpacked = (_looksLikeHex(trimmed) && trimmed.toLowerCase().startsWith('2423')) ||
-            (trimmed.startsWith(r'$#') && trimmed.contains(r'#$'))
-        ? unpackConfigText(trimmed)
-        : content;
-    return LiveCatalogParser.parse(unpacked, origin: origin,
-        sourceHeaders: headers, resolve: resolveUrl);
-  }
+  }) => LiveCatalogParser.parse(content.length <= LiveCatalogParser.maxBytes ? unpackConfigText(content) : content, origin: origin,
+      sourceHeaders: headers, resolve: resolveUrl);
   static int pageForEpisode(int index, int totalCount, bool descending) {
     if (totalCount <= 0) return 0;
     final clamped = index.clamp(0, totalCount - 1);
