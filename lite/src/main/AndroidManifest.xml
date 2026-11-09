@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.pilipala.marcomovie.lite" android:versionCode="50" android:versionName="0.5.0">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.pilipala.marcomovie.lite" android:versionCode="51" android:versionName="0.5.1">
   <uses-sdk android:minSdkVersion="14" android:targetSdkVersion="28" />
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -7,7 +7,7 @@
   <uses-feature android:name="android.software.leanback" android:required="false" />
   <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
   <application android:label="Marco Movie Lite" android:icon="@drawable/app_icon" android:theme="@style/LiteTheme" android:allowBackup="false" android:hardwareAccelerated="true" android:largeHeap="true">
-    <activity android:name=".LiteActivity" android:exported="true" android:screenOrientation="unspecified" android:configChanges="keyboardHidden|orientation|screenSize">
+    <activity android:name=".LiteActivity" android:exported="true" android:screenOrientation="unspecified" android:configChanges="keyboardHidden|orientation|screenSize|uiMode">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
         <category android:name="android.intent.category.LAUNCHER" />
