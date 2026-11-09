@@ -60,11 +60,13 @@ public final class CspEngine implements SourceEngine {
         }
         return "";
     }
+
     final Application app;
     final Cms.Site site;
     final Spider spider;
     final Object pluginLock;
     public final String pluginSha256;
+    private volatile boolean homeWarmed = false;
 
     public CspEngine(Application application, Cms.Config config, Cms.Site selected)
             throws Exception {
@@ -569,8 +571,47 @@ public final class CspEngine implements SourceEngine {
         }
     }
 
+    private void ensureConfigHomeWarmed() {
+        if (homeWarmed || !SourceController.isConfigOrNetdiskSite(site)) return;
+        homeWarmed = true;
+        try {
+            spider.homeContent(true);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    static Spider unwrapSpiderDelegate(Spider root) {
+        if (root == null) return null;
+        Spider current = root;
+        for (int depth = 0; depth < 4; depth++) {
+            Spider next = null;
+            for (Class<?> c = current.getClass();
+                    c != null && c != Object.class && c != Spider.class;
+                    c = c.getSuperclass()) {
+                for (Field f : c.getDeclaredFields()) {
+                    if (Modifier.isStatic(f.getModifiers())) continue;
+                    try {
+                        f.setAccessible(true);
+                        Object val = f.get(current);
+                        if (val instanceof Spider && val != current) {
+                            next = (Spider) val;
+                            break;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                if (next != null) break;
+            }
+            if (next == null) break;
+            current = next;
+        }
+        return current;
+    }
+
     public String home() throws Exception {
-        return call("home", () -> spider.homeContent(true));
+        String res = call("home", () -> spider.homeContent(true));
+        homeWarmed = true;
+        return res;
     }
 
     public String homeVideos() throws Exception {
@@ -655,10 +696,45 @@ public final class CspEngine implements SourceEngine {
         synchronized (pluginLock) {
             try {
                 syncAllPluginActivities(MainActivity.activeActivity);
-                return spider.action(value);
+                ensureConfigHomeWarmed();
+                String res = spider.action(value);
+                return res == null ? "" : res;
             } catch (Throwable error) {
                 throw new EngineException(
                         "来源交互失败：" + unwrap(error).getClass().getSimpleName(), unwrap(error));
+            }
+        }
+    }
+
+    @Override
+    public boolean supportsCustomAction() {
+        try {
+            Spider target = unwrapSpiderDelegate(spider);
+            if (target == null) return false;
+            Method m = target.getClass().getMethod("action", String.class);
+            Class<?> declaring = m.getDeclaringClass();
+            if (declaring == Spider.class) return false;
+            String declName = declaring.getName();
+            if (declName.endsWith("BaseSpiderGuard")) return false;
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    @Override
+    public String detailAction(String id) throws Exception {
+        synchronized (pluginLock) {
+            try {
+                syncAllPluginActivities(MainActivity.activeActivity);
+                ensureConfigHomeWarmed();
+                String res = spider.detailContent(Collections.singletonList(id));
+                diagnostic("detail_action_ok", site.api, null);
+                return res == null ? "" : res;
+            } catch (Throwable error) {
+                Throwable cause = unwrap(error);
+                diagnostic("detail_action_failed", site.api, cause);
+                throw new EngineException("来源交互失败：" + cause.getClass().getSimpleName(), cause);
             }
         }
     }
