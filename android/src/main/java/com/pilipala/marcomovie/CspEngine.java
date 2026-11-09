@@ -18,6 +18,48 @@ public final class CspEngine implements SourceEngine {
     static final Set<ClassLoader> ALL_PLUGIN_LOADERS =
             Collections.synchronizedSet(new LinkedHashSet<>());
     static volatile String activeJarDeclaration = "";
+    static volatile DexClassLoader activeProxyLoader;
+    static volatile String pendingPluginDanmaku = "";
+    static volatile long pendingPluginDanmakuAtMs = 0L;
+
+    public static int proxyPort() {
+        return ProxyAddress.port > 0 ? ProxyAddress.port : 9978;
+    }
+
+    public static void onPluginDanmaku(String path) {
+        if (path == null || path.trim().isEmpty()) return;
+        final String trimmed = path.trim();
+        pendingPluginDanmaku = trimmed;
+        pendingPluginDanmakuAtMs = System.currentTimeMillis();
+        final MainActivity activity = MainActivity.activeActivity;
+        if (activity != null && !activity.isFinishing()) {
+            activity.ui.post(
+                    () -> {
+                        if (activity.isFinishing()) return;
+                        if (activity.playbackControls != null) {
+                            activity.playbackControls.applyExternalDanmaku(trimmed);
+                        }
+                    });
+        }
+    }
+
+    public static void onPluginSubtitle(String path) {
+        if (path == null || path.trim().isEmpty()) return;
+    }
+
+    static String consumeRecentPluginDanmaku(long maxAgeMs) {
+        String url = pendingPluginDanmaku;
+        long at = pendingPluginDanmakuAtMs;
+        if (url != null
+                && !url.isEmpty()
+                && at > 0L
+                && (System.currentTimeMillis() - at) <= maxAgeMs) {
+            pendingPluginDanmaku = "";
+            pendingPluginDanmakuAtMs = 0L;
+            return url;
+        }
+        return "";
+    }
     final Application app;
     final Cms.Site site;
     final Spider spider;
@@ -52,6 +94,7 @@ public final class CspEngine implements SourceEngine {
             }
             pluginSha256 = digest(artifact, "SHA-256");
             DexClassLoader loader = loader(app, artifact, pluginSha256);
+            activeProxyLoader = loader;
             pluginLock = new Object();
             try (InputStream resource = loader.getResourceAsStream("classes.dex")) {
                 if (resource == null) throw new IOException("插件类加载器无法读取原始资源");
@@ -68,6 +111,7 @@ public final class CspEngine implements SourceEngine {
                 spider.init(app, site.ext == null ? "" : site.ext.toString());
             }
             collectPluginLoaders(loader, spider);
+            syncPluginProxyPort(loader, ProxyAddress.port);
             syncPluginActivity(loader, MainActivity.activeActivity);
             diagnostic("loaded", className, null);
         } catch (Throwable error) {
@@ -176,6 +220,7 @@ public final class CspEngine implements SourceEngine {
             snapshot.addAll(ALL_PLUGIN_LOADERS);
         }
         for (ClassLoader loader : snapshot) {
+            syncPluginProxyPort(loader, ProxyAddress.port);
             syncPluginActivity(loader, activity);
         }
     }
@@ -469,12 +514,17 @@ public final class CspEngine implements SourceEngine {
 
     public static Object[] proxy(Application app, Cms.Config config, Map<String, String> params)
             throws Exception {
-        String decl =
-                activeJarDeclaration != null && !activeJarDeclaration.isEmpty()
-                        ? activeJarDeclaration
-                        : config.spider;
-        File artifact = obtain(app, decl);
-        DexClassLoader loader = loader(app, artifact, digest(artifact, "SHA-256"));
+        DexClassLoader loader = activeProxyLoader;
+        if (loader == null) {
+            String decl =
+                    activeJarDeclaration != null && !activeJarDeclaration.isEmpty()
+                            ? activeJarDeclaration
+                            : config.spider;
+            File artifact = obtain(app, decl);
+            loader = loader(app, artifact, digest(artifact, "SHA-256"));
+            activeProxyLoader = loader;
+        }
+        syncPluginProxyPort(loader, ProxyAddress.port);
         // playerContent may call its own HTTP proxy synchronously. Holding its
         // catalogue lock here would deadlock that reentrant network request.
         try {

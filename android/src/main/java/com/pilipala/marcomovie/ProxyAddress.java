@@ -135,6 +135,12 @@ final class ProxyAddress {
                         .replace("|", "%7C")
                         .replace("{", "%7B")
                         .replace("}", "%7D")
+                        .replace("\"", "%22")
+                        .replace("<", "%3C")
+                        .replace(">", "%3E")
+                        .replace("\\", "%5C")
+                        .replace("^", "%5E")
+                        .replace("`", "%60")
                         .replace(" ", "%20");
         return prefix + tail;
     }

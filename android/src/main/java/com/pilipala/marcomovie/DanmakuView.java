@@ -123,15 +123,25 @@ final class DanmakuView extends View implements AutoCloseable {
                         }
                         String address = LocalProxy.rewrite(candidate);
                         if (!Cms.isHttp(address)) throw new IOException("来源没有提供有效弹幕地址");
-                        URL parsedUrl = new URL(Cms.normalizeHttp(address));
-                        boolean isLoopback = LocalProxy.loopbackHost(parsedUrl.getHost());
-                        connection = (HttpURLConnection) parsedUrl.openConnection();
-                        connection.setConnectTimeout(8000);
-                        connection.setReadTimeout(12000);
-                        connection.setRequestProperty("User-Agent", Cms.USER_AGENT);
-                        connection.setRequestProperty("Accept-Encoding", "gzip, deflate");
-                        if (headers != null) {
-                            for (Map.Entry<String, String> h : headers.entrySet()) {
+                        Map<String, String> reqHeaders =
+                                ProxyAddress.requestHeaders(
+                                        address,
+                                        headers != null
+                                                ? headers
+                                                : Collections.<String, String>emptyMap());
+                        URL currentUrl = new URL(Cms.normalizeHttp(address));
+                        for (int redirect = 0; redirect <= 5; redirect++) {
+                            if (connection != null) {
+                                connection.disconnect();
+                            }
+                            boolean isLoopback = LocalProxy.loopbackHost(currentUrl.getHost());
+                            connection = (HttpURLConnection) currentUrl.openConnection();
+                            connection.setInstanceFollowRedirects(false);
+                            connection.setConnectTimeout(12000);
+                            connection.setReadTimeout(25000);
+                            connection.setRequestProperty("User-Agent", Cms.USER_AGENT);
+                            connection.setRequestProperty("Accept-Encoding", "gzip, deflate");
+                            for (Map.Entry<String, String> h : reqHeaders.entrySet()) {
                                 String k = h.getKey();
                                 if (k == null) continue;
                                 if (isLoopback
@@ -141,6 +151,18 @@ final class DanmakuView extends View implements AutoCloseable {
                                 }
                                 connection.setRequestProperty(k, h.getValue());
                             }
+                            int status = connection.getResponseCode();
+                            if (status == 301
+                                    || status == 302
+                                    || status == 303
+                                    || status == 307
+                                    || status == 308) {
+                                String loc = connection.getHeaderField("Location");
+                                if (loc == null || loc.trim().isEmpty()) break;
+                                currentUrl = new URL(currentUrl, loc.trim());
+                                continue;
+                            }
+                            break;
                         }
                         String body;
                         try (InputStream in = connection.getInputStream()) {

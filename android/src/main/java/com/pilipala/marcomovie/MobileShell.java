@@ -63,6 +63,7 @@ final class MobileShell {
 
     static String cachedSearchKeyword = "";
     static String cachedSearchStatus = "";
+    static String cachedSearchSiteFilter = "";
     static final List<CachedSearchHit> cachedSearchHits = new ArrayList<>();
     static int cachedSearchScrollY = 0;
 
@@ -1782,8 +1783,17 @@ final class MobileShell {
         final TextView searchStatus = a.text("输入关键词搜索全部已启用的片源", 12, MainActivity.MUTED);
         searchStatus.setMaxLines(2);
         searchStatus.setEllipsize(TextUtils.TruncateAt.END);
-        searchStatus.setPadding(a.dp(4), a.dp(10), a.dp(4), a.dp(8));
+        searchStatus.setPadding(a.dp(4), a.dp(10), a.dp(4), a.dp(6));
         page.addView(searchStatus);
+
+        final HorizontalScrollView siteFilterScroll = new HorizontalScrollView(a);
+        siteFilterScroll.setHorizontalScrollBarEnabled(false);
+        siteFilterScroll.setPadding(0, a.dp(2), 0, a.dp(8));
+        siteFilterScroll.setVisibility(View.GONE);
+        final LinearLayout siteFilterRow = a.row();
+        siteFilterRow.setGravity(Gravity.CENTER_VERTICAL);
+        siteFilterScroll.addView(siteFilterRow);
+        page.addView(siteFilterScroll, new LinearLayout.LayoutParams(-1, -2));
 
         final ScrollView resultScroll = new ScrollView(a);
         resultScroll.setFillViewport(true);
@@ -1809,13 +1819,188 @@ final class MobileShell {
         final Runnable renderSearchStatus =
                 () -> {
                     int separator = cachedSearchStatus.indexOf('\n');
-                    searchStatus.setText(
+                    String mainLine =
                             separator < 0
                                     ? cachedSearchStatus
-                                    : cachedSearchStatus.substring(0, separator));
+                                    : cachedSearchStatus.substring(0, separator);
+                    if (!cachedSearchSiteFilter.isEmpty() && !cachedSearchHits.isEmpty()) {
+                        String filterName = cachedSearchSiteFilter;
+                        int filteredCount = 0;
+                        for (CachedSearchHit hit : cachedSearchHits) {
+                            if (hit.site != null && cachedSearchSiteFilter.equals(hit.site.key)) {
+                                filterName = hit.site.name;
+                                filteredCount++;
+                            }
+                        }
+                        mainLine =
+                                "已筛选「"
+                                        + filterName
+                                        + "」："
+                                        + filteredCount
+                                        + " 条（共 "
+                                        + cachedSearchHits.size()
+                                        + " 条）";
+                    }
+                    searchStatus.setText(mainLine);
                     sourceNotices.setText(
                             separator < 0 ? "" : cachedSearchStatus.substring(separator + 1));
                     sourceNotices.setVisibility(separator < 0 ? View.GONE : View.VISIBLE);
+                };
+
+        final Runnable[] refreshSiteFilterBar = new Runnable[1];
+        final Runnable rebuildFilteredResults =
+                () -> {
+                    resultList.removeAllViews();
+                    resultList.addView(sourceNotices);
+                    for (CachedSearchHit hit : cachedSearchHits) {
+                        if (cachedSearchSiteFilter.isEmpty()
+                                || (hit.site != null
+                                        && cachedSearchSiteFilter.equals(hit.site.key))) {
+                            resultList.addView(buildSearchResultRow(hit.site, hit.video));
+                        }
+                    }
+                    renderSearchStatus.run();
+                    if (refreshSiteFilterBar[0] != null) refreshSiteFilterBar[0].run();
+                };
+
+        refreshSiteFilterBar[0] =
+                () -> {
+                    siteFilterRow.removeAllViews();
+                    if (cachedSearchHits.isEmpty()) {
+                        siteFilterScroll.setVisibility(View.GONE);
+                        return;
+                    }
+                    final java.util.Map<String, Cms.Site> hitSites =
+                            new java.util.LinkedHashMap<>();
+                    final java.util.Map<String, Integer> siteCounts =
+                            new java.util.LinkedHashMap<>();
+                    for (CachedSearchHit hit : cachedSearchHits) {
+                        if (hit.site == null || hit.site.key == null) continue;
+                        hitSites.put(hit.site.key, hit.site);
+                        Integer prev = siteCounts.get(hit.site.key);
+                        siteCounts.put(hit.site.key, prev == null ? 1 : prev + 1);
+                    }
+                    if (!cachedSearchSiteFilter.isEmpty()
+                            && !siteCounts.containsKey(cachedSearchSiteFilter)) {
+                        cachedSearchSiteFilter = "";
+                    }
+                    siteFilterScroll.setVisibility(View.VISIBLE);
+
+                    if (hitSites.size() >= 2) {
+                        TextView drawerBtn = a.text("筛选线路 ▾", 12, 0xff5ac8fa);
+                        drawerBtn.setTypeface(null, Typeface.BOLD);
+                        drawerBtn.setSingleLine(true);
+                        drawerBtn.setPadding(a.dp(12), a.dp(5), a.dp(12), a.dp(5));
+                        drawerBtn.setBackground(
+                                glassBg(0xd81b2a34, 0xc8131f28, a.dp(999), a.dp(0.8f), 0x405ac8fa));
+                        MobileDetailScreen.bindTouchFeedback(drawerBtn);
+                        drawerBtn.setOnClickListener(
+                                v -> {
+                                    final List<String> keys = new ArrayList<>();
+                                    final List<String> labels = new ArrayList<>();
+                                    keys.add("");
+                                    labels.add("全部线路（" + cachedSearchHits.size() + "）");
+                                    int currentIdx = 0;
+                                    for (java.util.Map.Entry<String, Cms.Site> entry :
+                                            hitSites.entrySet()) {
+                                        String k = entry.getKey();
+                                        Cms.Site s = entry.getValue();
+                                        int c =
+                                                siteCounts.containsKey(k)
+                                                        ? siteCounts.get(k)
+                                                        : 0;
+                                        if (k.equals(cachedSearchSiteFilter)) {
+                                            currentIdx = keys.size();
+                                        }
+                                        keys.add(k);
+                                        labels.add(s.name + "（" + c + "）");
+                                    }
+                                    showDrawerPicker(
+                                            a,
+                                            "筛选搜索线路",
+                                            "选择仅展示指定片源的搜索结果，或恢复查看全部线路",
+                                            labels.toArray(new String[0]),
+                                            currentIdx,
+                                            which -> {
+                                                if (which >= 0 && which < keys.size()) {
+                                                    cachedSearchSiteFilter = keys.get(which);
+                                                    cachedSearchScrollY = 0;
+                                                    resultScroll.scrollTo(0, 0);
+                                                    rebuildFilteredResults.run();
+                                                }
+                                            });
+                                });
+                        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-2, -2);
+                        dlp.rightMargin = a.dp(7);
+                        siteFilterRow.addView(drawerBtn, dlp);
+                    }
+
+                    boolean allActive = cachedSearchSiteFilter.isEmpty();
+                    TextView allChip =
+                            a.text(
+                                    "全部 (" + cachedSearchHits.size() + ")",
+                                    12,
+                                    allActive ? 0xff000000 : 0xffe5e7eb);
+                    allChip.setTypeface(null, allActive ? Typeface.BOLD : Typeface.NORMAL);
+                    allChip.setSingleLine(true);
+                    allChip.setPadding(a.dp(13), a.dp(5), a.dp(13), a.dp(5));
+                    allChip.setBackground(
+                            allActive
+                                    ? glassBg(0xffffffff, 0xffeaeaf0, a.dp(999), 0, 0)
+                                    : glassBg(
+                                            0xcc262e2b,
+                                            0xb81a211f,
+                                            a.dp(999),
+                                            a.dp(0.7f),
+                                            0x2effffff));
+                    MobileDetailScreen.bindTouchFeedback(allChip);
+                    allChip.setOnClickListener(
+                            v -> {
+                                if (!cachedSearchSiteFilter.isEmpty()) {
+                                    cachedSearchSiteFilter = "";
+                                    cachedSearchScrollY = 0;
+                                    resultScroll.scrollTo(0, 0);
+                                    rebuildFilteredResults.run();
+                                }
+                            });
+                    LinearLayout.LayoutParams allLp = new LinearLayout.LayoutParams(-2, -2);
+                    allLp.rightMargin = a.dp(7);
+                    siteFilterRow.addView(allChip, allLp);
+
+                    for (java.util.Map.Entry<String, Cms.Site> entry : hitSites.entrySet()) {
+                        final String siteKey = entry.getKey();
+                        final Cms.Site siteObj = entry.getValue();
+                        int count = siteCounts.containsKey(siteKey) ? siteCounts.get(siteKey) : 0;
+                        final boolean active = siteKey.equals(cachedSearchSiteFilter);
+                        TextView chip =
+                                a.text(
+                                        siteObj.name + " (" + count + ")",
+                                        12,
+                                        active ? 0xff000000 : 0xffe5e7eb);
+                        chip.setTypeface(null, active ? Typeface.BOLD : Typeface.NORMAL);
+                        chip.setSingleLine(true);
+                        chip.setPadding(a.dp(13), a.dp(5), a.dp(13), a.dp(5));
+                        chip.setBackground(
+                                active
+                                        ? glassBg(0xffffffff, 0xffeaeaf0, a.dp(999), 0, 0)
+                                        : glassBg(
+                                                0xcc262e2b,
+                                                0xb81a211f,
+                                                a.dp(999),
+                                                a.dp(0.7f),
+                                                0x2effffff));
+                        MobileDetailScreen.bindTouchFeedback(chip);
+                        chip.setOnClickListener(
+                                v -> {
+                                    cachedSearchSiteFilter = active ? "" : siteKey;
+                                    cachedSearchScrollY = 0;
+                                    resultScroll.scrollTo(0, 0);
+                                    rebuildFilteredResults.run();
+                                });
+                        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+                        lp.rightMargin = a.dp(7);
+                        siteFilterRow.addView(chip, lp);
+                    }
                 };
 
         clearBtn.setOnClickListener(
@@ -1825,8 +2010,11 @@ final class MobileShell {
                     input.setText("");
                     cachedSearchKeyword = "";
                     cachedSearchStatus = "";
+                    cachedSearchSiteFilter = "";
                     cachedSearchHits.clear();
                     cachedSearchScrollY = 0;
+                    siteFilterRow.removeAllViews();
+                    siteFilterScroll.setVisibility(View.GONE);
                     resultList.removeAllViews();
                     sourceNotices.setText("");
                     sourceNotices.setVisibility(View.GONE);
@@ -1938,8 +2126,11 @@ final class MobileShell {
                     sourceNotices.setVisibility(View.GONE);
                     resultList.addView(sourceNotices);
                     cachedSearchKeyword = kw;
+                    cachedSearchSiteFilter = "";
                     cachedSearchHits.clear();
                     cachedSearchScrollY = 0;
+                    siteFilterRow.removeAllViews();
+                    siteFilterScroll.setVisibility(View.GONE);
 
                     List<Cms.Site> searchableSites = new ArrayList<>();
                     for (Cms.Site s : SourcePreferences.prioritized(a, a.config.sites)) {
@@ -2001,8 +2192,16 @@ final class MobileShell {
                                                                         new CachedSearchHit(
                                                                                 site, v));
                                                             }
-                                                            resultList.addView(
-                                                                    buildSearchResultRow(site, v));
+                                                            if (cachedSearchSiteFilter.isEmpty()
+                                                                    || cachedSearchSiteFilter
+                                                                            .equals(site.key)) {
+                                                                resultList.addView(
+                                                                        buildSearchResultRow(
+                                                                                site, v));
+                                                            }
+                                                        }
+                                                        if (!matches.isEmpty()) {
+                                                            refreshSiteFilterBar[0].run();
                                                         }
                                                         if (completed[0] < searchableSites.size()) {
                                                             cachedSearchStatus =
@@ -2023,7 +2222,7 @@ final class MobileShell {
                                                                                     : "本次搜索未返回影片，请查看片源提示")
                                                                             : "搜索完成，共找到 "
                                                                                     + hitCount[0]
-                                                                                    + " 条结果（点击任意线路进入，返回可继续切换）";
+                                                                                    + " 条结果（点击上方片源标签可筛选线路）";
                                                         }
                                                         if (!searchNotices.isEmpty())
                                                             cachedSearchStatus +=
@@ -2058,12 +2257,9 @@ final class MobileShell {
             input.setText(wantedKw);
             input.setSelection(wantedKw.length());
             if (wantedKw.equals(cachedSearchKeyword) && !cachedSearchHits.isEmpty()) {
-                for (CachedSearchHit hit : cachedSearchHits) {
-                    resultList.addView(buildSearchResultRow(hit.site, hit.video));
-                }
                 if (cachedSearchStatus.isEmpty())
                     cachedSearchStatus = "已保留搜索结果，共 " + cachedSearchHits.size() + " 条";
-                renderSearchStatus.run();
+                rebuildFilteredResults.run();
                 final int savedScroll = cachedSearchScrollY;
                 if (savedScroll > 0) {
                     resultScroll.post(() -> resultScroll.scrollTo(0, savedScroll));
@@ -2074,12 +2270,9 @@ final class MobileShell {
         } else if (!cachedSearchKeyword.isEmpty()) {
             input.setText(cachedSearchKeyword);
             input.setSelection(cachedSearchKeyword.length());
-            for (CachedSearchHit hit : cachedSearchHits) {
-                resultList.addView(buildSearchResultRow(hit.site, hit.video));
-            }
             if (cachedSearchStatus.isEmpty())
                 cachedSearchStatus = "已保留搜索结果，共 " + cachedSearchHits.size() + " 条";
-            renderSearchStatus.run();
+            rebuildFilteredResults.run();
             final int savedScroll = cachedSearchScrollY;
             if (savedScroll > 0) {
                 resultScroll.post(() -> resultScroll.scrollTo(0, savedScroll));
@@ -2514,13 +2707,22 @@ final class MobileShell {
             card.setOnLongClickListener(
                     v -> {
                         String[] names = new String[ch.streams.size()];
-                        for (int n = 0; n < names.length; n++) names[n] = "线路 " + (n + 1);
-                        new AppDialog.Builder(a)
-                                .setTitle(ch.name + " · 选择线路")
-                                .setItems(
-                                        names,
-                                        (dialog, n) -> a.playLive(source, ch, ch.streams.get(n)))
-                                .show();
+                        for (int n = 0; n < names.length; n++) {
+                            String lbl = ch.streams.get(n).label;
+                            names[n] =
+                                    "线路 "
+                                            + (n + 1)
+                                            + (lbl != null && !lbl.trim().isEmpty()
+                                                    ? " · " + lbl.trim()
+                                                    : "");
+                        }
+                        showDrawerPicker(
+                                a,
+                                ch.name + " · 选择直播线路",
+                                "长按频道可手动切换不同直播源线路",
+                                names,
+                                0,
+                                n -> a.playLive(source, ch, ch.streams.get(n)));
                         return true;
                     });
         }

@@ -2,7 +2,7 @@
 
 ## 未发布 — 订阅兼容修复中
 
-Android 手机/平板（0.5.9）与电视（0.5.9）的已验证升级与修复已按各平台独立版本号发布。以下跨端验证及实验仍在继续，不能视为 iPhone 或其他端已更新。
+Android 手机/平板（0.5.10）与电视（0.5.10）的已验证升级与修复已按各平台独立版本号发布。以下跨端验证及实验仍在继续，不能视为 iPhone 或其他端已更新。
 
 - Python 请求保留二进制内容，修复 Session Cookie 属性与同名 Cookie 的域隔离。
 - 为指定版本 T4 插件加入本机配置解析和共享适配，保留真实分页、影片及剧集标识；两条样例已取得目录、详情和 HLS 清单，其中一条搜索仍要求网站验证。
@@ -69,6 +69,21 @@ iPhone 仍需完成指定订阅及插件线路的独立运行、实际播放验�
 - 同步订阅源、多仓、脚本源（HTTP T4、DRPY、CatVod JS、Python Spider、已移植 Guard 源）与直播目录（`LiveCatalogParser`、`lives[].api`、`proxy://?do=live&type=txt&ext=`、Base64 直播列表、`parses` 解析回退）完整适配。
 - 切换为按 macOS 独立检查更新（`updates/macos.json`），切换筛选、直播源或离开详情页时主动取消过期请求。
 - 0.5.0 客户端首次升级请从下载页手动下载 macOS 0.5.1 应用包；限制同上，未完成的 33 条插件移植不计为已支持。
+
+## Android 手机 / 平板 0.5.10 — 2026-11-09
+
+完整说明：[Android 手机 / 平板 0.5.10](docs/releases/android-mobile-v0.5.10.md)。
+
+- 新增全局搜索结果**线路筛选栏**（`MobileShell.renderSearchTab`）：在并发搜索结果上方提供横向滑动的片源胶囊条（`全部 (N)` + 各命中片源 `片源名 (k)`）以及一键呼出底部抽屉的「`筛选线路 ▾`」快捷按钮；随并发搜索返回实时刷新各线路命中计数，点击任意片源即可过滤仅查看该线路结果，且进入影视详情页后返回自动保持筛选状态。
+- 修复 `饭太硬`、`王二小放牛娃`、`玩偶哥哥` 等多个扩展片源的弹幕无法正常获取与渲染的问题：在 `LocalProxy` 补齐 `/proxy?do=ck` 端口探测响应（`200 ok`）与请求行 UTF-8 解码，在 `CspEngine` 实时同步内层 `DexClassLoader` 代理端口并新增 `com.fongmi.android.tv.event.RefreshEvent.danmaku(String)` 异步宿主事件桥接，并在 `DanmakuView` / `DanmakuData` 增强跨协议重定向、本机代理鉴权头注入、XML 非法控制字符清理与未转义特殊字符（`&` / `<`）容错解析。
+- 修复部分电视直播频道提示“这条剧集需要解析或使用了特殊协议，基础版尚未支持”及无后缀 HLS 直播源播放失败的问题：在 `PlaybackController.openPlayer` 与 `LiveController.playLive` 中将 `LocalProxy.rewrite` 前置到协议校验之前，支持 `proxy://`、`rtmps://`、`rtsps://`、`mmsh://`、`srt://`、`webrtc://`、`webview://` 网页嗅探及多线路自动择优与故障回退，修复 `LiveCatalog` 带 `?` 查询参数直播地址的 `$线路名` 尾缀剥离，并在 `MoviePlayer` 为无 `.m3u8` 后缀的直播流开启 MIME 嗅探与 HLS 容器自动回退重试。
+
+## Android 电视 / 盒子 0.5.10 — 2026-11-09
+
+完整说明：[Android 电视 / 盒子 0.5.10](docs/releases/android-tv-v0.5.10.md)。
+
+- 同步修复 `饭太硬`、`王二小放牛娃`、`玩偶哥哥` 等多个扩展片源的弹幕获取与解析链路：补齐 `LocalProxy` `/proxy?do=ck` 端口探测响应与 UTF-8 查询解码、内层 `DexClassLoader` 代理端口同步、`com.fongmi.android.tv.event.RefreshEvent.danmaku(String)` 异步弹幕推送桥接，以及 `DanmakuData` XML/JSON 容错解析。
+- 同步修复电视直播频道提示“这条剧集需要解析或使用了特殊协议，基础版尚未支持”及无后缀 HLS 直播流起播失败的问题：前置 `LocalProxy.rewrite` 代理重写，扩展 `rtmps`/`rtsps`/`mmsh`/`srt`/`webrtc`/`webview` 协议支持与多线路自动回退，修复带查询参数直播 URL 的 `$线路名` 剥离，并为无 `.m3u8` 扩展名的直播地址开启 HLS 嗅探与自动回退。
 
 ## Android 电视 / 盒子 0.5.9 — 2026-11-09
 

@@ -9,11 +9,11 @@ public class SpiderApi {
     public void log(String message) {}
 
     public String getAddress(boolean local) {
-        return "http://127.0.0.1:9978/";
+        return "http://127.0.0.1:" + com.pilipala.marcomovie.CspEngine.proxyPort() + "/";
     }
 
     public String getPort() {
-        return "9978";
+        return String.valueOf(com.pilipala.marcomovie.CspEngine.proxyPort());
     }
 
     public String multiReq(JsonArray requests) {

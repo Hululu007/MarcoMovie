@@ -559,11 +559,23 @@ public final class LiveCatalog {
                 part = part.substring(0, first);
             }
             int dollar = part.lastIndexOf('$');
-            if (dollar > 0
-                    && part.indexOf('?') < 0
-                    && part.substring(dollar + 1).matches("[^/?=&$]{1,40}")) {
-                s.label = part.substring(dollar + 1);
-                part = part.substring(0, dollar);
+            int schemeSep = part.indexOf("://");
+            if (dollar > (schemeSep >= 0 ? schemeSep + 3 : 0)
+                    && dollar + 1 < part.length()
+                    && part.charAt(dollar + 1) != '{') {
+                String tail = part.substring(dollar + 1).trim();
+                boolean hasQuery = part.indexOf('?') >= 0 && dollar > part.indexOf('?');
+                boolean looksLikeLabel =
+                        !hasQuery
+                                ? tail.matches("[^/?=&$]{1,40}")
+                                : (tail.matches("[^/?=&$#]{1,32}")
+                                        && (!tail.matches("[\\x00-\\x7F]+")
+                                                || tail.matches(
+                                                        "(?i).*(?:hd|sd|fhd|uhd|4k|8k|ipv[46]|line|bak|flv|hls|m3u8|\\d+p).*")));
+                if (looksLikeLabel) {
+                    s.label = tail;
+                    part = part.substring(0, dollar);
+                }
             }
             s.url = resolve(origin, part.trim());
             if (!s.url.isEmpty()) out.add(s);
@@ -591,7 +603,20 @@ public final class LiveCatalog {
     private static String resolve(String origin, String value) {
         if (value == null || value.trim().isEmpty()) return "";
         value = value.trim();
-        if (value.matches("^[A-Za-z][A-Za-z0-9+.-]*:.*")) return value;
+        if (value.startsWith("//")) {
+            String scheme =
+                    origin != null && origin.regionMatches(true, 0, "https:", 0, 6)
+                            ? "https:"
+                            : "http:";
+            return scheme + value;
+        }
+        if (value.matches("^[A-Za-z0-9.-]+:\\d+/.*")) {
+            return "http://" + value;
+        }
+        if (value.matches("^[A-Za-z][A-Za-z0-9+.-]*://.*")
+                || value.matches("^(?i:magnet|content|file|javascript):.*")) {
+            return value;
+        }
         try {
             return Cms.resolve(origin, value);
         } catch (Exception ignored) {

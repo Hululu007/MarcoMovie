@@ -123,24 +123,46 @@ public final class Cms {
     public static boolean isMedia(String value) {
         if (isHttp(value)) return true;
         if (value == null) return false;
-        String lower = value.toLowerCase(Locale.ROOT);
+        String lower = value.trim().toLowerCase(Locale.ROOT);
         return lower.startsWith("rtsp://")
+                || lower.startsWith("rtsps://")
                 || lower.startsWith("rtmp://")
+                || lower.startsWith("rtmps://")
+                || lower.startsWith("rtmpt://")
+                || lower.startsWith("rtmpe://")
+                || lower.startsWith("rtmfp://")
                 || lower.startsWith("mms://")
+                || lower.startsWith("mmsh://")
+                || lower.startsWith("mmst://")
                 || lower.startsWith("udp://")
                 || lower.startsWith("rtp://")
+                || lower.startsWith("srt://")
+                || lower.startsWith("rist://")
+                || lower.startsWith("webrtc://")
+                || lower.startsWith("proxy://")
                 || lower.startsWith("file://")
                 || lower.startsWith("content://");
     }
 
     public static boolean isDirectStreamUrl(String value) {
         if (value == null || value.isEmpty()) return false;
-        String lower = value.toLowerCase(Locale.ROOT);
+        String lower = value.trim().toLowerCase(Locale.ROOT);
         if (lower.startsWith("rtsp://")
+                || lower.startsWith("rtsps://")
                 || lower.startsWith("rtmp://")
+                || lower.startsWith("rtmps://")
+                || lower.startsWith("rtmpt://")
+                || lower.startsWith("rtmpe://")
+                || lower.startsWith("rtmfp://")
                 || lower.startsWith("udp://")
                 || lower.startsWith("rtp://")
                 || lower.startsWith("mms://")
+                || lower.startsWith("mmsh://")
+                || lower.startsWith("mmst://")
+                || lower.startsWith("srt://")
+                || lower.startsWith("rist://")
+                || lower.startsWith("webrtc://")
+                || lower.startsWith("proxy://")
                 || lower.startsWith("file://")
                 || lower.startsWith("content://")
                 || lower.startsWith("magnet:?")) return true;

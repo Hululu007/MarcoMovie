@@ -121,7 +121,7 @@ public final class LocalProxy implements Closeable {
             if (c != '\r') b.write(c);
             if (b.size() > limit) throw new IOException("HTTP line too large");
         }
-        return b.toString("ISO-8859-1");
+        return b.toString("UTF-8");
     }
 
     private static long[] parseContentRange(String contentRange) {
@@ -240,6 +240,10 @@ public final class LocalProxy implements Closeable {
                     token,
                     isJs)) {
                 simple(out, 403, "Forbidden");
+                return;
+            }
+            if ("ck".equalsIgnoreCase(params.get("do"))) {
+                simple(out, 200, "ok");
                 return;
             }
             String upstreamOrigin = headers.remove("x-movie-origin");

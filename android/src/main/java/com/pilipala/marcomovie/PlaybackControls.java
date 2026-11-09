@@ -767,6 +767,16 @@ final class PlaybackControls {
                     }
                     String address = resolved.media.optString("danmaku");
                     if (address.isEmpty()) {
+                        String recentDm = CspEngine.consumeRecentPluginDanmaku(120000L);
+                        if (!recentDm.isEmpty()) {
+                            address = LocalProxy.rewrite(recentDm);
+                            try {
+                                resolved.media.put("danmaku", address);
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                    if (address.isEmpty()) {
                         message("当前来源没有提供弹幕，可导入本地 XML / JSON。");
                         return;
                     }
@@ -2079,8 +2089,50 @@ final class PlaybackControls {
         return seconds == 0 ? "关闭" : a.time(seconds * 1000);
     }
 
+    void applyExternalDanmaku(String rawUrl) {
+        if (rawUrl == null || rawUrl.trim().isEmpty()) return;
+        String candidate = rawUrl.trim();
+        if (candidate.startsWith("[") || candidate.startsWith("{")) {
+            try {
+                org.json.JSONObject wrapper =
+                        new org.json.JSONObject().put("danmaku", candidate);
+                String extracted = MediaOptions.extractDanmakuUrl(wrapper);
+                if (!extracted.isEmpty()) candidate = extracted;
+            } catch (Exception ignored) {
+            }
+        }
+        String rewritten = LocalProxy.rewrite(candidate);
+        if (rewritten == null || rewritten.isEmpty()) return;
+        String previous = resolved.media.optString("danmaku");
+        try {
+            resolved.media.put("danmaku", rewritten);
+        } catch (Exception ignored) {
+        }
+        if (a.prefs.getBoolean(Prefs.DANMAKU_DEFAULT, true)
+                && (!danmakuLoaded || !rewritten.equals(previous))) {
+            danmakuLoaded = true;
+            danmaku.enabled(true);
+            danmaku.load(
+                    rewritten,
+                    resolved.headers,
+                    new DanmakuView.Listener() {
+                        public void loaded(int count) {
+                            if (count > 0) a.toast("已加载 " + count + " 条弹幕");
+                        }
+
+                        public void error(String message) {}
+                    });
+        }
+    }
+
     void prepared() {
         if (a.player == null) return;
+        if (resolved.media.optString("danmaku").isEmpty()) {
+            String recentDm = CspEngine.consumeRecentPluginDanmaku(25000L);
+            if (!recentDm.isEmpty()) {
+                applyExternalDanmaku(recentDm);
+            }
+        }
         if (a.prefs.getBoolean(Prefs.DANMAKU_DEFAULT, true)
                 && !danmakuLoaded
                 && !resolved.media.optString("danmaku").isEmpty()) {
@@ -2090,7 +2142,9 @@ final class PlaybackControls {
                     resolved.media.optString("danmaku"),
                     resolved.headers,
                     new DanmakuView.Listener() {
-                        public void loaded(int count) {}
+                        public void loaded(int count) {
+                            if (count > 0) a.toast("已加载 " + count + " 条弹幕");
+                        }
 
                         public void error(String message) {}
                     });

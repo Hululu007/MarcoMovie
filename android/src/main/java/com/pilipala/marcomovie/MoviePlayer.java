@@ -68,6 +68,7 @@ public class MoviePlayer {
     private org.json.JSONObject options = new org.json.JSONObject();
     private DefaultMediaSourceFactory mediaSourceFactory;
     private String mediaMime;
+    private boolean hlsFallbackAttempted;
 
     public interface SubtitleListener {
         void text(CharSequence text);
@@ -277,6 +278,29 @@ public class MoviePlayer {
                                 @Override
                                 public void onPlayerError(PlaybackException error) {
                                     if (released) return;
+                                    if ((error.errorCode
+                                                            == PlaybackException
+                                                                    .ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED
+                                                    || error.errorCode
+                                                            == PlaybackException
+                                                                    .ERROR_CODE_PARSING_CONTAINER_MALFORMED)
+                                            && mediaMime == null
+                                            && !hlsFallbackAttempted
+                                            && uri != null
+                                            && mediaSourceFactory != null) {
+                                        String scheme = uri.getScheme();
+                                        if ("http".equalsIgnoreCase(scheme)
+                                                || "https".equalsIgnoreCase(scheme)) {
+                                            hlsFallbackAttempted = true;
+                                            mediaMime = MimeTypes.APPLICATION_M3U8;
+                                            try {
+                                                exo.setMediaSource(playbackSource(uri));
+                                                exo.prepare();
+                                                return;
+                                            } catch (Exception ignored) {
+                                            }
+                                        }
+                                    }
                                     lastError = error.getErrorCodeName();
                                     lastErrorTrack =
                                             error
@@ -479,6 +503,7 @@ public class MoviePlayer {
                             options.optString("_episodeName", "").toLowerCase(Locale.ROOT);
                     final boolean isLive = options.optBoolean("live", false);
                     readySent = false;
+                    hlsFallbackAttempted = false;
                     maxKnownDurationMs = 0;
                     prepareStarted = android.os.SystemClock.elapsedRealtime();
                     firstFrameMs = -1;
@@ -509,11 +534,10 @@ public class MoviePlayer {
                                                 mime = null;
                                             } else if (declared != null) {
                                                 mime = declared;
-                                            } else if (isLive) {
-                                                mime =
-                                                        fullLower.contains(".m3u8")
-                                                                ? MimeTypes.APPLICATION_M3U8
-                                                                : null;
+                                            } else if (isLive && fullLower.contains(".m3u8")) {
+                                                mime = MimeTypes.APPLICATION_M3U8;
+                                            } else if (isLive && fullLower.contains(".mpd")) {
+                                                mime = MimeTypes.APPLICATION_MPD;
                                             } else {
                                                 mime =
                                                         scope.call(

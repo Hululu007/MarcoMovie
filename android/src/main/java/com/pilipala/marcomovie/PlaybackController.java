@@ -207,7 +207,17 @@ final class PlaybackController {
             }
         }
         if (s.supported()) {
-            if (!s.requiresParser || Cms.isDirectStreamUrl(ep.url)) {
+            String rewrittenEpUrl = LocalProxy.rewrite(ep.url);
+            String cleanPath =
+                    rewrittenEpUrl == null
+                            ? ""
+                            : rewrittenEpUrl.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
+            boolean looksLikeWebPage =
+                    cleanPath.endsWith(".html")
+                            || cleanPath.endsWith(".htm")
+                            || cleanPath.endsWith(".shtml");
+            if (Cms.isDirectStreamUrl(rewrittenEpUrl)
+                    || (!s.requiresParser && Cms.isMedia(rewrittenEpUrl) && !looksLikeWebPage)) {
                 openPlayer(a, s, v, ep);
                 return;
             }
@@ -587,7 +597,27 @@ final class PlaybackController {
     }
 
     static void openPlayer(MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode e) {
-        if (e.url.startsWith("magnet:?")) {
+        if (e.url != null) {
+            e.url = e.url.trim();
+            if (e.url.startsWith("//")) {
+                e.url = "https:" + e.url;
+            }
+            if (e.url.regionMatches(true, 0, "webview://", 0, 10)) {
+                e.url = e.url.substring(10).trim();
+                resolveWebPage(a, s, v, e, "");
+                return;
+            }
+            if (a.config != null
+                    && (e.url.regionMatches(true, 0, "proxy://", 0, 8)
+                            || e.url.contains("/proxy"))) {
+                try {
+                    a.ensureProxy(a.config);
+                } catch (Exception ignored) {
+                }
+            }
+            e.url = LocalProxy.rewrite(e.url);
+        }
+        if (e.url != null && e.url.startsWith("magnet:?")) {
             magnetPlayer(a, s, v, e);
             return;
         }
@@ -815,6 +845,15 @@ final class PlaybackController {
     static void playerPage(MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode ep) {
         ep.url = LocalProxy.rewrite(ep.url);
         try {
+            String dm = ep.media.optString("danmaku");
+            if (dm != null && !dm.isEmpty()) {
+                ep.media.put("danmaku", LocalProxy.rewrite(dm));
+            } else {
+                String recentDm = CspEngine.consumeRecentPluginDanmaku(25000L);
+                if (!recentDm.isEmpty()) {
+                    ep.media.put("danmaku", LocalProxy.rewrite(recentDm));
+                }
+            }
             JSONArray subtitles = ep.media.optJSONArray("subtitles");
             if (subtitles != null)
                 for (int i = 0; i < subtitles.length(); i++) {
@@ -1113,6 +1152,29 @@ final class PlaybackController {
                                                                         ep.url =
                                                                                 LocalProxy.rewrite(
                                                                                         nextUrl);
+                                                                        JSONObject nextHeaders =
+                                                                                nextQ.optJSONObject(
+                                                                                        "headers");
+                                                                        if (nextHeaders != null) {
+                                                                            ep.headers.clear();
+                                                                            java.util.Iterator<
+                                                                                            String>
+                                                                                    hk =
+                                                                                            nextHeaders
+                                                                                                    .keys();
+                                                                            while (hk.hasNext()) {
+                                                                                String k =
+                                                                                        hk.next();
+                                                                                String val =
+                                                                                        nextHeaders
+                                                                                                .optString(
+                                                                                                        k,
+                                                                                                        "");
+                                                                                if (!val.isEmpty())
+                                                                                    ep.headers.put(
+                                                                                            k, val);
+                                                                            }
+                                                                        }
                                                                         String qName =
                                                                                 nextQ.optString(
                                                                                         "name",

@@ -171,6 +171,21 @@ public final class CompatChecks {
         check(
                 comments.get(0).time == 4500 && comments.get(0).color == 0xff0000,
                 "Dandan-style comment schema");
+        comments =
+                DanmakuData.parse(
+                        "<i><d p=\"2.0,1,25,16777215\">A & B <3\u0007</d><d p=\"3.0,1,25,16777215\">ok</d></i>");
+        check(
+                comments.size() == 2 && comments.get(0).text.contains("A & B"),
+                "fault-tolerant XML danmaku recovers from unescaped ampersand and control chars");
+        comments = DanmakuData.parse("{\"code\":0,\"data\":{\"danmuku\":[[5,1,16777215,\"nested\"]]}}");
+        check(
+                comments.size() == 1 && comments.get(0).time == 5000,
+                "nested data.danmuku JSON schema supported");
+        check(
+                Cms.isMedia("rtmps://live.example/app/stream")
+                        && Cms.isMedia("mmsh://live.example/stream")
+                        && Cms.isMedia("proxy://do=live&type=m3u8"),
+                "live streaming protocols and proxy scheme recognized as media");
         boolean refused = false;
         try {
             DanmakuData.parse(

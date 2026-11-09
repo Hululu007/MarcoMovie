@@ -192,6 +192,13 @@ final class LiveController {
         a.body.addView(pages);
     }
 
+    private static boolean isPlayableLiveUrl(String rawUrl) {
+        if (rawUrl == null || rawUrl.trim().isEmpty()) return false;
+        String u = rawUrl.trim();
+        if (u.regionMatches(true, 0, "webview://", 0, 10)) return true;
+        return Cms.isMedia(LocalProxy.rewrite(u));
+    }
+
     static void playLive(
             MainActivity a,
             LiveCatalog.Source source,
@@ -199,27 +206,84 @@ final class LiveController {
             LiveCatalog.Stream stream) {
         if (a.liveSession != null && a.liveSession.source == source)
             a.liveSession.index = a.liveSession.channels.indexOf(channel);
+        if (a.config != null) {
+            try {
+                a.ensureProxy(a.config);
+            } catch (Exception ignored) {
+            }
+        }
+        LiveCatalog.Stream chosen = stream;
+        if (channel != null
+                && !channel.streams.isEmpty()
+                && (chosen == null || !isPlayableLiveUrl(chosen.url))) {
+            for (LiveCatalog.Stream candidate : channel.streams) {
+                if (isPlayableLiveUrl(candidate.url)) {
+                    chosen = candidate;
+                    break;
+                }
+            }
+            if (chosen == null) chosen = channel.streams.get(0);
+        }
         a.activeLine = null;
         a.activeEpisode = null;
         a.resumeAt = 0;
+        String resolvedUrl = LocalProxy.rewrite(chosen.url);
         Cms.Site site = new Cms.Site();
         site.key = "live";
         site.name = source.name;
-        site.api = stream.url;
+        site.api = resolvedUrl;
         site.type = 1;
         site.playUrl = "";
-        site.headers.putAll(stream.headers);
+        site.headers.putAll(chosen.headers);
         Cms.Video video = new Cms.Video();
         video.title = channel.name;
         Cms.Episode ep = new Cms.Episode();
-        ep.name = "直播";
-        ep.url = stream.url;
-        ep.headers.putAll(stream.headers);
+        ep.name =
+                chosen.label != null && !chosen.label.trim().isEmpty()
+                        ? chosen.label.trim()
+                        : "直播";
+        ep.url = resolvedUrl;
+        ep.headers.putAll(chosen.headers);
         try {
             ep.media.put("live", true);
+            if (channel != null && channel.streams.size() > 1) {
+                org.json.JSONArray qualities = new org.json.JSONArray();
+                int selectedIdx = 0;
+                for (int i = 0; i < channel.streams.size(); i++) {
+                    LiveCatalog.Stream st = channel.streams.get(i);
+                    if (!isPlayableLiveUrl(st.url)
+                            || st.url.regionMatches(true, 0, "webview://", 0, 10)) continue;
+                    if (st == chosen) selectedIdx = qualities.length();
+                    org.json.JSONObject q = new org.json.JSONObject();
+                    String lbl =
+                            st.label != null && !st.label.trim().isEmpty()
+                                    ? st.label.trim()
+                                    : ("线路 " + (i + 1));
+                    q.put("name", lbl);
+                    q.put("url", LocalProxy.rewrite(st.url));
+                    if (!st.headers.isEmpty()) {
+                        q.put("headers", new org.json.JSONObject(st.headers));
+                    }
+                    qualities.put(q);
+                }
+                if (qualities.length() > 1) {
+                    ep.media.put("qualities", qualities);
+                    ep.media.put("_qualityIdx", selectedIdx);
+                }
+            }
         } catch (Exception ignored) {
         }
+        if (resolvedUrl != null && resolvedUrl.regionMatches(true, 0, "webview://", 0, 10)) {
+            ep.url = resolvedUrl.substring(10).trim();
+            site.api = ep.url;
+            PlaybackController.resolveWebPage(a, site, video, ep, "");
+            return;
+        }
         if (a.current != null && a.current.player) {
+            if (!Cms.isMedia(ep.url)) {
+                PlaybackController.openPlayer(a, site, video, ep);
+                return;
+            }
             MainActivity.Screen next =
                     new MainActivity.Screen(
                             () -> PlaybackController.playerPage(a, site, video, ep));
@@ -261,7 +325,13 @@ final class LiveController {
         if (a.liveSession == null || a.liveSession.index < 0) return;
         LiveCatalog.Channel c = a.liveSession.channels.get(a.liveSession.index);
         String[] labels = new String[c.streams.size()];
-        for (int i = 0; i < labels.length; i++) labels[i] = "线路 " + (i + 1);
+        for (int i = 0; i < labels.length; i++) {
+            String lbl = c.streams.get(i).label;
+            labels[i] =
+                    "线路 "
+                            + (i + 1)
+                            + (lbl != null && !lbl.trim().isEmpty() ? " · " + lbl.trim() : "");
+        }
         a.playbackControls.choose("直播线路", labels, -1, i -> tuneLive(a, a.liveSession.index, i));
     }
 
