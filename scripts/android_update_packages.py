@@ -42,7 +42,8 @@ def plan(output, releases):
                     files[name + '.sha256'] = (digest + '  ' + name + '\n').encode('ascii')
                 cache[tag] = dict(schema=1, platform=platform, versionName=version,
                     versionCode=identity['versionCode'], minSdk=identity['minSdk'],
-                    prerelease=not stable, notes=notes, githubUrl=github, **package,
+                    prerelease=not stable, notes=notes, githubUrl=github,
+                    size=len(body), sha256=digest, url=BASE + name,
                     packages={name: package}, release_url=f'https://github.com/{REPO}/releases/tag/{tag}')
             feed = cache[tag]
             path = 'updates/' + platform + ('-preview' if channel == 'preview' else '') + '.json'
@@ -60,5 +61,5 @@ def plan(output, releases):
             files[path] = (json.dumps(feed, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
             if channel == 'stable':
                 versions[platform] = version
-                cards[platform] = dict(size=feed['size'], sha256=feed['sha256'], url=feed['url'])
+                cards[platform] = dict(size=feed['size'], sha256=feed['sha256'], url=feed['packages'][package_name(version, edition)]['url'])
     return files, versions, cards
