@@ -17,7 +17,7 @@ public final class SubtitleProbe extends Instrumentation {
     volatile MainActivity a;
     final JSONObject result = new JSONObject();
     final CountDownLatch launched = new CountDownLatch(1);
-    static final String TITLE = "字幕方向键直调（实时预览）";
+    static final String TITLE = "全屏字幕实时预览与调节";
 
     // Isolated negative control: this is the exact unavailable callback type used before the fix.
     static final class LegacyCallback {
@@ -85,6 +85,44 @@ public final class SubtitleProbe extends Instrumentation {
         return visible;
     }
 
+    boolean focusText(String text) {
+        AccessibilityNodeInfo root = getUiAutomation().getRootInActiveWindow();
+        if (root == null) return false;
+        List<AccessibilityNodeInfo> matches = root.findAccessibilityNodeInfosByText(text);
+        boolean focused = false;
+        for (AccessibilityNodeInfo node : matches) {
+            if (!focused && node.isVisibleToUser() && node.isFocusable()) {
+                focused =
+                        node.isFocused() || node.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+            }
+            node.recycle();
+        }
+        root.recycle();
+        return focused;
+    }
+
+    boolean focusFirstSlider(AccessibilityNodeInfo node) {
+        if ("android.widget.SeekBar".contentEquals(node.getClassName()) && node.isVisibleToUser()) {
+            return node.isFocused() || node.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child == null) continue;
+            boolean focused = focusFirstSlider(child);
+            child.recycle();
+            if (focused) return true;
+        }
+        return false;
+    }
+
+    boolean focusSizeSlider() {
+        AccessibilityNodeInfo root = getUiAutomation().getRootInActiveWindow();
+        if (root == null) return false;
+        boolean focused = focusFirstSlider(root);
+        root.recycle();
+        return focused;
+    }
+
     void clickTag(String tag) {
         runOnMainSync(
                 () -> {
@@ -117,14 +155,22 @@ public final class SubtitleProbe extends Instrumentation {
         int size = a.prefs.getInt(Prefs.SUBTITLE_SIZE, 45);
         int bottom = a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24);
         int style = a.prefs.getInt(Prefs.SUBTITLE_STYLE, 0);
+        // The fullscreen adjuster now has separate size, position and style controls.
+        // Focus real controls, then use the remote keys to verify persisted changes.
+        await(origin + "_size_control_focused", this::focusSizeSlider);
         key(KeyEvent.KEYCODE_DPAD_RIGHT);
         await(
                 origin + "_size_changed",
                 () -> ui(() -> a.prefs.getInt(Prefs.SUBTITLE_SIZE, 45) == size + 2));
-        key(KeyEvent.KEYCODE_DPAD_UP);
+        await(origin + "_position_control_focused", () -> focusText("▲ 上移"));
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
         await(
                 origin + "_position_changed",
                 () -> ui(() -> a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24) == bottom + 6));
+        await(origin + "_style_control_focused", () -> focusText("字幕颜色与样式"));
+        key(KeyEvent.KEYCODE_DPAD_CENTER);
+        await(origin + "_style_drawer_visible", () -> textVisible("字幕颜色与样式（抽屉菜单）"));
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
         key(KeyEvent.KEYCODE_DPAD_CENTER);
         await(
                 origin + "_style_changed",
