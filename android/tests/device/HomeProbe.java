@@ -13,6 +13,7 @@ import org.json.*;
 /** Synthetic source with a separate preference file; never writes user playback records. */
 public final class HomeProbe extends Instrumentation {
     MainActivity a;
+    volatile boolean failAnimeCategory;
     final CountDownLatch launched = new CountDownLatch(1);
     final JSONObject result = new JSONObject();
     final java.util.concurrent.atomic.AtomicInteger homeRequests =
@@ -295,8 +296,6 @@ public final class HomeProbe extends Instrumentation {
                         a.engines.put(
                                 site.key,
                                 new SourceEngine() {
-                                    boolean failed;
-
                                     public String home() throws Exception {
                                         homeRequests.incrementAndGet();
                                         JSONObject o = new JSONObject(listing("推荐", 12, 1));
@@ -359,8 +358,8 @@ public final class HomeProbe extends Instrumentation {
                                     public String category(String id, int page) throws Exception {
                                         categoryRequests.incrementAndGet();
                                         if (id.equals("c1")) SystemClock.sleep(850);
-                                        if (id.equals("c3") && !failed) {
-                                            failed = true;
+                                        if (id.equals("c3") && failAnimeCategory) {
+                                            failAnimeCategory = false;
                                             throw new IOException("fixture failure");
                                         }
                                         return listing(
@@ -413,6 +412,73 @@ public final class HomeProbe extends Instrumentation {
                                     a.current.homeState.category.isEmpty()
                                             && tag("home-tab:0").isSelected()));
             check("initial_focus_on_recommended", ui(() -> tag("home-tab:0").hasFocus()));
+            // Dispatch through the Activity: home navigation consumes these keys before
+            // any tab OnKeyListener. No confirmation key should be needed to switch.
+            key(KeyEvent.KEYCODE_DPAD_RIGHT);
+            await(() -> a.current.homeState.category.equals("c1"));
+            check("right_focus_selects_movie", ui(() -> tag("home-tab:1").hasFocus()));
+            key(KeyEvent.KEYCODE_DPAD_RIGHT);
+            await(() -> a.current.homeState.ready && a.current.homeState.category.equals("c2"));
+            check(
+                    "right_focus_selects_series_content",
+                    ui(
+                            () ->
+                                    tag("home-tab:2").hasFocus()
+                                            && a.current
+                                                    .homeState
+                                                    .videos
+                                                    .get(0)
+                                                    .title
+                                                    .startsWith("c2")));
+            SystemClock.sleep(900);
+            check(
+                    "focus_switch_rejects_late_movie_content",
+                    ui(
+                            () ->
+                                    a.current.homeState.category.equals("c2")
+                                            && a.current
+                                                    .homeState
+                                                    .videos
+                                                    .get(0)
+                                                    .title
+                                                    .startsWith("c2")));
+            key(KeyEvent.KEYCODE_DPAD_LEFT);
+            await(() -> a.current.homeState.ready && a.current.homeState.category.equals("c1"));
+            check("left_focus_selects_movie", ui(() -> tag("home-tab:1").hasFocus()));
+            SystemClock.sleep(400);
+            runOnMainSync(() -> tag("home-tab:2").requestFocus());
+            await(() -> a.current.homeState.ready && a.current.homeState.category.equals("c2"));
+            check(
+                    "focus_without_recent_key_selects_category",
+                    ui(() -> tag("home-tab:2").hasFocus()));
+            int requestsAfterFocus = categoryRequests.get();
+            key(KeyEvent.KEYCODE_DPAD_CENTER);
+            check(
+                    "confirm_after_focus_does_not_reload",
+                    categoryRequests.get() == requestsAfterFocus);
+            runOnMainSync(
+                    () -> {
+                        tag("home-tab:1").requestFocus();
+                        tag("source-switcher").requestFocus();
+                    });
+            SystemClock.sleep(250);
+            check(
+                    "leaving_category_cancels_pending_selection",
+                    ui(
+                            () ->
+                                    a.current.homeState.category.equals("c2")
+                                            && tag("source-switcher").hasFocus()));
+            runOnMainSync(() -> tag("home-filters").requestFocus());
+            SystemClock.sleep(250);
+            check(
+                    "filter_focus_does_not_open_or_switch",
+                    ui(() -> a.appDialog == null && a.current.homeState.category.equals("c2")));
+            runOnMainSync(() -> tag("home-tab:0").requestFocus());
+            await(
+                    () ->
+                            a.current.homeState.ready
+                                    && a.current.homeState.category.isEmpty()
+                                    && tag("home-video:11") != null);
             check(
                     "history_has_four_cards_in_one_list",
                     ui(
@@ -602,6 +668,19 @@ public final class HomeProbe extends Instrumentation {
             check(
                     "wrapped_category_up_stays_in_categories",
                     ui(() -> String.valueOf(a.getCurrentFocus().getTag()).startsWith("home-tab:")));
+            await(
+                    () ->
+                            a.current.homeState.category.equals(
+                                    a.current.retainedHome.tabIds.get(a.getCurrentFocus())));
+            check(
+                    "wrapped_category_up_selects_focused_category",
+                    ui(() -> a.getCurrentFocus().isSelected()));
+            runOnMainSync(() -> tag("home-tab:0").requestFocus());
+            await(
+                    () ->
+                            a.current.homeState.ready
+                                    && a.current.homeState.category.isEmpty()
+                                    && tag("home-video:11") != null);
             check(
                     "source_has_visible_dropdown",
                     ui(
@@ -670,6 +749,7 @@ public final class HomeProbe extends Instrumentation {
             check("category_up_to_source", ui(() -> tag("source-switcher").hasFocus()));
             pacedUp();
             check("source_up_to_history", ui(() -> tag("home-history:0").hasFocus()));
+            runOnMainSync(() -> a.current.homeState.categoryCache.remove("c1"));
             click("home-tab:1");
             click("home-tab:2");
             await(() -> a.current.homeState.ready && a.current.homeState.category.equals("c2"));
@@ -808,6 +888,11 @@ public final class HomeProbe extends Instrumentation {
                                             && tag("home-video:2").hasFocus()));
             check("filtered_return_does_not_reload", categoryRequests.get() == filteredCount);
 
+            runOnMainSync(
+                    () -> {
+                        failAnimeCategory = true;
+                        a.current.homeState.categoryCache.remove("c3");
+                    });
             click("home-tab:3");
             await(() -> tag("home-load-more").isShown());
             check(

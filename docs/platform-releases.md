@@ -2,6 +2,8 @@
 
 The owner allows each platform to release independently after its own checks. Version numbers do not have to match. A release must name its platform, build commit, tested fixes and remaining limitations.
 
+**Standing release authorization (2026-11-10):** the owner instructed that future optimizations and fixes should be synchronized and published directly after the necessary checks, without a separate confirmation. This includes the Android TV category-focus fix in 0.5.15. Advance the affected platform's version, publish its verified package and matching source, and synchronize the download site and update feed. Report the actual validation scope; a build or emulator check does not establish physical-device acceptance.
+
 **Current maintenance release authorization (2026-11-10):** the owner explicitly authorized synchronizing the reviewed fixes to GitHub and publishing each platform with its own version. iOS 0.5.13 was already published before this request. The earlier broad plugin-acceptance gate is retained as a historical limitation, not a claim that these maintenance builds complete every plugin route or physical-device acceptance. Every release must state its actual test scope and remaining limitations.
 
 Desktop/Apple tags use `windows-vX.Y.Z`, `ios-vX.Y.Z` and `macos-vX.Y.Z`. They do not trigger the legacy `v*` all-platform publisher. Build the desired platform with the existing workflow dispatch, verify the artifact, and attach the package, SHA-256 file and corresponding source archive before publishing. Do not replace existing versioned assets. Keep the legacy all-platform release as GitHub's global latest so old clients are not directed to another platform's package.

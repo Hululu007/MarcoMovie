@@ -30,7 +30,6 @@ final class HomeScreen {
     HomeAmbient ambient;
     TextView status, source, more, earlier, allHistory;
     int ticket, request, posterWidth, gridEpoch;
-    long lastCategoryDpadTime, lastHorizontalTabDpadTime;
     Runnable pendingGrid;
 
     /** Tag of the card that should take focus once drawn after "加载更多". */
@@ -835,45 +834,29 @@ final class HomeScreen {
     void addTab(String label, String id, int index) {
         TextView button = pill(label, "home-tab:" + index, () -> choose(id, true));
         tabIds.put(button, id);
+        Runnable selectOnFocus =
+                () -> {
+                    if (button.hasFocus()
+                            && button.isAttachedToWindow()
+                            && active()
+                            && !id.equals(state.category)) {
+                        choose(id, true);
+                    }
+                };
         button.setOnFocusChangeListener(
                 (v, f) -> {
+                    button.removeCallbacks(selectOnFocus);
                     styleTab(button);
-                    if (f
-                            && a.isTvDevice()
-                            && !id.equals(state.category)
-                            && android.os.SystemClock.uptimeMillis() - lastHorizontalTabDpadTime
-                                    < 350L) {
-                        button.postDelayed(
-                                () -> {
-                                    if (button.hasFocus()
-                                            && active()
-                                            && !id.equals(state.category)) {
-                                        choose(id, true);
-                                    }
-                                },
-                                120);
+                    if (f && a.isTvDevice() && !id.equals(state.category)) {
+                        // Home navigation consumes DPAD before the tab's key listener runs.
+                        // Follow focus itself; briefly debounce rapid moves across categories.
+                        button.postDelayed(selectOnFocus, 120);
                     }
                 });
         addTabView(button);
     }
 
     void addTabView(TextView button) {
-        button.setOnKeyListener(
-                (v, keyCode, event) -> {
-                    FocusMotion.key(a, v, keyCode, event);
-                    if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
-                        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT
-                                || keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
-                            lastHorizontalTabDpadTime = android.os.SystemClock.uptimeMillis();
-                            lastCategoryDpadTime = lastHorizontalTabDpadTime;
-                        } else if ((keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
-                                        || keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN)
-                                && v.isSelected()) {
-                            lastCategoryDpadTime = android.os.SystemClock.uptimeMillis();
-                        }
-                    }
-                    return false;
-                });
         button.setSingleLine(false);
         button.setMaxLines(Integer.MAX_VALUE);
         button.setEllipsize(null);
