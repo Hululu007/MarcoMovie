@@ -66,6 +66,8 @@ final class MobileShell {
     static String cachedSearchSiteFilter = "";
     static final List<CachedSearchHit> cachedSearchHits = new ArrayList<>();
     static int cachedSearchScrollY = 0;
+    static int cachedSiteFilterScrollX = 0;
+    static SearchCoordinator activeSearchCoordinator;
 
     /** Sub-page of the 片库 tab: 0 history, 1 favorites, 2 downloads. */
     static int mySubTab = 0;
@@ -1981,6 +1983,12 @@ final class MobileShell {
         siteFilterScroll.setHorizontalScrollBarEnabled(false);
         siteFilterScroll.setPadding(0, a.dp(2), 0, a.dp(8));
         siteFilterScroll.setVisibility(View.GONE);
+        siteFilterScroll
+                .getViewTreeObserver()
+                .addOnScrollChangedListener(
+                        () -> {
+                            cachedSiteFilterScrollX = siteFilterScroll.getScrollX();
+                        });
         final LinearLayout siteFilterRow = a.row();
         siteFilterRow.setGravity(Gravity.CENTER_VERTICAL);
         siteFilterScroll.addView(siteFilterRow);
@@ -2003,10 +2011,6 @@ final class MobileShell {
         resultScroll.addView(resultList, new ScrollView.LayoutParams(-1, -2));
 
         final int[] searchSerial = {0};
-        final TextView sourceNotices = a.text("", 12, MainActivity.MUTED);
-        sourceNotices.setPadding(a.dp(4), 0, a.dp(4), a.dp(10));
-        sourceNotices.setVisibility(View.GONE);
-        resultList.addView(sourceNotices);
         final Runnable renderSearchStatus =
                 () -> {
                     int separator = cachedSearchStatus.indexOf('\n');
@@ -2033,16 +2037,12 @@ final class MobileShell {
                                         + " 条）";
                     }
                     searchStatus.setText(mainLine);
-                    sourceNotices.setText(
-                            separator < 0 ? "" : cachedSearchStatus.substring(separator + 1));
-                    sourceNotices.setVisibility(separator < 0 ? View.GONE : View.VISIBLE);
                 };
 
         final Runnable[] refreshSiteFilterBar = new Runnable[1];
         final Runnable rebuildFilteredResults =
                 () -> {
                     resultList.removeAllViews();
-                    resultList.addView(sourceNotices);
                     for (CachedSearchHit hit : cachedSearchHits) {
                         if (cachedSearchSiteFilter.isEmpty()
                                 || (hit.site != null
@@ -2194,6 +2194,10 @@ final class MobileShell {
         clearBtn.setOnClickListener(
                 v -> {
                     searchSerial[0]++;
+                    if (activeSearchCoordinator != null) {
+                        activeSearchCoordinator.close();
+                        activeSearchCoordinator = null;
+                    }
                     a.cancelPageRequests();
                     input.setText("");
                     cachedSearchKeyword = "";
@@ -2201,12 +2205,10 @@ final class MobileShell {
                     cachedSearchSiteFilter = "";
                     cachedSearchHits.clear();
                     cachedSearchScrollY = 0;
+                    cachedSiteFilterScrollX = 0;
                     siteFilterRow.removeAllViews();
                     siteFilterScroll.setVisibility(View.GONE);
                     resultList.removeAllViews();
-                    sourceNotices.setText("");
-                    sourceNotices.setVisibility(View.GONE);
-                    resultList.addView(sourceNotices);
                     searchStatus.setText("输入关键词搜索全部已启用的片源");
                 });
 
@@ -2308,15 +2310,17 @@ final class MobileShell {
                     renderHistoryChips.run();
 
                     final int searchTicket = ++searchSerial[0];
+                    if (activeSearchCoordinator != null) {
+                        activeSearchCoordinator.close();
+                        activeSearchCoordinator = null;
+                    }
                     a.cancelPageRequests();
                     resultList.removeAllViews();
-                    sourceNotices.setText("");
-                    sourceNotices.setVisibility(View.GONE);
-                    resultList.addView(sourceNotices);
                     cachedSearchKeyword = kw;
                     cachedSearchSiteFilter = "";
                     cachedSearchHits.clear();
                     cachedSearchScrollY = 0;
+                    cachedSiteFilterScrollX = 0;
                     siteFilterRow.removeAllViews();
                     siteFilterScroll.setVisibility(View.GONE);
 
@@ -2331,65 +2335,60 @@ final class MobileShell {
                     }
                     cachedSearchStatus = "正在并发搜索 " + searchableSites.size() + " 个片源…";
                     searchStatus.setText(cachedSearchStatus);
-                    final int ticket = a.generation;
                     final int[] completed = {0};
                     final int[] hitCount = {0};
-                    final List<String> searchNotices = new ArrayList<>();
 
-                    for (final Cms.Site site : searchableSites) {
-                        Future<?> f =
-                                RequestScope.submit(
-                                        a.worker,
-                                        () -> {
-                                            List<Cms.Video> matches = new ArrayList<>();
-                                            String notice = "";
-                                            try {
-                                                Cms.Listing l =
-                                                        Cms.listing(a.engine(site).search(kw, 1));
-                                                for (Cms.Video v : l.videos) {
-                                                    if (v.action == null || v.action.isEmpty()) {
-                                                        matches.add(v);
-                                                    }
+                    SearchCoordinator.configureThreads(a.prefs.getInt(Prefs.SEARCH_THREADS, 6));
+                    activeSearchCoordinator =
+                            new SearchCoordinator(
+                                    (site, keyword) -> {
+                                        List<Cms.Video> matches = new ArrayList<>();
+                                        try {
+                                            Cms.Listing l =
+                                                    Cms.listing(a.engine(site).search(keyword, 1));
+                                            for (Cms.Video v : l.videos) {
+                                                if (v.action == null || v.action.isEmpty()) {
+                                                    matches.add(v);
                                                 }
-                                            } catch (
-                                                    com.pilipala.catpaw.CatPawHost
-                                                                    .DrpySourceException
-                                                            error) {
-                                                notice =
-                                                        "drpy_verification_required"
-                                                                        .equals(error.code)
-                                                                ? "需要完成网站验证码，暂时无法搜索"
-                                                                : "暂时无法读取，请稍后重试";
-                                            } catch (Exception ignored) {
-                                                notice = "暂时无法读取，请稍后重试";
                                             }
-                                            final String sourceNotice = notice;
+                                        } catch (
+                                                com.pilipala.catpaw.CatPawHost.DrpySourceException
+                                                        error) {
+                                            if ("drpy_verification_required".equals(error.code)) {
+                                                throw new SearchCoordinator
+                                                        .VerificationRequiredException();
+                                            }
+                                            throw error;
+                                        }
+                                        return matches;
+                                    },
+                                    (site, matches, outcome) ->
                                             a.ui.post(
                                                     () -> {
-                                                        if (ticket != a.generation
-                                                                || searchTicket != searchSerial[0]
-                                                                || a.isFinishing()) return;
+                                                        if (searchTicket != searchSerial[0]
+                                                                || a.isFinishing()
+                                                                || a.isDestroyed()) return;
                                                         completed[0]++;
-                                                        if (!sourceNotice.isEmpty())
-                                                            searchNotices.add(
-                                                                    site.name + "：" + sourceNotice);
-                                                        for (final Cms.Video v : matches) {
-                                                            hitCount[0]++;
-                                                            if (kw.equals(cachedSearchKeyword)) {
-                                                                cachedSearchHits.add(
-                                                                        new CachedSearchHit(
-                                                                                site, v));
+                                                        if (matches != null) {
+                                                            for (final Cms.Video v : matches) {
+                                                                hitCount[0]++;
+                                                                if (kw.equals(
+                                                                        cachedSearchKeyword)) {
+                                                                    cachedSearchHits.add(
+                                                                            new CachedSearchHit(
+                                                                                    site, v));
+                                                                }
+                                                                if (cachedSearchSiteFilter.isEmpty()
+                                                                        || cachedSearchSiteFilter
+                                                                                .equals(site.key)) {
+                                                                    resultList.addView(
+                                                                            buildSearchResultRow(
+                                                                                    site, v));
+                                                                }
                                                             }
-                                                            if (cachedSearchSiteFilter.isEmpty()
-                                                                    || cachedSearchSiteFilter
-                                                                            .equals(site.key)) {
-                                                                resultList.addView(
-                                                                        buildSearchResultRow(
-                                                                                site, v));
+                                                            if (!matches.isEmpty()) {
+                                                                refreshSiteFilterBar[0].run();
                                                             }
-                                                        }
-                                                        if (!matches.isEmpty()) {
-                                                            refreshSiteFilterBar[0].run();
                                                         }
                                                         if (completed[0] < searchableSites.size()) {
                                                             cachedSearchStatus =
@@ -2403,26 +2402,19 @@ final class MobileShell {
                                                         } else {
                                                             cachedSearchStatus =
                                                                     hitCount[0] == 0
-                                                                            ? (searchNotices
-                                                                                            .isEmpty()
-                                                                                    ? "未找到与“" + kw
-                                                                                            + "”相关的影片"
-                                                                                    : "本次搜索未返回影片，请查看片源提示")
+                                                                            ? "未找到与“" + kw
+                                                                                    + "”相关的影片"
                                                                             : "搜索完成，共找到 "
                                                                                     + hitCount[0]
                                                                                     + " 条结果（点击上方片源标签可筛选线路）";
                                                         }
-                                                        if (!searchNotices.isEmpty())
-                                                            cachedSearchStatus +=
-                                                                    "\n"
-                                                                            + TextUtils.join(
-                                                                                    "\n",
-                                                                                    searchNotices);
                                                         renderSearchStatus.run();
-                                                    });
-                                        });
-                        a.pageRequests.add(f);
-                    }
+                                                    }),
+                                    Prefs.clampSearchTimeoutSeconds(
+                                                    a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20))
+                                            * 1000L,
+                                    90000L);
+                    activeSearchCoordinator.start(searchableSites, kw);
                 };
 
         searchBtn.setOnClickListener(v -> triggerSearch[0].run());
@@ -2445,10 +2437,14 @@ final class MobileShell {
             input.setText(wantedKw);
             input.setSelection(wantedKw.length());
             if (wantedKw.equals(cachedSearchKeyword) && !cachedSearchHits.isEmpty()) {
+                final int savedScroll = cachedSearchScrollY;
+                final int savedFilterX = cachedSiteFilterScrollX;
                 if (cachedSearchStatus.isEmpty())
                     cachedSearchStatus = "已保留搜索结果，共 " + cachedSearchHits.size() + " 条";
                 rebuildFilteredResults.run();
-                final int savedScroll = cachedSearchScrollY;
+                if (savedFilterX > 0) {
+                    siteFilterScroll.post(() -> siteFilterScroll.scrollTo(savedFilterX, 0));
+                }
                 if (savedScroll > 0) {
                     resultScroll.post(() -> resultScroll.scrollTo(0, savedScroll));
                 }
@@ -2458,10 +2454,14 @@ final class MobileShell {
         } else if (!cachedSearchKeyword.isEmpty()) {
             input.setText(cachedSearchKeyword);
             input.setSelection(cachedSearchKeyword.length());
+            final int savedScroll = cachedSearchScrollY;
+            final int savedFilterX = cachedSiteFilterScrollX;
             if (cachedSearchStatus.isEmpty())
                 cachedSearchStatus = "已保留搜索结果，共 " + cachedSearchHits.size() + " 条";
             rebuildFilteredResults.run();
-            final int savedScroll = cachedSearchScrollY;
+            if (savedFilterX > 0) {
+                siteFilterScroll.post(() -> siteFilterScroll.scrollTo(savedFilterX, 0));
+            }
             if (savedScroll > 0) {
                 resultScroll.post(() -> resultScroll.scrollTo(0, savedScroll));
             }

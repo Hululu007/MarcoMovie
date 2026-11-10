@@ -1172,7 +1172,7 @@ public final class MainActivity extends Activity {
                 return;
             }
             releasePlayer();
-            finish();
+            exitApp();
             return;
         }
         if (!back.isEmpty()) {
@@ -1182,8 +1182,61 @@ public final class MainActivity extends Activity {
             restore(current);
         } else {
             releasePlayer();
-            finish();
+            exitApp();
         }
+    }
+
+    volatile boolean allowSystemFinish;
+
+    void exitApp() {
+        allowSystemFinish = true;
+        super.finish();
+    }
+
+    private void interceptPluginFinish() {
+        AppLog.w(
+                "PluginGuard",
+                "intercepted unexpected Activity.finish() from extension",
+                new Throwable());
+        generation++;
+        ui.post(
+                () -> {
+                    if (isDestroyed() || allowSystemFinish) return;
+                    if (current != null && !current.home && !back.isEmpty()) {
+                        cancelPageRequests();
+                        generation++;
+                        current = back.pop();
+                        renderReturn(current);
+                        restore(current);
+                    }
+                });
+    }
+
+    @Override
+    public void finish() {
+        if (allowSystemFinish || switchingPrivacy) {
+            super.finish();
+            return;
+        }
+        interceptPluginFinish();
+    }
+
+    @Override
+    public void finishAffinity() {
+        if (allowSystemFinish || switchingPrivacy) {
+            super.finishAffinity();
+            return;
+        }
+        interceptPluginFinish();
+    }
+
+    @Override
+    public void finishAndRemoveTask() {
+        if (allowSystemFinish || switchingPrivacy) {
+            super.finishAndRemoveTask();
+            return;
+        }
+        interceptPluginFinish();
     }
 
     void minimizePlayback() {

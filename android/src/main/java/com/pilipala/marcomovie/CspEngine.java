@@ -757,7 +757,12 @@ public final class CspEngine implements SourceEngine {
     }
 
     public String homeVideos() throws Exception {
-        return call("recommendations", () -> spider.homeVideoContent());
+        return call(
+                "recommendations",
+                () -> {
+                    String raw = spider.homeVideoContent();
+                    return raw == null || raw.trim().isEmpty() ? "{\"list\":[]}" : raw;
+                });
     }
 
     public String liveContent(String url) throws Exception {
@@ -796,7 +801,47 @@ public final class CspEngine implements SourceEngine {
     }
 
     public String search(String keyword, int page) throws Exception {
-        return call("search", () -> spider.searchContent(keyword, false, "" + page));
+        return call(
+                "search",
+                () -> {
+                    Throwable lastError = null;
+                    String raw = null;
+                    if (page <= 1) {
+                        try {
+                            raw = spider.searchContent(keyword, false);
+                        } catch (Throwable t) {
+                            lastError = unwrap(t);
+                        }
+                        if (raw == null || raw.trim().isEmpty()) {
+                            try {
+                                raw = spider.searchContent(keyword, false, "1");
+                            } catch (Throwable t) {
+                                if (lastError == null) lastError = unwrap(t);
+                            }
+                        }
+                        if (raw == null || raw.trim().isEmpty()) {
+                            try {
+                                raw = spider.searchContent(keyword, true);
+                            } catch (Throwable t) {
+                                if (lastError == null) lastError = unwrap(t);
+                            }
+                        }
+                    } else {
+                        try {
+                            raw = spider.searchContent(keyword, false, "" + page);
+                        } catch (Throwable t) {
+                            lastError = unwrap(t);
+                        }
+                    }
+                    if (raw != null && !raw.trim().isEmpty()) {
+                        return raw;
+                    }
+                    if (lastError != null) {
+                        if (lastError instanceof Exception) throw (Exception) lastError;
+                        throw new IOException(lastError);
+                    }
+                    return "{\"list\":[]}";
+                });
     }
 
     public String player(String flag, String id) throws Exception {
