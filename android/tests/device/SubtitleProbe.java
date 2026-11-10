@@ -124,13 +124,15 @@ public final class SubtitleProbe extends Instrumentation {
     }
 
     void clickTag(String tag) {
-        runOnMainSync(
-                () -> {
-                    View control = a.root.findViewWithTag(tag);
-                    if (control == null) throw new AssertionError("Missing control: " + tag);
-                    control.requestFocus();
-                    if (!control.performClick()) throw new AssertionError("No action: " + tag);
-                });
+        boolean clicked =
+                ui(
+                        () -> {
+                            View control = a.root.findViewWithTag(tag);
+                            if (control == null) return false;
+                            control.requestFocus();
+                            return control.performClick();
+                        });
+        if (!clicked) throw new AssertionError("Missing control or action: " + tag);
         waitForIdleSync();
     }
 
@@ -278,26 +280,13 @@ public final class SubtitleProbe extends Instrumentation {
                                                     && a.player != null
                                                     && a.player.getDuration() >= 59000));
             runOnMainSync(() -> a.showControls(true));
-            clickTag("subtitles");
-            await(
-                    "player_subtitle_menu_visible",
-                    () ->
-                            ui(
-                                    () ->
-                                            a.playbackControls.activeDialog != null
-                                                    && a.playbackControls.activeDialog
-                                                            .isShowing()));
-            runOnMainSync(
-                    () -> {
-                        View item =
-                                a.playbackControls
-                                        .activeDialog
-                                        .getWindow()
-                                        .getDecorView()
-                                        .findViewWithTag("player-option:0");
-                        if (item == null || !item.performClick())
-                            throw new AssertionError("Missing subtitle adjuster menu action");
-                    });
+            clickTag("more");
+            await("player_more_menu_visible", () -> textVisible("字幕与显示"));
+            await("player_subtitle_entry_focused", () -> focusText("字幕与显示"));
+            key(KeyEvent.KEYCODE_DPAD_CENTER);
+            await("player_subtitle_menu_visible", () -> textVisible("方向键直调字幕"));
+            await("player_subtitle_adjuster_focused", () -> focusText("方向键直调字幕"));
+            key(KeyEvent.KEYCODE_DPAD_CENTER);
             adjust("player");
             check("player_survives_subtitle_dialog", ui(() -> a.prepared && a.player != null));
             result.put("passed", true);
