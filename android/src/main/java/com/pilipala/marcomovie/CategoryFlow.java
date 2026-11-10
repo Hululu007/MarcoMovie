@@ -7,6 +7,7 @@ import java.util.*;
 final class CategoryFlow extends ViewGroup {
     final int gap;
     final Runnable layoutReady;
+    final GlassSelection selection;
     final List<List<View>> lines = new ArrayList<>();
 
     CategoryFlow(MainActivity a, Runnable ready) {
@@ -14,6 +15,7 @@ final class CategoryFlow extends ViewGroup {
         float navScale = Prefs.clampNavScale(a.prefs.getInt(Prefs.NAV_SCALE_PERCENT, 100)) / 100f;
         gap = a.dp(Math.max(6, Math.round(8 * navScale)));
         layoutReady = ready;
+        selection = new GlassSelection(a, this);
         setClipChildren(false);
         setClipToPadding(false);
     }
@@ -68,6 +70,13 @@ final class CategoryFlow extends ViewGroup {
         }
         if (!line.isEmpty()) lines.add(line);
         layoutReady.run();
+        selection.refresh();
+    }
+
+    @Override
+    protected void dispatchDraw(android.graphics.Canvas canvas) {
+        selection.draw(canvas);
+        super.dispatchDraw(canvas);
     }
 
     View nearest(List<View> row, View origin) {

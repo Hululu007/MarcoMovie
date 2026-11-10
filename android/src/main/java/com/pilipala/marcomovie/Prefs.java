@@ -17,6 +17,7 @@ final class Prefs {
     // User-facing appearance & playback preferences included in backups.
     static final String UI_SCALE_PERCENT = "ui_scale_percent";
     static final String NAV_SCALE_PERCENT = "nav_scale_percent";
+    static final String TV_DOCK_POSITION = "tv_dock_position";
     static final String STARTUP_ANIMATION = "startup_animation";
     static final String SHOW_HERO_BANNER = "show_hero_banner";
     static final String HOME_AMBIENT = "home_ambient";
@@ -73,6 +74,7 @@ final class Prefs {
     static final String[] KEYS = {
         UI_SCALE_PERCENT,
         NAV_SCALE_PERCENT,
+        TV_DOCK_POSITION,
         STARTUP_ANIMATION,
         SHOW_HERO_BANNER,
         HOME_AMBIENT,
@@ -130,6 +132,7 @@ final class Prefs {
         Map<String, int[]> ranges = new HashMap<>();
         ranges.put(HOME_COLUMNS, new int[] {5, 8});
         ranges.put(NAV_SCALE_PERCENT, new int[] {85, 140});
+        ranges.put(TV_DOCK_POSITION, new int[] {0, 1});
         ranges.put(HOME_ROWS, new int[] {1, 4});
         ranges.put(HOME_SECTIONS, new int[] {0, 5});
         ranges.put(WALLPAPER_DIM, new int[] {0, 100});

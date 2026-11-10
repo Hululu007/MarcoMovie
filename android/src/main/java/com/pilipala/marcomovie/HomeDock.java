@@ -4,54 +4,83 @@ import android.graphics.*;
 import android.view.*;
 import android.widget.*;
 
-/** Home-only, fixed right rail. Content keeps its own scroll and return focus. */
+/** Home-only right/top rail. Content keeps its own scroll and return focus. */
 final class HomeDock {
     final MainActivity a;
     final LinearLayout rail;
     final TextView hint;
     final View[] items = new View[6];
+    final GlassSelection selection;
     final String[] labels = {"首页", "搜索", "直播", "收藏", "网盘", "设置"};
     final String[] keys = {
         "nav-home", "nav-search", "nav-live", "nav-favorites", "nav-accounts", "nav-settings"
     };
 
-    final boolean bottomMode;
+    final boolean bottomMode, topMode, horizontal;
     final float navScale;
     final int crossDp, mainDp, cellDp, hintHeightDp;
 
     HomeDock(MainActivity host) {
         a = host;
         bottomMode = a.useBottomDock();
+        topMode = a.useTopDock();
+        horizontal = bottomMode || topMode;
         navScale = Prefs.clampNavScale(a.prefs.getInt(Prefs.NAV_SCALE_PERCENT, 100)) / 100f;
-        cellDp = Math.round(38 * navScale);
-        crossDp = Math.round(50 * navScale);
-        mainDp = Math.round((bottomMode ? 296 : 292) * navScale);
+        cellDp = Math.round((a.isTvDevice() ? 42 : 38) * navScale);
+        crossDp = Math.round((a.isTvDevice() ? 56 : 50) * navScale);
+        mainDp =
+                Math.round(
+                        (a.isTvDevice() ? (horizontal ? 324 : 320) : (horizontal ? 296 : 292))
+                                * navScale);
         hintHeightDp = Math.round(28 * navScale);
-        rail = bottomMode ? a.row() : a.vertical();
+        rail =
+                new LinearLayout(a) {
+                    @Override
+                    protected void dispatchDraw(Canvas canvas) {
+                        selection.draw(canvas);
+                        super.dispatchDraw(canvas);
+                    }
+
+                    @Override
+                    protected void onLayout(boolean changed, int l, int t, int r, int b) {
+                        super.onLayout(changed, l, t, r, b);
+                        selection.refresh();
+                    }
+                };
+        rail.setOrientation(horizontal ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        selection = new GlassSelection(a, rail);
         rail.setTag("home-dock");
         rail.setGravity(Gravity.CENTER);
         rail.setClipChildren(false);
         rail.setClipToPadding(false);
         rail.setPadding(
-                a.dp(Math.round((bottomMode ? 10 : 6) * navScale)),
-                a.dp(Math.round((bottomMode ? 6 : 8) * navScale)),
-                a.dp(Math.round((bottomMode ? 10 : 6) * navScale)),
-                a.dp(Math.round((bottomMode ? 6 : 8) * navScale)));
+                a.dp(Math.round((horizontal ? 10 : 6) * navScale)),
+                a.dp(Math.round((horizontal ? 6 : 8) * navScale)),
+                a.dp(Math.round((horizontal ? 10 : 6) * navScale)),
+                a.dp(Math.round((horizontal ? 6 : 8) * navScale)));
         a.glass(rail, Math.round(25 * navScale));
         rail.setElevation(a.dp(8));
         FrameLayout.LayoutParams size =
-                bottomMode
+                horizontal
                         ? new FrameLayout.LayoutParams(
                                 a.dp(mainDp),
                                 a.dp(crossDp),
-                                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL)
+                                (topMode ? Gravity.TOP : Gravity.BOTTOM)
+                                        | Gravity.CENTER_HORIZONTAL)
                         : new FrameLayout.LayoutParams(
                                 a.dp(crossDp),
                                 a.dp(mainDp),
                                 Gravity.RIGHT | Gravity.CENTER_VERTICAL);
         if (bottomMode) size.bottomMargin = a.dp(14);
+        else if (topMode) size.topMargin = a.dp(16);
         else size.rightMargin = a.dp(20);
         a.root.addView(rail, size);
+        if (topMode) {
+            FrameLayout.LayoutParams viewport =
+                    (FrameLayout.LayoutParams) a.scroll.getLayoutParams();
+            viewport.topMargin = a.dp(crossDp + 34);
+            a.scroll.setLayoutParams(viewport);
+        }
         hint = a.text("", 12f * navScale, MainActivity.WHITE);
         hint.setTag("home-dock-label");
         hint.setGravity(Gravity.CENTER);
@@ -93,7 +122,7 @@ final class HomeDock {
             int cellGap = a.dp(Math.max(3, Math.round(4 * navScale)));
             LinearLayout.LayoutParams cell =
                     new LinearLayout.LayoutParams(a.dp(cellDp), a.dp(cellDp));
-            if (bottomMode) {
+            if (horizontal) {
                 cell.leftMargin = cellGap;
                 cell.rightMargin = cellGap;
             } else {
@@ -108,15 +137,17 @@ final class HomeDock {
                         FocusMotion.style(
                                 a,
                                 icon,
-                                focused,
+                                false,
                                 Color.TRANSPARENT,
-                                MainActivity.WHITE,
+                                Color.TRANSPARENT,
                                 // Half of the cell or more: a true circle, not a squircle.
                                 Math.max(24, (cellDp + 2) / 2),
                                 MainActivity.WHITE,
-                                MainActivity.DARK,
+                                MainActivity.WHITE,
                                 false,
-                                1.045f);
+                                1f);
+                        icon.setBackground(null);
+                        if (focused) selection.select(icon);
                         if (focused && !bottomMode) showLabel(index);
                         else {
                             hint.animate().cancel();
@@ -133,7 +164,7 @@ final class HomeDock {
                     });
         }
         for (int i = 0; i < items.length; i++) {
-            if (bottomMode) {
+            if (horizontal) {
                 items[i].setNextFocusLeftId(items[Math.max(0, i - 1)].getId());
                 items[i].setNextFocusRightId(items[Math.min(5, i + 1)].getId());
             } else {
@@ -151,7 +182,13 @@ final class HomeDock {
                                     && oldFocus.getTag() instanceof String
                                     && a.current != null)
                                 a.current.homeReturnFocus = (String) oldFocus.getTag();
+                            if (newFocus != null
+                                    && !contains(newFocus)
+                                    && contains(oldFocus)
+                                    && newFocus.getRootView() == a.root.getRootView())
+                                selection.select(items[0]);
                         });
+        selection.select(items[0]);
     }
 
     boolean contains(View view) {
@@ -166,7 +203,7 @@ final class HomeDock {
                 () -> {
                     if (!items[index].hasFocus()) return;
                     FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) hint.getLayoutParams();
-                    if (bottomMode) {
+                    if (horizontal) {
                         hint.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
                         p.gravity = Gravity.LEFT | Gravity.TOP;
                         p.rightMargin = 0;
@@ -182,7 +219,10 @@ final class HomeDock {
                                                 a.root.getWidth()
                                                         - hint.getMeasuredWidth()
                                                         - a.dp(6)));
-                        p.topMargin = Math.max(a.dp(4), rail.getTop() - a.dp(36));
+                        p.topMargin =
+                                topMode
+                                        ? rail.getBottom() + a.dp(6)
+                                        : Math.max(a.dp(4), rail.getTop() - a.dp(36));
                     } else
                         p.topMargin =
                                 rail.getTop()
@@ -201,12 +241,35 @@ final class HomeDock {
     }
 
     void rightEdge(View view) {
-        if (view != null) view.setNextFocusRightId(items[0].getId());
+        if (view != null && !horizontal) view.setNextFocusRightId(items[0].getId());
     }
 
     boolean key(KeyEvent event) {
-        if (!contains(a.getCurrentFocus()) || event.getKeyCode() != KeyEvent.KEYCODE_DPAD_LEFT)
-            return false;
+        View focused = a.getCurrentFocus();
+        if (!contains(focused)) return false;
+        int key = event.getKeyCode();
+        if (horizontal
+                && (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                int index = 0;
+                while (index < items.length - 1 && items[index] != focused) index++;
+                items[
+                        Math.max(
+                                0,
+                                Math.min(
+                                        items.length - 1,
+                                        index + (key == KeyEvent.KEYCODE_DPAD_LEFT ? -1 : 1)))]
+                        .requestFocus();
+            }
+            return true;
+        }
+        int exit =
+                topMode
+                        ? KeyEvent.KEYCODE_DPAD_DOWN
+                        : bottomMode ? KeyEvent.KEYCODE_DPAD_UP : KeyEvent.KEYCODE_DPAD_LEFT;
+        if (key != exit)
+            return horizontal
+                    && (key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN);
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
             View target =
                     a.current == null || a.current.homeReturnFocus == null
@@ -226,7 +289,21 @@ final class HomeDock {
         @Override
         public void draw(Canvas c) {
             Rect b = getBounds();
-            if (bottomMode) {
+            if (horizontal) {
+                if (topMode) {
+                    float edge = b.top + a.dp(4);
+                    paint.setColor(0xff303036);
+                    paint.setStyle(Paint.Style.FILL);
+                    c.drawRoundRect(
+                            new RectF(b.left, edge, b.right, b.bottom), a.dp(9), a.dp(9), paint);
+                    Path point = new Path();
+                    point.moveTo(b.exactCenterX() - a.dp(4), edge + a.dp(1));
+                    point.lineTo(b.exactCenterX(), b.top);
+                    point.lineTo(b.exactCenterX() + a.dp(4), edge + a.dp(1));
+                    point.close();
+                    c.drawPath(point, paint);
+                    return;
+                }
                 float edge = b.bottom - a.dp(4);
                 paint.setColor(0xff303036);
                 paint.setStyle(Paint.Style.FILL);
@@ -270,83 +347,81 @@ final class HomeDock {
     final class Icon extends View {
         final int kind;
         final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Path glyph = new Path();
 
         Icon(int kind) {
             super(a);
             this.kind = kind;
+            switch (kind) {
+                case 0:
+                    line(2, 10, 12, 2, 22, 10);
+                    line(5, 9, 5, 21, 10, 21, 10, 15, 14, 15, 14, 21, 19, 21, 19, 9);
+                    break;
+                case 1:
+                    glyph.addCircle(10, 10, 7, Path.Direction.CW);
+                    line(15.5f, 15.5f, 22, 22);
+                    break;
+                case 2:
+                    glyph.addRoundRect(new RectF(2, 4, 22, 18), 3, 3, Path.Direction.CW);
+                    line(9, 8, 16, 11, 9, 14, 9, 8);
+                    line(12, 18, 12, 22);
+                    line(8, 22, 16, 22);
+                    break;
+                case 3:
+                    glyph.moveTo(12, 21);
+                    glyph.cubicTo(8, 18, 2, 14, 2, 8);
+                    glyph.cubicTo(2, 2, 9, 1, 12, 6);
+                    glyph.cubicTo(15, 1, 22, 2, 22, 8);
+                    glyph.cubicTo(22, 14, 16, 18, 12, 21);
+                    glyph.close();
+                    break;
+                case 4:
+                    glyph.moveTo(6, 19);
+                    glyph.cubicTo(0, 19, 0, 11, 6, 11);
+                    glyph.cubicTo(6, 3, 17, 2, 19, 11);
+                    glyph.cubicTo(24, 11, 24, 19, 19, 19);
+                    glyph.close();
+                    line(8, 15, 16, 15);
+                    break;
+                case 5:
+                    line(2, 5, 6, 5);
+                    line(12, 5, 22, 5);
+                    line(2, 12, 12, 12);
+                    line(18, 12, 22, 12);
+                    line(2, 19, 6, 19);
+                    line(12, 19, 22, 19);
+                    glyph.addCircle(9, 5, 3, Path.Direction.CW);
+                    glyph.addCircle(15, 12, 3, Path.Direction.CW);
+                    glyph.addCircle(9, 19, 3, Path.Direction.CW);
+                    break;
+            }
         }
 
-        void line(Canvas c, float... xy) {
-            Path path = new Path();
-            path.moveTo(xy[0], xy[1]);
-            for (int i = 2; i < xy.length; i += 2) path.lineTo(xy[i], xy[i + 1]);
-            c.drawPath(path, p);
+        void line(float... xy) {
+            glyph.moveTo(xy[0], xy[1]);
+            for (int i = 2; i < xy.length; i += 2) glyph.lineTo(xy[i], xy[i + 1]);
         }
 
         @Override
         protected void onDraw(Canvas c) {
             super.onDraw(c);
             c.save();
-            float iconDp = 21f * navScale;
-            c.translate(getWidth() / 2f - a.dp(iconDp / 2f), getHeight() / 2f - a.dp(iconDp / 2f));
-            c.scale(a.dp(iconDp) / 24f, a.dp(iconDp) / 24f);
-            FocusMotion.State motion = (FocusMotion.State) getTag(R.id.focus_motion);
-            boolean light = hasFocus() && (motion == null || Color.alpha(motion.color) > 150);
-            p.setColor(light ? MainActivity.DARK : 0xffd6d6dd);
+            float size = a.dp((a.isTvDevice() ? 26f : 22f) * navScale);
+            float scale = size / 24f;
+            // Draw paths at display resolution with a constant, whole-pixel stroke.
+            c.translate(
+                    Math.round((getWidth() - size) / 2f), Math.round((getHeight() - size) / 2f));
+            c.scale(scale, scale);
+            p.setColor(hasFocus() ? MainActivity.WHITE : 0xffe0e6ef);
             p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(hasFocus() ? 2 : 1.7f);
+            p.setStrokeWidth(Math.max(2, Math.round(size / 12f)) / scale);
             p.setStrokeCap(Paint.Cap.ROUND);
             p.setStrokeJoin(Paint.Join.ROUND);
-            switch (kind) {
-                case 0:
-                    line(c, 3, 10, 12, 3, 21, 10);
-                    line(c, 5, 9, 5, 21, 10, 21, 10, 15, 14, 15, 14, 21, 19, 21, 19, 9);
-                    break;
-                case 1:
-                    c.drawCircle(10.5f, 10.5f, 6.7f, p);
-                    line(c, 16, 16, 21, 21);
-                    break;
-                case 2:
-                    c.drawRoundRect(new RectF(3, 6, 21, 19), 3, 3, p);
-                    line(c, 8, 2, 12, 6, 16, 2);
-                    line(c, 9, 22, 15, 22);
-                    break;
-                case 3:
-                    Path heart = new Path();
-                    heart.moveTo(12, 21);
-                    heart.cubicTo(9, 18, 2, 13, 2, 8);
-                    heart.cubicTo(2, 2, 9, 1, 12, 6);
-                    heart.cubicTo(15, 1, 22, 2, 22, 8);
-                    heart.cubicTo(22, 13, 15, 18, 12, 21);
-                    c.drawPath(heart, p);
-                    break;
-                case 4:
-                    Path cloud = new Path();
-                    cloud.moveTo(6, 19);
-                    cloud.cubicTo(-1, 19, 0, 10, 6, 10);
-                    cloud.cubicTo(6, 1, 18, 1, 19, 10);
-                    cloud.cubicTo(25, 10, 25, 19, 19, 19);
-                    cloud.close();
-                    c.drawPath(cloud, p);
-                    break;
-                case 5:
-                    c.drawCircle(12, 12, 6.3f, p);
-                    c.drawCircle(12, 12, 2.5f, p);
-                    for (int n = 0; n < 8; n++) {
-                        double t = n * Math.PI / 4;
-                        line(
-                                c,
-                                12 + (float) Math.cos(t) * 7,
-                                12 + (float) Math.sin(t) * 7,
-                                12 + (float) Math.cos(t) * 9.7f,
-                                12 + (float) Math.sin(t) * 9.7f);
-                    }
-                    break;
-            }
+            c.drawPath(glyph, p);
             c.restore();
             if (isSelected()) {
                 p.setStyle(Paint.Style.FILL);
-                p.setColor(hasFocus() ? MainActivity.DARK : MainActivity.WHITE);
+                p.setColor(MainActivity.WHITE);
                 c.drawCircle(a.dp(5), getHeight() / 2f, a.dp(1.5f), p);
             }
         }

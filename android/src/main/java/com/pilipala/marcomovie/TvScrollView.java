@@ -10,6 +10,8 @@ final class TvScrollView extends ScrollView {
     final MotionSpring spring = new MotionSpring(0, 18, .35f);
     MotionLoop.Step motion;
     boolean focusing, layingOut;
+    boolean readingMode, readingFocus;
+    long lastReadingStep;
     int goal;
 
     TvScrollView(MainActivity host) {
@@ -99,6 +101,7 @@ final class TvScrollView extends ScrollView {
         else if (area.bottom > bottom)
             y = area.bottom - getHeight() + Math.max(margin, (getHeight() - area.height()) / 3);
         else return;
+        if (readingMode) y = Math.max(reference - a.dp(48), Math.min(reference + a.dp(48), y));
         moveTo(y);
     }
 
@@ -110,7 +113,7 @@ final class TvScrollView extends ScrollView {
         } finally {
             focusing = false;
         }
-        reveal(focused);
+        if (!readingFocus) reveal(focused);
     }
 
     @Override
@@ -118,6 +121,8 @@ final class TvScrollView extends ScrollView {
         if (focusing) return;
         if (layingOut) {
             if (motion != null) return;
+            if (readingMode)
+                y = Math.max(getScrollY() - a.dp(48), Math.min(getScrollY() + a.dp(48), y));
             super.scrollTo(x, y);
             spring.snap(getScrollY());
             return;
@@ -145,11 +150,50 @@ final class TvScrollView extends ScrollView {
         Rect area = new Rect(rectangle);
         offsetDescendantRectToMyCoords(child, area);
         int old = goal;
-        if (immediate) {
+        if (immediate && !readingMode) {
             int delta = computeScrollDeltaToGetChildRectOnScreen(area);
             scrollTo(0, getScrollY() + delta);
         } else reveal(area);
         return old != goal || motion != null;
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        int key = event.getKeyCode();
+        if (readingMode
+                && (key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN)
+                && !event.isAltPressed()) return executeKeyEvent(event);
+        return super.dispatchKeyEvent(event);
+    }
+
+    boolean readingKey(KeyEvent event, int direction, View focused, View next) {
+        if (event.getRepeatCount() > 0 && event.getEventTime() - lastReadingStep < 120) return true;
+        lastReadingStep = event.getEventTime();
+        int reference = motion == null ? getScrollY() : goal;
+        int top = reference + a.dp(12), bottom = reference + getHeight() - a.dp(12);
+        if (next != null && next != this && next != focused) {
+            Rect area = new Rect(0, 0, next.getWidth(), next.getHeight());
+            offsetDescendantRectToMyCoords(next, area);
+            boolean visible =
+                    area.height() > getHeight() - a.dp(24)
+                            ? area.top < bottom && area.bottom > top
+                            : area.top >= top && area.bottom <= bottom;
+            if (visible) {
+                readingFocus = true;
+                try {
+                    next.requestFocus(direction);
+                } finally {
+                    readingFocus = false;
+                }
+                return true;
+            }
+        }
+        int step = a.dp(48) * (direction == FOCUS_UP ? -1 : 1);
+        // Limit queued travel while a remote sends rapid repeat events.
+        int end = bound(reference + step);
+        end = Math.max(getScrollY() - a.dp(96), Math.min(getScrollY() + a.dp(96), end));
+        moveTo(end);
+        return true;
     }
 
     @Override
@@ -162,6 +206,7 @@ final class TvScrollView extends ScrollView {
             View focused = findFocus();
             if (focused == this) focused = null;
             View next = FocusFinder.getInstance().findNextFocus(this, focused, direction);
+            if (readingMode) return readingKey(event, direction, focused, next);
             if (next != null && next != this) {
                 next.requestFocus(direction);
                 return true;

@@ -456,23 +456,27 @@ public final class HomeProbe extends Instrumentation {
             check(
                     "confirm_after_focus_does_not_reload",
                     categoryRequests.get() == requestsAfterFocus);
-            runOnMainSync(
-                    () -> {
-                        tag("home-tab:1").requestFocus();
-                        tag("source-switcher").requestFocus();
-                    });
+            check(
+                    "category_selection_is_immediate",
+                    ui(
+                            () -> {
+                                tag("home-tab:1").requestFocus();
+                                return a.current.homeState.category.equals("c1")
+                                        && tag("home-tab:1").isSelected();
+                            }));
+            runOnMainSync(() -> tag("source-switcher").requestFocus());
             SystemClock.sleep(250);
             check(
-                    "leaving_category_cancels_pending_selection",
+                    "leaving_category_keeps_immediate_selection",
                     ui(
                             () ->
-                                    a.current.homeState.category.equals("c2")
+                                    a.current.homeState.category.equals("c1")
                                             && tag("source-switcher").hasFocus()));
             runOnMainSync(() -> tag("home-filters").requestFocus());
             SystemClock.sleep(250);
             check(
                     "filter_focus_does_not_open_or_switch",
-                    ui(() -> a.appDialog == null && a.current.homeState.category.equals("c2")));
+                    ui(() -> a.appDialog == null && a.current.homeState.category.equals("c1")));
             runOnMainSync(() -> tag("home-tab:0").requestFocus());
             await(
                     () ->
@@ -541,7 +545,7 @@ public final class HomeProbe extends Instrumentation {
                     "dock_right_and_compact",
                     ui(
                             () ->
-                                    tag("home-dock").getWidth() <= a.dp(50)
+                                    tag("home-dock").getWidth() <= a.dp(56)
                                             && tag("home-dock").getRight()
                                                     <= a.root.getWidth() - a.dp(19)));
             check(
@@ -848,28 +852,69 @@ public final class HomeProbe extends Instrumentation {
             check(
                     "detail_return_sends_no_catalogue_requests",
                     homeRequests.get() == homeCount && categoryRequests.get() == categoryCount);
+            click("home-filters");
+            await(
+                    () ->
+                            tag("home-inline-filters").isShown()
+                                    && tag("home-filter:class:0").getWidth() > 0);
+            check(
+                    "filters_expand_as_three_inline_rows",
+                    ui(
+                            () ->
+                                    a.appDialog == null
+                                            && a.current.retainedHome.inlineFilters.getChildCount()
+                                                    == 3
+                                            && tag("home-inline-filters").getTop()
+                                                    >= a.current.retainedHome.filters.getBottom()));
+            key(KeyEvent.KEYCODE_DPAD_DOWN);
+            check(
+                    "filter_button_down_enters_first_row",
+                    ui(
+                            () ->
+                                    String.valueOf(a.getCurrentFocus().getTag())
+                                            .startsWith("home-filter:class:")));
+            key(KeyEvent.KEYCODE_DPAD_DOWN);
+            check(
+                    "inline_filter_down_enters_area_row",
+                    ui(
+                            () ->
+                                    String.valueOf(a.getCurrentFocus().getTag())
+                                            .startsWith("home-filter:area:")));
+            key(KeyEvent.KEYCODE_DPAD_DOWN);
+            check(
+                    "inline_filter_down_enters_year_row",
+                    ui(
+                            () ->
+                                    String.valueOf(a.getCurrentFocus().getTag())
+                                            .startsWith("home-filter:year:")));
+            key(KeyEvent.KEYCODE_DPAD_DOWN);
+            check(
+                    "last_filter_row_down_enters_posters",
+                    ui(
+                            () ->
+                                    String.valueOf(a.getCurrentFocus().getTag())
+                                            .startsWith("home-video:")));
+            key(KeyEvent.KEYCODE_DPAD_UP);
+            check(
+                    "poster_up_returns_to_last_filter_row",
+                    ui(
+                            () ->
+                                    String.valueOf(a.getCurrentFocus().getTag())
+                                            .startsWith("home-filter:year:")));
             for (int dimension = 0; dimension < 3; dimension++) {
                 final int choice = dimension;
-                click("home-filters");
-                runOnMainSync(
-                        () ->
-                                a.appDialog
-                                        .findViewById(android.R.id.content)
-                                        .findViewWithTag("dialog-option:" + choice)
-                                        .performClick());
-                await(() -> a.appDialog != null);
-                runOnMainSync(
-                        () ->
-                                a.appDialog
-                                        .findViewById(android.R.id.content)
-                                        .findViewWithTag("dialog-option:1")
-                                        .performClick());
+                String option = "home-filter:" + VideoFilters.DIMENSIONS[choice] + ":1";
+                click(option);
                 await(
                         () ->
                                 a.current.homeState.ready
                                         && a.current.homeState.selectedFilters.size() == choice + 1
                                         && tag("home-video:2") != null);
+                check(
+                        "filter_selection_keeps_row_focus_" + choice,
+                        ui(() -> tag(option).hasFocus() && tag(option).isSelected()));
             }
+            frame("inline-filters-expanded");
             check(
                     "all_three_tv_filters_reach_engine",
                     receivedFilters.size() == 3 && receivedFilters.get("year").equals("2026"));
@@ -887,6 +932,25 @@ public final class HomeProbe extends Instrumentation {
                                             && a.current.homeState.selectedFilters.size() == 3
                                             && tag("home-video:2").hasFocus()));
             check("filtered_return_does_not_reload", categoryRequests.get() == filteredCount);
+            check(
+                    "inline_filters_stay_expanded_on_detail_return",
+                    ui(() -> tag("home-inline-filters").isShown()));
+            click("home-filters");
+            check(
+                    "filter_button_collapses_without_clearing_selection",
+                    ui(
+                            () ->
+                                    !tag("home-inline-filters").isShown()
+                                            && a.current.homeState.selectedFilters.size() == 3
+                                            && tag("home-filters").hasFocus()));
+            click("home-filters");
+            check(
+                    "filter_button_reopens_existing_selection",
+                    ui(
+                            () ->
+                                    tag("home-inline-filters").isShown()
+                                            && tag("home-filter:year:1").isSelected()));
+            click("home-filters");
 
             runOnMainSync(
                     () -> {
@@ -1079,6 +1143,8 @@ public final class HomeProbe extends Instrumentation {
                         a.engines.put(site.key, originalFixture);
                         a.homeData.remove(site.key);
                     });
+            glassNavigation();
+            readingScroll();
             result.put("passed", true);
         } catch (Throwable e) {
             try {
@@ -1118,5 +1184,316 @@ public final class HomeProbe extends Instrumentation {
         report.putString("result", result.toString());
         sendStatus(0, report);
         finish(Activity.RESULT_OK, new Bundle());
+    }
+
+    void readingScroll() throws Exception {
+        runOnMainSync(
+                () ->
+                        a.open(
+                                new MainActivity.Screen(() -> new SettingsScreen(a).appearance()),
+                                true));
+        await(() -> tag("setting-tv_dock_position") != null);
+        check("settings_use_reading_scroll", ui(() -> ((TvScrollView) a.scroll).readingMode));
+        runOnMainSync(
+                () ->
+                        a.open(
+                                new MainActivity.Screen(
+                                        () -> {
+                                            new UpdateScreen(a).show();
+                                            StringBuilder notes = new StringBuilder();
+                                            for (int n = 1; n <= 100; n++)
+                                                notes.append(n)
+                                                        .append(". 电视端更新内容：分类导航、清晰图标和遥控器体验。\n");
+                                            ((TextView) tag("update-notes"))
+                                                    .setText(notes.toString());
+                                        }),
+                                true));
+        await(
+                () ->
+                        tag("update-notes") != null
+                                && tag("update-notes").getHeight() > a.scroll.getHeight() * 2);
+        runOnMainSync(
+                () -> {
+                    tag("update-notes").requestFocus();
+                    a.scroll.scrollTo(0, 0);
+                });
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        TvScrollView scroll = (TvScrollView) a.scroll;
+        check(
+                "long_update_down_scrolls_one_small_step",
+                ui(
+                        () ->
+                                scroll.readingMode
+                                        && scroll.goal > 0
+                                        && scroll.goal <= a.dp(48)
+                                        && tag("update-notes").hasFocus()));
+        await(() -> scroll.motion == null);
+        check(
+                "reading_step_does_not_skip_to_bottom",
+                ui(
+                        () ->
+                                scroll.getScrollY() <= a.dp(48)
+                                        && scroll.getScrollY() < scroll.limit() / 4));
+        check(
+                "held_remote_does_not_queue_large_reading_jump",
+                ui(
+                        () -> {
+                            int before = scroll.getScrollY();
+                            long now = SystemClock.uptimeMillis();
+                            for (int n = 0; n < 12; n++)
+                                a.dispatchKeyEvent(
+                                        new KeyEvent(
+                                                now,
+                                                now + n * 5,
+                                                KeyEvent.ACTION_DOWN,
+                                                KeyEvent.KEYCODE_DPAD_DOWN,
+                                                n));
+                            return scroll.goal <= before + a.dp(48);
+                        }));
+        await(() -> scroll.motion == null);
+        int beforeUp = scroll.getScrollY();
+        key(KeyEvent.KEYCODE_DPAD_UP);
+        check(
+                "reading_up_reverses_by_one_small_step",
+                ui(() -> scroll.goal < beforeUp && beforeUp - scroll.goal <= a.dp(48)));
+        frame("long-update-reading");
+        runOnMainSync(
+                () -> {
+                    View action = tag("update-check");
+                    Rect area = new Rect(0, 0, action.getWidth(), action.getHeight());
+                    scroll.offsetDescendantRectToMyCoords(action, area);
+                    scroll.scrollTo(0, area.bottom - scroll.getHeight() + a.dp(40));
+                });
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        check(
+                "reading_reaches_update_action_when_visible",
+                ui(() -> tag("update-check").hasFocus()));
+        runOnMainSync(
+                () -> {
+                    scroll.scrollTo(0, scroll.limit());
+                    tag("update-check").requestFocus();
+                    scroll.scrollTo(0, scroll.limit());
+                });
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        check("reading_bottom_stays_bounded", ui(() -> scroll.goal <= scroll.limit()));
+        runOnMainSync(() -> a.open(new MainActivity.Screen(a::home), false));
+        await(() -> tag("home-video:11") != null);
+        check(
+                "home_keeps_its_browsing_scroll_policy",
+                ui(() -> !((TvScrollView) a.scroll).readingMode));
+    }
+
+    void glassNavigation() throws Exception {
+        runOnMainSync(
+                () -> {
+                    a.prefs
+                            .edit()
+                            .putInt(Prefs.TV_DOCK_POSITION, 0)
+                            .putInt(Prefs.NAV_SCALE_PERCENT, 100)
+                            .putString(Prefs.WATCH_HISTORY, "[]")
+                            .apply();
+                    a.reduced = false;
+                    a.open(new MainActivity.Screen(a::home), false);
+                });
+        await(
+                () ->
+                        tag("home-video:11") != null
+                                && a.current.retainedHome.filters.selection.positioned);
+        GlassSelection category = a.current.retainedHome.filters.selection;
+        check(
+                "category_glass_retargets_without_fading_buttons",
+                ui(
+                        () -> {
+                            float previous = category.left.value;
+                            tag("home-tab:1").requestFocus();
+                            return category.target == tag("home-tab:1")
+                                    && category.animator != null
+                                    && category.left.value == previous
+                                    && a.current.homeState.category.equals("c1")
+                                    && tag("home-tab:0").getAlpha() == 1f
+                                    && tag("home-tab:1").getAlpha() == 1f
+                                    && tag("home-tab:0").getBackground() == null
+                                    && tag("home-tab:1").getBackground() == null;
+                        }));
+        SystemClock.sleep(45);
+        frame("glass-category-moving");
+        check(
+                "category_glass_reverses_from_current_position",
+                ui(
+                        () -> {
+                            float position = category.left.value;
+                            tag("home-tab:2").requestFocus();
+                            tag("home-tab:0").requestFocus();
+                            return category.left.value == position
+                                    && category.target == tag("home-tab:0")
+                                    && a.current.homeState.category.isEmpty();
+                        }));
+        await(() -> category.animator == null);
+        check(
+                "category_glass_settles_on_selected_bounds",
+                ui(
+                        () ->
+                                Math.abs(
+                                                category.left.value
+                                                        - tag("home-tab:0").getLeft()
+                                                        - a.dp(1))
+                                        < 1));
+        runOnMainSync(() -> tag("nav-home").requestFocus());
+        await(() -> a.homeDock.selection.animator == null);
+        GlassSelection dock = a.homeDock.selection;
+        check(
+                "dock_uses_one_sliding_glass_lens",
+                ui(
+                        () -> {
+                            float previous = dock.top.value;
+                            tag("nav-search").requestFocus();
+                            return dock.target == tag("nav-search")
+                                    && dock.animator != null
+                                    && dock.top.value == previous
+                                    && tag("nav-home").getBackground() == null
+                                    && tag("nav-search").getBackground() == null;
+                        }));
+        await(() -> dock.animator == null);
+        check(
+                "tv_dock_icons_slightly_larger",
+                ui(
+                        () ->
+                                tag("nav-home").getWidth() == a.dp(42)
+                                        && tag("home-dock").getWidth() == a.dp(56)));
+        frame("glass-right-dock");
+
+        runOnMainSync(
+                () ->
+                        a.open(
+                                new MainActivity.Screen(() -> new SettingsScreen(a).appearance()),
+                                true));
+        await(() -> tag("setting-tv_dock_position") != null);
+        check("dock_position_setting_visible", ui(() -> tag("setting-tv_dock_position").isShown()));
+        runOnMainSync(() -> tag("setting-tv_dock_position").performClick());
+        await(
+                () ->
+                        a.appDialog != null
+                                && a.appDialog
+                                                .findViewById(android.R.id.content)
+                                                .findViewWithTag("dialog-option:1")
+                                        != null);
+        runOnMainSync(
+                () ->
+                        a.appDialog
+                                .findViewById(android.R.id.content)
+                                .findViewWithTag("dialog-option:1")
+                                .performClick());
+        check(
+                "top_position_preference_saved",
+                ui(() -> a.prefs.getInt(Prefs.TV_DOCK_POSITION, 0) == 1));
+        runOnMainSync(a::onBackPressed);
+        await(
+                () ->
+                        a.homeDock != null
+                                && a.homeDock.topMode
+                                && tag("home-video:11") != null
+                                && tag("home-dock").getWidth() > 0);
+        check(
+                "top_dock_is_horizontal_and_fixed",
+                ui(
+                        () ->
+                                tag("home-dock").getParent() == a.root
+                                        && tag("home-dock").getWidth()
+                                                > tag("home-dock").getHeight()
+                                        && tag("home-dock").getTop() == a.dp(16)));
+        check(
+                "top_dock_reserves_content_viewport",
+                ui(() -> a.scroll.getTop() >= tag("home-dock").getBottom() + a.dp(12)));
+        runOnMainSync(() -> tag("source-switcher").requestFocus());
+        key(KeyEvent.KEYCODE_DPAD_UP);
+        check("up_from_content_enters_top_dock", ui(() -> tag("nav-home").hasFocus()));
+        key(KeyEvent.KEYCODE_DPAD_RIGHT);
+        check("top_dock_right_moves_to_search", ui(() -> tag("nav-search").hasFocus()));
+        key(KeyEvent.KEYCODE_DPAD_LEFT);
+        check("top_dock_left_moves_between_icons", ui(() -> tag("nav-home").hasFocus()));
+        key(KeyEvent.KEYCODE_DPAD_UP);
+        check("top_dock_up_stays_inside_navigation", ui(() -> tag("nav-home").hasFocus()));
+        key(KeyEvent.KEYCODE_DPAD_DOWN);
+        check("top_dock_down_restores_content_focus", ui(() -> tag("source-switcher").hasFocus()));
+        runOnMainSync(() -> tag("nav-settings").requestFocus());
+        await(() -> a.homeDock.selection.animator == null);
+        frame("glass-top-dock");
+        check(
+                "top_dock_label_inside_screen",
+                ui(
+                        () -> {
+                            View hint = tag("home-dock-label");
+                            return hint.getVisibility() == View.VISIBLE
+                                    && hint.getLeft() >= 0
+                                    && hint.getRight() <= a.root.getWidth()
+                                    && hint.getTop() >= tag("home-dock").getBottom();
+                        }));
+        click("nav-accounts");
+        await(() -> a.accountDialog != null && a.accountDialog.isShowing());
+        check(
+                "top_dock_account_panel_stays_within_screen",
+                ui(
+                        () -> {
+                            View panel =
+                                    a.accountDialog
+                                            .findViewById(android.R.id.content)
+                                            .findViewWithTag("account-panel");
+                            int[] point = new int[2];
+                            panel.getLocationOnScreen(point);
+                            return point[0] >= 0
+                                    && point[0] + panel.getWidth() <= a.windowWidth()
+                                    && point[1] >= 0
+                                    && point[1] + panel.getHeight() <= a.windowHeight();
+                        }));
+        key(KeyEvent.KEYCODE_BACK);
+        check(
+                "top_dock_account_panel_restores_anchor_focus",
+                ui(() -> tag("nav-accounts").hasFocus()));
+        runOnMainSync(
+                () -> {
+                    a.prefs.edit().putInt(Prefs.NAV_SCALE_PERCENT, 140).apply();
+                    a.refresh();
+                });
+        await(
+                () ->
+                        a.homeDock != null
+                                && a.homeDock.topMode
+                                && tag("home-video:11") != null
+                                && a.homeDock.navScale > 1.3f);
+        check(
+                "large_top_dock_stays_within_screen",
+                ui(
+                        () ->
+                                tag("home-dock").getLeft() >= a.dp(16)
+                                        && tag("home-dock").getRight()
+                                                <= a.root.getWidth() - a.dp(16)
+                                        && a.scroll.getTop()
+                                                >= tag("home-dock").getBottom() + a.dp(12)));
+        frame("glass-top-large");
+        check(
+                "reduced_motion_snaps_glass_without_delaying_category",
+                ui(
+                        () -> {
+                            a.reduced = true;
+                            tag("home-tab:1").requestFocus();
+                            GlassSelection glass = a.current.retainedHome.filters.selection;
+                            return a.current.homeState.category.equals("c1")
+                                    && glass.animator == null
+                                    && glass.left.value == glass.left.target;
+                        }));
+        runOnMainSync(
+                () -> {
+                    a.reduced = false;
+                    a.prefs
+                            .edit()
+                            .putInt(Prefs.TV_DOCK_POSITION, 0)
+                            .putInt(Prefs.NAV_SCALE_PERCENT, 100)
+                            .apply();
+                    a.refresh();
+                });
+        await(() -> a.homeDock != null && !a.homeDock.topMode && tag("home-video:11") != null);
+        check(
+                "right_dock_can_be_restored",
+                ui(() -> tag("home-dock").getWidth() < tag("home-dock").getHeight()));
     }
 }

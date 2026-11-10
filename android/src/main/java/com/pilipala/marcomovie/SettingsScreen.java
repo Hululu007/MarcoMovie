@@ -18,6 +18,8 @@ final class SettingsScreen {
 
     void page(String title, String note) {
         a.renderPage("", "");
+        if (a.isTvDevice() && a.scroll instanceof TvScrollView)
+            ((TvScrollView) a.scroll).readingMode = true;
         if (!a.isTvDevice()) {
             LinearLayout topNav = a.row();
             topNav.setGravity(Gravity.CENTER_VERTICAL);
@@ -534,6 +536,8 @@ final class SettingsScreen {
                             .setNegativeButton("返回", null)
                             .show();
                 });
+        if (a.isTvDevice())
+            ints("Dock 位置", Prefs.TV_DOCK_POSITION, new String[] {"右侧", "顶部"}, new int[] {0, 1}, 0);
         ints(
                 "导航栏字体与按钮大小",
                 Prefs.NAV_SCALE_PERCENT,

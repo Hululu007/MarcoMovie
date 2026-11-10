@@ -54,6 +54,8 @@ final class UpdateScreen {
 
     void show() {
         a.renderPage("", "");
+        if (a.isTvDevice() && a.scroll instanceof TvScrollView)
+            ((TvScrollView) a.scroll).readingMode = true;
         a.updateScreen = this;
         boolean tv = a.isTvDevice();
 
@@ -183,6 +185,11 @@ final class UpdateScreen {
         a.gap(heroCard, 6);
 
         notesBody = a.text("", 13f, 0xffd1d5db);
+        notesBody.setTag("update-notes");
+        notesBody.setId(View.generateViewId());
+        notesBody.setFocusable(tv);
+        notesBody.setFocusableInTouchMode(tv);
+        if (tv) notesBody.setContentDescription("更新内容，按上下键逐段阅读");
         notesBody.setLineSpacing(a.dp(4), 1f);
         heroCard.addView(notesBody, new LinearLayout.LayoutParams(-1, -2));
 

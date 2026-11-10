@@ -445,6 +445,10 @@ public final class MainActivity extends Activity {
         return TvLayoutPolicy.useBottomDock(windowWidth(), windowHeight(), formFactor);
     }
 
+    boolean useTopDock() {
+        return isTvDevice() && prefs.getInt(Prefs.TV_DOCK_POSITION, 0) == 1;
+    }
+
     void applyMobileSystemBars(boolean fullscreenPlayer) {
         if (isTvDevice()) return;
         try {
@@ -980,6 +984,8 @@ public final class MainActivity extends Activity {
         if (navigation) {
             if (useBottomDock()) {
                 body.setPadding(dp(18), statusBarHeight() + dp(14), dp(18), dp(86));
+            } else if (useTopDock()) {
+                body.setPadding(dp(34), dp(18), dp(34), dp(36));
             } else {
                 body.setPadding(dp(34), dp(18), dp(100), dp(36));
             }

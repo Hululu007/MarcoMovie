@@ -88,25 +88,46 @@ final class AccountPanel {
                 () -> {
                     boolean side =
                             a.homeDock != null && anchor != null && a.homeDock.contains(anchor);
+                    boolean top = side && a.homeDock.topMode;
                     int pivotY = 0;
                     if (side && window != null) {
                         int[] point = {0, 0};
                         anchor.getLocationInWindow(point);
                         int height = a.windowHeight();
                         WindowManager.LayoutParams position = window.getAttributes();
-                        position.x = a.windowWidth() - point[0] + a.dp(12);
-                        position.y =
-                                Math.max(
-                                        a.dp(24),
-                                        Math.min(
-                                                height - panel.getHeight() - a.dp(24),
-                                                point[1]
-                                                        + anchor.getHeight() / 2
-                                                        - panel.getHeight() / 2));
+                        if (top) {
+                            int left =
+                                    Math.max(
+                                            a.dp(24),
+                                            Math.min(
+                                                    a.windowWidth() - panel.getWidth() - a.dp(24),
+                                                    point[0]
+                                                            + anchor.getWidth() / 2
+                                                            - panel.getWidth() / 2));
+                            position.x = a.windowWidth() - left - panel.getWidth();
+                            position.y =
+                                    Math.max(
+                                            a.dp(24),
+                                            Math.min(
+                                                    height - panel.getHeight() - a.dp(24),
+                                                    point[1] + anchor.getHeight() + a.dp(14)));
+                            panel.setPivotX(point[0] + anchor.getWidth() / 2 - left);
+                        } else {
+                            position.x = a.windowWidth() - point[0] + a.dp(12);
+                            position.y =
+                                    Math.max(
+                                            a.dp(24),
+                                            Math.min(
+                                                    height - panel.getHeight() - a.dp(24),
+                                                    point[1]
+                                                            + anchor.getHeight() / 2
+                                                            - panel.getHeight() / 2));
+                        }
                         window.setAttributes(position);
-                        pivotY = point[1] + anchor.getHeight() / 2 - position.y;
+                        pivotY = top ? 0 : point[1] + anchor.getHeight() / 2 - position.y;
                     }
-                    panel.setPivotX(side ? panel.getWidth() : panel.getWidth() - a.dp(70));
+                    if (!top)
+                        panel.setPivotX(side ? panel.getWidth() : panel.getWidth() - a.dp(70));
                     panel.setPivotY(pivotY);
                     if (!a.reduced) {
                         panel.setScaleX(.88f);

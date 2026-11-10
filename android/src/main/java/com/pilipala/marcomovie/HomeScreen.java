@@ -27,6 +27,7 @@ final class HomeScreen {
     final List<List<View>> rows = new ArrayList<>();
     LinearLayout content;
     CategoryFlow filters;
+    InlineFilters inlineFilters;
     HomeAmbient ambient;
     TextView status, source, more, earlier, allHistory;
     int ticket, request, posterWidth, gridEpoch;
@@ -35,7 +36,7 @@ final class HomeScreen {
     /** Tag of the card that should take focus once drawn after "加载更多". */
     String pendingFocus;
 
-    boolean busy;
+    boolean busy, buildingTabs;
     Snapshot snapshot;
     State state;
     FrameLayout retainedRoot;
@@ -69,7 +70,7 @@ final class HomeScreen {
         int engineEpoch;
         List<Cms.Video> videos = new ArrayList<>();
         int page = 1, pages = 1, windowStart = 0;
-        boolean ready, initialized;
+        boolean ready, initialized, filtersExpanded;
         Snapshot snapshot;
         final Map<String, String> selectedFilters = new LinkedHashMap<>();
         final Map<String, Cms.Listing> categoryCache = new HashMap<>();
@@ -107,7 +108,7 @@ final class HomeScreen {
             if (a.current != null) a.current.homeState = state;
         }
         boolean bottomDock = a.useBottomDock();
-        int rightPadDp = Math.max(100, Math.round(50 * navScale) + 50);
+        int rightPadDp = a.useTopDock() ? 34 : Math.max(100, Math.round(56 * navScale) + 44);
         int bottomPadDp = Math.max(86, Math.round(50 * navScale) + 36);
         if (bottomDock) {
             a.body.setPadding(a.dp(18), a.dp(16), a.dp(18), a.dp(bottomPadDp));
@@ -144,6 +145,8 @@ final class HomeScreen {
         filters = new CategoryFlow(a, this::wireNavigation);
         filters.setPadding(0, a.dp(2), 0, a.dp(8));
         a.body.addView(filters);
+        inlineFilters = new InlineFilters(this);
+        a.body.addView(inlineFilters, new LinearLayout.LayoutParams(-1, -2));
         status = a.text("正在整理片单…", 13, MainActivity.MUTED);
         status.setPadding(a.dp(4), a.dp(12), 0, a.dp(12));
         a.body.addView(status);
@@ -306,7 +309,8 @@ final class HomeScreen {
                     Prefs.REDUCED,
                     Prefs.REDUCED_TRANSPARENCY,
                     Prefs.UI_SCALE_PERCENT,
-                    Prefs.NAV_SCALE_PERCENT
+                    Prefs.NAV_SCALE_PERCENT,
+                    Prefs.TV_DOCK_POSITION
                 }) values.put(key, prefs.get(key));
         return values;
     }
@@ -720,6 +724,7 @@ final class HomeScreen {
     }
 
     void buildTabs() {
+        buildingTabs = true;
         filters.removeAllViews();
         filters.lines.clear();
         tabs.clear();
@@ -769,6 +774,7 @@ final class HomeScreen {
         }
         updateTabs();
         wireNavigation();
+        buildingTabs = false;
     }
 
     List<VideoFilters.Definition> filterDefinitions() {
@@ -786,6 +792,13 @@ final class HomeScreen {
 
     void showFilters() {
         if (snapshot == null) return;
+        if (a.isTvDevice()) {
+            state.filtersExpanded = !state.filtersExpanded;
+            inlineFilters.render();
+            updateTabs();
+            wireNavigation();
+            return;
+        }
         List<VideoFilters.Definition> definitions = filterDefinitions();
         String[] labels = new String[definitions.size() + 1];
         for (int i = 0; i < definitions.size(); i++) {
@@ -846,12 +859,19 @@ final class HomeScreen {
             category = snapshot.categories.get(0).id;
         }
         // A new filter starts at page one; detail/back keeps this exact state.
+        View currentFocus = a.getCurrentFocus();
+        String focusTag =
+                currentFocus != null
+                                && String.valueOf(currentFocus.getTag()).startsWith("home-filter:")
+                        ? String.valueOf(currentFocus.getTag())
+                        : "home-filters";
         state.category = category;
         state.ready = false;
-        choose(category, true);
-        View filter = filters.findViewWithTag("home-filters");
+        busy = false;
+        if (a.current != null) a.current.focus = focusTag;
+        choose(category, false);
+        View filter = a.root.findViewWithTag(focusTag);
         if (filter != null) {
-            if (a.current != null) a.current.focus = "home-filters";
             filter.requestFocus();
         }
     }
@@ -859,23 +879,15 @@ final class HomeScreen {
     void addTab(String label, String id, int index) {
         TextView button = pill(label, "home-tab:" + index, () -> choose(id, true));
         tabIds.put(button, id);
-        Runnable selectOnFocus =
-                () -> {
-                    if (button.hasFocus()
-                            && button.isAttachedToWindow()
+        button.setOnFocusChangeListener(
+                (v, f) -> {
+                    styleTab(button);
+                    if (f
+                            && !buildingTabs
+                            && a.isTvDevice()
                             && active()
                             && !id.equals(state.category)) {
                         choose(id, true);
-                    }
-                };
-        button.setOnFocusChangeListener(
-                (v, f) -> {
-                    button.removeCallbacks(selectOnFocus);
-                    styleTab(button);
-                    if (f && a.isTvDevice() && !id.equals(state.category)) {
-                        // Home navigation consumes DPAD before the tab's key listener runs.
-                        // Follow focus itself; briefly debounce rapid moves across categories.
-                        button.postDelayed(selectOnFocus, 120);
                     }
                 });
         addTabView(button);
@@ -895,18 +907,25 @@ final class HomeScreen {
 
     void styleTab(TextView b) {
         boolean selected = state.category.equals(tabIds.get(b));
+        styleCategory(b, selected);
+    }
+
+    void styleCategory(TextView b, boolean selected) {
         b.setSelected(selected);
         FocusMotion.style(
                 a,
                 b,
-                b.hasFocus(),
-                selected ? 0xffededf2 : 0xff222228,
-                selected ? 0xffededf2 : 0xff36363e,
+                false,
+                Color.TRANSPARENT,
+                Color.TRANSPARENT,
                 Math.round(17 * navScale),
-                selected ? 0xff17171b : MainActivity.WHITE,
-                selected ? 0xff17171b : MainActivity.WHITE,
-                true,
-                1.02f);
+                MainActivity.WHITE,
+                MainActivity.WHITE,
+                false,
+                1f);
+        b.setBackground(null);
+        b.setTextColor(selected ? Color.WHITE : 0xffc8d0df);
+        if (selected) filters.selection.select(b);
     }
 
     void updateTabs() {
@@ -915,10 +934,11 @@ final class HomeScreen {
             if (tabIds.get(b) != null) styleTab(b);
             else if ("home-filters".equals(b.getTag())) {
                 b.setText(
-                        state.selectedFilters.isEmpty()
-                                ? "筛选"
-                                : "筛选 · " + state.selectedFilters.size());
-                b.setContentDescription("类型、国家地区、年份筛选");
+                        (state.selectedFilters.isEmpty()
+                                        ? "筛选"
+                                        : "筛选 · " + state.selectedFilters.size())
+                                + (a.isTvDevice() ? state.filtersExpanded ? "  ⌃" : "  ⌄" : ""));
+                b.setContentDescription((state.filtersExpanded ? "收起" : "展开") + "类型、国家地区、年份筛选");
             } else {
                 boolean hidden = false;
                 String name = "更多分类";
@@ -933,20 +953,24 @@ final class HomeScreen {
                         break;
                     }
                 b.setText(name + "  ⌄");
-                b.setSelected(hidden);
-                FocusMotion.style(
-                        a,
-                        b,
-                        b.hasFocus(),
-                        hidden ? 0xffededf2 : 0xff24242b,
-                        hidden ? 0xffededf2 : 0xff36363e,
-                        Math.round(17 * navScale),
-                        hidden ? 0xff17171b : MainActivity.WHITE,
-                        hidden ? 0xff17171b : MainActivity.WHITE,
-                        true,
-                        1.02f);
+                if (hidden) styleCategory(b, true);
+                else {
+                    b.setSelected(false);
+                    FocusMotion.style(
+                            a,
+                            b,
+                            b.hasFocus(),
+                            0xff24242b,
+                            0xff36363e,
+                            Math.round(17 * navScale),
+                            MainActivity.WHITE,
+                            MainActivity.WHITE,
+                            true,
+                            1.02f);
+                }
             }
         }
+        if (inlineFilters != null) inlineFilters.render();
     }
 
     View selectedTab() {
@@ -1377,7 +1401,9 @@ final class HomeScreen {
             card.setNextFocusUpId(
                     stackedHistory
                             ? (i == 0 ? allHistory : historyCards.get(i - 1)).getId()
-                            : card.getId());
+                            : a.useTopDock() && a.homeDock != null
+                                    ? a.homeDock.items[Math.min(i, 5)].getId()
+                                    : card.getId());
             card.setNextFocusDownId(
                     stackedHistory && i + 1 < historyCards.size()
                             ? historyCards.get(i + 1).getId()
@@ -1394,10 +1420,14 @@ final class HomeScreen {
                     stackedHistory ? allHistory.getId() : lastHistory.getId());
             allHistory.setNextFocusDownId(
                     stackedHistory ? historyCards.get(0).getId() : source.getId());
+            if (a.useTopDock() && a.homeDock != null)
+                allHistory.setNextFocusUpId(a.homeDock.items[5].getId());
         }
         source.setNextFocusUpId(
                 historyCards.isEmpty()
-                        ? source.getId()
+                        ? a.useTopDock() && a.homeDock != null
+                                ? a.homeDock.items[0].getId()
+                                : source.getId()
                         : historyCards.get(stackedHistory ? historyCards.size() - 1 : 0).getId());
         source.setNextFocusDownId(selectedTab().getId());
         int contentDownId =
@@ -1406,6 +1436,7 @@ final class HomeScreen {
                         : rows.isEmpty()
                                 ? (more.isShown() ? more.getId() : -1)
                                 : rows.get(0).get(0).getId();
+        boolean inline = inlineFilters != null && inlineFilters.expanded();
         for (int r = 0; r < filters.lines.size(); r++) {
             List<View> line = filters.lines.get(r);
             horizontal(line);
@@ -1426,7 +1457,10 @@ final class HomeScreen {
                         r == 0
                                 ? source.getId()
                                 : filters.nearest(filters.lines.get(r - 1), tab).getId());
-                int downId = contentDownId != -1 ? contentDownId : tab.getId();
+                int downId =
+                        inline
+                                ? inlineFilters.nearest(inlineFilters.rows.get(0), tab).getId()
+                                : contentDownId != -1 ? contentDownId : tab.getId();
                 if (r + 1 < filters.lines.size()) {
                     View below = filters.nearest(filters.lines.get(r + 1), tab);
                     boolean overlaps =
@@ -1442,6 +1476,29 @@ final class HomeScreen {
             if (a.homeDock != null && !line.isEmpty() && r + 1 == filters.lines.size())
                 a.homeDock.rightEdge(line.get(line.size() - 1));
         }
+        if (inline) {
+            for (int r = 0; r < inlineFilters.rows.size(); r++) {
+                List<View> line = inlineFilters.rows.get(r);
+                horizontal(line);
+                for (View option : line) {
+                    View filterButton = filters.findViewWithTag("home-filters");
+                    option.setNextFocusUpId(
+                            r == 0
+                                    ? (filterButton == null ? selectedTab() : filterButton).getId()
+                                    : inlineFilters
+                                            .nearest(inlineFilters.rows.get(r - 1), option)
+                                            .getId());
+                    option.setNextFocusDownId(
+                            r + 1 < inlineFilters.rows.size()
+                                    ? inlineFilters
+                                            .nearest(inlineFilters.rows.get(r + 1), option)
+                                            .getId()
+                                    : !rows.isEmpty() && !earlier.isShown()
+                                            ? inlineFilters.nearest(rows.get(0), option).getId()
+                                            : contentDownId == -1 ? option.getId() : contentDownId);
+                }
+            }
+        }
         for (int r = Math.max(0, firstRow); r < rows.size(); r++) {
             List<View> row = rows.get(r);
             horizontal(row);
@@ -1449,7 +1506,13 @@ final class HomeScreen {
                 View card = row.get(c);
                 card.setNextFocusUpId(
                         r == 0
-                                ? (earlier.isShown() ? earlier.getId() : selectedTab().getId())
+                                ? (earlier.isShown()
+                                        ? earlier.getId()
+                                        : inline
+                                                ? inlineFilters
+                                                        .nearest(inlineFilters.rows.get(2), card)
+                                                        .getId()
+                                                : selectedTab().getId())
                                 : rows.get(r - 1)
                                         .get(Math.min(c, rows.get(r - 1).size() - 1))
                                         .getId());
@@ -1461,10 +1524,13 @@ final class HomeScreen {
                                 : more.isShown() ? more.getId() : card.getId());
             }
         }
-        earlier.setNextFocusUpId(selectedTab().getId());
+        earlier.setNextFocusUpId(
+                inline ? inlineFilters.rows.get(2).get(0).getId() : selectedTab().getId());
         earlier.setNextFocusDownId(rows.isEmpty() ? more.getId() : rows.get(0).get(0).getId());
         more.setNextFocusUpId(
-                rows.isEmpty() ? selectedTab().getId() : rows.get(rows.size() - 1).get(0).getId());
+                rows.isEmpty()
+                        ? inline ? inlineFilters.rows.get(2).get(0).getId() : selectedTab().getId()
+                        : rows.get(rows.size() - 1).get(0).getId());
         if (a.homeDock != null) {
             a.homeDock.rightEdge(source);
             a.homeDock.rightEdge(allHistory);
