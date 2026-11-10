@@ -107,7 +107,7 @@ void main() {
         throwsFormatException);
   });
 
-  test('timed-out share reads are cancelled before the next original share', () async {
+  test('timed-out share is cancelled while independent original shares survive', () async {
     const detail = '''<title>玩偶共享站</title><div class="video-info"></div>
 <div class="module-row-info"><a data-clipboard-text="https://drive.uc.cn/s/slow"></a></div>
 <div class="module-row-info"><a data-clipboard-text="https://drive.uc.cn/s/next"></a></div>''';
@@ -125,11 +125,12 @@ void main() {
           firstAbort = abort;
           return slow.future;
         }
-        expect(firstAbort!.isCompleted, isTrue);
+        expect(firstAbort, isNotNull);
         return const [CmsEpisode(name: 'Original file', url: 'mmcloud://uc?fid=next')];
       },
     );
     final result = jsonDecode(await adapter.invoke(site, 'detail', ['42']));
+    expect(firstAbort!.isCompleted, isTrue);
     expect(result['list'][0]['lines'], hasLength(1));
     expect(result['list'][0]['wogg_share_errors'], hasLength(1));
     slow.complete(const []);

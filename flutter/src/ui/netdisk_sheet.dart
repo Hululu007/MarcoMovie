@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../core/netdisk_service.dart';
+import '../core/netdisk_session.dart';
 import '../core/storage_service.dart';
 import '../core/quark_account.dart';
 import 'apple_theme.dart';
@@ -156,8 +157,11 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
       if (!current()) return;
       if (res.state == NetdiskPollState.confirmed &&
           res.credential.isNotEmpty) {
-        if (session.driveKey == 'quark' &&
-            QuarkAccountSession.tryParseCredential(res.credential) == null) {
+        final complete = session.driveKey == 'quark'
+            ? QuarkAccountSession.tryParseCredential(res.credential) != null
+            : NetdiskSession.isUsable(session.driveKey, res.credential) &&
+                (session.driveKey != 'baidu' || res.accountVerified);
+        if (!complete) {
           setState(() => _qrStatusText = '账户验证未完成，请刷新二维码重试');
           return;
         }

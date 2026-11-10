@@ -11,6 +11,9 @@ import '../core/emby_library.dart';
 import '../core/csp_bridge.dart';
 import '../core/cloud_media_proxy.dart';
 import '../core/models.dart';
+import '../core/playback_recovery_policy.dart';
+import '../core/wogg_source.dart';
+import 'player_interaction_layers.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
 import 'desktop_player_window.dart';
@@ -90,6 +93,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final VideoController _controller;
   final CmsClient _client = CmsClient();
 
+  late final List<CmsLine> _lines;
   late int _lineIndex;
   late int _episodeIndex;
   late double _normalSpeed;
@@ -154,7 +158,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _outroSkippedForSession = false;
   final Set<int> _failedLineIndices = <int>{};
 
-  CmsLine get _currentLine => widget.video.lines[_lineIndex];
+  CmsLine get _currentLine => _lines[_lineIndex];
   CmsEpisode get _currentEpisode => _currentLine.episodes[_episodeIndex];
 
   bool get _isLiveStream =>
@@ -168,9 +172,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _lines = WoggSource.normalizeCachedVideoLabels(widget.site, widget.video).lines;
     _lineIndex = widget.initialLineIndex.clamp(
       0,
-      widget.video.lines.length - 1,
+      _lines.length - 1,
     );
     _episodeIndex = widget.initialEpisodeIndex.clamp(
       0,
@@ -384,8 +389,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (widget.site.isEffectivelyPrivate) return 0;
     for (final entry in widget.storage.getWatchHistory()) {
       if (entry.site == widget.site.key && entry.id == widget.video.id) {
-        if ((entry.line == _currentLine.name && entry.index == _episodeIndex) ||
-            entry.episode == _currentEpisode.name) {
+        final target = WoggSource.supports(widget.site)
+            ? WoggSource.resolveCachedBookmarkTarget(widget.site,
+                CmsVideo(id: widget.video.id, title: widget.video.title, lines: _lines), entry)
+            : null;
+        final matches = WoggSource.supports(widget.site)
+            ? target?.$1 == _lineIndex && target?.$2 == _episodeIndex
+            : (entry.line == _currentLine.name && entry.index == _episodeIndex) ||
+                entry.episode == _currentEpisode.name;
+        if (matches) {
           if (entry.duration > 0) {
             _lastKnownDurationMs = entry.duration;
           }
@@ -420,18 +432,23 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   bool _tryAutoSwitchLine({String reason = '当前线路不可用'}) {
-    if (_isLiveStream || widget.video.lines.length <= 1) return false;
+    if (_isLiveStream || _lines.length <= 1 ||
+        PlaybackRecoveryPolicy.decide(episode: _currentEpisode,
+          isTrial: false, hasNextQuality: false) == PlaybackRecoveryDecision.stop) {
+      return false;
+    }
     _failedLineIndices.add(_lineIndex);
-    final totalLines = widget.video.lines.length;
+    final totalLines = _lines.length;
     int? chosenIdx;
     for (int pass = 0; pass < 2 && chosenIdx == null; pass++) {
       for (int step = 1; step < totalLines; step++) {
         final candidateIdx = (_lineIndex + step) % totalLines;
         if (_failedLineIndices.contains(candidateIdx)) continue;
-        final candidateLine = widget.video.lines[candidateIdx];
+        final candidateLine = _lines[candidateIdx];
         if (candidateLine.episodes.isEmpty) continue;
         final epIdx = _episodeIndex.clamp(0, candidateLine.episodes.length - 1);
         final candidateEp = candidateLine.episodes[epIdx];
+        if (!PlaybackRecoveryPolicy.isAutomaticLineCandidate(candidateEp)) continue;
         if (candidateEp.url == _activeStreamUrl ||
             candidateEp.url == _currentEpisode.url) {
           continue;
@@ -449,10 +466,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       _lineIndex = nextIdx;
       _episodeIndex = _episodeIndex.clamp(
         0,
-        widget.video.lines[nextIdx].episodes.length - 1,
+        _lines[nextIdx].episodes.length - 1,
       );
     });
-    _showHud('$reason，已自动切换至 ${widget.video.lines[nextIdx].name}');
+    _showHud('$reason，已自动切换至 ${_lines[nextIdx].name}');
     _openCurrentEpisode(resumeMs: keepPos);
     return true;
   }
@@ -1067,7 +1084,32 @@ class _PlayerScreenState extends State<PlayerScreen>
           onHover: (event) => _onPointerMove(event.delta),
           child: Listener(
             onPointerMove: (event) => _onPointerMove(event.delta),
-            child: GestureDetector(
+            child: PlayerInteractionLayers(
+              controls: Stack(fit: StackFit.expand, children: [
+                if (_controlsVisible) _buildAppleChromeOverlay(context),
+              if (_playbackError.isNotEmpty)
+                Center(
+                  child: AppleGlassSurface(
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(_playbackError, textAlign: TextAlign.center),
+                        const SizedBox(height: 12),
+                        if (CmsClient.needsSourceVerification(widget.site, _playbackErrorCause))
+                          SourceVerificationButton(key: ValueKey('verification-$_playSession'),
+                            client: _client, site: widget.site,
+                            onVerified: () => _openCurrentEpisode(resumeMs: _pendingResumeMs)),
+                        TextButton(
+                          onPressed: () => _openCurrentEpisode(),
+                          child: const Text('重试播放'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ]),
+              surface: GestureDetector(
               behavior: HitTestBehavior.opaque,
           onTap: _toggleControls,
           onDoubleTap: () {
@@ -1182,28 +1224,6 @@ class _PlayerScreenState extends State<PlayerScreen>
                     ),
                   ),
                 ),
-              if (_controlsVisible) _buildAppleChromeOverlay(context),
-              if (_playbackError.isNotEmpty)
-                Center(
-                  child: AppleGlassSurface(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(_playbackError, textAlign: TextAlign.center),
-                        const SizedBox(height: 12),
-                        if (CmsClient.needsSourceVerification(widget.site, _playbackErrorCause))
-                          SourceVerificationButton(key: ValueKey('verification-$_playSession'),
-                            client: _client, site: widget.site,
-                            onVerified: () => _openCurrentEpisode(resumeMs: _pendingResumeMs)),
-                        TextButton(
-                          onPressed: () => _openCurrentEpisode(),
-                          child: const Text('重试播放'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
               if (_loading || _buffering)
                 Center(
                   child: AppleGlassSurface(
@@ -1231,6 +1251,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 ),
             ],
           ),
+              ),
             ),
           ),
         ),
@@ -1721,7 +1742,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           live ? '信号' : '选集',
           _showEpisodesSheet,
         ),
-      if (widget.video.lines.length > 1 || !live)
+      if (_lines.length > 1 || !live)
         _PlayerAction(CupertinoIcons.layers_alt_fill, '线路', _showLinesSheet),
       _PlayerAction(
         CupertinoIcons.slider_horizontal_3,
@@ -2413,15 +2434,15 @@ class _PlayerScreenState extends State<PlayerScreen>
         padding: const EdgeInsets.all(16),
         children: [
           AppleGroupedSection(
-            children: List.generate(widget.video.lines.length, (i) {
+            children: List.generate(_lines.length, (i) {
               final selected = i == _lineIndex;
               return AppleGroupedTile(
                 icon: CupertinoIcons.layers_alt_fill,
                 iconBgColor: selected
                     ? AppleColors.systemBlue
                     : AppleColors.groupedTertiary,
-                title: widget.video.lines[i].name,
-                subtitle: '${widget.video.lines[i].episodes.length} 集',
+                title: _lines[i].name,
+                subtitle: '${_lines[i].episodes.length} 集',
                 trailing: selected
                     ? const Icon(
                         CupertinoIcons.checkmark_alt,
@@ -2440,7 +2461,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     _lineIndex = i;
                     _episodeIndex = _episodeIndex.clamp(
                       0,
-                      widget.video.lines[i].episodes.length - 1,
+                      _lines[i].episodes.length - 1,
                     );
                   });
                   _openCurrentEpisode(resumeMs: keepPos);
@@ -2461,7 +2482,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       title: '选集与线路 (${_currentLine.episodes.length})',
       maxWidth: isLandscape ? math.min(screenSize.width - 24, 760.0) : 560.0,
       builder: (ctx) => _PlayerEpisodePickerSheet(
-        lines: widget.video.lines,
+        lines: _lines,
         initialLineIndex: _lineIndex,
         activeLineIndex: _lineIndex,
         activeEpisodeIndex: _episodeIndex,

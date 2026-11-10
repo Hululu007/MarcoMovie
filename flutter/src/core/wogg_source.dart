@@ -45,6 +45,125 @@ class WoggSource {
     }
   }
 
+  /// Correct only provably mismatched labels in an older WoGG detail snapshot.
+  /// The stable episode references remain the authority for playback routing.
+  static CmsVideo normalizeCachedVideoLabels(CmsSite site, CmsVideo video) {
+    if (!supports(site)) return video;
+    var changed = false;
+    final lines = <CmsLine>[];
+    for (final (index, line) in video.lines.indexed) {
+      final providers =
+          line.episodes.map((episode) => episode.cloudProvider).toSet();
+      var name = line.name;
+      if (providers.length == 1 && !providers.contains(null)) {
+        final provider = providers.single!;
+        final claimed = _labelProviders(name);
+        if (claimed.isNotEmpty &&
+            (claimed.length != 1 || !claimed.contains(provider))) {
+          final ordinal =
+              RegExp(r'\s+(\d+)$').firstMatch(name)?.group(1) ?? '${index + 1}';
+          name = '${_providerLabel(provider)} $ordinal';
+        }
+      }
+      changed |= name != line.name;
+      lines.add(name == line.name
+          ? line
+          : CmsLine(name: name, episodes: line.episodes));
+    }
+    if (!changed) return video;
+    return CmsVideo(
+      id: video.id,
+      title: video.title,
+      poster: video.poster,
+      remarks: video.remarks,
+      year: video.year,
+      area: video.area,
+      actor: video.actor,
+      description: video.description,
+      tag: video.tag,
+      lines: lines,
+      sourceWarnings: video.sourceWarnings,
+    );
+  }
+
+  /// Recover the known 0.5.15 provider-label bug without guessing a new file.
+  /// This is a read-only view of the bookmark; it does not migrate storage.
+  static WatchHistoryEntry normalizeCachedBookmark(
+      CmsSite site, CmsVideo video, WatchHistoryEntry bookmark) {
+    if (!supports(site) ||
+        bookmark.site != site.key ||
+        bookmark.id != video.id ||
+        bookmark.episode.trim().isEmpty ||
+        video.lines.any((line) => line.name == bookmark.line)) {
+      return bookmark;
+    }
+    // Only the exact provider names/aliases emitted by the reviewed source
+    // qualify. A title that merely mentions a provider is not migration proof.
+    final old = RegExp(
+            r'^(UC网盘|UC|优汐|夸克网盘|夸克|quark|百度网盘|百度|baidu|嘟嘟|阿里云盘|阿里网盘|阿里|alipan|aliyundrive) ([1-9][0-9]*)$',
+            caseSensitive: false)
+        .firstMatch(bookmark.line);
+    if (old == null) return bookmark;
+    final oldProviders = _labelProviders(old.group(1)!);
+    if (oldProviders.length != 1) return bookmark;
+    final ordinal = old.group(2)!;
+    final candidates = video.lines.where((line) =>
+        RegExp(r'\s+([1-9][0-9]*)$').firstMatch(line.name)?.group(1) ==
+        ordinal);
+    // Share failures leave gaps in these numbers. Never use the list index.
+    if (candidates.length != 1) return bookmark;
+    final candidate = candidates.single;
+    final providers =
+        candidate.episodes.map((episode) => episode.cloudProvider).toSet();
+    if (providers.length != 1 ||
+        providers.contains(null) ||
+        providers.single == oldProviders.single ||
+        candidate.episodes
+                .where((episode) => episode.name == bookmark.episode)
+                .length !=
+            1) {
+      return bookmark;
+    }
+    final claimed = _labelProviders(candidate.name);
+    if (claimed.isNotEmpty &&
+        (claimed.length != 1 || !claimed.contains(providers.single))) {
+      return bookmark;
+    }
+    return WatchHistoryEntry(
+      site: bookmark.site,
+      id: bookmark.id,
+      title: bookmark.title,
+      poster: bookmark.poster,
+      line: candidate.name,
+      episode: bookmark.episode,
+      index: bookmark.index,
+      position: bookmark.position,
+      duration: bookmark.duration,
+      updated: bookmark.updated,
+    );
+  }
+
+  /// Locate a saved file exactly; an unresolvable bookmark carries no progress.
+  /// Stored indices cannot identify a file after a partial share listing.
+  static (int lineIndex, int episodeIndex)? resolveCachedBookmarkTarget(
+      CmsSite site, CmsVideo video, WatchHistoryEntry bookmark) {
+    if (!supports(site) ||
+        bookmark.site != site.key ||
+        bookmark.id != video.id) {
+      return null;
+    }
+    final normalized = normalizeCachedBookmark(site, video, bookmark);
+    if (normalized.episode.trim().isEmpty) return null;
+    final lines =
+        video.lines.indexed.where((entry) => entry.$2.name == normalized.line);
+    if (lines.length != 1) return null;
+    final line = lines.single;
+    final episodes = line.$2.episodes.indexed
+        .where((entry) => entry.$2.name == normalized.episode);
+    if (episodes.length != 1) return null;
+    return (line.$1, episodes.single.$1);
+  }
+
   static const categories = [
     {'type_id': '1', 'type_name': '电影'},
     {'type_id': '2', 'type_name': '剧集'},
@@ -127,7 +246,7 @@ class WoggSource {
   }
 
   Future<String> invoke(CmsSite site, String method, List<Object?> args,
-      {Completer<void>? cancellation}) async {
+      {Completer<void>? cancellation, bool allowDetailRecovery = true}) async {
     void check() {
       if (cancellation?.isCompleted == true) {
         throw const FormatException('搜索已取消');
@@ -145,6 +264,45 @@ class WoggSource {
         }[method] ??
         method;
     String path;
+    final expectedTitle = method == 'detailContent' && args.length > 1
+        ? args[1]?.toString().trim() ?? ''
+        : '';
+    final expectedYear = method == 'detailContent' && args.length > 2
+        ? args[2]?.toString().trim() ?? ''
+        : '';
+    Future<String> recoverDetail() async {
+      check();
+      final raw = jsonDecode(await invoke(
+          site, 'searchContent', [expectedTitle],
+          cancellation: cancellation));
+      final candidates = (raw['list'] as List)
+          .whereType<Map>()
+          .where((item) =>
+              _sameTitle(expectedTitle, item['vod_name']?.toString() ?? '',
+                  expectedYear) &&
+              (_year(expectedYear).isEmpty ||
+                  _year(item['vod_year']?.toString() ?? '').isEmpty ||
+                  _year(expectedYear) ==
+                      _year(item['vod_year']?.toString() ?? '')))
+          .toList();
+      if (candidates.length != 1) {
+        throw const FormatException('旧版影片编号已失效，原站未找到唯一对应条目，请在当前源重新搜索选择');
+      }
+      final id = candidates.single['vod_id'].toString();
+      final recovered = jsonDecode(await invoke(
+          site, 'detailContent', [id, expectedTitle, expectedYear],
+          cancellation: cancellation, allowDetailRecovery: false));
+      final videos = recovered['list'];
+      if (videos is List && videos.isNotEmpty && videos.first is Map) {
+        final video = videos.first as Map;
+        video['wogg_share_errors'] = [
+          ...(video['wogg_share_errors'] as List? ?? const []),
+          {'line': '观看记录', 'message': '已重新匹配原站影片，请重新选择原文件播放'}
+        ];
+      }
+      return jsonEncode(recovered);
+    }
+
     var page = 1;
     switch (method) {
       case 'homeContent':
@@ -183,6 +341,8 @@ class WoggSource {
             ? ids.first.toString()
             : ids?.toString() ?? '';
         if (!RegExp(r'^\d+$').hasMatch(id)) {
+          if (allowDetailRecovery && expectedTitle.isNotEmpty)
+            return recoverDetail();
           throw const FormatException('玩偶详情编号无效');
         }
         path = 'voddetail/$id.html';
@@ -194,6 +354,10 @@ class WoggSource {
     final scope = _scope(site);
     final origins = <String>{
       if (_selectedOrigins[scope] != null) _selectedOrigins[scope]!,
+      // Prefer HTTPS on the same imported host. Never invent a different site.
+      for (final origin in config.origins)
+        if (Uri.parse(origin).scheme == 'http')
+          Uri.parse(origin).replace(scheme: 'https').toString(),
       ...config.origins,
     };
     Document? document;
@@ -230,9 +394,23 @@ class WoggSource {
       }
     }
     if (document == null || base == null) {
+      if (method == 'detailContent' &&
+          allowDetailRecovery &&
+          expectedTitle.isNotEmpty) {
+        return recoverDetail();
+      }
       throw const FormatException('玩偶原站暂时无法访问，请稍后重试或更新原订阅');
     }
     if (method == 'detailContent') {
+      final actualTitle = document
+              .querySelector('div.video-cover div.module-item-pic img')
+              ?.attributes['alt'] ??
+          _text(document.querySelector('h1'));
+      if (expectedTitle.isNotEmpty &&
+          !_sameTitle(expectedTitle, actualTitle, expectedYear)) {
+        if (allowDetailRecovery) return recoverDetail();
+        throw const FormatException('原站影片与观看记录不一致，请重新搜索选择');
+      }
       final id = args[0] is List
           ? (args[0] as List).first.toString()
           : args[0].toString();
@@ -251,6 +429,28 @@ class WoggSource {
       result['filters'] = _filters();
     }
     return jsonEncode(result);
+  }
+
+  static String _year(String value) =>
+      RegExp(r'^(?:19|20)\d{2}$').hasMatch(value.trim()) ? value.trim() : '';
+
+  static bool _sameTitle(String expected, String actual, String year) {
+    (String, String) identity(String value, String metadataYear) {
+      var result = value
+          .toLowerCase()
+          .replaceAll(RegExp(r'[\s:：·・,，.。\-—_《》<>（）()]'), '');
+      final trailing = result.length > 4
+          ? RegExp(r'(?:19|20)\d{2}$').firstMatch(result)?.group(0) ?? '' : '';
+      final suffix = _year(metadataYear).isNotEmpty ? _year(metadataYear) : trailing;
+      if (trailing.isNotEmpty && suffix == trailing) {
+        result = result.substring(0, result.length - 4);
+      }
+      return (result, suffix);
+    }
+    final a = identity(expected, year);
+    final b = identity(actual, '');
+    return a.$1.isNotEmpty && a.$1 == b.$1 &&
+        (a.$2.isEmpty || b.$2.isEmpty || a.$2 == b.$2);
   }
 
   static List<Map<String, dynamic>> _listing(Document doc, Uri base,
@@ -281,9 +481,8 @@ class WoggSource {
     return result;
   }
 
-  Future<Map<String, dynamic>> _detail(
-      Document doc, Uri base, String id, void Function() check,
-      Completer<void>? cancellation) async {
+  Future<Map<String, dynamic>> _detail(Document doc, Uri base, String id,
+      void Function() check, Completer<void>? cancellation) async {
     final image = doc.querySelector('div.video-cover div.module-item-pic img');
     final title = image?.attributes['alt'] ?? _text(doc.querySelector('h1'));
     final video = <String, dynamic>{
@@ -306,60 +505,133 @@ class WoggSource {
             .replaceAll('[收起部分]', '');
       }
     }
-    final lines = <Map<String, dynamic>>[];
-    final errors = <Map<String, String>>[];
+    final jobs = <({String? share, String label})>[];
     final seen = <String>{};
     var index = 0;
     final tabs = doc.querySelectorAll('.module-tab-item.downtab-item');
     final panels = doc.querySelectorAll('.module-downlist');
-    for (final link in doc.querySelectorAll('div.module-row-info > a')) {
-      final share = (link.attributes['data-clipboard-text'] ?? '').trim();
-      if (share.isEmpty || !seen.add(share)) continue;
+    final links = doc
+        .querySelectorAll('div.module-row-info > a')
+        .where((link) =>
+            (link.attributes['data-clipboard-text'] ?? '').trim().isNotEmpty)
+        .toList();
+    for (final (rowIndex, link) in links.indexed) {
+      final raw = (link.attributes['data-clipboard-text'] ?? '').trim();
+      String? share;
+      try {
+        share = _normalizeClipboardShare(raw);
+      } on FormatException {
+        // An ambiguous password or URL stays an explicit failed original line.
+      }
+      if (!seen.add(share ?? raw)) continue;
       index++;
       var label = '';
-      Element? ancestor = link.parent;
-      while (ancestor != null) {
-        final panel = panels.indexOf(ancestor);
-        if (panel >= 0 && panel < tabs.length) {
-          label = _text(tabs[panel]).replaceFirst(RegExp(r'\d+$'), '');
-          break;
+      // The original site can put several tabbed shares in one downlist.
+      // Prefer a one-to-one tab/row association; use panel grouping only when
+      // its cardinality actually matches the tabs. Neither may override the
+      // provider identified by the original share URL.
+      if (tabs.length == links.length) {
+        label = _tabLabel(tabs[rowIndex]);
+      } else if (tabs.length == panels.length) {
+        Element? ancestor = link.parent;
+        while (ancestor != null) {
+          final panel = panels.indexOf(ancestor);
+          if (panel >= 0) {
+            label = _tabLabel(tabs[panel]);
+            break;
+          }
+          ancestor = ancestor.parent;
         }
-        ancestor = ancestor.parent;
       }
-      if (label.isEmpty) label = _providerLabel(share);
+      final provider = _shareProvider(share ?? raw);
+      final claimed = _labelProviders(label);
+      if (label.isEmpty ||
+          provider != null &&
+              claimed.isNotEmpty &&
+              (claimed.length != 1 || !claimed.contains(provider))) {
+        label = _providerLabel(provider);
+      }
       label = '$label $index';
-      check();
-      final shareAbort = Completer<void>();
-      void cancelShare() {
-        if (!shareAbort.isCompleted) shareAbort.complete();
+      jobs.add((share: share, label: label));
+    }
+    final results = List<Map<String, dynamic>?>.filled(jobs.length, null);
+    final failures = List<Map<String, String>?>.filled(jobs.length, null);
+    final active = <Completer<void>>{};
+    var cursor = 0;
+    final subscription = cancellation?.future.asStream().listen((_) {
+      for (final token in active.toList()) {
+        if (!token.isCompleted) token.complete();
       }
-      final subscription = cancellation?.future.asStream().listen((_) => cancelShare());
-      try {
-        final episodes = await (listShareWithCancellation?.call(share, shareAbort) ??
-                listShare(share)).timeout(shareTimeout, onTimeout: () {
-          cancelShare();
-          throw TimeoutException('原网盘目录读取超时');
-        });
+    });
+    Future<void> worker() async {
+      while (cursor < jobs.length) {
         check();
-        if (episodes.isEmpty) throw const FormatException('分享中没有可播放视频');
-        lines.add({
-          'name': label,
-          'episodes': episodes
-              .map((episode) => {
-                    'name': episode.name,
-                    'url': episode.url,
-                    if (episode.headers.isNotEmpty) 'headers': episode.headers,
-                  })
-              .toList()
-        });
-      } catch (_) {
-        check();
-        errors.add({'line': label, 'message': '原网盘分享暂不可用，请检查网盘登录或分享状态'});
-      } finally {
-        cancelShare();
-        if (subscription != null) unawaited(subscription.cancel());
+        final position = cursor++;
+        final job = jobs[position];
+        final token = Completer<void>();
+        active.add(token);
+        try {
+          if (job.share == null) throw const FormatException('分享地址或提取码不明确');
+          final work = Future<List<CmsEpisode>>.sync(() =>
+              listShareWithCancellation?.call(job.share!, token) ??
+              listShare(job.share!));
+          final cancelled = token.future.then<List<CmsEpisode>>(
+              (_) => throw const FormatException('分享读取已取消'));
+          final episodes = await Future.any([work, cancelled])
+              .timeout(shareTimeout, onTimeout: () {
+            if (!token.isCompleted) token.complete();
+            throw TimeoutException('原分享目录读取超时');
+          });
+          check();
+          if (episodes.isEmpty) throw const FormatException('分享中没有可播放视频');
+          results[position] = {
+            'name': job.label,
+            'episodes': episodes
+                .map((episode) => {
+                      'name': episode.name,
+                      'url': episode.url,
+                      if (episode.headers.isNotEmpty)
+                        'headers': episode.headers,
+                    })
+                .toList(),
+          };
+          if (episodes.any((episode) =>
+              episode.playbackSession['listingWarning'] is String &&
+              (episode.playbackSession['listingWarning'] as String)
+                  .isNotEmpty)) {
+            // Keep real episodes and report incomplete directory metadata.
+            // Never echo provider responses, identifiers or account data.
+            failures[position] = {
+              'line': job.label,
+              'message': '目录返回不完整或总数不一致，已保留原网盘实际返回的视频，请稍后重试',
+            };
+          }
+        } catch (_) {
+          check();
+          failures[position] = {
+            'line': job.label,
+            'message': job.share == null
+                ? '原分享地址或提取码不明确，请检查原站分享信息'
+                : '原网盘分享暂不可用，请检查网盘登录或分享状态'
+          };
+        } finally {
+          active.remove(token);
+        }
       }
     }
+
+    try {
+      await Future.wait(
+          [for (var i = 0; i < 3 && i < jobs.length; i++) worker()]);
+      check();
+    } finally {
+      await subscription?.cancel();
+      for (final token in active.toList()) {
+        if (!token.isCompleted) token.complete();
+      }
+    }
+    final lines = results.whereType<Map<String, dynamic>>().toList();
+    final errors = failures.whereType<Map<String, String>>().toList();
     if (lines.isEmpty) {
       throw FormatException(
           index == 0 ? '玩偶原站尚未提供此片分享' : '玩偶原网盘分享暂不可用，请检查网盘登录或分享状态');
@@ -373,16 +645,92 @@ class WoggSource {
     };
   }
 
-  static String _providerLabel(String share) {
-    final host = Uri.tryParse(share)?.host.toLowerCase() ?? '';
-    if (host == 'drive.uc.cn') return 'UC网盘';
-    if (host == 'pan.quark.cn') return '夸克网盘';
-    if (host == 'pan.baidu.com') return '百度网盘';
-    if (host == 'www.alipan.com' || host == 'www.aliyundrive.com') {
-      return '阿里云盘';
+  static String _normalizeClipboardShare(String raw) {
+    if (raw.length > 16 * 1024) throw const FormatException('分享信息过长');
+    final marker = raw.indexOf('提取码');
+    if (marker < 0) return raw;
+    // The reviewed Cloud_baidu wrapper explicitly reads the 提取码 field.
+    // Treat full-width punctuation as the same field, without inventing keys
+    // or moving the share to a different host/provider.
+    if (!raw.contains('pan.baidu.com')) return raw;
+    if (RegExp(r'https?://', caseSensitive: false).allMatches(raw).length !=
+        1) {
+      throw const FormatException('分享链接不明确');
     }
-    return '原站分享';
+    final link = RegExp(r'https?://[^\s<>"\x27]+', caseSensitive: false)
+        .firstMatch(raw.substring(0, marker))
+        ?.group(0);
+    final passcodes = RegExp(r'提取码\s*[:：]\s*([A-Za-z0-9]{4})(?![A-Za-z0-9])')
+        .allMatches(raw)
+        .toList();
+    final uri = Uri.tryParse(link ?? '');
+    if (uri == null ||
+        uri.host != 'pan.baidu.com' ||
+        uri.userInfo.isNotEmpty ||
+        !const ['http', 'https'].contains(uri.scheme) ||
+        !RegExp(r'^/s/[A-Za-z0-9_-]+$').hasMatch(uri.path) ||
+        passcodes.length != 1 ||
+        (uri.queryParametersAll['pwd']?.length ?? 0) > 1) {
+      throw const FormatException('分享地址或提取码不明确');
+    }
+    final password = passcodes.single.group(1)!;
+    final existing = uri.queryParameters['pwd'];
+    if (existing != null && existing.isNotEmpty && existing != password) {
+      throw const FormatException('分享提取码不一致');
+    }
+    return uri.replace(queryParameters: {
+      ...uri.queryParametersAll,
+      'pwd': [password],
+    }).toString();
   }
+
+  static String _tabLabel(Element tab) =>
+      _text(tab).replaceFirst(RegExp(r'\s*\d+$'), '').trim();
+
+  static String? _shareProvider(String share) {
+    final uri = Uri.tryParse(share);
+    if (uri == null ||
+        !['http', 'https'].contains(uri.scheme) ||
+        uri.userInfo.isNotEmpty) {
+      return null;
+    }
+    final host = uri.host.toLowerCase();
+    if (host == 'drive.uc.cn' || host == 'fast.uc.cn') return 'uc';
+    if (host == 'pan.quark.cn') return 'quark';
+    if (host == 'pan.baidu.com') return 'baidu';
+    if (const {
+      'www.alipan.com',
+      'alipan.com',
+      'www.aliyundrive.com',
+      'aliyundrive.com'
+    }.contains(host)) {
+      return 'ali';
+    }
+    return null;
+  }
+
+  static Set<String> _labelProviders(String label) {
+    final text = label.toLowerCase();
+    return {
+      if (RegExp(r'(^|[^a-z])uc([^a-z]|$)|优汐').hasMatch(text)) 'uc',
+      if (text.contains('夸克') || text.contains('quark')) 'quark',
+      if (text.contains('百度') || text.contains('baidu') || text.contains('嘟嘟'))
+        'baidu',
+      if (text.contains('阿里') ||
+          text.contains('alipan') ||
+          text.contains('aliyundrive'))
+        'ali',
+    };
+  }
+
+  static String _providerLabel(String? provider) =>
+      const {
+        'uc': 'UC网盘',
+        'quark': '夸克网盘',
+        'baidu': '百度网盘',
+        'ali': '阿里云盘',
+      }[provider] ??
+      '原站分享';
 
   static String _text(Element? element) =>
       (element?.text ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();

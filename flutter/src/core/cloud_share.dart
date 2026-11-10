@@ -247,20 +247,26 @@ class CloudShareClient {
     final fileToken = file.session['fileToken'] ?? '';
     if (fileToken.isEmpty) throw const FormatException('UC 分享缺少文件访问凭据');
     final guestCookies = <String, String>{};
-    final result = await _json(
-        Uri.https('pc-api.uc.cn', '/1/clouddrive/file/download',
-            {'entry': 'ft', 'fr': 'pc', 'pr': 'UCBrowser'}),
-        provider: 'uc',
-        budget: share.budget,
-        cookies: guestCookies,
-        userAgent: _ucMediaUa,
-        referer: 'https://fast.uc.cn/',
-        body: {
-          'fids': [file.id],
-          'pwd_id': share.id,
-          'stoken': file.session['stoken'],
-          'fids_token': [fileToken],
-        });
+    late final Map result;
+    try {
+      result = await _json(
+          Uri.https('pc-api.uc.cn', '/1/clouddrive/file/download',
+              {'entry': 'ft', 'fr': 'pc', 'pr': 'UCBrowser'}),
+          provider: 'uc',
+          budget: share.budget,
+          cookies: guestCookies,
+          userAgent: _ucMediaUa,
+          referer: 'https://fast.uc.cn/',
+          body: {
+            'fids': [file.id],
+            'pwd_id': share.id,
+            'stoken': file.session['stoken'],
+            'fids_token': [fileToken],
+          });
+    } on _CloudHttpException catch (error) {
+      if (error.statusCode != 401 && error.statusCode != 403) rethrow;
+      return _resolveUcAccount(share, file);
+    }
     if ((result.containsKey('code') && _integer(result['code']) != 0) ||
         (result.containsKey('status') && _integer(result['status']) != 200)) {
       return _resolveUcAccount(share, file);
@@ -406,31 +412,35 @@ class CloudShareClient {
       final dir = dirs[cursor];
       if (!seenDirs.add(dir['id']!)) continue;
       final root = cursor == 0;
+      if (!root && (uk.isEmpty || shareId.isEmpty)) {
+        throw const FormatException('百度分享未返回目录所属信息，请重新打开分享');
+      }
       final pageSize = root ? 20 : _pageSize;
       final pageFingerprints = <String>{};
       for (var page = 1; page <= 200; page++) {
         final result = await _baiduJson(
             Uri.https('pan.baidu.com', '/share/list', {
-              'desc': root ? '1' : '0',
-              'showempty': '0',
               'page': '$page',
               'num': '$pageSize',
-              'order': root ? 'time' : 'name',
-              'view_mode': '1',
-              'channel': 'chunlei',
-              'web': '1',
-              'bdstoken': '',
-              'clienttype': '0',
               if (root) ...{
+                'desc': '1',
+                'showempty': '0',
+                'order': 'time',
+                'view_mode': '1',
+                'channel': 'chunlei',
+                'web': '1',
+                'bdstoken': '',
+                'clienttype': '0',
                 'shorturl': share.shortId,
                 'root': '1'
               } else ...{
-                'is_from_web': 'true',
+                // The share-directory API uses a smaller parameter set than
+                // the root browser API. Mixing those contracts can return -9
+                // for an otherwise accessible original directory.
                 'sekey': sekey,
                 'uk': uk,
                 'shareid': shareId,
                 'dir': dir['path']!,
-                'app_id': '250528'
               },
             }),
             share: share,
@@ -455,12 +465,10 @@ class CloudShareClient {
           if (_integer(row['isdir']) == 1) {
             if (!seenDirs.contains(id) &&
                 !dirs.any((item) => item['id'] == id)) {
-              // The original plugin uses a virtual /sharelink<uk>-<fid> path.
-              final prefix = RegExp(r'^/?sharelink[^/]+');
-              final suffix = prefix.hasMatch(path)
-                  ? path.replaceFirst(prefix, '')
-                  : '/$name';
-              dirs.add({'id': id, 'path': '/sharelink$uk-$id$suffix'});
+              if (path.isEmpty) {
+                throw const FormatException('百度分享未返回子目录路径，无法继续读取');
+              }
+              dirs.add({'id': id, 'path': path});
             }
           } else if (_video(row, name) && seenFiles.add(id)) {
             files.add(_CloudFile(
@@ -489,17 +497,24 @@ class CloudShareClient {
       required Map<String, String> cookies,
       Map<String, String>? form,
       String? referer}) async {
+    final previous = share.baiduCredential;
+    if (previous != null && await credentialReader('baidu') != previous) {
+      throw const FormatException('百度账号已切换，请重新打开分享');
+    }
     var result = await _json(uri,
         provider: 'baidu',
         budget: share.budget,
         cookies: cookies,
         form: form,
         referer: referer);
+    if (previous != null && await credentialReader('baidu') != previous) {
+      throw const FormatException('百度账号已切换，请重新打开分享');
+    }
     if (_integer(result['errno']) == 0) return result;
     // Retry the same request with an existing account; captchas remain errors.
     final credential = await credentialReader('baidu');
     final account = _credentialCookies(credential);
-    if ((account['BDUSS'] ?? '').isEmpty || (account['STOKEN'] ?? '').isEmpty) {
+    if ((account['BDUSS'] ?? '').isEmpty) {
       return result;
     }
     _checkCancelled();
@@ -507,6 +522,7 @@ class CloudShareClient {
       throw const FormatException('百度账号已切换，请重新打开分享');
     }
     cookies.addAll(account);
+    share.baiduCredential = credential;
     result = await _json(uri,
         provider: 'baidu',
         budget: share.budget,
@@ -523,7 +539,7 @@ class CloudShareClient {
     final credential = await credentialReader('baidu');
     final cookies = _credentialCookies(credential);
     final bduss = cookies['BDUSS'] ?? '';
-    if (bduss.isEmpty || (cookies['STOKEN'] ?? '').isEmpty) {
+    if (bduss.isEmpty) {
       throw const FormatException('百度网盘登录会话不完整，请在网盘面板重新登录');
     }
     Future<void> checkAccount() async {
@@ -620,8 +636,7 @@ class CloudShareClient {
         referer: referer,
         userAgent: userAgent);
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw FormatException(
-          '${provider == 'uc' ? 'UC' : '百度'}网盘请求失败（${response.statusCode}）');
+      throw _CloudHttpException(provider, response.statusCode);
     }
     dynamic result;
     try {
@@ -819,6 +834,13 @@ class CloudShareClient {
   }
 }
 
+class _CloudHttpException extends FormatException {
+  _CloudHttpException(String provider, this.statusCode)
+      : super('${provider == 'uc' ? 'UC' : '百度'}网盘请求失败（$statusCode）');
+
+  final int statusCode;
+}
+
 class _Share {
   _Share(this.provider, this.id, this.passcode, this.url);
   final String provider;
@@ -826,6 +848,7 @@ class _Share {
   final String passcode;
   final String url;
   final _ReadBudget budget = _ReadBudget();
+  String? baiduCredential;
   String get shortId => id.startsWith('1') ? id.substring(1) : id;
 
   static _Share? parse(String raw) {

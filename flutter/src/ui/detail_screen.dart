@@ -7,6 +7,7 @@ import '../core/cms_client.dart';
 import '../core/cms_parser.dart';
 import '../core/download_service.dart';
 import '../core/models.dart';
+import '../core/wogg_source.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
 import 'netdisk_sheet.dart';
@@ -118,7 +119,7 @@ class _DetailScreenState extends State<DetailScreen> {
   void initState() {
     super.initState();
     _activeSite = widget.site;
-    _video = widget.initialVideo;
+    _video = WoggSource.normalizeCachedVideoLabels(widget.site, widget.initialVideo);
     final curInfo = CmsParser.parseSeriesSeasonInfo(_video.title);
     _relatedSeasons = [
       (
@@ -258,7 +259,7 @@ class _DetailScreenState extends State<DetailScreen> {
       }
       _activeSite = owner;
       _isFavorite = widget.storage.isFavorite(owner.key, detailed.id, forPrivate: owner.isEffectivelyPrivate);
-      final bookmark = _findBookmark();
+      final bookmark = _findBookmark(detailed);
       int initialLine = 0;
       if (bookmark != null && detailed.lines.isNotEmpty) {
         final found =
@@ -439,7 +440,7 @@ class _DetailScreenState extends State<DetailScreen> {
     }
     setState(() {
       _activeSite = option.site;
-      _video = option.video;
+      _video = WoggSource.normalizeCachedVideoLabels(option.site, option.video);
       _selectedLine = 0;
       _selectedPage = 0;
       _selectedInLineSeason = null;
@@ -482,11 +483,15 @@ class _DetailScreenState extends State<DetailScreen> {
     return CmsParser.parseSeriesSeasonInfo(_video.title).seasonLabel;
   }
 
-  WatchHistoryEntry? _findBookmark() {
+  WatchHistoryEntry? _findBookmark([CmsVideo? currentVideo]) {
     if (_activeSite.isEffectivelyPrivate) return null;
+    final video = currentVideo ?? _video;
     for (final item in widget.storage.getWatchHistory()) {
-      if (item.site == _activeSite.key && item.id == _video.id) {
-        return item;
+      if (item.site == _activeSite.key && item.id == video.id) {
+        final bookmark = WoggSource.normalizeCachedBookmark(_activeSite, video, item);
+        if (WoggSource.supports(_activeSite) &&
+            WoggSource.resolveCachedBookmarkTarget(_activeSite, video, bookmark) == null) return null;
+        return bookmark;
       }
     }
     return null;
@@ -640,6 +645,8 @@ class _DetailScreenState extends State<DetailScreen> {
 
   Future<void> _openPlayer(int lineIdx, int epIdx, {int? resumeMs}) async {
     if (_video.lines.isEmpty) return;
+    final targetSite = _activeSite;
+    final targetVideo = _video;
     final safeLine = lineIdx.clamp(0, _video.lines.length - 1);
     final line = _video.lines[safeLine];
     if (line.episodes.isEmpty) return;
@@ -650,14 +657,22 @@ class _DetailScreenState extends State<DetailScreen> {
       await showNetdiskAccountSheet(context, widget.storage,
           initialDriveKey: provider);
       if (!mounted || !widget.storage.isNetdiskLoggedIn(provider)) return;
+      if (!identical(_activeSite, targetSite) || !identical(_video, targetVideo)) {
+        _toast('剧集信息已更新，请重新选择要播放的文件');
+        return;
+      }
     }
     int effectiveResumeMs = resumeMs ?? 0;
     if (resumeMs == null) {
       final bm = _findBookmark();
       if (bm != null) {
         final ep = line.episodes[safeEp];
-        if ((bm.line == line.name && bm.index == safeEp) ||
-            bm.episode == ep.name) {
+        final target = WoggSource.supports(_activeSite)
+            ? WoggSource.resolveCachedBookmarkTarget(_activeSite, _video, bm) : null;
+        final matches = WoggSource.supports(_activeSite)
+            ? target?.$1 == safeLine && target?.$2 == safeEp
+            : (bm.line == line.name && bm.index == safeEp) || bm.episode == ep.name;
+        if (matches) {
           effectiveResumeMs = bm.resumePosition;
         }
       }
@@ -666,8 +681,8 @@ class _DetailScreenState extends State<DetailScreen> {
         .push(
           CupertinoPageRoute<void>(
             builder: (_) => PlayerScreen(
-              site: _activeSite,
-              video: _video,
+              site: targetSite,
+              video: targetVideo,
               initialLineIndex: safeLine,
               initialEpisodeIndex: safeEp,
               initialPositionMs: effectiveResumeMs,
@@ -696,6 +711,15 @@ class _DetailScreenState extends State<DetailScreen> {
 
   void _playPrimaryAction(WatchHistoryEntry? bookmark) {
     if (_video.lines.isEmpty) return;
+    if (bookmark != null && WoggSource.supports(_activeSite)) {
+      final target = WoggSource.resolveCachedBookmarkTarget(_activeSite, _video, bookmark);
+      if (target == null || target.$1 != _selectedLine) {
+        _toast('原观看文件或线路已变更，请重新选择剧集');
+        return;
+      }
+      _openPlayer(target.$1, target.$2, resumeMs: bookmark.resumePosition);
+      return;
+    }
     if (bookmark != null) {
       final foundLine =
           _video.lines.indexWhere((l) => l.name == bookmark.line);
