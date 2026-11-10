@@ -192,6 +192,7 @@ if (!isMainThread) {
     }
     if ((releases.get(hash)||0)!==epoch || closing || resetting) throw Error('bundle_released');
     fs.mkdirSync(state, { recursive: true, mode: 0o700 });
+    if (kind === 'catpaw') syncPanConfigToState(state);
     const worker = new Worker(kind === 'drpy' ? path.join(__dirname,'drpy-worker.cjs') : __filename, {
       workerData: kind === 'drpy' ? {manifest,state} : { script, state }, stdout: true, stderr: true,
       resourceLimits: { maxOldGenerationSizeMb: 256 },
@@ -291,6 +292,31 @@ if (!isMainThread) {
     return session.open();
   }
 
+  function syncPanConfigToState(stateDir) {
+    try {
+      const srcFile = path.join(root, 'wexfnwconfig.json');
+      if (!fs.existsSync(srcFile)) return null;
+      const incoming = JSON.parse(fs.readFileSync(srcFile, 'utf8'));
+      const pan = incoming?.pan;
+      if (!pan || typeof pan !== 'object') return null;
+      const dstFile = path.join(stateDir, 'wexfnwconfig.json');
+      let existing = {};
+      if (fs.existsSync(dstFile)) {
+        try { existing = JSON.parse(fs.readFileSync(dstFile, 'utf8')) || {}; } catch (_) {}
+      }
+      if (!existing.pan || typeof existing.pan !== 'object') existing.pan = {};
+      for (const [k, v] of Object.entries(pan)) {
+        if (v && typeof v === 'object') {
+          existing.pan[k] = { ...(existing.pan[k] || {}), ...v };
+        }
+      }
+      fs.writeFileSync(dstFile, JSON.stringify(existing, null, 2) + '\n', 'utf8');
+      return pan;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function requestBackend(backend, method, reqPath, bodyObj) {
     return new Promise((resolve, reject) => {
       const payload = bodyObj !== undefined ? Buffer.from(JSON.stringify(bodyObj), 'utf8') : null;
@@ -313,7 +339,7 @@ if (!isMainThread) {
         }));
         resp.on('error', reject);
       });
-      r.setTimeout(25000, () => r.destroy(Error('timeout')));
+      r.setTimeout(35000, () => r.destroy(Error('timeout')));
       r.on('error', reject);
       if (payload) r.write(payload);
       r.end();
@@ -435,6 +461,20 @@ if (!isMainThread) {
       const parsedUrl = new URL('http://127.0.0.1' + resource);
       const spiderPath = parsedUrl.pathname.slice(4);
       const params = parsedUrl.searchParams;
+      try {
+        const srcFile = path.join(root, 'wexfnwconfig.json');
+        const mtime = fs.existsSync(srcFile) ? fs.statSync(srcFile).mtimeMs : 0;
+        if (mtime > 0 && instance.syncedPanMtime !== mtime) {
+          instance.syncedPanMtime = mtime;
+          const pan = syncPanConfigToState(path.join(root, hash, 'state'));
+          if (pan) {
+            for (const p of ['quark', 'uc', 'baidu']) {
+              const ck = String(pan[p]?.cookie || '');
+              await requestBackend(backend, 'PUT', `/website/api/credential/${p}/cookie`, { value: ck }).catch(() => {});
+            }
+          }
+        }
+      } catch (_) {}
       if (!instance.initedSpiders) instance.initedSpiders = new Set();
       if (!instance.initedSpiders.has(spiderPath)) {
         instance.initedSpiders.add(spiderPath);
@@ -538,7 +578,7 @@ if (!isMainThread) {
         source.on('error', () => res.destroy());
       }
     });
-    upstream.setTimeout(30000, () => upstream.destroy());
+    if (!spiderProxy) upstream.setTimeout(30000, () => upstream.destroy());
     upstream.on('error', () => {
       if (!res.headersSent) respond(res, 502, { error: 'source_request_failed' });
       else res.destroy();
@@ -546,7 +586,7 @@ if (!isMainThread) {
     res.on('close', () => upstream.destroy());
     req.pipe(upstream);
   });
-  server.requestTimeout = 35000;
+  server.requestTimeout = 0;
   server.headersTimeout = 10000;
   server.listen(0, '127.0.0.1', () => {
     const temporary = readyFile + '.tmp';

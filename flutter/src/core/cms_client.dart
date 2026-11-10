@@ -1285,6 +1285,9 @@ class CmsClient {
       if (CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s)) {
         return 2;
       }
+      if (s.isCatPaw && (CspBridge.isNetdiskSite(s) || s.name.toLowerCase().contains('4k'))) {
+        return -1;
+      }
       return 0;
     }
     final indexed = filtered.indexed.toList()

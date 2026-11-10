@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'cms_parser.dart';
+import 'quark_account.dart';
 import 'trailer_source.dart';
 import 'models.dart';
 
@@ -17,6 +20,8 @@ class CspBridge {
       'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
   static const String _desktopSafariUa =
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.15';
+  static const String _quarkPcUa =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) quark-cloud-drive/2.5.20 Chrome/100.0.4896.160 Electron/18.3.5.4-b478491100 Safari/537.36 Channel/pckk_other_ch';
 
   /// Multi-source MacCMS v10 JSON endpoints used as cross-platform portable
   /// backends for TVBox `csp_*` VOD spiders and Douban / search resolution on iOS.
@@ -680,12 +685,13 @@ class CspBridge {
       if (matchedDetail != null) {
         final v = matchedDetail;
         final targetTitle = v.title.isEmpty ? fallback.title : v.title;
-        if (wantNetdiskLines && targetTitle.trim().isNotEmpty) {
+        final hasQuarkLogin = await _hasLoggedInQuarkCookie();
+        if ((wantNetdiskLines || hasQuarkLogin) && targetTitle.trim().isNotEmpty) {
           final cross = await resolveCrossSourceVideo(
             v,
             targetTitle,
             fetchText,
-            siteHint: site.name,
+            siteHint: site.name.isEmpty ? '夸父4K' : site.name,
           );
           if (cross.lines.isNotEmpty) return cross;
         }
@@ -740,6 +746,11 @@ class CspBridge {
   ) async {
     if (TrailerSource.matches(site)) return TrailerSource.resolve(episode, fetchText);
     final rawUrl = episode.url.trim();
+
+    // 0. Real 4K Quark Share episode (`drive-pc.quark.cn/1/clouddrive/share/sharepage/save?...`)
+    if (rawUrl.contains('drive-pc.quark.cn/1/clouddrive/share/sharepage/save')) {
+      return _resolveQuarkShareEpisode(episode);
+    }
 
     // 1. Tuxiaobei `/play/{id}` -> extract `video-src` MP4
     if (rawUrl.contains('tuxiaobei.com/play/')) {
@@ -1872,6 +1883,10 @@ class CspBridge {
       }
     }
 
+    final quarkFuture = siteHint.trim().isNotEmpty
+        ? _scrapeRealQuarkShareEpisodes(query, cleanTitle, normTarget, fetchText)
+        : Future.value(const <_QuarkShareEpisodeItem>[]);
+
     final futures = vodPool.take(_primaryVodPoolCount).map((backend) async {
       try {
         final uri = Uri.parse(backend.api).replace(
@@ -1889,6 +1904,7 @@ class CspBridge {
     });
 
     final results = await Future.wait(futures);
+    final realQuarkEpisodes = await quarkFuture;
     for (final (backendName, videos) in results) {
       if (videos.isEmpty) continue;
       // Prefer exact title match first, then normalized title match, then substring match
@@ -1949,7 +1965,7 @@ class CspBridge {
     // prepend 4K Netdisk lines (夸父 / 优汐 / 嘟嘟 / 阿狸); when siteHint is empty,
     // preserve only directLines.
     final lines = <CmsLine>[];
-    if (directLines.isNotEmpty && siteHint.trim().isNotEmpty) {
+    if (siteHint.trim().isNotEmpty && (realQuarkEpisodes.isNotEmpty || directLines.isNotEmpty)) {
       int maxEpCount = 0;
       for (final l in directLines) {
         if (l.episodes.length > maxEpCount) maxEpCount = l.episodes.length;
@@ -1961,28 +1977,61 @@ class CspBridge {
           : directLines;
       final netdiskPool = fullLengthLines.isNotEmpty ? fullLengthLines : directLines;
       final netdiskOrder = _netdiskLineOrderForSite(siteHint);
-      for (int idx = 0; idx < netdiskOrder.length; idx++) {
-        final netdiskLabel = netdiskOrder[idx];
-        final sourceLine = netdiskPool[idx % netdiskPool.length];
-        final totalCount = sourceLine.episodes.length;
-        lines.add(
-          CmsLine(
-            name: netdiskLabel,
-            episodes: [
-              for (int epIdx = 0; epIdx < totalCount; epIdx++)
-                CmsEpisode(
-                  name: _format4kNetdiskEpisodeName(
-                    sourceLine.episodes[epIdx].name,
-                    epIdx,
-                    totalCount,
-                    fallback.title,
+      if (realQuarkEpisodes.isNotEmpty) {
+        for (int idx = 0; idx < netdiskOrder.length; idx++) {
+          final netdiskLabel = netdiskOrder[idx];
+          final mode = netdiskLabel.contains('无限') || netdiskLabel.contains('原画')
+              ? 'original'
+              : 'speed';
+          final fallbackLine = netdiskPool.isNotEmpty
+              ? netdiskPool[idx % netdiskPool.length]
+              : null;
+          lines.add(
+            CmsLine(
+              name: netdiskLabel,
+              episodes: [
+                for (int epIdx = 0; epIdx < realQuarkEpisodes.length; epIdx++)
+                  CmsEpisode(
+                    name: realQuarkEpisodes[epIdx].displayName,
+                    url: Uri.https(
+                      'drive-pc.quark.cn',
+                      '/1/clouddrive/share/sharepage/save',
+                      {
+                        'pwd_id': realQuarkEpisodes[epIdx].shareId,
+                        'stoken': realQuarkEpisodes[epIdx].stoken,
+                        'fid': realQuarkEpisodes[epIdx].fid,
+                        'fid_token': realQuarkEpisodes[epIdx].fidToken,
+                        'fname': realQuarkEpisodes[epIdx].fileName,
+                        'mode': mode,
+                        if (fallbackLine != null && epIdx < fallbackLine.episodes.length)
+                          'fallback': fallbackLine.episodes[epIdx].url,
+                      },
+                    ).toString(),
+                    headers: const {'User-Agent': _quarkPcUa},
                   ),
-                  url: sourceLine.episodes[epIdx].url,
-                  headers: sourceLine.episodes[epIdx].headers,
-                ),
-            ],
-          ),
-        );
+              ],
+            ),
+          );
+        }
+      } else {
+        for (int idx = 0; idx < netdiskOrder.length; idx++) {
+          final netdiskLabel = netdiskOrder[idx];
+          final sourceLine = netdiskPool[idx % netdiskPool.length];
+          final totalCount = sourceLine.episodes.length;
+          lines.add(
+            CmsLine(
+              name: netdiskLabel,
+              episodes: [
+                for (int epIdx = 0; epIdx < totalCount; epIdx++)
+                  CmsEpisode(
+                    name: sourceLine.episodes[epIdx].name,
+                    url: sourceLine.episodes[epIdx].url,
+                    headers: sourceLine.episodes[epIdx].headers,
+                  ),
+              ],
+            ),
+          );
+        }
       }
     }
     lines.addAll(directLines);
@@ -2024,27 +2073,579 @@ class CspBridge {
     return all;
   }
 
-  static String _format4kNetdiskEpisodeName(
-    String rawName,
-    int index,
-    int totalCount,
-    String title,
-  ) {
-    final trimmed = rawName.trim();
-    if (trimmed.startsWith('[') ||
-        trimmed.toLowerCase().endsWith('.mkv') ||
-        trimmed.toLowerCase().endsWith('.mp4')) {
-      return trimmed;
+  static Future<bool> _hasLoggedInQuarkCookie() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = (prefs.getString('mm_netdisk_cred_quark_v1') ?? '').trim();
+      final cookie = QuarkAccountSession.tryParseCredential(raw)?.cookie ?? raw;
+      return cookie.trim().isNotEmpty;
+    } catch (_) {
+      return false;
     }
-    final cleanTitle = title.trim();
-    if (totalCount <= 1) {
-      final prefix = cleanTitle.isNotEmpty ? '$cleanTitle.' : '';
-      final suffix = trimmed.isNotEmpty ? ' ($trimmed)' : '';
-      return '[14.80GB]${prefix}2160p.4K.Remux.HDR.DV.mkv$suffix';
+  }
+
+  static String _formatBytesSize(int bytes) {
+    if (bytes <= 0) return '4K';
+    final gb = bytes / (1024 * 1024 * 1024);
+    if (gb >= 1.0) return '${gb.toStringAsFixed(2)}GB';
+    final mb = bytes / (1024 * 1024);
+    return '${mb.toStringAsFixed(0)}MB';
+  }
+
+  static bool _isVideoFileName(String name) {
+    final lower = name.toLowerCase();
+    return lower.endsWith('.mkv') ||
+        lower.endsWith('.mp4') ||
+        lower.endsWith('.ts') ||
+        lower.endsWith('.m2ts') ||
+        lower.endsWith('.mov') ||
+        lower.endsWith('.avi') ||
+        lower.endsWith('.flv') ||
+        lower.endsWith('.iso');
+  }
+
+  static Future<List<_QuarkShareEpisodeItem>> _scrapeRealQuarkShareEpisodes(
+    String query,
+    String cleanTitle,
+    String normTarget,
+    CspHttpTextFetcher fetchText,
+  ) async {
+    try {
+      final searchUrl =
+          'https://www.wogg.net/vodsearch/-------------.html?wd=${Uri.encodeQueryComponent(query)}';
+      final searchHtml = await fetchText(
+        searchUrl,
+        headers: const {
+          'User-Agent': _desktopSafariUa,
+          'Referer': 'https://www.wogg.net/',
+        },
+        requestTimeout: const Duration(seconds: 6),
+      );
+      if (!searchHtml.contains('/voddetail/')) return const [];
+
+      String? selectedDetailPath;
+      String? firstDetailPath;
+      final anchorRegex = RegExp(
+        r'''<a[^>]+href\s*=\s*["'](/voddetail/\d+\.html)["']([^>]*)>([\s\S]*?)</a>''',
+        caseSensitive: false,
+      );
+      for (final m in anchorRegex.allMatches(searchHtml)) {
+        final path = (m.group(1) ?? '').trim();
+        if (path.isEmpty) continue;
+        firstDetailPath ??= path;
+        final attrs = m.group(2) ?? '';
+        final inner = (m.group(3) ?? '')
+            .replaceAll(RegExp(r'<[^>]*>'), '')
+            .trim();
+        final titleMatch = RegExp(r'''title\s*=\s*["']([^"']+)["']''', caseSensitive: false)
+            .firstMatch(attrs);
+        final candidateTitle = (titleMatch?.group(1) ?? inner).trim();
+        if (candidateTitle.isEmpty) continue;
+        final normCandidate = _normalizeTitleForMatch(candidateTitle);
+        if (candidateTitle == cleanTitle ||
+            candidateTitle == query ||
+            (normTarget.isNotEmpty &&
+                (normCandidate == normTarget || normCandidate.contains(normTarget)))) {
+          selectedDetailPath = path;
+          break;
+        }
+      }
+      final detailPath = selectedDetailPath ??
+          firstDetailPath ??
+          RegExp(r'/voddetail/\d+\.html').firstMatch(searchHtml)?.group(0);
+      if (detailPath == null || detailPath.isEmpty) return const [];
+
+      final detailHtml = await fetchText(
+        Uri.https('www.wogg.net', detailPath).toString(),
+        headers: const {
+          'User-Agent': _desktopSafariUa,
+          'Referer': 'https://www.wogg.net/',
+        },
+        requestTimeout: const Duration(seconds: 6),
+      );
+      final shareRegex = RegExp(r'https?://pan\.quark\.cn/s/([A-Za-z0-9_-]+)');
+      final shareIds = <String>[];
+      final seenShares = <String>{};
+      for (final m in shareRegex.allMatches(detailHtml)) {
+        final id = (m.group(1) ?? '').trim();
+        if (id.isNotEmpty && seenShares.add(id)) {
+          shareIds.add(id);
+          if (shareIds.length >= 2) break;
+        }
+      }
+      for (final shareId in shareIds) {
+        final items = await _listQuarkShareVideoFiles(shareId);
+        if (items.isNotEmpty) return items;
+      }
+    } catch (_) {}
+    return const [];
+  }
+
+  static Future<Map<String, dynamic>?> _quarkHttpJson(
+    HttpClient client,
+    String method,
+    Uri uri, {
+    String cookie = '',
+    Map<String, dynamic>? body,
+  }) async {
+    final req = await client.openUrl(method, uri).timeout(const Duration(seconds: 6));
+    req.headers.set('User-Agent', _quarkPcUa);
+    req.headers.set('Accept', 'application/json, text/plain, */*');
+    req.headers.set('Referer', 'https://pan.quark.cn/');
+    req.headers.set('Origin', 'https://pan.quark.cn');
+    if (cookie.isNotEmpty) {
+      req.headers.set('Cookie', cookie);
     }
-    final epNum = (index + 1).toString().padLeft(2, '0');
-    final sizeGb = (4.80 + ((index * 37) % 140) / 100.0).toStringAsFixed(2);
-    return '[${sizeGb}GB]E$epNum.2160p.4K.HDR.mkv';
+    if (body != null) {
+      final bytes = utf8.encode(jsonEncode(body));
+      req.headers.contentType = ContentType.json;
+      req.contentLength = bytes.length;
+      req.add(bytes);
+    }
+    final resp = await req.close().timeout(const Duration(seconds: 6));
+    final text = await utf8.decodeStream(resp).timeout(const Duration(seconds: 6));
+    final decoded = jsonDecode(text);
+    return decoded is Map<String, dynamic> ? decoded : null;
+  }
+
+  static Future<List<_QuarkShareEpisodeItem>> _listQuarkShareVideoFiles(
+    String shareId,
+  ) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+    try {
+      final tokenResp = await _quarkHttpJson(
+        client,
+        'POST',
+        Uri.parse('https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc'),
+        body: {'pwd_id': shareId, 'passcode': ''},
+      );
+      final stoken = (tokenResp?['data']?['stoken'] ?? '').toString().trim();
+      if (stoken.isEmpty) return const [];
+
+      final collected = <_QuarkShareEpisodeItem>[];
+      Future<void> walkDir(String pdirFid, int depth) async {
+        if (depth > 2 || collected.length >= 250) return;
+        final detailUri = Uri.https(
+          'drive-pc.quark.cn',
+          '/1/clouddrive/share/sharepage/detail',
+          {
+            'pr': 'ucpro',
+            'fr': 'pc',
+            'pwd_id': shareId,
+            'stoken': stoken,
+            'pdir_fid': pdirFid,
+            'force': '0',
+            '_page': '1',
+            '_size': '200',
+            '_fetch_banner': '0',
+            '_fetch_share': '0',
+            '_fetch_total': '1',
+            '_sort': 'file_type:asc,file_name:asc',
+          },
+        );
+        final detailResp = await _quarkHttpJson(client, 'GET', detailUri);
+        final list = detailResp?['data']?['list'];
+        if (list is! List) return;
+        final subDirs = <String>[];
+        for (final item in list) {
+          if (item is! Map) continue;
+          final fid = (item['fid'] ?? '').toString().trim();
+          final fileName = (item['file_name'] ?? '').toString().trim();
+          if (fid.isEmpty || fileName.isEmpty) continue;
+          final isDir = item['dir'] == true || item['file'] == false;
+          if (isDir) {
+            subDirs.add(fid);
+            continue;
+          }
+          final fidToken = (item['share_fid_token'] ?? '').toString().trim();
+          final category = (item['category'] as num?)?.toInt() ?? 0;
+          final size = (item['size'] as num?)?.toInt() ?? 0;
+          if (fidToken.isNotEmpty && (category == 1 || _isVideoFileName(fileName))) {
+            collected.add(
+              _QuarkShareEpisodeItem(
+                shareId: shareId,
+                stoken: stoken,
+                fid: fid,
+                fidToken: fidToken,
+                fileName: fileName,
+                size: size,
+                displayName: '[${_formatBytesSize(size)}]$fileName',
+              ),
+            );
+          }
+        }
+        for (final dirFid in subDirs.take(6)) {
+          await walkDir(dirFid, depth + 1);
+        }
+      }
+
+      await walkDir('0', 0);
+      if (collected.isEmpty) return const [];
+      final largeFiles = collected.where((e) => e.size >= 20 * 1024 * 1024).toList();
+      final filtered = largeFiles.isNotEmpty ? largeFiles : collected;
+      filtered.sort((a, b) => _compareEpisodeFileNames(a.fileName, b.fileName));
+      return filtered;
+    } catch (_) {
+      return const [];
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static int _compareEpisodeFileNames(String a, String b) {
+    final epRegex = RegExp(r'(?:[Ss]\d+[Ee](\d+)|[Ee][Pp]?(\d+)|第(\d+)[集话期])');
+    final ma = epRegex.firstMatch(a);
+    final mb = epRegex.firstMatch(b);
+    final na = int.tryParse(ma?.group(1) ?? ma?.group(2) ?? ma?.group(3) ?? '');
+    final nb = int.tryParse(mb?.group(1) ?? mb?.group(2) ?? mb?.group(3) ?? '');
+    if (na != null && nb != null && na != nb) {
+      return na.compareTo(nb);
+    }
+    return a.compareTo(b);
+  }
+
+  static Future<String> _fetchQuarkSocialDownloadUrl(
+    HttpClient client,
+    String cookie,
+    String fid,
+  ) async {
+    try {
+      final convList = await _quarkHttpJson(
+        client,
+        'GET',
+        Uri.parse('https://drive-social-api.quark.cn/1/clouddrive/chat/conv/list?pr=ucpro&fr=pc&_page=1&_size=50'),
+        cookie: cookie,
+      );
+      final convs = convList?['data']?['list'];
+      String? convId;
+      if (convs is List) {
+        for (final c in convs) {
+          if (c is Map && c['conversation_id'] != null) {
+            convId = c['conversation_id'].toString().trim();
+            if (convId.isNotEmpty) break;
+          }
+        }
+      }
+      if (convId == null || convId.isEmpty) return '';
+      await _quarkHttpJson(
+        client,
+        'POST',
+        Uri.parse('https://drive-social-api.quark.cn/1/clouddrive/chat/conv/msg/batch_send?pr=ucpro&fr=pc'),
+        cookie: cookie,
+        body: {
+          'conversation_ids': [convId],
+          'To_ids': const [],
+          'msg_list': [
+            {'type': 2, 'fid': fid, 'content': ''},
+          ],
+          'send_scenes': 'file_share',
+        },
+      );
+      final convInfo = await _quarkHttpJson(
+        client,
+        'GET',
+        Uri.parse('https://drive-social-api.quark.cn/1/clouddrive/chat/conv/info?pr=ucpro&fr=pc&conversation_id=${Uri.encodeQueryComponent(convId)}'),
+        cookie: cookie,
+      );
+      final lastMsgId = convInfo?['data']?['conversation']?['last_msg']?['store_msg_id']?.toString().trim() ?? '';
+      if (lastMsgId.isEmpty) return '';
+      final tokenResp = await _quarkHttpJson(
+        client,
+        'POST',
+        Uri.parse('https://drive-social-api.quark.cn/1/clouddrive/chat/conv/file/acquire_dl_token?pr=ucpro&fr=pc'),
+        cookie: cookie,
+        body: {
+          'conversation_id': convId,
+          'conversation_type': 3,
+          'msg_id': int.tryParse(lastMsgId) ?? lastMsgId,
+        },
+      );
+      final dlToken = (tokenResp?['data']?['token'] ?? '').toString().trim();
+      if (dlToken.isEmpty) return '';
+      final dlResp = await _quarkHttpJson(
+        client,
+        'POST',
+        Uri.parse('https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc'),
+        cookie: cookie,
+        body: {
+          'fids': [fid],
+          'speedup_session': '',
+          'token': dlToken,
+        },
+      );
+      final dlList = dlResp?['data'];
+      if (dlList is List && dlList.isNotEmpty && dlList.first is Map) {
+        return (dlList.first['download_url'] ?? '').toString().trim();
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  static Future<CmsEpisode> _resolveQuarkShareEpisode(CmsEpisode episode) async {
+    final uri = Uri.parse(episode.url.trim());
+    final shareId = (uri.queryParameters['pwd_id'] ?? '').trim();
+    var stoken = (uri.queryParameters['stoken'] ?? '').trim();
+    final fid = (uri.queryParameters['fid'] ?? '').trim();
+    final fidToken = (uri.queryParameters['fid_token'] ?? '').trim();
+    final fileName = (uri.queryParameters['fname'] ?? '').trim();
+    final mode = (uri.queryParameters['mode'] ?? 'speed').trim();
+    final fallbackUrl = (uri.queryParameters['fallback'] ?? '').trim();
+
+    String cookie = '';
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = (prefs.getString('mm_netdisk_cred_quark_v1') ?? '').trim();
+      cookie = (QuarkAccountSession.tryParseCredential(raw)?.cookie ?? raw).trim();
+    } catch (_) {}
+
+    if (cookie.isEmpty) {
+      if (fallbackUrl.isNotEmpty) {
+        return CmsEpisode(name: episode.name, url: fallbackUrl);
+      }
+      throw const FormatException('请先在「我的云盘 / 设置」扫码登录夸克网盘以播放 4K 原画资源');
+    }
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    try {
+      if (stoken.isEmpty && shareId.isNotEmpty) {
+        final tokenResp = await _quarkHttpJson(
+          client,
+          'POST',
+          Uri.parse('https://drive-pc.quark.cn/1/clouddrive/share/sharepage/token?pr=ucpro&fr=pc'),
+          cookie: cookie,
+          body: {'pwd_id': shareId, 'passcode': ''},
+        );
+        stoken = (tokenResp?['data']?['stoken'] ?? '').toString().trim();
+      }
+      if (shareId.isEmpty || stoken.isEmpty || fid.isEmpty || fidToken.isEmpty) {
+        throw const FormatException('夸克分享链接参数不完整');
+      }
+
+      // 1. Find or create `0000temp` directory
+      String tempDirFid = '';
+      final rootSort = await _quarkHttpJson(
+        client,
+        'GET',
+        Uri.parse('https://drive-pc.quark.cn/1/clouddrive/file/sort?pr=ucpro&fr=pc&pdir_fid=0&_page=1&_size=100&_sort=file_type:asc,updated_at:desc'),
+        cookie: cookie,
+      );
+      final rootList = rootSort?['data']?['list'];
+      if (rootList is List) {
+        for (final item in rootList) {
+          if (item is Map &&
+              (item['dir'] == true || item['file'] == false) &&
+              item['file_name'] == '0000temp') {
+            tempDirFid = (item['fid'] ?? '').toString().trim();
+            break;
+          }
+        }
+      }
+      if (tempDirFid.isEmpty) {
+        final mkdirResp = await _quarkHttpJson(
+          client,
+          'POST',
+          Uri.parse('https://drive-pc.quark.cn/1/clouddrive/file?pr=ucpro&fr=pc'),
+          cookie: cookie,
+          body: {
+            'pdir_fid': '0',
+            'file_name': '0000temp',
+            'dir_path': '',
+            'dir_init_lock': false,
+          },
+        );
+        tempDirFid = (mkdirResp?['data']?['fid'] ?? '').toString().trim();
+      }
+      if (tempDirFid.isEmpty) {
+        throw const FormatException('无法访问夸克网盘临时目录');
+      }
+
+      // 2. Check existing files in `0000temp` (reuse if same file, delete stale files to free quota)
+      String savedFid = '';
+      final tempSort = await _quarkHttpJson(
+        client,
+        'GET',
+        Uri.parse('https://drive-pc.quark.cn/1/clouddrive/file/sort?pr=ucpro&fr=pc&pdir_fid=$tempDirFid&_page=1&_size=100&_sort=file_type:asc,updated_at:desc'),
+        cookie: cookie,
+      );
+      final tempList = tempSort?['data']?['list'];
+      final staleFids = <String>[];
+      if (tempList is List) {
+        for (final item in tempList) {
+          if (item is! Map) continue;
+          final itemFid = (item['fid'] ?? '').toString().trim();
+          final itemName = (item['file_name'] ?? '').toString().trim();
+          if (itemFid.isEmpty) continue;
+          if (savedFid.isEmpty && fileName.isNotEmpty && itemName == fileName) {
+            savedFid = itemFid;
+          } else {
+            staleFids.add(itemFid);
+          }
+        }
+      }
+      if (staleFids.isNotEmpty) {
+        await _quarkHttpJson(
+          client,
+          'POST',
+          Uri.parse('https://drive-pc.quark.cn/1/clouddrive/file/delete?pr=ucpro&fr=pc'),
+          cookie: cookie,
+          body: {
+            'action_type': 2,
+            'filelist': staleFids,
+            'exclude_fids': const [],
+          },
+        ).catchError((_) => null);
+      }
+
+      // 3. Save shared file to `0000temp` if not already cached
+      if (savedFid.isEmpty) {
+        final saveResp = await _quarkHttpJson(
+          client,
+          'POST',
+          Uri.parse('https://drive-pc.quark.cn/1/clouddrive/share/sharepage/save?pr=ucpro&fr=pc'),
+          cookie: cookie,
+          body: {
+            'fid_list': [fid],
+            'fid_token_list': [fidToken],
+            'to_pdir_fid': tempDirFid,
+            'pwd_id': shareId,
+            'stoken': stoken,
+            'pdir_fid': '0',
+            'scene': 'link',
+          },
+        );
+        final taskId = (saveResp?['data']?['task_id'] ?? '').toString().trim();
+        if (taskId.isNotEmpty) {
+          for (int i = 0; i < 12; i++) {
+            await Future<void>.delayed(const Duration(milliseconds: 250));
+            final taskResp = await _quarkHttpJson(
+              client,
+              'GET',
+              Uri.parse('https://drive-pc.quark.cn/1/clouddrive/task?pr=ucpro&fr=pc&task_id=$taskId&retry_index=$i'),
+              cookie: cookie,
+            );
+            final topFids = taskResp?['data']?['save_as']?['save_as_top_fids'];
+            if (topFids is List && topFids.isNotEmpty) {
+              savedFid = topFids.first.toString().trim();
+              if (savedFid.isNotEmpty) break;
+            }
+          }
+        }
+      }
+      if (savedFid.isEmpty) {
+        throw const FormatException('夸克网盘转存 4K 资源超时');
+      }
+
+      final playHeaders = <String, String>{
+        'User-Agent': _quarkPcUa,
+        'Cookie': cookie,
+        'Referer': 'https://pan.quark.cn/',
+      };
+
+      // 4. Fetch 4K / 2K / Super cloud transcode streams
+      final transcodeVariants = <CmsEpisode>[];
+      try {
+        final playResp = await _quarkHttpJson(
+          client,
+          'POST',
+          Uri.parse('https://drive-pc.quark.cn/1/clouddrive/file/v2/play?pr=ucpro&fr=pc'),
+          cookie: cookie,
+          body: {
+            'fid': savedFid,
+            'resolutions': 'normal,low,high,super,2k,4k',
+            'supports': 'fmp4,m3u8',
+          },
+        );
+        final videoList = playResp?['data']?['video_list'];
+        if (videoList is List) {
+          const order = ['4k', '2k', 'super', 'high', 'normal', 'low'];
+          const labels = {
+            '4k': '4K云盘',
+            '2k': '2K云盘',
+            'super': '超清云盘',
+            'high': '高清云盘',
+            'normal': '标清云盘',
+            'low': '流畅云盘',
+          };
+          for (final resKey in order) {
+            for (final item in videoList) {
+              if (item is! Map) continue;
+              if (item['resolution']?.toString().toLowerCase() == resKey) {
+                final vUrl = (item['video_info']?['url'] ?? '').toString().trim();
+                if (vUrl.isNotEmpty) {
+                  transcodeVariants.add(
+                    CmsEpisode(
+                      name: labels[resKey] ?? resKey.toUpperCase(),
+                      url: vUrl,
+                      headers: playHeaders,
+                    ),
+                  );
+                }
+              }
+            }
+          }
+        }
+      } catch (_) {}
+
+      // 5. Fetch 4K original MKV stream (`file/download` + social token fallback)
+      String originalUrl = '';
+      if (mode == 'original') {
+        originalUrl = await _fetchQuarkSocialDownloadUrl(client, cookie, savedFid);
+      }
+      if (originalUrl.isEmpty) {
+        try {
+          final dlResp = await _quarkHttpJson(
+            client,
+            'POST',
+            Uri.parse('https://drive-pc.quark.cn/1/clouddrive/file/download?pr=ucpro&fr=pc'),
+            cookie: cookie,
+            body: {
+              'fids': [savedFid],
+            },
+          );
+          final dlList = dlResp?['data'];
+          if (dlList is List && dlList.isNotEmpty && dlList.first is Map) {
+            originalUrl = (dlList.first['download_url'] ?? '').toString().trim();
+          }
+        } catch (_) {}
+      }
+      if (originalUrl.isEmpty && mode != 'original') {
+        originalUrl = await _fetchQuarkSocialDownloadUrl(client, cookie, savedFid);
+      }
+
+      final variants = <CmsEpisode>[];
+      if (mode == 'original') {
+        if (originalUrl.isNotEmpty) {
+          variants.add(CmsEpisode(name: '4K原画', url: originalUrl, headers: playHeaders));
+        }
+        variants.addAll(transcodeVariants);
+      } else {
+        variants.addAll(transcodeVariants);
+        if (originalUrl.isNotEmpty) {
+          variants.add(CmsEpisode(name: '4K原画', url: originalUrl, headers: playHeaders));
+        }
+      }
+
+      if (variants.isNotEmpty) {
+        return CmsEpisode(
+          name: episode.name,
+          url: variants.first.url,
+          headers: playHeaders,
+          variants: variants,
+        );
+      }
+    } catch (_) {
+      if (fallbackUrl.isNotEmpty) {
+        return CmsEpisode(name: episode.name, url: fallbackUrl);
+      }
+      rethrow;
+    } finally {
+      client.close(force: true);
+    }
+
+    if (fallbackUrl.isNotEmpty) {
+      return CmsEpisode(name: episode.name, url: fallbackUrl);
+    }
+    throw const FormatException('未能解析出可用的夸克 4K 播放地址');
   }
 
   static Future<List<CmsLine>> resolveCrossSourceLines(
@@ -2104,4 +2705,24 @@ class CspBridge {
     }
     return extra;
   }
+}
+
+class _QuarkShareEpisodeItem {
+  final String shareId;
+  final String stoken;
+  final String fid;
+  final String fidToken;
+  final String fileName;
+  final int size;
+  final String displayName;
+
+  const _QuarkShareEpisodeItem({
+    required this.shareId,
+    required this.stoken,
+    required this.fid,
+    required this.fidToken,
+    required this.fileName,
+    required this.size,
+    required this.displayName,
+  });
 }

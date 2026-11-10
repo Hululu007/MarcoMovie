@@ -589,6 +589,13 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (ua.isNotEmpty) {
             await dyn.setProperty('user-agent', ua);
           }
+          final ref = headers.entries
+              .firstWhere(
+                (e) => e.key.toLowerCase() == 'referer',
+                orElse: () => const MapEntry('Referer', ''),
+              )
+              .value;
+          await dyn.setProperty('referrer', ref);
         } catch (_) {}
         await _player.open(
           Media(
@@ -670,6 +677,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _toggleControls() {
     setState(() => _controlsVisible = !_controlsVisible);
     if (_controlsVisible) _scheduleHide();
+  }
+
+  void _onPointerMove(Offset delta) {
+    if (!_desktop || delta.distanceSquared < 0.25) return;
+    if (!_controlsVisible) {
+      setState(() => _controlsVisible = true);
+    }
+    _scheduleHide();
   }
 
   void _windowChanged() {
@@ -844,20 +859,16 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_videoWidth > 0 && _videoHeight > 0) {
       final maxDim = math.max(_videoWidth, _videoHeight);
       final minDim = math.min(_videoWidth, _videoHeight);
-      if (is4kContext && maxDim < 3800 && minDim < 2100) {
-        parts.add('4K 3840 × 2160');
-      } else {
-        final tier = (maxDim >= 3800 || minDim >= 2100)
-            ? '4K '
-            : (maxDim >= 2500 || minDim >= 1400)
-            ? '2K '
-            : (maxDim >= 1900 || minDim >= 1000)
-            ? '1080P '
-            : (maxDim >= 1200 || minDim >= 700)
-            ? '720P '
-            : '';
-        parts.add('$tier$_videoWidth × $_videoHeight');
-      }
+      final tier = (maxDim >= 3800 || minDim >= 2100)
+          ? '4K '
+          : (maxDim >= 2500 || minDim >= 1400)
+          ? '2K '
+          : (maxDim >= 1900 || minDim >= 1000)
+          ? '1080P '
+          : (maxDim >= 1200 || minDim >= 700)
+          ? '720P '
+          : '';
+      parts.add('$tier$_videoWidth × $_videoHeight');
     } else if (is4kContext) {
       parts.add('4K UHD');
     }
@@ -868,8 +879,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (vc.isNotEmpty) {
       if (vc.contains('hevc') ||
           vc.contains('h265') ||
-          vc.contains('hev1') ||
-          (is4kContext && vc.contains('h264'))) {
+          vc.contains('hev1')) {
         parts.add('HEVC');
       } else if (vc.contains('avc') || vc.contains('h264')) {
         parts.add('H.264');
@@ -986,8 +996,15 @@ class _PlayerScreenState extends State<PlayerScreen>
           }
           return KeyEventResult.ignored;
         },
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
+        child: MouseRegion(
+          cursor: _desktop && !_controlsVisible && _playing
+              ? SystemMouseCursors.none
+              : SystemMouseCursors.basic,
+          onHover: (event) => _onPointerMove(event.delta),
+          child: Listener(
+            onPointerMove: (event) => _onPointerMove(event.delta),
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
           onTap: _toggleControls,
           onDoubleTap: () {
             if (_desktop) {
@@ -1149,6 +1166,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                 ),
             ],
+          ),
+            ),
           ),
         ),
       ),

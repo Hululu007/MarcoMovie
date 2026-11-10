@@ -5,6 +5,8 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'quark_account.dart';
 
 class GuardBootstrapException extends FormatException {
   final String code;
@@ -29,6 +31,7 @@ class CatPawHost {
   Future<void>? _closing;
   bool _needsReset = false;
   Directory? _root;
+  String? _lastSyncedPanJson;
   final _activeDrpy = <String, int>{};
   final _releasingDrpy = <String, Future<void>>{};
   int _generation = 0;
@@ -81,6 +84,7 @@ class CatPawHost {
       );
     }
     await _stageDrpyAssets(root);
+    await _syncNetdiskConfig(root);
     final ready = File('${root.path}/ready.json');
     if (Platform.isIOS) {
       await const MethodChannel('marco_movie/catpaw').invokeMethod('start', {
@@ -223,6 +227,30 @@ class CatPawHost {
       await _writeAtomic(File('${root.path}/${entry.key}'), entry.value);
     }
     await _writeAtomic(File('${root.path}/drpy-assets.json'), manifestBytes);
+  }
+
+  Future<void> _syncNetdiskConfig(Directory root) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final quarkRaw = (prefs.getString('mm_netdisk_cred_quark_v1') ?? '').trim();
+      final quarkCookie = QuarkAccountSession.tryParseCredential(quarkRaw)?.cookie ?? quarkRaw;
+      final ucCookie = (prefs.getString('mm_netdisk_cred_uc_v1') ?? '').trim();
+      final baiduCookie = (prefs.getString('mm_netdisk_cred_baidu_v1') ?? '').trim();
+      final cfgFile = File('${root.path}/wexfnwconfig.json');
+      if (quarkCookie.isEmpty && ucCookie.isEmpty && baiduCookie.isEmpty && !await cfgFile.exists()) {
+        return;
+      }
+      final payload = jsonEncode({
+        'pan': {
+          'quark': {'cookie': quarkCookie},
+          'uc': {'cookie': ucCookie},
+          'baidu': {'cookie': baiduCookie},
+        },
+      });
+      if (_lastSyncedPanJson == payload && await cfgFile.exists()) return;
+      await _writeAtomic(cfgFile, utf8.encode('$payload\n'));
+      _lastSyncedPanJson = payload;
+    } catch (_) {}
   }
 
   static Future<void> _writeAtomic(File file, List<int> bytes) async {
@@ -694,6 +722,8 @@ class CatPawHost {
       _drpyManifest(bytes);
     } else if (!await File('${root.path}/${logical.host}/index.cjs').exists()) {
       throw StateError('此设备没有对应的 CatPaw 服务包，请重新导入原订阅');
+    } else if (logical.path.startsWith('/api/spider/')) {
+      await _syncNetdiskConfig(root);
     }
     _checkCancellation(cancellation);
     if (generation != _generation) throw StateError('CatPaw 本机服务已关闭');
