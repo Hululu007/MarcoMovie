@@ -256,8 +256,9 @@ class NetdiskSession {
       if (session is Map) {
         for (final key in const ['bduss', 'stoken', 'ptoken']) {
           final value = session[key];
-          if (value is String && _value(value) && value != ticket)
+          if (value is String && _value(value) && value != ticket) {
             values[key.toUpperCase()] = value;
+          }
         }
       }
       // Header cookies (including deletions) take precedence over body fallbacks.
@@ -278,16 +279,14 @@ class NetdiskSession {
     }
     // Passport login and the Netdisk web session are separate. The latter may
     // set host-only pan.baidu.com STOKEN/PANPSC cookies via redirects.
-    {
-      await baiduRequest(client, Uri.https('pan.baidu.com', '/disk/home'), jar,
-          timeout: const Duration(seconds: 15));
-      await baiduRequest(
-          client,
-          Uri.https('pan.baidu.com', '/api/loginStatus',
-              {'clienttype': '0', 'app_id': '250528', 'web': '1'}),
-          jar,
-          timeout: const Duration(seconds: 15));
-    }
+    await baiduRequest(client, Uri.https('pan.baidu.com', '/disk/home'), jar,
+        timeout: const Duration(seconds: 15));
+    await baiduRequest(
+        client,
+        Uri.https('pan.baidu.com', '/api/loginStatus',
+            {'clienttype': '0', 'app_id': '250528', 'web': '1'}),
+        jar,
+        timeout: const Duration(seconds: 15));
     final verified = await baiduRequest(
         client,
         Uri.https('pan.baidu.com', '/rest/2.0/membership/user/info', {

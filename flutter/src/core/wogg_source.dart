@@ -341,8 +341,9 @@ class WoggSource {
             ? ids.first.toString()
             : ids?.toString() ?? '';
         if (!RegExp(r'^\d+$').hasMatch(id)) {
-          if (allowDetailRecovery && expectedTitle.isNotEmpty)
+          if (allowDetailRecovery && expectedTitle.isNotEmpty) {
             return recoverDetail();
+          }
           throw const FormatException('玩偶详情编号无效');
         }
         path = 'voddetail/$id.html';
@@ -406,8 +407,21 @@ class WoggSource {
               .querySelector('div.video-cover div.module-item-pic img')
               ?.attributes['alt'] ??
           _text(document.querySelector('h1'));
+      final years = <String>{
+        for (final tag in document.querySelectorAll('.video-info-aux a'))
+          if (_year(_text(tag)).isNotEmpty) _year(_text(tag)),
+        for (final row in document.querySelectorAll('div.video-info-items'))
+          if (const ['年代：', '年份：']
+              .contains(_text(row.querySelector('span.video-info-itemtitle'))))
+            if (_year(_text(row.querySelector('div.video-info-item')))
+                .isNotEmpty)
+              _year(_text(row.querySelector('div.video-info-item'))),
+      };
       if (expectedTitle.isNotEmpty &&
-          !_sameTitle(expectedTitle, actualTitle, expectedYear)) {
+          (!_sameTitle(expectedTitle, actualTitle, expectedYear) ||
+              _year(expectedYear).isNotEmpty &&
+                  years.isNotEmpty &&
+                  (years.length != 1 || years.single != _year(expectedYear)))) {
         if (allowDetailRecovery) return recoverDetail();
         throw const FormatException('原站影片与观看记录不一致，请重新搜索选择');
       }
@@ -440,16 +454,20 @@ class WoggSource {
           .toLowerCase()
           .replaceAll(RegExp(r'[\s:：·・,，.。\-—_《》<>（）()]'), '');
       final trailing = result.length > 4
-          ? RegExp(r'(?:19|20)\d{2}$').firstMatch(result)?.group(0) ?? '' : '';
-      final suffix = _year(metadataYear).isNotEmpty ? _year(metadataYear) : trailing;
+          ? RegExp(r'(?:19|20)\d{2}$').firstMatch(result)?.group(0) ?? ''
+          : '';
+      final suffix =
+          _year(metadataYear).isNotEmpty ? _year(metadataYear) : trailing;
       if (trailing.isNotEmpty && suffix == trailing) {
         result = result.substring(0, result.length - 4);
       }
       return (result, suffix);
     }
+
     final a = identity(expected, year);
     final b = identity(actual, '');
-    return a.$1.isNotEmpty && a.$1 == b.$1 &&
+    return a.$1.isNotEmpty &&
+        a.$1 == b.$1 &&
         (a.$2.isEmpty || b.$2.isEmpty || a.$2 == b.$2);
   }
 
