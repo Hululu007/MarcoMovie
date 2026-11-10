@@ -31,6 +31,7 @@ import java.util.regex.Pattern;
  */
 final class DetailScreen {
     private static final Pattern SCORE_PATTERN = Pattern.compile("(?<!\\d)([1-9]\\.[0-9])(?!\\d)");
+    private static long lastLineHorizontalDpadTime;
 
     private DetailScreen() {}
 
@@ -680,6 +681,16 @@ final class DetailScreen {
             choice.setMinimumHeight(a.dp(36));
             choice.setBackground(a.bg(selected ? 0xff3b5472 : 0x991c202b, 18));
             choice.setPadding(a.dp(15), a.dp(7), a.dp(15), a.dp(7));
+            choice.setOnKeyListener(
+                    (v, keyCode, event) -> {
+                        FocusMotion.key(a, v, keyCode, event);
+                        if (event.getAction() == android.view.KeyEvent.ACTION_DOWN
+                                && (keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT
+                                        || keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT)) {
+                            lastLineHorizontalDpadTime = android.os.SystemClock.uptimeMillis();
+                        }
+                        return false;
+                    });
             choice.setOnFocusChangeListener(
                     (view, focus) -> {
                         FocusMotion.style(
@@ -694,6 +705,22 @@ final class DetailScreen {
                                 false,
                                 1.03f);
                         choice.setPadding(a.dp(15), a.dp(7), a.dp(15), a.dp(7));
+                        if (focus
+                                && a.isTvDevice()
+                                && !selected
+                                && android.os.SystemClock.uptimeMillis()
+                                                - lastLineHorizontalDpadTime
+                                        < 350L) {
+                            choice.postDelayed(
+                                    () -> {
+                                        if (choice.hasFocus()
+                                                && UiCompat.isAttached(choice)
+                                                && !selected) {
+                                            choice.performClick();
+                                        }
+                                    },
+                                    120);
+                        }
                     });
             sources.addView(choice);
         }

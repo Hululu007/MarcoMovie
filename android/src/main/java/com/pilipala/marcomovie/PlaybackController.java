@@ -215,11 +215,25 @@ final class PlaybackController {
             boolean looksLikeWebPage =
                     cleanPath.endsWith(".html")
                             || cleanPath.endsWith(".htm")
-                            || cleanPath.endsWith(".shtml");
+                            || cleanPath.endsWith(".shtml")
+                            || cleanPath.contains("/share/");
             if (Cms.isDirectStreamUrl(rewrittenEpUrl)
                     || (!s.requiresParser && Cms.isMedia(rewrittenEpUrl) && !looksLikeWebPage)) {
                 openPlayer(a, s, v, ep);
                 return;
+            }
+            if (v != null && v.lines != null) {
+                for (Cms.Line sibling : v.lines) {
+                    if (sibling == line) continue;
+                    Cms.Episode match = findMatchingEpisode(sibling, line, ep);
+                    if (match != null && Cms.isDirectStreamUrl(LocalProxy.rewrite(match.url))) {
+                        a.activeLine = sibling;
+                        a.activeEpisode = match;
+                        rememberEpisodeOnBackStack(a, sibling, match);
+                        openPlayer(a, s, v, match);
+                        return;
+                    }
+                }
             }
             resolveCmsWithParser(a, s, v, ep, s.playUrl);
             return;
@@ -496,6 +510,34 @@ final class PlaybackController {
         a.pageRequests.add(request);
     }
 
+    private static String extractEmbeddedStreamUrl(String baseUrl, String body) {
+        if (body == null || body.isEmpty()) return "";
+        java.util.regex.Matcher m =
+                java.util.regex.Pattern.compile(
+                                "(?:const|var|let)?\\s*(?:url|main|playurl|src|vid)\\s*[:=]\\s*[\"']([^\"']+\\.(?:m3u8|mp4)(?:\\?[^\"']*)?)[\"']",
+                                java.util.regex.Pattern.CASE_INSENSITIVE)
+                        .matcher(body);
+        if (!m.find()) {
+            m =
+                    java.util.regex.Pattern.compile(
+                                    "[\"']((?:https?:)?//[^\"']+\\.(?:m3u8|mp4)(?:\\?[^\"']*)?|/[^\"'\\s<>]+\\.(?:m3u8|mp4)(?:\\?[^\"'\\s<>]*)?)[\"']",
+                                    java.util.regex.Pattern.CASE_INSENSITIVE)
+                            .matcher(body);
+            if (!m.find()) return "";
+        }
+        String found = m.group(1).trim().replace("\\/", "/");
+        if (found.isEmpty()) return "";
+        try {
+            if (found.startsWith("//")) return "https:" + found;
+            if (Cms.isHttp(found)) return found;
+            if (baseUrl != null && Cms.isHttp(baseUrl)) {
+                return new java.net.URI(baseUrl).resolve(found).toString();
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
     static void resolveCmsWithParser(
             MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode ep, String preferredPrefix) {
         if (a.playbackLoading != null) return;
@@ -505,6 +547,31 @@ final class PlaybackController {
                 RequestScope.submit(
                         a.details,
                         () -> {
+                            // 0. If ep.url is an HTML share wrapper with an embedded .m3u8/.mp4,
+                            // extract it directly before falling back to external parsers.
+                            if (ep.url != null && Cms.isHttp(ep.url)) {
+                                try {
+                                    String html = Cms.fetch(ep.url, s.headers);
+                                    String embedded = extractEmbeddedStreamUrl(ep.url, html);
+                                    if (Cms.isDirectStreamUrl(embedded)) {
+                                        final Cms.Episode directEp = new Cms.Episode();
+                                        directEp.name = ep.name;
+                                        directEp.url = embedded;
+                                        directEp.headers.putAll(
+                                                Cms.inheritedHeaders(s.api, embedded, s.headers));
+                                        a.ui.post(
+                                                () -> {
+                                                    if (serial != a.playbackResolveSerial
+                                                            || ticket != a.generation
+                                                            || a.isFinishing()) return;
+                                                    clearPlaybackLoading(a);
+                                                    openPlayer(a, s, v, directEp);
+                                                });
+                                        return;
+                                    }
+                                } catch (Exception ignored) {
+                                }
+                            }
                             // 1. Try preferredPrefix or JSON parsers in config.parses
                             List<Cms.Parse> candidates = new java.util.ArrayList<>();
                             if (preferredPrefix != null && Cms.isHttp(preferredPrefix)) {
@@ -1029,23 +1096,18 @@ final class PlaybackController {
                                                 Cms.inheritedHeaders(s.api, ep.url, s.headers);
                                         Cms.mergeHeaders(mediaHeaders, ep.headers);
                                         int engPref = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
-                                        int spiderPlayerType = ep.media.optInt("playerType", -1);
-                                        if (engPref == 0
-                                                && (spiderPlayerType == 1 || ep.media.has("ijk"))) {
-                                            engPref = 2;
-                                        }
                                         candidate =
-                                                engPref == 1
+                                                ep.media.optBoolean("_systemFallback")
+                                                                || engPref == 1
                                                         ? new SystemPlayer(a)
-                                                        : engPref == 2
-                                                                ? MoviePlayer.createIjk(a)
-                                                                : ep.media.optBoolean(
-                                                                                "_softwareFallback")
-                                                                        ? new MoviePlayer(
-                                                                                a,
-                                                                                ep.media.optInt(
-                                                                                        "_fallbackMode",
-                                                                                        2))
+                                                        : ep.media.optBoolean("_softwareFallback")
+                                                                ? new MoviePlayer(
+                                                                        a,
+                                                                        ep.media.optInt(
+                                                                                "_fallbackMode", 2),
+                                                                        engPref == 2)
+                                                                : engPref == 2
+                                                                        ? MoviePlayer.createIjk(a)
                                                                         : new MoviePlayer(a);
                                         candidate.configureDefaultAudio();
                                         candidate.setDataSource(
@@ -1155,6 +1217,75 @@ final class PlaybackController {
                                                             (mp, what, extra) -> {
                                                                 if (ticket != a.generation)
                                                                     return true;
+                                                                if (PlaybackFailure.decoderFallback(
+                                                                                what)
+                                                                        && a.prefs.getInt(
+                                                                                        Prefs
+                                                                                                .DECODER_MODE,
+                                                                                        0)
+                                                                                == 0) {
+                                                                    if (!ep.media.optBoolean(
+                                                                            "_softwareFallback")) {
+                                                                        try {
+                                                                            ep.media.put(
+                                                                                    "_softwareFallback",
+                                                                                    true);
+                                                                            ep.media.put(
+                                                                                    "_fallbackMode",
+                                                                                    mp
+                                                                                            .softFallbackMode());
+                                                                        } catch (
+                                                                                Exception ignored) {
+                                                                        }
+                                                                        a.resumeAt =
+                                                                                mp
+                                                                                        .getCurrentPosition();
+                                                                        a.playStatus.setText(
+                                                                                "正在尝试内置软解码…");
+                                                                        a.ui.post(
+                                                                                () -> {
+                                                                                    if (ticket
+                                                                                            == a.generation)
+                                                                                        playerPage(
+                                                                                                a,
+                                                                                                s,
+                                                                                                v,
+                                                                                                ep);
+                                                                                });
+                                                                        return true;
+                                                                    }
+                                                                    if (!ep.media.optBoolean(
+                                                                                    "_systemFallback")
+                                                                            && a.prefs.getInt(
+                                                                                            Prefs
+                                                                                                    .PLAYER_ENGINE,
+                                                                                            0)
+                                                                                    != 1) {
+                                                                        try {
+                                                                            ep.media.put(
+                                                                                    "_systemFallback",
+                                                                                    true);
+                                                                        } catch (
+                                                                                Exception ignored) {
+                                                                        }
+                                                                        a.resumeAt =
+                                                                                mp
+                                                                                        .getCurrentPosition();
+                                                                        a.playStatus.setText(
+                                                                                "正在切换至系统硬件播放器…");
+                                                                        a.ui.post(
+                                                                                () -> {
+                                                                                    if (ticket
+                                                                                            == a.generation)
+                                                                                        playerPage(
+                                                                                                a,
+                                                                                                s,
+                                                                                                v,
+                                                                                                ep);
+                                                                                });
+                                                                        return true;
+                                                                    }
+                                                                }
                                                                 JSONArray qualities =
                                                                         ep.media.optJSONArray(
                                                                                 "qualities");
@@ -1180,6 +1311,10 @@ final class PlaybackController {
                                                                             ep.media.put(
                                                                                     "_qualityIdx",
                                                                                     qIdx + 1);
+                                                                            ep.media.remove(
+                                                                                    "_softwareFallback");
+                                                                            ep.media.remove(
+                                                                                    "_systemFallback");
                                                                         } catch (
                                                                                 Exception ignored) {
                                                                         }
@@ -1229,43 +1364,77 @@ final class PlaybackController {
                                                                         return true;
                                                                     }
                                                                 }
-                                                                if (PlaybackFailure.decoderFallback(
-                                                                                what)
-                                                                        && a.prefs.getInt(
-                                                                                        Prefs
-                                                                                                .DECODER_MODE,
-                                                                                        0)
-                                                                                == 0
-                                                                        && a.prefs.getInt(
-                                                                                        Prefs
-                                                                                                .PLAYER_ENGINE,
-                                                                                        0)
-                                                                                == 0
-                                                                        && !ep.media.optBoolean(
-                                                                                "_softwareFallback")) {
-                                                                    try {
-                                                                        ep.media.put(
-                                                                                "_softwareFallback",
-                                                                                true);
-                                                                        ep.media.put(
-                                                                                "_fallbackMode",
-                                                                                mp
-                                                                                        .softFallbackMode());
-                                                                    } catch (Exception ignored) {
+                                                                if (v != null
+                                                                        && v.lines != null
+                                                                        && v.lines.size() > 1
+                                                                        && a.activeLine != null) {
+                                                                    int curLineIdx =
+                                                                            v.lines.indexOf(
+                                                                                    a.activeLine);
+                                                                    int hopCount =
+                                                                            ep.media.optInt(
+                                                                                    "_lineHopCount",
+                                                                                    0);
+                                                                    if (curLineIdx >= 0
+                                                                            && hopCount
+                                                                                    < Math.min(
+                                                                                            3,
+                                                                                            v.lines
+                                                                                                            .size()
+                                                                                                    - 1)) {
+                                                                        Cms.Line nextLine =
+                                                                                v.lines.get(
+                                                                                        (curLineIdx
+                                                                                                        + 1)
+                                                                                                % v
+                                                                                                        .lines
+                                                                                                        .size());
+                                                                        Cms.Episode nextEp =
+                                                                                findMatchingEpisode(
+                                                                                        nextLine,
+                                                                                        a.activeLine,
+                                                                                        a.activeEpisode
+                                                                                                        != null
+                                                                                                ? a.activeEpisode
+                                                                                                : ep);
+                                                                        if (nextEp != null
+                                                                                && nextLine
+                                                                                        != a.activeLine) {
+                                                                            try {
+                                                                                nextEp.media.put(
+                                                                                        "_lineHopCount",
+                                                                                        hopCount
+                                                                                                + 1);
+                                                                            } catch (
+                                                                                    Exception
+                                                                                            ignored) {
+                                                                            }
+                                                                            a.resumeAt =
+                                                                                    mp
+                                                                                            .getCurrentPosition();
+                                                                            a.playStatus.setText(
+                                                                                    "当前线路异常，正在切换至 "
+                                                                                            + nextLine.name
+                                                                                            + "…");
+                                                                            a.ui.post(
+                                                                                    () -> {
+                                                                                        if (ticket
+                                                                                                == a.generation) {
+                                                                                            rememberEpisodeOnBackStack(
+                                                                                                    a,
+                                                                                                    nextLine,
+                                                                                                    nextEp);
+                                                                                            resolvePlayer(
+                                                                                                    a,
+                                                                                                    s,
+                                                                                                    v,
+                                                                                                    nextLine,
+                                                                                                    nextEp);
+                                                                                        }
+                                                                                    });
+                                                                            return true;
+                                                                        }
                                                                     }
-                                                                    a.resumeAt =
-                                                                            mp.getCurrentPosition();
-                                                                    a.playStatus.setText(
-                                                                            "正在尝试内置软解码…");
-                                                                    a.ui.post(
-                                                                            () -> {
-                                                                                if (ticket
-                                                                                        == a.generation)
-                                                                                    playerPage(
-                                                                                            a, s, v,
-                                                                                            ep);
-                                                                            });
-                                                                    return true;
                                                                 }
                                                                 stopEmbySession(a);
                                                                 a.prepared = false;

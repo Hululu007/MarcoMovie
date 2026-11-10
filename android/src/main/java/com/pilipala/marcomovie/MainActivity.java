@@ -108,6 +108,22 @@ public final class MainActivity extends Activity {
         return scoped;
     }
 
+    @Override
+    public int checkSelfPermission(String permission) {
+        if (CspEngine.isStoragePermission(permission)) {
+            return android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        return super.checkSelfPermission(permission);
+    }
+
+    @Override
+    public int checkPermission(String permission, int pid, int uid) {
+        if (CspEngine.isStoragePermission(permission)) {
+            return android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        return super.checkPermission(permission, pid, uid);
+    }
+
     boolean reduced, prepared, playing, foreground;
     int generation;
     static final int MAX_HOME_SNAPSHOTS = 8;

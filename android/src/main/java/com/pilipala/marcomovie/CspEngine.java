@@ -21,6 +21,82 @@ public final class CspEngine implements SourceEngine {
     static volatile DexClassLoader activeProxyLoader;
     static volatile String pendingPluginDanmaku = "";
     static volatile long pendingPluginDanmakuAtMs = 0L;
+    static volatile PluginApplication pluginAppWrapper;
+
+    static boolean isStoragePermission(String permission) {
+        if (permission == null) return false;
+        return "android.permission.READ_EXTERNAL_STORAGE".equals(permission)
+                || "android.permission.WRITE_EXTERNAL_STORAGE".equals(permission)
+                || "android.permission.MANAGE_EXTERNAL_STORAGE".equals(permission);
+    }
+
+    static final class PluginApplication extends Application {
+        final Application base;
+
+        PluginApplication(Application base) {
+            this.base = base;
+            attachBaseContext(base);
+        }
+
+        @Override
+        public Context getApplicationContext() {
+            return this;
+        }
+
+        @Override
+        public void registerActivityLifecycleCallbacks(ActivityLifecycleCallbacks callback) {
+            base.registerActivityLifecycleCallbacks(callback);
+        }
+
+        @Override
+        public void unregisterActivityLifecycleCallbacks(ActivityLifecycleCallbacks callback) {
+            base.unregisterActivityLifecycleCallbacks(callback);
+        }
+
+        @Override
+        public void registerComponentCallbacks(android.content.ComponentCallbacks callback) {
+            base.registerComponentCallbacks(callback);
+        }
+
+        @Override
+        public void unregisterComponentCallbacks(android.content.ComponentCallbacks callback) {
+            base.unregisterComponentCallbacks(callback);
+        }
+
+        @Override
+        public int checkSelfPermission(String permission) {
+            if (isStoragePermission(permission)) {
+                return android.content.pm.PackageManager.PERMISSION_GRANTED;
+            }
+            return base.checkSelfPermission(permission);
+        }
+
+        @Override
+        public int checkPermission(String permission, int pid, int uid) {
+            if (isStoragePermission(permission)) {
+                return android.content.pm.PackageManager.PERMISSION_GRANTED;
+            }
+            return base.checkPermission(permission, pid, uid);
+        }
+    }
+
+    static Application wrapPluginApplication(Application app) {
+        if (app == null || app instanceof PluginApplication) return app;
+        PluginApplication current = pluginAppWrapper;
+        if (current != null && current.base == app) return current;
+        synchronized (CspEngine.class) {
+            current = pluginAppWrapper;
+            if (current == null || current.base != app) {
+                current = new PluginApplication(app);
+                pluginAppWrapper = current;
+            }
+            return current;
+        }
+    }
+
+    static Application unwrapApplication(Application app) {
+        return app instanceof PluginApplication ? ((PluginApplication) app).base : app;
+    }
 
     public static int proxyPort() {
         return ProxyAddress.port > 0 ? ProxyAddress.port : 9978;
@@ -70,7 +146,7 @@ public final class CspEngine implements SourceEngine {
 
     public CspEngine(Application application, Cms.Config config, Cms.Site selected)
             throws Exception {
-        app = application;
+        app = wrapPluginApplication(application);
         site = selected;
         if (!eligible(selected)) throw new IOException("此来源不是实验 CSP JAR 接口支持的 csp_ 站点");
         try {
@@ -126,6 +202,7 @@ public final class CspEngine implements SourceEngine {
 
     static synchronized DexClassLoader loader(Application app, File artifact, String sha)
             throws Exception {
+        app = wrapPluginApplication(app);
         DexClassLoader existing = LOADERS.get(sha);
         if (existing != null) {
             collectPluginLoaders(existing, null);
@@ -371,6 +448,9 @@ public final class CspEngine implements SourceEngine {
                 if (android.app.Activity.class.isAssignableFrom(type)) {
                     f.setAccessible(true);
                     f.set(target, activity);
+                } else if (Application.class.isAssignableFrom(type)) {
+                    f.setAccessible(true);
+                    f.set(target, wrapPluginApplication(activity.getApplication()));
                 } else if (java.lang.ref.WeakReference.class.isAssignableFrom(type)) {
                     f.setAccessible(true);
                     Object current = f.get(target);
@@ -432,9 +512,10 @@ public final class CspEngine implements SourceEngine {
     @SuppressWarnings("unchecked")
     static List<Object> lifecycleCallbacks(Application app) {
         try {
+            Application raw = unwrapApplication(app);
             Field field = Application.class.getDeclaredField("mActivityLifecycleCallbacks");
             field.setAccessible(true);
-            Object value = field.get(app);
+            Object value = field.get(raw);
             if (value instanceof List)
                 synchronized (value) {
                     return new ArrayList<>((List<Object>) value);
@@ -451,7 +532,8 @@ public final class CspEngine implements SourceEngine {
      */
     static void replayForegroundActivity(Application app, List<Object> before) {
         if (before == null) return;
-        List<Object> after = lifecycleCallbacks(app);
+        final Application rawApp = unwrapApplication(app);
+        List<Object> after = lifecycleCallbacks(rawApp);
         if (after == null) return;
         final List<Application.ActivityLifecycleCallbacks> rawCallbacks = new ArrayList<>();
         for (Object callback : after)
@@ -468,8 +550,8 @@ public final class CspEngine implements SourceEngine {
                             Application.ActivityLifecycleCallbacks safeCb =
                                     wrapLifecycleCallback(rawCb);
                             try {
-                                app.unregisterActivityLifecycleCallbacks(rawCb);
-                                app.registerActivityLifecycleCallbacks(safeCb);
+                                rawApp.unregisterActivityLifecycleCallbacks(rawCb);
+                                rawApp.registerActivityLifecycleCallbacks(safeCb);
                             } catch (Throwable ignored) {
                             }
                             added.add(safeCb);

@@ -95,6 +95,10 @@ public class MoviePlayer {
         this(context, true, decoderMode, false);
     }
 
+    public MoviePlayer(Context context, int decoderMode, boolean forceIjk) {
+        this(context, true, decoderMode, forceIjk);
+    }
+
     protected MoviePlayer(Context context, boolean initializeExo) {
         this(context, initializeExo, -1, false);
     }
@@ -552,12 +556,12 @@ public class MoviePlayer {
                                             boolean knownContainer =
                                                     !fullLower.contains(".m3u8")
                                                             && !fullLower.contains(".mpd")
-                                                            && (epName.endsWith(".mkv")
-                                                                    || epName.endsWith(".mp4")
-                                                                    || epName.endsWith(".webm")
-                                                                    || epName.endsWith(".avi")
-                                                                    || epName.endsWith(".mov")
-                                                                    || epName.endsWith(".flv")
+                                                            && (epName.contains(".mkv")
+                                                                    || epName.contains(".mp4")
+                                                                    || epName.contains(".webm")
+                                                                    || epName.contains(".avi")
+                                                                    || epName.contains(".mov")
+                                                                    || epName.contains(".flv")
                                                                     || fullLower.contains(".mkv")
                                                                     || fullLower.contains(".mp4")
                                                                     || fullLower.contains(".flv")
@@ -628,38 +632,22 @@ public class MoviePlayer {
                                                                                                         : 1500)
                                                                                                 * 188);
                                                         if (ijkMode) {
-                                                            extractors
-                                                                    .setConstantBitrateSeekingAlwaysEnabled(
-                                                                            true)
-                                                                    .setTsExtractorFlags(
-                                                                            androidx.media3
-                                                                                            .extractor
-                                                                                            .ts
-                                                                                            .DefaultTsPayloadReaderFactory
-                                                                                            .FLAG_ALLOW_NON_IDR_KEYFRAMES
-                                                                                    | androidx
-                                                                                            .media3
-                                                                                            .extractor
-                                                                                            .ts
-                                                                                            .DefaultTsPayloadReaderFactory
-                                                                                            .FLAG_DETECT_ACCESS_UNITS
-                                                                                    | androidx
-                                                                                            .media3
-                                                                                            .extractor
-                                                                                            .ts
-                                                                                            .DefaultTsPayloadReaderFactory
-                                                                                            .FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS
-                                                                                    | androidx
-                                                                                            .media3
-                                                                                            .extractor
-                                                                                            .ts
-                                                                                            .DefaultTsPayloadReaderFactory
-                                                                                            .FLAG_IGNORE_SPLICE_INFO_STREAM)
-                                                                    .setMp4ExtractorFlags(
-                                                                            androidx.media3
-                                                                                    .extractor.mp4
-                                                                                    .Mp4Extractor
-                                                                                    .FLAG_WORKAROUND_IGNORE_EDIT_LISTS);
+                                                            extractors.setTsExtractorFlags(
+                                                                    androidx.media3.extractor.ts
+                                                                                    .DefaultTsPayloadReaderFactory
+                                                                                    .FLAG_ALLOW_NON_IDR_KEYFRAMES
+                                                                            | androidx.media3
+                                                                                    .extractor.ts
+                                                                                    .DefaultTsPayloadReaderFactory
+                                                                                    .FLAG_DETECT_ACCESS_UNITS
+                                                                            | androidx.media3
+                                                                                    .extractor.ts
+                                                                                    .DefaultTsPayloadReaderFactory
+                                                                                    .FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS
+                                                                            | androidx.media3
+                                                                                    .extractor.ts
+                                                                                    .DefaultTsPayloadReaderFactory
+                                                                                    .FLAG_IGNORE_SPLICE_INFO_STREAM);
                                                         }
                                                         mediaSourceFactory =
                                                                 new DefaultMediaSourceFactory(
@@ -867,13 +855,13 @@ public class MoviePlayer {
                         : "";
         String u = uri != null ? uri.toString().toLowerCase(Locale.ROOT) : "";
         String m = mediaMime != null ? mediaMime.toLowerCase(Locale.ROOT) : "";
-        if (epName.endsWith(".mkv") || u.contains(".mkv") || m.contains("matroska")) return "MKV";
+        if (epName.contains(".mkv") || u.contains(".mkv") || m.contains("matroska")) return "MKV";
         if (m.contains("mpegurl") || u.contains(".m3u8")) return "HLS";
         if (m.contains("dash") || u.contains(".mpd")) return "DASH";
-        if (epName.endsWith(".mp4") || u.contains(".mp4")) return "MP4";
-        if (epName.endsWith(".flv") || u.contains(".flv")) return "FLV";
-        if (epName.endsWith(".ts") || u.contains(".ts")) return "TS";
-        if (epName.endsWith(".webm") || u.contains(".webm")) return "WebM";
+        if (epName.contains(".mp4") || u.contains(".mp4")) return "MP4";
+        if (epName.contains(".flv") || u.contains(".flv")) return "FLV";
+        if (epName.contains(".ts") || u.contains(".ts")) return "TS";
+        if (epName.contains(".webm") || u.contains(".webm")) return "WebM";
         return "";
     }
 

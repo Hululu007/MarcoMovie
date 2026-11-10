@@ -30,7 +30,7 @@ final class HomeScreen {
     HomeAmbient ambient;
     TextView status, source, more, earlier, allHistory;
     int ticket, request, posterWidth, gridEpoch;
-    long lastCategoryDpadTime;
+    long lastCategoryDpadTime, lastHorizontalTabDpadTime;
     Runnable pendingGrid;
 
     /** Tag of the card that should take focus once drawn after "加载更多". */
@@ -737,8 +737,7 @@ final class HomeScreen {
                                         .setNegativeButton("关闭", null)
                                         .show();
                             });
-            extra.setOnFocusChangeListener(
-                    (v, f) -> outline(extra, f, 17, extra.isSelected() ? 0xffededf2 : 0xff24242b));
+            extra.setOnFocusChangeListener((v, f) -> updateTabs());
             addTabView(extra);
         }
         if (!configSite) {
@@ -836,25 +835,14 @@ final class HomeScreen {
     void addTab(String label, String id, int index) {
         TextView button = pill(label, "home-tab:" + index, () -> choose(id, true));
         tabIds.put(button, id);
-        button.setOnKeyListener(
-                (v, keyCode, event) -> {
-                    FocusMotion.key(a, v, keyCode, event);
-                    if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
-                        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT
-                                || keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT
-                                || ((keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
-                                                || keyCode
-                                                        == android.view.KeyEvent.KEYCODE_DPAD_DOWN)
-                                        && v.isSelected())) {
-                            lastCategoryDpadTime = android.os.SystemClock.uptimeMillis();
-                        }
-                    }
-                    return false;
-                });
         button.setOnFocusChangeListener(
                 (v, f) -> {
                     styleTab(button);
-                    if (f && a.isTvDevice() && !id.equals(state.category)) {
+                    if (f
+                            && a.isTvDevice()
+                            && !id.equals(state.category)
+                            && android.os.SystemClock.uptimeMillis() - lastHorizontalTabDpadTime
+                                    < 350L) {
                         button.postDelayed(
                                 () -> {
                                     if (button.hasFocus()
@@ -870,6 +858,22 @@ final class HomeScreen {
     }
 
     void addTabView(TextView button) {
+        button.setOnKeyListener(
+                (v, keyCode, event) -> {
+                    FocusMotion.key(a, v, keyCode, event);
+                    if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
+                        if (keyCode == android.view.KeyEvent.KEYCODE_DPAD_LEFT
+                                || keyCode == android.view.KeyEvent.KEYCODE_DPAD_RIGHT) {
+                            lastHorizontalTabDpadTime = android.os.SystemClock.uptimeMillis();
+                            lastCategoryDpadTime = lastHorizontalTabDpadTime;
+                        } else if ((keyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
+                                        || keyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN)
+                                && v.isSelected()) {
+                            lastCategoryDpadTime = android.os.SystemClock.uptimeMillis();
+                        }
+                    }
+                    return false;
+                });
         button.setSingleLine(false);
         button.setMaxLines(Integer.MAX_VALUE);
         button.setEllipsize(null);
@@ -939,6 +943,7 @@ final class HomeScreen {
 
     View selectedTab() {
         for (View v : tabs) if (tabIds.containsKey(v) && v.isSelected()) return v;
+        for (View v : tabs) if ("home-category-more".equals(v.getTag()) && v.isSelected()) return v;
         return tabs.isEmpty() ? source : tabs.get(0);
     }
 
@@ -1379,24 +1384,46 @@ final class HomeScreen {
                         ? source.getId()
                         : historyCards.get(stackedHistory ? historyCards.size() - 1 : 0).getId());
         source.setNextFocusDownId(selectedTab().getId());
+        int contentDownId =
+                earlier.isShown()
+                        ? earlier.getId()
+                        : rows.isEmpty()
+                                ? (more.isShown() ? more.getId() : -1)
+                                : rows.get(0).get(0).getId();
         for (int r = 0; r < filters.lines.size(); r++) {
             List<View> line = filters.lines.get(r);
             horizontal(line);
+            if (!line.isEmpty() && r + 1 < filters.lines.size()) {
+                List<View> nextLine = filters.lines.get(r + 1);
+                if (!nextLine.isEmpty()) {
+                    line.get(line.size() - 1).setNextFocusRightId(nextLine.get(0).getId());
+                }
+            }
+            if (!line.isEmpty() && r > 0) {
+                List<View> prevLine = filters.lines.get(r - 1);
+                if (!prevLine.isEmpty()) {
+                    line.get(0).setNextFocusLeftId(prevLine.get(prevLine.size() - 1).getId());
+                }
+            }
             for (View tab : line) {
                 tab.setNextFocusUpId(
                         r == 0
                                 ? source.getId()
                                 : filters.nearest(filters.lines.get(r - 1), tab).getId());
-                tab.setNextFocusDownId(
-                        r + 1 < filters.lines.size()
-                                ? filters.nearest(filters.lines.get(r + 1), tab).getId()
-                                : earlier.isShown()
-                                        ? earlier.getId()
-                                        : rows.isEmpty()
-                                                ? (more.isShown() ? more.getId() : tab.getId())
-                                                : rows.get(0).get(0).getId());
+                int downId = contentDownId != -1 ? contentDownId : tab.getId();
+                if (r + 1 < filters.lines.size()) {
+                    View below = filters.nearest(filters.lines.get(r + 1), tab);
+                    boolean overlaps =
+                            below != null
+                                    && below.getRight() > tab.getLeft()
+                                    && below.getLeft() < tab.getRight();
+                    if (overlaps) {
+                        downId = below.getId();
+                    }
+                }
+                tab.setNextFocusDownId(downId);
             }
-            if (a.homeDock != null && !line.isEmpty())
+            if (a.homeDock != null && !line.isEmpty() && r + 1 == filters.lines.size())
                 a.homeDock.rightEdge(line.get(line.size() - 1));
         }
         for (int r = Math.max(0, firstRow); r < rows.size(); r++) {

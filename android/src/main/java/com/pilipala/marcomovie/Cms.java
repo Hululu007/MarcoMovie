@@ -1139,6 +1139,26 @@ public final class Cms {
         }
     }
 
+    private static void prioritizeDirectStreamLines(Video v) {
+        if (v == null || v.lines.size() <= 1) return;
+        List<Line> direct = new ArrayList<>();
+        List<Line> indirect = new ArrayList<>();
+        for (Line l : v.lines) {
+            boolean hasDirect =
+                    !l.episodes.isEmpty()
+                            && (isDirectStreamUrl(l.episodes.get(0).url)
+                                    || (l.name != null
+                                            && l.name.toLowerCase(Locale.ROOT).contains("m3u8")));
+            if (hasDirect) direct.add(l);
+            else indirect.add(l);
+        }
+        if (!direct.isEmpty() && !indirect.isEmpty()) {
+            v.lines.clear();
+            v.lines.addAll(direct);
+            v.lines.addAll(indirect);
+        }
+    }
+
     private static Video video(JSONObject j) {
         Video v = new Video();
         v.id = j.optString("vod_id");
@@ -1164,6 +1184,7 @@ public final class Cms {
         String[] from = j.optString("vod_play_from").split("\\$\\$\\$", -1),
                 urls = j.optString("vod_play_url").split("\\$\\$\\$", -1);
         parsePlayLines(v, from, urls);
+        prioritizeDirectStreamLines(v);
         return v;
     }
 
@@ -1216,6 +1237,7 @@ public final class Cms {
             }
             parsePlayLines(v, subFrom, subUrls);
         }
+        prioritizeDirectStreamLines(v);
         return v;
     }
 

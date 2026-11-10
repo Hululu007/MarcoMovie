@@ -14,6 +14,9 @@ final class MediaOptions {
         if (original.name != null && !original.name.isEmpty()) {
             out.media.put("_episodeName", original.name);
         }
+        if (original.media != null && original.media.has("_lineHopCount")) {
+            out.media.put("_lineHopCount", original.media.optInt("_lineHopCount", 0));
+        }
         JSONArray qualities = new JSONArray();
         out.url = extractPlayUrl(result.opt("url"), qualities);
         if (out.url.isEmpty()
