@@ -2,15 +2,24 @@ package com.pilipala.marcomovie;
 
 /** Phase-only diagnostics: no source addresses, titles, IDs, or authentication data. */
 final class DetailRequest {
+    final String logTag;
     final long started = android.os.SystemClock.elapsedRealtime();
     long dispatched, engineReady, returned, parsed;
     boolean cached;
     long gateWaitNanos, delegateNanos;
 
+    DetailRequest() {
+        this("MovieDetailTiming");
+    }
+
+    DetailRequest(String tag) {
+        logTag = tag;
+    }
+
     void ready() {
         long now = android.os.SystemClock.elapsedRealtime();
         android.util.Log.i(
-                "MovieDetailTiming",
+                logTag,
                 "cache="
                         + cached
                         + " queue_ms="

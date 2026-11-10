@@ -138,6 +138,7 @@ final class SourceController {
 
     static void closeEngines(MainActivity a) {
         a.liveSession = null;
+        if (a.detailPrefetch != null) a.detailPrefetch.cancel(true);
         a.detailCache.clear();
         a.homeData.clear();
         if (a.localProxy != null) {
@@ -252,6 +253,14 @@ final class SourceController {
                 || video.id.isEmpty()) return;
         if (isConfigOrNetdiskSite(site) || isConfigOrNetdiskActionCard(site, video)) return;
         if (ListingRoute.isRedirect(video.tag, video.action, video.id)) return;
+        // Speculation must never occupy a serialized plugin or initialize another source.
+        // Keep one optional request at most, leaving the detail workers available for clicks.
+        final SourceEngine source;
+        synchronized (a) {
+            source = a.engines.get(site.key);
+        }
+        if (source == null || source.requiresExternalRuntime()) return;
+        if (a.detailPrefetch != null && !a.detailPrefetch.isDone()) return;
         if (video.lines != null
                 && !video.lines.isEmpty()
                 && video.description != null
@@ -260,30 +269,35 @@ final class SourceController {
         final String id = video.id;
         final String key = epoch + ":" + site.key.length() + ":" + site.key + id;
         if (a.detailCache.get(key) != null) return;
-        RequestScope.submit(
-                a.details,
-                () -> {
-                    try {
-                        if (a.detailCache.get(key) != null) return;
-                        String raw =
-                                a.detailFlights.get(
-                                        key,
-                                        () -> {
-                                            String cached = a.detailCache.get(key);
-                                            if (cached != null) return cached;
-                                            SourceEngine source = a.engine(site);
-                                            long[] phases = new long[2];
-                                            String fetched =
-                                                    SourceGate.measured(
-                                                            phases, () -> source.detail(id));
-                                            if (fetched != null && epoch == a.engineEpoch) {
-                                                a.detailCache.put(key, fetched);
-                                            }
-                                            return fetched;
-                                        });
-                    } catch (Throwable ignored) {
-                    }
-                });
+        a.detailPrefetch =
+                RequestScope.submit(
+                        a.details,
+                        () -> {
+                            try {
+                                if (a.detailCache.get(key) != null) return;
+                                String raw =
+                                        a.detailFlights.get(
+                                                key,
+                                                () -> {
+                                                    String cached = a.detailCache.get(key);
+                                                    if (cached != null) return cached;
+                                                    long[] phases = new long[2];
+                                                    String fetched =
+                                                            SourceGate.measured(
+                                                                    phases,
+                                                                    () -> source.detail(id));
+                                                    if (fetched != null
+                                                            && epoch == a.engineEpoch
+                                                            && !Cms.listing(fetched)
+                                                                    .videos
+                                                                    .isEmpty()) {
+                                                        a.detailCache.put(key, fetched);
+                                                    }
+                                                    return fetched;
+                                                });
+                            } catch (Throwable ignored) {
+                            }
+                        });
     }
 
     static void loadDetail(
@@ -314,10 +328,6 @@ final class SourceController {
                                                                 SourceGate.measured(
                                                                         phases,
                                                                         () -> source.detail(id));
-                                                        if (fetched != null
-                                                                && epoch == a.engineEpoch) {
-                                                            a.detailCache.put(key, fetched);
-                                                        }
                                                         return fetched;
                                                     });
                                     if (timing.engineReady == 0)
@@ -1246,6 +1256,21 @@ final class SourceController {
     static void saveConfig(MainActivity a, Cms.Config c, String origin) throws Exception {
         if (!c.warehouse.isEmpty()) origin = c.warehouse;
         else if (!c.origin.isEmpty()) origin = c.origin;
+        ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
+        String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");
+        if (a.isTvDevice()) {
+            rememberConfig(a, library);
+            String id = ConfigLibrary.identity(origin, c.raw);
+            String previousId =
+                    a.config == null ? "" : ConfigLibrary.identity(a.configOrigin, a.config.raw);
+            if (!id.equals(previousId)) {
+                selected = "";
+                for (ConfigLibrary.Entry entry : library.entries()) {
+                    if (id.equals(entry.id)) selected = entry.selected;
+                }
+            }
+            library.remember(c.raw, origin, configName(c), selected);
+        }
         a.configStore.write(c.raw);
         SourcePicker.applyEdits(a, c, origin);
         a.closeEngines();
@@ -1253,7 +1278,7 @@ final class SourceController {
         a.configOrigin = origin;
         android.content.SharedPreferences.Editor editor =
                 a.prefs.edit().putString(Prefs.ORIGIN, origin);
-        String currentKey = a.prefs.getString(Prefs.SELECTED_SITE, "");
+        String currentKey = selected;
         boolean hasSelected = false;
         Cms.Site firstAvailable = null;
         for (Cms.Site s : c.sites) {
@@ -1264,12 +1289,28 @@ final class SourceController {
         }
         if (!hasSelected && firstAvailable != null) {
             editor.putString(Prefs.SELECTED_SITE, firstAvailable.key);
-        }
+        } else if (hasSelected) editor.putString(Prefs.SELECTED_SITE, currentKey);
+        else editor.remove(Prefs.SELECTED_SITE);
         editor.apply();
         a.back.clear();
         a.current = new MainActivity.Screen(a::home);
         a.current.render.run();
         a.restore(a.current);
         a.toast("已导入 " + c.sites.size() + " 个来源");
+    }
+
+    static String configName(Cms.Config config) {
+        if (config.sites.isEmpty()) return "我的订阅";
+        return config.sites.get(0).name
+                + (config.sites.size() > 1 ? " · " + config.sites.size() + " 个片源" : "");
+    }
+
+    static void rememberConfig(MainActivity a, ConfigLibrary library) throws Exception {
+        if (a.config != null && a.config.raw != null && !a.config.raw.isEmpty())
+            library.remember(
+                    a.config.raw,
+                    a.configOrigin,
+                    configName(a.config),
+                    a.prefs.getString(Prefs.SELECTED_SITE, ""));
     }
 }

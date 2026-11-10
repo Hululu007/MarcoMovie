@@ -28,6 +28,13 @@ final class RequestScope {
         return CURRENT.get();
     }
 
+    static void checkCurrent() throws InterruptedIOException {
+        RequestScope scope = CURRENT.get();
+        if (scope != null) scope.check();
+        else if (Thread.currentThread().isInterrupted())
+            throw new InterruptedIOException("Request cancelled");
+    }
+
     static void onCancel(Runnable listener) {
         RequestScope scope = CURRENT.get();
         if (scope != null && listener != null) {

@@ -5,7 +5,7 @@ sys.path.insert(0,str(Path(__file__).parent))
 from build_android import ROOT, BUILD, JDK, SDK, ANDROID, run, exe
 
 probe_name=sys.argv[1] if len(sys.argv)>1 else 'DecoderProbe'
-assert probe_name in ('DecoderProbe','InteractionProbe','HomeProbe','StartupProbe','ExperienceProbe','MotionProbe','SearchCaseProbe','PerformanceProbe','DetailProbe','ConfigLiveProbe','UpdateProbe','LayoutProbe','ResponsiveProbe','MobilePlayerProbe','SourceHostProbe')
+assert probe_name in ('DecoderProbe','InteractionProbe','HomeProbe','LoadingProbe','StartupProbe','ExperienceProbe','MotionProbe','SearchCaseProbe','PerformanceProbe','DetailProbe','ConfigLiveProbe','UpdateProbe','LayoutProbe','ResponsiveProbe','MobilePlayerProbe','SourceHostProbe')
 out=BUILD/('source-host-probe' if probe_name=='SourceHostProbe' else 'mobile-player-probe' if probe_name=='MobilePlayerProbe' else 'responsive-probe' if probe_name=='ResponsiveProbe' else 'layout-probe' if probe_name=='LayoutProbe' else 'update-probe' if probe_name=='UpdateProbe' else 'config-live-probe' if probe_name=='ConfigLiveProbe' else 'detail-probe' if probe_name=='DetailProbe' else 'performance-probe' if probe_name=='PerformanceProbe' else 'search-case-probe' if probe_name=='SearchCaseProbe' else 'motion-probe' if probe_name=='MotionProbe' else 'experience-probe' if probe_name=='ExperienceProbe' else 'startup-probe' if probe_name=='StartupProbe' else 'probe' if probe_name=='Probe' else 'decoder-probe' if probe_name=='DecoderProbe' else 'home-probe' if probe_name=='HomeProbe' else 'interaction-probe');out.mkdir(exist_ok=True)
 for d in ('classes','dex'): (out/d).mkdir(exist_ok=True)
 manifest=out/'AndroidManifest.xml'

@@ -60,6 +60,7 @@ jobs:
           python android/tests/run_checks.py
           python android/tests/run_global_search_checks.py
           python android/tests/run_scheduling_checks.py
+          python android/tests/run_config_library_checks.py
           python android/tests/run_live_checks.py
           python android/tests/run_seek_checks.py
           python android/tests/run_review_fix_checks.py

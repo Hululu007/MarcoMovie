@@ -53,6 +53,7 @@ final class HomeScreen {
         final String skip;
         final int pages;
         String filterSchema = "{}";
+        boolean recommendationsPending;
 
         Snapshot(List<Cms.Video> videos, List<Cms.Category> categories, String skip, int pages) {
             this.videos = videos;
@@ -162,7 +163,9 @@ final class HomeScreen {
                         "加载更多",
                         "home-load-more",
                         () -> {
-                            if (snapshot == null) {
+                            if (snapshot == null
+                                    || (snapshot.recommendationsPending
+                                            && state.category.isEmpty())) {
                                 loadHome();
                                 return;
                             }
@@ -230,11 +233,12 @@ final class HomeScreen {
 
     void refreshHomeSilently() {
         final int token = request;
-        a.worker.execute(
+        a.submitPage(
                 () -> {
                     try {
                         SourceEngine engine = a.engine(site);
                         String raw = engine.home();
+                        RequestScope.checkCurrent();
                         List<Cms.Category> categories = Cms.categories(raw);
                         Cms.Listing list = parseHomeListing(raw);
                         clean(list.videos);
@@ -244,6 +248,7 @@ final class HomeScreen {
                                 clean(list.videos);
                             } catch (Throwable ignored) {
                             }
+                        RequestScope.checkCurrent();
                         String skip = "";
                         if (list.videos.isEmpty() && !categories.isEmpty()) {
                             skip = categories.get(0).id;
@@ -251,8 +256,10 @@ final class HomeScreen {
                             clean(list.videos);
                         }
                         if (list.videos.isEmpty() && categories.isEmpty()) return;
+                        RequestScope.checkCurrent();
                         final Snapshot fresh =
                                 new Snapshot(list.videos, categories, skip, list.pageCount);
+                        fresh.filterSchema = raw;
                         writeDiskSnapshot(a, site.key, fresh);
                         a.ui.post(
                                 () -> {
@@ -361,15 +368,32 @@ final class HomeScreen {
                     try {
                         SourceEngine engine = a.engine(site);
                         String raw = engine.home();
+                        RequestScope.checkCurrent();
                         List<Cms.Category> categories = Cms.categories(raw);
                         Cms.Listing list = parseHomeListing(raw);
                         clean(list.videos);
+                        if (list.videos.isEmpty()
+                                && !categories.isEmpty()
+                                && !SourceController.isConfigOrNetdiskSite(site)) {
+                            Snapshot navigation =
+                                    new Snapshot(new ArrayList<>(), categories, "", 1);
+                            navigation.filterSchema = raw;
+                            navigation.recommendationsPending = true;
+                            a.ui.post(
+                                    () -> {
+                                        if (!active() || token != request) return;
+                                        snapshot = navigation;
+                                        renderSnapshot();
+                                        status.setText("正在读取推荐…");
+                                    });
+                        }
                         if (list.videos.isEmpty())
                             try {
                                 list = Cms.listing(engine.homeVideos());
                                 clean(list.videos);
                             } catch (Throwable ignored) {
                             }
+                        RequestScope.checkCurrent();
                         String skip = "";
                         if (list.videos.isEmpty() && !categories.isEmpty()) {
                             skip = categories.get(0).id;
@@ -378,6 +402,7 @@ final class HomeScreen {
                         }
                         Snapshot result =
                                 new Snapshot(list.videos, categories, skip, list.pageCount);
+                        RequestScope.checkCurrent();
                         result.filterSchema = raw;
                         if (!a.reduced
                                 && (site.api == null || !site.api.contains("fixture.test"))) {
@@ -636,7 +661,7 @@ final class HomeScreen {
                                             }
                                         }
                                     },
-                                    150);
+                                    500);
                         }
                     });
             if (i == 0
@@ -957,7 +982,9 @@ final class HomeScreen {
             filters.requestRectangleOnScreen(
                     new Rect(0, -a.dp(8), filters.getWidth(), filters.getHeight()), false);
         }
-        if (category.isEmpty()) {
+        if (category.isEmpty() && snapshot.recommendationsPending) {
+            loadHome();
+        } else if (category.isEmpty()) {
             state.videos.addAll(
                     VideoFilters.apply(
                             snapshot.videos, filterDefinitions(), state.selectedFilters));
@@ -989,15 +1016,28 @@ final class HomeScreen {
         status.setText("正在读取分类…");
         more.setText("正在加载…");
         more.setVisibility(first ? View.GONE : View.VISIBLE);
+        DetailRequest timing = new DetailRequest("MovieCategoryTiming");
         a.submitPage(
                 () -> {
                     try {
-                        Cms.Listing list =
-                                Cms.listing(a.engine(site).category(category, page, remoteFilters));
+                        timing.dispatched = android.os.SystemClock.elapsedRealtime();
+                        SourceEngine engine = a.engine(site);
+                        timing.engineReady = android.os.SystemClock.elapsedRealtime();
+                        long[] phases = new long[2];
+                        String raw =
+                                SourceGate.measured(
+                                        phases,
+                                        () -> engine.category(category, page, remoteFilters));
+                        timing.returned = android.os.SystemClock.elapsedRealtime();
+                        timing.gateWaitNanos = phases[0];
+                        timing.delegateNanos = phases[1];
+                        RequestScope.checkCurrent();
+                        Cms.Listing list = Cms.listing(raw);
                         clean(list.videos);
                         int received = list.videos.size();
                         List<Cms.Video> matching =
                                 VideoFilters.apply(list.videos, definitions, selections);
+                        timing.parsed = android.os.SystemClock.elapsedRealtime();
                         a.ui.post(
                                 () -> {
                                     if (!active() || token != request) return;
@@ -1034,6 +1074,7 @@ final class HomeScreen {
                                     pendingFocus =
                                             !first && focusMore ? "home-video:" + focusIndex : null;
                                     drawGrid(!first && !changedWindow);
+                                    content.postOnAnimation(timing::ready);
                                     if (first
                                             && a.current != null
                                             && a.current.focus != null
@@ -1222,14 +1263,6 @@ final class HomeScreen {
                     && a.current != null
                     && a.current.focus != null
                     && a.current.focus.startsWith("home-video:")) restoreFocus();
-            if (!a.reduced && !state.videos.isEmpty()) {
-                final Cms.Video firstVid = state.videos.get(0);
-                content.postDelayed(
-                        () -> {
-                            if (active()) SourceController.prefetchDetail(a, site, firstVid);
-                        },
-                        350);
-            }
         }
     }
 
@@ -1269,7 +1302,7 @@ final class HomeScreen {
                                             SourceController.prefetchDetail(a, site, video);
                                         }
                                     },
-                                    200);
+                                    500);
                         }
                     }
                 });

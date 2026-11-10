@@ -24,6 +24,7 @@ public final class MainActivity extends Activity {
     final ExecutorService details = Executors.newFixedThreadPool(4);
     final DetailCache detailCache = new DetailCache();
     final SingleFlight<String> detailFlights = new SingleFlight<>();
+    Future<?> detailPrefetch;
     final List<Future<?>> pageRequests = new ArrayList<>();
     final ExecutorService artwork = Executors.newFixedThreadPool(8);
     final List<Future<?>> artworkRequests = new ArrayList<>();
@@ -1357,7 +1358,10 @@ public final class MainActivity extends Activity {
         LinearLayout hero = row();
         addButton(
                 hero,
-                button(config == null ? "＋ 导入我的配置" : "＋ 更新配置", "primary", () -> importDialog()));
+                button(
+                        config == null ? "＋ 导入我的配置" : (isTvDevice() ? "＋ 添加新源" : "＋ 更新配置"),
+                        "primary",
+                        () -> importDialog()));
         if (config != null) addButton(hero, button("浏览片库", "primary", () -> chooseSources()));
         addButton(
                 hero,

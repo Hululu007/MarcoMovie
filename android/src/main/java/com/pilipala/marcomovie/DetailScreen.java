@@ -355,13 +355,14 @@ final class DetailScreen {
                 AppLog.w("DetailScreen", "present ready detail failed", error);
                 info.addView(a.text("详情数据无法显示，请返回后重试。", 15, MainActivity.MUTED));
             }
-        } else if (!a.reduced && hasPlayableLines(listing)) {
+        } else if (hasPlayableLines(listing)) {
             try {
                 present.accept(listing);
             } catch (Exception error) {
                 AppLog.w("DetailScreen", "present listing detail failed", error);
             }
-            if (listing.description == null || listing.description.trim().isEmpty()) {
+            if (!a.reduced
+                    && (listing.description == null || listing.description.trim().isEmpty())) {
                 a.loadDetail(s, listing.id, present);
             }
         } else {

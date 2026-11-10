@@ -94,7 +94,8 @@ final class PhoneConfigDialog {
             String address = server.address(ip);
             LinearLayout panel = a.vertical();
             panel.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
-            TextView note = a.text("手机与电视连接同一网络，扫码后在手机粘贴配置地址。", 15, MainActivity.MUTED);
+            TextView note =
+                    a.text("手机与电视连接同一网络，扫码粘贴配置地址。新源会单独保存，旧源可在「已添加源」中切换。", 15, MainActivity.MUTED);
             panel.addView(note);
             a.gap(panel, 12);
             int qrSize = a.dp(190);

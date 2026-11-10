@@ -11,7 +11,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "android/build/api23-probes"
 ADB = os.environ.get("ADB", "adb")
-PROBES = ("SubtitleProbe", "HomeProbe", "SourceHostProbe")
+PROBES = ("SubtitleProbe", "HomeProbe", "LoadingProbe", "SourceHostProbe")
 
 
 def adb(*args, check=True, timeout=300):

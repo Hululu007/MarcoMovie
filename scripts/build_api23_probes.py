@@ -17,7 +17,7 @@ from build_quickjs_deadline import build as build_quickjs_deadline
 
 
 OUT = BUILD / "api23-probes"
-PROBES = ("SubtitleProbe", "HomeProbe", "SourceHostProbe")
+PROBES = ("SubtitleProbe", "HomeProbe", "LoadingProbe", "SourceHostProbe")
 
 
 def sign(source, name):
@@ -57,7 +57,7 @@ def build_live_plugin(app_classes):
 def main(phone=False):
     global OUT, PROBES
     OUT = BUILD / ('phone-source-probe' if phone else 'api23-probes')
-    PROBES = ('SourceHostProbe',) if phone else ('SubtitleProbe', 'HomeProbe', 'SourceHostProbe')
+    PROBES = ('SourceHostProbe',) if phone else ('SubtitleProbe', 'HomeProbe', 'LoadingProbe', 'SourceHostProbe')
     abi = 'x86_64' if phone else 'x86'
     source = BUILD / ('unsigned-mobile.apk' if phone else 'unsigned.apk')
     app_classes = BUILD / "classes.jar"
