@@ -1473,6 +1473,13 @@ public final class HomeProbe extends Instrumentation {
                                                 >= tag("home-dock").getBottom() + a.dp(12)));
         frame("glass-top-large");
         check(
+                "large_top_dock_label_clears_content",
+                ui(
+                        () ->
+                                a.scroll.getTop() + a.body.getPaddingTop()
+                                        >= tag("home-dock").getBottom()
+                                                + a.dp(6 + a.homeDock.hintHeightDp)));
+        check(
                 "reduced_motion_snaps_glass_without_delaying_category",
                 ui(
                         () -> {

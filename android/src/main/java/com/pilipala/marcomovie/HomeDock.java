@@ -78,7 +78,7 @@ final class HomeDock {
         if (topMode) {
             FrameLayout.LayoutParams viewport =
                     (FrameLayout.LayoutParams) a.scroll.getLayoutParams();
-            viewport.topMargin = a.dp(crossDp + 34);
+            viewport.topMargin = a.dp(crossDp + Math.max(34, hintHeightDp + 6));
             a.scroll.setLayoutParams(viewport);
         }
         hint = a.text("", 12f * navScale, MainActivity.WHITE);

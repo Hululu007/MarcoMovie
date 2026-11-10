@@ -92,6 +92,7 @@ final class GlassSelection {
         float stretchY = Math.min(a.dp(4), Math.abs(top.velocity + bottom.velocity) * .00065f);
         drawing.inset(-stretchX, -stretchY);
         float radius = Math.min(drawing.width(), drawing.height()) * .5f;
+        paint.setAlpha(255);
         paint.setStyle(Paint.Style.FILL);
         paint.setShader(
                 new LinearGradient(

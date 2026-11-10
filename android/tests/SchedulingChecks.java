@@ -199,6 +199,7 @@ public final class SchedulingChecks {
                 worker.submit(() -> RequestScope.current() == null).get(),
                 "scope removed before worker reuse");
         worker.shutdownNow();
+        cancellationBeforeInterrupt();
         MotionSpring spring = new MotionSpring(0, 18, .05f);
         spring.target(500);
         spring.step(.07f);
@@ -274,5 +275,59 @@ public final class SchedulingChecks {
                 "gate becomes reusable only after old call exits");
 
         System.out.println(checks + " scheduling/cache/motion checks passed");
+    }
+
+    static void cancellationBeforeInterrupt() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1), finished = new CountDownLatch(1);
+        AtomicInteger fallback = new AtomicInteger();
+        ExecutorService worker =
+                Executors.newSingleThreadExecutor(
+                        work ->
+                                new Thread(work) {
+                                    @Override
+                                    public void interrupt() {
+                                        super.interrupt();
+                                        // Make the delegate finish its catch/check path before
+                                        // cancel() can return.
+                                        try {
+                                            finished.await(2, TimeUnit.SECONDS);
+                                        } catch (InterruptedException ignored) {
+                                            Thread.currentThread().interrupt();
+                                        }
+                                    }
+                                });
+        try {
+            Future<?> task =
+                    RequestScope.submit(
+                            worker,
+                            () -> {
+                                try {
+                                    entered.countDown();
+                                    try {
+                                        new CountDownLatch(1).await();
+                                    } catch (InterruptedException ignored) {
+                                    }
+                                    RequestScope.checkCurrent();
+                                    fallback.incrementAndGet();
+                                } catch (InterruptedIOException expected) {
+                                } finally {
+                                    finished.countDown();
+                                }
+                            });
+            check(entered.await(2, TimeUnit.SECONDS), "cancellable delegate entered wait");
+            check(task.cancel(true), "running request cancellation succeeds");
+            check(
+                    finished.await(2, TimeUnit.SECONDS) && fallback.get() == 0,
+                    "cancellation visible before cleared interrupt can start fallback");
+            check(
+                    worker.submit(
+                                    () ->
+                                            RequestScope.current() == null
+                                                    && !Thread.currentThread().isInterrupted())
+                            .get(2, TimeUnit.SECONDS),
+                    "cancelled worker remains reusable without leaked scope or interrupt");
+        } finally {
+            worker.shutdownNow();
+        }
     }
 }

@@ -119,6 +119,11 @@ final class RequestScope {
                                         })) {
                     @Override
                     public boolean cancel(boolean interrupt) {
+                        if (isDone()) return false;
+                        // Publish cancellation before interrupting a delegate: catching
+                        // InterruptedException clears its thread flag and may otherwise let it
+                        // start a fallback request before FutureTask.cancel returns.
+                        scope.cancelled = true;
                         boolean result = super.cancel(interrupt);
                         if (result) scope.cancel();
                         return result;

@@ -245,6 +245,7 @@ public final class LoadingProbe extends Instrumentation {
                     "category_cancels_old_recommendation",
                     recommendationCancelled.await(1, TimeUnit.SECONDS));
             SystemClock.sleep(100);
+            result.put("category_calls_after_cancel", categories.get());
             check("cancelled_home_skips_fallback_request", categories.get() == 1);
             runOnMainSync(() -> a.current.retainedHome.choose("series", true));
             check("series_ready", await(() -> a.current.homeState.ready, 1800));
