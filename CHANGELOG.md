@@ -1,3 +1,9 @@
+## 2026-11-11 Windows 0.5.11 / macOS 0.5.10 录屏反馈修复
+
+- [Windows 0.5.11](docs/releases/windows-v0.5.11.md) · [macOS 0.5.10](docs/releases/macos-v0.5.10.md)。
+- 修复实际桌面订阅的另一版插件适配、夸克原画媒体会话及轮换、大文件 Range 与 HLS 请求，并补齐起播超时和跨订阅搜索区分。
+- 两端各 578 项检查与原生构建通过，包含打包解码库的合成鉴权 HEVC/MKV 进度和定位检查。真实账号原片与物理 Mac 验收范围见[复核记录](docs/desktop-recording-regressions-20261111.md)。
+
 ## 2026-11-11 Android 电视 / 盒子 0.5.17
 
 - [电视端 0.5.17](docs/releases/android-tv-v0.5.17.md)：分类获得焦点立即切换，分类栏与 Dock 使用连续滑动的液态玻璃选中框。
