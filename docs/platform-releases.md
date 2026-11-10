@@ -1,5 +1,7 @@
 # Independent platform releases
 
+Android TV / box 0.5.17 (version code 71) adds immediate category selection, a sliding glass selection frame, three inline filter rows, a right/top Dock with redrawn vector icons, and small reading scroll steps. It also closes the cancellation/fallback race while retaining the 0.5.16 loading and saved-subscription changes. Exact build commit: `fede0b4e832fdc426a4097bc1a785047f4f59a9a`; Android build/offline workflow `42849589975` passed the required Android jobs and API 23 TV workflow `42849589988` passed 337 checks. No physical TV or real-provider latency acceptance is claimed. See [the version record](releases/android-tv-v0.5.17.md).
+
 Android TV / box 0.5.16 (version code 70) optimizes category/detail request scheduling and retains independently switchable saved subscriptions. The exact build commit is `e435f461183d6a0db68ef7c3f475190bee10c0e5`; Android build/offline workflow `42841196245` and API 23 TV workflow `42841196321` passed the required Android jobs and 295 emulator checks. No physical TV or real-provider latency acceptance is claimed. See [the version record](releases/android-tv-v0.5.16.md).
 
 The owner allows each platform to release independently after its own checks. Version numbers do not have to match. A release must name its platform, build commit, tested fixes and remaining limitations.
