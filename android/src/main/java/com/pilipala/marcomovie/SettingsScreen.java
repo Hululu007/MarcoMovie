@@ -118,11 +118,12 @@ final class SettingsScreen {
         a.open(new MainActivity.Screen(a::home), false);
     }
 
+    interface AccountChoice {
+        void accept(int index);
+    }
+
     void showAccountActionPicker(
-            String title,
-            String subtitle,
-            String[] labels,
-            java.util.function.IntConsumer handleChoice) {
+            String title, String subtitle, String[] labels, AccountChoice handleChoice) {
         if (!a.isTvDevice()) {
             MobileShell.showDrawerPicker(a, title, subtitle, labels, -1, handleChoice::accept);
         } else {

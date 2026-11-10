@@ -1769,7 +1769,10 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        if (privateMode && isFinishing() && !switchingPrivacy) PrivacySpace.active = false;
+        if (privateMode && isFinishing() && !switchingPrivacy) {
+            MobileShell.clearSearchSession();
+            PrivacySpace.active = false;
+        }
         if (activeActivity == this) activeActivity = null;
         clearPlaybackLoading();
         if (phoneConfig != null) phoneConfig.close();

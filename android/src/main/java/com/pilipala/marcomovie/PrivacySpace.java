@@ -186,9 +186,7 @@ final class PrivacySpace {
         active = privateMode;
         a.switchingPrivacy = true;
         MobileShell.activeTab = 0;
-        MobileShell.cachedSearchHits.clear();
-        MobileShell.cachedSearchKeyword =
-                MobileShell.pendingSearchKeyword = MobileShell.cachedSearchStatus = "";
+        MobileShell.clearSearchSession();
         a.recreate();
     }
 }

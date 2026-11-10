@@ -3,6 +3,7 @@ package com.pilipala.marcomovie;
 import android.content.Context;
 import android.os.Environment;
 import android.os.SystemClock;
+import com.pilipala.source.MediaRequestHeaders;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -152,6 +153,7 @@ final class DownloadManager {
             o.put("resolve", resolve);
             o.put("url", url);
             o.put("headers", new JSONObject(headers));
+            o.put("scopedHeaders", true);
             o.put("mime", mime);
             o.put("base", base);
             o.put("ext", ext);
@@ -189,6 +191,11 @@ final class DownloadManager {
             }
             t.mime = o.optString("mime");
             t.base = o.optString("base");
+            if (!o.optBoolean("scopedHeaders", false)) {
+                Map<String, String> safe = MediaRequestHeaders.forTarget(t.headers, null, t.source);
+                t.headers.clear();
+                t.headers.putAll(safe);
+            }
             t.ext = o.optString("ext");
             t.path = o.optString("path");
             t.state = o.optInt("state", PAUSED);
@@ -205,6 +212,7 @@ final class DownloadManager {
     /** A single execution of a task; pausing stops only the run it belongs to. */
     private static final class Run {
         final Task task;
+        String credentialOrigin;
         final Map<String, String> headers = new LinkedHashMap<>();
         final Map<String, byte[]> keys = new HashMap<>();
         final Set<HttpURLConnection> connections = new HashSet<>();
@@ -333,7 +341,7 @@ final class DownloadManager {
                 t.resolve = !site.supported();
                 if (!t.resolve) {
                     t.url = text(ep.url);
-                    t.headers.putAll(site.headers);
+                    t.headers.putAll(MediaRequestHeaders.forTarget(site.headers, site.api, ep.url));
                 }
                 t.headers.putAll(ep.headers);
                 String mime = ep.media == null ? null : MediaOptions.mime(ep.media);
@@ -546,6 +554,7 @@ final class DownloadManager {
             run.headers.putAll(suffix.headers);
         }
         address = LocalProxy.rewrite(address);
+        run.credentialOrigin = address;
         if (!Cms.isHttp(address)) throw new DownloadException("该剧集不是 HTTP(S) 直链，暂不支持下载");
         if (HLS_MIME.equals(t.mime) || address.toLowerCase(Locale.ROOT).contains(".m3u8")) {
             downloadHls(run, address);
@@ -1064,6 +1073,13 @@ final class DownloadManager {
 
     private HttpURLConnection open(Run run, String address, String range) throws Exception {
         URL next = new URL(Cms.normalizeHttp(address));
+        if (run.credentialOrigin != null
+                && run.credentialOrigin.startsWith("https://")
+                && !"https".equalsIgnoreCase(next.getProtocol())) {
+            throw new DownloadException("拒绝将安全下载降级为 HTTP");
+        }
+        Map<String, String> activeHeaders =
+                MediaRequestHeaders.forTarget(run.headers, run.credentialOrigin, next.toString());
         for (int hop = 0; hop < 6; hop++) {
             check(run);
             HttpURLConnection c = (HttpURLConnection) next.openConnection();
@@ -1072,7 +1088,7 @@ final class DownloadManager {
             c.setInstanceFollowRedirects(false);
             c.setRequestProperty("User-Agent", Cms.USER_AGENT);
             c.setRequestProperty("Accept-Encoding", "identity");
-            for (Map.Entry<String, String> e : run.headers.entrySet()) {
+            for (Map.Entry<String, String> e : activeHeaders.entrySet()) {
                 c.setRequestProperty(e.getKey(), e.getValue());
             }
             if (range != null) c.setRequestProperty("Range", range);
@@ -1090,8 +1106,16 @@ final class DownloadManager {
                 String location = c.getHeaderField("Location");
                 release(run, c);
                 if (location == null) throw new DownloadException("服务器重定向缺少目标地址");
-                next = new URL(next, location);
-                if (!Cms.isHttp(next.toString())) throw new DownloadException("不支持的重定向地址");
+                URL target = new URL(next, location);
+                if (!Cms.isHttp(target.toString())) throw new DownloadException("不支持的重定向地址");
+                if ("https".equalsIgnoreCase(next.getProtocol())
+                        && !"https".equalsIgnoreCase(target.getProtocol())) {
+                    throw new DownloadException("拒绝将安全下载降级为 HTTP");
+                }
+                activeHeaders =
+                        MediaRequestHeaders.forTarget(
+                                activeHeaders, next.toString(), target.toString());
+                next = target;
                 continue;
             }
             if (status < 200 || status >= 300) {

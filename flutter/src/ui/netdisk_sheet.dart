@@ -49,7 +49,8 @@ class _NetdiskAccountSheet extends StatefulWidget {
   State<_NetdiskAccountSheet> createState() => _NetdiskAccountSheetState();
 }
 
-class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet> {
+class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
+    with WidgetsBindingObserver {
   late final NetdiskService _service =
       widget.service ??
       NetdiskService(quarkAccounts: widget.storage.quarkAccounts);
@@ -60,10 +61,14 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet> {
   Timer? _pollTimer;
   int _qrAttempt = 0;
   int? _pollingAttempt;
+  bool _foreground = true;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _foreground = WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
     if (widget.initialDriveKey != null && widget.initialDriveKey!.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
@@ -74,7 +79,21 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+    if (!_foreground) {
+      _pollTimer?.cancel();
+      return;
+    }
+    final session = _qrSession;
+    if (session != null && _pollingAttempt == null) {
+      _pollQr(_qrAttempt, session);
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _qrAttempt++;
     _pollTimer?.cancel();
     if (widget.service == null) _service.close();
@@ -105,7 +124,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet> {
         _qrSession = session;
         _qrStatusText = _driveByKey(driveKey).appHint;
       });
-      _pollTimer = Timer(
+      if (_foreground) _pollTimer = Timer(
         const Duration(seconds: 3),
         () => _pollQr(attempt, session),
       );
@@ -129,7 +148,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet> {
     bool current() =>
         mounted && ModalRoute.of(context)?.isCurrent != false &&
         attempt == _qrAttempt && identical(_qrSession, session);
-    if (!current() || _pollingAttempt == attempt) return;
+    if (!current() || !_foreground || _pollingAttempt == attempt) return;
     _pollTimer?.cancel();
     _pollingAttempt = attempt;
     try {
@@ -153,7 +172,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet> {
         setState(() => _qrStatusText = res.message);
         if (res.state == NetdiskPollState.waiting ||
             res.state == NetdiskPollState.scanned) {
-          _pollTimer = Timer(
+          if (_foreground) _pollTimer = Timer(
             const Duration(seconds: 3),
             () => _pollQr(attempt, session),
           );

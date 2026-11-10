@@ -43,7 +43,7 @@
 
 ### 8. 配置/CMS 兼容扩展与本地回环媒体代理 (`LiteCatalog` & `LiteMediaProxy`)
 - **CMS 与配置格式**：同时支持 JSON CMS (`type=1`) 与 MacCMS XML (`type=0`)；支持明文 JSON、带注释 JSON、`GZIP` 压缩配置、`**` Base64 配置与 `2423` Hex-AES-128-CBC 加密配置；自动提取片源级 `ua`、`header`/`headers` 与 `ext.headers`。
-- **本地回环媒体代理 (`LiteMediaProxy`)**：在 `127.0.0.1` 随机端口提供随机令牌保护的本地 HTTP 代理，利用 Conscrypt TLS 1.2 桥接现代 HTTPS 媒体流、自动注入片源自定义 `User-Agent` / `Referer` 请求头、转发 MP4 `Range` 字节范围请求 (`206 Partial Content`)，并自动重写 `.m3u8` HLS 播放列表中的分片与密钥相对地址，不关闭任何证书或主机名校验。
+- **本地回环媒体代理 (`LiteMediaProxy`)**：在 `127.0.0.1` 随机端口提供随机令牌保护的本地 HTTP 代理，使用系统安全连接组件，并在系统支持时启用 TLS 1.2、自动注入片源自定义 `User-Agent` / `Referer` 请求头、转发 MP4 `Range` 字节范围请求 (`206 Partial Content`)，并自动重写 `.m3u8` HLS 播放列表中的分片与密钥相对地址，不关闭任何证书或主机名校验。
 - **Emby 媒体库**：可从「配置 → 连接 Emby 媒体库」添加，支持媒体库浏览、搜索、剧集详情、播放进度回传与原始媒体直连。
 
 ## 验证与本地构建
@@ -66,3 +66,7 @@ python -X utf8 scripts/test_lite_device.py
 
 - Lite 版坚持零动态代码执行原则：对于 `type=3` 等需要运行外部 JAR / JS / Python 爬虫的源，保留在列表中并明确标注「暂不支持」，不伪装成空片库。
 - `LiteMediaProxy` 可协助旧系统播放器桥接支持 TLS 1.2 的 HTTPS / HLS 媒体流及自定义请求头，但底层音视频解码仍受旧电视硬件解码器或候选版 FFmpeg 编码格式支持范围限制。
+
+### HTTPS 支持边界
+
+标准 Lite 使用系统 TLS 组件，不包含 Conscrypt。Android 4.1–4.4 在设备支持时显式启用 TLS 1.2；Android 4.0 的系统组件不支持 TLS 1.2，遇到这类服务会报告不兼容，不能保证现代 HTTPS 播放。实验候选版的 Conscrypt 2.5.2 最低支持 Android 4.4，不可作为 API 14 兼容证明。证书和主机名校验始终保留。

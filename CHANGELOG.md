@@ -1,3 +1,11 @@
+## 2026-11-10 审阅修复维护版本
+
+- [Windows 0.5.8](docs/releases/windows-v0.5.8.md)
+- [macOS 0.5.7](docs/releases/macos-v0.5.7.md)
+- [Android 手机 / 平板 0.5.16](docs/releases/android-mobile-v0.5.16.md)
+- [Android 电视 / 盒子 0.5.14](docs/releases/android-tv-v0.5.14.md)
+- [Android Lite 0.5.2](docs/releases/android-lite-v0.5.2.md)
+
 # 版本记录
 
 ## 未发布 — 订阅兼容修复中

@@ -1439,9 +1439,11 @@ class CmsClient {
       return null;
     }
     try {
+      final parserUrl = '$prefix${Uri.encodeComponent(target)}';
       final resp = await _getText(
-        '$prefix${Uri.encodeComponent(target)}',
-        headers: site.headers,
+        parserUrl,
+        headers: SourcePlayback.headersForOrigin(
+            site.headers, _sourceCredentialOrigin(site), Uri.tryParse(parserUrl)),
       );
       final trimmed = resp.trim();
       if (!trimmed.startsWith('{')) return null;

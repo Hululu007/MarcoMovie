@@ -68,6 +68,16 @@ final class MobileShell {
     static int cachedSearchScrollY = 0;
     static int cachedSiteFilterScrollX = 0;
     static SearchCoordinator activeSearchCoordinator;
+    static boolean cachedSearchPrivate;
+
+    static void clearSearchSession() {
+        if (activeSearchCoordinator != null) activeSearchCoordinator.close();
+        activeSearchCoordinator = null;
+        cachedSearchKeyword =
+                pendingSearchKeyword = cachedSearchStatus = cachedSearchSiteFilter = "";
+        cachedSearchHits.clear();
+        cachedSearchScrollY = cachedSiteFilterScrollX = 0;
+    }
 
     /** Sub-page of the 片库 tab: 0 history, 1 favorites, 2 downloads. */
     static int mySubTab = 0;
@@ -1915,6 +1925,8 @@ final class MobileShell {
     // TAB 1: MOBILE SEARCH (System Soft Keyboard + Multi-Site Live Results)
     // =========================================================================
     private void renderSearchTab() {
+        if (cachedSearchPrivate != a.privateMode) clearSearchSession();
+        cachedSearchPrivate = a.privateMode;
         LinearLayout page = a.vertical();
         page.setPadding(a.dp(16), statusBarHeight() + a.dp(10), a.dp(16), 0);
         contentContainer.addView(page, new FrameLayout.LayoutParams(-1, -1));
@@ -2366,6 +2378,9 @@ final class MobileShell {
                                             a.ui.post(
                                                     () -> {
                                                         if (searchTicket != searchSerial[0]
+                                                                || a.switchingPrivacy
+                                                                || a.privateMode
+                                                                        != PrivacySpace.active
                                                                 || a.isFinishing()
                                                                 || a.isDestroyed()) return;
                                                         completed[0]++;

@@ -73,6 +73,7 @@ jobs:
           python android/tests/run_emby_checks.py
           python android/tests/run_compat_checks.py
           python android/tests/run_favorites_checks.py
+          python android/tests/run_download_security_checks.py
           python android/tests/run_warehouse_checks.py
           python android/tests/run_video_filter_checks.py
           python android/tests/run_glasswork_checks.py
@@ -271,8 +272,8 @@ jobs:
           cmake -S packages/quickjs_engine/native -B packages/quickjs_engine/native/build -DCMAKE_BUILD_TYPE=Release
           cmake --build packages/quickjs_engine/native/build --parallel 4
           flutter test
-          VERSION="0.5.6"
-          flutter build macos --release --build-name="$VERSION" --build-number=56
+          VERSION="0.5.7"
+          flutter build macos --release --build-name="$VERSION" --build-number=57
           APP=$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' -print -quit)
           python3 ../scripts/prepare_catpaw_runtime.py --platform macos --destination "$APP/Contents/Frameworks/node"
           codesign --force --deep --sign - --preserve-metadata=entitlements "$APP"

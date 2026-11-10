@@ -22,11 +22,12 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONObject;
+import com.pilipala.source.MediaRequestHeaders;
 
 /**
  * Loopback HTTP media proxy for Android 4.x (API 14+) TVs.
  *
- * <p>Bridges modern HTTPS (TLS 1.2 via Conscrypt), SNI, custom Referer/User-Agent headers, and HLS
+ * <p>Bridges HTTPS supported by the system TLS provider, custom Referer/User-Agent headers, and HLS
  * (.m3u8) segment playlists into a local {@code http://127.0.0.1/} stream consumable by legacy
  * Stagefright {@code MediaPlayer} and {@code IjkMediaPlayer}. Never disables certificate or
  * hostname verification.
@@ -274,9 +275,7 @@ public final class LiteMediaProxy {
                             && "http".equalsIgnoreCase(after.getProtocol())) {
                         throw new IOException("Downgrade redirect rejected");
                     }
-                    if (!before.getAuthority().equalsIgnoreCase(after.getAuthority())) {
-                        activeHeaders = Collections.emptyMap();
-                    }
+                    activeHeaders = MediaRequestHeaders.forTarget(activeHeaders, current, next);
                     current = next;
                     continue;
                 }
@@ -388,7 +387,7 @@ public final class LiteMediaProxy {
                         try {
                             String resolved =
                                     LiteCatalog.http(new URL(base, rawUri).toString());
-                            String proxied = buildProxyUrl(resolved, headers);
+                            String proxied = childProxyUrl(baseUrl, resolved, headers);
                             line =
                                     line.substring(0, valStart)
                                             + proxied
@@ -401,13 +400,24 @@ public final class LiteMediaProxy {
             } else {
                 try {
                     String resolved = LiteCatalog.http(new URL(base, line).toString());
-                    out.append(buildProxyUrl(resolved, headers)).append('\n');
+                    out.append(childProxyUrl(baseUrl, resolved, headers)).append('\n');
                 } catch (Exception invalid) {
                     out.append(line).append('\n');
                 }
             }
         }
         return out.toString();
+    }
+
+    private String childProxyUrl(String parent, String child, Map<String, String> headers)
+            throws Exception {
+        URL before = new URL(parent), after = new URL(child);
+        if ("https".equalsIgnoreCase(before.getProtocol())
+                && !"https".equalsIgnoreCase(after.getProtocol())) {
+            // Keep a blocked local URL so callers cannot fall back to the raw child.
+            return buildProxyUrl("http://127.0.0.1:" + port() + "/blocked-downgrade", Collections.<String,String>emptyMap());
+        }
+        return buildProxyUrl(child, MediaRequestHeaders.forTarget(headers, parent, child));
     }
 
     private static void sendSimpleError(Socket client, int code, String message)

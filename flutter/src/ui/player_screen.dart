@@ -579,7 +579,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
         try {
           final dyn = _player.platform as dynamic;
-          await dyn.setProperty('tls-verify', 'no');
+          await dyn.setProperty('tls-verify', 'yes');
           final ua = headers.entries
               .firstWhere(
                 (e) => e.key.toLowerCase() == 'user-agent',
@@ -746,6 +746,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       0,
       _duration.inMilliseconds,
     );
+    setState(() => _position = Duration(milliseconds: targetMs));
     _player.seek(Duration(milliseconds: targetMs));
     _showHud(
       '${seconds >= 0 ? "快进" : "快退"} ${_formatDuration(Duration(milliseconds: targetMs))}',
@@ -787,9 +788,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   String get _kernelShortLabel => switch (_playerKernel) {
-    'ijk' => 'IJK',
-    'mpv' => 'MPV',
-    _ => 'EXO',
+    'ijk' => '兼容',
+    'mpv' => '大缓冲',
+    _ => '均衡',
   };
 
   double _desktopScale(Size size) {
@@ -800,7 +801,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _applyPlayerKernel(String kernel) async {
     try {
       final dyn = _player.platform as dynamic;
-      await dyn.setProperty('tls-verify', 'no');
+      await dyn.setProperty('tls-verify', 'yes');
       switch (kernel) {
         case 'ijk':
           await dyn.setProperty('hwdec', 'auto-copy');
@@ -1661,7 +1662,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _PlayerAction(CupertinoIcons.layers_alt_fill, '线路', _showLinesSheet),
       _PlayerAction(
         CupertinoIcons.slider_horizontal_3,
-        '内核·$_kernelShortLabel',
+        '策略·$_kernelShortLabel',
         _showKernelSheet,
         shortLabel: _kernelShortLabel,
         active: _playerKernel != 'exo',
@@ -2238,23 +2239,23 @@ class _PlayerScreenState extends State<PlayerScreen>
     const kernels = <({String key, String title, String subtitle})>[
       (
         key: 'exo',
-        title: 'EXO 超速内核 (推荐)',
-        subtitle: '硬件加速解码与分片断点容错，适合绝大多数 4K 与 HLS 线路',
+        title: '均衡播放（默认）',
+        subtitle: '自动选择解码方式，使用 64 MB 前向缓冲',
       ),
       (
         key: 'ijk',
-        title: 'IJK 兼容内核',
-        subtitle: '开启帧缓冲拷贝与深度探测，适合音画不同步或特殊封装片源',
+        title: '兼容缓冲',
+        subtitle: '硬件解码拷贝输出，增加媒体探测时间',
       ),
       (
         key: 'mpv',
-        title: 'MPV 原画内核',
-        subtitle: '超大内存缓冲与原画直通输出，适合高码率 4K Remux 蓝光原盘',
+        title: '大容量缓冲',
+        subtitle: '使用 128 MB 前向缓冲，占用更多内存',
       ),
     ];
     showAppleModalSheet<void>(
       context: context,
-      title: '切换播放内核',
+      title: '切换播放策略',
       builder: (ctx) => ListView(
         shrinkWrap: true,
         padding: const EdgeInsets.all(16),

@@ -1,3 +1,4 @@
+import 'package:package_info_plus/package_info_plus.dart';
 import 'source_choice_sliver.dart';
 import 'dart:async';
 import 'dart:io';
@@ -127,6 +128,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   @override
   void initState() {
     super.initState();
+    unawaited(_loadInstalledVersion());
     GlassworkBackdrop.reduceTransparency.value =
         widget.storage.glassBlurLevel == 'solid' ||
             widget.storage.glassBlurStrength <= 0.02;
@@ -5903,19 +5905,19 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
               settingKey: 'player_kernel',
               icon: CupertinoIcons.slider_horizontal_3,
               iconBgColor: AppleColors.systemTeal,
-              title: '默认播放内核',
-              subtitle: '选择内置播放器的解码与网络缓冲引擎（EXO / IJK / MPV）',
+              title: '默认播放策略',
+              subtitle: '调整同一播放器的硬件解码偏好与缓冲大小',
               trailingText: switch (widget.storage.playerKernel) {
-                'ijk' => 'IJK 兼容内核',
-                'mpv' => 'MPV 原画内核',
-                _ => 'EXO 超速内核',
+                'ijk' => '兼容缓冲',
+                'mpv' => '大容量缓冲',
+                _ => '均衡播放',
               },
               currentValue: widget.storage.playerKernel,
               onStateChanged: refreshBoth,
               options: const [
-                ('exo', 'EXO 超速内核（推荐）', '硬件加速解码与分片断点容错，适合绝大多数 4K 与 HLS 线路'),
-                ('ijk', 'IJK 兼容内核', '开启帧缓冲拷贝与深度探测，适合音画不同步或特殊封装片源'),
-                ('mpv', 'MPV 原画内核', '超大内存缓冲与原画直通输出，适合高码率 4K Remux 蓝光原盘'),
+                ('exo', '均衡播放（默认）', '自动选择解码方式，使用 64 MB 前向缓冲'),
+                ('ijk', '兼容缓冲', '硬件解码拷贝输出，增加媒体探测时间'),
+                ('mpv', '大容量缓冲', '使用 128 MB 前向缓冲，占用更多内存'),
               ],
               onSelected: (val) async {
                 await widget.storage.setPlayerKernel(val);
@@ -6792,7 +6794,16 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     );
   }
 
-  static const String _currentAppVersion = '0.5.6';
+  String _currentAppVersion = '读取中';
+
+  Future<void> _loadInstalledVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (mounted) setState(() => _currentAppVersion = info.version);
+    } catch (_) {
+      if (mounted) setState(() => _currentAppVersion = '未知');
+    }
+  }
 
   static String _formatCleanReleaseNotes(String raw) {
     final lines = raw.split(RegExp(r'\r?\n'));
@@ -6859,6 +6870,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
           builder: (ctx, setSheetState) {
             Future<void> checkRemote() async {
               try {
+                final installed = await PackageInfo.fromPlatform();
+                if (installed.version.isEmpty) throw const FormatException('无法读取已安装版本');
+                _currentAppVersion = installed.version;
                 release = await AppUpdate.check();
                 latestVersion = release!.version;
                 releaseNotes = _formatCleanReleaseNotes(release!.notes);
