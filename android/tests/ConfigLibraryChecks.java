@@ -51,6 +51,11 @@ public final class ConfigLibraryChecks {
                         && reopened.entries().get(0).name.equals("Updated"),
                 "update keeps order and latest selection");
         check(reopened.raw(two).equals(second), "updating one address preserves the other");
+        reopened.rememberIfAbsent(first, "https://one.example/config.json", "Stale", "same");
+        check(
+                reopened.entries().get(0).name.equals("Updated")
+                        && reopened.raw(reopened.entries().get(0)).equals(first + "\n"),
+                "opening saved sources cannot overwrite a newer import");
         ConfigLibrary.Entry local = reopened.remember(first, "", "Local", "same");
         reopened.remember(first, "", "Local", "same");
         reopened.remember(second, "", "Local two", "same");

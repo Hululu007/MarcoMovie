@@ -438,7 +438,7 @@ final class SourcePicker {
         a.worker.execute(
                 () -> {
                     try {
-                        library.remember(
+                        library.rememberIfAbsent(
                                 previous.raw,
                                 previousOrigin,
                                 SourceController.configName(previous),

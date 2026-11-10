@@ -92,6 +92,15 @@ final class ConfigLibrary {
         }
     }
 
+    void rememberIfAbsent(String raw, String origin, String name, String selected)
+            throws Exception {
+        synchronized (LOCK) {
+            String id = identity(origin, raw);
+            for (Entry entry : entries()) if (entry.id.equals(id)) return;
+            remember(raw, origin, name, selected);
+        }
+    }
+
     String raw(Entry entry) throws Exception {
         String value = read(content(entry), 4 * 1024 * 1024);
         if (!hash(value).equals(entry.digest)) throw new IOException("保存的订阅内容损坏，原文件已保留");
