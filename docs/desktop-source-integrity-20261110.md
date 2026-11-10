@@ -2,7 +2,7 @@
 
 2026-11-10 核实：Windows 0.5.8、macOS 0.5.7 存在与 iOS 同类的问题。两端的发布源码均为 `d26b46302ac038f1749c8cb53916f739f33addba`；修复基于桌面主线 `8948f3e7eba8168589347bca1cab4238611ffcf9`，该基线的 Flutter 树与两个发布标签一致。
 
-发布基线可核对 [Windows 0.5.8](https://github.com/Pilipala9919/MarcoMovie/releases/tag/windows-v0.5.8) 和 [macOS 0.5.7](https://github.com/Pilipala9919/MarcoMovie/releases/tag/macos-v0.5.7)。本次为未发布修复，两个现有下载包不会自动获得这些改动。
+发布基线可核对 [Windows 0.5.8](https://github.com/Pilipala9919/MarcoMovie/releases/tag/windows-v0.5.8) 和 [macOS 0.5.7](https://github.com/Pilipala9919/MarcoMovie/releases/tag/macos-v0.5.7)。随后已独立发布 [Windows 0.5.9](releases/windows-v0.5.9.md) 和 [macOS 0.5.8](releases/macos-v0.5.8.md)，原版本安装包保持不变。
 
 ## 已复现的问题
 
@@ -22,7 +22,7 @@
 - 分享超时会取消后续请求。播放器切集、退出、换账号会停止旧操作；同一文件切换画质保留其本机代理生命周期。
 - 拒绝旧 WoGG / Guard / 脚本缓存中的外站直链；App V2 详情请求保留配置路径及查询参数。
 
-## 验证结果
+## 首轮本地验证结果
 
 - Windows 宿主：Flutter 3.38.9 / Dart 3.10.8，461 项完整 Flutter 测试通过，包括原有下载、隐私、JS/Python、本机 Node、播放控制与桌面窗口回归。
 - 新增桌面检查覆盖实际回环 HTTP 的目录到媒体字节链路、App V2 查询参数、原源为空、Guard 旧缓存拒绝、分享超时、真实存储键同步、代理换画质保留与账号切换失效。
@@ -34,6 +34,6 @@
 
 ## 验证边界
 
-本次没有 macOS / Xcode 环境，没有新 Mac 原生构建或 Mac 实机播放证据。Windows 自动化验证包含实际本机 HTTP / Node / QuickJS 运行和 Release 编译，但不等于用户账号、会员文件及 HEVC/HDR 等实际影片播放验收。UC、百度、阿里等协议测试使用合成响应，不使用用户账号或真实分享内容。
+首次本地核实时没有 macOS / Xcode 环境。后续 [GitHub 原生构建](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42800286093) 已完成 Windows 与 macOS Release 构建，两端各 461 项 Flutter 测试通过；包内版本、架构、ZIP 完整性与 SHA-256 已核对。这仍不是用户 Mac 实机播放证据。Windows 自动化验证包含实际本机 HTTP / Node / QuickJS 运行和 Release 编译，但不等于用户账号、会员文件及 HEVC/HDR 等实际影片播放验收。UC、百度、阿里等协议测试使用合成响应，不使用用户账号或真实分享内容。
 
-未发布、未修改正式更新通道。Android、Lite、iOS 独立分支不由本次桌面修复发布。
+已发布 Windows 0.5.9 与 macOS 0.5.8；构建提交为 `f888769f7e24f2015414bcb17346181465b7c286`。Android、Lite、iOS 独立分支不由本次桌面修复发布。
