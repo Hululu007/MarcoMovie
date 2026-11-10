@@ -4,6 +4,7 @@
 const crypto = require('node:crypto');
 const {zipMember, unwrapGuard, Dex, MAX} = require('./drpy-guard-extractor.cjs');
 const ARTIFACTS = {
+  '88e67402129e7db92669fb351397ecd4d09709e6c70b577f22a19cfb0ad5f204': '141dd6387f9c0334c070c12663b48281153e7e4a3138b423dbadb55aeb9c8247',
   'e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e': 'f68c170d1f12077550eb3ec912e7ae004a57624f314db0e6280a2b1cc319ba5c',
   'da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096': '7ae99a034ee2616f0b850ab0c1610d5d4d45d627677fa3e41c8e9809bd4b2a8d'
 };

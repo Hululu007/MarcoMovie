@@ -173,6 +173,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $version = ((Select-String pubspec.yaml -Pattern '^version:').Line -replace '^version:\s*','' -replace '\+.*','').Trim()
           $releaseDir = "build/windows/x64/runner/Release"
+          $env:MARCOMOVIE_TEST_MPV = "$PWD/$releaseDir/libmpv-2.dll"
+          flutter test test/native_cloud_playback_test.dart
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Remove-Item Env:MARCOMOVIE_TEST_MPV
           python ../scripts/prepare_catpaw_runtime.py --platform windows --destination "$releaseDir/data/node"
           if ($LASTEXITCODE -ne 0) { exit 1 }
           foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "concrt140.dll")) {
@@ -274,9 +278,10 @@ jobs:
           cmake -S packages/quickjs_engine/native -B packages/quickjs_engine/native/build -DCMAKE_BUILD_TYPE=Release
           cmake --build packages/quickjs_engine/native/build --parallel 4
           flutter test
-          VERSION="0.5.9"
-          flutter build macos --release --build-name="$VERSION" --build-number=59
-          APP=$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' -print -quit)
+          VERSION="0.5.10"
+          flutter build macos --release --build-name="$VERSION" --build-number=60
+          APP=$(find "$PWD/build/macos/Build/Products/Release" -maxdepth 1 -name '*.app' -print -quit)
+          DYLD_FRAMEWORK_PATH="$APP/Contents/Frameworks" MARCOMOVIE_TEST_MPV="$APP/Contents/Frameworks/Mpv.framework/Mpv" flutter test test/native_cloud_playback_test.dart
           python3 ../scripts/prepare_catpaw_runtime.py --platform macos --destination "$APP/Contents/Frameworks/node"
           codesign --force --deep --sign - --preserve-metadata=entitlements "$APP"
           mkdir -p dist

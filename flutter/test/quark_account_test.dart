@@ -14,11 +14,12 @@ http.Response jsonResponse(
   Object value, {
   int status = 200,
   Map<String, String> headers = const {},
-}) => http.Response(
-  jsonEncode(value),
-  status,
-  headers: {'content-type': 'application/json', ...headers},
-);
+}) =>
+    http.Response(
+      jsonEncode(value),
+      status,
+      headers: {'content-type': 'application/json', ...headers},
+    );
 
 class AccountFixture {
   final requests = <http.Request>[];
@@ -67,9 +68,9 @@ class AccountFixture {
             ? {
                 'set-cookie':
                     '__pus=fixture-account; Domain=.quark.cn; Path=/; Secure; HttpOnly, '
-                    '__puus=fixture-session; Domain=.quark.cn; Path=/; Expires=Wed, 01 Jan 2037 00:00:00 GMT, '
-                    'discard=wrong-domain; Domain=outside.invalid; Path=/, '
-                    'limited=path-cookie; Path=/private',
+                        '__puus=fixture-session; Domain=.quark.cn; Path=/; Expires=Wed, 01 Jan 2037 00:00:00 GMT, '
+                        'discard=wrong-domain; Domain=outside.invalid; Path=/, '
+                        'limited=path-cookie; Path=/private',
               }
             : {},
       );
@@ -111,13 +112,35 @@ QuarkAccountProvider provider(
   AccountFixture fixture, {
   String Function()? read,
   void Function(String)? write,
-}) => QuarkAccountProvider(
-  readCredential: read ?? () => '',
-  writeCredential: write ?? (_) {},
-  httpClient: fixture.client,
-);
+}) =>
+    QuarkAccountProvider(
+      readCredential: read ?? () => '',
+      writeCredential: write ?? (_) {},
+      httpClient: fixture.client,
+    );
 
 void main() {
+  test('playback cookie rotation rejects identity changes and foreign origins',
+      () {
+    final endpoint = Uri.parse('https://drive-pc.quark.cn/download');
+    expect(
+        QuarkAccountSession.refreshOperationCookie(
+            cookie, '__puus=next; Path=/; Secure', endpoint),
+        '__pus=fixture-account; __puus=next');
+    expect(
+        QuarkAccountSession.refreshOperationCookie(
+            cookie, '__puus=foreign; Domain=evil.test; Path=/', endpoint),
+        cookie);
+    expect(
+        () => QuarkAccountSession.refreshOperationCookie(
+            cookie, '__pus=another-account; Path=/', endpoint),
+        throwsA(isA<QuarkAccountException>()));
+    expect(
+        () => QuarkAccountSession.refreshOperationCookie(cookie,
+            '__puus=next; Path=/', Uri.parse('https://evil.test/download')),
+        throwsA(isA<QuarkAccountException>()));
+  });
+
   test(
     'QR completes CAS exchange, real cookie validation and distinct Drive ST',
     () async {
@@ -283,7 +306,7 @@ void main() {
               ? {
                   'set-cookie':
                       '__pus=fixture-account; Path=/; Max-Age=600; Expires=Thu, 01 Jan 1970 00:00:00 GMT, '
-                      'old=; Path=/; Max-Age=0',
+                          'old=; Path=/; Max-Age=0',
                 }
               : {},
         ),
@@ -363,7 +386,8 @@ void main() {
       expect(
         QuarkAccountSession.tryParseCredential(
           session.toCredential(),
-        )!.accountId,
+        )!
+            .accountId,
         session.accountId,
       );
       for (final changed in [

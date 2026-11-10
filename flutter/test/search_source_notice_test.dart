@@ -64,6 +64,19 @@ const sources = [
 ];
 
 void main() {
+  test('identical plugin keys in separate subscriptions both search', () async {
+    const first = CmsSite(key: 'same', name: '同名片源', type: 3,
+        api: 'csp_WoGGGuard', spider: 'https://fixture.invalid/plugin.jar',
+        subscriptionId: 'one');
+    final second = first.copyWith(subscriptionId: 'two');
+    final results = await NoticeClient().searchAcrossSites([first, second, first], '影片').toList();
+    expect(results.map((r) => r.$1.subscriptionId), ['one', 'two']);
+    const owners = [SubscriptionEntry(id: 'one', name: '订阅甲'),
+      SubscriptionEntry(id: 'two', name: '订阅乙')];
+    expect(searchSourceLabel(first, [first, second], owners), '同名片源（订阅甲 1）');
+    expect(searchSourceLabel(second, [first, second], owners), '同名片源（订阅乙 2）');
+  });
+
   test(
     'source failures are reported independently while healthy results survive',
     () async {

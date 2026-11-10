@@ -12,6 +12,7 @@ import '../core/csp_bridge.dart';
 import '../core/cloud_media_proxy.dart';
 import '../core/models.dart';
 import '../core/playback_recovery_policy.dart';
+import '../core/playback_startup.dart';
 import '../core/wogg_source.dart';
 import 'player_interaction_layers.dart';
 import '../core/storage_service.dart';
@@ -135,6 +136,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _playSession = 0;
   Completer<void>? _sourceAbort;
   final _cloudMedia = PlayerCloudMediaSession();
+  final _startup = PlaybackStartup();
   int _pendingResumeMs = 0;
   int _lastKnownPositionMs = 0;
   int _lastKnownDurationMs = 0;
@@ -226,6 +228,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _player.stream.position.listen((pos) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+      _startup.position(pos);
       final nextPos = (!_isDraggingSeek && !_isSliderDragging)
           ? ((_pendingResumeMs > 0 && pos.inMilliseconds < 2000)
                 ? Duration(milliseconds: _pendingResumeMs)
@@ -476,6 +479,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _failPlayback([Object? error]) {
     if (!mounted) return;
+    _startup.cancel();
     _embySession?.stop(_position.inMilliseconds);
     _embySession = null;
     final cloudError = CmsClient.cloudPlaybackError(_currentEpisode, error);
@@ -490,8 +494,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       _buffering = false;
       _playing = false;
       _controlsVisible = true;
-      _playbackError = cloudError.isEmpty
-          ? '播放失败，请重试或切换线路' : cloudError;
+      _playbackError = cloudError.isNotEmpty ? cloudError
+          : error is TimeoutException
+          ? '媒体加载超时，请重试或选择其他画质'
+          : '播放失败，请重试或切换线路';
       _playbackErrorCause = error;
       if (CmsClient.needsSourceVerification(widget.site, error)) {
         _playbackError = '此片源需要完成验证码后继续播放';
@@ -509,6 +515,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _openCurrentEpisode({int? resumeMs, CmsEpisode? quality}) async {
+    _startup.cancel();
     final qualityLease = quality == null ? null : PlayerCloudMediaSession.of(quality);
     final keepsLease = _cloudMedia.owns(qualityLease);
     // Quality variants of one cloud file share their proxy and cancellation
@@ -592,7 +599,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                 return result;
               },
               cancellation: sourceAbort,
-            ));
+            ).timeout(const Duration(seconds: 90), onTimeout: () {
+              if (!sourceAbort.isCompleted) sourceAbort.complete();
+              throw const FormatException('片源解析超时，请重试');
+            }));
       pendingLease = PlayerCloudMediaSession.of(resolvedEpisode);
       if (quality == null &&
           resolvedEpisode.variants.length > 1 &&
@@ -637,6 +647,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       await _changeMedia(session, () async {
         _cloudMedia.adopt(pendingLease);
         _allowEvents = true;
+        _startup.waitForProgress(() {
+          if (mounted && session == _playSession && _allowEvents) {
+            _failPlayback(TimeoutException('media startup'));
+            _changeMedia(session, _player.stop).catchError((_) {});
+          }
+        });
         final baseMedia = widget.mediaForPlayback(
           resolvedEpisode,
           start: _pendingResumeMs > 0
@@ -999,6 +1015,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    _startup.cancel();
     if (_sourceAbort?.isCompleted == false) _sourceAbort!.complete();
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();

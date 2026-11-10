@@ -32,6 +32,9 @@ TEST_AUTHORITIES = {
     'flutter/test/cloud_share_test.dart': {'x@drive.uc.cn', 'fast.uc.cn', 'video.uc.cn'},
     'flutter/test/desktop_cloud_media_test.dart': {'media.uc.cn'},
     'flutter/test/cloud_media_proxy_test.dart': {'video.uc.cn', 'video.uc.cn:444'},
+    'flutter/test/quark_drive_test.dart': {'media.quark.cn'},
+    'flutter/test/quark_media_proxy_test.dart': {'media.quark.cn', 'next.quark.cn', 'media.quark.cn:444', 'user@media.quark.cn', 'media.uc.cn'},
+    'flutter/test/native_cloud_playback_test.dart': {'media.quark.cn'},
     'flutter/test/wogg_source_test.dart': {'user:password@catalogue.invalid', 'alipan.com', 'aliyundrive.com', 'fast.uc.cn'},
     'android/tests/JsHttpChecks.java': {'new:secret@', 'us%40er:pa%2Bss@'},
     'flutter/test/python_host_compat_test.dart': {'user:pass@[::1]:8443'},
@@ -75,6 +78,11 @@ for p in files:
     # Exact reviewed, owner-supplied brand asset; all other videos remain excluded.
     if relative.as_posix()=='android/src/main/assets/branding/startup.mp4':
         if hashlib.sha256(p.read_bytes()).hexdigest()!='915d0b8e337d7980ef67f71864eed346407e0061602ca67ff3272502b5d8ec1b':issues.append(f'{relative}: unreviewed brand video')
+        continue
+    # Generated blue frames and a sine tone for native HEVC/HTTP regression.
+    # Permit only the reviewed bytes, not arbitrary recorded media in tests.
+    if relative.as_posix()=='flutter/test/fixtures/cloud-playback.mkv':
+        if hashlib.sha256(p.read_bytes()).hexdigest()!='158d193f2fc0b9096c77cf2fb8402e347a5761b3503e4612e25d42c6d4a93347':issues.append(f'{relative}: unreviewed playback fixture')
         continue
     vendor_dart = relative.as_posix().startswith('flutter/packages/quickjs_engine/lib/') and p.suffix == '.dart'
     if any(part in (EXCLUDED - {'lib'} if vendor_dart else EXCLUDED) for part in relative.parts) or p.suffix in {'.apk','.aab','.p12','.jks','.keystore','.rar','.zip','.bin','.mp4'}:

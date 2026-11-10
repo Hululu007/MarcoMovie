@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:marco_movie/core/models.dart';
+import 'package:marco_movie/core/cloud_media_proxy.dart';
 import 'package:marco_movie/core/cms_client.dart';
 import 'package:marco_movie/core/quark_account.dart';
 import 'package:marco_movie/core/quark_drive.dart';
@@ -69,6 +70,88 @@ Matcher _error(String code) =>
     isA<QuarkDriveException>().having((e) => e.code, 'code', code);
 
 void main() {
+  test('original Quark media and quality variants keep their account session',
+      () async {
+    final accounts = _Accounts();
+    var mediaCalls = 0;
+    final drive = QuarkDriveClient(
+      accounts: accounts,
+      httpClient: MockClient((request) async {
+        if (request.url.path.endsWith('/download')) {
+          final response = _ok([
+            {
+              'fid': 'owned-1',
+              'download_url': 'https://media.quark.cn/original.mkv'
+            }
+          ]);
+          return http.Response(response.body, 200, headers: {
+            ...response.headers,
+            'set-cookie': '__puus=after-download; Path=/; Secure'
+          });
+        }
+        expect(request.headers['cookie'],
+            '__pus=fixture-account-a; __puus=after-download');
+        return _ok({
+          'video_list': [
+            {
+              'resolution': '4k',
+              'video_info': {'url': 'https://media.quark.cn/4k.m3u8'}
+            },
+            {
+              'resolution': 'high',
+              'video_info': {'url': 'https://signed-cdn.example/high.m3u8'}
+            },
+          ]
+        });
+      }),
+      mediaClientFactory: () => MockClient((request) async {
+        mediaCalls++;
+        expect(request.url.host, 'media.quark.cn');
+        expect(
+            request.headers['cookie'],
+            mediaCalls == 1
+                ? '__pus=fixture-account-a; __puus=after-download'
+                : '__pus=fixture-account-a; __puus=after-media');
+        expect(request.headers['range'], 'bytes=8589934592-8589934594');
+        expect(request.headers['referer'], 'https://pan.quark.cn/');
+        expect(request.followRedirects, isFalse);
+        return http.Response.bytes([1, 2, 3], 206,
+            headers: {
+              'content-type': 'video/x-matroska',
+              'content-range': 'bytes 8589934592-8589934594/78168404787',
+              'set-cookie': '__puus=after-media; Path=/; Secure',
+            });
+      }),
+    );
+    final result = await drive.resolve(_episode);
+    final lease = result.playbackSession['cloudMediaLease'] as CloudMediaLease;
+    addTearDown(lease.close);
+    drive.close(); // Resolving client lifetime does not end playback.
+    expect(Uri.parse(result.url).host, '127.0.0.1');
+    expect(result.variants.map((e) => e.name), ['原画', '4K', '高清']);
+    for (final item in [result, ...result.variants]) {
+      expect(item.headers.keys.map((k) => k.toLowerCase()),
+          isNot(contains('cookie')));
+      expect(item.playbackSession['cloudMediaLease'], same(lease));
+    }
+    expect(result.variants.last.url, 'https://signed-cdn.example/high.m3u8');
+    final response = await http.get(Uri.parse(result.url),
+        headers: {'Range': 'bytes=8589934592-8589934594'});
+    expect(response.statusCode, 206);
+    expect(response.bodyBytes, [1, 2, 3]);
+    expect(response.headers['content-range'],
+        'bytes 8589934592-8589934594/78168404787');
+    expect(response.headers.containsKey('set-cookie'), isFalse);
+    expect(
+        (await http.get(Uri.parse(result.url),
+                headers: {'Range': 'bytes=8589934592-8589934594'}))
+            .statusCode,
+        206);
+    accounts.switchTo('account-b');
+    expect((await http.get(Uri.parse(result.url))).statusCode, 410);
+    expect(mediaCalls, 2);
+  });
+
   test(
     'stored validated session flows through owned listing and CmsClient playback',
     () async {

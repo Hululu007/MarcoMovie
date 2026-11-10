@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+import 'cloud_media_proxy.dart';
 import 'quark_account.dart';
 import 'source_playback.dart';
 
@@ -13,14 +14,18 @@ class QuarkDriveClient {
   QuarkDriveClient({
     required QuarkAccountProvider accounts,
     http.Client? httpClient,
+    http.Client Function()? mediaClientFactory,
     this.isCancelled,
   })  : _accounts = accounts,
         _http = httpClient ?? http.Client(),
-        _ownsHttp = httpClient == null;
+        _ownsHttp = httpClient == null,
+        _mediaClientFactory = mediaClientFactory ?? http.Client.new;
 
   final QuarkAccountProvider _accounts;
   final http.Client _http;
   final bool _ownsHttp;
+  final http.Client Function() _mediaClientFactory;
+  final _operationCookies = Expando<String>();
   final bool Function()? isCancelled;
   static const _pageSize = 50;
   static const _timeout = Duration(seconds: 20);
@@ -197,19 +202,57 @@ class QuarkDriveClient {
     if (variants.isEmpty) {
       throw const QuarkDriveException('unavailable', '夸克未返回可用的原画或转码地址');
     }
-    // Account cookies belong only to the fixed API origin. Signed media URLs
-    // and thumbnails may use a CDN; never hand its player the account cookie.
-    final resolved = await SourcePlayback.decode(
-      {
-        'parse': 0,
-        'url': variants,
-        'header': {'User-Agent': _userAgent, 'Referer': _referer},
-      },
-      episode,
-      localUrl: (_) async => throw const FormatException('夸克不返回本地代理地址'),
-    );
-    await _accounts.assertCurrentSession(session, generation: generation);
-    return resolved;
+    // Quark's original media endpoints also require the validated account
+    // session. Keep it in a provider-scoped transport, never in player headers.
+    CloudMediaLease? lease;
+    try {
+      for (final variant in variants) {
+        final target = Uri.parse(variant['url'] as String);
+        if (!CloudMediaLease.isTrustedQuarkMedia(target)) continue;
+        lease ??= await CloudMediaLease.open(
+          target: target,
+          provider: CloudMediaProvider.quark,
+          headers: {
+            'Cookie': _operationCookies[session] ?? session.cookie,
+            'User-Agent': _userAgent,
+            'Referer': _referer
+          },
+          isCancelled: () => isCancelled?.call() == true,
+          isCurrent: () async {
+            try {
+              await _accounts.assertCurrentSession(session,
+                  generation: generation);
+              return true;
+            } catch (_) {
+              return false;
+            }
+          },
+          client: _mediaClientFactory(),
+        );
+        variant['url'] = lease.urlFor(target).toString();
+      }
+      final resolved = await SourcePlayback.decode(
+        {
+          'parse': 0,
+          'url': variants,
+          'header': {'User-Agent': _userAgent, 'Referer': _referer},
+        },
+        episode,
+        localUrl: (_) async => throw const FormatException('夸克不返回本地代理地址'),
+      );
+      await _accounts.assertCurrentSession(session, generation: generation);
+      CmsEpisode attach(CmsEpisode item) => CmsEpisode(
+          name: item.name,
+          url: item.url,
+          headers: item.headers,
+          externalAudioUrl: item.externalAudioUrl,
+          playbackSession: {if (lease != null) 'cloudMediaLease': lease},
+          variants: item.variants.map(attach).toList());
+      return attach(resolved);
+    } catch (_) {
+      await lease?.close();
+      rethrow;
+    }
   }
 
   /// Walks the original public share with pagination. Stable episode references
@@ -632,7 +675,7 @@ class QuarkDriveClient {
       ..followRedirects = false
       ..maxRedirects = 0
       ..headers.addAll({
-        'Cookie': session.cookie,
+        'Cookie': _operationCookies[session] ?? session.cookie,
         'User-Agent': _userAgent,
         'Referer': _referer,
         'Content-Type': 'application/json',
@@ -691,6 +734,10 @@ class QuarkDriveClient {
       if (code != 0 || (status != null && status != 200)) {
         throw const QuarkDriveException('unavailable', '夸克暂时无法提供此文件');
       }
+      _operationCookies[session] = QuarkAccountSession.refreshOperationCookie(
+          _operationCookies[session] ?? session.cookie,
+          response.headers['set-cookie'],
+          uri);
       return value;
     } on TimeoutException {
       throw const QuarkDriveException('unavailable', '夸克请求超时，请稍后重试');

@@ -5,6 +5,10 @@ const crypto = require('node:crypto');
 const { TextDecoder } = require('node:util');
 const { zipMember, MAX } = require('./drpy-guard-extractor.cjs');
 const PROFILES = {
+  '88e67402129e7db92669fb351397ecd4d09709e6c70b577f22a19cfb0ad5f204': {
+    nativeSha: 'fac9e3937d9928e437ebff79bc5164df418a6adb212494ef21c273579b045dcb',
+    mask: 0xb7
+  },
   'e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e': {
     nativeSha: 'fac9e3937d9928e437ebff79bc5164df418a6adb212494ef21c273579b045dcb',
     mask: 0xb7

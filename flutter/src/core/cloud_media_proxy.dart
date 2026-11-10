@@ -4,14 +4,18 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:http/http.dart' as http;
+import 'quark_account.dart';
 
-/// An ephemeral capability for one authenticated UC file. Credentials never
-/// leave this transport or follow a redirect to a different origin.
+enum CloudMediaProvider { uc, quark }
+
+/// A player-owned capability for one cloud file and its quality variants.
+/// Account headers stay here, scoped to the selected provider's HTTPS hosts.
 class CloudMediaLease {
   CloudMediaLease._(
       this._server,
       this._client,
-      this._target,
+      Uri target,
+      this._provider,
       this._headers,
       this._isCancelled,
       this._isCurrent,
@@ -19,13 +23,16 @@ class CloudMediaLease {
       DateTime Function() clock)
       : _clock = clock,
         _created = clock() {
+    urlFor(target);
     _server.listen(_serve);
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _sweep());
   }
 
   final HttpServer _server;
   final http.Client _client;
-  final Uri _target;
+  final CloudMediaProvider _provider;
+  final _targets = <String, Uri>{};
+  final _paths = <Uri, String>{};
   final Map<String, String> _headers;
   final bool Function() _isCancelled;
   final Future<bool> Function() _isCurrent;
@@ -39,6 +46,31 @@ class CloudMediaLease {
 
   Uri get url =>
       Uri.parse('http://127.0.0.1:${_server.port}/$_capability/media');
+
+  static bool isTrustedQuarkMedia(Uri uri) =>
+      uri.scheme == 'https' &&
+      uri.userInfo.isEmpty &&
+      (!uri.hasPort || uri.port == 443) &&
+      (uri.host == 'quark.cn' || uri.host.endsWith('.quark.cn'));
+
+  bool _trusted(Uri uri) => _provider == CloudMediaProvider.quark
+      ? isTrustedQuarkMedia(uri)
+      : isTrustedUcMedia(uri);
+
+  /// Only provider API responses or a provider playlist can register a target.
+  /// The incoming HTTP request never supplies an upstream URL.
+  Uri urlFor(Uri target) {
+    if (_closed || !_trusted(target) || _targets.length >= 32768) {
+      throw const FormatException('网盘媒体地址无效或播放会话已结束');
+    }
+    final path = _paths.putIfAbsent(target, () {
+      final suffix = _targets.isEmpty ? 'media' : 'media-${_targets.length}';
+      final path = '/$_capability/$suffix';
+      _targets[path] = target;
+      return path;
+    });
+    return Uri.parse('http://127.0.0.1:${_server.port}$path');
+  }
 
   static bool isTrustedUcMedia(Uri uri) =>
       uri.scheme == 'https' &&
@@ -54,11 +86,14 @@ class CloudMediaLease {
       required Map<String, String> headers,
       required bool Function() isCancelled,
       required Future<bool> Function() isCurrent,
+      CloudMediaProvider provider = CloudMediaProvider.uc,
       DateTime Function()? clock,
       http.Client? client}) async {
-    if (!isTrustedUcMedia(target)) {
+    if (!(provider == CloudMediaProvider.quark
+        ? isTrustedQuarkMedia(target)
+        : isTrustedUcMedia(target))) {
       client?.close();
-      throw const FormatException('UC 返回的媒体域名无法安全携带账号会话');
+      throw const FormatException('网盘返回的媒体域名无法安全携带账号会话');
     }
     if (isCancelled() || !await isCurrent()) {
       client?.close();
@@ -68,7 +103,7 @@ class CloudMediaLease {
     final token = base64Url
         .encode(List.generate(32, (_) => Random.secure().nextInt(256)))
         .replaceAll('=', '');
-    return CloudMediaLease._(server, client ?? http.Client(), target,
+    return CloudMediaLease._(server, client ?? http.Client(), target, provider,
         Map.of(headers), isCancelled, isCurrent, token, clock ?? DateTime.now);
   }
 
@@ -91,8 +126,9 @@ class CloudMediaLease {
   }
 
   Future<void> _serve(HttpRequest request) async {
+    final target = _targets[request.uri.path];
     if (_closed ||
-        request.uri.path != '/$_capability/media' ||
+        target == null ||
         request.uri.hasQuery ||
         !const ['GET', 'HEAD'].contains(request.method)) {
       request.response.statusCode = HttpStatus.notFound;
@@ -110,7 +146,7 @@ class CloudMediaLease {
         request.response.statusCode = HttpStatus.gone;
         return;
       }
-      final upstream = http.Request(request.method, _target)
+      final upstream = http.Request(request.method, target)
         ..followRedirects = false;
       upstream.headers.addAll(_headers);
       upstream.headers['Accept-Encoding'] = 'identity';
@@ -120,16 +156,18 @@ class CloudMediaLease {
           request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
           return;
         }
-        upstream.headers['Range'] = range;
+        if (!target.path.toLowerCase().endsWith('.m3u8')) {
+          upstream.headers['Range'] = range;
+        }
       }
-      final response =
-          await _client.send(upstream).timeout(const Duration(seconds: 20));
+      final (response, finalTarget) = await _send(upstream);
       if (_closed || _isCancelled() || !await _isCurrent()) {
         await response.stream.listen((_) {}).cancel();
         request.response.statusCode = HttpStatus.gone;
         return;
       }
-      // Never follow redirects, including redirects to another UC hostname.
+      // UC keeps its existing no-redirect policy. Quark redirects are followed
+      // only after checking every destination against the same provider scope.
       if (!const [200, 206, 416].contains(response.statusCode)) {
         await response.stream.listen((_) {}).cancel();
         request.response.statusCode = HttpStatus.badGateway;
@@ -162,6 +200,29 @@ class CloudMediaLease {
         await response.stream.listen((_) {}).cancel();
         return;
       }
+      if (_provider == CloudMediaProvider.quark &&
+          (mime.toLowerCase().contains('mpegurl') ||
+              finalTarget.path.toLowerCase().endsWith('.m3u8'))) {
+        final body = <int>[];
+        await for (final chunk
+            in response.stream.timeout(const Duration(seconds: 30))) {
+          if (_closed ||
+              _isCancelled() ||
+              body.length + chunk.length > 2 * 1024 * 1024) {
+            throw const FormatException('网盘播放列表无效');
+          }
+          body.addAll(chunk);
+        }
+        final playlist = _rewritePlaylist(utf8.decode(body), finalTarget);
+        final encoded = utf8.encode(playlist);
+        request.response.statusCode = HttpStatus.ok;
+        request.response.headers.removeAll('content-range');
+        request.response.headers
+            .set('content-type', 'application/vnd.apple.mpegurl');
+        request.response.contentLength = encoded.length;
+        request.response.add(encoded);
+        return;
+      }
       await for (final chunk
           in response.stream.timeout(const Duration(seconds: 30))) {
         if (_closed || _isCancelled()) break;
@@ -181,11 +242,84 @@ class CloudMediaLease {
     }
   }
 
+  Future<(http.StreamedResponse, Uri)> _send(http.Request initial) async {
+    var request = initial;
+    for (var redirects = 0;; redirects++) {
+      final response =
+          await _client.send(request).timeout(const Duration(seconds: 20));
+      if (_provider == CloudMediaProvider.quark &&
+          !_closed &&
+          !_isCancelled() &&
+          await _isCurrent()) {
+        final cookie = _headers['Cookie'];
+        if (cookie != null) {
+          try {
+            _headers['Cookie'] = QuarkAccountSession.refreshOperationCookie(
+                cookie, response.headers['set-cookie'], request.url);
+          } catch (_) {
+            await response.stream.listen((_) {}).cancel();
+            rethrow;
+          }
+        }
+      }
+      if (_provider != CloudMediaProvider.quark ||
+          !const [301, 302, 303, 307, 308].contains(response.statusCode)) {
+        return (response, request.url);
+      }
+      await response.stream.listen((_) {}).cancel();
+      final location = response.headers['location'];
+      final next = location == null ? null : request.url.resolve(location);
+      if (redirects >= 3 ||
+          next == null ||
+          !_trusted(next) ||
+          _closed ||
+          _isCancelled() ||
+          !await _isCurrent()) {
+        throw const FormatException('网盘媒体重定向无效');
+      }
+      request = http.Request(initial.method, next)
+        ..followRedirects = false
+        ..headers.addAll(initial.headers)
+        ..headers.addAll(_headers);
+    }
+  }
+
+  String _rewritePlaylist(String text, Uri origin) {
+    if (!text.trimLeft().startsWith('#EXTM3U')) {
+      throw const FormatException('网盘未返回有效播放列表');
+    }
+    String media(String value) {
+      final uri = origin.resolve(value);
+      if (_trusted(uri)) return urlFor(uri).toString();
+      // Signed external CDN resources remain anonymous. Never pass the account
+      // headers to the native decoder, including for HLS keys and segments.
+      if (uri.scheme != 'https' ||
+          uri.userInfo.isNotEmpty ||
+          uri.host.isEmpty ||
+          !uri.host.contains('.') ||
+          InternetAddress.tryParse(uri.host) != null ||
+          uri.host.endsWith('.localhost')) {
+        throw const FormatException('网盘播放列表包含无效地址');
+      }
+      return uri.toString();
+    }
+
+    return text.split('\n').map((line) {
+      final value = line.trim();
+      if (value.isEmpty) return line;
+      if (!value.startsWith('#')) return media(value);
+      return line.replaceAllMapped(
+          RegExp(r'URI="([^"]+)"'), (match) => 'URI="${media(match[1]!)}"');
+    }).join('\n');
+  }
+
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
     _timer?.cancel();
     _headers.clear();
+    _targets.clear();
+    _paths.clear();
     _client.close();
     await _server.close(force: true);
   }

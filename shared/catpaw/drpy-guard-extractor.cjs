@@ -5,6 +5,46 @@ const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const MAX = 16 * 1024 * 1024;
 const PROFILES = {
+  // Desktop subscription captured on 2026-11-10. Read only the reviewed
+  // constants; this artifact is distinct from the iOS subscription build.
+  '88e67402129e7db92669fb351397ecd4d09709e6c70b577f22a19cfb0ad5f204': {
+    auete: {
+      init: 'dacfe382fff4030441f2b81c37ba98fb5999cba25211b75851dee8b0a06245bc',
+      player: '1217b0f480e8c7f0bcc1f8eac2168706ff85f0954ffe956cc399027785fd3c6f'
+    },
+    bttwoo: {
+      init: 'b896ca9f25e8ea4cd786baf4b3ba84dadcb155f2659c5de1ed760179b06632cd',
+      encodePlayKey: '450b78890c547603e2c633a10463959ded6f3764bef71c3733b21d8bb06a0a60',
+      clinit: '0dedbc3c6c01b50c63f6e5032d08f2ff86e183efbbce52f64def41eb4a4b1d6e',
+      headerClass: 'Lcom/github/catvod/spider/merge/x5;',
+      headerClinit: '165116febeb25cc854103a354b005eb92f4a25dd766570abc6687a6ca6e11b25',
+      headerCount: 1682,
+      originMask: 2256,
+      playKeyMask: 1841,
+      userAgentMask: 2657
+    },
+    appgz: {
+      methods: {
+        '<init>': 'ab57f6f97defeef1829f2b0435ba2fdb47d364ba647d484318a973efbe4d4a87',
+        'N': '560778016a320e768437d9cbc71847a818b442b78e2f8ba038ae423e6a5f615d',
+        'tF': 'bf87fb15255e12f8e505009a98e262e15088e5dff093140366bb1be87ac9230b',
+        'init': '83583414c8cc0f739ec5bd649ed9a1e339053d539a76f3cb96a38aceef88e707',
+        'playerContent': 'dc332b898d7502a55ce37e87fa15f284d89958786aa9383d12e97cc20122c519'
+      },
+      clinit: '2c9dea916ed74561ca468d8a09d592e52863990f2a864798c13233dbf6fa3f6f',
+      count: 3104,
+      origin: [1206, 24, 959],
+      privateKey: [16, 848, 2579],
+      publicKey: [864, 216, 659],
+      signatureSuffix: [1508, 36, 456],
+      utdidKey: [1857, 44, 3141],
+      ua: [1090, 13, 2926],
+      version: [1110, 7, 429],
+      pkg: [1128, 44, 848],
+      ver: [1175, 7, 2409],
+      code: [1193, 6, 1123]
+    }
+  },
   'e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e': {
     auete: {
       init: '3841e63ceeae29689e3b5d5b7f92b4d8177278dad5084818c2476df489128c17',
@@ -358,7 +398,7 @@ function extractKnownPlugin(bytes, adapter = 'dm84-v1') {
     reader.reviewedCode(className, '<init>', b.init);
     reader.reviewedCode(className, 'encodePlayKey', b.encodePlayKey);
     const values = reader.reviewedShortArray(className, b.clinit, 'short', 10, 686);
-    const headerValues = reader.reviewedShortArray(b.headerClass, b.headerClinit, 'short', 316, 1667);
+    const headerValues = reader.reviewedShortArray(b.headerClass, b.headerClinit, 'short', 316, b.headerCount ?? 1667);
     const decode = (array, start, length, mask) => String.fromCharCode(...array.slice(start, start + length).map(value => value ^ mask));
     const origin = endpoint(decode(values, 0, 23, b.originMask)), playKey = decode(values, 24, 20, b.playKeyMask), userAgent = decode(headerValues, 1048, 117, b.userAgentMask);
     if (origin.pathname !== '/' || origin.search || !/^[\x21-\x7e]{20}$/.test(playKey) || /[\r\n]/.test(userAgent)) fail();

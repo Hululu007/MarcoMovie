@@ -36,14 +36,37 @@ class QuarkAccountSession {
   bool get pcApi => true;
   bool get h5Save => driveSt.isNotEmpty;
 
+  /// Accept provider-issued rotation for this playback operation only. The
+  /// persistent credential remains the account-change boundary; a response
+  /// cannot replace its identity or copy cookies from another provider.
+  static String refreshOperationCookie(
+      String current, String? setCookie, Uri endpoint) {
+    if (setCookie == null || setCookie.isEmpty) return current;
+    if (endpoint.scheme != 'https' ||
+        endpoint.userInfo.isNotEmpty ||
+        (endpoint.hasPort && endpoint.port != 443) ||
+        !(endpoint.host == 'quark.cn' || endpoint.host.endsWith('.quark.cn'))) {
+      throw const QuarkAccountException('quark_cookie_origin', '夸克会话响应来源无效');
+    }
+    final cookies = _AccountCookies.fromHeader(current);
+    final identity = cookies.accountId;
+    cookies.receive(
+        http.Response('', 200, headers: {'set-cookie': setCookie}), endpoint);
+    if (cookies.accountId != identity) {
+      throw const QuarkAccountException(
+          'quark_account_changed', '夸克会话身份已变化，请重新验证账号');
+    }
+    return cookies.header;
+  }
+
   String toCredential() => jsonEncode({
-    'provider': 'quark',
-    'version': 1,
-    'cookie': cookie,
-    'driveSt': driveSt,
-    'accountId': accountId,
-    'validatedAt': validatedAt.toUtc().toIso8601String(),
-  });
+        'provider': 'quark',
+        'version': 1,
+        'cookie': cookie,
+        'driveSt': driveSt,
+        'accountId': accountId,
+        'validatedAt': validatedAt.toUtc().toIso8601String(),
+      });
 
   /// Parses a stored validation record; this alone does not revalidate it online.
   static QuarkAccountSession? tryParseCredential(String value) {
@@ -65,8 +88,7 @@ class QuarkAccountSession {
       if (at == null ||
           at.isAfter(DateTime.now().add(const Duration(minutes: 5))) ||
           ticket.isNotEmpty && !_validTicket(ticket) ||
-          data['accountId'] != jar.accountId)
-        return null;
+          data['accountId'] != jar.accountId) return null;
       return QuarkAccountSession(
         cookie: jar.header,
         driveSt: ticket,
@@ -120,17 +142,16 @@ class _AccountCookies {
       if (!_name.hasMatch(name) ||
           _attributes.contains(name.toLowerCase()) ||
           _invalidValue.hasMatch(value) ||
-          _values.containsKey(name))
-        _badCookie();
+          _values.containsKey(name)) _badCookie();
       _values[name] = value;
     }
     requireIdentity();
   }
 
   Never _badCookie() => throw const QuarkAccountException(
-    'quark_cookie_invalid',
-    '夸克 Cookie 格式无效，请重新登录或检查凭据',
-  );
+        'quark_cookie_invalid',
+        '夸克 Cookie 格式无效，请重新登录或检查凭据',
+      );
 
   void requireIdentity() {
     final identity = _values['__pus'] ?? '';
@@ -162,22 +183,19 @@ class _AccountCookies {
       } catch (_) {
         _badCookie();
       }
-      final domain = parsed.domain
-          ?.replaceFirst(RegExp(r'^\.'), '')
-          .toLowerCase();
+      final domain =
+          parsed.domain?.replaceFirst(RegExp(r'^\.'), '').toLowerCase();
       if (domain != null &&
           domain.isNotEmpty &&
           domain != endpoint.host &&
-          !endpoint.host.endsWith('.$domain'))
-        continue;
+          !endpoint.host.endsWith('.$domain')) continue;
       // This is an account credential, not arbitrary cookies for website paths.
       if (parsed.path != null && parsed.path != '/' && parsed.path!.isNotEmpty)
         continue;
       if (!_name.hasMatch(parsed.name) ||
           _attributes.contains(parsed.name.toLowerCase()) ||
           _invalidValue.hasMatch(parsed.value) ||
-          parsed.value.length > 8192)
-        _badCookie();
+          parsed.value.length > 8192) _badCookie();
       final expired = parsed.maxAge != null
           ? parsed.maxAge! <= 0
           : parsed.expires != null && !parsed.expires!.isAfter(DateTime.now());
@@ -214,8 +232,8 @@ class QuarkAccountProvider {
     required this.readCredential,
     required this.writeCredential,
     http.Client? httpClient,
-  }) : _http = httpClient ?? http.Client(),
-       _ownsClient = httpClient == null;
+  })  : _http = httpClient ?? http.Client(),
+        _ownsClient = httpClient == null;
 
   int get generation => _generation;
 
@@ -256,8 +274,7 @@ class QuarkAccountProvider {
     if (cached != null &&
         cached.toCredential() == raw &&
         DateTime.now().difference(cached.validatedAt) <
-            const Duration(minutes: 5))
-      return cached;
+            const Duration(minutes: 5)) return cached;
     if (raw.trim().isEmpty) {
       throw const QuarkAccountException('quark_auth_required', '请先登录并验证夸克账号');
     }
@@ -274,14 +291,12 @@ class QuarkAccountProvider {
     final session = await validateCredential(stored?.cookie ?? task.input);
     if (task.generation != _generation ||
         await readCredential() != task.input ||
-        task.generation != _generation)
-      throw StateError('夸克账号已更改，请重试');
+        task.generation != _generation) throw StateError('夸克账号已更改，请重试');
     task.output = session.toCredential();
     await writeCredential(task.output!);
     if (task.generation != _generation ||
         await readCredential() != task.output ||
-        task.generation != _generation)
-      throw StateError('夸克账号已更改，请重试');
+        task.generation != _generation) throw StateError('夸克账号已更改，请重试');
     _observedCredential = task.output;
     _cached = session;
     _generation++;
@@ -381,8 +396,7 @@ class QuarkAccountProvider {
   }
 
   Future<http.Response> _get(Uri endpoint, {String? cookie}) async {
-    final allowed =
-        endpoint.scheme == 'https' &&
+    final allowed = endpoint.scheme == 'https' &&
         endpoint.userInfo.isEmpty &&
         endpoint.port == 443 &&
         ((endpoint.host == 'pan.quark.cn' &&
@@ -425,7 +439,8 @@ class QuarkAccountProvider {
           response.statusCode,
           headers: response.headers,
         );
-      })().timeout(const Duration(seconds: 8));
+      })()
+          .timeout(const Duration(seconds: 8));
     } on QuarkAccountException {
       rethrow;
     } catch (_) {

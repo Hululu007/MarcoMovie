@@ -500,7 +500,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
             if (!mounted || epoch != _searchEpoch) return;
             setState(() {
               _searchNotices['${site.subscriptionId}:${site.key}'] =
-                  '${site.name}：${searchSourceNotice(error)}';
+                  '${_searchSourceLabel(site)}：${searchSourceNotice(error)}';
               if (CmsClient.needsSourceVerification(site, error)) {
                 _searchVerificationSites['${site.subscriptionId}:${site.key}'] = site;
               }
@@ -513,6 +513,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
             if (!mounted || epoch != _searchEpoch) return;
             final (site, videos) = batch;
             setState(() {
+              final key = '${site.subscriptionId}:${site.key}';
+              _searchNotices.remove(key);
+              _searchVerificationSites.remove(key);
               for (final v in videos) {
                 _searchResults.add((site, v));
               }
@@ -549,12 +552,15 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     } catch (error) {
       if (!mounted || epoch != _searchEpoch) return;
       setState(() {
-        _searchNotices[key] = '${site.name}：${searchSourceNotice(error)}';
+        _searchNotices[key] = '${_searchSourceLabel(site)}：${searchSourceNotice(error)}';
         if (!CmsClient.needsSourceVerification(site, error)) _searchVerificationSites.remove(key);
       });
     }
     _searchSheetListener?.call();
   }
+
+  String _searchSourceLabel(CmsSite site) => searchSourceLabel(
+      site, _visibleSupportedSites, widget.storage.getSubscriptions());
 
   Future<void> _loadLivePlaylist(int sourceIndex) async {
     final lives = _visibleLives;
@@ -2806,7 +2812,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                                     final selected =
                                         _searchSiteFilterKey == key;
                                     final titleText =
-                                        isAll ? '全部线路' : site!.name;
+                                        isAll ? '全部线路' : _searchSourceLabel(site!);
                                     return ApplePressableScale(
                                       pressedScale: 0.94,
                                       pressedOpacity: 0.88,

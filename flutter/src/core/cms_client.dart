@@ -23,6 +23,7 @@ import 'source_playback.dart';
 import 'source_verification.dart';
 import 'models.dart';
 import 'quark_drive.dart';
+import 'quark_account.dart';
 import 'storage_service.dart';
 /// HTTP CMS client with TVBox `okhttp/3.15` User-Agent parity, system certificate validation for third-party
 /// CMS hosts, multi-depot (`urls`/`storeHouse`) resolution, and bounded concurrent search.
@@ -101,6 +102,7 @@ class CmsClient {
     final message = switch (error) {
       AliShareException e => e.message,
       QuarkDriveException e => e.message,
+      QuarkAccountException e => e.message,
       FormatException e => e.message,
       _ => '',
     };
@@ -1668,7 +1670,10 @@ class CmsClient {
         if (!nativeAdapter && backends.isEmpty) continue;
         final String sig;
         if (_usesJs(s)) {
-          sig = s.key;
+          // The same plugin key in two subscriptions can have different
+          // artifacts, extensions and credentials. They are separate sources.
+          sig = jsonEncode([s.subscriptionId, s.key, s.api, s.ext,
+            s.pluginReference, s.headers]);
         } else if (CspBridge.isBiliSite(s)) {
           sig = 'csp_bili_search';
         } else if (CspBridge.isFirstAidSite(s)) {

@@ -862,8 +862,8 @@ class WoggSource {
   }
 }
 
-/// The fixed offsets are reviewed data locations in one exact DEX, not an
-/// interpreter. An updated plugin fails closed until its data layout is reviewed.
+/// Reviewed data locations for the original subscription variants. Package and
+/// inner DEX hashes are paired; imported code is never evaluated.
 class WoggPluginConfiguration {
   final List<String> origins;
   final String userAgent;
@@ -871,10 +871,23 @@ class WoggPluginConfiguration {
       {required this.origins, required this.userAgent});
 
   static WoggPluginConfiguration extract(Uint8List bytes) {
-    if (bytes.isEmpty ||
-        bytes.length > 16 * 1024 * 1024 ||
-        sha256.convert(bytes).toString() !=
-            'da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096') {
+    const profiles = {
+      'da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096': (
+        dex: '3d92d4cd3d3c11896d4a2a576e06fd68748b4944c6bc2330357c4c2085ffa47d',
+        offset: 1620732, uaMask: 974,
+        originMasks: [1112, 1852, 1824, 1782, 1412],
+      ),
+      '88e67402129e7db92669fb351397ecd4d09709e6c70b577f22a19cfb0ad5f204': (
+        dex: 'ca0f07bd6f82fa9508e7dbe72157e15e478dbf2a2d60d255a4aea4c6d1cb35f1',
+        offset: 1724260, uaMask: 1947,
+        originMasks: [2183, 731, 581, 1275, 1715],
+      ),
+    };
+    if (bytes.isEmpty || bytes.length > 16 * 1024 * 1024) {
+      throw const FormatException('玩偶插件包为空或超过大小限制');
+    }
+    final profile = profiles[sha256.convert(bytes).toString()];
+    if (profile == null) {
       throw const FormatException('此版本玩偶插件尚未完成适配，请保留原订阅并更新应用');
     }
     Uint8List member(Uint8List data, String name) {
@@ -892,24 +905,23 @@ class WoggPluginConfiguration {
       if (const [1, 2, 5, 6].contains(payload[i])) payload[i] ^= 7;
     }
     final dex = member(payload, 'classes.dex');
-    if (sha256.convert(dex).toString() !=
-        '3d92d4cd3d3c11896d4a2a576e06fd68748b4944c6bc2330357c4c2085ffa47d') {
+    if (sha256.convert(dex).toString() != profile.dex) {
       throw const FormatException('玩偶插件数据校验失败');
     }
-    final data = ByteData.sublistView(dex, 1620732, 1620732 + 1548 * 2);
+    final data = ByteData.sublistView(dex, profile.offset, profile.offset + 1548 * 2);
     String decode(int start, int length, int mask) => String.fromCharCodes([
           for (var i = start; i < start + length; i++)
             data.getUint16(i * 2, Endian.little) ^ mask,
         ]);
     return WoggPluginConfiguration(
       origins: [
-        decode(796, 26, 1112),
-        decode(822, 31, 1852),
-        decode(853, 21, 1824),
-        decode(874, 26, 1782),
-        decode(900, 20, 1412)
+        decode(796, 26, profile.originMasks[0]),
+        decode(822, 31, profile.originMasks[1]),
+        decode(853, 21, profile.originMasks[2]),
+        decode(874, 26, profile.originMasks[3]),
+        decode(900, 20, profile.originMasks[4])
       ],
-      userAgent: decode(43, 111, 974),
+      userAgent: decode(43, 111, profile.uaMask),
     );
   }
 }
