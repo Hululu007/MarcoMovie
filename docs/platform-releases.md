@@ -1,5 +1,7 @@
 # Independent platform releases
 
+Android TV / box 0.5.16 (version code 70) optimizes category/detail request scheduling and retains independently switchable saved subscriptions. The exact build commit is `e435f461183d6a0db68ef7c3f475190bee10c0e5`; Android build/offline workflow `42841196245` and API 23 TV workflow `42841196321` passed the required Android jobs and 295 emulator checks. No physical TV or real-provider latency acceptance is claimed. See [the version record](releases/android-tv-v0.5.16.md).
+
 The owner allows each platform to release independently after its own checks. Version numbers do not have to match. A release must name its platform, build commit, tested fixes and remaining limitations.
 
 **Standing release authorization (2026-11-10):** the owner instructed that future optimizations and fixes should be synchronized and published directly after the necessary checks, without a separate confirmation. This includes the Android TV category-focus fix in 0.5.15. Advance the affected platform's version, publish its verified package and matching source, and synchronize the download site and update feed. Report the actual validation scope; a build or emulator check does not establish physical-device acceptance.
