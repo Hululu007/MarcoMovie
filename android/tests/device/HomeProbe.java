@@ -122,6 +122,7 @@ public final class HomeProbe extends Instrumentation {
                         () ->
                                 a.hasWindowFocus()
                                         || a.appDialog != null
+                                        || a.accountDialog != null
                                         || a.sourceDialog != null
                                                 && a.sourceDialog
                                                         .getWindow()
@@ -131,6 +132,7 @@ public final class HomeProbe extends Instrumentation {
                 () ->
                         a.hasWindowFocus()
                                 || a.appDialog != null
+                                || a.accountDialog != null
                                 || a.sourceDialog != null
                                         && a.sourceDialog
                                                 .getWindow()
