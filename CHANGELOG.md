@@ -1,3 +1,10 @@
+## 2026-11-10 Windows 0.5.10 / macOS 0.5.9 iOS 反馈同类问题修复
+
+- [Windows 0.5.10](docs/releases/windows-v0.5.10.md) · [macOS 0.5.9](docs/releases/macos-v0.5.9.md)。
+- 修复百度扫码会话和状态、网盘线路标签与自动跨网盘恢复、旧观看记录／收藏编号及播放器按钮重复点击误触背景手势。
+- 补齐原分享子目录、提取码、部分目录提示、分享取消与暂停后播放代理生命周期；保留原文件和真实网盘归属。
+- Windows 568 项、macOS 568 项 Flutter 测试及原生构建通过，安装包、SHA-256 与对应源码已独立发布。真实账号和 4K/HDR 实机播放仍需验证。
+
 ## 2026-11-10 Windows 0.5.9 / macOS 0.5.8 原片源拉取修复
 
 - [Windows 0.5.9](docs/releases/windows-v0.5.9.md) · [macOS 0.5.8](docs/releases/macos-v0.5.8.md)。

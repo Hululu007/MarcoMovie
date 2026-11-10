@@ -2,7 +2,7 @@
   <img src="docs/images/tv-banner-960x540.png" width="480" alt="Marco Movie — 银色场记板与播放标志" />
   <h1>Marco Movie</h1>
   <p>支持 Android 电视、手机、平板及 Windows / macOS / iOS 多端自适应的播放器。</p>
-  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.5.14 · Android 电视：0.5.12 · Android Lite：0.5.1 · Windows：0.5.9 · macOS：0.5.8 · iOS：0.5.0 · 各端独立更新</p>
+  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.5.14 · Android 电视：0.5.12 · Android Lite：0.5.1 · Windows：0.5.10 · macOS：0.5.9 · iOS：0.5.0 · 各端独立更新</p>
   <p><a href="https://marcotv.wlj9919.top/movie/">镜像下载与产品展示</a> · <a href="https://github.com/Pilipala9919/MarcoMovie/releases">GitHub 下载</a> · <a href="docs/USER_GUIDE.md">使用指南</a> · <a href="docs/BUILD.md">构建说明</a> · <a href="docs/PRIVACY.md">隐私说明</a></p>
 </div>
 

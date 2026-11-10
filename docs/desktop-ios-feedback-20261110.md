@@ -20,3 +20,7 @@
 在旧桌面基线运行新增复现用例，响应 Cookie、字符串扫码状态、原分享标签归属三项均失败；修复后通过。本地完整 Flutter 回归 568 项通过，平台生成检查 7 项通过。新测试覆盖百度真实账号验证成功／失败、补全登录重试、Cookie 作用域、旧编号零／唯一／多个匹配、原文件恢复策略及鼠标／触控按钮。
 
 网盘接口测试使用合成响应，没有使用用户账号或修改云盘。实际本机 HTTP、Node、QuickJS 回归与原生构建不能代替 Windows / Mac 用户账号、会员文件或 HEVC/HDR 影片的实机播放验收。正式发布记录另列两端原生 CI、版本、构建提交及安装包校验结果。
+
+## 正式发布结果
+
+[Windows 0.5.10](releases/windows-v0.5.10.md) 和 [macOS 0.5.9](releases/macos-v0.5.9.md) 已发布。构建提交 `a4896e4a24051a682510b4566e76917675f9d4e7`；[原生构建](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42825902587) 中 Windows 568 项、macOS 568 项 Flutter 测试通过。安装包版本、架构、ZIP 完整性、SHA-256、兼容别名和对应源码已核对。
