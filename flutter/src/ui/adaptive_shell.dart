@@ -806,8 +806,6 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           // Active page content (with right clearance in landscape for the right-side Dock)
           Padding(
             padding: EdgeInsets.only(
-              bottom: !isLandscape && safeTabIndex == pages.length - 1
-                  ? AppleLiquidGlassDock.portraitFootprint(context) : 0,
               right: isLandscape
                   ? AppleLiquidGlassDock.landscapeFootprint(context)
                   : 0,
@@ -5426,7 +5424,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
               pad,
               useSidebar && _isMacOS ? 28 : 16,
               pad,
-              useSidebar ? 36 : 28,
+              useSidebar ? 36 : MediaQuery.paddingOf(context).bottom + 28,
             ),
             children: [
               const Padding(

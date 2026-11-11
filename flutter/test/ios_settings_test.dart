@@ -201,4 +201,22 @@ void main() {
         find.byKey(const ValueKey('settings-page-playback')), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets(
+      'portrait settings scroll viewport extends behind transparent Dock without high clipping mask',
+      (tester) async {
+    await mount(tester, const Size(390, 844));
+    await tester.tap(find.text('设置').last);
+    await tester.pumpAndSettle();
+    final listRect =
+        tester.getRect(find.byKey(const ValueKey('ios-settings-root')));
+    final dockRect = tester.getRect(find.byType(AppleLiquidGlassDock));
+    final aboutRect =
+        tester.getRect(find.byKey(const ValueKey('settings-category-about')));
+    expect(listRect.bottom, 844.0);
+    expect(aboutRect.bottom, lessThanOrEqualTo(dockRect.top));
+    await tapKey(tester, 'settings-category-about');
+    expect(find.byKey(const ValueKey('settings-page-about')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 }

@@ -25,48 +25,52 @@ class IosSettingsPage extends StatelessWidget {
       required this.version});
 
   @override
-  Widget build(BuildContext context) => SafeArea(
-        child: ListView(
-          key: const ValueKey('ios-settings-root'),
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
-          children: [
-            const Text('设置',
-                style: TextStyle(
-                    color: AppleColors.labelPrimary,
-                    fontSize: 32,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -.7)),
-            const SizedBox(height: 6),
-            Text('Marco Movie · $version',
-                style: const TextStyle(
-                    color: AppleColors.labelSecondary, fontSize: 13)),
-            const SizedBox(height: 24),
-            LayoutBuilder(builder: (context, constraints) {
-              final entries = pages(onChanged);
-              final columns = constraints.maxWidth >= 620 ? 2 : 1;
-              final width =
-                  (constraints.maxWidth - (columns - 1) * 14) / columns;
-              return Wrap(spacing: 14, runSpacing: 12, children: [
-                for (final entry in entries)
-                  SizedBox(
-                      width: width,
-                      child: SettingsCapsule(
-                        key: ValueKey('settings-category-${entry.id}'),
-                        pane: entry,
-                        onPressed: () => showAppleModalSheet<void>(
-                          context: context,
-                          title: '设置',
-                          builder: (_) => _SettingsDrawer(
-                              pages: pages,
-                              rootId: entry.id,
-                              onChanged: onChanged),
-                        ),
-                      )),
-              ]);
-            }),
-          ],
-        ),
-      );
+  Widget build(BuildContext context) {
+    final safeBottom = MediaQuery.paddingOf(context).bottom;
+    return SafeArea(
+      bottom: false,
+      child: ListView(
+        key: const ValueKey('ios-settings-root'),
+        padding: EdgeInsets.fromLTRB(20, 16, 20, safeBottom + 28),
+        children: [
+          const Text('设置',
+              style: TextStyle(
+                  color: AppleColors.labelPrimary,
+                  fontSize: 32,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -.7)),
+          const SizedBox(height: 6),
+          Text('Marco Movie · $version',
+              style: const TextStyle(
+                  color: AppleColors.labelSecondary, fontSize: 13)),
+          const SizedBox(height: 24),
+          LayoutBuilder(builder: (context, constraints) {
+            final entries = pages(onChanged);
+            final columns = constraints.maxWidth >= 620 ? 2 : 1;
+            final width =
+                (constraints.maxWidth - (columns - 1) * 14) / columns;
+            return Wrap(spacing: 14, runSpacing: 12, children: [
+              for (final entry in entries)
+                SizedBox(
+                    width: width,
+                    child: SettingsCapsule(
+                      key: ValueKey('settings-category-${entry.id}'),
+                      pane: entry,
+                      onPressed: () => showAppleModalSheet<void>(
+                        context: context,
+                        title: '设置',
+                        builder: (_) => _SettingsDrawer(
+                            pages: pages,
+                            rootId: entry.id,
+                            onChanged: onChanged),
+                      ),
+                    )),
+            ]);
+          }),
+        ],
+      ),
+    );
+  }
 }
 
 class SettingsCapsule extends StatelessWidget {
