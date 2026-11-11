@@ -167,6 +167,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _introSkippedForSession = false;
   bool _outroSkippedForSession = false;
   final Set<int> _failedLinesForEpisode = <int>{};
+  final Set<String> _failedQualityUrls = <String>{};
 
   CmsLine get _currentLine => _lines[_lineIndex.clamp(0, _lines.length - 1)];
   CmsEpisode get _currentEpisode =>
@@ -234,10 +235,35 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
       final vCodec = (track.video.codec ?? track.video.decoder ?? '').trim();
       final aCodec = (track.audio.codec ?? track.audio.decoder ?? '').trim();
-      if (vCodec != _videoCodec || aCodec != _audioCodec) {
+      if ((vCodec.isNotEmpty && vCodec != _videoCodec) ||
+          (aCodec.isNotEmpty && aCodec != _audioCodec)) {
         setState(() {
-          _videoCodec = vCodec;
-          _audioCodec = aCodec;
+          if (vCodec.isNotEmpty) _videoCodec = vCodec;
+          if (aCodec.isNotEmpty) _audioCodec = aCodec;
+        });
+      }
+    });
+    _player.stream.tracks.listen((tracks) {
+      if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
+      String pickCodec(Iterable<({String id, String? codec, String? decoder})> list) {
+        for (final item in list) {
+          if (item.id == 'auto' || item.id == 'no') continue;
+          final c = (item.codec ?? item.decoder ?? '').trim();
+          if (c.isNotEmpty) return c;
+        }
+        return '';
+      }
+      final vCodec = pickCodec(
+        tracks.video.map((t) => (id: t.id, codec: t.codec, decoder: t.decoder)),
+      );
+      final aCodec = pickCodec(
+        tracks.audio.map((t) => (id: t.id, codec: t.codec, decoder: t.decoder)),
+      );
+      if ((_videoCodec.isEmpty && vCodec.isNotEmpty) ||
+          (_audioCodec.isEmpty && aCodec.isNotEmpty)) {
+        setState(() {
+          if (_videoCodec.isEmpty && vCodec.isNotEmpty) _videoCodec = vCodec;
+          if (_audioCodec.isEmpty && aCodec.isNotEmpty) _audioCodec = aCodec;
         });
       }
     });
@@ -320,6 +346,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _introSkippedForSession = true;
         if (targetMs > 0) {
           _lastKnownPositionMs = targetMs;
+          _startup.reanchor(Duration(milliseconds: targetMs));
           setState(() {
             _position = Duration(milliseconds: targetMs);
           });
@@ -340,6 +367,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _skipIntroSec > 0 &&
           dur.inSeconds > _skipIntroSec + 30) {
         _introSkippedForSession = true;
+        _startup.reanchor(Duration(seconds: _skipIntroSec));
         _player.seek(Duration(seconds: _skipIntroSec));
         _showHud('已自动跳过片头 ${_skipIntroSec}s');
       }
@@ -351,6 +379,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _openCurrentEpisode(resumeMs: 0);
           return;
         }
+        _startup.updateState(playing: playing);
         setState(() {
           _playing = playing;
           if (playing) _loading = false;
@@ -358,6 +387,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         PlaybackWakelock.setEnabled(playing);
         if (!playing) {
           _saveProgress();
+        } else if (!_loading && !_buffering) {
+          _scheduleHide();
         }
         if (playing || _position > Duration.zero) {
           _embySession?.update(_position.inMilliseconds, !playing, force: true);
@@ -366,8 +397,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     });
 
     _player.stream.buffering.listen((buffering) {
-      if (mounted && _allowEvents && _matchesActiveMedia)
+      if (mounted && _allowEvents && _matchesActiveMedia) {
+        _startup.updateState(buffering: buffering);
         setState(() => _buffering = buffering);
+        if (!buffering && _playing) _scheduleHide();
+      }
     });
 
     _player.stream.completed.listen((completed) {
@@ -476,6 +510,34 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  CmsEpisode? _nextFallbackQuality() {
+    if (_qualityChoices.length <= 1) return null;
+    final curIdx = _qualityChoices.indexWhere((v) => v.url == _activeStreamUrl);
+    if (curIdx >= 0) {
+      for (int i = curIdx + 1; i < _qualityChoices.length; i++) {
+        final candidate = _qualityChoices[i];
+        if (candidate.url != _activeStreamUrl &&
+            !_failedQualityUrls.contains(candidate.url)) {
+          return candidate;
+        }
+      }
+    }
+    CmsEpisode? best;
+    int bestRank = -1;
+    for (final candidate in _qualityChoices) {
+      if (candidate.url == _activeStreamUrl ||
+          _failedQualityUrls.contains(candidate.url)) {
+        continue;
+      }
+      final rank = _rankVariantQuality(candidate);
+      if (rank > bestRank) {
+        best = candidate;
+        bestRank = rank;
+      }
+    }
+    return best;
+  }
+
   Future<bool> _performNetdiskRecovery(
     int session, {
     required bool isTrial,
@@ -490,19 +552,22 @@ class _PlayerScreenState extends State<PlayerScreen>
               ? _position.inMilliseconds
               : (_pendingResumeMs > 0 ? _pendingResumeMs : _lastKnownPositionMs));
 
-    final curIdx = _qualityChoices.indexWhere((v) => v.url == _activeStreamUrl);
-    final nextIdx = curIdx >= 0 ? curIdx + 1 : 1;
-    final nextVariant =
-        _qualityChoices.length > 1 && nextIdx < _qualityChoices.length
-            ? _qualityChoices[nextIdx]
-            : null;
+    if (_activeStreamUrl.isNotEmpty) {
+      _failedQualityUrls.add(_activeStreamUrl);
+    }
+    final nextVariant = _nextFallbackQuality();
     final decision = PlaybackRecoveryPolicy.decide(
       episode: _currentEpisode,
       isTrial: isTrial,
       hasNextQuality: nextVariant != null,
     );
     if (decision == PlaybackRecoveryDecision.nextQuality) {
-      await _openCurrentEpisode(resumeMs: savedResume, quality: nextVariant!);
+      _showHud(
+        error is TimeoutException
+            ? '当前画质缓冲过慢，已自动切换至 ${nextVariant!.name}'
+            : '已自动切换至 ${nextVariant!.name}',
+      );
+      await _openCurrentEpisode(resumeMs: savedResume, quality: nextVariant);
       return true;
     }
     if (decision == PlaybackRecoveryDecision.stop) return false;
@@ -559,10 +624,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final cloudError = CmsClient.cloudPlaybackError(_currentEpisode, error);
     if (cloudError.isEmpty &&
         !_isLiveStream &&
-        _videoWidth == 0 &&
-        _position.inMilliseconds < 3000 &&
+        !_startup.isPastStartupWindow &&
         !CmsClient.needsSourceVerification(widget.site, error)) {
-      if (_qualityChoices.length > 1 ||
+      if (_nextFallbackQuality() != null ||
           (_lines.length > 1 && _failedLinesForEpisode.length < 6)) {
         final recoverySession = _playSession;
         unawaited(
@@ -620,7 +684,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _openCurrentEpisode({int? resumeMs, CmsEpisode? quality}) async {
-    _startup.cancel();
+    _startup.reset();
     final qualityLease = quality == null ? null : PlayerCloudMediaSession.of(quality);
     final keepsLease = _cloudMedia.owns(qualityLease);
     // Quality variants of one cloud file share their proxy and cancellation
@@ -630,7 +694,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         ? _sourceAbort!
         : (_sourceAbort = Completer<void>());
     final session = ++_playSession;
-    if (quality == null) _qualityChoices = const [];
+    if (quality == null) {
+      _qualityChoices = const [];
+      _failedQualityUrls.clear();
+    }
     _embySession?.stop(_position.inMilliseconds);
     _embySession = null;
     _allowHistory = false;
@@ -738,12 +805,27 @@ class _PlayerScreenState extends State<PlayerScreen>
       await _changeMedia(session, () async {
         _cloudMedia.adopt(pendingLease);
         _allowEvents = true;
-        _startup.waitForProgress(() {
-          if (mounted && session == _playSession && _allowEvents) {
-            _failPlayback(TimeoutException('media startup'));
-            _changeMedia(session, _player.stop).catchError((_) {});
-          }
-        });
+        final hasFallback = _nextFallbackQuality() != null ||
+            (PlaybackRecoveryPolicy.decide(
+                      episode: _currentEpisode,
+                      isTrial: false,
+                      hasNextQuality: false,
+                    ) ==
+                    PlaybackRecoveryDecision.alternateLine &&
+                _lines.length > 1 &&
+                _failedLinesForEpisode.length < 6);
+        _startup.waitForProgress(
+          () {
+            if (mounted && session == _playSession && _allowEvents) {
+              _failPlayback(TimeoutException('media startup'));
+              _changeMedia(session, _player.stop).catchError((_) {});
+            }
+          },
+          hasFallback: hasFallback,
+          startOffset: _pendingResumeMs > 0
+              ? Duration(milliseconds: _pendingResumeMs)
+              : Duration.zero,
+        );
         final baseMedia = widget.mediaForPlayback(
           resolvedEpisode,
           start: _pendingResumeMs > 0
@@ -850,7 +932,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _scheduleHide() {
     _hideTimer?.cancel();
     _hideTimer = Timer(const Duration(seconds: 4), () {
-      if (mounted && _playing) {
+      if (mounted &&
+          _playing &&
+          !_loading &&
+          !_buffering &&
+          _playbackError.isEmpty) {
         setState(() => _controlsVisible = false);
       }
     });
@@ -992,11 +1078,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     };
   }
 
+  static const String _baseLavfOptions =
+      'seg_max_retry=5,strict=experimental,allowed_extensions=ALL,'
+      'protocol_whitelist=[udp,rtp,tcp,tls,data,file,http,https,crypto]';
+
   Future<void> _applyPlayerKernel(String kernel) async {
     try {
       final dyn = _player.platform as dynamic;
       await dyn.setProperty('tls-verify', 'yes');
       await dyn.setProperty('hwdec', _hardwareDecoder(kernel));
+      await dyn.setProperty('cache-on-disk', 'no');
+      await dyn.setProperty('cache-pause-wait', '1');
       switch (kernel) {
         case 'ijk':
           await dyn.setProperty('cache', 'yes');
@@ -1005,7 +1097,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           await dyn.setProperty('network-timeout', '25');
           await dyn.setProperty(
             'demuxer-lavf-o',
-            'reconnect=1,reconnect_delay_max=5,analyzeduration=2000000,probesize=2000000',
+            '$_baseLavfOptions,reconnect=1,reconnect_delay_max=5,analyzeduration=2000000,probesize=2000000',
           );
           break;
         case 'mpv':
@@ -1015,7 +1107,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           await dyn.setProperty('network-timeout', '20');
           await dyn.setProperty(
             'demuxer-lavf-o',
-            'reconnect=1,reconnect_delay_max=4',
+            '$_baseLavfOptions,reconnect=1,reconnect_delay_max=4',
           );
           break;
         case 'exo':
@@ -1029,7 +1121,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           await dyn.setProperty('network-timeout', '15');
           await dyn.setProperty(
             'demuxer-lavf-o',
-            'reconnect=1,reconnect_delay_max=4,fflags=+discardcorrupt+genpts',
+            '$_baseLavfOptions,reconnect=1,reconnect_delay_max=4,fflags=+discardcorrupt+genpts',
           );
           break;
       }
@@ -1303,9 +1395,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   compact: true,
                                   onPressed: () {
                                     _failedLinesForEpisode.clear();
+                                    _failedQualityUrls.clear();
                                     _openCurrentEpisode();
                                   },
                                 ),
+                                if (_qualityChoices.length > 1)
+                                  AppleCapsuleButton(
+                                    label: '切换画质 (${_qualityChoices.length})',
+                                    icon: CupertinoIcons.sparkles,
+                                    compact: true,
+                                    onPressed: _showQualityChoices,
+                                  ),
                                 if (_lines.length > 1)
                                   AppleCapsuleButton(
                                     label: '切换线路 (${_lines.length})',
@@ -1325,6 +1425,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                     onChanged: () {
                                       if (mounted) {
                                         _failedLinesForEpisode.clear();
+                                        _failedQualityUrls.clear();
                                         _openCurrentEpisode();
                                       }
                                     },
@@ -2512,8 +2613,17 @@ class _PlayerScreenState extends State<PlayerScreen>
         cancelButton:CupertinoActionSheetAction(onPressed:()=>Navigator.pop(sheet),child:const Text('取消')),
       ),
     );
-    if(!mounted || session != _playSession || selected == null || selected.url == _activeStreamUrl) return;
-    await _openCurrentEpisode(resumeMs:_position.inMilliseconds,quality:selected);
+    if (!mounted ||
+        session != _playSession ||
+        selected == null ||
+        selected.url == _activeStreamUrl) {
+      return;
+    }
+    _failedQualityUrls.remove(selected.url);
+    final keepPos = _position.inMilliseconds >= 1000
+        ? _position.inMilliseconds
+        : _lastKnownPositionMs;
+    await _openCurrentEpisode(resumeMs: keepPos, quality: selected);
   }
 
   void _showAudioTracksSheet() {

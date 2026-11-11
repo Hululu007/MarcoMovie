@@ -1,8 +1,49 @@
 // Local loopback + synthetic upstream only; no account or external media calls.
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:marco_movie/core/cloud_media_proxy.dart';
+
+class _InfiniteRangeClient extends http.BaseClient {
+  _InfiniteRangeClient({required this.onStart, required this.onCancel});
+
+  final void Function() onStart;
+  final void Function() onCancel;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    onStart();
+    late final StreamController<List<int>> controller;
+    Timer? pump;
+    controller = StreamController<List<int>>(
+      onListen: () {
+        controller.add(List<int>.filled(32768, 7));
+        pump = Timer.periodic(const Duration(milliseconds: 5), (_) {
+          if (!controller.isClosed && !controller.isPaused) {
+            controller.add(List<int>.filled(32768, 7));
+          }
+        });
+      },
+      onCancel: () {
+        pump?.cancel();
+        onCancel();
+      },
+    );
+    return http.StreamedResponse(
+      controller.stream,
+      206,
+      contentLength: 4 * 1024 * 1024 * 1024,
+      headers: {
+        'content-type': 'video/mp4',
+        'accept-ranges': 'bytes',
+        'content-range': 'bytes 0-4294967295/4294967296',
+      },
+    );
+  }
+}
 
 void main() {
   test('a six minute pause preserves the player-owned media lease', () async {
@@ -188,6 +229,45 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 1300));
       await expectLater(http.get(url), throwsA(isA<http.ClientException>()));
       expect(calls, 0);
+    } finally {
+      await lease.close();
+    }
+  });
+
+  test(
+      'aborted loopback Range probes cancel upstream streams and allow rapid MP4 Range seeks without 429',
+      () async {
+    var activeUpstreams = 0;
+    var cancelledUpstreams = 0;
+    final lease = await CloudMediaLease.open(
+      target: Uri.parse('https://video.uc.cn/E01.mp4'),
+      headers: {'Cookie': '__pus=synthetic'},
+      isCancelled: () => false,
+      isCurrent: () async => true,
+      client: _InfiniteRangeClient(
+        onStart: () => activeUpstreams++,
+        onCancel: () {
+          activeUpstreams--;
+          cancelledUpstreams++;
+        },
+      ),
+    );
+    try {
+      // Simulate 8 sequential/overlapping FFmpeg Range probes (ftyp, moov,
+      // video mdat, audio mdat, sidx, seeks) that read 32 KB and close early.
+      for (var i = 0; i < 8; i++) {
+        final ioClient = HttpClient();
+        final req = await ioClient.getUrl(lease.url);
+        req.headers.set('Range', 'bytes=${i * 1048576}-');
+        final res = await req.close();
+        expect(res.statusCode, 206, reason: 'Range seek #$i must not hit 429');
+        final firstChunk = await res.first;
+        expect(firstChunk, isNotEmpty);
+        ioClient.close(force: true);
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(activeUpstreams, 0);
+      expect(cancelledUpstreams, 8);
     } finally {
       await lease.close();
     }

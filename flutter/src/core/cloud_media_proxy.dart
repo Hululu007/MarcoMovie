@@ -28,6 +28,9 @@ class CloudMediaLease {
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _sweep());
   }
 
+  static const int _maxConcurrentRequests = 16;
+  static const int _flushThresholdBytes = 256 * 1024;
+
   final HttpServer _server;
   final http.Client _client;
   final CloudMediaProvider _provider;
@@ -38,6 +41,7 @@ class CloudMediaLease {
   final Future<bool> Function() _isCurrent;
   final String _capability;
   final _requests = <HttpRequest>{};
+  final _upstreams = <StreamSubscription<List<int>>>{};
   final DateTime Function() _clock;
   final DateTime _created;
   Timer? _timer;
@@ -162,7 +166,7 @@ class CloudMediaLease {
       await request.response.close();
       return;
     }
-    if (_requests.length >= 4) {
+    if (_requests.length >= _maxConcurrentRequests) {
       request.response.statusCode = HttpStatus.tooManyRequests;
       await request.response.close();
       return;
@@ -175,11 +179,9 @@ class CloudMediaLease {
       }
       final upstream = http.Request(request.method, target)
         ..followRedirects = false;
-      upstream.headers.addAll(_headers);
-      if (_provider == CloudMediaProvider.baidu &&
-          !isTrustedBaiduAccountMedia(target)) {
-        upstream.headers.removeWhere((k, _) => k.toLowerCase() == 'cookie');
-      }
+      final includeCookie = _provider != CloudMediaProvider.baidu ||
+          isTrustedBaiduAccountMedia(target);
+      _copyHeaders(upstream.headers, includeCookie: includeCookie);
       upstream.headers['Accept-Encoding'] = 'identity';
       final range = request.headers.value('range');
       if (range != null) {
@@ -254,12 +256,7 @@ class CloudMediaLease {
         request.response.add(encoded);
         return;
       }
-      await for (final chunk
-          in response.stream.timeout(const Duration(seconds: 30))) {
-        if (_closed || _isCancelled()) break;
-        request.response.add(chunk);
-        await request.response.flush().timeout(const Duration(seconds: 30));
-      }
+      await _pipeMediaStream(response.stream, request.response);
     } catch (_) {
       // Do not surface upstream URLs, cookies or socket errors to the player.
       try {
@@ -269,6 +266,88 @@ class CloudMediaLease {
       _requests.remove(request);
       try {
         await request.response.close();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _pipeMediaStream(
+    Stream<List<int>> source,
+    HttpResponse sink,
+  ) async {
+    final done = Completer<void>();
+    StreamSubscription<List<int>>? subscription;
+    Timer? idleTimer;
+    var finished = false;
+    var pendingBytes = 0;
+
+    Future<void> finish([Object? error, StackTrace? stackTrace]) async {
+      if (finished) return;
+      finished = true;
+      idleTimer?.cancel();
+      final sub = subscription;
+      if (sub != null) {
+        _upstreams.remove(sub);
+        try {
+          await sub.cancel();
+        } catch (_) {}
+      }
+      if (!done.isCompleted) {
+        if (error != null) {
+          done.completeError(error, stackTrace);
+        } else {
+          done.complete();
+        }
+      }
+    }
+
+    void resetIdleTimer() {
+      idleTimer?.cancel();
+      idleTimer = Timer(const Duration(seconds: 30), () {
+        unawaited(finish(TimeoutException('upstream media idle')));
+      });
+    }
+
+    // Abort the upstream Range download immediately if the player closes its
+    // loopback socket (e.g. after probing ftyp/moov or seeking in a 4K MP4).
+    unawaited(sink.done.then((_) => finish(), onError: (_) => finish()));
+    resetIdleTimer();
+    subscription = source.listen(
+      (chunk) {
+        if (finished || _closed || _isCancelled()) {
+          unawaited(finish());
+          return;
+        }
+        resetIdleTimer();
+        try {
+          sink.add(chunk);
+        } catch (_) {
+          unawaited(finish());
+          return;
+        }
+        pendingBytes += chunk.length;
+        if (pendingBytes >= _flushThresholdBytes) {
+          pendingBytes = 0;
+          subscription?.pause(
+            sink
+                .flush()
+                .timeout(const Duration(seconds: 30))
+                .catchError((_) => finish()),
+          );
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        unawaited(finish(error, stackTrace));
+      },
+      onDone: () {
+        unawaited(finish());
+      },
+      cancelOnError: true,
+    );
+    _upstreams.add(subscription);
+    await done.future;
+    if (!_closed && !_isCancelled() && pendingBytes > 0) {
+      try {
+        await sink.flush().timeout(const Duration(seconds: 30));
       } catch (_) {}
     }
   }
@@ -314,14 +393,21 @@ class CloudMediaLease {
           !await _isCurrent()) {
         throw const FormatException('网盘媒体重定向无效');
       }
-      request = http.Request(initial.method, next)
-        ..followRedirects = false
-        ..headers.addAll(initial.headers)
-        ..headers.addAll(_headers);
-      if (_provider == CloudMediaProvider.baidu &&
-          !isTrustedBaiduAccountMedia(next)) {
-        request.headers.removeWhere((k, _) => k.toLowerCase() == 'cookie');
+      final keepCookie = _provider != CloudMediaProvider.baidu ||
+          isTrustedBaiduAccountMedia(next);
+      request = http.Request(initial.method, next)..followRedirects = false;
+      for (final entry in initial.headers.entries) {
+        if (!keepCookie && entry.key.toLowerCase() == 'cookie') continue;
+        request.headers[entry.key] = entry.value;
       }
+      _copyHeaders(request.headers, includeCookie: keepCookie);
+    }
+  }
+
+  void _copyHeaders(Map<String, String> target, {required bool includeCookie}) {
+    for (final entry in _headers.entries) {
+      if (!includeCookie && entry.key.toLowerCase() == 'cookie') continue;
+      target[entry.key] = entry.value;
     }
   }
 
@@ -361,6 +447,13 @@ class CloudMediaLease {
     _headers.clear();
     _targets.clear();
     _paths.clear();
+    final activeUpstreams = _upstreams.toList();
+    _upstreams.clear();
+    for (final sub in activeUpstreams) {
+      try {
+        await sub.cancel();
+      } catch (_) {}
+    }
     _client.close();
     await _server.close(force: true);
   }

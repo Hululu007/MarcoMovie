@@ -71,4 +71,76 @@ void main() {
       skip: library == null
           ? 'Set MARCOMOVIE_TEST_MPV to the built desktop library'
           : false);
+
+  test(
+      'Windows mpv RAM cache + preserved lavf options play Quark HLS and MP4 without file-cache errors',
+      () async {
+    MediaKit.ensureInitialized(libmpv: library);
+    final bytes = await File('test/fixtures/cloud-playback.mkv').readAsBytes();
+    final errors = <String>[];
+    final transport = await CloudMediaLease.open(
+      target: Uri.parse('https://media.quark.cn/play/master.m3u8'),
+      provider: CloudMediaProvider.quark,
+      headers: {'Cookie': '__pus=synthetic-native-hls'},
+      isCancelled: () => false,
+      isCurrent: () async => true,
+      client: MockClient((request) async {
+        expect(request.headers['cookie'], '__pus=synthetic-native-hls');
+        if (request.url.path.endsWith('.m3u8')) {
+          return http.Response(
+            '#EXTM3U\n'
+            '#EXT-X-VERSION:3\n'
+            '#EXT-X-TARGETDURATION:6\n'
+            '#EXTINF:5.0,\n'
+            'segment.mkv\n'
+            '#EXT-X-ENDLIST\n',
+            200,
+            headers: {'content-type': 'application/vnd.apple.mpegurl'},
+          );
+        }
+        return http.Response.bytes(bytes, 200, headers: {
+          'content-type': 'video/mp2t',
+        });
+      }),
+    );
+    final player = Player(
+      configuration: const PlayerConfiguration(
+        vo: 'null',
+        muted: true,
+        logLevel: MPVLogLevel.error,
+      ),
+    );
+    try {
+      final dyn = player.platform as dynamic;
+      await dyn.setProperty('ao', 'null');
+      await dyn.setProperty('cache', 'yes');
+      await dyn.setProperty('cache-on-disk', 'no');
+      await dyn.setProperty('cache-pause-wait', '1');
+      await dyn.setProperty('demuxer-max-bytes', '134217728');
+      await dyn.setProperty('demuxer-readahead-secs', '30');
+      await dyn.setProperty(
+        'demuxer-lavf-o',
+        'seg_max_retry=5,strict=experimental,allowed_extensions=ALL,'
+            'protocol_whitelist=[udp,rtp,tcp,tls,data,file,http,https,crypto],'
+            'reconnect=1,reconnect_delay_max=4',
+      );
+      player.stream.log.listen((log) {
+        if (log.text.contains('Failed to create file cache')) {
+          errors.add(log.text);
+        }
+      });
+      final progressed = player.stream.position
+          .firstWhere((p) => p.inMilliseconds >= 1000)
+          .timeout(const Duration(seconds: 15));
+      await player.open(Media(transport.url.toString()));
+      await progressed;
+      expect(errors, isEmpty);
+    } finally {
+      await player.dispose();
+      await transport.close();
+    }
+  },
+      skip: library == null
+          ? 'Set MARCOMOVIE_TEST_MPV to the built desktop library'
+          : false);
 }
