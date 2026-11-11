@@ -168,6 +168,10 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   bool _introSkippedForSession = false;
   bool _outroSkippedForSession = false;
+  bool _userSelectedQuality = false;
+  final List<int> _midPlaybackStallEpochsMs = <int>[];
+  Timer? _midPlaybackStallTimer;
+  int _lastPointerScheduleMs = 0;
   final Set<int> _failedLinesForEpisode = <int>{};
   final Set<int> _failedLiveEpisodes = <int>{};
   final Set<String> _failedQualityUrls = <String>{};
@@ -405,7 +409,33 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (mounted && _allowEvents && _matchesActiveMedia) {
         _startup.updateState(buffering: buffering);
         setState(() => _buffering = buffering);
-        if (!buffering && _playing) _scheduleHide();
+        if (!buffering) {
+          _midPlaybackStallTimer?.cancel();
+          if (_playing) _scheduleHide();
+        } else if (!_isLiveStream &&
+            !_loading &&
+            !_userSelectedQuality &&
+            _startup.isPastStartupWindow &&
+            _position.inMilliseconds >= 2500 &&
+            _nextFallbackQuality() != null) {
+          final now = DateTime.now().millisecondsSinceEpoch;
+          _midPlaybackStallEpochsMs.removeWhere((t) => now - t > 22000);
+          if (_midPlaybackStallEpochsMs.isEmpty ||
+              now - _midPlaybackStallEpochsMs.last >= 700) {
+            _midPlaybackStallEpochsMs.add(now);
+          }
+          if (_midPlaybackStallEpochsMs.length >= 3) {
+            _downgradeOnSustainedBuffering(_playSession);
+          } else {
+            final stallSession = _playSession;
+            _midPlaybackStallTimer?.cancel();
+            _midPlaybackStallTimer = Timer(const Duration(seconds: 9), () {
+              if (mounted && _buffering && stallSession == _playSession) {
+                _downgradeOnSustainedBuffering(stallSession);
+              }
+            });
+          }
+        }
       }
     });
 
@@ -620,9 +650,33 @@ class _PlayerScreenState extends State<PlayerScreen>
     return false;
   }
 
+  void _downgradeOnSustainedBuffering(int session) {
+    if (!mounted ||
+        session != _playSession ||
+        !_allowEvents ||
+        _isLiveStream ||
+        _userSelectedQuality) {
+      return;
+    }
+    final nextVariant = _nextFallbackQuality();
+    if (nextVariant == null) return;
+    _midPlaybackStallTimer?.cancel();
+    _midPlaybackStallEpochsMs.clear();
+    if (_activeStreamUrl.isNotEmpty) {
+      _failedQualityUrls.add(_activeStreamUrl);
+    }
+    final keepPos = _position.inMilliseconds >= 1000
+        ? _position.inMilliseconds
+        : _lastKnownPositionMs;
+    _showHud('当前码率较高频繁缓冲，已自动切换至 ${nextVariant.name}');
+    unawaited(_openCurrentEpisode(resumeMs: keepPos, quality: nextVariant));
+  }
+
   void _failPlayback([Object? error]) {
     if (!mounted) return;
     _startup.cancel();
+    _midPlaybackStallTimer?.cancel();
+    _midPlaybackStallEpochsMs.clear();
     PlaybackWakelock.setEnabled(false);
     _embySession?.stop(_position.inMilliseconds);
     _embySession = null;
@@ -712,8 +766,19 @@ class _PlayerScreenState extends State<PlayerScreen>
     return next;
   }
 
-  Future<void> _openCurrentEpisode({int? resumeMs, CmsEpisode? quality}) async {
+  Future<void> _openCurrentEpisode({
+    int? resumeMs,
+    CmsEpisode? quality,
+    bool userSelectedQuality = false,
+  }) async {
     _startup.reset();
+    _midPlaybackStallTimer?.cancel();
+    _midPlaybackStallEpochsMs.clear();
+    if (quality == null) {
+      _userSelectedQuality = false;
+    } else if (userSelectedQuality) {
+      _userSelectedQuality = true;
+    }
     final qualityLease = quality == null ? null : PlayerCloudMediaSession.of(quality);
     final keepsLease = _cloudMedia.owns(qualityLease);
     // Quality variants of one cloud file share their proxy and cancellation
@@ -1031,8 +1096,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!_desktop || delta.distanceSquared < 0.25) return;
     if (!_controlsVisible) {
       setState(() => _controlsVisible = true);
+      _lastPointerScheduleMs = DateTime.now().millisecondsSinceEpoch;
+      _scheduleHide();
+      return;
     }
-    _scheduleHide();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastPointerScheduleMs >= 250) {
+      _lastPointerScheduleMs = now;
+      _scheduleHide();
+    }
   }
 
   void _windowChanged() {
@@ -1152,6 +1224,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (Platform.isIOS || Platform.isMacOS) {
       return kernel == 'exo' ? 'videotoolbox' : 'auto-safe';
     }
+    if (Platform.isWindows) {
+      return kernel == 'ijk' ? 'd3d11va-copy' : 'auto-safe';
+    }
     return switch (kernel) {
       'ijk' => 'auto-copy',
       'mpv' => 'auto-safe',
@@ -1169,12 +1244,36 @@ class _PlayerScreenState extends State<PlayerScreen>
       await dyn.setProperty('tls-verify', 'yes');
       await dyn.setProperty('hwdec', _hardwareDecoder(kernel));
       await dyn.setProperty('cache-on-disk', 'no');
-      await dyn.setProperty('cache-pause-wait', '1');
+      await dyn.setProperty('cache-pause', 'yes');
+      await dyn.setProperty('cache-pause-initial', 'no');
+      await dyn.setProperty(
+        'cache-pause-wait',
+        _isLiveStream ? '1' : (kernel == 'mpv' ? '5' : '4'),
+      );
+      if (Platform.isWindows) {
+        await dyn.setProperty('vd-lavc-threads', '0');
+        await dyn.setProperty('vd-lavc-dr', 'yes');
+        await dyn.setProperty('scale', 'bilinear');
+        await dyn.setProperty('cscale', 'bilinear');
+        await dyn.setProperty('dscale', 'bilinear');
+        await dyn.setProperty('correct-downscaling', 'no');
+        await dyn.setProperty('linear-downscaling', 'no');
+        await dyn.setProperty('sigmoid-upscaling', 'no');
+        await dyn.setProperty('dither-depth', 'no');
+        await dyn.setProperty('hdr-compute-peak', 'no');
+      }
       switch (kernel) {
         case 'ijk':
           await dyn.setProperty('cache', 'yes');
-          await dyn.setProperty('demuxer-max-bytes', '67108864');
-          await dyn.setProperty('demuxer-readahead-secs', '20');
+          await dyn.setProperty(
+            'demuxer-max-bytes',
+            _desktop ? '134217728' : '67108864',
+          );
+          await dyn.setProperty(
+            'demuxer-max-back-bytes',
+            _desktop ? '33554432' : '16777216',
+          );
+          await dyn.setProperty('demuxer-readahead-secs', '30');
           await dyn.setProperty('network-timeout', '25');
           await dyn.setProperty(
             'demuxer-lavf-o',
@@ -1183,9 +1282,21 @@ class _PlayerScreenState extends State<PlayerScreen>
           break;
         case 'mpv':
           await dyn.setProperty('cache', 'yes');
-          await dyn.setProperty('demuxer-max-bytes', '134217728');
-          await dyn.setProperty('demuxer-readahead-secs', '30');
-          await dyn.setProperty('network-timeout', '20');
+          await dyn.setProperty(
+            'demuxer-max-bytes',
+            (Platform.isWindows || Platform.isLinux)
+                ? '536870912'
+                : (Platform.isMacOS ? '268435456' : '134217728'),
+          );
+          await dyn.setProperty(
+            'demuxer-max-back-bytes',
+            _desktop ? '134217728' : '33554432',
+          );
+          await dyn.setProperty(
+            'demuxer-readahead-secs',
+            _desktop ? '90' : '45',
+          );
+          await dyn.setProperty('network-timeout', '25');
           await dyn.setProperty(
             'demuxer-lavf-o',
             '$_baseLavfOptions,reconnect=1,reconnect_delay_max=4',
@@ -1196,13 +1307,24 @@ class _PlayerScreenState extends State<PlayerScreen>
           await dyn.setProperty('cache', 'yes');
           await dyn.setProperty(
             'demuxer-max-bytes',
-            (Platform.isIOS || Platform.isMacOS) ? '33554432' : '67108864',
+            (Platform.isWindows || Platform.isLinux)
+                ? '268435456'
+                : (Platform.isMacOS
+                      ? '134217728'
+                      : (Platform.isIOS ? '33554432' : '67108864')),
           );
-          await dyn.setProperty('demuxer-readahead-secs', '15');
-          await dyn.setProperty('network-timeout', '15');
+          await dyn.setProperty(
+            'demuxer-max-back-bytes',
+            _desktop ? '67108864' : '16777216',
+          );
+          await dyn.setProperty(
+            'demuxer-readahead-secs',
+            _desktop ? '45' : '20',
+          );
+          await dyn.setProperty('network-timeout', '20');
           await dyn.setProperty(
             'demuxer-lavf-o',
-            '$_baseLavfOptions,reconnect=1,reconnect_delay_max=4,fflags=+discardcorrupt+genpts',
+            '$_baseLavfOptions,reconnect=1,reconnect_delay_max=4',
           );
           break;
       }
@@ -1324,6 +1446,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   @override
   void dispose() {
     _startup.cancel();
+    _midPlaybackStallTimer?.cancel();
     PlaybackWakelock.setEnabled(false);
     if (_sourceAbort?.isCompleted == false) _sourceAbort!.complete();
     WidgetsBinding.instance.removeObserver(this);
@@ -2711,7 +2834,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     final keepPos = _position.inMilliseconds >= 1000
         ? _position.inMilliseconds
         : _lastKnownPositionMs;
-    await _openCurrentEpisode(resumeMs: keepPos, quality: selected);
+    await _openCurrentEpisode(
+      resumeMs: keepPos,
+      quality: selected,
+      userSelectedQuality: true,
+    );
   }
 
   void _showAudioTracksSheet() {
@@ -2817,11 +2944,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _showKernelSheet() {
-    const kernels = <({String key, String title, String subtitle})>[
+    final kernels = <({String key, String title, String subtitle})>[
       (
         key: 'exo',
         title: '均衡播放（默认）',
-        subtitle: '自动选择解码方式，使用 64 MB 前向缓冲',
+        subtitle: _desktop
+            ? '硬件解码优先，桌面端使用 256 MB 高速前向缓冲'
+            : '自动选择解码方式，使用 64 MB 前向缓冲',
       ),
       (
         key: 'ijk',
@@ -2831,7 +2960,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       (
         key: 'mpv',
         title: '大容量缓冲',
-        subtitle: '使用 128 MB 前向缓冲，占用更多内存',
+        subtitle: _desktop
+            ? '桌面端使用 512 MB 超大前向缓冲，适合高码率 4K 原盘'
+            : '使用 128 MB 前向缓冲，占用更多内存',
       ),
     ];
     showAppleModalSheet<void>(

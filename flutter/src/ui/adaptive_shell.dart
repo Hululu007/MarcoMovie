@@ -663,7 +663,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     }
     Navigator.of(context)
         .push(
-          CupertinoPageRoute<void>(
+          buildApplePageRoute<void>(
             builder: (_) => DetailScreen(
               site: site,
               initialVideo: video,
@@ -744,13 +744,13 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       ),
       (CupertinoIcons.gear_alt, CupertinoIcons.gear_alt_fill, '设置'),
     ];
-    final pages = [
-      _buildHomeTab(context, useSidebar: isLandscape),
-      _buildLiveTab(context, useSidebar: isLandscape),
-      _buildFavoritesHistoryTab(context, useSidebar: isLandscape),
-      _buildSettingsTab(context, useSidebar: isLandscape),
-    ];
-    final safeTabIndex = _tabIndex.clamp(0, pages.length - 1);
+    final safeTabIndex = _tabIndex.clamp(0, dockItems.length - 1);
+    final Widget activePage = switch (safeTabIndex) {
+      1 => _buildLiveTab(context, useSidebar: isLandscape),
+      2 => _buildFavoritesHistoryTab(context, useSidebar: isLandscape),
+      3 => _buildSettingsTab(context, useSidebar: isLandscape),
+      _ => _buildHomeTab(context, useSidebar: isLandscape),
+    };
     final ambientPoster = safeTabIndex == 0 && _homeVideos.isNotEmpty
         ? _homeVideos.first.poster
         : '';
@@ -759,6 +759,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             !_privateSessionUnlocked &&
             !(_activeSite?.isEffectivelyPrivate ?? false)
         ? _homeVideos.first.title
+        : '';
+    final ambientYear = safeTabIndex == 0 && _homeVideos.isNotEmpty
+        ? _homeVideos.first.year
         : '';
     final customWallUrl = widget.storage.customWallpaperUrl;
     final blurSigma = switch (widget.storage.glassBlurLevel) {
@@ -813,7 +816,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           // blurred ambient artwork of the featured title on the home tab.
           RepaintBoundary(
             child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 600),
+              duration: isWindowsDesktopUi
+                  ? Duration.zero
+                  : const Duration(milliseconds: 600),
               child: AppleAmbientBackground(
                 key: ValueKey<String>(
                   '$ambientPoster|${widget.storage.wallpaperPreset}|$customWallUrl|${widget.storage.ambientGlowEnabled}|$blurSigma',
@@ -829,7 +834,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                         child: PosterImage(
                           url: ambientPoster,
                           title: ambientTitle,
-                          highRes: true,
+                          year: ambientYear,
+                          highRes: !isWindowsDesktopUi,
+                          forBackdrop: true,
                           placeholder: const SizedBox.shrink(),
                         ),
                       ),
@@ -843,7 +850,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                   ? AppleLiquidGlassDock.landscapeFootprint(context)
                   : 0,
             ),
-            child: RepaintBoundary(child: pages[safeTabIndex]),
+            child: RepaintBoundary(child: activePage),
           ),
           // iPhone / iPad style Dock:
           // - Portrait: bottom floating rounded-rectangle dock
@@ -926,22 +933,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           final s1 = ((topSafePad * 0.35) / maxH).clamp(0.008, 0.045);
           final s2 = ((topSafePad * 0.78) / maxH).clamp(0.020, 0.085);
           final s3 = ((topSafePad + 16.0) / maxH).clamp(0.038, 0.13);
-          return ShaderMask(
-            blendMode: BlendMode.dstIn,
-            shaderCallback: (rect) => LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: const [
-                Color(0x00FFFFFF),
-                Color(0x1EFFFFFF),
-                Color(0x88FFFFFF),
-                Color(0xFFFFFFFF),
-                Color(0xFFFFFFFF),
-                Color(0x00FFFFFF),
-              ],
-              stops: [0.0, s1, s2, s3, 0.968, 1.0],
-            ).createShader(rect),
-            child: CustomScrollView(
+          final homeScrollView = CustomScrollView(
               physics: const BouncingScrollPhysics(
                 parent: AlwaysScrollableScrollPhysics(),
               ),
@@ -1445,7 +1437,26 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             ),
           ],
         ],
-      ),
+      );
+          if (isWindowsDesktopUi) {
+            return homeScrollView;
+          }
+          return ShaderMask(
+            blendMode: BlendMode.dstIn,
+            shaderCallback: (rect) => LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: const [
+                Color(0x00FFFFFF),
+                Color(0x1EFFFFFF),
+                Color(0x88FFFFFF),
+                Color(0xFFFFFFFF),
+                Color(0xFFFFFFFF),
+                Color(0x00FFFFFF),
+              ],
+              stops: [0.0, s1, s2, s3, 0.968, 1.0],
+            ).createShader(rect),
+            child: homeScrollView,
           );
         },
       ),
@@ -1782,31 +1793,42 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              ImageFiltered(
-                imageFilter: ImageFilter.blur(
-                  sigmaX: 36,
-                  sigmaY: 36,
-                  tileMode: TileMode.mirror,
-                ),
-                child: PosterImage(
-                  url: featured.poster,
-                  title: featured.title,
-                  highRes: true,
-                  placeholder: const SizedBox.shrink(),
-                ),
-              ),
-              Container(
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [
-                      Color(0x55000000),
-                      Color(0xAD07080C),
-                      Color(0xEB050508),
-                    ],
-                    stops: [0.0, 0.55, 1.0],
-                  ),
+              RepaintBoundary(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    ImageFiltered(
+                      imageFilter: ImageFilter.blur(
+                        sigmaX: isWindowsDesktopUi ? 22 : 36,
+                        sigmaY: isWindowsDesktopUi ? 22 : 36,
+                        tileMode: isWindowsDesktopUi
+                            ? TileMode.decal
+                            : TileMode.mirror,
+                      ),
+                      child: PosterImage(
+                        url: featured.poster,
+                        title: featured.title,
+                        year: featured.year,
+                        highRes: !isWindowsDesktopUi,
+                        forBackdrop: true,
+                        placeholder: const SizedBox.shrink(),
+                      ),
+                    ),
+                    Container(
+                      decoration: const BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            Color(0x55000000),
+                            Color(0xAD07080C),
+                            Color(0xEB050508),
+                          ],
+                          stops: [0.0, 0.55, 1.0],
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
               Padding(
@@ -1830,6 +1852,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                         child: PosterImage(
                           url: featured.poster,
                           title: featured.title,
+                          year: featured.year,
                           highRes: true,
                           placeholder: _buildPosterPlaceholder(),
                         ),
@@ -2570,39 +2593,41 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   }) {
     final cardKey =
         'vcard_${site.key}_${video.id.isNotEmpty ? video.id : video.title}_${badge ?? ""}';
-    return ApplePressableScale(
+    return RepaintBoundary(
       key: ValueKey(cardKey),
-      pressedScale: 0.945,
-      pressedOpacity: 0.90,
-      onTap: onTap ?? () => _openVideoDetail(site, video),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: AppleSmoothClipCard(
-              borderRadius: 20,
-              backgroundColor: const Color(0xFF1C1C20),
-              rimStrength: 0.86,
-              boxShadow: const [
-                BoxShadow(
-                  color: Color(0x36000000),
-                  blurRadius: 12,
-                  offset: Offset(0, 5),
-                ),
-              ],
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  video.id.startsWith('netdisk_qr:')
-                      ? _buildNetdiskCardPoster(
-                          video.id.substring('netdisk_qr:'.length).trim(),
-                          video.title,
-                        )
-                      : PosterImage(
-                          url: video.poster,
-                          title: site.isEffectivelyPrivate ? '' : video.title,
-                          placeholder: _buildPosterPlaceholder(),
-                        ),
+      child: ApplePressableScale(
+        pressedScale: 0.945,
+        pressedOpacity: 0.90,
+        onTap: onTap ?? () => _openVideoDetail(site, video),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: AppleSmoothClipCard(
+                borderRadius: 20,
+                backgroundColor: const Color(0xFF1C1C20),
+                rimStrength: 0.86,
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x36000000),
+                    blurRadius: 12,
+                    offset: Offset(0, 5),
+                  ),
+                ],
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    video.id.startsWith('netdisk_qr:')
+                        ? _buildNetdiskCardPoster(
+                            video.id.substring('netdisk_qr:'.length).trim(),
+                            video.title,
+                          )
+                        : PosterImage(
+                            url: video.poster,
+                            title: site.isEffectivelyPrivate ? '' : video.title,
+                            year: site.isEffectivelyPrivate ? '' : video.year,
+                            placeholder: _buildPosterPlaceholder(),
+                          ),
                   if (badge != null && badge.isNotEmpty)
                     Positioned(
                       top: 7,
@@ -2712,6 +2737,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             ),
           ],
         ],
+      ),
       ),
     );
   }
@@ -4257,7 +4283,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       ],
     );
     Navigator.of(context).push(
-      CupertinoPageRoute<void>(
+      buildApplePageRoute<void>(
         builder: (_) => PlayerScreen(
           site: liveSite,
           video: liveVideo,
@@ -4353,13 +4379,14 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                     ? 'HD'
                     : null;
 
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => _openLiveChannelStream(lives, channel, 0),
-      onLongPress: channel.urls.length > 1
-          ? () => _showLiveChannelLinesSheet(lives, channel)
-          : null,
-      child: DecoratedBox(
+    return RepaintBoundary(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => _openLiveChannelStream(lives, channel, 0),
+        onLongPress: channel.urls.length > 1
+            ? () => _showLiveChannelLinesSheet(lives, channel)
+            : null,
+        child: DecoratedBox(
         decoration: ShapeDecoration(
           gradient: const LinearGradient(
             begin: Alignment.topLeft,
@@ -4507,6 +4534,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             ],
           ),
         ),
+      ),
       ),
     );
   }
@@ -5295,7 +5323,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       ],
     );
     Navigator.of(context).push(
-      CupertinoPageRoute<void>(
+      buildApplePageRoute<void>(
         builder: (_) => PlayerScreen(
           site: site,
           video: video,
@@ -5768,7 +5796,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   }) {
     Navigator.of(context)
         .push(
-          CupertinoPageRoute<void>(
+          buildApplePageRoute<void>(
             builder: (routeCtx) => StatefulBuilder(
               builder: (subCtx, setSubState) {
                 void refreshBoth() {
@@ -7648,7 +7676,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     final targetCtx = hostContext ?? context;
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       return Navigator.of(targetCtx).push<T>(
-        CupertinoPageRoute<T>(
+        buildApplePageRoute<T>(
           builder: (pageCtx) => IosSettingsScaffold(
             title: title,
             backLabel: backLabel,
@@ -10064,6 +10092,7 @@ class _PrivacyModePortalAnimationState
         return Opacity(
           opacity: masterOpacity.clamp(0.0, 1.0),
           child: BackdropFilter(
+            enabled: !isWindowsDesktopUi,
             filter: ImageFilter.blur(sigmaX: blurSigma, sigmaY: blurSigma),
             child: Container(
               decoration: const BoxDecoration(

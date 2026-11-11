@@ -95,7 +95,7 @@ class MarcoMovieApp extends StatelessWidget {
           builders: {
             TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
             TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
-            TargetPlatform.windows: CupertinoPageTransitionsBuilder(),
+            TargetPlatform.windows: WindowsSmoothPageTransitionsBuilder(),
             TargetPlatform.android: CupertinoPageTransitionsBuilder(),
           },
         ),

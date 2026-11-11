@@ -96,6 +96,8 @@ class PosterLoader {
   static final LinkedHashMap<String, Uint8List> _memory =
       LinkedHashMap<String, Uint8List>();
   static int _memoryBytes = 0;
+  static final Map<String, Set<VoidCallback>> _keyListeners = {};
+  static final Map<String, String> _cleanTitleMemo = {};
   static final Map<String, Future<Uint8List>> _inflight = {};
   static final Map<String, Future<Uint8List>> _inflightTitleBytes = {};
   static final Map<String, Future<Uint8List>> _inflightHdTitleBytes = {};
@@ -111,11 +113,28 @@ class PosterLoader {
       _inflightEpisodeMeta = {};
   static final Map<int, Color> _ambientColorCache = {};
   static final Map<int, bool> _hdDimensionCache = {};
+  static final Map<int, bool> _clearDimensionCache = {};
   static int _active = 0;
   static final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
   static Directory? _diskDir;
   static bool _diskReady = false;
+  static bool _legacyDiskCleaned = false;
   static final math.Random _rng = math.Random();
+
+  static void addKeyListener(String key, VoidCallback listener) {
+    if (key.isEmpty) return;
+    (_keyListeners[key] ??= <VoidCallback>{}).add(listener);
+  }
+
+  static void removeKeyListener(String key, VoidCallback listener) {
+    if (key.isEmpty) return;
+    final set = _keyListeners[key];
+    if (set == null) return;
+    set.remove(listener);
+    if (set.isEmpty) {
+      _keyListeners.remove(key);
+    }
+  }
 
   static String _randomDoubanBid() {
     const chars =
@@ -138,6 +157,7 @@ class PosterLoader {
   static Future<void> clearCache() async {
     _memory.clear();
     _memoryBytes = 0;
+    _cleanTitleMemo.clear();
     _titleCoverUrlsCache.clear();
     _verifiedTitleCoverUrlsCache.clear();
     _titleSynopsisCache.clear();
@@ -146,23 +166,28 @@ class PosterLoader {
     _seriesEpisodeMetaCache.clear();
     _ambientColorCache.clear();
     _hdDimensionCache.clear();
+    _clearDimensionCache.clear();
     cacheRevision.value++;
     metadataRevision.value++;
-    try {
-      final dir = _diskDir ??
-          Directory(
-            '${Directory.systemTemp.path}${Platform.pathSeparator}marco_poster_cache_v4',
-          );
-      if (await dir.exists()) {
-        await for (final entity in dir.list()) {
-          if (entity is File) {
-            try {
-              await entity.delete();
-            } catch (_) {}
+    for (final folder in const [
+      'marco_poster_cache_v5',
+      'marco_poster_cache_v4',
+    ]) {
+      try {
+        final dir = Directory(
+          '${Directory.systemTemp.path}${Platform.pathSeparator}$folder',
+        );
+        if (await dir.exists()) {
+          await for (final entity in dir.list()) {
+            if (entity is File) {
+              try {
+                await entity.delete();
+              } catch (_) {}
+            }
           }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
   }
 
   /// Upgrades known thumbnail poster URLs to their 1080p HD counterparts.
@@ -210,7 +235,9 @@ class PosterLoader {
   static String cleanTitleForQuery(String rawTitle) => _cleanTitle(rawTitle);
 
   static String _cleanTitle(String rawTitle) {
-    return rawTitle
+    final cached = _cleanTitleMemo[rawTitle];
+    if (cached != null) return cached;
+    final cleaned = rawTitle
         .replaceAll(RegExp(r'[\(（\[【].*?[\)）\]】]'), '')
         .replaceAll(RegExp(r'第[0-9一二三四五六七八九十百]+[季部集期篇章]'), '')
         .replaceAll(
@@ -221,6 +248,49 @@ class PosterLoader {
         )
         .replaceAll(RegExp(r'(?:19|20)\d{2}\s*$'), '')
         .trim();
+    if (_cleanTitleMemo.length > 1024) {
+      _cleanTitleMemo.clear();
+    }
+    _cleanTitleMemo[rawTitle] = cleaned;
+    return cleaned;
+  }
+
+  /// Rejects celebrity portraits, streamer avatars, character icons, and user
+  /// avatars so a homonym person (e.g. Douban `type: "celebrity"` `/personage/`
+  /// photo for《谷雨》) is never mistaken for a film or drama poster.
+  @visibleForTesting
+  static bool isPersonOrAvatarImageUrl(String rawUrl) {
+    final lower = rawUrl.trim().toLowerCase();
+    if (lower.isEmpty) return false;
+    return lower.contains('/view/personage/') ||
+        lower.contains('/personage/') ||
+        lower.contains('/view/celebrity/') ||
+        lower.contains('/celebrity/') ||
+        lower.contains('/avatar/') ||
+        lower.contains('/icon/u') ||
+        lower.contains('lain.bgm.tv/pic/crt/') ||
+        lower.contains('lain.bgm.tv/pic/user/') ||
+        lower.contains('huya.com') ||
+        lower.contains('douyucdn.cn');
+  }
+
+  static int? _extractTargetYear(String rawTitle, [String explicitYear = '']) {
+    final mExplicit = RegExp(r'\b((?:19|20)\d{2})\b').firstMatch(explicitYear);
+    if (mExplicit != null) {
+      return int.tryParse(mExplicit.group(1)!);
+    }
+    final mTitle = RegExp(
+      r'(?:[\(（\[【\s])((?:19|20)\d{2})(?:[\)）\]】]|\s*$)|((?:19|20)\d{2})\s*$',
+    ).firstMatch(rawTitle);
+    if (mTitle != null) {
+      return int.tryParse(mTitle.group(1) ?? mTitle.group(2) ?? '');
+    }
+    return null;
+  }
+
+  static String _scopedTitleToken(String cleanTitle, int? targetYear) {
+    if (cleanTitle.isEmpty) return '';
+    return targetYear != null ? '$cleanTitle@$targetYear' : cleanTitle;
   }
 
   static int? _extractSeasonNumber(String rawTitle) {
@@ -299,34 +369,166 @@ class PosterLoader {
 
   /// Verifies that an encyclopedia description/abstract actually describes a
   /// film, TV drama, anime, variety show, or documentary — rejecting homonym
-  /// entries such as the 24 Solar Terms (`二十四节气·谷雨/惊蛰/清明/白露/立春`),
-  /// novels, dictionary words, poems, plants, or administrative regions.
-  static bool _isFilmOrTvEntryText(String text) {
-    final t = text.trim();
-    if (t.isEmpty) return false;
-    // Reject solar terms, novels, idioms, plants, and geography definitions
+  /// entries such as actors/streamers/directors (`演员/主播/主持人`), the 24 Solar
+  /// Terms (`二十四节气·谷雨/惊蛰/清明/白露/立春`), novels, idioms, plants, or
+  /// mismatched-era homonym films when [targetYear] is known.
+  @visibleForTesting
+  static bool isFilmOrTvEncyclopediaEntry({
+    required String abstractText,
+    String descText = '',
+    int? targetYear,
+  }) {
+    final abs = abstractText.trim();
+    final desc = descText.trim();
+    final combined = '$abs $desc'.trim();
+    if (combined.isEmpty) return false;
+
+    // 1. Reject person biographies (actors, singers, streamers, hosts, directors)
+    final descHasWorkType = RegExp(
+      r'电视剧|剧集|网剧|网络剧|短剧|连续剧|电影|影片|故事片|纪录片|动画|动漫|番剧|综艺|真人秀',
+    ).hasMatch(desc);
+    if (!descHasWorkType &&
+        RegExp(
+          r'演员|歌手|主持人|主播|解说|电竞|选手|导演|编剧|制片人|作家|诗人|画家|摄影师|配音|运动员|企业家|学者|教授|人物',
+        ).hasMatch(desc)) {
+      return false;
+    }
+    final head = abs.length > 56 ? abs.substring(0, 56) : abs;
+    final headLooksLikeWork = head.contains('《') ||
+        RegExp(
+          r'是由|是一部|是一档|是.*(?:电视剧|剧集|网剧|短剧|连续剧|电影|影片|纪录片|动画|番剧|综艺)',
+        ).hasMatch(head);
+    if (!headLooksLikeWork &&
+        RegExp(
+          r'出生于|生于|毕业于|籍贯|中国(?:内地|大陆|香港|台湾)?(?:男|女)?(?:影视)?(?:演员|歌手|导演|主持人|编剧|音乐人|配音|主播)|(?:，|,)\s*(?:男|女)\s*(?:，|,)',
+        ).hasMatch(head)) {
+      return false;
+    }
+
+    // 2. Reject solar terms, novels, idioms, plants, and geography definitions
     if (RegExp(
       r'二十四节气|太阳到达黄经|节气之一|春季的最后一个节气|雨生百谷|春茶|'
       r'所著的.*小说|连载于.*小说|网络小说|起点中文网|晋江文学城|'
       r'汉语词语|成语|唐代诗人|宋代词人|草本植物|中药材|行政区划|下辖',
-    ).hasMatch(t)) {
+    ).hasMatch(combined)) {
       return false;
     }
-    return RegExp(
+
+    // 3. Require explicit film/TV work terms
+    final hasWorkTerms = RegExp(
       r'电视剧|剧集|网剧|网络剧|短剧|连续剧|电视连续剧|'
       r'电影|影片|院线|故事片|纪录片|'
       r'动画|动漫|番剧|电视动画|动画片|'
       r'综艺|真人秀|节目|'
-      r'执导|导演|主演|领衔主演|出演|饰演|编剧|制片|出品|播出|首播|上映|定档|杀青',
-    ).hasMatch(t);
+      r'执导|领衔主演|主演|出品|播出|首播|上映|定档|杀青',
+    ).hasMatch(combined);
+    if (!hasWorkTerms) return false;
+
+    // 4. Verify release/production year compatibility when targetYear is known
+    if (targetYear != null) {
+      final prodYearMatches = RegExp(
+        r'((?:19|20)\d{2})年(?:\d{1,2}月)?(?:\d{1,2}日)?[^\n，。；]{0,10}(?:上映|首播|播出|开播|定档|出品|开机|杀青|制作|发行)',
+      ).allMatches(combined);
+      final prodYears = <int>[];
+      for (final m in prodYearMatches) {
+        final y = int.tryParse(m.group(1) ?? '');
+        if (y != null) prodYears.add(y);
+      }
+      if (prodYears.isNotEmpty &&
+          !prodYears.any((y) => y >= targetYear - 2 && y <= targetYear + 1)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static bool _isFilmOrTvEntryText(String text) =>
+      isFilmOrTvEncyclopediaEntry(abstractText: text);
+
+  /// Parses Douban `subject_suggest` JSON list, strictly rejecting `celebrity`
+  /// / `personage` entries and mismatched release years while ranking exact-year
+  /// matches first.
+  @visibleForTesting
+  static List<String> parseDoubanSuggestCoverUrls(
+    Object? decoded,
+    String rawTitle, {
+    String year = '',
+  }) {
+    if (decoded is! List || decoded.isEmpty) return const [];
+    final cleanTitle = _cleanTitle(rawTitle);
+    if (cleanTitle.isEmpty) return const [];
+    final targetYear = _extractTargetYear(rawTitle, year);
+    final scored = <({String url, int score, int order})>[];
+    int order = 0;
+
+    for (final item in decoded) {
+      if (item is! Map) continue;
+      final itemType = (item['type'] ?? '').toString().trim().toLowerCase();
+      if (itemType.isNotEmpty && itemType != 'movie' && itemType != 'tv') {
+        continue;
+      }
+      final itemUrl = (item['url'] ?? '').toString().trim().toLowerCase();
+      if (itemUrl.contains('/celebrity/') || itemUrl.contains('/personage/')) {
+        continue;
+      }
+      final itemTitle = (item['title'] ?? '').toString().trim();
+      final itemSubTitle = (item['sub_title'] ?? '').toString().trim();
+      if (!_isSameWorkTitle(itemTitle, cleanTitle) &&
+          !_isSameWorkTitle(itemSubTitle, cleanTitle)) {
+        continue;
+      }
+      final rawImg = (item['img'] ?? '').toString().trim();
+      if (!rawImg.startsWith('http') || isPersonOrAvatarImageUrl(rawImg)) {
+        continue;
+      }
+      final hdImg = upgradeUrlToHd(rawImg);
+      if (!hdImg.startsWith('http') || isPersonOrAvatarImageUrl(hdImg)) {
+        continue;
+      }
+
+      final itemYear = int.tryParse((item['year'] ?? '').toString().trim());
+      int score = 10;
+      if (targetYear != null) {
+        if (itemYear != null) {
+          final diff = (itemYear - targetYear).abs();
+          if (diff >= 2) continue;
+          score = diff == 0 ? 100 : 50;
+        } else {
+          score = 5;
+        }
+      } else if (itemYear != null) {
+        score = 20;
+      }
+      scored.add((url: hdImg, score: score, order: order++));
+    }
+
+    if (scored.isEmpty) return const [];
+    final hasYearVerified =
+        targetYear != null && scored.any((c) => c.score >= 50);
+    final filtered = hasYearVerified
+        ? scored.where((c) => c.score >= 50).toList()
+        : scored;
+    filtered.sort((a, b) {
+      final cmp = b.score.compareTo(a.score);
+      return cmp != 0 ? cmp : a.order.compareTo(b.order);
+    });
+    final seen = <String>{};
+    final out = <String>[];
+    for (final entry in filtered) {
+      if (seen.add(entry.url)) {
+        out.add(entry.url);
+      }
+    }
+    return out;
   }
 
   /// Filters out non-entertainment Bing image search results (solar-term posters,
-  /// graphic design templates, stock material, wallpapers, tea/poetry posters).
+  /// graphic design templates, stock material, wallpapers, streamer/person selfies).
   static bool _isNonEntertainmentBingCaption(String text) {
     return RegExp(
       r'节气|二十四节气|雨生百谷|春山雨前|春茶|茗茶|茶叶|养生|诗词|古诗|'
       r'手抄报|模板|素材|设计|海报设计|展板|易拉宝|宣传画|公众号首图|'
+      r'主播|解说|电竞|自拍|头像|个人资料|简历|'
       r'千图|昵图|包图|花瓣|站酷|红动中国|图怪兽|稿定设计|壁纸|插画|矢量|PPT',
       caseSensitive: false,
     ).hasMatch(text);
@@ -369,11 +571,40 @@ class PosterLoader {
     return out;
   }
 
-  static String _cacheKeyFor(String rawUrl, String title) {
+  static String _cacheKeyFor(
+    String rawUrl,
+    String title, {
+    int? targetYear,
+  }) {
     final u = upgradeUrlToHd(rawUrl);
     if (u.isNotEmpty) return u;
-    final t = _cleanTitle(title);
-    return t.isEmpty ? '' : 'title:$t';
+    final scoped = _scopedTitleToken(_cleanTitle(title), targetYear);
+    return scoped.isEmpty ? '' : 'title:$scoped';
+  }
+
+  /// Verifies whether [bytes] is already a clear, readable cover image (`>= 340x460`
+  /// or `>= 160K` pixels or `>= 65KB`) so authentic CMS posters are kept intact
+  /// rather than replaced by heuristic title searches.
+  static Future<bool> isClearPosterBytes(Uint8List bytes) async {
+    if (bytes.length < 14 * 1024) return false;
+    if (bytes.length >= 65 * 1024) return true;
+    final fp = _bytesFingerprint(bytes);
+    final cached = _clearDimensionCache[fp];
+    if (cached != null) return cached;
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final w = frame.image.width;
+      final h = frame.image.height;
+      frame.image.dispose();
+      final clear = (w >= 340 && h >= 460) || (w * h >= 160000);
+      _clearDimensionCache[fp] = clear;
+      return clear;
+    } catch (_) {
+      final fallback = bytes.length >= 42 * 1024;
+      _clearDimensionCache[fp] = fallback;
+      return fallback;
+    }
   }
 
   /// Decodes the image header to verify whether [bytes] is a true high-definition
@@ -402,37 +633,46 @@ class PosterLoader {
 
   /// Synchronously peeks in-memory LRU cache so already-loaded posters render
   /// on the very first frame without any async gap.
+  /// When [rawUrl] is a live CMS URL, it is NEVER shadowed by unrelated title-only
+  /// fallback entries.
   static Uint8List? peekMemory(
     String rawUrl, {
     String title = '',
+    String year = '',
     bool preferHd = false,
   }) {
     if (EmbyLibrary.isImage(rawUrl)) return _memory[rawUrl];
     final clean = _cleanTitle(title);
-    if (preferHd && clean.isNotEmpty) {
-      final hdKey = 'title_hd:$clean';
-      final hdHit = _memory.remove(hdKey);
-      if (hdHit != null) {
-        _memory[hdKey] = hdHit;
-        return hdHit;
-      }
-    }
+    final targetYear = _extractTargetYear(title, year);
+    final scoped = _scopedTitleToken(clean, targetYear);
     final u = upgradeUrlToHd(rawUrl);
-    if (u.isNotEmpty) {
+    final hasLiveUrl = u.isNotEmpty && !_isKnownDeadPosterHost(u);
+
+    if (hasLiveUrl) {
+      if (preferHd) {
+        final hdUrlKey = 'hd_url:$u';
+        final hdUrlHit = _memory.remove(hdUrlKey);
+        if (hdUrlHit != null) {
+          _memory[hdUrlKey] = hdUrlHit;
+          return hdUrlHit;
+        }
+      }
       final hit = _memory.remove(u);
       if (hit != null) {
         _memory[u] = hit;
         return hit;
       }
+      return null;
     }
-    if (clean.isNotEmpty) {
-      final hdKey = 'title_hd:$clean';
+
+    if (scoped.isNotEmpty) {
+      final hdKey = 'title_hd:$scoped';
       final hdHit = _memory.remove(hdKey);
       if (hdHit != null) {
         _memory[hdKey] = hdHit;
         return hdHit;
       }
-      final tKey = 'title:$clean';
+      final tKey = 'title:$scoped';
       final hit = _memory.remove(tKey);
       if (hit != null) {
         _memory[tKey] = hit;
@@ -442,11 +682,26 @@ class PosterLoader {
     return null;
   }
 
-  /// Synchronously peeks only the verified HD title cache (`title_hd:<clean>`).
-  static Uint8List? peekHdMemory(String title) {
+  /// Synchronously peeks only the verified HD cache (`hd_url:<u>` or `title_hd:<scoped>`).
+  static Uint8List? peekHdMemory(
+    String title, {
+    String rawUrl = '',
+    String year = '',
+  }) {
+    final u = upgradeUrlToHd(rawUrl);
+    if (u.isNotEmpty && !_isKnownDeadPosterHost(u)) {
+      final hdUrlKey = 'hd_url:$u';
+      final hdUrlHit = _memory.remove(hdUrlKey);
+      if (hdUrlHit != null) {
+        _memory[hdUrlKey] = hdUrlHit;
+        return hdUrlHit;
+      }
+      return null;
+    }
     final clean = _cleanTitle(title);
-    if (clean.isEmpty) return null;
-    final hdKey = 'title_hd:$clean';
+    final scoped = _scopedTitleToken(clean, _extractTargetYear(title, year));
+    if (scoped.isEmpty) return null;
+    final hdKey = 'title_hd:$scoped';
     final hdHit = _memory.remove(hdKey);
     if (hdHit != null) {
       _memory[hdKey] = hdHit;
@@ -455,9 +710,13 @@ class PosterLoader {
     return null;
   }
 
-  /// Loads poster bytes, de-duplicating concurrent requests and racing slow
-  /// overseas URLs against fast domestic HD cover resolution by [title].
-  static Future<Uint8List> load(String raw, {String title = ''}) {
+  /// Loads poster bytes, de-duplicating concurrent requests and preserving
+  /// authentic CMS poster URLs whenever available.
+  static Future<Uint8List> load(
+    String raw, {
+    String title = '',
+    String year = '',
+  }) {
     if (EmbyLibrary.isImage(raw)) {
       final cached = _memory[raw];
       if (cached != null) return SynchronousFuture(cached);
@@ -465,64 +724,55 @@ class PosterLoader {
         .then((bytes) { _remember(raw, bytes); return bytes; })
         .whenComplete(() { _inflight.remove(raw); }));
     }
-    final immediate = peekMemory(raw, title: title);
+    final immediate = peekMemory(raw, title: title, year: year);
     if (immediate != null) {
       return SynchronousFuture<Uint8List>(immediate);
     }
+    final targetYear = _extractTargetYear(title, year);
     final upgradedUrl = upgradeUrlToHd(raw);
-    final key = _cacheKeyFor(upgradedUrl, title);
+    final key = _cacheKeyFor(upgradedUrl, title, targetYear: targetYear);
     if (key.isEmpty) {
       return Future<Uint8List>.error(const FormatException('空海报地址'));
     }
     final pending = _inflight[key];
     if (pending != null) return pending;
-    final future = _loadUncached(upgradedUrl, title.trim(), key)
-        .whenComplete(() { _inflight.remove(key); });
+    final future = _loadUncached(
+      upgradedUrl,
+      title.trim(),
+      key,
+      year: year,
+    ).whenComplete(() {
+      _inflight.remove(key);
+    });
     _inflight[key] = future;
     return future;
   }
 
   /// Explicitly resolves an official 1080p/2K high-definition domestic poster by
   /// [rawTitle] (via Bangumi `images.large`, film-verified Baidu Baike raw `bcebos`,
-  /// title-verified Bilibili PGC, and title-verified Douban `l_ratio_poster`),
+  /// title-verified Bilibili PGC, and title/year-verified Douban `l_ratio_poster`),
   /// verifying actual pixel resolution before persisting across memory and disk cache.
-  /// When [rawUrl] is provided by the CMS, unverified generic search results (Bing)
-  /// are NEVER allowed to overwrite the CMS poster.
+  /// Never overwrites the raw CMS URL entry itself.
   static Future<Uint8List> loadHdByTitle(
     String rawTitle, {
     String rawUrl = '',
+    String year = '',
   }) {
     final clean = _cleanTitle(rawTitle);
     if (clean.isEmpty) {
       return Future<Uint8List>.error(const FormatException('空片名'));
     }
-    final hdKey = 'title_hd:$clean';
+    final targetYear = _extractTargetYear(rawTitle, year);
+    final scoped = _scopedTitleToken(clean, targetYear);
+    final hdKey = 'title_hd:$scoped';
     final hit = _memory[hdKey];
     if (hit != null && hit.length >= 68 * 1024) {
       return SynchronousFuture<Uint8List>(hit);
     }
-    final pending = _inflightHdTitleBytes[clean];
+    final pending = _inflightHdTitleBytes[scoped];
     if (pending != null) return pending;
 
     final future = () async {
-      // Check disk cache for hdKey first and verify pixel dimensions
-      final hdDisk = await _diskFileFor(hdKey);
-      if (hdDisk != null) {
-        try {
-          if (await hdDisk.exists()) {
-            final diskBytes = await hdDisk.readAsBytes();
-            if (_looksLikeImage(diskBytes) &&
-                await isTrueHdPoster(diskBytes)) {
-              _remember(hdKey, diskBytes);
-              _remember('title:$clean', diskBytes);
-              final u = upgradeUrlToHd(rawUrl);
-              if (u.isNotEmpty) _remember(u, diskBytes);
-              return diskBytes;
-            }
-          }
-        } catch (_) {}
-      }
-
       // If the CMS provided a valid poster URL, check if its upgraded URL is
       // already a true HD poster first!
       final hasValidCmsUrl =
@@ -531,15 +781,31 @@ class PosterLoader {
         final upgradedCms = upgradeUrlToHd(rawUrl);
         final inMemCms = _memory[upgradedCms];
         if (inMemCms != null && await isTrueHdPoster(inMemCms)) {
-          await _persistHdResult(clean, rawUrl, inMemCms);
+          await _persistHdResult(scoped, rawUrl, inMemCms);
           return inMemCms;
         }
+      }
+
+      // Check disk cache for hdKey and verify pixel dimensions
+      final hdDisk = await _diskFileFor(hdKey);
+      if (hdDisk != null) {
+        try {
+          if (await hdDisk.exists()) {
+            final diskBytes = await hdDisk.readAsBytes();
+            if (_looksLikeImage(diskBytes) &&
+                await isTrueHdPoster(diskBytes)) {
+              await _persistHdResult(scoped, rawUrl, diskBytes);
+              return diskBytes;
+            }
+          }
+        } catch (_) {}
       }
 
       // Resolve candidate URLs: when CMS already has a valid poster URL, ONLY
       // allow verified film/TV databases (`verifiedOnly: true`) to upgrade it!
       final urls = await _resolveCoverUrlsByTitle(
         clean,
+        year: year.isNotEmpty ? year : (targetYear?.toString() ?? ''),
         forceRefreshHd: true,
         verifiedOnly: hasValidCmsUrl,
       );
@@ -547,6 +813,7 @@ class PosterLoader {
       int bestScore = 0;
 
       for (final candidateUrl in urls) {
+        if (isPersonOrAvatarImageUrl(candidateUrl)) continue;
         for (final attempt in _attemptsFor(candidateUrl)) {
           try {
             final bytes = await _fetch(
@@ -561,42 +828,42 @@ class PosterLoader {
               bestScore = score;
             }
             if (isTrueHd && bytes.length >= 68 * 1024) {
-              await _persistHdResult(clean, rawUrl, bytes);
+              await _persistHdResult(scoped, rawUrl, bytes);
               return bytes;
             }
           } catch (_) {}
         }
       }
       if (bestBytes != null && await isTrueHdPoster(bestBytes)) {
-        await _persistHdResult(clean, rawUrl, bestBytes);
+        await _persistHdResult(scoped, rawUrl, bestBytes);
         return bestBytes;
       }
-      if (bestBytes != null && bestBytes.length >= 85 * 1024) {
-        await _persistHdResult(clean, rawUrl, bestBytes);
+      if (!hasValidCmsUrl && bestBytes != null && bestBytes.length >= 85 * 1024) {
+        await _persistHdResult(scoped, rawUrl, bestBytes);
         return bestBytes;
       }
       throw Exception('未找到「$clean」高清封面');
     }()
-        .whenComplete(() { _inflightHdTitleBytes.remove(clean); });
+        .whenComplete(() {
+      _inflightHdTitleBytes.remove(scoped);
+    });
 
-    _inflightHdTitleBytes[clean] = future;
+    _inflightHdTitleBytes[scoped] = future;
     return future;
   }
 
   static Future<void> _persistHdResult(
-    String cleanTitle,
+    String scopedTitle,
     String rawUrl,
     Uint8List bytes,
   ) async {
-    final hdKey = 'title_hd:$cleanTitle';
-    final tKey = 'title:$cleanTitle';
+    final hdKey = 'title_hd:$scopedTitle';
+    final tKey = 'title:$scopedTitle';
     _remember(hdKey, bytes);
     _remember(tKey, bytes);
     final u = upgradeUrlToHd(rawUrl);
-    if (u.isNotEmpty) {
-      _remember(u, bytes);
-      final urlDisk = await _diskFileFor(u);
-      if (urlDisk != null) unawaited(_writeDisk(urlDisk, bytes));
+    if (u.isNotEmpty && !_isKnownDeadPosterHost(u)) {
+      _remember('hd_url:$u', bytes);
     }
     final hdDisk = await _diskFileFor(hdKey);
     if (hdDisk != null) unawaited(_writeDisk(hdDisk, bytes));
@@ -707,12 +974,15 @@ class PosterLoader {
   }
 
   /// Returns cached or fetched series synopsis from Baidu Baike / Bangumi / Douban.
-  static Future<String> fetchSeriesSynopsis(String rawTitle) async {
+  static Future<String> fetchSeriesSynopsis(
+    String rawTitle, {
+    String year = '',
+  }) async {
     final clean = _cleanTitle(rawTitle);
     if (clean.isEmpty) return '';
     final cached = _titleSynopsisCache[clean];
     if (cached != null && cached.isNotEmpty) return cached;
-    await _resolveCoverUrlsByTitle(clean);
+    await _resolveCoverUrlsByTitle(clean, year: year);
     return _titleSynopsisCache[clean] ?? '';
   }
 
@@ -1184,7 +1454,10 @@ class PosterLoader {
   /// Resolves up to 35 distinct 16:9 widescreen scene stills (`剧照 / 画面`)
   /// for [rawTitle] so each episode card in the horizontal episode strip shows
   /// a distinct scene frame from the drama instead of repeating the main cover.
-  static Future<List<String>> fetchSeriesEpisodeStills(String rawTitle) {
+  static Future<List<String>> fetchSeriesEpisodeStills(
+    String rawTitle, {
+    String year = '',
+  }) {
     final clean = _cleanTitle(rawTitle);
     if (clean.isEmpty) return SynchronousFuture<List<String>>(const []);
     final cached = _seriesEpisodeStillsCache[clean];
@@ -1204,11 +1477,13 @@ class PosterLoader {
       final seenCoreIds = <String>{};
       final variants = _queryVariantsForTitle(clean);
       final primaryQuery = variants.isNotEmpty ? variants.first : clean;
+      final targetYear = _extractTargetYear(rawTitle, year);
+      final yearHint = targetYear != null ? '$targetYear ' : '';
       final isShortAmbiguousTitle = clean.length <= 2;
       final queries = <String>[
-        '$primaryQuery 电视剧 剧照 画面 -节气 -模板 -素材',
+        '$primaryQuery ${yearHint}电视剧 剧照 画面 -节气 -模板 -素材 -主播',
         if (variants.length >= 2)
-          '${variants[1]} 电视剧 剧照 画面 -节气 -模板 -素材',
+          '${variants[1]} ${yearHint}电视剧 剧照 画面 -节气 -模板 -素材 -主播',
       ];
 
       for (final qText in queries) {
@@ -1279,7 +1554,9 @@ class PosterLoader {
               ).firstMatch(cardJsonAttr);
               if (murlMatch != null) {
                 final rawMurl = upgradeUrlToHd(murlMatch.group(1)!);
-                if (_isFastDomesticHost(rawMurl) && seenUrls.add(rawMurl)) {
+                if (!isPersonOrAvatarImageUrl(rawMurl) &&
+                    _isFastDomesticHost(rawMurl) &&
+                    seenUrls.add(rawMurl)) {
                   stills.add(rawMurl);
                 }
               }
@@ -1330,31 +1607,69 @@ class PosterLoader {
         lower.contains('qpic.cn') ||
         lower.contains('sinaimg.cn') ||
         lower.contains('bing.net') ||
-        lower.contains('tuxiaobei.com') ||
-        lower.contains('huya.com') ||
-        lower.contains('douyucdn.cn');
+        lower.contains('tuxiaobei.com');
   }
 
   static Future<Uint8List> _loadUncached(
     String rawUrl,
     String rawTitle,
-    String cacheKey,
-  ) async {
+    String cacheKey, {
+    String year = '',
+  }) async {
     final cleanTitle = _cleanTitle(rawTitle);
-    final titleCacheKey = cleanTitle.isNotEmpty ? 'title:$cleanTitle' : '';
-    final hdTitleKey = cleanTitle.isNotEmpty ? 'title_hd:$cleanTitle' : '';
+    final targetYear = _extractTargetYear(rawTitle, year);
+    final scopedTitle = _scopedTitleToken(cleanTitle, targetYear);
+    final titleCacheKey = scopedTitle.isNotEmpty ? 'title:$scopedTitle' : '';
+    final hdTitleKey = scopedTitle.isNotEmpty ? 'title_hd:$scopedTitle' : '';
+    final hasLiveUrl = rawUrl.isNotEmpty && !_isKnownDeadPosterHost(rawUrl);
 
-    // 0. If we already have an HD title cover in memory, return it immediately
+    // 1. When CMS provides a live poster URL, always check & fetch that exact URL
+    // first so homonym titles never overwrite an authentic CMS cover.
+    final diskFile = await _diskFileFor(cacheKey);
+    if (hasLiveUrl) {
+      if (diskFile != null) {
+        try {
+          if (await diskFile.exists()) {
+            final bytes = await diskFile.readAsBytes();
+            if (_looksLikeImage(bytes)) {
+              _remember(cacheKey, bytes);
+              return bytes;
+            }
+          }
+        } catch (_) {}
+      }
+      try {
+        final bytes = await _tryPrimaryUrlAttempts(
+          rawUrl,
+          maxAttempts: cleanTitle.isNotEmpty ? 2 : 4,
+          perAttemptTimeout: const Duration(milliseconds: 3400),
+        );
+        _remember(cacheKey, bytes);
+        if (diskFile != null) {
+          unawaited(_writeDisk(diskFile, bytes));
+        }
+        return bytes;
+      } catch (e) {
+        if (cleanTitle.isNotEmpty) {
+          final bytes = await _resolveTitleCoverBytes(
+            cleanTitle,
+            year: year,
+            cacheKey: titleCacheKey,
+          );
+          _remember(cacheKey, bytes);
+          return bytes;
+        }
+        rethrow;
+      }
+    }
+
+    // 2. Empty or dead CMS URL: resolve from scoped HD/title cache or domestic APIs
     if (hdTitleKey.isNotEmpty) {
       final inMemHd = _memory[hdTitleKey];
       if (inMemHd != null) {
         _remember(cacheKey, inMemHd);
         return inMemHd;
       }
-    }
-
-    // 1. Check disk cache for HD title cover, URL key, or title key
-    if (hdTitleKey.isNotEmpty) {
       final hdDiskFile = await _diskFileFor(hdTitleKey);
       if (hdDiskFile != null) {
         try {
@@ -1371,20 +1686,7 @@ class PosterLoader {
       }
     }
 
-    final diskFile = await _diskFileFor(cacheKey);
-    if (diskFile != null) {
-      try {
-        if (await diskFile.exists()) {
-          final bytes = await diskFile.readAsBytes();
-          if (_looksLikeImage(bytes)) {
-            _remember(cacheKey, bytes);
-            if (titleCacheKey.isNotEmpty) _remember(titleCacheKey, bytes);
-            return bytes;
-          }
-        }
-      } catch (_) {}
-    }
-    if (titleCacheKey.isNotEmpty && titleCacheKey != cacheKey) {
+    if (titleCacheKey.isNotEmpty) {
       final inMemTitle = _memory[titleCacheKey];
       if (inMemTitle != null) {
         _remember(cacheKey, inMemTitle);
@@ -1405,11 +1707,10 @@ class PosterLoader {
       }
     }
 
-    // 2. If rawUrl is empty or a known dead host, resolve directly by title
-    if ((rawUrl.isEmpty || _isKnownDeadPosterHost(rawUrl)) &&
-        cleanTitle.isNotEmpty) {
+    if (cleanTitle.isNotEmpty) {
       final bytes = await _resolveTitleCoverBytes(
         cleanTitle,
+        year: year,
         cacheKey: titleCacheKey,
       );
       _remember(cacheKey, bytes);
@@ -1419,95 +1720,7 @@ class PosterLoader {
       return bytes;
     }
 
-    // 3. If rawUrl is a slow/unverified third-party host and we have a title,
-    // race the primary URL against a verified domestic film-DB lookup (starting
-    // after 900ms if the primary URL hasn't finished yet). Unverified Bing search
-    // is only used if rawUrl completely fails.
-    if (rawUrl.isNotEmpty &&
-        cleanTitle.isNotEmpty &&
-        !_isFastDomesticHost(rawUrl)) {
-      final completer = Completer<Uint8List>();
-      Object? lastErr;
-      int remaining = 2;
-
-      void handleSuccess(Uint8List bytes) {
-        if (!completer.isCompleted) {
-          _remember(cacheKey, bytes);
-          if (titleCacheKey.isNotEmpty) _remember(titleCacheKey, bytes);
-          if (diskFile != null) {
-            unawaited(_writeDisk(diskFile, bytes));
-          }
-          completer.complete(bytes);
-        }
-      }
-
-      void handleError(Object e) {
-        lastErr = e;
-        remaining--;
-        if (remaining <= 0 && !completer.isCompleted) {
-          completer.completeError(
-            Exception('海报加载失败：${lastErr ?? cacheKey}'),
-          );
-        }
-      }
-
-      unawaited(
-        _tryPrimaryUrlAttempts(
-          rawUrl,
-          maxAttempts: 2,
-          perAttemptTimeout: const Duration(milliseconds: 2600),
-        ).then(handleSuccess, onError: handleError),
-      );
-
-      unawaited(
-        Future<void>.delayed(const Duration(milliseconds: 900)).then((_) async {
-          if (completer.isCompleted) {
-            remaining--;
-            return;
-          }
-          try {
-            final bytes = await _resolveTitleCoverBytes(
-              cleanTitle,
-              cacheKey: titleCacheKey,
-              verifiedOnly: true,
-            );
-            handleSuccess(bytes);
-          } catch (e) {
-            handleError(e);
-          }
-        }),
-      );
-
-      return completer.future;
-    }
-
-    // 4. Standard path for fast domestic URLs or untitled URLs
-    try {
-      final bytes = await _tryPrimaryUrlAttempts(
-        rawUrl,
-        maxAttempts: cleanTitle.isNotEmpty ? 2 : 4,
-        perAttemptTimeout: const Duration(milliseconds: 3600),
-      );
-      _remember(cacheKey, bytes);
-      if (titleCacheKey.isNotEmpty) _remember(titleCacheKey, bytes);
-      if (diskFile != null) {
-        unawaited(_writeDisk(diskFile, bytes));
-      }
-      return bytes;
-    } catch (e) {
-      if (cleanTitle.isNotEmpty) {
-        final bytes = await _resolveTitleCoverBytes(
-          cleanTitle,
-          cacheKey: titleCacheKey,
-        );
-        _remember(cacheKey, bytes);
-        if (diskFile != null) {
-          unawaited(_writeDisk(diskFile, bytes));
-        }
-        return bytes;
-      }
-      rethrow;
-    }
+    throw FormatException('无效的海报地址: $cacheKey');
   }
 
   static Future<Uint8List> _tryPrimaryUrlAttempts(
@@ -1545,20 +1758,25 @@ class PosterLoader {
   /// Deduplicated title-to-bytes resolver.
   static Future<Uint8List> _resolveTitleCoverBytes(
     String cleanTitle, {
+    String year = '',
     required String cacheKey,
     bool verifiedOnly = false,
   }) {
-    final inflightKey = verifiedOnly ? 'verified:$cleanTitle' : cleanTitle;
+    final targetYear = _extractTargetYear(cleanTitle, year);
+    final scoped = _scopedTitleToken(cleanTitle, targetYear);
+    final inflightKey = verifiedOnly ? 'verified:$scoped' : scoped;
     final existing = _inflightTitleBytes[inflightKey];
     if (existing != null) return existing;
 
     final future = () async {
       final urls = await _resolveCoverUrlsByTitle(
         cleanTitle,
+        year: year,
         verifiedOnly: verifiedOnly,
       );
       Object? lastError;
       for (final candidateUrl in urls) {
+        if (isPersonOrAvatarImageUrl(candidateUrl)) continue;
         for (final attempt in _attemptsFor(candidateUrl)) {
           try {
             final bytes = await _fetch(
@@ -1566,11 +1784,11 @@ class PosterLoader {
               attempt.$2,
               timeout: const Duration(milliseconds: 3500),
             );
-            final tKey = 'title:$cleanTitle';
+            final tKey = 'title:$scoped';
             _remember(tKey, bytes);
             if (await isTrueHdPoster(bytes)) {
-              _remember('title_hd:$cleanTitle', bytes);
-              final hdDisk = await _diskFileFor('title_hd:$cleanTitle');
+              _remember('title_hd:$scoped', bytes);
+              final hdDisk = await _diskFileFor('title_hd:$scoped');
               if (hdDisk != null) unawaited(_writeDisk(hdDisk, bytes));
             }
             if (cacheKey.isNotEmpty) {
@@ -1596,23 +1814,26 @@ class PosterLoader {
 
   /// Resolves candidate 1080p/2K vertical poster URLs for [cleanTitle] across:
   /// 1. Bangumi Official Open API (`api.bgm.tv` `images.large` 1080p/2K covers)
-  /// 2. Baidu Baike OpenAPI (`BaikeLemmaCardApi` raw `bcebos.com` official covers, film/TV verified)
-  /// 3. Bilibili PGC Search (`api.bilibili.com` `media_bangumi` & `media_ft` raw covers, title verified)
-  /// 4. Douban Web Search & `subject_suggest` with `Cookie: bid=...` (`l_ratio_poster`, title verified)
+  /// 2. Baidu Baike OpenAPI (`BaikeLemmaCardApi` raw `bcebos.com` official covers, film/TV + year verified)
+  /// 3. Bilibili PGC Search (`api.bilibili.com` `media_bangumi` & `media_ft` raw covers, title + year verified)
+  /// 4. Douban Web Search & `subject_suggest` with `Cookie: bid=...` (`l_ratio_poster`, movie/tv type + year verified)
   /// 5. Bing China `cn.bing.com/images/async` original `murl` high-res vertical covers (ONLY when `!verifiedOnly`)
   static Future<List<String>> _resolveCoverUrlsByTitle(
     String cleanTitle, {
+    String year = '',
     bool forceRefreshHd = false,
     bool verifiedOnly = false,
   }) async {
+    final targetYear = _extractTargetYear(cleanTitle, year);
+    final scopedKey = _scopedTitleToken(cleanTitle, targetYear);
     if (!forceRefreshHd) {
       if (verifiedOnly) {
-        final cachedVerified = _verifiedTitleCoverUrlsCache[cleanTitle];
+        final cachedVerified = _verifiedTitleCoverUrlsCache[scopedKey];
         if (cachedVerified != null && cachedVerified.isNotEmpty) {
           return cachedVerified;
         }
       } else {
-        final cached = _titleCoverUrlsCache[cleanTitle];
+        final cached = _titleCoverUrlsCache[scopedKey];
         if (cached != null && cached.isNotEmpty) return cached;
       }
     }
@@ -1624,21 +1845,27 @@ class PosterLoader {
 
     void addPrimaryHd(String raw) {
       final hd = upgradeUrlToHd(raw);
-      if (hd.startsWith('http') && seen.add(hd)) {
+      if (hd.startsWith('http') &&
+          !isPersonOrAvatarImageUrl(hd) &&
+          seen.add(hd)) {
         primaryHdResults.add(hd);
       }
     }
 
     void addMurlHd(String raw) {
       final hd = upgradeUrlToHd(raw);
-      if (hd.startsWith('http') && seen.add(hd)) {
+      if (hd.startsWith('http') &&
+          !isPersonOrAvatarImageUrl(hd) &&
+          seen.add(hd)) {
         murlHdResults.add(hd);
       }
     }
 
     void addBingOip(String raw) {
       final hd = upgradeUrlToHd(raw);
-      if (hd.startsWith('http') && seen.add(hd)) {
+      if (hd.startsWith('http') &&
+          !isPersonOrAvatarImageUrl(hd) &&
+          seen.add(hd)) {
         bingOipFallbackResults.add(hd);
       }
     }
@@ -1684,6 +1911,19 @@ class PosterLoader {
                         !_isSameWorkTitle(name, cleanTitle)) {
                       continue;
                     }
+                    if (targetYear != null) {
+                      final airDate =
+                          (item['air_date'] ?? '').toString().trim();
+                      final airYearMatch =
+                          RegExp(r'^((?:19|20)\d{2})').firstMatch(airDate);
+                      if (airYearMatch != null) {
+                        final airYear = int.tryParse(airYearMatch.group(1)!);
+                        if (airYear != null &&
+                            (airYear - targetYear).abs() >= 2) {
+                          continue;
+                        }
+                      }
+                    }
                     final images = item['images'];
                     if (images is Map) {
                       final large = (images['large'] ?? '').toString().trim();
@@ -1712,14 +1952,13 @@ class PosterLoader {
       }(),
 
       // Source 2: Baidu Baike OpenAPI LemmaCard (`BaikeLemmaCardApi` raw `bcebos.com` poster + official synopsis)
-      // Explicitly verifies film/TV/anime/variety attributes so homonyms like《谷雨》(solar term)
-      // are never mistaken for TV drama posters.
+      // Queries explicit drama/movie keys first and strictly rejects person bios & solar terms.
       () async {
         final baikeKeys = <String>[
           for (final qv in variants.take(2)) ...[
-            qv,
             '${qv}电视剧',
             '${qv}电影',
+            qv,
           ],
         ];
         for (final bkKey in baikeKeys) {
@@ -1752,8 +1991,11 @@ class PosterLoader {
                 final abstractText =
                     (decoded['abstract'] ?? '').toString().trim();
                 final descText = (decoded['desc'] ?? '').toString().trim();
-                final isFilmOrTv =
-                    _isFilmOrTvEntryText('$abstractText $descText');
+                final isFilmOrTv = isFilmOrTvEncyclopediaEntry(
+                  abstractText: abstractText,
+                  descText: descText,
+                  targetYear: targetYear,
+                );
                 if (titleMatches &&
                     isFilmOrTv &&
                     abstractText.length >= 18) {
@@ -1761,7 +2003,10 @@ class PosterLoader {
                   metadataRevision.value++;
                 }
                 final rawImg = (decoded['image'] ?? '').toString().trim();
-                if (titleMatches && isFilmOrTv && rawImg.startsWith('http')) {
+                if (titleMatches &&
+                    isFilmOrTv &&
+                    rawImg.startsWith('http') &&
+                    !isPersonOrAvatarImageUrl(rawImg)) {
                   addPrimaryHd(rawImg);
                   break;
                 }
@@ -1777,7 +2022,7 @@ class PosterLoader {
         }
       }(),
 
-      // Source 3: Bilibili PGC Search (`media_bangumi` & `media_ft`) — strict title verification
+      // Source 3: Bilibili PGC Search (`media_bangumi` & `media_ft`) — strict title & year verification
       () async {
         for (final stype in const ['media_bangumi', 'media_ft']) {
           HttpClientRequest? req;
@@ -1814,8 +2059,20 @@ class PosterLoader {
                       if (!_isSameWorkTitle(rawItemTitle, cleanTitle)) {
                         continue;
                       }
+                      if (targetYear != null && item['pubtime'] is num) {
+                        final secs = (item['pubtime'] as num).toInt();
+                        if (secs > 0) {
+                          final pubYear = DateTime.fromMillisecondsSinceEpoch(
+                            secs * 1000,
+                          ).year;
+                          if ((pubYear - targetYear).abs() >= 2) {
+                            continue;
+                          }
+                        }
+                      }
                       final cover = (item['cover'] ?? '').toString().trim();
-                      if (cover.isNotEmpty) {
+                      if (cover.isNotEmpty &&
+                          !isPersonOrAvatarImageUrl(cover)) {
                         addPrimaryHd(cover);
                       }
                     }
@@ -1833,7 +2090,7 @@ class PosterLoader {
         }
       }(),
 
-      // Source 4: Douban Subject Suggest & Search with `Cookie: bid=...` — strict title verification
+      // Source 4: Douban Subject Suggest with `Cookie: bid=...` — strict movie/tv type + year verification
       () async {
         for (final variant in variants.take(2)) {
           HttpClientRequest? req;
@@ -1857,25 +2114,15 @@ class PosterLoader {
                   .join()
                   .timeout(const Duration(milliseconds: 2200));
               final decoded = jsonDecode(body);
-              if (decoded is List && decoded.isNotEmpty) {
-                for (final item in decoded) {
-                  if (item is Map) {
-                    final itemTitle =
-                        (item['title'] ?? '').toString().trim();
-                    final itemSubTitle =
-                        (item['sub_title'] ?? '').toString().trim();
-                    if (!_isSameWorkTitle(itemTitle, cleanTitle) &&
-                        !_isSameWorkTitle(itemSubTitle, cleanTitle)) {
-                      continue;
-                    }
-                    final img = (item['img'] ?? '').toString().trim();
-                    if (img.startsWith('http')) {
-                      addPrimaryHd(img);
-                    }
-                  }
-                }
-                if (primaryHdResults.isNotEmpty) break;
+              final matchedUrls = parseDoubanSuggestCoverUrls(
+                decoded,
+                cleanTitle,
+                year: year.isNotEmpty ? year : (targetYear?.toString() ?? ''),
+              );
+              for (final u in matchedUrls) {
+                addPrimaryHd(u);
               }
+              if (matchedUrls.isNotEmpty) break;
             } else {
               await resp.drain<void>();
             }
@@ -1888,13 +2135,14 @@ class PosterLoader {
       }(),
 
       // Source 5: Bing China Original High-Res `murl` Vertical Posters + OIP fallback
-      // (Only queried when `!verifiedOnly`, and strictly filtered against solar terms / templates)
+      // (Only queried when `!verifiedOnly`, and strictly filtered against solar terms / templates / selfies)
       if (!verifiedOnly)
         () async {
           HttpClientRequest? req;
           try {
+            final yearToken = targetYear != null ? '$targetYear ' : '';
             final query = Uri.encodeQueryComponent(
-              '$primary 电视剧 电影 官方海报 竖版 -节气 -二十四节气 -模板 -素材',
+              '$primary ${yearToken}电视剧 电影 官方海报 竖版 -节气 -二十四节气 -模板 -素材 -主播',
             );
             final uri = Uri.parse(
               'https://cn.bing.com/images/async?q=$query&first=0&count=12&qft=+filterui:aspect-tall',
@@ -1963,7 +2211,7 @@ class PosterLoader {
     ]);
 
     if (primaryHdResults.isNotEmpty) {
-      _verifiedTitleCoverUrlsCache[cleanTitle] =
+      _verifiedTitleCoverUrlsCache[scopedKey] =
           List<String>.unmodifiable(primaryHdResults);
     }
     if (verifiedOnly) {
@@ -1976,7 +2224,7 @@ class PosterLoader {
       ...bingOipFallbackResults,
     ];
     if (results.isNotEmpty) {
-      _titleCoverUrlsCache[cleanTitle] = results;
+      _titleCoverUrlsCache[scopedKey] = results;
     }
     return results;
   }
@@ -2010,7 +2258,12 @@ class PosterLoader {
       final removed = _memory.remove(oldestKey);
       if (removed != null) _memoryBytes -= removed.length;
     }
-    // Broadcast to all mounted PosterImage widgets so scrolling lists refresh immediately
+    final keyCallbacks = _keyListeners[key];
+    if (keyCallbacks != null && keyCallbacks.isNotEmpty) {
+      for (final cb in List<VoidCallback>.of(keyCallbacks)) {
+        cb();
+      }
+    }
     cacheRevision.value++;
   }
 
@@ -2228,12 +2481,25 @@ class PosterLoader {
       _diskReady = true;
       try {
         final dir = Directory(
-          '${Directory.systemTemp.path}${Platform.pathSeparator}marco_poster_cache_v4',
+          '${Directory.systemTemp.path}${Platform.pathSeparator}marco_poster_cache_v5',
         );
         if (!await dir.exists()) await dir.create(recursive: true);
         _diskDir = dir;
       } catch (_) {
         _diskDir = null;
+      }
+      if (!_legacyDiskCleaned) {
+        _legacyDiskCleaned = true;
+        unawaited(() async {
+          try {
+            final legacyDir = Directory(
+              '${Directory.systemTemp.path}${Platform.pathSeparator}marco_poster_cache_v4',
+            );
+            if (await legacyDir.exists()) {
+              await legacyDir.delete(recursive: true);
+            }
+          } catch (_) {}
+        }());
       }
     }
     final dir = _diskDir;
@@ -2265,7 +2531,8 @@ class PosterLoader {
 class MarcoPosterProvider extends ImageProvider<MarcoPosterProvider> {
   final String url;
   final String title;
-  const MarcoPosterProvider(this.url, {this.title = ''});
+  final String year;
+  const MarcoPosterProvider(this.url, {this.title = '', this.year = ''});
 
   @override
   Future<MarcoPosterProvider> obtainKey(ImageConfiguration configuration) {
@@ -2289,9 +2556,13 @@ class MarcoPosterProvider extends ImageProvider<MarcoPosterProvider> {
     ImageDecoderCallback decode,
   ) async {
     try {
-      final bytes = await PosterLoader.load(key.url, title: key.title);
+      final bytes = await PosterLoader.load(
+        key.url,
+        title: key.title,
+        year: key.year,
+      );
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-      return decode(buffer);
+      return await decode(buffer);
     } catch (e) {
       scheduleMicrotask(() => PaintingBinding.instance.imageCache.evict(key));
       rethrow;
@@ -2302,27 +2573,31 @@ class MarcoPosterProvider extends ImageProvider<MarcoPosterProvider> {
   bool operator ==(Object other) =>
       other is MarcoPosterProvider &&
       other.url == url &&
-      other.title == title;
+      other.title == title &&
+      other.year == year;
 
   @override
-  int get hashCode => Object.hash(url, title);
+  int get hashCode => Object.hash(url, title, year);
 
   @override
-  String toString() => 'MarcoPosterProvider("$url", title: "$title")';
+  String toString() =>
+      'MarcoPosterProvider("$url", title: "$title", year: "$year")';
 }
 
 /// Stateful poster widget that loads verified image bytes via [PosterLoader],
-/// listens to [PosterLoader.cacheRevision] so scrolling lists refresh in real time,
-/// keeps loaded cards alive during scroll, and upgrades low-res thumbnails to
-/// true 1080p/2K posters when [highRes] is enabled.
+/// subscribes to targeted O(1) cache keys so scrolling lists refresh in real time
+/// without waking unrelated cards, keeps loaded cards alive during scroll, and
+/// upgrades genuinely blurry thumbnails when [highRes] is enabled.
 class PosterImage extends StatefulWidget {
   final String url;
   final String title;
+  final String year;
   final BoxFit fit;
   final AlignmentGeometry alignment;
   final Widget placeholder;
   final bool fadeIn;
   final bool highRes;
+  final bool forBackdrop;
   final ValueChanged<Uint8List>? onBytesLoaded;
 
   const PosterImage({
@@ -2330,10 +2605,12 @@ class PosterImage extends StatefulWidget {
     required this.url,
     required this.placeholder,
     this.title = '',
+    this.year = '',
     this.fit = BoxFit.cover,
     this.alignment = Alignment.center,
     this.fadeIn = true,
     this.highRes = false,
+    this.forBackdrop = false,
     this.onBytesLoaded,
   });
 
@@ -2347,14 +2624,44 @@ class _PosterImageState extends State<PosterImage>
   bool _loadedSync = false;
   int _retryCount = 0;
   Timer? _retryTimer;
+  List<String> _subscribedKeys = const [];
 
   @override
   bool get wantKeepAlive => _bytes != null;
 
+  List<String> _computeSubscribedKeys() {
+    final raw = widget.url.trim();
+    if (EmbyLibrary.isImage(raw)) return [raw];
+    final u = PosterLoader.upgradeUrlToHd(raw);
+    if (u.isNotEmpty && !PosterLoader._isKnownDeadPosterHost(u)) {
+      return widget.highRes ? <String>[u, 'hd_url:$u'] : <String>[u];
+    }
+    final clean = PosterLoader._cleanTitle(widget.title);
+    final scoped = PosterLoader._scopedTitleToken(
+      clean,
+      PosterLoader._extractTargetYear(widget.title, widget.year),
+    );
+    if (scoped.isNotEmpty) {
+      return <String>['title:$scoped', 'title_hd:$scoped'];
+    }
+    return const [];
+  }
+
+  void _resubscribeKeys() {
+    for (final k in _subscribedKeys) {
+      PosterLoader.removeKeyListener(k, _onKeyCacheUpdated);
+    }
+    final nextKeys = _computeSubscribedKeys();
+    _subscribedKeys = nextKeys;
+    for (final k in nextKeys) {
+      PosterLoader.addKeyListener(k, _onKeyCacheUpdated);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
-    PosterLoader.cacheRevision.addListener(_onGlobalCacheUpdated);
+    _resubscribeKeys();
     _initLoad();
   }
 
@@ -2363,26 +2670,32 @@ class _PosterImageState extends State<PosterImage>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.url.trim() != widget.url.trim() ||
         oldWidget.title.trim() != widget.title.trim() ||
+        oldWidget.year.trim() != widget.year.trim() ||
         oldWidget.highRes != widget.highRes) {
       _retryTimer?.cancel();
       _retryCount = 0;
+      _resubscribeKeys();
       _initLoad();
     }
   }
 
   @override
   void dispose() {
-    PosterLoader.cacheRevision.removeListener(_onGlobalCacheUpdated);
+    for (final k in _subscribedKeys) {
+      PosterLoader.removeKeyListener(k, _onKeyCacheUpdated);
+    }
+    _subscribedKeys = const [];
     _retryTimer?.cancel();
     super.dispose();
   }
 
-  void _onGlobalCacheUpdated() {
+  void _onKeyCacheUpdated() {
     if (!mounted) return;
     if (_bytes == null) {
       final hit = PosterLoader.peekMemory(
         widget.url,
         title: widget.title,
+        year: widget.year,
         preferHd: widget.highRes,
       );
       if (hit != null) {
@@ -2395,7 +2708,11 @@ class _PosterImageState extends State<PosterImage>
       return;
     }
     if (widget.highRes && widget.title.trim().isNotEmpty) {
-      final hdHit = PosterLoader.peekHdMemory(widget.title);
+      final hdHit = PosterLoader.peekHdMemory(
+        widget.title,
+        rawUrl: widget.url,
+        year: widget.year,
+      );
       if (hdHit != null && !identical(hdHit, _bytes)) {
         setState(() {
           _bytes = hdHit;
@@ -2419,6 +2736,7 @@ class _PosterImageState extends State<PosterImage>
     final immediate = PosterLoader.peekMemory(
       widget.url,
       title: widget.title,
+      year: widget.year,
       preferHd: widget.highRes,
     );
     if (immediate != null) {
@@ -2426,7 +2744,9 @@ class _PosterImageState extends State<PosterImage>
       _loadedSync = true;
       updateKeepAlive();
       _notifyBytes(immediate);
-      if (widget.highRes && widget.title.trim().isNotEmpty) {
+      if (widget.highRes &&
+          !widget.forBackdrop &&
+          widget.title.trim().isNotEmpty) {
         unawaited(_verifyAndUpgradeIfLowRes(immediate, widget.title.trim()));
       }
       return;
@@ -2441,9 +2761,13 @@ class _PosterImageState extends State<PosterImage>
     Uint8List currentBytes,
     String requestedTitle,
   ) async {
-    final isHd = await PosterLoader.isTrueHdPoster(currentBytes);
+    final hasLiveCmsUrl = widget.url.trim().isNotEmpty &&
+        !PosterLoader._isKnownDeadPosterHost(widget.url);
+    final alreadyGood = hasLiveCmsUrl
+        ? await PosterLoader.isClearPosterBytes(currentBytes)
+        : await PosterLoader.isTrueHdPoster(currentBytes);
     if (!mounted || widget.title.trim() != requestedTitle) return;
-    if (!isHd) {
+    if (!alreadyGood) {
       await _tryUpgradeToHd(requestedTitle, currentBytes.length);
     }
   }
@@ -2457,6 +2781,7 @@ class _PosterImageState extends State<PosterImage>
       final hdBytes = await PosterLoader.loadHdByTitle(
         requestedTitle,
         rawUrl: widget.url,
+        year: widget.year,
       );
       if (!mounted || widget.title.trim() != requestedTitle) return;
       final isHd = await PosterLoader.isTrueHdPoster(hdBytes);
@@ -2475,17 +2800,17 @@ class _PosterImageState extends State<PosterImage>
     if (widget.url.trim().isEmpty && widget.title.trim().isEmpty) return;
     final requestedUrl = widget.url.trim();
     final requestedTitle = widget.title.trim();
+    final requestedYear = widget.year.trim();
     try {
-      if (widget.highRes && requestedTitle.isNotEmpty && !EmbyLibrary.isImage(requestedUrl)) {
-        unawaited(_tryUpgradeToHd(requestedTitle, _bytes?.length ?? 0));
-      }
       final data = await PosterLoader.load(
         requestedUrl,
         title: requestedTitle,
+        year: requestedYear,
       );
       if (!mounted) return;
       if (widget.url.trim() != requestedUrl ||
-          widget.title.trim() != requestedTitle) {
+          widget.title.trim() != requestedTitle ||
+          widget.year.trim() != requestedYear) {
         return;
       }
       if (_bytes == null || data.length > _bytes!.length) {
@@ -2495,11 +2820,20 @@ class _PosterImageState extends State<PosterImage>
         updateKeepAlive();
         _notifyBytes(data);
       }
-      if (widget.highRes && requestedTitle.isNotEmpty && !EmbyLibrary.isImage(requestedUrl)) {
+      if (widget.highRes &&
+          !widget.forBackdrop &&
+          requestedTitle.isNotEmpty &&
+          !EmbyLibrary.isImage(requestedUrl)) {
         unawaited(_verifyAndUpgradeIfLowRes(data, requestedTitle));
       }
     } catch (_) {
       if (!mounted) return;
+      if (widget.highRes &&
+          requestedTitle.isNotEmpty &&
+          !EmbyLibrary.isImage(requestedUrl) &&
+          _bytes == null) {
+        unawaited(_tryUpgradeToHd(requestedTitle, 0));
+      }
       if (_retryCount < 2) {
         _retryCount++;
         final delayMs = _retryCount == 1 ? 800 : 2000;
@@ -2520,8 +2854,37 @@ class _PosterImageState extends State<PosterImage>
     }
     return LayoutBuilder(
       builder: (context, constraints) {
+        if (widget.forBackdrop) {
+          final backdropImg = Image(
+            image: ResizeImage.resizeIfNeeded(
+              360,
+              null,
+              MemoryImage(bytes),
+            ),
+            fit: widget.fit,
+            alignment: widget.alignment,
+            width: constraints.maxWidth.isFinite ? constraints.maxWidth : null,
+            height:
+                constraints.maxHeight.isFinite ? constraints.maxHeight : null,
+            gaplessPlayback: true,
+            isAntiAlias: false,
+            filterQuality: FilterQuality.low,
+            errorBuilder: (_, __, ___) => widget.placeholder,
+          );
+          if (_loadedSync || !widget.fadeIn) {
+            return backdropImg;
+          }
+          return TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0.0, end: 1.0),
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            builder: (context, opacity, child) =>
+                Opacity(opacity: opacity, child: child),
+            child: backdropImg,
+          );
+        }
         final dpr = (MediaQuery.maybeDevicePixelRatioOf(context) ?? 2.0)
-            .clamp(2.0, 3.5);
+            .clamp(1.25, 3.0);
         final isLargeSurface = widget.highRes ||
             (constraints.maxWidth.isFinite && constraints.maxWidth >= 210) ||
             (constraints.maxHeight.isFinite && constraints.maxHeight >= 260);
@@ -2534,7 +2897,7 @@ class _PosterImageState extends State<PosterImage>
               ? constraints.maxHeight * 0.72
               : constraints.maxWidth;
           final px = (effectiveWidth * dpr).ceil();
-          cacheWidth = ((px + 239) ~/ 240) * 240;
+          cacheWidth = ((px + 179) ~/ 180) * 180;
         }
         final ImageProvider provider = isLargeSurface
             ? MemoryImage(bytes)
@@ -2560,7 +2923,7 @@ class _PosterImageState extends State<PosterImage>
         }
         return TweenAnimationBuilder<double>(
           tween: Tween<double>(begin: 0.0, end: 1.0),
-          duration: const Duration(milliseconds: 220),
+          duration: const Duration(milliseconds: 200),
           curve: Curves.easeOutCubic,
           builder: (context, opacity, child) => Stack(
             fit: StackFit.passthrough,
@@ -2582,6 +2945,7 @@ class _PosterImageState extends State<PosterImage>
 /// so scrolling episode strips update immediately.
 class EpisodeStillImage extends StatefulWidget {
   final String seriesTitle;
+  final String year;
   final int episodeIndex;
   final String fallbackPosterUrl;
   final Widget placeholder;
@@ -2592,6 +2956,7 @@ class EpisodeStillImage extends StatefulWidget {
     required this.episodeIndex,
     required this.fallbackPosterUrl,
     required this.placeholder,
+    this.year = '',
   });
 
   @override
@@ -2616,6 +2981,7 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
   void didUpdateWidget(covariant EpisodeStillImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.seriesTitle != widget.seriesTitle ||
+        oldWidget.year != widget.year ||
         oldWidget.episodeIndex != widget.episodeIndex) {
       _resolveStill();
     }
@@ -2668,7 +3034,7 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
     try {
       await Future.wait([
         PosterLoader.fetchSeriesEpisodeMetadata(title),
-        PosterLoader.fetchSeriesEpisodeStills(title),
+        PosterLoader.fetchSeriesEpisodeStills(title, year: widget.year),
       ]);
       if (!mounted) return;
       _pickFromCaches();
@@ -2684,9 +3050,10 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
     final fallbackPosterWidget = PosterImage(
       url: widget.fallbackPosterUrl,
       title: widget.seriesTitle,
+      year: widget.year,
       fit: BoxFit.cover,
       alignment: Alignment(0.0, alignY),
-      highRes: true,
+      highRes: false,
       placeholder: widget.placeholder,
     );
     if (still != null && still.isNotEmpty) {
@@ -2697,7 +3064,7 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
         url: still,
         title: '',
         fit: BoxFit.cover,
-        highRes: true,
+        highRes: false,
         placeholder: fallbackPosterWidget,
       );
     }

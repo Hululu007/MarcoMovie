@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'quark_account.dart';
 
 enum CloudMediaProvider { uc, quark, baidu }
@@ -28,8 +29,17 @@ class CloudMediaLease {
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _sweep());
   }
 
-  static const int _maxConcurrentRequests = 16;
-  static const int _flushThresholdBytes = 256 * 1024;
+  static const int _maxConcurrentRequests = 24;
+  static const int _flushThresholdBytes = 4 * 1024 * 1024;
+
+  static http.Client createDefaultMediaClient() {
+    final io = HttpClient()
+      ..autoUncompress = false
+      ..maxConnectionsPerHost = 12
+      ..connectionTimeout = const Duration(seconds: 20)
+      ..idleTimeout = const Duration(seconds: 30);
+    return IOClient(io);
+  }
 
   final HttpServer _server;
   final http.Client _client;
@@ -130,12 +140,21 @@ class CloudMediaLease {
       client?.close();
       throw const FormatException('播放已取消或网盘账号已切换');
     }
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0)
+      ..autoCompress = false;
     final token = base64Url
         .encode(List.generate(32, (_) => Random.secure().nextInt(256)))
         .replaceAll('=', '');
-    return CloudMediaLease._(server, client ?? http.Client(), target, provider,
-        Map.of(headers), isCancelled, isCurrent, token, clock ?? DateTime.now);
+    return CloudMediaLease._(
+        server,
+        client ?? createDefaultMediaClient(),
+        target,
+        provider,
+        Map.of(headers),
+        isCancelled,
+        isCurrent,
+        token,
+        clock ?? DateTime.now);
   }
 
   Future<void> _sweep() async {
@@ -258,6 +277,7 @@ class CloudMediaLease {
         request.response.add(encoded);
         return;
       }
+      request.response.bufferOutput = false;
       await _pipeMediaStream(response.stream, request.response);
     } catch (_) {
       // Do not surface upstream URLs, cookies or socket errors to the player.

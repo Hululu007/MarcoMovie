@@ -2,11 +2,92 @@ import 'dart:io' show Platform;
 import 'dart:math' as math;
 import 'dart:ui';
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-bool get _isWindowsDesktop => !kIsWeb && Platform.isWindows;
+bool get isWindowsDesktopUi =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+
+bool get _isWindowsDesktop => isWindowsDesktopUi;
+
+/// Lightweight, single-layer desktop page transition for Windows ANGLE/D3D11:
+/// avoids `CupertinoPageRoute`'s 500ms dual-page full-screen parallax + shadow
+/// composite, animating only the incoming page in 185ms inside a [RepaintBoundary].
+class WindowsSmoothPageTransitionsBuilder extends PageTransitionsBuilder {
+  const WindowsSmoothPageTransitionsBuilder();
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    if (animation.status == AnimationStatus.completed &&
+        !secondaryAnimation.isAnimating) {
+      return child;
+    }
+    final curved = CurvedAnimation(
+      parent: animation,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+    final beginOffset = route.fullscreenDialog
+        ? const Offset(0.0, 0.024)
+        : const Offset(0.016, 0.0);
+    return RepaintBoundary(
+      child: FadeTransition(
+        opacity: curved,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: beginOffset,
+            end: Offset.zero,
+          ).animate(curved),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+/// Platform-adaptive route builder: preserves native [CupertinoPageRoute] on
+/// iOS / iPadOS / macOS while using a crisp 185ms GPU-friendly transition on Windows.
+PageRoute<T> buildApplePageRoute<T>({
+  required WidgetBuilder builder,
+  RouteSettings? settings,
+  bool fullscreenDialog = false,
+  bool maintainState = true,
+}) {
+  if (!isWindowsDesktopUi) {
+    return CupertinoPageRoute<T>(
+      builder: builder,
+      settings: settings,
+      fullscreenDialog: fullscreenDialog,
+      maintainState: maintainState,
+    );
+  }
+  return PageRouteBuilder<T>(
+    settings: settings,
+    fullscreenDialog: fullscreenDialog,
+    maintainState: maintainState,
+    opaque: true,
+    transitionDuration: const Duration(milliseconds: 185),
+    reverseTransitionDuration: const Duration(milliseconds: 150),
+    pageBuilder: (context, _, __) => builder(context),
+    transitionsBuilder: (context, animation, secondaryAnimation, child) {
+      return const WindowsSmoothPageTransitionsBuilder().buildTransitions<T>(
+        ModalRoute.of(context)! as PageRoute<T>,
+        context,
+        animation,
+        secondaryAnimation,
+        child,
+      );
+    },
+  );
+}
 
 /// Apple iOS 27 Liquid Glass design tokens (iOS / iPadOS / macOS dark appearance):
 /// deep obsidian canvas, refractive translucent glass materials, specular rims.
@@ -250,7 +331,7 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
   @override
   void initState() {
     super.initState();
-    if (ImageFilter.isShaderFilterSupported) _loadLens();
+    if (!_isWindowsDesktop && ImageFilter.isShaderFilterSupported) _loadLens();
   }
   Future<void> _loadLens() async {
     try {
@@ -276,7 +357,8 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
             strength <= 0.02 ||
             MediaQuery.highContrastOf(context) ||
             MediaQuery.disableAnimationsOf(context);
-        final shader = _shader;
+        final winFastGlass = _isWindowsDesktop;
+        final shader = winFastGlass ? null : _shader;
         if (shader != null) {
           shader.setFloat(2, widget.radius);
           shader.setFloat(
@@ -285,7 +367,7 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
           );
         }
         return BackdropFilter(
-          enabled: !opaque,
+          enabled: !opaque && !winFastGlass,
           filter: shader == null
               ? liquidGlassFilter(
                   blur: 1.0 + 18.0 * strength,
@@ -298,14 +380,21 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
           child: ColoredBox(
             color: opaque
                 ? const Color(0xF51E1E22)
-                : shader == null
+                : winFastGlass
                     ? Color.fromRGBO(
-                        30,
-                        30,
-                        34,
-                        (0.88 - 0.34 * strength).clamp(0.45, 0.92),
+                        26,
+                        28,
+                        35,
+                        (0.91 - 0.16 * strength).clamp(0.73, 0.93),
                       )
-                    : Colors.transparent,
+                    : shader == null
+                        ? Color.fromRGBO(
+                            30,
+                            30,
+                            34,
+                            (0.88 - 0.34 * strength).clamp(0.45, 0.92),
+                          )
+                        : Colors.transparent,
             child: widget.child,
           ),
         );
@@ -462,7 +551,9 @@ class AppleEdgeFade extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (fadeWidth <= 0 || (!fadeStart && !fadeEnd)) return child;
+    if (_isWindowsDesktop || fadeWidth <= 0 || (!fadeStart && !fadeEnd)) {
+      return child;
+    }
     return ShaderMask(
       blendMode: BlendMode.dstIn,
       shaderCallback: (rect) {
@@ -709,12 +800,14 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
   }
 
   Widget _shell({required Widget child}) {
-    return LiquidGlass(
-      borderRadius: AppleLiquidGlassDock._dockRadius,
-      tint: const Color(0x52141418),
-      blur: 20,
-      saturation: 1.8,
-      child: child,
+    return RepaintBoundary(
+      child: LiquidGlass(
+        borderRadius: AppleLiquidGlassDock._dockRadius,
+        tint: const Color(0x52141418),
+        blur: 20,
+        saturation: 1.8,
+        child: child,
+      ),
     );
   }
 
@@ -1613,65 +1706,67 @@ Future<T?> showAppleModalSheet<T>({
               : (isLandscape ? math.max(8.0, safe.top) : 0),
         ),
         child: Center(
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: effectiveMaxWidth,
-              maxHeight: screenSize.height * 0.88,
-            ),
-            child: LiquidGlass(
-              borderRadius: 28,
-              rimStrength: 1.0,
-              child: Material(
-                color: Colors.transparent,
-                child: SafeArea(
-                  top: false,
-                  left: false,
-                  right: false,
-                  bottom: !isLandscape && !ignoreKeyboardInsets,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const SizedBox(height: 9),
-                      Container(
-                        width: 40,
-                        height: 4.5,
-                        decoration: BoxDecoration(
-                          color: const Color(0x66EBEBF5),
-                          borderRadius: BorderRadius.circular(999),
+          child: RepaintBoundary(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: effectiveMaxWidth,
+                maxHeight: screenSize.height * 0.88,
+              ),
+              child: LiquidGlass(
+                borderRadius: 28,
+                rimStrength: 1.0,
+                child: Material(
+                  color: Colors.transparent,
+                  child: SafeArea(
+                    top: false,
+                    left: false,
+                    right: false,
+                    bottom: !isLandscape && !ignoreKeyboardInsets,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox(height: 9),
+                        Container(
+                          width: 40,
+                          height: 4.5,
+                          decoration: BoxDecoration(
+                            color: const Color(0x66EBEBF5),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
                         ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 10, 12, 10),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                title,
-                                style: const TextStyle(
-                                  color: AppleColors.labelPrimary,
-                                  fontSize: 17.5,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: -0.35,
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(20, 10, 12, 10),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  title,
+                                  style: const TextStyle(
+                                    color: AppleColors.labelPrimary,
+                                    fontSize: 17.5,
+                                    fontWeight: FontWeight.w700,
+                                    letterSpacing: -0.35,
+                                  ),
                                 ),
                               ),
-                            ),
-                            if (trailingAction != null) trailingAction,
-                            CupertinoButton(
-                              padding: const EdgeInsets.all(6),
-                              minSize: 30,
-                              onPressed: () => Navigator.of(ctx).pop(),
-                              child: const Icon(
-                                CupertinoIcons.xmark_circle_fill,
-                                color: AppleColors.labelTertiary,
-                                size: 26,
+                              if (trailingAction != null) trailingAction,
+                              CupertinoButton(
+                                padding: const EdgeInsets.all(6),
+                                minSize: 30,
+                                onPressed: () => Navigator.of(ctx).pop(),
+                                child: const Icon(
+                                  CupertinoIcons.xmark_circle_fill,
+                                  color: AppleColors.labelTertiary,
+                                  size: 26,
+                                ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
-                      ),
-                      Container(height: 0.5, color: const Color(0x22FFFFFF)),
-                      Flexible(child: builder(ctx)),
-                    ],
+                        Container(height: 0.5, color: const Color(0x22FFFFFF)),
+                        Flexible(child: builder(ctx)),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -1722,6 +1817,7 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
 
   bool get _shouldAnimate {
     if (!widget.animate || !widget.showAmbientArtwork) return false;
+    if (_isWindowsDesktop) return false;
     if (!kIsWeb && Platform.environment.containsKey('FLUTTER_TEST')) {
       return false;
     }
@@ -1856,31 +1952,58 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
             child: IgnorePointer(
               child: RepaintBoundary(
                 child: ClipRect(
-                  child: ShaderMask(
-                    blendMode: BlendMode.dstIn,
-                    shaderCallback: (rect) => const LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Color(0x80FFFFFF),
-                        Color(0x38FFFFFF),
-                        Color(0x00FFFFFF),
-                      ],
-                      stops: [0.0, 0.45, 0.88],
-                    ).createShader(rect),
-                    child: ImageFiltered(
-                      imageFilter: ImageFilter.blur(
-                        sigmaX: _isWindowsDesktop
-                            ? math.min(widget.blurSigma, 24.0)
-                            : widget.blurSigma,
-                        sigmaY: _isWindowsDesktop
-                            ? math.min(widget.blurSigma, 24.0)
-                            : widget.blurSigma,
-                        tileMode: TileMode.decal,
-                      ),
-                      child: widget.artwork,
-                    ),
-                  ),
+                  child: _isWindowsDesktop
+                      ? Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            Opacity(
+                              opacity: 0.44,
+                              child: ImageFiltered(
+                                imageFilter: ImageFilter.blur(
+                                  sigmaX: math.min(widget.blurSigma, 24.0),
+                                  sigmaY: math.min(widget.blurSigma, 24.0),
+                                  tileMode: TileMode.decal,
+                                ),
+                                child: widget.artwork,
+                              ),
+                            ),
+                            DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    const Color(0x00000000),
+                                    gradientColors[1].withValues(alpha: 0.72),
+                                    gradientColors[1],
+                                  ],
+                                  stops: const [0.0, 0.58, 0.96],
+                                ),
+                              ),
+                            ),
+                          ],
+                        )
+                      : ShaderMask(
+                          blendMode: BlendMode.dstIn,
+                          shaderCallback: (rect) => const LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Color(0x80FFFFFF),
+                              Color(0x38FFFFFF),
+                              Color(0x00FFFFFF),
+                            ],
+                            stops: [0.0, 0.45, 0.88],
+                          ).createShader(rect),
+                          child: ImageFiltered(
+                            imageFilter: ImageFilter.blur(
+                              sigmaX: widget.blurSigma,
+                              sigmaY: widget.blurSigma,
+                              tileMode: TileMode.decal,
+                            ),
+                            child: widget.artwork,
+                          ),
+                        ),
                 ),
               ),
             ),

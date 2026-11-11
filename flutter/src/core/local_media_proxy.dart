@@ -199,8 +199,8 @@ class LocalMediaLease {
     _timer = Timer.periodic(const Duration(seconds: 2), (_) => _sweep());
   }
 
-  static const int _maxConcurrentRequests = 16;
-  static const int _flushThresholdBytes = 256 * 1024;
+  static const int _maxConcurrentRequests = 24;
+  static const int _flushThresholdBytes = 4 * 1024 * 1024;
   static const int _maxPlaylistBytes = 4 * 1024 * 1024;
   static const int _sniffPrefixBytes = 4096;
   static const String _defaultBrowserUa =
@@ -407,7 +407,8 @@ class LocalMediaLease {
       if (_hopByHopHeaderNames.contains(key.toLowerCase())) continue;
       sanitized[key] = value;
     }
-    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0)
+      ..autoCompress = false;
     final random = math.Random.secure();
     final capability = List.generate(
       16,
@@ -430,8 +431,9 @@ class LocalMediaLease {
   static http.Client _createDirectFallbackHttpClient({bool directOnly = false}) {
     final io = HttpClient()
       ..autoUncompress = true
+      ..maxConnectionsPerHost = 12
       ..connectionTimeout = const Duration(seconds: 15)
-      ..idleTimeout = const Duration(seconds: 15);
+      ..idleTimeout = const Duration(seconds: 30);
     if (directOnly) {
       io.findProxy = (_) => 'DIRECT';
     }
@@ -803,6 +805,7 @@ class LocalMediaLease {
         return;
       }
 
+      request.response.bufferOutput = false;
       _copyResponseHeaders(response, request.response);
       request.response.statusCode = response.statusCode;
       await _pipeMediaStream(response.stream, request.response);
@@ -873,45 +876,45 @@ class LocalMediaLease {
     _TargetKind kind,
     HttpResponse downstream,
   ) async {
-    final iterator = StreamIterator<List<int>>(upstream.stream);
+    final done = Completer<void>();
+    StreamSubscription<List<int>>? subscription;
+    Timer? idleTimer;
+    var finished = false;
+    var phase = 0; // 0: sniffing prefix, 1: playlist accumulation, 2: binary streaming
+    var pendingBytes = 0;
     final prefixBuilder = BytesBuilder(copy: false);
-    var streamEnded = false;
-    try {
-      while (prefixBuilder.length < _sniffPrefixBytes) {
-        final hasMore =
-            await iterator.moveNext().timeout(const Duration(seconds: 25));
-        if (!hasMore) {
-          streamEnded = true;
-          break;
-        }
-        if (_closed || _isCancelled()) throw StateError('cancelled');
-        prefixBuilder.add(iterator.current);
-        if (_startsWithM3u8Magic(prefixBuilder.toBytes()) &&
-            prefixBuilder.length >= 7) {
-          break;
+    final playlistBuilder = BytesBuilder(copy: false);
+
+    Future<void> finish([Object? error, StackTrace? stackTrace]) async {
+      if (finished) return;
+      finished = true;
+      idleTimer?.cancel();
+      final sub = subscription;
+      if (sub != null) {
+        _upstreams.remove(sub);
+        try {
+          await sub.cancel();
+        } catch (_) {}
+      }
+      if (!done.isCompleted) {
+        if (error != null) {
+          done.completeError(error, stackTrace);
+        } else {
+          done.complete();
         }
       }
+    }
 
-      final prefix = prefixBuilder.takeBytes();
-      if (_startsWithM3u8Magic(prefix)) {
-        final fullBuilder = BytesBuilder(copy: false)..add(prefix);
-        if (!streamEnded) {
-          while (await iterator
-              .moveNext()
-              .timeout(const Duration(seconds: 30))) {
-            if (_closed || _isCancelled()) throw StateError('cancelled');
-            if (fullBuilder.length + iterator.current.length >
-                _maxPlaylistBytes) {
-              throw const FormatException('媒体播放列表体积超出安全上限');
-            }
-            fullBuilder.add(iterator.current);
-          }
-        }
-        final text = utf8.decode(fullBuilder.takeBytes(), allowMalformed: true);
-        await _respondPlaylist(downstream, text, finalTarget);
-        return;
-      }
+    void resetIdleTimer() {
+      idleTimer?.cancel();
+      idleTimer = Timer(const Duration(seconds: 30), () {
+        unawaited(finish(TimeoutException('upstream media idle')));
+      });
+    }
 
+    void beginBinaryStream(Uint8List prefix) {
+      phase = 2;
+      downstream.bufferOutput = false;
       final skip =
           kind == _TargetKind.tsSegment ? findDisguisedTsOffset(prefix) : 0;
       _copyResponseHeaders(upstream, downstream);
@@ -926,23 +929,113 @@ class LocalMediaLease {
           downstream.headers.removeAll(HttpHeaders.contentLengthHeader);
         }
       }
-
       final initialSlice = skip > 0 ? prefix.sublist(skip) : prefix;
       if (initialSlice.isNotEmpty) {
         downstream.add(initialSlice);
+        pendingBytes += initialSlice.length;
       }
-      if (streamEnded) return;
+    }
 
-      Stream<List<int>> remaining() async* {
-        while (await iterator.moveNext()) {
-          yield iterator.current;
+    unawaited(downstream.done.then((_) => finish(), onError: (_) => finish()));
+    resetIdleTimer();
+    subscription = upstream.stream.listen(
+      (chunk) {
+        if (finished || _closed || _isCancelled()) {
+          unawaited(finish(StateError('cancelled')));
+          return;
         }
-      }
-
-      await _pipeMediaStream(remaining(), downstream);
-    } finally {
+        resetIdleTimer();
+        try {
+          if (phase == 0) {
+            prefixBuilder.add(chunk);
+            final currentBytes = prefixBuilder.toBytes();
+            if (_startsWithM3u8Magic(currentBytes) && currentBytes.length >= 7) {
+              final taken = prefixBuilder.takeBytes();
+              if (taken.length > _maxPlaylistBytes) {
+                unawaited(
+                  finish(const FormatException('媒体播放列表体积超出安全上限')),
+                );
+                return;
+              }
+              phase = 1;
+              playlistBuilder.add(taken);
+              return;
+            }
+            if (prefixBuilder.length >= _sniffPrefixBytes) {
+              final prefix = prefixBuilder.takeBytes();
+              if (_startsWithM3u8Magic(prefix)) {
+                if (prefix.length > _maxPlaylistBytes) {
+                  unawaited(
+                    finish(const FormatException('媒体播放列表体积超出安全上限')),
+                  );
+                  return;
+                }
+                phase = 1;
+                playlistBuilder.add(prefix);
+                return;
+              }
+              beginBinaryStream(prefix);
+            }
+            return;
+          }
+          if (phase == 1) {
+            if (playlistBuilder.length + chunk.length > _maxPlaylistBytes) {
+              unawaited(
+                finish(const FormatException('媒体播放列表体积超出安全上限')),
+              );
+              return;
+            }
+            playlistBuilder.add(chunk);
+            return;
+          }
+          downstream.add(chunk);
+          pendingBytes += chunk.length;
+          if (pendingBytes >= _flushThresholdBytes) {
+            pendingBytes = 0;
+            subscription?.pause(
+              downstream
+                  .flush()
+                  .timeout(const Duration(seconds: 30))
+                  .catchError((_) => finish()),
+            );
+          }
+        } catch (e, st) {
+          unawaited(finish(e, st));
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        unawaited(finish(error, stackTrace));
+      },
+      onDone: () async {
+        if (finished) return;
+        try {
+          if (phase == 0) {
+            final prefix = prefixBuilder.takeBytes();
+            if (_startsWithM3u8Magic(prefix)) {
+              final text = utf8.decode(prefix, allowMalformed: true);
+              await _respondPlaylist(downstream, text, finalTarget);
+            } else {
+              beginBinaryStream(prefix);
+            }
+          } else if (phase == 1) {
+            final text = utf8.decode(
+              playlistBuilder.takeBytes(),
+              allowMalformed: true,
+            );
+            await _respondPlaylist(downstream, text, finalTarget);
+          }
+          await finish();
+        } catch (e, st) {
+          await finish(e, st);
+        }
+      },
+      cancelOnError: true,
+    );
+    _upstreams.add(subscription);
+    await done.future;
+    if (!_closed && !_isCancelled() && phase == 2 && pendingBytes > 0) {
       try {
-        await iterator.cancel();
+        await downstream.flush().timeout(const Duration(seconds: 30));
       } catch (_) {}
     }
   }

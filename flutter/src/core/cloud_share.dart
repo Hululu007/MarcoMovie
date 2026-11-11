@@ -22,7 +22,8 @@ class CloudShareClient {
         _ownsClient = client == null,
         _clock = clock ?? DateTime.now,
         _isCancelled = isCancelled ?? (() => false),
-        _mediaClientFactory = mediaClientFactory ?? http.Client.new;
+        _mediaClientFactory =
+            mediaClientFactory ?? CloudMediaLease.createDefaultMediaClient;
 
   final http.Client _http;
   final bool _ownsClient;

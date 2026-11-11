@@ -36,7 +36,7 @@ Future<void> showNetdiskAccountSheet(
 }) async {
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     await Navigator.of(context).push<void>(
-      CupertinoPageRoute<void>(
+      buildApplePageRoute<void>(
         builder: (_) => IosSettingsScaffold(
           title: '我的云盘',
           backLabel: iosBackLabel,

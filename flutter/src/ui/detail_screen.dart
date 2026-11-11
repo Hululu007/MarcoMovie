@@ -115,6 +115,7 @@ class _DetailScreenState extends State<DetailScreen> {
   final ValueNotifier<double> _scrollOffset = ValueNotifier<double>(0.0);
   Color? _posterAmbientColor;
   String _externalSynopsis = '';
+  int _lastMetadataSnapshotSig = 0;
   Completer<void>? _detailAbort;
   Completer<void>? _seasonAbort;
   int _detailEpoch = 0;
@@ -143,6 +144,7 @@ class _DetailScreenState extends State<DetailScreen> {
     final immediateBytes = PosterLoader.peekMemory(
       _video.poster,
       title: _publicLookupTitle,
+      year: _video.year,
       preferHd: true,
     );
     if (immediateBytes != null) {
@@ -174,6 +176,11 @@ class _DetailScreenState extends State<DetailScreen> {
   void _onExternalMetadataRevision() {
     if (!mounted || _activeSite.isEffectivelyPrivate) return;
     final syn = PosterLoader.peekSeriesSynopsis(_video.title);
+    final epMetaLen = PosterLoader.peekAllEpisodeMeta(_video.title).length;
+    final capLen = PosterLoader.peekSeriesEpisodeCaptions(_video.title).length;
+    final sig = Object.hash(syn, epMetaLen, capLen);
+    if (sig == _lastMetadataSnapshotSig) return;
+    _lastMetadataSnapshotSig = sig;
     if (syn.isNotEmpty && syn != _externalSynopsis) {
       _externalSynopsis = syn;
     }
@@ -226,7 +233,7 @@ class _DetailScreenState extends State<DetailScreen> {
     if (_activeSite.isEmby || _activeSite.isEffectivelyPrivate) return;
     if (title.trim().isEmpty) return;
     unawaited(
-      PosterLoader.fetchSeriesSynopsis(title).then((syn) {
+      PosterLoader.fetchSeriesSynopsis(title, year: _video.year).then((syn) {
         if (!mounted || syn.isEmpty) return;
         if (_externalSynopsis != syn) {
           setState(() {
@@ -238,7 +245,7 @@ class _DetailScreenState extends State<DetailScreen> {
     if (!_isVarietyShow) {
       unawaited(PosterLoader.fetchSeriesEpisodeMetadata(title));
     }
-    unawaited(PosterLoader.fetchSeriesEpisodeStills(title));
+    unawaited(PosterLoader.fetchSeriesEpisodeStills(title, year: _video.year));
   }
 
   Future<void> _loadDetail() async {
@@ -692,7 +699,7 @@ class _DetailScreenState extends State<DetailScreen> {
     }
     if (!mounted) return;
     await Navigator.of(context).push(
-      CupertinoPageRoute<void>(
+      buildApplePageRoute<void>(
         builder: (_) => PlayerScreen(
           site: targetSite,
           video: targetVideo,
@@ -1049,7 +1056,7 @@ class _DetailScreenState extends State<DetailScreen> {
       ),
     );
     if (pick == null || !mounted) return;
-    await Navigator.of(context).push(CupertinoPageRoute<void>(
+    await Navigator.of(context).push(buildApplePageRoute<void>(
       builder: (_) => DetailScreen(site: pick.$1, initialVideo: pick.$2,
         client: widget.client, storage: widget.storage),
     ));
@@ -1517,6 +1524,7 @@ class _DetailScreenState extends State<DetailScreen> {
                   child: PosterImage(
                     url: _video.poster,
                     title: _publicLookupTitle,
+                    year: _video.year,
                     fit: BoxFit.cover,
                     alignment: const Alignment(0.0, -0.32),
                     highRes: true,
@@ -2584,6 +2592,7 @@ class _DetailScreenState extends State<DetailScreen> {
                               children: [
                                 EpisodeStillImage(
                                   seriesTitle: _publicLookupTitle,
+                                  year: _video.year,
                                   episodeIndex: posIdx,
                                   fallbackPosterUrl: _video.poster,
                                   placeholder: _posterPlaceholder(
@@ -2832,80 +2841,153 @@ class _DetailScreenState extends State<DetailScreen> {
               //    the vertical 34% line and the horizontal heroStageHeight line, while
               //    keeping right-side poster artwork clearly visible with low blur!)
               Positioned.fill(
-                child: ValueListenableBuilder<double>(
-                  valueListenable: _scrollOffset,
-                  builder: (context, offset, child) {
-                    final progress = (offset / 320.0).clamp(0.0, 1.0);
-                    final blurSigma = 1.6 + progress * 7.5;
-                    final scrollVeilAlpha = progress * 0.36;
+                child: isWindowsDesktopUi
+                    ? Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          RepaintBoundary(
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                ImageFiltered(
+                                  imageFilter: ImageFilter.blur(
+                                    sigmaX: 2.2,
+                                    sigmaY: 2.2,
+                                    tileMode: TileMode.decal,
+                                  ),
+                                  child: PosterImage(
+                                    url: _video.poster,
+                                    title: _publicLookupTitle,
+                                    year: _video.year,
+                                    fit: BoxFit.cover,
+                                    alignment: const Alignment(0.35, -0.2),
+                                    forBackdrop: true,
+                                    onBytesLoaded: _updateAmbientFromBytes,
+                                    placeholder: _posterPlaceholder(bgColor),
+                                  ),
+                                ),
+                                DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      begin: Alignment.centerLeft,
+                                      end: Alignment.centerRight,
+                                      colors: [
+                                        bgColor,
+                                        bgColor.withValues(alpha: 0.94),
+                                        bgColor.withValues(alpha: 0.46),
+                                        bgColor.withValues(alpha: 0.14),
+                                        bgColor.withValues(alpha: 0.05),
+                                      ],
+                                      stops: const [0.0, 0.24, 0.46, 0.72, 1.0],
+                                    ),
+                                  ),
+                                ),
+                                DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      begin: Alignment.topCenter,
+                                      end: Alignment.bottomCenter,
+                                      colors: [
+                                        bgColor.withValues(alpha: 0.56),
+                                        bgColor.withValues(alpha: 0.04),
+                                        bgColor.withValues(alpha: 0.32),
+                                        bgColor.withValues(alpha: 0.90),
+                                        bgColor,
+                                      ],
+                                      stops: const [0.0, 0.18, 0.58, 0.80, 1.0],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          ValueListenableBuilder<double>(
+                            valueListenable: _scrollOffset,
+                            builder: (context, offset, _) {
+                              final veil =
+                                  (offset / 320.0).clamp(0.0, 1.0) * 0.52;
+                              if (veil <= 0.01) return const SizedBox.shrink();
+                              return ColoredBox(
+                                color: bgColor.withValues(alpha: veil),
+                              );
+                            },
+                          ),
+                        ],
+                      )
+                    : ValueListenableBuilder<double>(
+                        valueListenable: _scrollOffset,
+                        builder: (context, offset, child) {
+                          final progress = (offset / 320.0).clamp(0.0, 1.0);
+                          final blurSigma = 1.6 + progress * 7.5;
+                          final scrollVeilAlpha = progress * 0.36;
 
-                    final backdropImage = ImageFiltered(
-                      imageFilter: ImageFilter.blur(
-                        sigmaX: blurSigma,
-                        sigmaY: blurSigma,
-                        tileMode: TileMode.decal,
+                          final backdropImage = ImageFiltered(
+                            imageFilter: ImageFilter.blur(
+                              sigmaX: blurSigma,
+                              sigmaY: blurSigma,
+                              tileMode: TileMode.decal,
+                            ),
+                            child: child!,
+                          );
+
+                          return Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              backdropImage,
+                              DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.centerLeft,
+                                    end: Alignment.centerRight,
+                                    colors: [
+                                      bgColor,
+                                      bgColor.withValues(alpha: 0.94),
+                                      bgColor.withValues(alpha: 0.46),
+                                      bgColor.withValues(alpha: 0.14),
+                                      bgColor.withValues(alpha: 0.05),
+                                    ],
+                                    stops: const [0.0, 0.24, 0.46, 0.72, 1.0],
+                                  ),
+                                ),
+                              ),
+                              DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      bgColor.withValues(alpha: 0.56),
+                                      bgColor.withValues(alpha: 0.04),
+                                      bgColor.withValues(alpha: 0.32),
+                                      bgColor.withValues(alpha: 0.90),
+                                      bgColor,
+                                    ],
+                                    stops: const [0.0, 0.18, 0.58, 0.80, 1.0],
+                                  ),
+                                ),
+                              ),
+                              if (scrollVeilAlpha > 0.01)
+                                Positioned.fill(
+                                  child: ColoredBox(
+                                    color: bgColor.withValues(
+                                      alpha: scrollVeilAlpha,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          );
+                        },
+                        child: PosterImage(
+                          url: _video.poster,
+                          title: _publicLookupTitle,
+                          year: _video.year,
+                          fit: BoxFit.cover,
+                          alignment: const Alignment(0.35, -0.2),
+                          forBackdrop: true,
+                          onBytesLoaded: _updateAmbientFromBytes,
+                          placeholder: _posterPlaceholder(bgColor),
+                        ),
                       ),
-                      child: child!,
-                    );
-
-                    return Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        backdropImage,
-                        // Left-to-right seamless solid-color blend: solid on left text area,
-                        // light & transparent on right so poster artwork is clearly visible
-                        DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.centerLeft,
-                              end: Alignment.centerRight,
-                              colors: [
-                                bgColor,
-                                bgColor.withValues(alpha: 0.94),
-                                bgColor.withValues(alpha: 0.46),
-                                bgColor.withValues(alpha: 0.14),
-                                bgColor.withValues(alpha: 0.05),
-                              ],
-                              stops: const [0.0, 0.24, 0.46, 0.72, 1.0],
-                            ),
-                          ),
-                        ),
-                        // Top-to-bottom seamless solid-color blend into bgColor across 100% height
-                        DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.topCenter,
-                              end: Alignment.bottomCenter,
-                              colors: [
-                                bgColor.withValues(alpha: 0.56),
-                                bgColor.withValues(alpha: 0.04),
-                                bgColor.withValues(alpha: 0.32),
-                                bgColor.withValues(alpha: 0.90),
-                                bgColor,
-                              ],
-                              stops: const [0.0, 0.18, 0.58, 0.80, 1.0],
-                            ),
-                          ),
-                        ),
-                        if (scrollVeilAlpha > 0.01)
-                          Positioned.fill(
-                            child: ColoredBox(
-                              color: bgColor.withValues(alpha: scrollVeilAlpha),
-                            ),
-                          ),
-                      ],
-                    );
-                  },
-                  child: PosterImage(
-                    url: _video.poster,
-                    title: _publicLookupTitle,
-                    fit: BoxFit.cover,
-                    alignment: const Alignment(0.35, -0.2),
-                    highRes: true,
-                    onBytesLoaded: _updateAmbientFromBytes,
-                    placeholder: _posterPlaceholder(bgColor),
-                  ),
-                ),
               ),
 
               // 3. Main Scrollable Widescreen Foreground Content
@@ -3042,6 +3124,7 @@ class _DetailScreenState extends State<DetailScreen> {
               PosterImage(
                 url: _video.poster,
                 title: _publicLookupTitle,
+                year: _video.year,
                 highRes: true,
                 onBytesLoaded: _updateAmbientFromBytes,
                 placeholder: _posterPlaceholder(bgColor),

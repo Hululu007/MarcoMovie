@@ -19,7 +19,8 @@ class QuarkDriveClient {
   })  : _accounts = accounts,
         _http = httpClient ?? http.Client(),
         _ownsHttp = httpClient == null,
-        _mediaClientFactory = mediaClientFactory ?? http.Client.new;
+        _mediaClientFactory =
+            mediaClientFactory ?? CloudMediaLease.createDefaultMediaClient;
 
   final QuarkAccountProvider _accounts;
   final http.Client _http;

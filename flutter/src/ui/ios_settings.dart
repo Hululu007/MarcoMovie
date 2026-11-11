@@ -61,7 +61,7 @@ class _IosSettingsPageState extends State<IosSettingsPage> {
   void _openRootPane(BuildContext context, SettingsPane entry) {
     Navigator.of(context)
         .push<void>(
-          CupertinoPageRoute<void>(
+          buildApplePageRoute<void>(
             builder: (_) => IosSettingsSubPage(
               pages: widget.pages,
               pathIds: [entry.id],
@@ -314,7 +314,7 @@ class _IosSettingsSubPageState extends State<IosSettingsSubPage> {
   void _openChild(BuildContext context, SettingsPane current, SettingsPane child) {
     Navigator.of(context)
         .push<void>(
-          CupertinoPageRoute<void>(
+          buildApplePageRoute<void>(
             builder: (_) => IosSettingsSubPage(
               pages: widget.pages,
               pathIds: [...widget.pathIds, child.id],
