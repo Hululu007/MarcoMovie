@@ -156,6 +156,28 @@ public final class SearchVariantsChecks {
                         && found.size() == 2
                         && "anime_dl2".equals(found.get(0).id)
                         && "comic_dl2".equals(found.get(1).id));
+        calls[0] = 0;
+        found =
+                SearchVariants.run(
+                        "斗罗大陆2",
+                        mergedTerms,
+                        t -> false,
+                        term -> {
+                            calls[0]++;
+                            Cms.Video primary = video("anime_direct", "斗罗大陆2：绝世唐门");
+                            primary.tag = "动漫";
+                            return Collections.singletonList(primary);
+                        });
+        check(calls[0] == 1 && found.size() == 1 && "anime_direct".equals(found.get(0).id));
+        check(
+                SearchVariants.canonicalSearchKey("斗罗大陆2")
+                                .equals(SearchVariants.canonicalSearchKey("斗罗大陆II"))
+                        && SearchVariants.canonicalSearchKey("庆余年 第二季")
+                                .equals(SearchVariants.canonicalSearchKey("庆余年 S02"))
+                        && SearchVariants.canonicalSearchKey("庆余年 第一季")
+                                .equals(SearchVariants.canonicalSearchKey("庆余年"))
+                        && !SearchVariants.canonicalSearchKey("庆余年 第二季")
+                                .equals(SearchVariants.canonicalSearchKey("庆余年")));
         check(!SearchVariants.wantsComicOrShortDrama("斗罗大陆2"));
         check(SearchVariants.wantsComicOrShortDrama("斗罗大陆2漫剧"));
         System.out.println("OK " + checks + " search fallback checks");

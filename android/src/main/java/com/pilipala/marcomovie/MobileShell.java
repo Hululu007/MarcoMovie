@@ -250,32 +250,22 @@ final class MobileShell {
         FrameLayout backdrop = new FrameLayout(a);
         backdrop.setMinimumWidth(a.windowWidth());
         backdrop.setMinimumHeight(a.windowHeight());
-        backdrop.setBackgroundColor(0x88000000);
+        backdrop.setBackgroundColor(0x96000000);
         backdrop.setOnClickListener(v -> dlg.dismiss());
 
-        int sheetWidth =
-                a.isPortrait() ? a.windowWidth() : Math.min(a.windowWidth() - a.dp(32), a.dp(540));
+        int cardWidth = Math.min(a.windowWidth() - a.dp(32), a.dp(410));
         LinearLayout sheet = a.vertical();
         sheet.setTag("mobile-drawer");
         sheet.setClickable(true);
-        sheet.setMinimumWidth(sheetWidth);
-        sheet.setPadding(a.dp(20), a.dp(12), a.dp(20), a.dp(28) + a.navigationBarHeight());
+        sheet.setMinimumWidth(cardWidth);
+        sheet.setPadding(a.dp(20), a.dp(18), a.dp(20), a.dp(16));
         GradientDrawable sheetBg =
                 new GradientDrawable(
                         GradientDrawable.Orientation.TOP_BOTTOM,
-                        new int[] {0xf619221f, 0xfa101614});
-        float r = a.dp(26);
-        sheetBg.setCornerRadii(new float[] {r, r, r, r, 0, 0, 0, 0});
-        sheetBg.setStroke(Math.max(1, a.dp(1)), 0x33ffffff);
+                        new int[] {0xf41c2421, 0xf8111715});
+        sheetBg.setCornerRadius(a.dp(26));
+        sheetBg.setStroke(Math.max(1, a.dp(1)), 0x36ffffff);
         sheet.setBackground(sheetBg);
-
-        // Top drag handle pill
-        View handle = new View(a);
-        handle.setBackground(a.bg(0x48ffffff, 999));
-        LinearLayout.LayoutParams handleLp = new LinearLayout.LayoutParams(a.dp(40), a.dp(4));
-        handleLp.gravity = Gravity.CENTER_HORIZONTAL;
-        handleLp.bottomMargin = a.dp(14);
-        sheet.addView(handle, handleLp);
 
         LinearLayout headerRow = a.row();
         headerRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -290,26 +280,29 @@ final class MobileShell {
         }
         headerRow.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1f));
 
-        TextView closeBtn = a.text("关闭", 12.5f, 0xffe5e7eb);
+        TextView closeBtn = a.text("✕", 13.5f, 0xffe5e7eb);
         closeBtn.setGravity(Gravity.CENTER);
-        closeBtn.setPadding(a.dp(13), a.dp(6), a.dp(13), a.dp(6));
-        closeBtn.setBackground(a.bg(0x24ffffff, 999));
+        GradientDrawable closeBg = new GradientDrawable();
+        closeBg.setShape(GradientDrawable.OVAL);
+        closeBg.setColor(0x22ffffff);
+        closeBg.setStroke(Math.max(1, a.dp(1)), 0x28ffffff);
+        closeBtn.setBackground(closeBg);
         MobileDetailScreen.bindTouchFeedback(closeBtn);
         closeBtn.setOnClickListener(v -> dlg.dismiss());
-        headerRow.addView(closeBtn, new LinearLayout.LayoutParams(-2, -2));
+        LinearLayout.LayoutParams closeLp = new LinearLayout.LayoutParams(a.dp(32), a.dp(32));
+        closeLp.leftMargin = a.dp(8);
+        headerRow.addView(closeBtn, closeLp);
         sheet.addView(headerRow, new LinearLayout.LayoutParams(-1, -2));
 
-        a.gap(sheet, 16);
+        a.gap(sheet, 14);
 
-        ScrollView scroll = new ScrollView(a);
-        scroll.setVerticalScrollBarEnabled(false);
         LinearLayout list = a.vertical();
         for (int i = 0; i < options.length; i++) {
             final int idx = i;
             boolean active = (i == selectedIndex);
             LinearLayout optRow = a.row();
             optRow.setGravity(Gravity.CENTER_VERTICAL);
-            optRow.setPadding(a.dp(16), a.dp(15), a.dp(16), a.dp(15));
+            optRow.setPadding(a.dp(16), a.dp(13), a.dp(16), a.dp(13));
             optRow.setBackground(
                     active
                             ? glassBg(0x380a84ff, 0x260a84ff, a.dp(16), a.dp(1f), 0x885ac8fa)
@@ -331,17 +324,26 @@ final class MobileShell {
                     });
 
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-            lp.bottomMargin = a.dp(10);
+            lp.bottomMargin = i == options.length - 1 ? a.dp(2) : a.dp(8);
             list.addView(optRow, lp);
         }
+        int maxScrollHeight = Math.max(a.dp(180), Math.round(a.windowHeight() * 0.58f));
+        list.measure(
+                View.MeasureSpec.makeMeasureSpec(cardWidth - a.dp(40), View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        ScrollView scroll = new ScrollView(a);
+        scroll.setVerticalScrollBarEnabled(false);
         scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
-        int maxSheetHeight = Math.round(a.windowHeight() * 0.72f);
-        sheet.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+        sheet.addView(
+                scroll,
+                new LinearLayout.LayoutParams(
+                        -1,
+                        Math.min(maxScrollHeight, Math.max(a.dp(48), list.getMeasuredHeight()))));
 
         FrameLayout.LayoutParams sheetLp =
-                new FrameLayout.LayoutParams(
-                        sheetWidth, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        sheetLp.topMargin = Math.max(a.dp(80), a.windowHeight() - maxSheetHeight);
+                new FrameLayout.LayoutParams(cardWidth, -2, Gravity.CENTER);
+        sheetLp.topMargin = a.dp(24);
+        sheetLp.bottomMargin = a.dp(24);
         backdrop.addView(sheet, sheetLp);
 
         dlg.setContentView(
@@ -355,7 +357,19 @@ final class MobileShell {
                     .setLayout(
                             android.view.WindowManager.LayoutParams.MATCH_PARENT,
                             android.view.WindowManager.LayoutParams.MATCH_PARENT);
-            dlg.getWindow().setGravity(Gravity.BOTTOM | Gravity.FILL_HORIZONTAL);
+            dlg.getWindow().setGravity(Gravity.CENTER);
+        }
+        if (!a.reduced) {
+            sheet.setScaleX(0.95f);
+            sheet.setScaleY(0.95f);
+            sheet.setAlpha(0f);
+            sheet.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .alpha(1f)
+                    .setDuration(165)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                    .start();
         }
     }
 
@@ -918,7 +932,15 @@ final class MobileShell {
         homeReady = false;
         ++a.generation;
         if (activeTab == 0 && homeScroll != null) homeScrollY = homeScroll.getScrollY();
-        activeTab = Math.max(0, Math.min(4, index));
+        int nextTab = Math.max(0, Math.min(4, index));
+        if (nextTab != 1 && activeSearchCoordinator != null) {
+            activeSearchCoordinator.close();
+            activeSearchCoordinator = null;
+        }
+        if (nextTab == 4 && activeTab == 4 && MobileIosSettings.hasSubPage()) {
+            MobileIosSettings.resetToRoot();
+        }
+        activeTab = nextTab;
         a.cancelPageRequests();
         // When on Search tab (1), highlight Home (0) in the 4-tab dock
         int highlightedDockTab = activeTab == 1 ? 0 : activeTab;
@@ -2615,6 +2637,10 @@ final class MobileShell {
         MobileDetailScreen.bindTouchFeedback(row);
         row.setOnClickListener(
                 view -> {
+                    if (activeSearchCoordinator != null) {
+                        activeSearchCoordinator.close();
+                        activeSearchCoordinator = null;
+                    }
                     activeTab = 1;
                     a.openListing(site, v);
                 });
@@ -3455,6 +3481,12 @@ final class MobileShell {
 
     private void renderSettingsTabImpl() {
         MobileIosSettings.render(a, contentContainer, currentSite, this);
+    }
+
+    void refreshSettingsPage(int slideDirection) {
+        if (activeTab == 4 && contentContainer != null) {
+            MobileIosSettings.render(a, contentContainer, currentSite, this, slideDirection);
+        }
     }
 
     @SuppressWarnings("unused")

@@ -1217,10 +1217,15 @@ public final class MainActivity extends Activity {
             }
         }
         if (current != null && current.home) {
-            if (!isTvDevice() && MobileShell.activeTab == 4 && MobileShell.settingsSubPage != 0) {
-                MobileShell.settingsSubPage = 0;
-                MobileShell.show(this);
-                return;
+            if (!isTvDevice() && MobileShell.activeTab == 4) {
+                if (MobileIosSettings.navigateBack(this)) {
+                    return;
+                }
+                if (MobileShell.settingsSubPage != 0) {
+                    MobileShell.settingsSubPage = 0;
+                    MobileShell.show(this);
+                    return;
+                }
             }
             if (!isTvDevice() && !back.isEmpty()) {
                 capture();

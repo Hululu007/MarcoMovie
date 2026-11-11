@@ -249,6 +249,40 @@ public final class CompatChecks {
                         .getString("url")
                         .endsWith("/caption.srt"),
                 "cloud subs alias preserves external captions");
+        Cms.Episode cloudEp = new Cms.Episode();
+        cloudEp.name = "第01集";
+        JSONObject cloudSameTier =
+                new JSONObject()
+                        .put(
+                                "url",
+                                new JSONArray()
+                                        .put("多线程原画")
+                                        .put("http://127.0.0.1:9978/proxy?do=quark&id=1")
+                                        .put("原画")
+                                        .put("https://drive-pc.quark.cn/file/ep01"));
+        Cms.Episode preferredDirect = MediaOptions.episode(site, cloudEp, cloudSameTier);
+        check(
+                "https://drive-pc.quark.cn/file/ep01".equals(preferredDirect.url)
+                        && preferredDirect
+                                .media
+                                .getJSONArray("qualities")
+                                .getJSONObject(1)
+                                .getString("url")
+                                .startsWith("http://127.0.0.1:9978/proxy"),
+                "direct cloud original stream is preferred over loopback proxy with proxy retained as fallback");
+        JSONObject cloudLowerTier =
+                new JSONObject()
+                        .put(
+                                "url",
+                                new JSONArray()
+                                        .put("原画")
+                                        .put("http://127.0.0.1:9978/proxy?do=quark&id=2")
+                                        .put("普画")
+                                        .put("https://drive-pc.quark.cn/transcode/720.m3u8"));
+        Cms.Episode keptRaw = MediaOptions.episode(site, cloudEp, cloudLowerTier);
+        check(
+                keptRaw.url.startsWith("http://127.0.0.1:9978/proxy"),
+                "4K original stream via proxy is not downgraded to lower transcode tier");
         String history = "[]";
         for (int n = 0; n < 65; n++) {
             WatchHistory.Entry e = new WatchHistory.Entry();

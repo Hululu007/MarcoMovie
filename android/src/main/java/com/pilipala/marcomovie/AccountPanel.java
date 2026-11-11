@@ -83,7 +83,7 @@ final class AccountPanel {
                             + "请在「设置 → 订阅与账号」导入带有配置中心或网盘源的订阅包后，即可在此统一扫码登录夸克、UC、百度、阿里、115 等网盘。");
             return;
         }
-        showMobileBottomSheet(a, configSite, hasCatPaw);
+        showMobileCenteredDialog(a, configSite, hasCatPaw);
     }
 
     private static void showTvDialog(final MainActivity a, final View anchor) {
@@ -237,25 +237,36 @@ final class AccountPanel {
                 });
     }
 
-    private static void showMobileBottomSheet(
+    private static void runSafeAccountAction(final MainActivity a, final String action) {
+        try {
+            CspEngine.syncAllPluginActivities(a);
+            PluginDialogStyler.watch(a);
+            new SettingsScreen(a).accountAction(action);
+        } catch (Throwable t) {
+            AppLog.w("AccountPanel", "accountAction failed: " + action, t);
+            a.notice(a.message(t));
+        }
+    }
+
+    private static void showMobileCenteredDialog(
             final MainActivity a, final Cms.Site configSite, boolean hasCatPaw) {
         final Dialog sheet = new Dialog(a);
         a.accountDialog = sheet;
         sheet.requestWindowFeature(Window.FEATURE_NO_TITLE);
         sheet.setOnDismissListener(d -> a.accountDialog = null);
 
+        final int dialogWidth = Math.min(a.windowWidth() - a.dp(32), a.dp(410));
+
         LinearLayout card = a.vertical();
         card.setTag("mobile-drawer");
-        card.setPadding(a.dp(18), a.dp(12), a.dp(18), a.dp(22) + a.navigationBarHeight());
-        a.glass(card, 28);
-
-        // Top grabber
-        View grabber = new View(a);
-        grabber.setBackground(a.bg(0x45ffffff, 999));
-        LinearLayout.LayoutParams grabLp = new LinearLayout.LayoutParams(a.dp(36), a.dp(4));
-        grabLp.gravity = Gravity.CENTER_HORIZONTAL;
-        grabLp.bottomMargin = a.dp(12);
-        card.addView(grabber, grabLp);
+        card.setPadding(a.dp(20), a.dp(18), a.dp(20), a.dp(14));
+        GradientDrawable cardBg =
+                new GradientDrawable(
+                        GradientDrawable.Orientation.TOP_BOTTOM,
+                        new int[] {0xf41c2421, 0xf8111715});
+        cardBg.setCornerRadius(a.dp(28));
+        cardBg.setStroke(Math.max(1, a.dp(1)), 0x36ffffff);
+        card.setBackground(cardBg);
 
         // Header row: Title + circular close button
         LinearLayout header = a.row();
@@ -280,11 +291,7 @@ final class AccountPanel {
         subTv.setPadding(a.dp(2), a.dp(6), a.dp(2), a.dp(14));
         card.addView(subTv, new LinearLayout.LayoutParams(-1, -2));
 
-        ScrollView sv = new ScrollView(a);
-        sv.setVerticalScrollBarEnabled(false);
         LinearLayout list = a.vertical();
-        sv.addView(list, new ScrollView.LayoutParams(-1, -2));
-        card.addView(sv, new LinearLayout.LayoutParams(-1, -2));
 
         if (configSite != null || hasCatPaw) {
             list.addView(
@@ -297,8 +304,7 @@ final class AccountPanel {
                             () -> {
                                 sheet.dismiss();
                                 a.toast("正在调起云盘授权面板…");
-                                PluginDialogStyler.watch(a);
-                                new SettingsScreen(a).accountAction("LoginShow");
+                                runSafeAccountAction(a, "LoginShow");
                             }));
 
             list.addView(
@@ -311,8 +317,7 @@ final class AccountPanel {
                             () -> {
                                 sheet.dismiss();
                                 a.toast("正在打开凭据推送面板…");
-                                PluginDialogStyler.watch(a);
-                                new SettingsScreen(a).accountAction("pushCkShow");
+                                runSafeAccountAction(a, "pushCkShow");
                             }));
 
             list.addView(
@@ -324,8 +329,7 @@ final class AccountPanel {
                             "调整播放详情页默认首选的云盘与原画线路排序",
                             () -> {
                                 sheet.dismiss();
-                                PluginDialogStyler.watch(a);
-                                new SettingsScreen(a).accountAction("panSortShow");
+                                runSafeAccountAction(a, "panSortShow");
                             }));
 
             list.addView(
@@ -337,8 +341,7 @@ final class AccountPanel {
                             "自定义多网盘聚合检索时的画质与网盘展示先后",
                             () -> {
                                 sheet.dismiss();
-                                PluginDialogStyler.watch(a);
-                                new SettingsScreen(a).accountAction("panSourceSortShow");
+                                runSafeAccountAction(a, "panSourceSortShow");
                             }));
         }
 
@@ -356,20 +359,44 @@ final class AccountPanel {
                             }));
         }
 
+        int maxScrollH = Math.max(a.dp(200), Math.round(a.windowHeight() * 0.62f));
+        list.measure(
+                View.MeasureSpec.makeMeasureSpec(dialogWidth - a.dp(40), View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        ScrollView sv = new ScrollView(a);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.addView(list, new ScrollView.LayoutParams(-1, -2));
+        card.addView(
+                sv,
+                new LinearLayout.LayoutParams(
+                        -1, Math.min(maxScrollH, Math.max(a.dp(60), list.getMeasuredHeight()))));
+
         sheet.setContentView(card);
         Window win = sheet.getWindow();
         if (win != null) {
             win.getDecorView().setTag("app-dialog");
             win.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             WindowManager.LayoutParams wlp = win.getAttributes();
-            wlp.width = WindowManager.LayoutParams.MATCH_PARENT;
+            wlp.width = dialogWidth;
             wlp.height = WindowManager.LayoutParams.WRAP_CONTENT;
-            wlp.gravity = Gravity.BOTTOM;
-            wlp.dimAmount = 0.62f;
+            wlp.gravity = Gravity.CENTER;
+            wlp.dimAmount = 0.64f;
             win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
             win.setAttributes(wlp);
         }
         sheet.show();
+        if (!a.reduced) {
+            card.setScaleX(0.95f);
+            card.setScaleY(0.95f);
+            card.setAlpha(0f);
+            card.animate()
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .alpha(1f)
+                    .setDuration(165)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                    .start();
+        }
     }
 
     private static View buildCapsuleItem(

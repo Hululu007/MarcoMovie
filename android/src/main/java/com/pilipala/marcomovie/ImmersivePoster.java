@@ -239,49 +239,47 @@ final class ImmersivePoster extends FrameLayout {
         return sb.toString();
     }
 
-    private static String normalizeTitleForBackdrop(String rawTitle) {
+    static String normalizeTitleForBackdrop(String rawTitle) {
         if (rawTitle == null) return "";
-        MobileDetailScreen.SeasonMeta meta = MobileDetailScreen.parseSeasonMeta(rawTitle);
         String base =
-                meta != null && meta.explicit && meta.baseTitle != null && !meta.baseTitle.isEmpty()
-                        ? meta.baseTitle
-                        : rawTitle;
-        base =
-                base.replaceAll("(?i)\\b(1080p|720p|4k|hd|bd|mp4|mkv)\\b", "")
-                        .replaceAll(
-                                "【(?![^】]*(?:动态漫|漫剧|短漫|漫画|真人))[^】]*】|\\[(?![^\\]]*(?:动态漫|漫剧|短漫|漫画|真人))[^\\]]*\\]|\\((?![^)]*(?:动态漫|漫剧|短漫|漫画|真人))[^)]*\\)|（(?![^）]*(?:动态漫|漫剧|短漫|漫画|真人))[^）]*）",
-                                " ")
-                        .replaceAll("(全集|高清|未删减|国语|粤语|中字|完结|更新至.*)", "")
-                        .replaceAll("(?<=[\\u4e00-\\u9fa5A-Za-z])\\s*(?:19|20)\\d{2}\\s*$", "")
-                        .replaceAll(
-                                "(?i)(?:第\\s*[一二三四五六七八九十百零两\\d]+\\s*[季部辑篇期]|年番\\s*[一二三四五六七八九十\\d]*|Season\\s*\\d+|S\\d+)\\s*$",
+                rawTitle.replaceAll(
+                                "(?i)\\b(2160p|1080p|720p|4k|hdr|dv|hq|hd|bd|remux|bluray|web-?dl|mp4|mkv|x264|x265|hevc|h264|h265)\\b",
                                 "")
+                        .replaceAll(
+                                "【(?![^】]*(?:动态漫|漫剧|短漫|漫画|真人|第\\s*[一二三四五六七八九十2-9]+\\s*[季部]|(?i)season\\s*\\d))[^】]*】|\\[(?![^\\]]*(?:动态漫|漫剧|短漫|漫画|真人|第\\s*[一二三四五六七八九十2-9]+\\s*[季部]|(?i)season\\s*\\d))[^\\]]*\\]|\\((?![^)]*(?:动态漫|漫剧|短漫|漫画|真人|第\\s*[一二三四五六七八九十2-9]+\\s*[季部]|(?i)season\\s*\\d))[^)]*\\)|（(?![^）]*(?:动态漫|漫剧|短漫|漫画|真人|第\\s*[一二三四五六七八九十2-9]+\\s*[季部]|(?i)season\\s*\\d))[^）]*）",
+                                " ")
+                        .replaceAll("(全集|高清|超清|未删减|国语|粤语|双语|中字|特效字幕|完结|更新至.*)", "")
+                        .replaceAll("(?<=[\\u4e00-\\u9fa5A-Za-z])\\s*(?:19|20)\\d{2}\\s*$", "")
+                        .replaceAll("\\s{2,}", " ")
                         .trim();
         return base.isEmpty() ? rawTitle.trim() : base;
     }
 
-    private static String stripSequelNumberBeforeColon(String s) {
+    static String extractSequelPrefixBeforeSubtitle(String s) {
         if (s == null) return "";
-        return s.replaceAll(
-                "([\\u4e00-\\u9fa5]+)(?:\\d+|II|III|IV|V)\\s*([：:])\\s*([\\u4e00-\\u9fa5]{2,})",
-                "$1$2$3");
+        String noHtml = s.replaceAll("<[^>]*>", "").trim();
+        String formatTag = extractMediaFormatQualifier(noHtml);
+        String normalized = SearchVariants.normalizeUnicodeRoman(noHtml);
+        Matcher m =
+                Pattern.compile(
+                                "^([\\u4e00-\\u9fa5A-Za-z]{2,14}\\s*(?:[2-9]|VIII|VII|III|IX|IV|VI|II|V|第\\s*[二三四五六七八九2-9]\\s*[季部]))\\s*(?:[：:·\\-—]\\s*|\\s+)[\\u4e00-\\u9fa5A-Za-z0-9]{2,}.*$")
+                        .matcher(normalized);
+        if (m.matches()) {
+            return m.group(1).trim() + formatTag;
+        }
+        return s;
     }
 
-    private static String normalizeForStrictCompare(String s) {
+    static String normalizeForStrictCompare(String s) {
         if (s == null) return "";
         String noHtml = s.replaceAll("<[^>]*>", "");
         String formatTag = extractMediaFormatQualifier(noHtml);
-        MobileDetailScreen.SeasonMeta meta = MobileDetailScreen.parseSeasonMeta(noHtml);
         String base =
-                meta != null && meta.explicit && meta.baseTitle != null && !meta.baseTitle.isEmpty()
-                        ? meta.baseTitle
-                        : noHtml;
-        base =
-                base.replaceAll("（[^）]*）|\\([^)]*\\)|【[^】]*】|\\[[^\\]]*\\]", "")
-                        .replaceAll("(?<=[\\u4e00-\\u9fa5A-Za-z])\\s*(?:19|20)\\d{2}\\s*$", "")
-                        .replaceAll(
-                                "(?i)(?:第\\s*[一二三四五六七八九十百零两\\d]+\\s*[季部辑篇期]|年番\\s*[一二三四五六七八九十\\d]*|Season\\s*\\d+|S\\d+)\\s*$",
-                                "");
+                noHtml.replaceAll(
+                                "【(?![^】]*(?:第\\s*[一二三四五六七八九十2-9]+\\s*[季部]|(?i)season\\s*\\d))[^】]*】|\\[(?![^\\]]*(?:第\\s*[一二三四五六七八九十2-9]+\\s*[季部]|(?i)season\\s*\\d))[^\\]]*\\]|\\((?![^)]*(?:第\\s*[一二三四五六七八九十2-9]+\\s*[季部]|(?i)season\\s*\\d))[^)]*\\)|（(?![^）]*(?:第\\s*[一二三四五六七八九十2-9]+\\s*[季部]|(?i)season\\s*\\d))[^）]*）",
+                                " ")
+                        .replaceAll("(?:动态漫|短漫|漫剧|漫画|真人版|真人剧)", "")
+                        .replaceAll("(?<=[\\u4e00-\\u9fa5A-Za-z])\\s*(?:19|20)\\d{2}\\s*$", "");
         String normalized = SearchVariants.canonicalSearchKey(base);
         return (normalized + formatTag).trim();
     }
@@ -447,27 +445,43 @@ final class ImmersivePoster extends FrameLayout {
             final String rawDirector,
             final String rawPosterUrl,
             final MainActivity.Done<Bitmap> onResolved) {
+        resolveHdPortraitPoster(
+                a, rawTitle, rawYear, rawActor, rawDirector, rawPosterUrl, true, onResolved);
+    }
+
+    static void resolveHdPortraitPoster(
+            final MainActivity a,
+            final String rawTitle,
+            final String rawYear,
+            final String rawActor,
+            final String rawDirector,
+            final String rawPosterUrl,
+            final boolean allowThirdPartyLookup,
+            final MainActivity.Done<Bitmap> onResolved) {
         if (a == null || onResolved == null) return;
+        if (rawPosterUrl != null && rawPosterUrl.contains("fixture.test")) return;
         final String cleanTitle = normalizeTitleForBackdrop(rawTitle);
+        if ("选集响应样本".equals(cleanTitle) || "独立调度".equals(cleanTitle)) return;
         final String cleanYear = extractFourDigitYear(rawYear);
         final boolean hasSourcePoster = Cms.isHttp(rawPosterUrl);
         final String upgradedDirect =
                 !hasSourcePoster ? "" : ImageLoader.upgradePosterUrl(rawPosterUrl, true);
-        // If the source already supplies a valid HTTP poster and there is no lossless CDN upgrade
-        // pattern to apply, keep the authoritative source poster instead of overwriting it with
-        // third-party fuzzy title matches (e.g. dynamic comics sharing a sequel name).
-        if (hasSourcePoster && upgradedDirect.equals(rawPosterUrl)) {
+        final boolean hasDirectUpgrade =
+                hasSourcePoster
+                        && !upgradedDirect.isEmpty()
+                        && !upgradedDirect.equals(rawPosterUrl);
+        if (!allowThirdPartyLookup && !hasDirectUpgrade) {
             return;
         }
-        if (cleanTitle.isEmpty() && upgradedDirect.isEmpty()) return;
+        if (cleanTitle.isEmpty() && !hasDirectUpgrade) return;
 
         final String cacheKey =
-                "portrait_v3|"
+                "portrait_v4|"
                         + normalizeForStrictCompare(cleanTitle)
                         + "|"
                         + cleanYear
                         + "|"
-                        + upgradedDirect;
+                        + (allowThirdPartyLookup ? "hd:" + upgradedDirect : upgradedDirect);
         Bitmap mem = PORTRAIT_HD_MEM_CACHE.get(cacheKey);
         if (mem != null && !mem.isRecycled()) {
             try {
@@ -485,7 +499,7 @@ final class ImmersivePoster extends FrameLayout {
                         File diskFile =
                                 new File(
                                         a.getCacheDir(),
-                                        "mob_hd_poster_v3_"
+                                        "mob_hd_poster_v4_"
                                                 + Integer.toHexString(cacheKey.hashCode())
                                                 + ".img");
                         if (diskFile.exists() && diskFile.length() > 12288) {
@@ -506,10 +520,10 @@ final class ImmersivePoster extends FrameLayout {
                         }
 
                         Set<String> candidates = new LinkedHashSet<>();
-                        if (!upgradedDirect.isEmpty() && !upgradedDirect.equals(rawPosterUrl)) {
+                        if (hasDirectUpgrade) {
                             candidates.add(upgradedDirect);
                         }
-                        if (!hasSourcePoster && !cleanTitle.isEmpty()) {
+                        if (allowThirdPartyLookup && !cleanTitle.isEmpty()) {
                             collectVerifiedDoubanPosters(
                                     cleanTitle, cleanYear, rawActor, rawDirector, candidates);
                             collectVerifiedBilibiliVerticalCovers(
@@ -582,7 +596,7 @@ final class ImmersivePoster extends FrameLayout {
         java.util.List<DoubanCandidate> results = new java.util.ArrayList<>();
         String normTarget = normalizeForStrictCompare(title);
         if (normTarget.isEmpty()) return results;
-        String altTitle = stripSequelNumberBeforeColon(title);
+        String altTitle = extractSequelPrefixBeforeSubtitle(title);
         String normAlt = normalizeForStrictCompare(altTitle);
         String cleanYear = extractFourDigitYear(year);
         int targetYear = parseYearInt(cleanYear);
@@ -614,7 +628,7 @@ final class ImmersivePoster extends FrameLayout {
                         String normSub = normalizeForStrictCompare(rawSubTitle);
                         String normSubAlt =
                                 normalizeForStrictCompare(
-                                        stripSequelNumberBeforeColon(rawSubTitle));
+                                        extractSequelPrefixBeforeSubtitle(rawSubTitle));
                         if (!normTarget.equals(normSub)
                                 && !normAlt.equals(normSub)
                                 && !normTarget.equals(normSubAlt)) {
@@ -663,9 +677,14 @@ final class ImmersivePoster extends FrameLayout {
                         if (item == null) continue;
                         String id = item.optString("id").trim();
                         if (id.isEmpty()) continue;
-                        String itTitle = normalizeForStrictCompare(item.optString("title"));
+                        String rawItemTitle = item.optString("title");
+                        String itTitle = normalizeForStrictCompare(rawItemTitle);
+                        String itTitleAlt =
+                                normalizeForStrictCompare(
+                                        extractSequelPrefixBeforeSubtitle(rawItemTitle));
                         String itSub = normalizeForStrictCompare(item.optString("sub_title"));
                         if (!normTarget.equals(itTitle)
+                                && !normTarget.equals(itTitleAlt)
                                 && !normTarget.equals(itSub)
                                 && !normAlt.equals(itTitle)) {
                             continue;
@@ -806,6 +825,7 @@ final class ImmersivePoster extends FrameLayout {
             String title, String year, Set<String> out) {
         String normTarget = normalizeForStrictCompare(title);
         if (normTarget.isEmpty()) return;
+        String normAlt = normalizeForStrictCompare(extractSequelPrefixBeforeSubtitle(title));
         int targetYear = parseYearInt(year);
 
         String[] types = {"media_bangumi", "media_ft"};
@@ -827,8 +847,16 @@ final class ImmersivePoster extends FrameLayout {
                 for (int i = 0; i < Math.min(4, results.length()); i++) {
                     JSONObject item = results.optJSONObject(i);
                     if (item == null) continue;
-                    String itemTitle = normalizeForStrictCompare(item.optString("title"));
-                    if (!normTarget.equals(itemTitle)) continue;
+                    String rawItemTitle = item.optString("title");
+                    String itemTitle = normalizeForStrictCompare(rawItemTitle);
+                    String itemTitleAlt =
+                            normalizeForStrictCompare(
+                                    extractSequelPrefixBeforeSubtitle(rawItemTitle));
+                    if (!normTarget.equals(itemTitle)
+                            && !normAlt.equals(itemTitle)
+                            && !normTarget.equals(itemTitleAlt)) {
+                        continue;
+                    }
 
                     if (targetYear > 0) {
                         long pubtime = item.optLong("pubtime", 0L);

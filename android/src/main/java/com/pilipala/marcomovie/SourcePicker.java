@@ -416,6 +416,7 @@ final class SourcePicker {
             window.setLayout(panelWidth, -2);
             window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
             WindowManager.LayoutParams params = window.getAttributes();
+            params.gravity = Gravity.CENTER;
             params.dimAmount = .65f;
             window.setAttributes(params);
         }

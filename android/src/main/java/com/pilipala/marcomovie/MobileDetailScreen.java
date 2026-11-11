@@ -452,6 +452,7 @@ final class MobileDetailScreen {
         private final Runnable onLoaded;
         final int targetW;
         final int targetH;
+        private Bitmap lockedHd;
 
         PosterHookImageView(MainActivity a, PortraitBackdropView target, Runnable onLoaded) {
             super(a);
@@ -464,8 +465,22 @@ final class MobileDetailScreen {
             layout(0, 0, targetW, targetH);
         }
 
+        void setHdBitmap(Bitmap hdBmp) {
+            if (hdBmp == null || hdBmp.isRecycled()) return;
+            this.lockedHd = hdBmp;
+            super.setImageBitmap(hdBmp);
+            target.setPosterBitmap(hdBmp, onLoaded);
+        }
+
+        void resetHdLock() {
+            this.lockedHd = null;
+        }
+
         @Override
         public void setImageBitmap(Bitmap bm) {
+            if (lockedHd != null && !lockedHd.isRecycled() && bm != lockedHd) {
+                return;
+            }
             super.setImageBitmap(bm);
             target.setPosterBitmap(bm, onLoaded);
         }
@@ -539,6 +554,10 @@ final class MobileDetailScreen {
         a.clearPlaybackLoading();
         a.cancelArtwork();
         a.cancelPageRequests();
+        if (MobileShell.activeSearchCoordinator != null) {
+            MobileShell.activeSearchCoordinator.close();
+            MobileShell.activeSearchCoordinator = null;
+        }
         if (a.current != null) a.current.home = false;
         a.stopWeb();
         a.stopMagnet();
@@ -589,8 +608,9 @@ final class MobileDetailScreen {
                 listing.actor,
                 listing.director,
                 listing.poster,
+                !SearchVariants.isComicOrShortDrama(listing, s.name),
                 hdBmp -> {
-                    posterHook.setImageBitmap(hdBmp);
+                    posterHook.setHdBitmap(hdBmp);
                     refreshEpisodeStillBitmaps(a.root, hdBmp);
                 });
 
@@ -791,6 +811,9 @@ final class MobileDetailScreen {
                     if (v.poster == null || v.poster.isEmpty()) v.poster = listing.poster;
                     if (v.title == null || v.title.isEmpty()) v.title = listing.title;
                     titleView.setText(v.title);
+                    if (!Objects.equals(v.title, listing.title)) {
+                        posterHook.resetHdLock();
+                    }
                     if (!Objects.equals(v.poster, listing.poster)
                             && v.poster != null
                             && !v.poster.isEmpty()) {
@@ -803,8 +826,9 @@ final class MobileDetailScreen {
                             v.actor,
                             v.director,
                             v.poster,
+                            !SearchVariants.isComicOrShortDrama(v, s.name),
                             hdBmp -> {
-                                posterHook.setImageBitmap(hdBmp);
+                                posterHook.setHdBitmap(hdBmp);
                                 refreshEpisodeStillBitmaps(a.root, hdBmp);
                             });
                     lowerBody.removeView(loadingState);
@@ -1545,17 +1569,16 @@ final class MobileDetailScreen {
         final Dialog dialog = new Dialog(a);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
 
+        int dialogWidth = Math.min(a.windowWidth() - a.dp(28), a.dp(420));
         LinearLayout sheet = a.vertical();
-        int navBottom = a.navigationBarHeight();
-        sheet.setPadding(a.dp(18), a.dp(12), a.dp(18), a.dp(20) + navBottom);
-        a.glass(sheet, 28);
-
-        View grabber = new View(a);
-        grabber.setBackground(a.bg(0x45ffffff, 999));
-        LinearLayout.LayoutParams grabLp = new LinearLayout.LayoutParams(a.dp(36), a.dp(4));
-        grabLp.gravity = Gravity.CENTER_HORIZONTAL;
-        grabLp.bottomMargin = a.dp(12);
-        sheet.addView(grabber, grabLp);
+        sheet.setPadding(a.dp(18), a.dp(18), a.dp(18), a.dp(18));
+        GradientDrawable cardBg =
+                new GradientDrawable(
+                        GradientDrawable.Orientation.TOP_BOTTOM,
+                        new int[] {0xf41c2421, 0xf8111715});
+        cardBg.setCornerRadius(a.dp(28));
+        cardBg.setStroke(Math.max(1, a.dp(1)), 0x36ffffff);
+        sheet.setBackground(cardBg);
 
         LinearLayout header = a.row();
         header.setGravity(Gravity.CENTER_VERTICAL);
@@ -1572,7 +1595,7 @@ final class MobileDetailScreen {
         closeBtn.setOnClickListener(v -> dialog.dismiss());
         header.addView(closeBtn, new LinearLayout.LayoutParams(a.dp(30), a.dp(30)));
         sheet.addView(header, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(sheet, 12);
+        a.gap(sheet, 14);
 
         ScrollView sv = new ScrollView(a);
         sv.setVerticalScrollBarEnabled(false);
@@ -1582,8 +1605,12 @@ final class MobileDetailScreen {
         int maxSheetBodyH =
                 Math.min(
                         a.dp(460),
-                        (int) (a.getResources().getDisplayMetrics().heightPixels * 0.62f));
-        sheet.addView(sv, new LinearLayout.LayoutParams(-1, maxSheetBodyH));
+                        (int) (a.getResources().getDisplayMetrics().heightPixels * 0.60f));
+        int rows = (total + 2) / 3;
+        int estimatedH = rows * a.dp(50) + a.dp(12);
+        sheet.addView(
+                sv,
+                new LinearLayout.LayoutParams(-1, estimatedH > maxSheetBodyH ? maxSheetBodyH : -2));
 
         int cols = 3;
         LinearLayout currentRow = null;
@@ -1632,14 +1659,20 @@ final class MobileDetailScreen {
             win.getDecorView().setTag("app-dialog");
             win.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             WindowManager.LayoutParams wlp = win.getAttributes();
-            wlp.width = WindowManager.LayoutParams.MATCH_PARENT;
+            wlp.width = dialogWidth;
             wlp.height = WindowManager.LayoutParams.WRAP_CONTENT;
-            wlp.gravity = Gravity.BOTTOM;
+            wlp.gravity = Gravity.CENTER;
             wlp.dimAmount = 0.62f;
             win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
             win.setAttributes(wlp);
         }
         dialog.show();
+        if (!a.reduced) {
+            sheet.setScaleX(0.95f);
+            sheet.setScaleY(0.95f);
+            sheet.setAlpha(0f);
+            sheet.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(180).start();
+        }
     }
 
     private static void renderSeasonStrip(
@@ -1765,7 +1798,7 @@ final class MobileDetailScreen {
 
         Matcher m3 =
                 Pattern.compile(
-                                "^([\\u4e00-\\u9fa5A-Za-z][\\u4e00-\\u9fa5A-Za-z0-9·\\s]{1,20}?)\\s*(?:[（(\\[【·\\-]\\s*)?(20[123]\\d)\\s*[季期年]?(?:\\s*[)）\\]】])?\\s*$")
+                                "^([\\u4e00-\\u9fa5A-Za-z][\\u4e00-\\u9fa5A-Za-z0-9·\\s]{1,20}?)\\s*(?:[（(\\[【·\\-]\\s*)?(20[123]\\d)\\s*[季期](?:\\s*[)）\\]】])?\\s*$")
                         .matcher(t);
         if (m3.matches()) {
             String base = m3.group(1).trim();
@@ -1838,6 +1871,7 @@ final class MobileDetailScreen {
             final WatchHistory.Entry remembered,
             final Map<Integer, Cms.Video> bySeason,
             final Map<Integer, String> labels) {
+        if (site == null || !site.supported()) return;
         final SeasonMeta curMeta = parseSeasonMeta(currentVideo.title);
         if (!curMeta.explicit) return;
         final String baseKey = normalizeBaseKey(curMeta.baseTitle);

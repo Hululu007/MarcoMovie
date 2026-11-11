@@ -20,12 +20,12 @@ import android.widget.Button;
 import android.widget.CheckedTextView;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import com.pilipala.glass.GlassworkSurface;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -37,15 +37,19 @@ import java.util.WeakHashMap;
 /**
  * Runtime Liquid Glass theme layer for third-party spider / ConfigCenter dialogs (e.g. Pan.java
  * LoginShow, QR scan dialogs, Cookie prompts, and netdisk priority pickers). Styles Android host
- * views without modifying or unwrapping any plugin binary.
+ * views without modifying or unwrapping any plugin binary, and never mutates view tags.
  */
 final class PluginDialogStyler {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final Set<View> STYLED_DECORS =
             Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
+    private static final Set<View> STYLED_CARD_ROOTS =
+            Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
     private static final Set<View> STYLED_DRIVE_ROWS =
             Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
-    private static final int[] WATCH_DELAYS_MS = {0, 45, 120, 260, 520, 950, 1600};
+    private static final Set<View> STYLED_LIST_VIEWS =
+            Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
+    private static final int[] WATCH_DELAYS_MS = {0, 45, 120, 260, 520, 950, 1600, 2400};
 
     private PluginDialogStyler() {}
 
@@ -63,27 +67,31 @@ final class PluginDialogStyler {
     }
 
     static void scanAndStyleWindows(final MainActivity a) {
-        if (a == null || a.isFinishing()) return;
-        View activityDecor = a.getWindow() != null ? a.getWindow().getDecorView() : null;
-        List<View> views = getGlobalWindowViews();
-        for (View root : views) {
-            if (root == null || root == activityDecor || !(root instanceof ViewGroup)) continue;
-            if (isAppOwnedWindow(root)) continue;
-            Context ctx = root.getContext();
-            if (!belongsToApp(ctx, a)) continue;
-            ViewGroup.LayoutParams rawLp = root.getLayoutParams();
-            if (rawLp instanceof WindowManager.LayoutParams) {
-                WindowManager.LayoutParams wlp = (WindowManager.LayoutParams) rawLp;
-                // Skip Toasts and non-interactive system overlays
-                if (wlp.type == WindowManager.LayoutParams.TYPE_TOAST) continue;
-                if ((wlp.flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) continue;
+        if (a == null || a.isFinishing() || a.isDestroyed()) return;
+        try {
+            View activityDecor = a.getWindow() != null ? a.getWindow().getDecorView() : null;
+            List<View> views = getGlobalWindowViews();
+            for (View root : views) {
+                if (root == null || root == activityDecor || !(root instanceof ViewGroup)) continue;
+                if (isAppOwnedWindow(root)) continue;
+                Context ctx = root.getContext();
+                if (!belongsToApp(ctx, a)) continue;
+                ViewGroup.LayoutParams rawLp = root.getLayoutParams();
+                if (rawLp instanceof WindowManager.LayoutParams) {
+                    WindowManager.LayoutParams wlp = (WindowManager.LayoutParams) rawLp;
+                    // Skip Toasts and non-interactive system overlays
+                    if (wlp.type == WindowManager.LayoutParams.TYPE_TOAST) continue;
+                    if ((wlp.flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) continue;
+                }
+                // Only style dialog-like hierarchies (AlertDialog content or custom spider dialogs)
+                View content = root.findViewById(android.R.id.content);
+                if (!(content instanceof ViewGroup) || ((ViewGroup) content).getChildCount() == 0) {
+                    continue;
+                }
+                stylePluginDecor(a, (ViewGroup) root, (ViewGroup) content);
             }
-            // Only style dialog-like hierarchies (AlertDialog content or custom spider dialogs)
-            View content = root.findViewById(android.R.id.content);
-            if (!(content instanceof ViewGroup) || ((ViewGroup) content).getChildCount() == 0) {
-                continue;
-            }
-            stylePluginDecor(a, (ViewGroup) root, (ViewGroup) content);
+        } catch (Throwable t) {
+            AppLog.w("PluginDialogStyler", "scanAndStyleWindows skipped", t);
         }
     }
 
@@ -155,45 +163,61 @@ final class PluginDialogStyler {
 
     private static void stylePluginDecor(
             final MainActivity a, final ViewGroup decor, final ViewGroup content) {
-        final boolean firstPass = STYLED_DECORS.add(decor);
-        DisplayMetrics dm = a.getResources().getDisplayMetrics();
-        final int maxDialogWidth =
-                a.isTvDevice()
-                        ? Math.min(dm.widthPixels - a.dp(96), a.dp(540))
-                        : Math.min(dm.widthPixels - a.dp(28), a.dp(410));
+        try {
+            final boolean firstPass = STYLED_DECORS.add(decor);
+            DisplayMetrics dm = a.getResources().getDisplayMetrics();
+            final int maxDialogWidth =
+                    a.isTvDevice()
+                            ? Math.min(dm.widthPixels - a.dp(96), a.dp(540))
+                            : Math.min(dm.widthPixels - a.dp(32), a.dp(410));
 
-        if (firstPass) {
-            decor.setBackgroundColor(Color.TRANSPARENT);
-            adjustWindowLayoutParams(a, decor, maxDialogWidth);
+            if (firstPass) {
+                decor.setBackgroundColor(Color.TRANSPARENT);
+                adjustWindowLayoutParams(a, decor, maxDialogWidth, dm.heightPixels);
 
-            // Detect secondary dialogs (e.g. QR login or Cookie dialog opened from LoginShow)
-            if (Build.VERSION.SDK_INT >= 18) {
+                // Detect secondary dialogs (e.g. QR login or Cookie dialog opened from LoginShow)
+                if (Build.VERSION.SDK_INT >= 18) {
+                    decor.getViewTreeObserver()
+                            .addOnWindowFocusChangeListener(
+                                    hasFocus -> {
+                                        try {
+                                            if (!hasFocus) watch(a);
+                                            else
+                                                styleHierarchyPass(
+                                                        a, decor, content, maxDialogWidth);
+                                        } catch (Throwable ignored) {
+                                        }
+                                    });
+                }
                 decor.getViewTreeObserver()
-                        .addOnWindowFocusChangeListener(
-                                hasFocus -> {
-                                    if (!hasFocus) watch(a);
-                                    else styleHierarchyPass(a, decor, content, maxDialogWidth);
-                                });
-            }
-            decor.getViewTreeObserver()
-                    .addOnPreDrawListener(
-                            new ViewTreeObserver.OnPreDrawListener() {
-                                @Override
-                                public boolean onPreDraw() {
-                                    if (!decor.isAttachedToWindow()) {
-                                        decor.getViewTreeObserver().removeOnPreDrawListener(this);
+                        .addOnPreDrawListener(
+                                new ViewTreeObserver.OnPreDrawListener() {
+                                    @Override
+                                    public boolean onPreDraw() {
+                                        try {
+                                            if (!decor.isAttachedToWindow()) {
+                                                decor.getViewTreeObserver()
+                                                        .removeOnPreDrawListener(this);
+                                                return true;
+                                            }
+                                            refreshSpiderButtonStates(a, content);
+                                        } catch (Throwable ignored) {
+                                        }
                                         return true;
                                     }
-                                    refreshSpiderButtonStates(a, content);
-                                    return true;
-                                }
-                            });
-        }
+                                });
+            } else {
+                adjustWindowLayoutParams(a, decor, maxDialogWidth, dm.heightPixels);
+            }
 
-        styleHierarchyPass(a, decor, content, maxDialogWidth);
+            styleHierarchyPass(a, decor, content, maxDialogWidth);
+        } catch (Throwable t) {
+            AppLog.w("PluginDialogStyler", "stylePluginDecor skipped", t);
+        }
     }
 
-    private static void adjustWindowLayoutParams(MainActivity a, ViewGroup decor, int targetWidth) {
+    private static void adjustWindowLayoutParams(
+            MainActivity a, ViewGroup decor, int targetWidth, int screenHeight) {
         try {
             ViewGroup.LayoutParams raw = decor.getLayoutParams();
             if (!(raw instanceof WindowManager.LayoutParams)) return;
@@ -203,13 +227,23 @@ final class PluginDialogStyler {
                 wlp.width = targetWidth;
                 changed = true;
             }
+            int maxHeight = Math.round(screenHeight * 0.82f);
+            if (wlp.height > maxHeight) {
+                wlp.height = maxHeight;
+                changed = true;
+            }
+            if (wlp.gravity != Gravity.CENTER || wlp.x != 0 || wlp.y != 0) {
+                wlp.gravity = Gravity.CENTER;
+                wlp.x = 0;
+                wlp.y = 0;
+                changed = true;
+            }
             if ((wlp.flags & WindowManager.LayoutParams.FLAG_DIM_BEHIND) == 0
                     || wlp.dimAmount < 0.55f) {
                 wlp.flags |= WindowManager.LayoutParams.FLAG_DIM_BEHIND;
                 wlp.dimAmount = 0.66f;
                 changed = true;
             }
-            wlp.gravity = Gravity.CENTER;
             if (changed) {
                 WindowManager wm = (WindowManager) a.getSystemService(Context.WINDOW_SERVICE);
                 if (wm != null) wm.updateViewLayout(decor, wlp);
@@ -224,13 +258,19 @@ final class PluginDialogStyler {
         // shows
         clearBackgroundUpToDecor(content, decor);
 
-        ViewGroup cardRoot = (ViewGroup) content.getChildAt(0);
-        if (cardRoot == null) return;
+        View firstChild = content.getChildAt(0);
+        if (!(firstChild instanceof ViewGroup)) return;
+        ViewGroup cardRoot = (ViewGroup) firstChild;
 
-        if (!Boolean.TRUE.equals(cardRoot.getTag(android.R.id.background))) {
-            a.glass(cardRoot, 26);
+        if (STYLED_CARD_ROOTS.add(cardRoot)) {
+            GradientDrawable glassCard =
+                    new GradientDrawable(
+                            GradientDrawable.Orientation.TOP_BOTTOM,
+                            new int[] {0xf41c2421, 0xf8111715});
+            glassCard.setCornerRadius(a.dp(26));
+            glassCard.setStroke(Math.max(1, a.dp(1)), 0x36ffffff);
+            cardRoot.setBackground(glassCard);
             cardRoot.setPadding(a.dp(18), a.dp(18), a.dp(18), a.dp(14));
-            cardRoot.setTag(android.R.id.background, Boolean.TRUE);
         }
 
         int maxInnerWidth = Math.max(a.dp(240), maxDialogWidth - a.dp(36));
@@ -257,8 +297,10 @@ final class PluginDialogStyler {
 
         // Clamp oversized hardcoded widths (e.g. Pan.java 500dp QR dialog LinearLayout)
         ViewGroup.LayoutParams lp = v.getLayoutParams();
-        if (lp != null && lp.width > maxInnerWidth) {
-            lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+        if (lp != null
+                && lp.width > maxInnerWidth
+                && !(v.getParent() instanceof HorizontalScrollView)) {
+            lp.width = maxInnerWidth;
             v.setLayoutParams(lp);
         }
 
@@ -289,14 +331,11 @@ final class PluginDialogStyler {
             return;
         }
 
-        // Strip stark #FFFFFF / #424242 solid ColorDrawables on intermediate containers
+        // Strip stark #FFFFFF / #424242 backgrounds (ColorDrawable, GradientDrawable, OEM
+        // NinePatch/Inset drawables) on intermediate wrapper containers
         if (v != cardRoot && v instanceof ViewGroup && !(v instanceof ListView)) {
-            Drawable bg = v.getBackground();
-            if (bg instanceof ColorDrawable) {
-                int c = ((ColorDrawable) bg).getColor();
-                if (c != Color.TRANSPARENT) {
-                    v.setBackgroundColor(Color.TRANSPARENT);
-                }
+            if (v.getBackground() != null) {
+                v.setBackgroundColor(Color.TRANSPARENT);
             }
             if (v instanceof ScrollView) {
                 ((ScrollView) v).setVerticalScrollBarEnabled(false);
@@ -367,26 +406,26 @@ final class PluginDialogStyler {
         Button accountBtn = (Button) row.getChildAt(0);
         Button statusBtn = (Button) row.getChildAt(1);
 
-        LinearLayout.LayoutParams leftLp =
-                accountBtn.getLayoutParams() instanceof LinearLayout.LayoutParams
-                        ? (LinearLayout.LayoutParams) accountBtn.getLayoutParams()
-                        : new LinearLayout.LayoutParams(0, a.dp(42), 1f);
-        leftLp.width = 0;
-        leftLp.weight = 1f;
-        leftLp.height = a.dp(42);
-        leftLp.setMargins(0, 0, a.dp(8), 0);
-        accountBtn.setLayoutParams(leftLp);
+        if (accountBtn.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+            LinearLayout.LayoutParams leftLp =
+                    (LinearLayout.LayoutParams) accountBtn.getLayoutParams();
+            leftLp.width = 0;
+            leftLp.weight = 1f;
+            leftLp.height = a.dp(42);
+            leftLp.setMargins(0, 0, a.dp(8), 0);
+            accountBtn.setLayoutParams(leftLp);
+        }
         accountBtn.setPadding(a.dp(12), 0, a.dp(12), 0);
 
-        LinearLayout.LayoutParams rightLp =
-                statusBtn.getLayoutParams() instanceof LinearLayout.LayoutParams
-                        ? (LinearLayout.LayoutParams) statusBtn.getLayoutParams()
-                        : new LinearLayout.LayoutParams(a.dp(78), a.dp(42));
-        rightLp.width = a.dp(78);
-        rightLp.weight = 0f;
-        rightLp.height = a.dp(42);
-        rightLp.setMargins(0, 0, 0, 0);
-        statusBtn.setLayoutParams(rightLp);
+        if (statusBtn.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+            LinearLayout.LayoutParams rightLp =
+                    (LinearLayout.LayoutParams) statusBtn.getLayoutParams();
+            rightLp.width = a.dp(78);
+            rightLp.weight = 0f;
+            rightLp.height = a.dp(42);
+            rightLp.setMargins(0, 0, 0, 0);
+            statusBtn.setLayoutParams(rightLp);
+        }
         statusBtn.setPadding(a.dp(6), 0, a.dp(6), 0);
 
         applySpiderDriveButtonStyle(a, accountBtn, false);
@@ -401,6 +440,11 @@ final class PluginDialogStyler {
                 LinearLayout row = (LinearLayout) child;
                 applySpiderDriveButtonStyle(a, (Button) row.getChildAt(0), false);
                 applySpiderDriveButtonStyle(a, (Button) row.getChildAt(1), true);
+            } else if (child instanceof ListView) {
+                ListView lv = (ListView) child;
+                for (int j = 0; j < lv.getChildCount(); j++) {
+                    styleListItem(a, lv.getChildAt(j));
+                }
             } else if (child instanceof Button) {
                 Button btn = (Button) child;
                 int id = btn.getId();
@@ -614,24 +658,16 @@ final class PluginDialogStyler {
     }
 
     private static void styleListView(final MainActivity a, ListView lv) {
-        lv.setBackgroundColor(Color.TRANSPARENT);
-        lv.setCacheColorHint(Color.TRANSPARENT);
-        lv.setDivider(new ColorDrawable(0x18ffffff));
-        lv.setDividerHeight(1);
-        lv.setSelector(new ColorDrawable(0x1cffffff));
+        if (STYLED_LIST_VIEWS.add(lv)) {
+            lv.setBackgroundColor(Color.TRANSPARENT);
+            lv.setCacheColorHint(Color.TRANSPARENT);
+            lv.setDivider(new ColorDrawable(0x18ffffff));
+            lv.setDividerHeight(1);
+            lv.setSelector(new ColorDrawable(0x1cffffff));
+        }
         for (int i = 0; i < lv.getChildCount(); i++) {
             styleListItem(a, lv.getChildAt(i));
         }
-        lv.setOnHierarchyChangeListener(
-                new ViewGroup.OnHierarchyChangeListener() {
-                    @Override
-                    public void onChildViewAdded(View parent, View child) {
-                        styleListItem(a, child);
-                    }
-
-                    @Override
-                    public void onChildViewRemoved(View parent, View child) {}
-                });
     }
 
     private static void styleListItem(MainActivity a, View child) {

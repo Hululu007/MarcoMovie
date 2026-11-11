@@ -34,7 +34,7 @@ final class SearchVariants {
         List<Cms.Video> get(String term) throws Exception;
     }
 
-    private static String normalizeUnicodeRoman(String s) {
+    static String normalizeUnicodeRoman(String s) {
         if (s == null || s.isEmpty()) return "";
         return s.replace("Ⅷ", "VIII")
                 .replace("Ⅶ", "VII")
@@ -177,6 +177,13 @@ final class SearchVariants {
         for (int i = 2; i < CN_NUM.length; i++) {
             s = s.replaceAll("第\\s*" + CN_NUM[i] + "\\s*[季部]", String.valueOf(i));
         }
+        s = s.replaceAll("第\\s*([2-9])\\s*[季部]", "$1");
+        s =
+                s.replaceAll(
+                        "(?i)(?<=[\\u4e00-\\u9fa5])\\s*(?:season\\s*0*|s0*)([2-9])(?![0-9A-Za-z])",
+                        "$1");
+        s = s.replaceAll("第\\s*[一1]\\s*[季部]", "");
+        s = s.replaceAll("(?i)(?<=[\\u4e00-\\u9fa5])\\s*(?:season\\s*0*1|s0*1)(?![0-9A-Za-z])", "");
         return s.toLowerCase(Locale.ROOT)
                 .replaceAll("[\\s·:：\\-—_（）()【】\\[\\]《》〈〉\"“”'’!！?？,，.。/\\\\]", "");
     }
@@ -248,17 +255,13 @@ final class SearchVariants {
                         }
                     }
                 }
-                if (!merged.isEmpty()) {
-                    if (!hasSequelForms) {
-                        rankVideos(query, merged, "");
-                        return merged;
-                    }
-                    // For sequel-numbered queries (e.g. "斗罗大陆2"), probe at least the primary
-                    // Roman counterpart ("斗罗大陆II") as well, and keep probing up to the 3-attempt
-                    // cap if only comic/short-drama items were returned so far.
-                    if (sequelQueriesDone >= 2 && foundPrimaryMedia) {
-                        break;
-                    }
+                if (!merged.isEmpty() && foundPrimaryMedia) {
+                    rankVideos(query, merged, "");
+                    return merged;
+                }
+                if (!merged.isEmpty() && !hasSequelForms) {
+                    rankVideos(query, merged, "");
+                    return merged;
                 }
             } catch (SearchCoordinator.VerificationRequiredException e) {
                 throw e;

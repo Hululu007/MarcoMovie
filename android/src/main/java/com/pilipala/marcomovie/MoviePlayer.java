@@ -186,8 +186,8 @@ public class MoviePlayer {
                                     * 1000;
                     int minBuffer = Math.min(12000, buffer);
                     int maxBuffer = Math.max(20000, buffer);
-                    int startBufferMs = this.ijkMode ? 500 : 800;
-                    int rebufferMs = this.ijkMode ? 1200 : 1600;
+                    int startBufferMs = this.ijkMode ? 400 : 500;
+                    int rebufferMs = this.ijkMode ? 1000 : 1400;
                     exo =
                             new ExoPlayer.Builder(this.context, renderers)
                                     .setLoadControl(
@@ -545,134 +545,147 @@ public class MoviePlayer {
                     maxKnownDurationMs = 0;
                     prepareStarted = android.os.SystemClock.elapsedRealtime();
                     firstFrameMs = -1;
-                    // Local proxy and signed URLs often have no extension. Inspect a bounded
-                    // response prefix off the UI thread so HLS/DASH uses the correct parser.
+
+                    String declared = MediaOptions.mime(options);
+                    String fullLower = address.toString().toLowerCase(Locale.ROOT);
+                    boolean explicitHls = fullLower.contains(".m3u8");
+                    boolean explicitDash = fullLower.contains(".mpd");
+                    boolean knownContainer =
+                            !explicitHls
+                                    && !explicitDash
+                                    && (epName.contains(".mkv")
+                                            || epName.contains(".mp4")
+                                            || epName.contains(".webm")
+                                            || epName.contains(".avi")
+                                            || epName.contains(".mov")
+                                            || epName.contains(".flv")
+                                            || fullLower.contains(".mkv")
+                                            || fullLower.contains(".mp4")
+                                            || fullLower.contains(".flv")
+                                            || fullLower.contains(".ts"));
+                    boolean cloudOrLocalProxy =
+                            !isLive
+                                    && !explicitHls
+                                    && !explicitDash
+                                    && isCloudDriveOrLocalProxyContainer(address, fullLower);
+                    if (declared != null
+                            || explicitHls
+                            || explicitDash
+                            || knownContainer
+                            || cloudOrLocalProxy) {
+                        String fastMime =
+                                declared != null
+                                        ? declared
+                                        : explicitHls
+                                                ? MimeTypes.APPLICATION_M3U8
+                                                : explicitDash ? MimeTypes.APPLICATION_MPD : null;
+                        startExoPrepare(address, requestHeaders, scope, fastMime, ticket);
+                        return null;
+                    }
+
+                    // Ambiguous extensionless HTTP URLs: inspect a bounded response prefix off the
+                    // UI thread so HLS/DASH uses the right parser without blocking main looper.
                     Thread sniff =
                             new Thread(
                                     () -> {
                                         String mime = null;
                                         try {
-                                            String declared = MediaOptions.mime(options);
-                                            String fullLower =
-                                                    address.toString().toLowerCase(Locale.ROOT);
-                                            boolean knownContainer =
-                                                    !fullLower.contains(".m3u8")
-                                                            && !fullLower.contains(".mpd")
-                                                            && (epName.contains(".mkv")
-                                                                    || epName.contains(".mp4")
-                                                                    || epName.contains(".webm")
-                                                                    || epName.contains(".avi")
-                                                                    || epName.contains(".mov")
-                                                                    || epName.contains(".flv")
-                                                                    || fullLower.contains(".mkv")
-                                                                    || fullLower.contains(".mp4")
-                                                                    || fullLower.contains(".flv")
-                                                                    || fullLower.contains(".ts"));
-                                            if (knownContainer) {
-                                                mime = null;
-                                            } else if (declared != null) {
-                                                mime = declared;
-                                            } else if (isLive && fullLower.contains(".m3u8")) {
-                                                mime = MimeTypes.APPLICATION_M3U8;
-                                            } else if (isLive && fullLower.contains(".mpd")) {
-                                                mime = MimeTypes.APPLICATION_MPD;
-                                            } else {
-                                                mime =
-                                                        scope.call(
-                                                                () ->
-                                                                        sniffMime(
-                                                                                address,
-                                                                                requestHeaders,
-                                                                                scope));
-                                            }
+                                            mime =
+                                                    scope.call(
+                                                            () ->
+                                                                    sniffMime(
+                                                                            address,
+                                                                            requestHeaders,
+                                                                            scope));
                                         } catch (Exception ignored) {
                                         }
                                         if (scope.cancelled) return;
                                         final String resolvedMime = mime;
                                         main.post(
-                                                () -> {
-                                                    if (released
-                                                            || scope.cancelled
-                                                            || ticket != preparation) return;
-                                                    try {
-                                                        String userAgent = "MarcoMovie/0.2.0";
-                                                        for (Map.Entry<String, String> header :
-                                                                requestHeaders.entrySet())
-                                                            if (header.getKey()
-                                                                    .equalsIgnoreCase("User-Agent"))
-                                                                userAgent = header.getValue();
-                                                        DefaultHttpDataSource.Factory http =
-                                                                new DefaultHttpDataSource.Factory()
-                                                                        .setUserAgent(userAgent)
-                                                                        .setDefaultRequestProperties(
-                                                                                requestHeaders)
-                                                                        .setAllowCrossProtocolRedirects(
-                                                                                true)
-                                                                        .setConnectTimeoutMs(
-                                                                                ijkMode
-                                                                                        ? 20000
-                                                                                        : 15000)
-                                                                        .setReadTimeoutMs(
-                                                                                ijkMode
-                                                                                        ? 45000
-                                                                                        : 30000);
-                                                        DefaultDataSource.Factory data =
-                                                                new DefaultDataSource.Factory(
-                                                                        context, http);
-                                                        mediaMime = resolvedMime;
-                                                        androidx.media3.extractor
-                                                                        .DefaultExtractorsFactory
-                                                                extractors =
-                                                                        new androidx.media3
-                                                                                        .extractor
-                                                                                        .DefaultExtractorsFactory()
-                                                                                .setConstantBitrateSeekingEnabled(
-                                                                                        true)
-                                                                                .setTsExtractorTimestampSearchBytes(
-                                                                                        (ijkMode
-                                                                                                        ? 3600
-                                                                                                        : 1500)
-                                                                                                * 188);
-                                                        if (ijkMode) {
-                                                            extractors.setTsExtractorFlags(
-                                                                    androidx.media3.extractor.ts
-                                                                                    .DefaultTsPayloadReaderFactory
-                                                                                    .FLAG_ALLOW_NON_IDR_KEYFRAMES
-                                                                            | androidx.media3
-                                                                                    .extractor.ts
-                                                                                    .DefaultTsPayloadReaderFactory
-                                                                                    .FLAG_DETECT_ACCESS_UNITS
-                                                                            | androidx.media3
-                                                                                    .extractor.ts
-                                                                                    .DefaultTsPayloadReaderFactory
-                                                                                    .FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS
-                                                                            | androidx.media3
-                                                                                    .extractor.ts
-                                                                                    .DefaultTsPayloadReaderFactory
-                                                                                    .FLAG_IGNORE_SPLICE_INFO_STREAM);
-                                                        }
-                                                        mediaSourceFactory =
-                                                                new DefaultMediaSourceFactory(
-                                                                        data, extractors);
-                                                        exo.setMediaSource(playbackSource(address));
-                                                        exo.prepare();
-                                                    } catch (Exception error) {
-                                                        lastError =
-                                                                error.getClass().getSimpleName();
-                                                        if (errorListener != null)
-                                                            errorListener.onError(
-                                                                    MoviePlayer.this,
-                                                                    PlaybackException
-                                                                            .ERROR_CODE_UNSPECIFIED,
-                                                                    0);
-                                                    }
-                                                });
+                                                () ->
+                                                        startExoPrepare(
+                                                                address,
+                                                                requestHeaders,
+                                                                scope,
+                                                                resolvedMime,
+                                                                ticket));
                                     },
                                     "media-type-probe");
                     sniff.setDaemon(true);
                     sniff.start();
                     return null;
                 });
+    }
+
+    private void startExoPrepare(
+            Uri address,
+            Map<String, String> requestHeaders,
+            RequestScope scope,
+            String resolvedMime,
+            int ticket) {
+        if (released || (scope != null && scope.cancelled) || ticket != preparation) return;
+        try {
+            String userAgent = "MarcoMovie/0.2.0";
+            for (Map.Entry<String, String> header : requestHeaders.entrySet())
+                if (header.getKey().equalsIgnoreCase("User-Agent")) userAgent = header.getValue();
+            DefaultHttpDataSource.Factory http =
+                    new DefaultHttpDataSource.Factory()
+                            .setUserAgent(userAgent)
+                            .setDefaultRequestProperties(requestHeaders)
+                            .setAllowCrossProtocolRedirects(true)
+                            .setConnectTimeoutMs(ijkMode ? 20000 : 15000)
+                            .setReadTimeoutMs(ijkMode ? 45000 : 30000);
+            DefaultDataSource.Factory data = new DefaultDataSource.Factory(context, http);
+            mediaMime = resolvedMime;
+            androidx.media3.extractor.DefaultExtractorsFactory extractors =
+                    new androidx.media3.extractor.DefaultExtractorsFactory()
+                            .setConstantBitrateSeekingEnabled(true)
+                            .setTsExtractorTimestampSearchBytes((ijkMode ? 3600 : 1500) * 188);
+            if (ijkMode) {
+                extractors.setTsExtractorFlags(
+                        androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+                                        .FLAG_ALLOW_NON_IDR_KEYFRAMES
+                                | androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+                                        .FLAG_DETECT_ACCESS_UNITS
+                                | androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+                                        .FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS
+                                | androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+                                        .FLAG_IGNORE_SPLICE_INFO_STREAM);
+            }
+            mediaSourceFactory = new DefaultMediaSourceFactory(data, extractors);
+            exo.setMediaSource(playbackSource(address));
+            exo.prepare();
+        } catch (Exception error) {
+            lastError = error.getClass().getSimpleName();
+            if (errorListener != null)
+                errorListener.onError(
+                        MoviePlayer.this, PlaybackException.ERROR_CODE_UNSPECIFIED, 0);
+        }
+    }
+
+    static boolean isCloudDriveOrLocalProxyContainer(Uri address, String fullLower) {
+        if (fullLower == null || fullLower.isEmpty()) return false;
+        if (fullLower.contains("m3u8") || fullLower.contains(".mpd")) return false;
+        String host =
+                address == null || address.getHost() == null
+                        ? ""
+                        : address.getHost().toLowerCase(Locale.ROOT);
+        if (("127.0.0.1".equals(host) || "localhost".equals(host))
+                && fullLower.contains("/proxy")) {
+            return true;
+        }
+        return host.contains("quark.cn")
+                || host.contains("uc.cn")
+                || host.contains("aliyundrive")
+                || host.contains("alipan")
+                || host.contains("baidupcs")
+                || host.contains("pcs.baidu")
+                || host.contains("115.com")
+                || host.contains("115cdn")
+                || host.contains("123pan")
+                || host.contains("189.cn")
+                || host.contains("139.com")
+                || host.contains("xunlei");
     }
 
     private static String sniffMime(
@@ -700,8 +713,8 @@ public class MoviePlayer {
         try {
             connection = (HttpURLConnection) new URL(address.toString()).openConnection();
             RequestScope.attach(connection);
-            connection.setConnectTimeout(2500);
-            connection.setReadTimeout(2500);
+            connection.setConnectTimeout(1200);
+            connection.setReadTimeout(1200);
             connection.setInstanceFollowRedirects(true);
             connection.setRequestProperty("User-Agent", "MarcoMovie/0.2.0");
             connection.setRequestProperty("Range", "bytes=0-" + (PROBE_MAX_BYTES - 1));

@@ -1,6 +1,5 @@
 package com.pilipala.marcomovie;
 
-import android.app.Dialog;
 import android.content.SharedPreferences;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -8,17 +7,14 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.graphics.Typeface;
-import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.text.TextUtils;
 import android.view.Gravity;
-import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.Window;
-import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -32,12 +28,11 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * 1:1 Android Mobile implementation of iOS {@code IosSettingsPage} ({@code ios_settings.dart}):
- * - Large {@code 32sp} "设置" header + version subtitle (5-tap triggers PrivacySpace)
- * - Responsive 1-col / 2-col grid of 6 {@code 36dp}-radius Liquid Glass {@code SettingsCapsule}s
- * - {@code 72%}-height Liquid Glass bottom drawer with breadcrumb {@code AppleCapsuleButton}
- *   navigation, wrapping {@code SettingsChoices} pills, live glass-intensity slider, and full
- *   Android playback / source / cloud / backup capabilities.
+ * Android Mobile 2-Level Liquid Glass Settings architecture aligned with iOS {@code IosSettingsPage}:
+ * - Level 1: Full-screen "设置" page with version subtitle (5-tap PrivacySpace) and 6 {@code 36dp}
+ *   Liquid Glass category capsules
+ * - Level 2: Full-screen secondary settings page (never a popup dialog) with top {@code ‹} back
+ *   navigation, grouped section cards, wrapping {@code SettingsChoices} pills, and live glass slider.
  */
 final class MobileIosSettings {
     private static final int COLOR_PURPLE = 0xffbf5af2;
@@ -65,7 +60,32 @@ final class MobileIosSettings {
     private static final int ICON_BACKUP = 15;
     private static final int ICON_BROOM = 16;
 
+    /** Empty string = Level 1 root page; non-empty = active Level 2 category title. */
+    private static String activeCategoryTitle = "";
+
     private MobileIosSettings() {}
+
+    static boolean hasSubPage() {
+        return activeCategoryTitle != null && !activeCategoryTitle.isEmpty();
+    }
+
+    static void resetToRoot() {
+        activeCategoryTitle = "";
+        MobileShell.settingsSubPage = 0;
+    }
+
+    static boolean navigateBack(MainActivity a) {
+        if (!hasSubPage()) return false;
+        resetToRoot();
+        if (a != null) {
+            if (a.current != null && a.current.mobileHome != null) {
+                a.current.mobileHome.refreshSettingsPage(-1);
+            } else {
+                MobileShell.show(a);
+            }
+        }
+        return true;
+    }
 
     static final class PaneSpec {
         final String title;
@@ -90,119 +110,46 @@ final class MobileIosSettings {
     }
 
     interface PaneBuilder {
-        void build(LinearLayout body, DrawerController ctl);
+        void build(LinearLayout body, PageController ctl);
     }
 
     interface ChoiceAction {
         void onSelect(int index);
     }
 
-    private static final class DrawerController {
+    static final class PageController {
         final MainActivity a;
+        final FrameLayout contentContainer;
+        final Cms.Site currentSite;
         final MobileShell shell;
-        final Dialog dialog;
-        final List<PaneSpec> path = new ArrayList<>();
-        final LinearLayout sheetRoot;
-        final FlowWrapLayout breadcrumbWrap;
-        final ScrollView bodyScroll;
-        final LinearLayout bodyCol;
-        Runnable onRootRefresh;
+        ScrollView activeScroll;
 
-        DrawerController(
+        PageController(
                 MainActivity a,
-                MobileShell shell,
-                Dialog dialog,
-                LinearLayout sheetRoot,
-                FlowWrapLayout breadcrumbWrap,
-                ScrollView bodyScroll,
-                LinearLayout bodyCol,
-                Runnable onRootRefresh) {
+                FrameLayout contentContainer,
+                Cms.Site currentSite,
+                MobileShell shell) {
             this.a = a;
+            this.contentContainer = contentContainer;
+            this.currentSite = currentSite;
             this.shell = shell;
-            this.dialog = dialog;
-            this.sheetRoot = sheetRoot;
-            this.breadcrumbWrap = breadcrumbWrap;
-            this.bodyScroll = bodyScroll;
-            this.bodyCol = bodyCol;
-            this.onRootRefresh = onRootRefresh;
         }
 
-        void push(PaneSpec pane) {
-            path.add(pane);
-            renderCurrent(true);
+        void openSubPage(PaneSpec pane) {
+            activeCategoryTitle = pane.title;
+            MobileShell.settingsSubPage = 1;
+            renderInternal(a, contentContainer, currentSite, shell, 1, 0);
         }
 
-        void popTo(int index) {
-            if (index < 0) {
-                dialog.dismiss();
-                return;
-            }
-            while (path.size() > index + 1) {
-                path.remove(path.size() - 1);
-            }
-            renderCurrent(true);
+        void backToRoot() {
+            resetToRoot();
+            renderInternal(a, contentContainer, currentSite, shell, -1, 0);
         }
 
         void rerenderInPlace() {
-            final int scrollY = bodyScroll.getScrollY();
-            renderCurrent(false);
-            bodyScroll.post(() -> bodyScroll.scrollTo(0, scrollY));
+            final int savedScrollY = activeScroll != null ? activeScroll.getScrollY() : 0;
             if (shell != null) shell.applyAppearancePreferences();
-            if (onRootRefresh != null) onRootRefresh.run();
-        }
-
-        void renderCurrent(boolean resetScroll) {
-            if (path.isEmpty()) return;
-            final PaneSpec current = path.get(path.size() - 1);
-
-            breadcrumbWrap.removeAllViews();
-            // "< 返回" pill
-            breadcrumbWrap.addView(
-                    buildSmallCapsulePill(
-                            a,
-                            "‹ 返回",
-                            false,
-                            () -> {
-                                if (path.size() > 1) popTo(path.size() - 2);
-                                else dialog.dismiss();
-                            }));
-            for (int i = 0; i < path.size(); i++) {
-                final int idx = i;
-                boolean isLast = (i == path.size() - 1);
-                breadcrumbWrap.addView(
-                        buildSmallCapsulePill(
-                                a,
-                                path.get(i).title,
-                                isLast,
-                                () -> {
-                                    if (!isLast) popTo(idx);
-                                }));
-            }
-
-            bodyCol.removeAllViews();
-            if (current.subtitle != null && !current.subtitle.isEmpty()) {
-                TextView sub = a.text(current.subtitle, 13f, 0xffd1d1da);
-                sub.setLineSpacing(a.dp(3), 1f);
-                sub.setPadding(a.dp(4), 0, a.dp(4), a.dp(14));
-                bodyCol.addView(sub, new LinearLayout.LayoutParams(-1, -2));
-            }
-
-            for (final PaneSpec child : current.children) {
-                View cap = buildSettingsCapsule(a, child, () -> push(child));
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-                lp.bottomMargin = a.dp(10);
-                bodyCol.addView(cap, lp);
-            }
-            if (!current.children.isEmpty() && current.builder != null) {
-                a.gap(bodyCol, 8);
-            }
-            if (current.builder != null) {
-                current.builder.build(bodyCol, this);
-            }
-            a.gap(bodyCol, 18);
-            if (resetScroll) {
-                bodyScroll.scrollTo(0, 0);
-            }
+            renderInternal(a, contentContainer, currentSite, shell, 0, savedScrollY);
         }
     }
 
@@ -211,105 +158,228 @@ final class MobileIosSettings {
             final FrameLayout contentContainer,
             final Cms.Site currentSite,
             final MobileShell shell) {
+        render(a, contentContainer, currentSite, shell, 0);
+    }
+
+    static void render(
+            final MainActivity a,
+            final FrameLayout contentContainer,
+            final Cms.Site currentSite,
+            final MobileShell shell,
+            final int slideDirection) {
+        renderInternal(a, contentContainer, currentSite, shell, slideDirection, 0);
+    }
+
+    private static void renderInternal(
+            final MainActivity a,
+            final FrameLayout contentContainer,
+            final Cms.Site currentSite,
+            final MobileShell shell,
+            final int slideDirection,
+            final int restoreScrollY) {
         contentContainer.removeAllViews();
 
-        ScrollView sv = new ScrollView(a);
+        final ScrollView sv = new ScrollView(a);
         sv.setVerticalScrollBarEnabled(false);
         sv.setClipToPadding(false);
         int topInset = getStatusBarHeight(a);
         int bottomDockClearance = a.dp(116) + a.navigationBarHeight();
-        sv.setPadding(a.dp(20), topInset + a.dp(16), a.dp(20), bottomDockClearance);
+        sv.setPadding(a.dp(20), topInset + a.dp(14), a.dp(20), bottomDockClearance);
         contentContainer.addView(sv, new FrameLayout.LayoutParams(-1, -1));
 
         final LinearLayout rootCol = a.vertical();
         sv.addView(rootCol, new ScrollView.LayoutParams(-1, -2));
 
-        // iOS Large Title: '设置' (32sp w700 #FFF5F5F7)
-        TextView largeTitle = a.text("设置", 32f, 0xfff5f5f7);
-        largeTitle.setTypeface(null, Typeface.BOLD);
-        largeTitle.setLetterSpacing(-0.02f);
-        rootCol.addView(largeTitle, new LinearLayout.LayoutParams(-1, -2));
+        final PageController ctl = new PageController(a, contentContainer, currentSite, shell);
+        ctl.activeScroll = sv;
 
-        a.gap(rootCol, 6);
+        List<PaneSpec> pages = buildPages(a, currentSite, shell);
+        PaneSpec activePane = null;
+        if (hasSubPage()) {
+            for (PaneSpec p : pages) {
+                if (p.title.equals(activeCategoryTitle)) {
+                    activePane = p;
+                    break;
+                }
+            }
+            if (activePane == null) {
+                resetToRoot();
+            }
+        }
+        MobileShell.settingsSubPage = activePane != null ? 1 : 0;
 
-        // Version line (13sp #FFD1D1DA; 5 taps unlock/exit PrivacySpace)
-        String verText = "Marco Movie · v" + UpdateManager.installedVersion(a);
-        if (a.privateMode) verText += " · 隐私空间";
-        TextView verLabel = a.text(verText, 13f, a.privateMode ? COLOR_GREEN : 0xffd1d1da);
-        verLabel.setOnClickListener(v -> PrivacySpace.logoTap(a));
-        rootCol.addView(verLabel, new LinearLayout.LayoutParams(-1, -2));
+        if (activePane == null) {
+            // ==================== LEVEL 1: PRIMARY SETTINGS PAGE ====================
+            TextView largeTitle = a.text("设置", 32f, 0xfff5f5f7);
+            largeTitle.setTypeface(null, Typeface.BOLD);
+            largeTitle.setLetterSpacing(-0.02f);
+            rootCol.addView(largeTitle, new LinearLayout.LayoutParams(-1, -2));
 
-        a.gap(rootCol, 24);
+            a.gap(rootCol, 6);
 
-        final LinearLayout gridHolder = a.vertical();
-        rootCol.addView(gridHolder, new LinearLayout.LayoutParams(-1, -2));
+            String verText = "Marco Movie · v" + UpdateManager.installedVersion(a);
+            if (a.privateMode) verText += " · 隐私空间";
+            TextView verLabel = a.text(verText, 13f, a.privateMode ? COLOR_GREEN : 0xffd1d1da);
+            verLabel.setOnClickListener(v -> PrivacySpace.logoTap(a));
+            rootCol.addView(verLabel, new LinearLayout.LayoutParams(-1, -2));
 
-        final Runnable populateCapsules =
-                new Runnable() {
-                    @Override
-                    public void run() {
-                        gridHolder.removeAllViews();
-                        List<PaneSpec> pages = buildPages(a, currentSite, shell);
-                        int widthPx = a.windowWidth();
-                        float density = a.getResources().getDisplayMetrics().density;
-                        boolean twoCols = (widthPx / Math.max(1f, density)) >= 620f;
+            a.gap(rootCol, 22);
 
-                        if (!twoCols) {
-                            for (int i = 0; i < pages.size(); i++) {
-                                final PaneSpec pane = pages.get(i);
-                                View cap =
-                                        buildSettingsCapsule(
-                                                a,
-                                                pane,
-                                                () -> openSettingsDrawer(a, shell, pane, this));
-                                LinearLayout.LayoutParams lp =
-                                        new LinearLayout.LayoutParams(-1, -2);
-                                lp.bottomMargin = a.dp(12);
-                                gridHolder.addView(cap, lp);
-                            }
-                        } else {
-                            for (int i = 0; i < pages.size(); i += 2) {
-                                LinearLayout row = a.row();
-                                row.setGravity(Gravity.TOP);
-                                final PaneSpec leftPane = pages.get(i);
-                                View leftCap =
-                                        buildSettingsCapsule(
-                                                a,
-                                                leftPane,
-                                                () -> openSettingsDrawer(a, shell, leftPane, this));
-                                LinearLayout.LayoutParams leftLp =
-                                        new LinearLayout.LayoutParams(0, -2, 1f);
-                                leftLp.rightMargin = a.dp(7);
-                                row.addView(leftCap, leftLp);
+            int widthPx = a.windowWidth();
+            float density = a.getResources().getDisplayMetrics().density;
+            boolean twoCols = (widthPx / Math.max(1f, density)) >= 620f;
 
-                                if (i + 1 < pages.size()) {
-                                    final PaneSpec rightPane = pages.get(i + 1);
-                                    View rightCap =
-                                            buildSettingsCapsule(
-                                                    a,
-                                                    rightPane,
-                                                    () ->
-                                                            openSettingsDrawer(
-                                                                    a, shell, rightPane, this));
-                                    LinearLayout.LayoutParams rightLp =
-                                            new LinearLayout.LayoutParams(0, -2, 1f);
-                                    rightLp.leftMargin = a.dp(7);
-                                    row.addView(rightCap, rightLp);
-                                } else {
-                                    LinearLayout.LayoutParams emptyLp =
-                                            new LinearLayout.LayoutParams(0, 1, 1f);
-                                    emptyLp.leftMargin = a.dp(7);
-                                    row.addView(new View(a), emptyLp);
-                                }
-                                LinearLayout.LayoutParams rowLp =
-                                        new LinearLayout.LayoutParams(-1, -2);
-                                rowLp.bottomMargin = a.dp(12);
-                                gridHolder.addView(row, rowLp);
-                            }
-                        }
+            if (!twoCols) {
+                for (int i = 0; i < pages.size(); i++) {
+                    final PaneSpec pane = pages.get(i);
+                    View cap = buildSettingsCapsule(a, pane, () -> ctl.openSubPage(pane));
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+                    lp.bottomMargin = a.dp(12);
+                    rootCol.addView(cap, lp);
+                }
+            } else {
+                for (int i = 0; i < pages.size(); i += 2) {
+                    LinearLayout row = a.row();
+                    row.setGravity(Gravity.TOP);
+                    final PaneSpec leftPane = pages.get(i);
+                    View leftCap =
+                            buildSettingsCapsule(a, leftPane, () -> ctl.openSubPage(leftPane));
+                    LinearLayout.LayoutParams leftLp = new LinearLayout.LayoutParams(0, -2, 1f);
+                    leftLp.rightMargin = a.dp(7);
+                    row.addView(leftCap, leftLp);
+
+                    if (i + 1 < pages.size()) {
+                        final PaneSpec rightPane = pages.get(i + 1);
+                        View rightCap =
+                                buildSettingsCapsule(
+                                        a, rightPane, () -> ctl.openSubPage(rightPane));
+                        LinearLayout.LayoutParams rightLp =
+                                new LinearLayout.LayoutParams(0, -2, 1f);
+                        rightLp.leftMargin = a.dp(7);
+                        row.addView(rightCap, rightLp);
+                    } else {
+                        LinearLayout.LayoutParams emptyLp = new LinearLayout.LayoutParams(0, 1, 1f);
+                        emptyLp.leftMargin = a.dp(7);
+                        row.addView(new View(a), emptyLp);
                     }
-                };
-        populateCapsules.run();
+                    LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, -2);
+                    rowLp.bottomMargin = a.dp(12);
+                    rootCol.addView(row, rowLp);
+                }
+            }
+        } else {
+            // ==================== LEVEL 2: SECONDARY SETTINGS PAGE ====================
+            LinearLayout topNav = a.row();
+            topNav.setGravity(Gravity.CENTER_VERTICAL);
+            topNav.setPadding(0, 0, 0, a.dp(12));
+
+            TextView backBtn = a.text("‹", 22f, Color.WHITE);
+            backBtn.setTag("settings-back");
+            backBtn.setGravity(Gravity.CENTER);
+            backBtn.setPadding(0, 0, a.dp(1), a.dp(2));
+            GradientDrawable backCircle = new GradientDrawable();
+            backCircle.setShape(GradientDrawable.OVAL);
+            backCircle.setColor(0x24ffffff);
+            backCircle.setStroke(Math.max(1, a.dp(1)), 0x34ffffff);
+            backBtn.setBackground(backCircle);
+            bindPressFeedback(backBtn);
+            backBtn.setOnClickListener(v -> ctl.backToRoot());
+            LinearLayout.LayoutParams backLp = new LinearLayout.LayoutParams(a.dp(38), a.dp(38));
+            backLp.rightMargin = a.dp(12);
+            topNav.addView(backBtn, backLp);
+
+            LinearLayout titleStack = a.vertical();
+            TextView crumb = a.text("设置", 11.5f, 0x99ebebf5);
+            crumb.setOnClickListener(v -> ctl.backToRoot());
+            titleStack.addView(crumb);
+
+            TextView subTitle = a.text(activePane.title, 24f, 0xfff5f5f7);
+            subTitle.setTypeface(null, Typeface.BOLD);
+            titleStack.addView(subTitle);
+            topNav.addView(titleStack, new LinearLayout.LayoutParams(0, -2, 1f));
+            rootCol.addView(topNav, new LinearLayout.LayoutParams(-1, -2));
+
+            if (activePane.subtitle != null && !activePane.subtitle.isEmpty()) {
+                TextView desc = a.text(activePane.subtitle, 13f, 0xffd1d1da);
+                desc.setLineSpacing(a.dp(3), 1f);
+                desc.setPadding(a.dp(2), 0, a.dp(2), a.dp(16));
+                rootCol.addView(desc, new LinearLayout.LayoutParams(-1, -2));
+            }
+
+            if (!activePane.children.isEmpty()) {
+                for (int i = 0; i < activePane.children.size(); i++) {
+                    PaneSpec section = activePane.children.get(i);
+                    addSubSectionCard(a, rootCol, section, ctl);
+                }
+            }
+            if (activePane.builder != null) {
+                activePane.builder.build(rootCol, ctl);
+            }
+        }
+
+        if (restoreScrollY > 0) {
+            sv.post(() -> sv.scrollTo(0, restoreScrollY));
+        }
+        if (slideDirection != 0 && !a.reduced) {
+            rootCol.setTranslationX(slideDirection > 0 ? a.dp(26) : -a.dp(22));
+            rootCol.setAlpha(0.35f);
+            rootCol.animate()
+                    .translationX(0f)
+                    .alpha(1f)
+                    .setDuration(170)
+                    .setInterpolator(new DecelerateInterpolator())
+                    .start();
+        }
+    }
+
+    private static void addSubSectionCard(
+            MainActivity a, LinearLayout parent, PaneSpec section, PageController ctl) {
+        LinearLayout card = a.vertical();
+        card.setPadding(a.dp(16), a.dp(16), a.dp(16), a.dp(10));
+        int intensity = a.prefs.getInt(Prefs.MOBILE_GLASS_INTENSITY, 65);
+        int fillAlpha = Math.round(0x12 + (intensity / 100f) * 0x14);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.RECTANGLE);
+        bg.setCornerRadius(a.dp(28));
+        bg.setColor((fillAlpha << 24) | 0x00ffffff);
+        bg.setStroke(Math.max(1, a.dp(1)), 0x22ffffff);
+        card.setBackground(bg);
+
+        LinearLayout secHeader = a.row();
+        secHeader.setGravity(Gravity.CENTER_VERTICAL);
+
+        FrameLayout badge = new FrameLayout(a);
+        GradientDrawable circle = new GradientDrawable();
+        circle.setShape(GradientDrawable.OVAL);
+        circle.setColor((section.color & 0x00ffffff) | 0x2e000000);
+        badge.setBackground(circle);
+        badge.addView(
+                new CapsuleIconView(a, section.iconKind, section.color),
+                new FrameLayout.LayoutParams(a.dp(18), a.dp(18), Gravity.CENTER));
+        LinearLayout.LayoutParams badgeLp = new LinearLayout.LayoutParams(a.dp(32), a.dp(32));
+        badgeLp.rightMargin = a.dp(10);
+        secHeader.addView(badge, badgeLp);
+
+        LinearLayout secTitles = a.vertical();
+        TextView st = a.text(section.title, 16f, 0xfff5f5f7);
+        st.setTypeface(null, Typeface.BOLD);
+        secTitles.addView(st);
+        if (section.subtitle != null && !section.subtitle.isEmpty()) {
+            TextView ss = a.text(section.subtitle, 11.5f, 0xb8d1d1da);
+            ss.setPadding(0, a.dp(2), 0, 0);
+            secTitles.addView(ss);
+        }
+        secHeader.addView(secTitles, new LinearLayout.LayoutParams(0, -2, 1f));
+        card.addView(secHeader, new LinearLayout.LayoutParams(-1, -2));
+
+        a.gap(card, 14);
+        if (section.builder != null) {
+            section.builder.build(card, ctl);
+        }
+
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(-1, -2);
+        cardLp.bottomMargin = a.dp(14);
+        parent.addView(card, cardLp);
     }
 
     private static List<PaneSpec> buildPages(
@@ -351,10 +421,8 @@ final class MobileIosSettings {
                                             ctl.rerenderInPlace();
                                         } else if ((hasSavedWp && idx == 2)
                                                 || (!hasSavedWp && idx == 1)) {
-                                            ctl.dialog.dismiss();
                                             new SettingsScreen(a).pick(44, "image/*", false);
                                         } else {
-                                            ctl.dialog.dismiss();
                                             new SettingsScreen(a).wallpaperUrl();
                                         }
                                     });
@@ -436,7 +504,6 @@ final class MobileIosSettings {
                                                     .edit()
                                                     .putInt(Prefs.UI_SCALE_PERCENT, target)
                                                     .commit();
-                                            ctl.dialog.dismiss();
                                             a.recreate();
                                         }
                                     });
@@ -847,10 +914,9 @@ final class MobileIosSettings {
                                     COLOR_BLUE,
                                     "字幕大小与位置全屏调校",
                                     "当前字号 " + subSize + " · 距底 " + subBottom + "dp (支持双指缩放与拖拽)",
-                                    () -> {
-                                        ctl.dialog.dismiss();
-                                        PlaybackControls.showSubtitleAdjuster(a, null, a::refresh);
-                                    });
+                                    () ->
+                                            PlaybackControls.showSubtitleAdjuster(
+                                                    a, null, ctl::rerenderInPlace));
                         });
 
         PaneSpec introOutroSub =
@@ -880,9 +946,8 @@ final class MobileIosSettings {
                                                     .apply();
                                             ctl.rerenderInPlace();
                                         } else {
-                                            ctl.dialog.dismiss();
                                             PlaybackControls.showSkipAdjuster(
-                                                    a, true, 0, 0, a::refresh);
+                                                    a, true, 0, 0, ctl::rerenderInPlace);
                                         }
                                     });
 
@@ -905,9 +970,8 @@ final class MobileIosSettings {
                                                     .apply();
                                             ctl.rerenderInPlace();
                                         } else {
-                                            ctl.dialog.dismiss();
                                             PlaybackControls.showSkipAdjuster(
-                                                    a, false, 0, 0, a::refresh);
+                                                    a, false, 0, 0, ctl::rerenderInPlace);
                                         }
                                     });
                         });
@@ -940,10 +1004,7 @@ final class MobileIosSettings {
                                     COLOR_GREEN,
                                     "切换当前默认片源",
                                     "当前：" + curSiteName,
-                                    () -> {
-                                        ctl.dialog.dismiss();
-                                        a.chooseSources();
-                                    });
+                                    a::chooseSources);
 
                             addActionCapsule(
                                     a,
@@ -952,10 +1013,7 @@ final class MobileIosSettings {
                                     COLOR_BLUE,
                                     "片源排序与显隐管理",
                                     "置顶常用片源或隐藏不需要参与检索的站点",
-                                    () -> {
-                                        ctl.dialog.dismiss();
-                                        SourcePicker.manage(a);
-                                    });
+                                    () -> SourcePicker.manage(a));
 
                             if (a.config != null && a.config.depots.length() > 1) {
                                 addActionCapsule(
@@ -965,10 +1023,7 @@ final class MobileIosSettings {
                                         COLOR_INDIGO,
                                         "切换多仓子仓库线路",
                                         "当前配置包含 " + a.config.depots.length() + " 条子仓库，点击切换",
-                                        () -> {
-                                            ctl.dialog.dismiss();
-                                            SourcePicker.showWarehouses(a);
-                                        });
+                                        () -> SourcePicker.showWarehouses(a));
                             }
 
                             addActionCapsule(
@@ -978,10 +1033,7 @@ final class MobileIosSettings {
                                     COLOR_TEAL,
                                     "导入或更新影视订阅",
                                     "支持一键读取剪贴板、输入订阅链接或选择本地包",
-                                    () -> {
-                                        ctl.dialog.dismiss();
-                                        MobileShell.showMobileImportDialog(a);
-                                    });
+                                    () -> MobileShell.showMobileImportDialog(a));
 
                             addActionCapsule(
                                     a,
@@ -990,10 +1042,7 @@ final class MobileIosSettings {
                                     COLOR_ORANGE,
                                     "导入或管理电视直播源",
                                     "支持 M3U、TXT (#genre#) 与 JSON 直播订阅地址",
-                                    () -> {
-                                        ctl.dialog.dismiss();
-                                        SourceController.showLiveImportDialog(a);
-                                    });
+                                    () -> SourceController.showLiveImportDialog(a));
 
                             addActionCapsule(
                                     a,
@@ -1002,10 +1051,7 @@ final class MobileIosSettings {
                                     COLOR_GREEN,
                                     "我的云盘 · 扫码登录与线路",
                                     "管理夸克、UC、百度、阿里、115 等授权与解析排序",
-                                    () -> {
-                                        ctl.dialog.dismiss();
-                                        AccountPanel.show(a);
-                                    });
+                                    () -> AccountPanel.show(a));
 
                             addActionCapsule(
                                     a,
@@ -1014,10 +1060,7 @@ final class MobileIosSettings {
                                     COLOR_PURPLE,
                                     "连接 Emby 媒体服务器",
                                     "直连家庭 NAS 或远程 Emby 媒体库流畅播放",
-                                    () -> {
-                                        ctl.dialog.dismiss();
-                                        EmbyEngine.connect(a);
-                                    });
+                                    () -> EmbyEngine.connect(a));
 
                             if (CatPawSettings.available(a)) {
                                 addActionCapsule(
@@ -1027,10 +1070,7 @@ final class MobileIosSettings {
                                         COLOR_TEAL,
                                         "CatPaw 本机引擎配置",
                                         "管理内嵌 CatPaw 服务端口与网盘凭据",
-                                        () -> {
-                                            ctl.dialog.dismiss();
-                                            CatPawSettings.choose(a);
-                                        });
+                                        () -> CatPawSettings.choose(a));
                             }
 
                             a.gap(body, 6);
@@ -1123,10 +1163,7 @@ final class MobileIosSettings {
                                     COLOR_TEAL,
                                     "导出备份文件",
                                     "保存 MarcoMovie-backup.json 到手机存储",
-                                    () -> {
-                                        ctl.dialog.dismiss();
-                                        new SettingsScreen(a).pick(45, "application/json", true);
-                                    });
+                                    () -> new SettingsScreen(a).pick(45, "application/json", true));
 
                             addActionCapsule(
                                     a,
@@ -1135,10 +1172,7 @@ final class MobileIosSettings {
                                     COLOR_BLUE,
                                     "从备份文件恢复",
                                     "选择已导出的备份包还原配置与观影记录 (不影响网盘登录)",
-                                    () -> {
-                                        ctl.dialog.dismiss();
-                                        new SettingsScreen(a).pick(46, "*/*", false);
-                                    });
+                                    () -> new SettingsScreen(a).pick(46, "*/*", false));
                         });
 
         PaneSpec cacheDiagSub =
@@ -1189,7 +1223,6 @@ final class MobileIosSettings {
                                             ? "当前处于独立加密空间，点击返回常规空间"
                                             : "连续点击设置页版本号 5 次亦可快速进入独立私密空间",
                                     () -> {
-                                        ctl.dialog.dismiss();
                                         for (int i = 0; i < 5; i++) PrivacySpace.logoTap(a);
                                     });
 
@@ -1228,7 +1261,7 @@ final class MobileIosSettings {
                                                                                         .MOBILE_SHOW_HISTORY)
                                                                         .commit();
                                                                 a.reduced = false;
-                                                                ctl.dialog.dismiss();
+                                                                resetToRoot();
                                                                 a.recreate();
                                                             })
                                                     .show());
@@ -1293,13 +1326,11 @@ final class MobileIosSettings {
                                     COLOR_INDIGO,
                                     "检查软件更新",
                                     "在线检测新版本说明、校验签名并下载安装包",
-                                    () -> {
-                                        ctl.dialog.dismiss();
-                                        a.open(
-                                                new MainActivity.Screen(
-                                                        () -> new UpdateScreen(a).show()),
-                                                true);
-                                    });
+                                    () ->
+                                            a.open(
+                                                    new MainActivity.Screen(
+                                                            () -> new UpdateScreen(a).show()),
+                                                    true));
 
                             TextView legal =
                                     a.text(
@@ -1313,106 +1344,6 @@ final class MobileIosSettings {
         top.add(aboutPane);
 
         return top;
-    }
-
-    private static void openSettingsDrawer(
-            final MainActivity a,
-            final MobileShell shell,
-            final PaneSpec initialPane,
-            final Runnable onRootRefresh) {
-        final Dialog dialog = new Dialog(a);
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
-
-        int screenH = a.getResources().getDisplayMetrics().heightPixels;
-        int sheetH = Math.min(a.dp(680), Math.round(screenH * 0.74f));
-
-        LinearLayout sheet = a.vertical();
-        sheet.setTag("mobile-drawer");
-        sheet.setPadding(a.dp(20), a.dp(10), a.dp(20), a.dp(12) + a.navigationBarHeight());
-        a.glass(sheet, 32);
-
-        // 1. Grabber (36x4dp)
-        View grabber = new View(a);
-        grabber.setBackground(a.bg(0x3dffffff, 999));
-        LinearLayout.LayoutParams grabLp = new LinearLayout.LayoutParams(a.dp(36), a.dp(4));
-        grabLp.gravity = Gravity.CENTER_HORIZONTAL;
-        grabLp.bottomMargin = a.dp(12);
-        sheet.addView(grabber, grabLp);
-
-        // 2. Sheet header: '设置' (18sp w700) + circular '✕'
-        LinearLayout header = a.row();
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView headTitle = a.text("设置", 18f, 0xfff5f5f7);
-        headTitle.setTypeface(null, Typeface.BOLD);
-        header.addView(headTitle, new LinearLayout.LayoutParams(0, -2, 1f));
-
-        TextView closeBtn = a.text("✕", 13.5f, 0xd9f5f5f7);
-        closeBtn.setGravity(Gravity.CENTER);
-        GradientDrawable closeCircle = new GradientDrawable();
-        closeCircle.setShape(GradientDrawable.OVAL);
-        closeCircle.setColor(0x20ffffff);
-        closeCircle.setStroke(Math.max(1, a.dp(1)), 0x26ffffff);
-        closeBtn.setBackground(closeCircle);
-        bindPressFeedback(closeBtn);
-        closeBtn.setOnClickListener(v -> dialog.dismiss());
-        header.addView(closeBtn, new LinearLayout.LayoutParams(a.dp(30), a.dp(30)));
-        sheet.addView(header, new LinearLayout.LayoutParams(-1, -2));
-
-        a.gap(sheet, 12);
-
-        // 3. Breadcrumb Wrap row
-        FlowWrapLayout breadcrumbWrap = new FlowWrapLayout(a, a.dp(6), a.dp(6));
-        sheet.addView(breadcrumbWrap, new LinearLayout.LayoutParams(-1, -2));
-
-        a.gap(sheet, 14);
-
-        // 4. Scrollable Drawer Body
-        ScrollView bodyScroll = new ScrollView(a);
-        bodyScroll.setVerticalScrollBarEnabled(false);
-        bodyScroll.setClipToPadding(false);
-        LinearLayout bodyCol = a.vertical();
-        bodyScroll.addView(bodyCol, new ScrollView.LayoutParams(-1, -2));
-        sheet.addView(bodyScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
-
-        final DrawerController ctl =
-                new DrawerController(
-                        a,
-                        shell,
-                        dialog,
-                        sheet,
-                        breadcrumbWrap,
-                        bodyScroll,
-                        bodyCol,
-                        onRootRefresh);
-        ctl.push(initialPane);
-
-        // Intercept Android system Back inside nested sub-panes to pop breadcrumb first
-        dialog.setOnKeyListener(
-                (d, keyCode, event) -> {
-                    if (keyCode == KeyEvent.KEYCODE_BACK
-                            && event.getAction() == KeyEvent.ACTION_UP
-                            && ctl.path.size() > 1) {
-                        ctl.popTo(ctl.path.size() - 2);
-                        return true;
-                    }
-                    return false;
-                });
-
-        dialog.setContentView(
-                sheet, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, sheetH));
-        Window win = dialog.getWindow();
-        if (win != null) {
-            win.getDecorView().setTag("app-dialog");
-            win.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            WindowManager.LayoutParams wlp = win.getAttributes();
-            wlp.width = WindowManager.LayoutParams.MATCH_PARENT;
-            wlp.height = sheetH;
-            wlp.gravity = Gravity.BOTTOM;
-            wlp.dimAmount = 0.58f;
-            win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            win.setAttributes(wlp);
-        }
-        dialog.show();
     }
 
     /**
@@ -1548,7 +1479,7 @@ final class MobileIosSettings {
     }
 
     private static void addGlassSliderCard(
-            final MainActivity a, LinearLayout parent, int currentVal, final DrawerController ctl) {
+            final MainActivity a, LinearLayout parent, int currentVal, final PageController ctl) {
         LinearLayout box = a.vertical();
         box.setPadding(a.dp(16), a.dp(14), a.dp(16), a.dp(14));
         GradientDrawable bg = new GradientDrawable();
@@ -1607,29 +1538,6 @@ final class MobileIosSettings {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
         lp.bottomMargin = a.dp(16);
         parent.addView(box, lp);
-    }
-
-    private static View buildSmallCapsulePill(
-            MainActivity a, String text, boolean active, Runnable onTap) {
-        TextView pill = a.text(text, 12.5f, active ? Color.WHITE : 0xd9f5f5f7);
-        pill.setTypeface(null, Typeface.BOLD);
-        pill.setSingleLine(true);
-        pill.setGravity(Gravity.CENTER);
-        pill.setPadding(a.dp(12), a.dp(6), a.dp(12), a.dp(6));
-
-        GradientDrawable gd = new GradientDrawable();
-        gd.setShape(GradientDrawable.RECTANGLE);
-        gd.setCornerRadius(a.dp(999));
-        if (active) {
-            gd.setColor(COLOR_BLUE);
-        } else {
-            gd.setColor(0x1cffffff);
-            gd.setStroke(Math.max(1, a.dp(1)), 0x26ffffff);
-        }
-        pill.setBackground(gd);
-        bindPressFeedback(pill);
-        pill.setOnClickListener(v -> onTap.run());
-        return pill;
     }
 
     private static int matchPresetOrCustom(int[] presets, int val) {
