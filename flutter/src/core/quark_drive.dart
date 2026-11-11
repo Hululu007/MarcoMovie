@@ -341,6 +341,7 @@ class QuarkDriveClient {
       directories.add(parent);
       final children = <Map>[];
       var fetched = 0;
+      var previousPageCount = 0;
       int? advertisedTotal;
       final pageFingerprints = <String>{};
       for (var page = 1;; page++) {
@@ -415,14 +416,17 @@ class QuarkDriveClient {
           onListingWarning?.call();
         }
         // A stale provider total is not permission to discard real files.
-        // An empty next page ends this folder with a visible partial warning;
-        // full pages still continue even when the advertised total is smaller.
+        // An empty next page ends this folder; only warn if the folder was
+        // empty or the previous page hit Quark's 100-item page boundary.
         if (rows.isEmpty) {
-          if (advertisedTotal != null && fetched < advertisedTotal) {
+          if (advertisedTotal != null &&
+              fetched < advertisedTotal &&
+              (fetched == 0 || previousPageCount >= 100)) {
             onListingWarning?.call();
           }
           break;
         }
+        previousPageCount = rows.length;
         if (rows.length < pageSize &&
             (advertisedTotal == null || fetched >= advertisedTotal)) {
           break;

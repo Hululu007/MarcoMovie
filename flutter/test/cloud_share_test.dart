@@ -836,28 +836,37 @@ void main() {
   });
 
   test(
-      'Baidu falls back from mbd.baidu.com to membership/user/info and proxies d.pcs.baidu.com -> baidupcs.com with Cookie stripped on CDN',
+      'Baidu password share single-encodes randsk in DLNA query and proxies d.pcs.baidu.com -> regional P2SP CDN with Cookie stripped',
       () async {
     final now = DateTime.utc(2026, 11, 11);
+    const encodedRandsk = 'synthetic%2Bshare%2Fkey%3D';
     final pcsSeenCookies = <String?>[];
     final cdnSeenCookies = <String?>[];
     final cdnSeenRanges = <String?>[];
+    String? dlnaRawQuery;
+    String? dlnaCookie;
 
     final mockHttp = MockClient((request) async {
       if (request.url.path.startsWith('/s/')) {
         return http.Response('page', 200);
       }
-      if (request.url.host == 'mbd.baidu.com') {
-        // Simulate mbd.baidu.com failure / empty uid
-        return http.Response('{"errno": 2}', 200);
+      if (request.url.path == '/share/verify') {
+        return response({'errno': 0, 'randsk': encodedRandsk});
       }
-      if (request.url.path == '/rest/2.0/membership/user/info') {
+      if (request.url.host == 'mbd.baidu.com') {
+        expect(request.headers.containsKey('referer'), isFalse);
+        expect(request.headers.containsKey('Referer'), isFalse);
         return response({
-          'error_code': 0,
-          'user_info': {'loginstate': 1, 'uk': 88664422},
+          'errno': 0,
+          'data': {
+            'fields': {'uid': 'passport-uid-9988'}
+          },
         });
       }
       if (request.url.queryParameters['origin'] == 'dlna') {
+        dlnaRawQuery = request.url.query;
+        dlnaCookie = request.headers['cookie'] ?? request.headers['Cookie'];
+        expect(request.url.queryParameters['sekey'], 'synthetic+share/key=');
         return response({
           'errno': 0,
           'list': [
@@ -879,18 +888,20 @@ void main() {
     final streamTransport = MockClient.streaming((request, bodyStream) async {
       await bodyStream.drain<void>();
       if (request.url.host == 'd.pcs.baidu.com') {
-        pcsSeenCookies.add(request.headers['Cookie'] ?? request.headers['cookie']);
+        pcsSeenCookies
+            .add(request.headers['Cookie'] ?? request.headers['cookie']);
         return http.StreamedResponse(
           const Stream<List<int>>.empty(),
           302,
           headers: {
             'location':
-                'https://qdall01.baidupcs.com/file/signed_4k.mkv?sign=temp',
+                'https://cdn01.regional-cdn.example:8443/file/signed_4k.mkv?sign=temp',
           },
         );
       }
-      if (request.url.host == 'qdall01.baidupcs.com') {
-        cdnSeenCookies.add(request.headers['Cookie'] ?? request.headers['cookie']);
+      if (request.url.host == 'cdn01.regional-cdn.example') {
+        cdnSeenCookies
+            .add(request.headers['Cookie'] ?? request.headers['cookie']);
         cdnSeenRanges.add(request.headers['Range'] ?? request.headers['range']);
         return http.StreamedResponse(
           Stream<List<int>>.value(const <int>[0x1A, 0x45, 0xDF, 0xA3]),
@@ -914,8 +925,13 @@ void main() {
     );
     addTearDown(client.close);
 
-    final episodes = await client.listShare('https://pan.baidu.com/s/1abcde');
+    final episodes =
+        await client.listShare('https://pan.baidu.com/s/1abcde?pwd=f999');
     final resolved = await client.resolve(episodes.single);
+    expect(dlnaRawQuery, contains('sekey=synthetic%2Bshare%2Fkey%3D'));
+    expect(dlnaRawQuery, isNot(contains('%252B')));
+    expect(dlnaCookie, contains('BDCLND=$encodedRandsk'));
+
     final lease = resolved.playbackSession['cloudMediaLease'] as CloudMediaLease?;
     expect(lease, isNotNull);
     addTearDown(() async => await lease?.close());
@@ -934,6 +950,7 @@ void main() {
     expect(resp.statusCode, 206);
     expect(payload, const <int>[0x1A, 0x45, 0xDF, 0xA3]);
     expect(pcsSeenCookies.single, contains('BDUSS=baidu-account-bduss'));
+    expect(pcsSeenCookies.single, isNot(contains('BDCLND')));
     expect(cdnSeenCookies.single, isNull);
     expect(cdnSeenRanges.single, 'bytes=0-3');
   });

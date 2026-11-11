@@ -73,6 +73,7 @@ if (!isMainThread) {
     bootstrap = task;
     const cancelled = () => { task.cancel?.(); };
     res.once('close', cancelled);
+    let status = 200, payload = null;
     try {
       const body = await new Promise((resolve, reject) => {
         const chunks = []; let size = 0, finished = false;
@@ -109,25 +110,25 @@ if (!isMainThread) {
           if (settled) return; settled = true; clearTimeout(timer); task.cancel = null;
           if (error) reject(error); else resolve(value);
         };
-        const timer = setTimeout(() => done(Error('bootstrap_timeout')), 2000);
+        const timer = setTimeout(() => done(Error('bootstrap_timeout')), 3800);
         task.cancel = () => done(Error('bootstrap_cancelled'));
         worker.once('message', value => done(null, value));
         worker.once('error', () => done(Error('guard_artifact_invalid')));
         worker.once('exit', () => done(Error('guard_artifact_invalid')));
       });
       if (result.error) throw Error(result.error);
-      if (!res.destroyed && !closing) respond(res, 200, result);
+      payload = result;
     } catch (error) {
-      if (!res.destroyed && !closing) {
-        const code = ['guard_artifact_unsupported', 'guard_artifact_integrity', 'guard_artifact_invalid', 'bootstrap_timeout', 'bootstrap_request'].includes(error.message) ? error.message : 'guard_artifact_invalid';
-        respond(res, code === 'bootstrap_request' ? 400 : code === 'bootstrap_timeout' ? 504 : 422, { error: code });
-      }
+      const code = ['guard_artifact_unsupported', 'guard_artifact_integrity', 'guard_artifact_invalid', 'bootstrap_timeout', 'bootstrap_request'].includes(error.message) ? error.message : 'guard_artifact_invalid';
+      status = code === 'bootstrap_request' ? 400 : code === 'bootstrap_timeout' ? 504 : 422;
+      payload = { error: code };
     } finally {
       res.off('close', cancelled);
       await task.worker?.terminate();
       if (bootstrap === task) bootstrap = null;
       finish();
     }
+    if (!res.destroyed && !closing && payload) respond(res, status, payload);
   }
   async function stop(instance) {
     instance.http?.close(); clearTimeout(instance.callTimer); instance.manager?.close();

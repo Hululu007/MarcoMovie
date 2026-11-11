@@ -548,52 +548,23 @@ class CloudShareClient {
       }
     }
 
-    Map info = const {};
-    var uid = '';
-    try {
-      info = await _json(
-          Uri.https('mbd.baidu.com', '/userx/v1/info/get', {
-            'appname': 'baiduboxapp',
-            'fields': '["bg_image","member","uid","avatar","avatar_member"]',
-            'client': '',
-            'clientfrom': '',
-            'lang': 'zh-cn',
-            'tpl': '',
-            'ttt': '',
-          }),
-          provider: 'baidu',
-          budget: share.budget,
-          cookies: cookies,
-          userAgent: 'netdisk;P2SP;2.2.91.136;android-android');
-      await checkAccount();
-      _checkBaidu(info);
-      uid = _string(_map(_map(info['data'])['fields'])['uid']);
-    } on _CloudHttpException {
-      await checkAccount();
-    } on FormatException {
-      await checkAccount();
-    }
-    if (uid.isEmpty) {
-      final membership = await _json(
-          Uri.https('pan.baidu.com', '/rest/2.0/membership/user/info', {
-            'method': 'query',
-            'clienttype': '0',
-            'app_id': '250528',
-            'web': '1',
-          }),
-          provider: 'baidu',
-          budget: share.budget,
-          cookies: cookies,
-          referer: 'https://pan.baidu.com/',
-          userAgent: _baiduMediaUa);
-      await checkAccount();
-      final errCode =
-          _string(membership['error_code'] ?? membership['errno']);
-      final userInfo = _map(membership['user_info']);
-      if (errCode == '0' && _string(userInfo['loginstate']) != '0') {
-        uid = _string(userInfo['uk'] ?? userInfo['user_id']);
-      }
-    }
+    final info = await _json(
+        Uri.https('mbd.baidu.com', '/userx/v1/info/get', {
+          'appname': 'baiduboxapp',
+          'fields': '["bg_image","member","uid","avatar","avatar_member"]',
+          'client': '',
+          'clientfrom': '',
+          'lang': 'zh-cn',
+          'tpl': '',
+          'ttt': '',
+        }),
+        provider: 'baidu',
+        budget: share.budget,
+        cookies: cookies,
+        userAgent: 'netdisk;P2SP;2.2.91.136;android-android');
+    await checkAccount();
+    _checkBaidu(info);
+    final uid = _string(_map(_map(info['data'])['fields'])['uid']);
     if (uid.isEmpty) throw const FormatException('百度登录会话已失效，请重新登录');
     final time = '${_clock().millisecondsSinceEpoch}';
     const device = '73CED981D0F186D12BC18CAE1684FFD5|VSRCQTF6W';
@@ -607,12 +578,13 @@ class CloudShareClient {
         (file.session['uk'] ?? '').isEmpty) {
       throw const FormatException('百度分享缺少原始文件归属信息');
     }
+    final rawSekey = file.session['sekey'] ?? '';
     final result = await _json(
         Uri.https('pan.baidu.com', '/share/list', {
           'shareid': file.session['shareId']!,
           'uk': file.session['uk']!,
           'fid': file.id,
-          'sekey': file.session['sekey'] ?? '',
+          'sekey': _decodeSekeyForQuery(rawSekey),
           'origin': 'dlna',
           'devuid': device,
           'clienttype': '1',
@@ -624,7 +596,10 @@ class CloudShareClient {
         provider: 'baidu',
         budget: share.budget,
         userAgent: _baiduMediaUa,
-        cookies: cookies);
+        cookies: {
+          ...cookies,
+          if (rawSekey.isNotEmpty) 'BDCLND': rawSekey,
+        });
     await checkAccount();
     _checkBaidu(result);
     final list = result['list'];
@@ -730,10 +705,11 @@ class CloudShareClient {
           ..followRedirects = false
           ..headers.addAll({
             'User-Agent': userAgent ?? (provider == 'uc' ? _ucUa : _baiduUa),
-            'Referer': referer ??
-                (provider == 'uc'
-                    ? 'https://drive.uc.cn/'
-                    : 'https://pan.baidu.com/'),
+            if (referer != null || uri.host != 'mbd.baidu.com')
+              'Referer': referer ??
+                  (provider == 'uc'
+                      ? 'https://drive.uc.cn/'
+                      : 'https://pan.baidu.com/'),
             'Accept': 'application/json',
             if (provider == 'uc' && userAgent == _ucMediaUa)
               'Sec-Ch-Ua':
@@ -813,15 +789,33 @@ class CloudShareClient {
     return response;
   }
 
+  static String _decodeSekeyForQuery(String sekey) {
+    if (sekey.isEmpty) return '';
+    try {
+      return Uri.decodeComponent(sekey);
+    } catch (_) {
+      return sekey;
+    }
+  }
+
   static void _checkUc(Map result) {
-    if ((result.containsKey('code') && _integer(result['code']) != 0) ||
-        (result.containsKey('status') && _integer(result['status']) != 200)) {
+    final code = _integer(result['code']);
+    final status = _integer(result['status']);
+    if ((result.containsKey('code') && code != 0) ||
+        (result.containsKey('status') && status != 200)) {
+      if (code == 41011 || status == 404) {
+        throw const FormatException('原 UC 分享链接已取消或已失效');
+      }
       throw const FormatException('UC 分享访问失败或已失效，请检查提取码和分享状态');
     }
   }
 
   static void _checkBaidu(Map result) {
-    if (!result.containsKey('errno') || _integer(result['errno']) != 0) {
+    final errno = result.containsKey('errno') ? _integer(result['errno']) : -1;
+    if (errno != 0) {
+      if (const [-7, -9, -21, -144, -145].contains(errno)) {
+        throw const FormatException('原百度分享链接已取消或已失效');
+      }
       throw const FormatException('百度分享访问失败或登录已失效，请检查提取码与登录状态');
     }
   }

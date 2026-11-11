@@ -99,6 +99,12 @@ void main() {
         searchSourceNotice(TimeoutException('private address')),
         contains('超时'),
       );
+      expect(
+        searchSourceNotice(
+          const DrpySourceException('drpy_source_unavailable', 'raw socket'),
+        ),
+        '原站连接失败，当前片源暂时不可用',
+      );
     },
   );
 

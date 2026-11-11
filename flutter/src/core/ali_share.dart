@@ -496,6 +496,15 @@ class AliShareClient {
           throw const AliShareException(
               '阿里云盘剩余空间不足，请清理「MarcoMovie分享播放」目录后重试');
         }
+        if (errCode.contains('sharelink.forbidden') ||
+            errCode.contains('sharelink.cancelled') ||
+            errCode.contains('sharelink.expired') ||
+            errCode.contains('sharelink.notfound')) {
+          throw const AliShareException('原阿里分享链接已取消或已失效');
+        }
+      }
+      if (response.statusCode == 404) {
+        throw const AliShareException('原阿里分享链接已取消或已失效');
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw const AliShareException('阿里请求失败，请检查账号或分享权限');

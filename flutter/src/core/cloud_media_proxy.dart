@@ -66,6 +66,15 @@ class CloudMediaLease {
           (!uri.hasPort || uri.port == 443) &&
           (uri.host == 'baidupcs.com' || uri.host.endsWith('.baidupcs.com')));
 
+  static bool isSafeBaiduRedirectTarget(Uri uri) =>
+      isTrustedBaiduAccountMedia(uri) ||
+      (uri.scheme == 'https' &&
+          uri.userInfo.isEmpty &&
+          uri.host.isNotEmpty &&
+          uri.host.contains('.') &&
+          InternetAddress.tryParse(uri.host) == null &&
+          !uri.host.endsWith('.localhost'));
+
   bool _trusted(Uri uri) => switch (_provider) {
         CloudMediaProvider.quark => isTrustedQuarkMedia(uri),
         CloudMediaProvider.baidu => isTrustedBaiduMedia(uri),
@@ -294,9 +303,12 @@ class CloudMediaLease {
       await response.stream.listen((_) {}).cancel();
       final location = response.headers['location'];
       final next = location == null ? null : request.url.resolve(location);
+      final allowedRedirect = next != null &&
+          (_provider == CloudMediaProvider.baidu
+              ? isSafeBaiduRedirectTarget(next)
+              : _trusted(next));
       if (redirects >= maxRedirects ||
-          next == null ||
-          !_trusted(next) ||
+          !allowedRedirect ||
           _closed ||
           _isCancelled() ||
           !await _isCurrent()) {

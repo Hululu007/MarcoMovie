@@ -601,7 +601,7 @@ class WoggSource {
             throw TimeoutException('原分享目录读取超时');
           });
           check();
-          if (episodes.isEmpty) throw const FormatException('分享中没有可播放视频');
+          if (episodes.isEmpty) throw const _EmptyShareException();
           results[position] = {
             'name': job.label,
             'episodes': episodes
@@ -624,13 +624,11 @@ class WoggSource {
               'message': '目录返回不完整或总数不一致，已保留原网盘实际返回的视频，请稍后重试',
             };
           }
-        } catch (_) {
+        } catch (error) {
           check();
           failures[position] = {
             'line': job.label,
-            'message': job.share == null
-                ? '原分享地址或提取码不明确，请检查原站分享信息'
-                : '原网盘分享暂不可用，请检查网盘登录或分享状态'
+            'message': _classifyShareFailure(job.share, error),
           };
         } finally {
           active.remove(token);
@@ -661,6 +659,17 @@ class WoggSource {
     return {
       'list': [video]
     };
+  }
+
+  static String _classifyShareFailure(String? share, Object error) {
+    if (share == null) return '原分享地址或提取码不明确，请检查原站分享信息';
+    if (error is _EmptyShareException) return '该网盘分享目录为空';
+    if (error is TimeoutException) return '该备用分享响应超时，已跳过';
+    final text = error.toString();
+    if (text.contains('已取消或已失效') || text.contains('网盘请求失败（404）')) {
+      return '该网盘分享链接已取消或已失效';
+    }
+    return '原网盘分享暂不可用，请检查网盘登录或分享状态';
   }
 
   static String _normalizeClipboardShare(String raw) {
@@ -924,4 +933,8 @@ class WoggPluginConfiguration {
       userAgent: decode(43, 111, profile.uaMask),
     );
   }
+}
+
+class _EmptyShareException implements Exception {
+  const _EmptyShareException();
 }

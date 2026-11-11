@@ -309,4 +309,32 @@ void main() {
                     'mmwogg://quark?v=1&pwd_id=share123&fid=target&pdir_fid=0')),
         throwsStateError);
   });
+
+  test(
+      'under-full folder page with stale _total metadata does not emit false listingWarning',
+      () async {
+    final client = MockClient((request) async {
+      if (request.url.path.endsWith('/token')) {
+        return ok({'stoken': 'temporary-share'});
+      }
+      final page = int.parse(request.url.queryParameters['_page']!);
+      return ok(
+        {
+          'list': page == 1
+              ? [for (var i = 0; i < 64; i++) video('ep-$i')]
+              : const <Object>[],
+        },
+        total: 76,
+      );
+    });
+    final episodes = await QuarkDriveClient.listPublicShareEpisodes(
+      'https://pan.quark.cn/s/share123',
+      httpClient: client,
+    );
+    expect(episodes, hasLength(64));
+    expect(
+      episodes.any((e) => e.playbackSession['listingWarning'] != null),
+      isFalse,
+    );
+  });
 }

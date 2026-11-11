@@ -17,6 +17,16 @@ class GuardSource {
   final DrpySource drpy;
   final Future<Uint8List> Function(String, Map<String, String>) read;
   final _cache = <String, ({String rule, String origin, DateTime expires})>{};
+  final _inFlightReads = <String, Future<Uint8List>>{};
+  final _inFlightBootstraps =
+      <
+        String,
+        ({
+          Future<({String rule, String origin, DateTime expires})> future,
+          Completer<void> sharedCancel,
+          int Function(int delta) adjustWaiters,
+        })
+      >{};
 
   GuardSource({required this.host, required this.drpy, required this.read});
 
@@ -91,31 +101,102 @@ class GuardSource {
       throw const FormatException('此插件需要订阅提供完整的 HTTP(S) 插件地址');
     }
     if (item == null || DateTime.now().isAfter(item.expires)) {
-      final bytes = await read(address, site.headers);
       checkCancelled();
-      if (bytes.isEmpty || bytes.length > maxArtifactBytes) {
-        throw const FormatException('插件包为空或超过 16 MB');
+      var entry = _inFlightBootstraps[key];
+      if (entry == null) {
+        final sharedCancel = Completer<void>();
+        var waiters = 0;
+        int adjust(int delta) => waiters += delta;
+        late final ({
+          Future<({String rule, String origin, DateTime expires})> future,
+          Completer<void> sharedCancel,
+          int Function(int delta) adjustWaiters,
+        }) created;
+        final future = () async {
+          final readKey = jsonEncode([address, site.headers]);
+          var pendingRead = _inFlightReads[readKey];
+          if (pendingRead == null) {
+            pendingRead = Future<Uint8List>.sync(
+              () => read(address, site.headers),
+            );
+            _inFlightReads[readKey] = pendingRead;
+            pendingRead.whenComplete(() {
+              if (identical(_inFlightReads[readKey], pendingRead)) {
+                _inFlightReads.remove(readKey);
+              }
+            }).ignore();
+          }
+          final bytes = await pendingRead;
+          if (sharedCancel.isCompleted) {
+            throw const FormatException('搜索已取消');
+          }
+          if (bytes.isEmpty || bytes.length > maxArtifactBytes) {
+            throw const FormatException('插件包为空或超过 16 MB');
+          }
+          if (expected != null &&
+              md5.convert(bytes).toString() != expected.toLowerCase()) {
+            throw const FormatException('插件摘要校验失败，请刷新原订阅后重试');
+          }
+          final generated = await host.bootstrapGuard(
+            bytes,
+            adapter: adapter,
+            extension: adapter == 't4-v1' ? site.ext : null,
+            cancellation: sharedCancel,
+          );
+          if (sharedCancel.isCompleted) {
+            throw const FormatException('搜索已取消');
+          }
+          final resolved = (
+            rule: generated['rule'] as String,
+            origin: generated['origin'] as String,
+            expires: DateTime.now().add(const Duration(minutes: 5)),
+          );
+          if (_cache.length >= 32) _cache.remove(_cache.keys.first);
+          _cache[key] = resolved;
+          return resolved;
+        }();
+        created = (
+          future: future,
+          sharedCancel: sharedCancel,
+          adjustWaiters: adjust,
+        );
+        _inFlightBootstraps[key] = created;
+        future.whenComplete(() {
+          if (identical(_inFlightBootstraps[key], created)) {
+            _inFlightBootstraps.remove(key);
+          }
+        }).ignore();
+        entry = created;
       }
-      if (expected != null &&
-          md5.convert(bytes).toString() != expected.toLowerCase()) {
-        throw const FormatException('插件摘要校验失败，请刷新原订阅后重试');
+      entry.adjustWaiters(1);
+      var released = false;
+      void releaseWaiter() {
+        if (released) return;
+        released = true;
+        if (entry!.adjustWaiters(-1) <= 0 && !entry.sharedCancel.isCompleted) {
+          entry.sharedCancel.complete();
+        }
       }
-      final generated = await host.bootstrapGuard(
-        bytes,
-        adapter: adapter,
-        extension: adapter == 't4-v1' ? site.ext : null,
-        cancellation: cancellation,
-      );
+      final cancelSub = cancellation?.future.asStream().listen((_) {
+        releaseWaiter();
+      });
+      try {
+        item = cancellation == null
+            ? await entry.future
+            : await Future.any([
+                entry.future,
+                cancellation.future.then<
+                  ({String rule, String origin, DateTime expires})
+                >((_) => throw const FormatException('搜索已取消')),
+              ]);
+      } finally {
+        releaseWaiter();
+        await cancelSub?.cancel();
+      }
       checkCancelled();
-      item = (
-        rule: generated['rule'] as String,
-        origin: generated['origin'] as String,
-        expires: DateTime.now().add(const Duration(minutes: 5)),
-      );
-      if (_cache.length >= 32) _cache.remove(_cache.keys.first);
-      _cache[key] = item;
     }
-    final target = Uri.parse(item.origin);
+    final activeItem = item!;
+    final target = Uri.parse(activeItem.origin);
     final sameOrigin =
         artifact.scheme == target.scheme &&
         artifact.host == target.host &&
@@ -146,19 +227,19 @@ class GuardSource {
                 site.subscriptionId,
                 if (site.subscriptionId.isEmpty) ...[
                   site.pluginReference,
-                  item.origin,
+                  activeItem.origin,
                 ],
               ]),
         headers: runtimeHeaders,
         ext: jsonEncode({
-          'ruleHash': sha256.convert(utf8.encode(item.rule)).toString(),
+          'ruleHash': sha256.convert(utf8.encode(activeItem.rule)).toString(),
           'originalExt': site.ext,
         }),
       ),
       method,
       args,
-      rule: item.rule,
-      origin: item.origin,
+      rule: activeItem.rule,
+      origin: activeItem.origin,
       cancellation: cancellation,
     );
   }

@@ -35,6 +35,8 @@ class CatPawHost {
   String? _lastSyncedPanJson;
   final _activeDrpy = <String, int>{};
   final _releasingDrpy = <String, Future<void>>{};
+  Future<void> _bootstrapQueue = Future<void>.value();
+  static int _writeSeq = 0;
   int _generation = 0;
   static const drpyRuntime = 'drpy2-ca23ffdb-1';
   static const _maxBundleBytes = 16 * 1024 * 1024;
@@ -276,7 +278,7 @@ class CatPawHost {
 
   static Future<void> _writeAtomic(File file, List<int> bytes) async {
     final staging = File(
-      '${file.path}.tmp-$pid-${DateTime.now().microsecondsSinceEpoch}',
+      '${file.path}.tmp-$pid-${DateTime.now().microsecondsSinceEpoch}-${++_writeSeq}',
     );
     try {
       await staging.writeAsBytes(bytes, flush: true);
@@ -432,46 +434,55 @@ class CatPawHost {
     final folder = Directory('${root.path}/imports');
     await _withCancellation(folder.create(recursive: true), cancellation);
     _checkCancellation(cancellation);
-    final file = File('${folder.path}/$hash.jar');
-    if (await file.exists()) {
-      if (await file.length() > _maxBundleBytes ||
-          sha256.convert(await file.readAsBytes()).toString() != hash) {
-        throw const FormatException('本机插件文件校验失败');
-      }
-    } else {
-      await _withCancellation(_writeAtomic(file, artifact), cancellation);
-    }
-    _checkCancellation(cancellation);
-    final base = await _withCancellation(_ensure(), cancellation);
-    _checkCancellation(cancellation);
-    final deadline = DateTime.now().add(const Duration(seconds: 2));
-    var backoffMs = 80;
-    while (true) {
-      try {
-        return await _requestGuardBootstrap(
-          base,
-          hash,
-          adapter,
-          extension,
-          cancellation,
-        );
-      } on GuardBootstrapException catch (error) {
-        if (error.code != 'bootstrap_busy' ||
-            !DateTime.now().isBefore(deadline)) {
-          rethrow;
+    final previousTurn = _bootstrapQueue;
+    final turnDone = Completer<void>();
+    _bootstrapQueue = previousTurn.whenComplete(() => turnDone.future);
+    try {
+      await _withCancellation(previousTurn, cancellation);
+      _checkCancellation(cancellation);
+      final file = File('${folder.path}/$hash.jar');
+      if (await file.exists()) {
+        if (await file.length() > _maxBundleBytes ||
+            sha256.convert(await file.readAsBytes()).toString() != hash) {
+          throw const FormatException('本机插件文件校验失败');
         }
-        final remaining = deadline.difference(DateTime.now()).inMilliseconds;
-        if (remaining <= 0) rethrow;
-        await _withCancellation(
-          Future<void>.delayed(
-            Duration(
-              milliseconds: remaining < backoffMs ? remaining : backoffMs,
-            ),
-          ),
-          cancellation,
-        );
-        backoffMs = (backoffMs * 2).clamp(80, 250);
+      } else {
+        await _withCancellation(_writeAtomic(file, artifact), cancellation);
       }
+      _checkCancellation(cancellation);
+      final base = await _withCancellation(_ensure(), cancellation);
+      _checkCancellation(cancellation);
+      final deadline = DateTime.now().add(const Duration(seconds: 2));
+      var backoffMs = 80;
+      while (true) {
+        try {
+          return await _requestGuardBootstrap(
+            base,
+            hash,
+            adapter,
+            extension,
+            cancellation,
+          );
+        } on GuardBootstrapException catch (error) {
+          if (error.code != 'bootstrap_busy' ||
+              !DateTime.now().isBefore(deadline)) {
+            rethrow;
+          }
+          final remaining = deadline.difference(DateTime.now()).inMilliseconds;
+          if (remaining <= 0) rethrow;
+          await _withCancellation(
+            Future<void>.delayed(
+              Duration(
+                milliseconds: remaining < backoffMs ? remaining : backoffMs,
+              ),
+            ),
+            cancellation,
+          );
+          backoffMs = (backoffMs * 2).clamp(80, 250);
+        }
+      }
+    } finally {
+      if (!turnDone.isCompleted) turnDone.complete();
     }
   }
 

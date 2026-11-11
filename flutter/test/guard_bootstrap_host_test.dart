@@ -462,6 +462,20 @@ void main() {
         await File('${directory.path}/real/drpy-bootstrap-worker.cjs').exists(),
         isTrue,
       );
+      final concurrent = await Future.wait([
+        for (final (adapter, ext) in const [
+          ('t4-v1', 'ZXh0LTE='),
+          ('auete-v1', null),
+          ('t4-v1', 'ZXh0LTI='),
+          ('bttwoo-v1', null),
+          ('dm84-v1', null),
+          ('fy-v1', null),
+        ])
+          host
+              .bootstrapGuard(bytes, adapter: adapter, extension: ext)
+              .then<String>((_) => 'unexpected', onError: (Object e) => (e as GuardBootstrapException).code),
+      ]);
+      expect(concurrent, List.filled(6, 'guard_artifact_unsupported'));
     },
   );
 }

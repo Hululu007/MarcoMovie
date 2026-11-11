@@ -109,6 +109,7 @@ class _DetailScreenState extends State<DetailScreen> {
   bool _discoveringSeasons = false;
   String _discoveredFranchiseKey = '';
   bool _synopsisExpanded = false;
+  bool _sourceWarningsExpanded = false;
   late bool _descending;
   late bool _isFavorite;
   final ValueNotifier<double> _scrollOffset = ValueNotifier<double>(0.0);
@@ -1563,9 +1564,7 @@ class _DetailScreenState extends State<DetailScreen> {
                               ],
                               const SizedBox(height: 18),
                               if (!_loading && _video.sourceWarnings.isNotEmpty)
-                                Padding(padding: const EdgeInsets.only(bottom: 12),
-                                  child: Text(_video.sourceWarnings.join('\n'),
-                                    style: const TextStyle(color: AppleColors.labelSecondary, fontSize: 13))),
+                                _buildSourceWarningsSection(),
                               if (_loading)
                                 const Padding(
                                   padding: EdgeInsets.symmetric(vertical: 32),
@@ -1621,6 +1620,95 @@ class _DetailScreenState extends State<DetailScreen> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildSourceWarningsSection() {
+    if (_video.lines.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Text(
+          _video.sourceWarnings.join('\n'),
+          style: const TextStyle(color: AppleColors.labelSecondary, fontSize: 13),
+        ),
+      );
+    }
+    final primaryWarnings = <String>[];
+    final backupWarnings = <String>[];
+    for (final warning in _video.sourceWarnings) {
+      if (warning.startsWith('观看记录：') || warning.contains('目录返回不完整')) {
+        primaryWarnings.add(warning);
+      } else {
+        backupWarnings.add(warning);
+      }
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (primaryWarnings.isNotEmpty)
+            Padding(
+              padding: EdgeInsets.only(bottom: backupWarnings.isNotEmpty ? 6 : 0),
+              child: Text(
+                primaryWarnings.join('\n'),
+                style: const TextStyle(
+                  color: AppleColors.labelSecondary,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          if (backupWarnings.isNotEmpty) ...[
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => setState(
+                () => _sourceWarningsExpanded = !_sourceWarningsExpanded,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Row(
+                  children: [
+                    const Icon(
+                      CupertinoIcons.info_circle,
+                      size: 14,
+                      color: AppleColors.labelTertiary,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        '已加载 ${_video.lines.length} 条可用线路（另有 ${backupWarnings.length} 条备用分享已跳过）',
+                        style: const TextStyle(
+                          color: AppleColors.labelTertiary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                    Icon(
+                      _sourceWarningsExpanded
+                          ? CupertinoIcons.chevron_up
+                          : CupertinoIcons.chevron_down,
+                      size: 13,
+                      color: AppleColors.labelTertiary,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (_sourceWarningsExpanded)
+              Padding(
+                padding: const EdgeInsets.only(top: 6, left: 20),
+                child: Text(
+                  backupWarnings.join('\n'),
+                  style: const TextStyle(
+                    color: AppleColors.labelTertiary,
+                    fontSize: 12,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -2873,9 +2961,7 @@ class _DetailScreenState extends State<DetailScreen> {
                             children: [
                               const SizedBox(height: 8),
                               if (!_loading && _video.sourceWarnings.isNotEmpty)
-                                Padding(padding: const EdgeInsets.only(bottom: 12),
-                                  child: Text(_video.sourceWarnings.join('\n'),
-                                    style: const TextStyle(color: AppleColors.labelSecondary, fontSize: 13))),
+                                _buildSourceWarningsSection(),
                               if (_loading)
                                 const Padding(
                                   padding: EdgeInsets.symmetric(vertical: 32),

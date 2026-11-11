@@ -507,4 +507,39 @@ void main() {
       });
     },
   );
+
+  test(
+    'concurrent search across six Guard sites sharing one JAR downloads once',
+    () async {
+      final host = PortHost();
+      var downloads = 0;
+      final gate = Completer<Uint8List>();
+      final guard = GuardSource(
+        host: host,
+        drpy: DrpySource(host: host, read: (_, __) async => ''),
+        read: (_, __) {
+          downloads++;
+          return gate.future;
+        },
+      );
+      final base = site('https://import.invalid/plugin.jar;md5;$digest');
+      final sites = [
+        base.copyWith(key: 't4a', api: 'csp_T4Guard', ext: 'ZXh0LTE='),
+        base.copyWith(key: 'auete', api: 'csp_AueteGuard'),
+        base.copyWith(key: 't4b', api: 'csp_T4Guard', ext: 'ZXh0LTI='),
+        base.copyWith(key: 'bttwoo', api: 'csp_BttwooGuard'),
+        base.copyWith(key: 'dm84', api: 'csp_Dm84Guard'),
+        base.copyWith(key: 'fy', api: 'csp_FyGuard'),
+      ];
+      final futures = [
+        for (final s in sites) guard.invoke(s, 'search', ['斗罗大陆', false, 1]),
+      ];
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      gate.complete(bytes);
+      final results = await Future.wait(futures);
+      expect(results, hasLength(6));
+      expect(downloads, 1);
+      expect(host.bootstraps, 6);
+    },
+  );
 }
