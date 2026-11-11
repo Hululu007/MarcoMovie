@@ -601,6 +601,72 @@ void main() {
     expect(NetdiskSession.aliCredential(ext),
         'ali_token=valid-refresh-token-123456');
   });
+  test('Ali decodes GBK Chinese nicknames including 0x5C trail bytes in bizExt',
+      () async {
+    // '餐' in GBK is [0xB2, 0x5C] where 0x5C is ASCII backslash '\'.
+    // A naive single-byte decoder would let 0x5C escape the closing '"' of nickName!
+    final prefix = utf8.encode('{"pds_login_result":{"nickName":"');
+    final gbkNick = <int>[0xD3, 0xB0, 0xCA, 0xD3, 0xB2, 0x5C]; // "影视餐" in GBK
+    final suffix =
+        utf8.encode('","refreshToken":"gbk-ali-refresh-token-987654"}}');
+    final gbkBizExt = base64Url.encode([...prefix, ...gbkNick, ...suffix]);
+
+    expect(
+      NetdiskSession.aliCredential(gbkBizExt),
+      'ali_token=gbk-ali-refresh-token-987654',
+    );
+    expect(
+      NetdiskSession.aliCredential(
+          '{"pds_login_result":{"refresh_token":"json-ali-refresh-token-654321"}}'),
+      'ali_token=json-ali-refresh-token-654321',
+    );
+
+    final client = MockClient((_) async => response({
+          'content': {
+            'data': {'qrCodeStatus': 'CONFIRMED', 'bizExt': gbkBizExt}
+          }
+        }));
+    final poll =
+        await NetdiskService(httpClient: client).pollQrSession(qr('ali'));
+    expect(poll.state, NetdiskPollState.confirmed);
+    expect(poll.credential, 'ali_token=gbk-ali-refresh-token-987654');
+  });
+  test('Baidu web auth credential warms pan.baidu.com and verifies membership',
+      () async {
+    final goodClient = MockClient((request) async {
+      expect(request.url.host, 'pan.baidu.com');
+      expect(request.headers['Cookie'], contains('BDUSS=web-bduss'));
+      if (request.url.path == '/disk/home') {
+        return http.Response('', 200,
+            headers: {'set-cookie': 'STOKEN=warmed-stoken; Path=/'});
+      }
+      if (request.url.path == '/api/loginStatus') {
+        return response({});
+      }
+      expect(request.url.path, '/rest/2.0/membership/user/info');
+      expect(request.headers['Cookie'], contains('STOKEN=warmed-stoken'));
+      return response({
+        'errno': 0,
+        'user_info': {'uk': 888999}
+      });
+    });
+    final verified = await NetdiskSession.verifyBaiduWebCredential(
+      goodClient,
+      'BDUSS=web-bduss; BAIDUID=web-baiduid',
+    );
+    expect(verified, 'BDUSS=web-bduss; STOKEN=warmed-stoken; BAIDUID=web-baiduid');
+
+    final badClient = MockClient((request) async {
+      if (request.url.path == '/rest/2.0/membership/user/info') {
+        return response({'errno': -6});
+      }
+      return response({});
+    });
+    await expectLater(
+      NetdiskSession.verifyBaiduWebCredential(badClient, 'BDUSS=invalid-bduss'),
+      throwsFormatException,
+    );
+  });
   test('old Ali QR envelopes without refresh tokens never appear logged in',
       () async {
     SharedPreferences.setMockInitialValues({});

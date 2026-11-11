@@ -1,3 +1,9 @@
+## 2026-11-11 iOS / iPadOS 0.5.20 与 macOS 0.5.12 四大网盘跳转登录、百度播放与并发搜索修复
+
+- [iOS / iPadOS 0.5.20](docs/releases/ios-v0.5.20.md) · [macOS 0.5.12](docs/releases/macos-v0.5.12.md)：修复阿里云盘扫码确认后因官方 `bizExt` 采用 GBK 中文编码导致的验证报错；为 iOS / iPadOS 新增原生 `WKWebView` 授权壳层（`marco_movie/netdisk_auth`），打通百度网盘（`bdnetdisk://com.baidu.passport/grantweb` 原生授权页）、阿里云盘（本机免密 / 淘宝跳转 / 验证码与相册扫码）、夸克及 UC（iPhone / iPad 独立 `appkey` 协议）本机跳转授权与扫码双通道登录。
+- 修复带提取码百度网盘分享 `sekey` 二次编码及区域 CDN 重定向问题、夸克分享目录末页误报与详情页失效备用分享刷屏折叠、全站搜索共享插件包并发下载争抢报错，以及 iOS 设置页底部 Dock 高遮罩遮挡问题。
+- 658 项 Flutter 自动化测试及多端原生构建回归通过，未声明用户私人账号实机全片验收。
+
 ## 2026-11-11 Windows 0.5.14 网盘高码率无限加载修复
 
 - [Windows 0.5.14](docs/releases/windows-v0.5.14.md)：修复本地 `CloudMediaProxy` 在 `libmpv` 分段 `Range` 探测关闭套接字后未及时取消上游网盘流导致的带宽争抢与 `429` 并发限流（并发上限提升至 16、改为 256 KB 分批回压刷新，并修复百度跨域重定向请求头过滤异常）。
