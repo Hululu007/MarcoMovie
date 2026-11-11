@@ -540,6 +540,7 @@ final class SourceController {
         lastConfigActionAt = SystemClock.elapsedRealtime();
         pendingConfigRefreshOnFocus = false;
         CspEngine.syncAllPluginActivities(a);
+        PluginDialogStyler.watch(a);
         final int ticket = a.generation;
         a.worker.execute(
                 () -> {
@@ -591,6 +592,7 @@ final class SourceController {
         lastConfigActionAt = SystemClock.elapsedRealtime();
         pendingConfigRefreshOnFocus = false;
         CspEngine.syncAllPluginActivities(a);
+        PluginDialogStyler.watch(a);
         final int ticket = a.generation;
         a.worker.execute(
                 () -> {

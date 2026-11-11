@@ -229,16 +229,28 @@ final class ImmersivePoster extends FrameLayout {
         return m.find() ? m.group(1) : "";
     }
 
+    private static String extractMediaFormatQualifier(String text) {
+        if (text == null || text.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        if (text.contains("动态漫")) sb.append("#dongtaiman");
+        else if (text.contains("短漫") || text.contains("漫剧")) sb.append("#manju");
+        else if (text.contains("漫画")) sb.append("#manhua");
+        if (text.contains("真人")) sb.append("#liveaction");
+        return sb.toString();
+    }
+
     private static String normalizeTitleForBackdrop(String rawTitle) {
         if (rawTitle == null) return "";
         MobileDetailScreen.SeasonMeta meta = MobileDetailScreen.parseSeasonMeta(rawTitle);
         String base =
-                meta != null && meta.baseTitle != null && !meta.baseTitle.isEmpty()
+                meta != null && meta.explicit && meta.baseTitle != null && !meta.baseTitle.isEmpty()
                         ? meta.baseTitle
                         : rawTitle;
         base =
                 base.replaceAll("(?i)\\b(1080p|720p|4k|hd|bd|mp4|mkv)\\b", "")
-                        .replaceAll("【[^】]*】|\\[[^\\]]*\\]|\\([^)]*\\)|（[^）]*）", " ")
+                        .replaceAll(
+                                "【(?![^】]*(?:动态漫|漫剧|短漫|漫画|真人))[^】]*】|\\[(?![^\\]]*(?:动态漫|漫剧|短漫|漫画|真人))[^\\]]*\\]|\\((?![^)]*(?:动态漫|漫剧|短漫|漫画|真人))[^)]*\\)|（(?![^）]*(?:动态漫|漫剧|短漫|漫画|真人))[^）]*）",
+                                " ")
                         .replaceAll("(全集|高清|未删减|国语|粤语|中字|完结|更新至.*)", "")
                         .replaceAll("(?<=[\\u4e00-\\u9fa5A-Za-z])\\s*(?:19|20)\\d{2}\\s*$", "")
                         .replaceAll(
@@ -250,15 +262,18 @@ final class ImmersivePoster extends FrameLayout {
 
     private static String stripSequelNumberBeforeColon(String s) {
         if (s == null) return "";
-        return s.replaceAll("([\\u4e00-\\u9fa5]+)\\d+\\s*([：:])", "$1$2");
+        return s.replaceAll(
+                "([\\u4e00-\\u9fa5]+)(?:\\d+|II|III|IV|V)\\s*([：:])\\s*([\\u4e00-\\u9fa5]{2,})",
+                "$1$2$3");
     }
 
     private static String normalizeForStrictCompare(String s) {
         if (s == null) return "";
         String noHtml = s.replaceAll("<[^>]*>", "");
+        String formatTag = extractMediaFormatQualifier(noHtml);
         MobileDetailScreen.SeasonMeta meta = MobileDetailScreen.parseSeasonMeta(noHtml);
         String base =
-                meta != null && meta.baseTitle != null && !meta.baseTitle.isEmpty()
+                meta != null && meta.explicit && meta.baseTitle != null && !meta.baseTitle.isEmpty()
                         ? meta.baseTitle
                         : noHtml;
         base =
@@ -267,9 +282,8 @@ final class ImmersivePoster extends FrameLayout {
                         .replaceAll(
                                 "(?i)(?:第\\s*[一二三四五六七八九十百零两\\d]+\\s*[季部辑篇期]|年番\\s*[一二三四五六七八九十\\d]*|Season\\s*\\d+|S\\d+)\\s*$",
                                 "");
-        return base.toLowerCase()
-                .replaceAll("[\\s·:：\\-—_（）()【】\\[\\]《》〈〉\"“”'’!！?？,，.。/\\\\]", "")
-                .trim();
+        String normalized = SearchVariants.canonicalSearchKey(base);
+        return (normalized + formatTag).trim();
     }
 
     void resolveHdBackdrop(
@@ -436,14 +450,19 @@ final class ImmersivePoster extends FrameLayout {
         if (a == null || onResolved == null) return;
         final String cleanTitle = normalizeTitleForBackdrop(rawTitle);
         final String cleanYear = extractFourDigitYear(rawYear);
+        final boolean hasSourcePoster = Cms.isHttp(rawPosterUrl);
         final String upgradedDirect =
-                rawPosterUrl == null || rawPosterUrl.isEmpty()
-                        ? ""
-                        : ImageLoader.upgradePosterUrl(rawPosterUrl, true);
+                !hasSourcePoster ? "" : ImageLoader.upgradePosterUrl(rawPosterUrl, true);
+        // If the source already supplies a valid HTTP poster and there is no lossless CDN upgrade
+        // pattern to apply, keep the authoritative source poster instead of overwriting it with
+        // third-party fuzzy title matches (e.g. dynamic comics sharing a sequel name).
+        if (hasSourcePoster && upgradedDirect.equals(rawPosterUrl)) {
+            return;
+        }
         if (cleanTitle.isEmpty() && upgradedDirect.isEmpty()) return;
 
         final String cacheKey =
-                "portrait_v2|"
+                "portrait_v3|"
                         + normalizeForStrictCompare(cleanTitle)
                         + "|"
                         + cleanYear
@@ -466,7 +485,7 @@ final class ImmersivePoster extends FrameLayout {
                         File diskFile =
                                 new File(
                                         a.getCacheDir(),
-                                        "mob_hd_poster_v2_"
+                                        "mob_hd_poster_v3_"
                                                 + Integer.toHexString(cacheKey.hashCode())
                                                 + ".img");
                         if (diskFile.exists() && diskFile.length() > 12288) {
@@ -487,13 +506,10 @@ final class ImmersivePoster extends FrameLayout {
                         }
 
                         Set<String> candidates = new LinkedHashSet<>();
-                        if (!upgradedDirect.isEmpty()
-                                && (!upgradedDirect.equals(rawPosterUrl)
-                                        || upgradedDirect.contains("/l_ratio_poster/")
-                                        || upgradedDirect.contains("/t/p/w780/"))) {
+                        if (!upgradedDirect.isEmpty() && !upgradedDirect.equals(rawPosterUrl)) {
                             candidates.add(upgradedDirect);
                         }
-                        if (!cleanTitle.isEmpty()) {
+                        if (!hasSourcePoster && !cleanTitle.isEmpty()) {
                             collectVerifiedDoubanPosters(
                                     cleanTitle, cleanYear, rawActor, rawDirector, candidates);
                             collectVerifiedBilibiliVerticalCovers(

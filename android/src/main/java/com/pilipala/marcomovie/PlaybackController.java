@@ -240,6 +240,7 @@ final class PlaybackController {
         }
         if (a.playbackLoading != null) return;
         showPlaybackLoading(a);
+        PluginDialogStyler.watch(a);
         final int serial = a.playbackResolveSerial, ticket = a.generation;
         Future<?> request =
                 RequestScope.submit(
@@ -542,6 +543,7 @@ final class PlaybackController {
             MainActivity a, Cms.Site s, Cms.Video v, Cms.Episode ep, String preferredPrefix) {
         if (a.playbackLoading != null) return;
         showPlaybackLoading(a);
+        PluginDialogStyler.watch(a);
         final int serial = a.playbackResolveSerial, ticket = a.generation;
         Future<?> request =
                 RequestScope.submit(

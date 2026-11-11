@@ -171,11 +171,22 @@ final class PrivacySpace {
         EditText input = new EditText(a);
         input.setHint(hint);
         input.setTextColor(MainActivity.WHITE);
-        input.setHintTextColor(MainActivity.MUTED);
+        input.setHintTextColor(0x80ebebf5);
+        input.setTextSize(15f);
         input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
         input.setFilters(
                 new android.text.InputFilter[] {new android.text.InputFilter.LengthFilter(4)});
         input.setSingleLine(true);
+        input.setPadding(a.dp(14), a.dp(11), a.dp(14), a.dp(11));
+        android.graphics.drawable.GradientDrawable gd =
+                new android.graphics.drawable.GradientDrawable();
+        gd.setCornerRadius(a.dp(14));
+        gd.setColor(0x20ffffff);
+        gd.setStroke(Math.max(1, a.dp(1)), 0x33ffffff);
+        input.setBackground(gd);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = a.dp(10);
+        input.setLayoutParams(lp);
         return input;
     }
 

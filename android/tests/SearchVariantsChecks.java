@@ -121,6 +121,43 @@ public final class SearchVariantsChecks {
             verification = true;
         }
         check(verification && calls[0] == 1);
+
+        List<String> sequelForms = SearchVariants.sequelVariants("斗罗大陆2");
+        check(
+                sequelForms.contains("斗罗大陆2")
+                        && sequelForms.contains("斗罗大陆II")
+                        && sequelForms.contains("斗罗大陆第二季"));
+        List<String> mergedTerms =
+                SearchVariants.mergeTerms("斗罗大陆2", Collections.singletonList("斗罗大陆2"));
+        check(mergedTerms.indexOf("斗罗大陆2") == 0 && mergedTerms.contains("斗罗大陆II"));
+
+        calls[0] = 0;
+        found =
+                SearchVariants.run(
+                        "斗罗大陆2",
+                        mergedTerms,
+                        t -> false,
+                        term -> {
+                            calls[0]++;
+                            if ("斗罗大陆2".equals(term)) {
+                                Cms.Video comic = video("comic_dl2", "斗罗大陆2动态漫");
+                                comic.tag = "短漫剧";
+                                return Collections.singletonList(comic);
+                            }
+                            if ("斗罗大陆II".equals(term)) {
+                                Cms.Video anime = video("anime_dl2", "斗罗大陆II绝世唐门");
+                                anime.tag = "动漫";
+                                return Collections.singletonList(anime);
+                            }
+                            return Collections.emptyList();
+                        });
+        check(
+                calls[0] == 2
+                        && found.size() == 2
+                        && "anime_dl2".equals(found.get(0).id)
+                        && "comic_dl2".equals(found.get(1).id));
+        check(!SearchVariants.wantsComicOrShortDrama("斗罗大陆2"));
+        check(SearchVariants.wantsComicOrShortDrama("斗罗大陆2漫剧"));
         System.out.println("OK " + checks + " search fallback checks");
     }
 }

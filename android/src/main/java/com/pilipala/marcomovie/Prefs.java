@@ -71,6 +71,13 @@ final class Prefs {
     static final String GLOBAL_SEARCH_HISTORY = "global_search_history";
     static final String PHONETIC_TITLES = "phonetic_titles";
 
+    // Mobile iOS-aligned shell preferences (kept outside KEYS to preserve cross-device backup
+    // schema table invariants).
+    static final String MOBILE_GLASS_INTENSITY = "mobile_glass_intensity";
+    static final String MOBILE_POSTER_DENSITY = "mobile_poster_density";
+    static final String MOBILE_CARD_SUBTITLE = "mobile_card_subtitle";
+    static final String MOBILE_SHOW_HISTORY = "mobile_show_history";
+
     static final String[] KEYS = {
         UI_SCALE_PERCENT,
         NAV_SCALE_PERCENT,

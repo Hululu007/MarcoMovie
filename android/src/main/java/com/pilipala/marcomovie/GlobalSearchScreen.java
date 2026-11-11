@@ -730,10 +730,12 @@ public final class GlobalSearchScreen implements AutoCloseable {
                             final PhoneticSearchIndex index = a.phonetic;
                             if (index != null && !query.matches("[A-Za-z0-9' -]+"))
                                 if (!a.privateMode) index.prefer(query);
-                            final List<String> variants =
+                            final List<String> baseVariants =
                                     index == null
                                             ? Collections.singletonList(query)
                                             : index.searchTerms(query);
+                            final List<String> variants =
+                                    SearchVariants.mergeTerms(query, baseVariants);
                             a.ui.post(
                                     () -> {
                                         if (current() && serial == searchSerial)

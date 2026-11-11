@@ -59,7 +59,10 @@ final class PlayerBubble {
         scroll.addView(items);
         int[] origin = new int[2];
         anchor.getLocationInWindow(origin);
-        int maxHeight = Math.min(a.dp(246), Math.max(a.dp(100), origin[1] - a.dp(140)));
+        int maxHeight =
+                a.isTvDevice()
+                        ? Math.min(a.dp(246), Math.max(a.dp(100), origin[1] - a.dp(140)))
+                        : Math.min(a.dp(260), Math.max(a.dp(120), origin[1] - a.dp(88)));
         FrameLayout viewport =
                 new FrameLayout(a) {
                     @Override
@@ -139,9 +142,11 @@ final class PlayerBubble {
             lp.setMargins(a.dp(2), a.dp(2), a.dp(2), a.dp(2));
             items.addView(item, lp);
         }
-        hint.setGravity(Gravity.CENTER);
-        hint.setPadding(a.dp(8), a.dp(10), a.dp(8), 0);
-        panel.addView(hint);
+        if (a.isTvDevice()) {
+            hint.setGravity(Gravity.CENTER);
+            hint.setPadding(a.dp(8), a.dp(10), a.dp(8), 0);
+            panel.addView(hint);
+        }
         shell.addView(panel);
         int width = Math.min(a.dp(310), a.root.getWidth() - a.dp(32));
         int x =
@@ -170,7 +175,7 @@ final class PlayerBubble {
         dialog.setOnDismissListener(
                 d -> {
                     closed.run();
-                    if (UiCompat.isAttached(anchor)) anchor.requestFocus();
+                    if (a.isTvDevice() && UiCompat.isAttached(anchor)) anchor.requestFocus();
                 });
         dialog.show();
         Window window = dialog.getWindow();
@@ -178,7 +183,9 @@ final class PlayerBubble {
         window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
         window.setLayout(width, -2);
         window.setGravity(Gravity.TOP | Gravity.LEFT);
-        window.getDecorView().setSystemUiVisibility(5894);
+        if (a.isTvDevice() || !a.isPortrait()) {
+            window.getDecorView().setSystemUiVisibility(5894);
+        }
         shell.measure(
                 View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(a.root.getHeight(), View.MeasureSpec.AT_MOST));
@@ -203,10 +210,12 @@ final class PlayerBubble {
                                         new android.view.animation.DecelerateInterpolator())
                                 .start();
                     }
-                    View first =
-                            items.getChildAt(
-                                    Math.max(0, Math.min(selected, items.getChildCount() - 1)));
-                    if (first != null) first.requestFocus();
+                    if (a.isTvDevice()) {
+                        View first =
+                                items.getChildAt(
+                                        Math.max(0, Math.min(selected, items.getChildCount() - 1)));
+                        if (first != null) first.requestFocus();
+                    }
                 });
         return dialog;
     }

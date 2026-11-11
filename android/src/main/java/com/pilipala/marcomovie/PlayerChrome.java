@@ -374,7 +374,9 @@ final class PlayerChrome {
         if (titleView != null) {
             titleView.setTextSize(compact ? 17 : (portrait ? 20 : 26));
         }
-        episodeLabel.setVisibility(compact ? View.GONE : View.VISIBLE);
+        boolean ultraShort = !a.isTvDevice() && height < a.dp(325);
+        episodeLabel.setTextSize(compact ? 12f : 13.5f);
+        episodeLabel.setVisibility(ultraShort ? View.GONE : View.VISIBLE);
         if (a.playStatus != null) a.playStatus.setVisibility(compact ? View.GONE : View.VISIBLE);
         if (fsBtn != null) {
             fsBtn.setText(portrait ? "⛶ 全屏横屏" : "⛶ 退出全屏");

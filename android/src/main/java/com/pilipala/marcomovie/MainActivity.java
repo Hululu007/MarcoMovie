@@ -482,6 +482,35 @@ public final class MainActivity extends Activity {
         }
     }
 
+    int navigationBarHeight() {
+        if (isTvDevice()) return 0;
+        try {
+            Window w = getWindow();
+            if (w == null || root == null) return 0;
+            android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+            if (android.os.Build.VERSION.SDK_INT >= 17) {
+                getWindowManager().getDefaultDisplay().getRealMetrics(dm);
+            } else {
+                getWindowManager().getDefaultDisplay().getMetrics(dm);
+            }
+            int[] loc = new int[2];
+            root.getLocationOnScreen(loc);
+            int rootBottom = loc[1] + root.getHeight();
+            // Only return bottom inset when the view actually extends into the system bar zone
+            if (root.getHeight() > 0 && dm.heightPixels - rootBottom >= dp(24)) {
+                return 0;
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 23) {
+                android.view.WindowInsets insets = w.getDecorView().getRootWindowInsets();
+                if (insets != null) {
+                    return Math.max(0, Math.min(dp(48), insets.getSystemWindowInsetBottom()));
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return 0;
+    }
+
     void togglePlayerOrientation() {
         if (isTvDevice()) return;
         if (isPortrait()) {
@@ -1721,7 +1750,10 @@ public final class MainActivity extends Activity {
     @Override
     public void onWindowFocusChanged(boolean focus) {
         super.onWindowFocusChanged(focus);
-        if (!focus) finishSeek(false);
+        if (!focus) {
+            finishSeek(false);
+            PluginDialogStyler.watch(this);
+        }
         SourceController.onActivityFocusChanged(this, focus);
     }
 

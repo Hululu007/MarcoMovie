@@ -1,6 +1,6 @@
 package com.pilipala.marcomovie;
 
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -12,11 +12,14 @@ import android.graphics.PorterDuffXfermode;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -24,6 +27,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import com.pilipala.glass.GlassworkSurface;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -1515,21 +1519,19 @@ final class MobileDetailScreen {
             }
         }
         String title = seasonNums.size() > 1 ? "选择季数（共 " + seasonNums.size() + " 季）" : "选择季数";
-        new AlertDialog.Builder(a)
-                .setTitle(title)
-                .setSingleChoiceItems(
-                        items,
-                        checkedIdx,
-                        (dialog, which) -> {
-                            dialog.dismiss();
-                            int sNum = seasonNums.get(which);
-                            Cms.Video target = discoveredSeasons.get(sNum);
-                            if (target != null && !Objects.equals(target.id, currentVideo.id)) {
-                                show(a, site, target, null);
-                            }
-                        })
-                .setNegativeButton("关闭", null)
-                .show();
+        MobileShell.showDrawerPicker(
+                a,
+                title,
+                items,
+                checkedIdx,
+                which -> {
+                    if (which < 0 || which >= seasonNums.size()) return;
+                    int sNum = seasonNums.get(which);
+                    Cms.Video target = discoveredSeasons.get(sNum);
+                    if (target != null && !Objects.equals(target.id, currentVideo.id)) {
+                        show(a, site, target, null);
+                    }
+                });
     }
 
     private static void showAllEpisodesDialog(
@@ -1540,18 +1542,48 @@ final class MobileDetailScreen {
             boolean descending,
             WatchHistory.Entry remembered) {
         int total = line.episodes.size();
+        final Dialog dialog = new Dialog(a);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+
+        LinearLayout sheet = a.vertical();
+        int navBottom = a.navigationBarHeight();
+        sheet.setPadding(a.dp(18), a.dp(12), a.dp(18), a.dp(20) + navBottom);
+        a.glass(sheet, 28);
+
+        View grabber = new View(a);
+        grabber.setBackground(a.bg(0x45ffffff, 999));
+        LinearLayout.LayoutParams grabLp = new LinearLayout.LayoutParams(a.dp(36), a.dp(4));
+        grabLp.gravity = Gravity.CENTER_HORIZONTAL;
+        grabLp.bottomMargin = a.dp(12);
+        sheet.addView(grabber, grabLp);
+
+        LinearLayout header = a.row();
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        TextView titleTv = a.text("全部剧集 · " + line.name + " (" + total + ")", 17, Color.WHITE);
+        titleTv.setTypeface(null, Typeface.BOLD);
+        titleTv.setSingleLine(true);
+        titleTv.setEllipsize(TextUtils.TruncateAt.END);
+        header.addView(titleTv, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        TextView closeBtn = a.text("✕", 14, 0xd9ffffff);
+        closeBtn.setGravity(Gravity.CENTER);
+        closeBtn.setBackground(glassBg(a, 0x24ffffff, 0x2effffff, 999));
+        bindTouchFeedback(closeBtn);
+        closeBtn.setOnClickListener(v -> dialog.dismiss());
+        header.addView(closeBtn, new LinearLayout.LayoutParams(a.dp(30), a.dp(30)));
+        sheet.addView(header, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(sheet, 12);
+
         ScrollView sv = new ScrollView(a);
         sv.setVerticalScrollBarEnabled(false);
         LinearLayout grid = a.vertical();
-        grid.setPadding(a.dp(14), a.dp(12), a.dp(14), a.dp(16));
+        grid.setPadding(0, a.dp(2), 0, a.dp(6));
         sv.addView(grid, new ScrollView.LayoutParams(-1, -2));
-
-        final AlertDialog dialog =
-                new AlertDialog.Builder(a)
-                        .setTitle("全部剧集 · " + line.name + " (" + total + ")")
-                        .setView(sv)
-                        .setNegativeButton("关闭", null)
-                        .create();
+        int maxSheetBodyH =
+                Math.min(
+                        a.dp(460),
+                        (int) (a.getResources().getDisplayMetrics().heightPixels * 0.62f));
+        sheet.addView(sv, new LinearLayout.LayoutParams(-1, maxSheetBodyH));
 
         int cols = 3;
         LinearLayout currentRow = null;
@@ -1573,7 +1605,8 @@ final class MobileDetailScreen {
             cell.setSingleLine(true);
             cell.setEllipsize(TextUtils.TruncateAt.END);
             cell.setPadding(a.dp(8), a.dp(10), a.dp(8), a.dp(10));
-            cell.setBackground(a.bg(isCurrent ? Color.WHITE : 0xff252734, 10));
+            cell.setBackground(
+                    isCurrent ? a.bg(Color.WHITE, 12) : glassBg(a, 0x26ffffff, 0x24ffffff, 12));
             bindTouchFeedback(cell);
             cell.setOnClickListener(
                     v -> {
@@ -1591,6 +1624,20 @@ final class MobileDetailScreen {
                 lp.setMargins(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
                 currentRow.addView(new View(a), lp);
             }
+        }
+
+        dialog.setContentView(sheet);
+        Window win = dialog.getWindow();
+        if (win != null) {
+            win.getDecorView().setTag("app-dialog");
+            win.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            WindowManager.LayoutParams wlp = win.getAttributes();
+            wlp.width = WindowManager.LayoutParams.MATCH_PARENT;
+            wlp.height = WindowManager.LayoutParams.WRAP_CONTENT;
+            wlp.gravity = Gravity.BOTTOM;
+            wlp.dimAmount = 0.62f;
+            win.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            win.setAttributes(wlp);
         }
         dialog.show();
     }
@@ -1728,46 +1775,52 @@ final class MobileDetailScreen {
             }
         }
 
-        Matcher m4 = Pattern.compile("^([\\u4e00-\\u9fa5]{2,16})\\s*([1-9])\\s*$").matcher(t);
-        if (m4.matches()) {
-            String base = m4.group(1).trim();
-            int num = parseChineseNumber(m4.group(2));
-            if (!base.isEmpty()) {
-                return new SeasonMeta(base, num, "第 " + num + " 季", true);
-            }
-        }
-
         return new SeasonMeta(t, 1, "第 1 季", false);
     }
 
     static void updateRatingBadges(
             TextView doubanBadge, TextView rtBadge, Cms.Video v, double resolvedDouban) {
         double dbScore = resolvedDouban;
-        if (dbScore < 2.0 && v != null) {
+        int rtPercent = -1;
+        if (v != null) {
             String blob =
                     (v.remarks == null ? "" : v.remarks)
                             + " "
                             + (v.description == null ? "" : v.description);
-            Matcher m =
-                    Pattern.compile("(?:豆瓣|评分|TMDB|IMDb)?\\s*[:：]?\\s*([4-9]\\.[0-9])\\s*分?")
-                            .matcher(blob);
-            if (m.find()) {
+            if (dbScore < 2.0) {
+                Matcher m =
+                        Pattern.compile("(?:豆瓣|评分|TMDB|IMDb)\\s*[:：]?\\s*([2-9]\\.[0-9])\\s*分?")
+                                .matcher(blob);
+                if (m.find()) {
+                    try {
+                        dbScore = Double.parseDouble(m.group(1));
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            Matcher rtm = Pattern.compile("(?:烂番茄|新鲜度)\\s*[:：]?\\s*(\\d{2,3})\\s*%").matcher(blob);
+            if (rtm.find()) {
                 try {
-                    dbScore = Double.parseDouble(m.group(1));
+                    int parsed = Integer.parseInt(rtm.group(1));
+                    if (parsed >= 1 && parsed <= 100) rtPercent = parsed;
                 } catch (Exception ignored) {
                 }
             }
         }
-        int titleHash = Math.abs((v == null || v.title == null ? "movie" : v.title).hashCode());
-        if (dbScore < 2.0) {
-            dbScore = 7.4 + ((titleHash % 16) * 0.1);
+        if (dbScore >= 2.0 && dbScore <= 10.0) {
+            doubanBadge.setText(String.format(Locale.US, "豆瓣 ★ %.1f", dbScore));
+            doubanBadge.setVisibility(View.VISIBLE);
+        } else {
+            doubanBadge.setText("");
+            doubanBadge.setVisibility(View.GONE);
         }
-        int rtPercent =
-                Math.max(
-                        68,
-                        Math.min(98, (int) Math.round(dbScore * 10.4 + ((titleHash / 7) % 5) - 2)));
-        doubanBadge.setText(String.format(Locale.US, "豆瓣 ★ %.1f", dbScore));
-        rtBadge.setText("烂番茄 " + rtPercent + "%");
+        if (rtPercent > 0) {
+            rtBadge.setText("烂番茄 " + rtPercent + "%");
+            rtBadge.setVisibility(View.VISIBLE);
+        } else {
+            rtBadge.setText("");
+            rtBadge.setVisibility(View.GONE);
+        }
     }
 
     private static String normalizeBaseKey(String s) {
@@ -1789,6 +1842,7 @@ final class MobileDetailScreen {
         if (!curMeta.explicit) return;
         final String baseKey = normalizeBaseKey(curMeta.baseTitle);
         if (baseKey.isEmpty()) return;
+        final boolean curIsComic = SearchVariants.isComicOrShortDrama(currentVideo);
         final int ticket = a.generation;
         a.submitPage(
                 () -> {
@@ -1802,6 +1856,7 @@ final class MobileDetailScreen {
                         boolean added = false;
                         for (Cms.Video cand : found) {
                             if (cand == null || cand.title == null) continue;
+                            if (SearchVariants.isComicOrShortDrama(cand) != curIsComic) continue;
                             SeasonMeta candMeta = parseSeasonMeta(cand.title);
                             if (!baseKey.equals(normalizeBaseKey(candMeta.baseTitle))) continue;
                             if (!curMeta.explicit

@@ -3,12 +3,15 @@ package com.pilipala.marcomovie;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RadialGradient;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
@@ -26,8 +29,10 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Future;
 import org.json.JSONArray;
@@ -90,11 +95,36 @@ final class MobileShell {
 
     private final MainActivity a;
     private FrameLayout contentContainer;
+    private AmbientCanvasView ambientCanvas;
+    private LinearLayout floatingDock;
     private final View[] navTabs = new View[5];
     private final TextView[] navLabels = new TextView[5];
     private final NavGlyph[] navIcons = new NavGlyph[5];
     private static final String[] TAB_NAMES = {"主页", "搜索", "直播", "片库", "设置"};
     private static final int[] DOCK_TAB_INDICES = {0, 2, 3, 4};
+
+    void applyAppearancePreferences() {
+        if (ambientCanvas != null) {
+            ambientCanvas.reloadWallpaper();
+            ambientCanvas.invalidate();
+        }
+        if (floatingDock != null) {
+            int intensity =
+                    a.prefs.getInt(
+                            Prefs.MOBILE_GLASS_INTENSITY,
+                            a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false) ? 100 : 65);
+            int topAlpha = Math.round(0x88 + (intensity / 100f) * 0x6c);
+            int botAlpha = Math.round(0x7c + (intensity / 100f) * 0x74);
+            floatingDock.setBackground(
+                    glassBg(
+                            (topAlpha << 24) | 0x001b2421,
+                            (botAlpha << 24) | 0x00111715,
+                            a.dp(999),
+                            a.dp(0.9f),
+                            0x36ffffff));
+            floatingDock.invalidate();
+        }
+    }
 
     // Home tab state (persisted across MobileShell re-renders for the same active site)
     private Cms.Site currentSite;
@@ -190,6 +220,15 @@ final class MobileShell {
     static void showDrawerPicker(
             MainActivity a,
             String title,
+            String[] options,
+            int selectedIndex,
+            PlayerBubble.IntAction onSelect) {
+        showDrawerPicker(a, title, "", options, selectedIndex, onSelect);
+    }
+
+    static void showDrawerPicker(
+            MainActivity a,
+            String title,
             String subtitle,
             String[] options,
             int selectedIndex,
@@ -197,6 +236,7 @@ final class MobileShell {
         final android.app.Dialog dlg = new android.app.Dialog(a);
         dlg.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE);
         if (dlg.getWindow() != null) {
+            dlg.getWindow().getDecorView().setTag("app-dialog");
             dlg.getWindow()
                     .setBackgroundDrawable(
                             new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
@@ -216,9 +256,10 @@ final class MobileShell {
         int sheetWidth =
                 a.isPortrait() ? a.windowWidth() : Math.min(a.windowWidth() - a.dp(32), a.dp(540));
         LinearLayout sheet = a.vertical();
+        sheet.setTag("mobile-drawer");
         sheet.setClickable(true);
         sheet.setMinimumWidth(sheetWidth);
-        sheet.setPadding(a.dp(20), a.dp(12), a.dp(20), a.dp(28));
+        sheet.setPadding(a.dp(20), a.dp(12), a.dp(20), a.dp(28) + a.navigationBarHeight());
         GradientDrawable sheetBg =
                 new GradientDrawable(
                         GradientDrawable.Orientation.TOP_BOTTOM,
@@ -552,8 +593,9 @@ final class MobileShell {
                     }
                 });
 
-        // Layer 0: iOS 27 Emerald-Obsidian Ambient Background
-        a.root.addView(new AmbientCanvasView(a), new FrameLayout.LayoutParams(-1, -1));
+        // Layer 0: iOS 27 Emerald-Obsidian Ambient Background / Custom Wallpaper
+        ambientCanvas = new AmbientCanvasView(a);
+        a.root.addView(ambientCanvas, new FrameLayout.LayoutParams(-1, -1));
 
         float widthDp = a.windowWidth() / a.getResources().getDisplayMetrics().density;
         boolean tabletSideRail = widthDp >= 640 && !a.isPortrait();
@@ -570,6 +612,7 @@ final class MobileShell {
             FrameLayout railWrap = new FrameLayout(a);
             railWrap.setPadding(a.dp(8), statusBarHeight() + a.dp(12), a.dp(12), a.dp(12));
             LinearLayout sideRail = buildNavigationBar(true);
+            floatingDock = sideRail;
             FrameLayout.LayoutParams railLp =
                     new FrameLayout.LayoutParams(
                             a.dp(72 * navScale), a.dp(296 * navScale), Gravity.CENTER_VERTICAL);
@@ -598,6 +641,7 @@ final class MobileShell {
 
             // Layer 4: iPhone Floating Liquid Glass 4-Tab Pill Dock
             LinearLayout bottomDock = buildNavigationBar(false);
+            floatingDock = bottomDock;
             int dockWidthPx =
                     Math.min(a.dp(286 * navScale), Math.max(a.dp(244), a.windowWidth() - a.dp(32)));
             FrameLayout.LayoutParams dockLp =
@@ -605,7 +649,7 @@ final class MobileShell {
                             dockWidthPx,
                             a.dp(64 * navScale),
                             Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-            dockLp.bottomMargin = a.dp(16);
+            dockLp.bottomMargin = a.dp(16) + a.navigationBarHeight();
             a.root.addView(bottomDock, dockLp);
         }
 
@@ -1039,7 +1083,7 @@ final class MobileShell {
 
         // 2. History shelf; the newest entry remains first and resumes on tap.
         List<WatchHistory.Entry> history = a.watchHistory();
-        if (!history.isEmpty()) {
+        if (!history.isEmpty() && a.prefs.getBoolean(Prefs.MOBILE_SHOW_HISTORY, true)) {
             LinearLayout histHeader = a.row();
             histHeader.setGravity(Gravity.CENTER_VERTICAL);
             histHeader.setPadding(a.dp(16), a.dp(14), a.dp(16), a.dp(8));
@@ -1713,10 +1757,16 @@ final class MobileShell {
     private void renderVideoGrid(LinearLayout container, Cms.Site site, List<Cms.Video> videos) {
         container.removeAllViews();
         float widthDp = a.windowWidth() / a.getResources().getDisplayMetrics().density;
-        int cols = widthDp >= 720 ? 5 : (widthDp >= 520 ? 4 : 3);
+        int baseCols = widthDp >= 720 ? 5 : (widthDp >= 520 ? 4 : 3);
+        int densityPref = a.prefs.getInt(Prefs.MOBILE_POSTER_DENSITY, 1);
+        int cols =
+                densityPref == 0
+                        ? Math.max(2, baseCols - 1)
+                        : (densityPref == 2 ? Math.min(6, baseCols + 1) : baseCols);
+        int subtitleMode = a.prefs.getInt(Prefs.MOBILE_CARD_SUBTITLE, 0);
         int horizontalPaddingDp = widthDp >= 640 && !a.isPortrait() ? 116 : 32;
         int cardWidthDp =
-                Math.max(92, (int) ((widthDp - horizontalPaddingDp - (cols - 1) * 12) / cols));
+                Math.max(76, (int) ((widthDp - horizontalPaddingDp - (cols - 1) * 12) / cols));
         int posterHeightDp = Math.round(cardWidthDp * 1.48f);
 
         LinearLayout currentRow = null;
@@ -1769,13 +1819,15 @@ final class MobileShell {
             title.setPadding(a.dp(1), a.dp(7), a.dp(1), 0);
             card.addView(title);
 
-            // Line 2: Subtitle (`year · area` or fallback to `remarks` / `site.name`, 11sp muted)
-            String subtitleText = formatCardSubtitle(v, site);
-            TextView sub = a.text(subtitleText, 11, 0xff8e959e);
-            sub.setSingleLine(true);
-            sub.setEllipsize(TextUtils.TruncateAt.END);
-            sub.setPadding(a.dp(1), a.dp(2), a.dp(1), a.dp(2));
-            card.addView(sub);
+            // Line 2: Subtitle controlled by Settings -> 浏览 -> 海报与卡片
+            if (subtitleMode != 3) {
+                String subtitleText = formatCardSubtitle(v, site, subtitleMode);
+                TextView sub = a.text(subtitleText, 11, 0xff8e959e);
+                sub.setSingleLine(true);
+                sub.setEllipsize(TextUtils.TruncateAt.END);
+                sub.setPadding(a.dp(1), a.dp(2), a.dp(1), a.dp(2));
+                card.addView(sub);
+            }
 
             LinearLayout.LayoutParams cellLp = new LinearLayout.LayoutParams(0, -2, 1);
             int colIdx = i % cols;
@@ -1798,7 +1850,13 @@ final class MobileShell {
         }
     }
 
-    private static String formatCardSubtitle(Cms.Video v, Cms.Site site) {
+    private static String formatCardSubtitle(Cms.Video v, Cms.Site site, int mode) {
+        if (mode == 2) {
+            return site != null && site.name != null ? site.name : "";
+        }
+        if (mode == 0 && v.remarks != null && !v.remarks.trim().isEmpty()) {
+            return v.remarks.trim();
+        }
         String year = v.year == null ? "" : v.year.trim();
         String area = v.area == null ? "" : v.area.trim();
         String tag = v.tag == null ? "" : v.tag.trim();
@@ -2060,16 +2118,49 @@ final class MobileShell {
                     searchStatus.setText(mainLine);
                 };
 
+        final String preferredSiteKey =
+                currentSite != null ? currentSite.key : a.prefs.getString(Prefs.SELECTED_SITE, "");
+
         final Runnable[] refreshSiteFilterBar = new Runnable[1];
         final Runnable rebuildFilteredResults =
                 () -> {
                     resultList.removeAllViews();
+                    List<CachedSearchHit> ordered = new ArrayList<>();
                     for (CachedSearchHit hit : cachedSearchHits) {
                         if (cachedSearchSiteFilter.isEmpty()
                                 || (hit.site != null
                                         && cachedSearchSiteFilter.equals(hit.site.key))) {
-                            resultList.addView(buildSearchResultRow(hit.site, hit.video));
+                            ordered.add(hit);
                         }
+                    }
+                    final String activeKw = cachedSearchKeyword;
+                    Collections.sort(
+                            ordered,
+                            (h1, h2) -> {
+                                boolean p1 =
+                                        h1.site != null
+                                                && preferredSiteKey != null
+                                                && preferredSiteKey.equals(h1.site.key);
+                                boolean p2 =
+                                        h2.site != null
+                                                && preferredSiteKey != null
+                                                && preferredSiteKey.equals(h2.site.key);
+                                int s1 =
+                                        SearchVariants.scoreVideo(
+                                                activeKw,
+                                                h1.video,
+                                                h1.site == null ? "" : h1.site.name,
+                                                p1);
+                                int s2 =
+                                        SearchVariants.scoreVideo(
+                                                activeKw,
+                                                h2.video,
+                                                h2.site == null ? "" : h2.site.name,
+                                                p2);
+                                return Integer.compare(s2, s1);
+                            });
+                    for (CachedSearchHit hit : ordered) {
+                        resultList.addView(buildSearchResultRow(hit.site, hit.video));
                     }
                     renderSearchStatus.run();
                     if (refreshSiteFilterBar[0] != null) refreshSiteFilterBar[0].run();
@@ -2086,6 +2177,15 @@ final class MobileShell {
                             new java.util.LinkedHashMap<>();
                     final java.util.Map<String, Integer> siteCounts =
                             new java.util.LinkedHashMap<>();
+                    // Pin currentSite immediately after "全部" when it has results
+                    if (preferredSiteKey != null && !preferredSiteKey.isEmpty()) {
+                        for (CachedSearchHit hit : cachedSearchHits) {
+                            if (hit.site != null && preferredSiteKey.equals(hit.site.key)) {
+                                hitSites.put(hit.site.key, hit.site);
+                                break;
+                            }
+                        }
+                    }
                     for (CachedSearchHit hit : cachedSearchHits) {
                         if (hit.site == null || hit.site.key == null) continue;
                         hitSites.put(hit.site.key, hit.site);
@@ -2349,11 +2449,23 @@ final class MobileShell {
                     for (Cms.Site s : SourcePreferences.prioritized(a, a.config.sites)) {
                         if (a.available(s) && s.searchable) searchableSites.add(s);
                     }
+                    final String selectedKey =
+                            currentSite != null
+                                    ? currentSite.key
+                                    : a.prefs.getString(Prefs.SELECTED_SITE, "");
+                    Collections.sort(
+                            searchableSites,
+                            (x, y) ->
+                                    Boolean.compare(
+                                            !x.key.equals(selectedKey),
+                                            !y.key.equals(selectedKey)));
                     if (searchableSites.isEmpty()) {
                         cachedSearchStatus = "当前没有可搜索的片源";
                         searchStatus.setText(cachedSearchStatus);
                         return;
                     }
+                    final List<String> expandedTerms =
+                            SearchVariants.mergeTerms(kw, Collections.singletonList(kw));
                     cachedSearchStatus = "正在并发搜索 " + searchableSites.size() + " 个片源…";
                     searchStatus.setText(cachedSearchStatus);
                     final int[] completed = {0};
@@ -2362,27 +2474,39 @@ final class MobileShell {
                     SearchCoordinator.configureThreads(a.prefs.getInt(Prefs.SEARCH_THREADS, 6));
                     activeSearchCoordinator =
                             new SearchCoordinator(
-                                    (site, keyword) -> {
-                                        List<Cms.Video> matches = new ArrayList<>();
-                                        try {
-                                            Cms.Listing l =
-                                                    Cms.listing(a.engine(site).search(keyword, 1));
-                                            for (Cms.Video v : l.videos) {
-                                                if (v.action == null || v.action.isEmpty()) {
-                                                    matches.add(v);
-                                                }
-                                            }
-                                        } catch (
-                                                com.pilipala.catpaw.CatPawHost.DrpySourceException
-                                                        error) {
-                                            if ("drpy_verification_required".equals(error.code)) {
-                                                throw new SearchCoordinator
-                                                        .VerificationRequiredException();
-                                            }
-                                            throw error;
-                                        }
-                                        return matches;
-                                    },
+                                    (site, keyword) ->
+                                            SearchVariants.run(
+                                                    keyword,
+                                                    expandedTerms,
+                                                    t -> true,
+                                                    term -> {
+                                                        List<Cms.Video> matches = new ArrayList<>();
+                                                        try {
+                                                            Cms.Listing l =
+                                                                    Cms.listing(
+                                                                            a.engine(site)
+                                                                                    .search(
+                                                                                            term,
+                                                                                            1));
+                                                            for (Cms.Video v : l.videos) {
+                                                                if (v.action == null
+                                                                        || v.action.isEmpty()) {
+                                                                    matches.add(v);
+                                                                }
+                                                            }
+                                                        } catch (
+                                                                com.pilipala.catpaw.CatPawHost
+                                                                                .DrpySourceException
+                                                                        error) {
+                                                            if ("drpy_verification_required"
+                                                                    .equals(error.code)) {
+                                                                throw new SearchCoordinator
+                                                                        .VerificationRequiredException();
+                                                            }
+                                                            throw error;
+                                                        }
+                                                        return matches;
+                                                    }),
                                     (site, matches, outcome) ->
                                             a.ui.post(
                                                     () -> {
@@ -2393,7 +2517,7 @@ final class MobileShell {
                                                                 || a.isFinishing()
                                                                 || a.isDestroyed()) return;
                                                         completed[0]++;
-                                                        if (matches != null) {
+                                                        if (matches != null && !matches.isEmpty()) {
                                                             for (final Cms.Video v : matches) {
                                                                 hitCount[0]++;
                                                                 if (kw.equals(
@@ -2402,17 +2526,8 @@ final class MobileShell {
                                                                             new CachedSearchHit(
                                                                                     site, v));
                                                                 }
-                                                                if (cachedSearchSiteFilter.isEmpty()
-                                                                        || cachedSearchSiteFilter
-                                                                                .equals(site.key)) {
-                                                                    resultList.addView(
-                                                                            buildSearchResultRow(
-                                                                                    site, v));
-                                                                }
                                                             }
-                                                            if (!matches.isEmpty()) {
-                                                                refreshSiteFilterBar[0].run();
-                                                            }
+                                                            rebuildFilteredResults.run();
                                                         }
                                                         if (completed[0] < searchableSites.size()) {
                                                             cachedSearchStatus =
@@ -2522,10 +2637,33 @@ final class MobileShell {
         title.setEllipsize(TextUtils.TruncateAt.END);
         info.addView(title);
 
+        LinearLayout badgeRow = a.row();
+        badgeRow.setGravity(Gravity.CENTER_VERTICAL);
+        badgeRow.setPadding(0, a.dp(4), 0, 0);
+
         TextView badge = a.text("来源：" + site.name, 12, 0xff0a84ff);
         badge.setTypeface(null, Typeface.BOLD);
-        badge.setPadding(0, a.dp(4), 0, 0);
-        info.addView(badge);
+        badge.setSingleLine(true);
+        badge.setEllipsize(TextUtils.TruncateAt.END);
+        badgeRow.addView(badge);
+
+        String rawTag = v.tag == null ? "" : v.tag.trim();
+        boolean isComic = SearchVariants.isComicOrShortDrama(v, site.name);
+        String displayTag =
+                !rawTag.isEmpty() && !"folder".equalsIgnoreCase(rawTag)
+                        ? rawTag
+                        : (isComic ? "漫剧/衍生" : "");
+        if (!displayTag.isEmpty()) {
+            TextView typePill = a.text(displayTag, 10.5f, isComic ? 0xffffb84d : 0xff6ee7b7);
+            typePill.setTypeface(null, Typeface.BOLD);
+            typePill.setSingleLine(true);
+            typePill.setPadding(a.dp(7), a.dp(1.5f), a.dp(7), a.dp(1.5f));
+            typePill.setBackground(a.bg(isComic ? 0x33ff9f0a : 0x2c30d158, 999));
+            LinearLayout.LayoutParams tpLp = new LinearLayout.LayoutParams(-2, -2);
+            tpLp.leftMargin = a.dp(7);
+            badgeRow.addView(typePill, tpLp);
+        }
+        info.addView(badgeRow, new LinearLayout.LayoutParams(-1, -2));
 
         String sub =
                 ((v.year == null ? "" : v.year)
@@ -2642,6 +2780,8 @@ final class MobileShell {
                                     activeCatalog[0],
                                     activeGroupIdx,
                                     s.toString().trim(),
+                                    searchInput,
+                                    120,
                                     groupRow,
                                     channelGridCol);
                         }
@@ -2716,6 +2856,8 @@ final class MobileShell {
                                                         catalog,
                                                         activeGroupIdx,
                                                         searchInput.getText().toString().trim(),
+                                                        searchInput,
+                                                        120,
                                                         groupRow,
                                                         channelGridCol);
                                             });
@@ -2740,6 +2882,8 @@ final class MobileShell {
             final LiveCatalog.Catalog catalog,
             final int[] selectedGroupHolder,
             final String searchQuery,
+            final EditText searchInput,
+            final int maxVisibleCount,
             final LinearLayout groupRow,
             final LinearLayout channelGridCol) {
         groupRow.removeAllViews();
@@ -2766,8 +2910,19 @@ final class MobileShell {
         allBtn.setOnClickListener(
                 v -> {
                     selectedGroupHolder[0] = -1;
+                    if (searchInput != null && searchInput.getText().length() > 0) {
+                        searchInput.setText("");
+                        return;
+                    }
                     renderLiveGroupsAndChannels(
-                            source, catalog, selectedGroupHolder, "", groupRow, channelGridCol);
+                            source,
+                            catalog,
+                            selectedGroupHolder,
+                            "",
+                            searchInput,
+                            120,
+                            groupRow,
+                            channelGridCol);
                 });
         LinearLayout.LayoutParams allLp = new LinearLayout.LayoutParams(-2, -2);
         allLp.rightMargin = a.dp(7);
@@ -2793,8 +2948,19 @@ final class MobileShell {
             gBtn.setOnClickListener(
                     v -> {
                         selectedGroupHolder[0] = gIdx;
+                        if (searchInput != null && searchInput.getText().length() > 0) {
+                            searchInput.setText("");
+                            return;
+                        }
                         renderLiveGroupsAndChannels(
-                                source, catalog, selectedGroupHolder, "", groupRow, channelGridCol);
+                                source,
+                                catalog,
+                                selectedGroupHolder,
+                                "",
+                                searchInput,
+                                120,
+                                groupRow,
+                                channelGridCol);
                     });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
             lp.rightMargin = a.dp(7);
@@ -2839,9 +3005,10 @@ final class MobileShell {
 
         int swDp = a.getResources().getConfiguration().screenWidthDp;
         final int cols = swDp >= 880 ? 4 : (swDp >= 580 ? 3 : 2);
+        final int shownCount = Math.min(displayList.size(), Math.max(cols, maxVisibleCount));
         LinearLayout currentRow = null;
 
-        for (int i = 0; i < displayList.size(); i++) {
+        for (int i = 0; i < shownCount; i++) {
             if (i % cols == 0) {
                 currentRow = a.row();
                 currentRow.setBaselineAligned(false);
@@ -2858,7 +3025,7 @@ final class MobileShell {
             }
             currentRow.addView(card, cardLp);
         }
-        int remainder = displayList.size() % cols;
+        int remainder = shownCount % cols;
         if (remainder != 0 && currentRow != null) {
             for (int pad = remainder; pad < cols; pad++) {
                 View spacer = new View(a);
@@ -2868,6 +3035,33 @@ final class MobileShell {
                 }
                 currentRow.addView(spacer, spLp);
             }
+        }
+        if (shownCount < displayList.size()) {
+            TextView moreBtn =
+                    a.text(
+                            "加载更多频道（已显示 " + shownCount + " / " + displayList.size() + "）",
+                            13,
+                            0xff5ac8fa);
+            moreBtn.setTypeface(null, Typeface.BOLD);
+            moreBtn.setGravity(Gravity.CENTER);
+            moreBtn.setPadding(a.dp(16), a.dp(11), a.dp(16), a.dp(11));
+            moreBtn.setBackground(
+                    glassBg(0xcc202926, 0xb8161d1b, a.dp(999), a.dp(0.8f), 0x33ffffff));
+            MobileDetailScreen.bindTouchFeedback(moreBtn);
+            moreBtn.setOnClickListener(
+                    v ->
+                            renderLiveGroupsAndChannels(
+                                    source,
+                                    catalog,
+                                    selectedGroupHolder,
+                                    searchQuery,
+                                    searchInput,
+                                    shownCount + 120,
+                                    groupRow,
+                                    channelGridCol));
+            LinearLayout.LayoutParams moreLp = new LinearLayout.LayoutParams(-1, -2);
+            moreLp.topMargin = a.dp(4);
+            channelGridCol.addView(moreBtn, moreLp);
         }
     }
 
@@ -3151,6 +3345,25 @@ final class MobileShell {
                                 info.addView(sub);
                                 row.addView(info, new LinearLayout.LayoutParams(0, -2, 1));
 
+                                TextView unfav = a.text("移除", 12, 0xffef4444);
+                                unfav.setPadding(a.dp(10), a.dp(6), a.dp(10), a.dp(6));
+                                MobileDetailScreen.bindTouchFeedback(unfav);
+                                unfav.setOnClickListener(
+                                        v -> {
+                                            a.prefs
+                                                    .edit()
+                                                    .putString(
+                                                            Prefs.FAVORITES,
+                                                            Favorites.toggle(
+                                                                    a.prefs.getString(
+                                                                            Prefs.FAVORITES, "[]"),
+                                                                    f.site,
+                                                                    f.video()))
+                                                    .apply();
+                                            run();
+                                        });
+                                row.addView(unfav);
+
                                 row.setOnClickListener(
                                         v -> {
                                             Cms.Site targetSite = null;
@@ -3162,9 +3375,9 @@ final class MobileShell {
                                                     }
                                                 }
                                             }
-                                            if (targetSite == null) targetSite = currentSite;
                                             if (targetSite == null) {
-                                                a.toast("该收藏所属的片源不可用");
+                                                a.toast("原片源不在当前订阅中，已自动全网搜索该影片");
+                                                openSearchTab(a, f.title);
                                                 return;
                                             }
                                             final Cms.Site resolvedSite = targetSite;
@@ -3205,8 +3418,18 @@ final class MobileShell {
                 });
         clearBtn.setOnClickListener(
                 v -> {
-                    a.prefs.edit().putString(Prefs.WATCH_HISTORY, "[]").apply();
-                    renderSubTab.run();
+                    if (a.watchHistory().isEmpty()) return;
+                    new AppDialog.Builder(a)
+                            .setTitle("清空观看历史？")
+                            .setMessage("清空后将移除所有影片的本地观看进度记录。")
+                            .setNegativeButton("取消", null)
+                            .setPositiveButton(
+                                    "清空",
+                                    (d, w) -> {
+                                        a.prefs.edit().putString(Prefs.WATCH_HISTORY, "[]").apply();
+                                        renderSubTab.run();
+                                    })
+                            .show();
                 });
 
         renderSubTab.run();
@@ -3227,6 +3450,15 @@ final class MobileShell {
     // TAB 4: MOBILE SETTINGS (2-Level Clean Architecture, Zero Emojis, Zero Ghosting)
     // =========================================================================
     private void renderSettingsTab() {
+        renderSettingsTabImpl();
+    }
+
+    private void renderSettingsTabImpl() {
+        MobileIosSettings.render(a, contentContainer, currentSite, this);
+    }
+
+    @SuppressWarnings("unused")
+    private void renderLegacySettingsTabUnused() {
         contentContainer.removeAllViews();
 
         final ScrollView sv = new ScrollView(a);
@@ -4832,11 +5064,45 @@ final class MobileShell {
      * Deep emerald-obsidian ambient canvas matching the iPhone `AppleAmbientBackground` preset.
      */
     private static final class AmbientCanvasView extends View {
+        private final MainActivity a;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint wpPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final Rect srcRect = new Rect();
+        private final Rect dstRect = new Rect();
+        private Bitmap wallpaperBmp;
+        private long wallpaperMtime = -1L;
 
-        AmbientCanvasView(Context context) {
-            super(context);
+        AmbientCanvasView(MainActivity activity) {
+            super(activity);
+            this.a = activity;
+            reloadWallpaper();
+        }
+
+        void reloadWallpaper() {
+            if (a == null || !a.prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false)) {
+                wallpaperBmp = null;
+                wallpaperMtime = -1L;
+                return;
+            }
+            File wpFile = new File(a.getFilesDir(), "wallpaper.jpg");
+            if (!wpFile.exists()) {
+                wallpaperBmp = null;
+                wallpaperMtime = -1L;
+                return;
+            }
+            long mtime = wpFile.lastModified();
+            if (wallpaperBmp != null && !wallpaperBmp.isRecycled() && mtime == wallpaperMtime) {
+                return;
+            }
+            try {
+                Bitmap decoded = BitmapFactory.decodeFile(wpFile.getAbsolutePath());
+                if (decoded != null) {
+                    wallpaperBmp = decoded;
+                    wallpaperMtime = mtime;
+                }
+            } catch (Throwable ignored) {
+            }
         }
 
         @Override
@@ -4844,6 +5110,29 @@ final class MobileShell {
             int w = getWidth();
             int h = getHeight();
             if (w <= 0 || h <= 0) return;
+
+            if (wallpaperBmp != null
+                    && !wallpaperBmp.isRecycled()
+                    && a != null
+                    && a.prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false)) {
+                int bw = wallpaperBmp.getWidth();
+                int bh = wallpaperBmp.getHeight();
+                if (bw > 0 && bh > 0) {
+                    float scale = Math.max((float) w / bw, (float) h / bh);
+                    int cropW = Math.round(w / scale);
+                    int cropH = Math.round(h / scale);
+                    int sx = Math.max(0, (bw - cropW) / 2);
+                    int sy = Math.max(0, (bh - cropH) / 2);
+                    srcRect.set(sx, sy, Math.min(bw, sx + cropW), Math.min(bh, sy + cropH));
+                    dstRect.set(0, 0, w, h);
+                    canvas.drawBitmap(wallpaperBmp, srcRect, dstRect, wpPaint);
+                    int dimPct =
+                            Math.max(20, Math.min(90, a.prefs.getInt(Prefs.WALLPAPER_DIM, 60)));
+                    int dimAlpha = Math.round(255f * (dimPct / 100f));
+                    canvas.drawColor((dimAlpha << 24) | 0x00060a08);
+                    return;
+                }
+            }
 
             paint.setShader(
                     new LinearGradient(
@@ -4856,16 +5145,18 @@ final class MobileShell {
                             Shader.TileMode.CLAMP));
             canvas.drawRect(0, 0, w, h, paint);
 
-            float radius = Math.max(w, h) * 0.65f;
-            glowPaint.setShader(
-                    new RadialGradient(
-                            w * 0.5f,
-                            h * 0.14f,
-                            radius,
-                            new int[] {0x38205c44, 0x14123628, 0x00070c0a},
-                            new float[] {0f, 0.55f, 1f},
-                            Shader.TileMode.CLAMP));
-            canvas.drawRect(0, 0, w, h, glowPaint);
+            if (a == null || a.prefs.getBoolean(Prefs.HOME_AMBIENT, true)) {
+                float radius = Math.max(w, h) * 0.65f;
+                glowPaint.setShader(
+                        new RadialGradient(
+                                w * 0.5f,
+                                h * 0.14f,
+                                radius,
+                                new int[] {0x38205c44, 0x14123628, 0x00070c0a},
+                                new float[] {0f, 0.55f, 1f},
+                                Shader.TileMode.CLAMP));
+                canvas.drawRect(0, 0, w, h, glowPaint);
+            }
         }
     }
 

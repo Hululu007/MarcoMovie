@@ -164,14 +164,20 @@ final class AppDialog extends Dialog {
         w.setGravity(Gravity.CENTER);
         w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
         WindowManager.LayoutParams attrs = w.getAttributes();
-        attrs.dimAmount = .5f;
+        attrs.dimAmount = a.isTvDevice() ? .5f : .62f;
         w.setAttributes(attrs);
-        w.getDecorView().setSystemUiVisibility(5894);
-        w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
-        View first = selected;
-        if (first == null)
-            first = content.getChildCount() > 0 ? content.getChildAt(0) : actions.get(-1);
-        if (first != null) first.requestFocus();
+        if (a.isTvDevice()) {
+            w.getDecorView().setSystemUiVisibility(5894);
+            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+            View first = selected;
+            if (first == null)
+                first = content.getChildCount() > 0 ? content.getChildAt(0) : actions.get(-1);
+            if (first != null) first.requestFocus();
+        } else {
+            w.setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                            | WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
+        }
         if (!a.reduced) {
             panel.setAlpha(0);
             panel.setScaleX(.96f);

@@ -115,14 +115,18 @@ final class PhoneConfigDialog {
             url.setGravity(android.view.Gravity.CENTER);
             url.setPadding(0, a.dp(10), 0, 0);
             panel.addView(url);
-            android.widget.Button emby = new android.widget.Button(a);
-            emby.setText("连接 Emby");
-            emby.setOnClickListener(
-                    v -> {
-                        if (dialog != null) dialog.dismiss();
-                        EmbyEngine.connect(a);
-                    });
-            panel.addView(emby);
+            android.widget.Button emby =
+                    a.button(
+                            "连接 Emby 媒体库",
+                            "config-emby",
+                            () -> {
+                                if (dialog != null) dialog.dismiss();
+                                EmbyEngine.connect(a);
+                            });
+            emby.setTextSize(13.5f);
+            LinearLayout.LayoutParams embyLp = new LinearLayout.LayoutParams(-2, a.dp(40));
+            embyLp.topMargin = a.dp(10);
+            panel.addView(emby, embyLp);
             a.gap(panel, 6);
             panel.addView(a.text("二维码有效 5 分钟 · 关闭后停止接收", 12, MainActivity.MUTED));
             dialog =
