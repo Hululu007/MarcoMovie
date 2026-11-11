@@ -1,6 +1,6 @@
 # 内置解码组件
 
-Marco Movie 0.3.3 将以下组件随 ARM 32 位 APK 提供，无需另外安装解码器应用。
+Marco Movie 将以下组件随 Android TV（ARM 32 位）与 Android 手机端（ARM 32 位 + ARM64 16KB 页面对齐）APK 内置提供，无需另外安装解码器应用。
 
 | 组件 | 用途 |
 | --- | --- |
@@ -26,7 +26,7 @@ Marco Movie 0.3.3 将以下组件随 ARM 32 位 APK 提供，无需另外安装�
 
 二进制由本项目从官方固定提交构建，不提取其他播放器的闭源组件。`android/decoder-dependencies.json` 固定下载地址和 SHA-256；库摘要及上游提交在 `android/src/main/assets/decoder-licenses/provenance.json`。
 
-[解码组件发布页](https://github.com/Pilipala9919/MarcoMovie/releases/tag/decoders-1.5.1-armv7-v1) 同时提供原生库、完整对应上游源码包、构建配方和摘要。源码包中的各 `*-source.tar` 保留上游源码和许可证；`build/` 提供固定提交与编译参数。也可在本仓库用 Linux、Python 3、CMake、Ninja、Make、Git、NDK r26b 运行：
+[ARMv7 解码组件发布页](https://github.com/Pilipala9919/MarcoMovie/releases/tag/decoders-1.5.1-armv7-v1) 与 [ARM64 解码组件发布页](https://github.com/Pilipala9919/MarcoMovie/releases/tag/decoders-1.5.1-arm64-v1) 同时提供原生库、完整对应上游源码包、构建配方和摘要。源码包中的各 `*-source.tar` 保留上游源码和许可证；`build/` 提供固定提交与编译参数。也可在本仓库用 Linux、Python 3、CMake、Ninja、Make、Git、NDK r26b 运行：
 
 ```sh
 export ANDROID_NDK_HOME=/path/to/android-ndk-r26b

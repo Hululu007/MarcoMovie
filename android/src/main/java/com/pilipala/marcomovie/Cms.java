@@ -839,7 +839,9 @@ public final class Cms {
                 || t.startsWith("//")
                 || t.startsWith("/*")
                 || t.startsWith("#EXTM3U")
-                || t.contains(",#genre#");
+                || t.contains("#EXTINF:")
+                || t.contains(",#genre#")
+                || t.matches("(?s).*[^,\\r\\n]{1,64},(?:https?|rtmps?|rtsp|mms|proxy)://.*");
     }
 
     /** Some operator-provided TVBox configs are JPEG/PNG/GIF + '**' + Base64(JSON) or AES hex. */

@@ -656,29 +656,90 @@ public final class CspEngine implements SourceEngine {
                 && s.api.substring(4).matches("[A-Za-z0-9_$.]+");
     }
 
+    static void resetActiveProxy() {
+        activeProxyLoader = null;
+        activeJarDeclaration = "";
+    }
+
+    private static boolean isUsableProxyResult(Object[] res) {
+        if (res == null || res.length < 3) return false;
+        if (res[0] instanceof Number && ((Number) res[0]).intValue() >= 400) return false;
+        Object body = res[2];
+        if (body == null) return false;
+        if (body instanceof String) return !((String) body).trim().isEmpty();
+        if (body instanceof byte[]) return ((byte[]) body).length > 0;
+        return true;
+    }
+
+    private static Object[] invokeProxyOnLoader(ClassLoader rootLoader, Map<String, String> params)
+            throws Throwable {
+        Throwable last = null;
+        Object[] fallbackResult = null;
+        for (ClassLoader cl : collectPluginLoaders(rootLoader, null)) {
+            try {
+                Class<?> proxyCls = Class.forName("com.github.catvod.spider.Proxy", false, cl);
+                Method m = proxyCls.getMethod("proxy", Map.class);
+                Object raw = m.invoke(null, params);
+                if (raw instanceof Object[]) {
+                    Object[] arr = (Object[]) raw;
+                    if (isUsableProxyResult(arr)) return arr;
+                    if (fallbackResult == null) fallbackResult = arr;
+                }
+            } catch (ClassNotFoundException | NoSuchMethodException ignored) {
+            } catch (InvocationTargetException ite) {
+                last = unwrap(ite);
+            } catch (Throwable t) {
+                last = t;
+            }
+        }
+        if (fallbackResult != null) return fallbackResult;
+        if (last != null) throw last;
+        return null;
+    }
+
     public static Object[] proxy(Application app, Cms.Config config, Map<String, String> params)
             throws Exception {
-        DexClassLoader loader = activeProxyLoader;
-        if (loader == null) {
-            String decl =
-                    activeJarDeclaration != null && !activeJarDeclaration.isEmpty()
-                            ? activeJarDeclaration
-                            : config.spider;
-            File artifact = obtain(app, decl);
-            loader = loader(app, artifact, digest(artifact, "SHA-256"));
-            activeProxyLoader = loader;
+        LinkedHashSet<DexClassLoader> candidates = new LinkedHashSet<>();
+        if (activeProxyLoader != null) {
+            candidates.add(activeProxyLoader);
+        } else if (activeJarDeclaration != null && !activeJarDeclaration.trim().isEmpty()) {
+            try {
+                File artifact = obtain(app, activeJarDeclaration);
+                DexClassLoader loaded = loader(app, artifact, digest(artifact, "SHA-256"));
+                activeProxyLoader = loaded;
+                candidates.add(loaded);
+            } catch (Exception ignored) {
+            }
         }
-        syncPluginProxyPort(loader, ProxyAddress.port);
+        if (config != null && config.spider != null && !config.spider.trim().isEmpty()) {
+            try {
+                File mainArtifact = obtain(app, config.spider);
+                DexClassLoader mainLoader =
+                        loader(app, mainArtifact, digest(mainArtifact, "SHA-256"));
+                candidates.add(mainLoader);
+                if (activeProxyLoader == null) activeProxyLoader = mainLoader;
+            } catch (Exception e) {
+                if (candidates.isEmpty()) throw e;
+            }
+        }
         // playerContent may call its own HTTP proxy synchronously. Holding its
         // catalogue lock here would deadlock that reentrant network request.
-        try {
-            return (Object[])
-                    loader.loadClass("com.github.catvod.spider.Proxy")
-                            .getMethod("proxy", Map.class)
-                            .invoke(null, params);
-        } catch (InvocationTargetException e) {
-            throw new IOException("来源代理执行失败", unwrap(e));
+        Throwable lastError = null;
+        Object[] fallbackResult = null;
+        for (DexClassLoader candidate : candidates) {
+            syncPluginProxyPort(candidate, ProxyAddress.port);
+            syncPluginActivity(candidate, MainActivity.activeActivity);
+            try {
+                Object[] res = invokeProxyOnLoader(candidate, params);
+                if (isUsableProxyResult(res)) return res;
+                if (fallbackResult == null && res != null) fallbackResult = res;
+            } catch (Throwable t) {
+                lastError = t;
+            }
         }
+        if (fallbackResult != null) return fallbackResult;
+        if (lastError != null) throw new IOException("来源代理执行失败", lastError);
+        return null;
     }
 
     public static final class EngineException extends Exception {

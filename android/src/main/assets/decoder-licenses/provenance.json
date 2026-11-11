@@ -35,8 +35,12 @@
     "patch_ffmpeg.py: TrueHD channel layout and flush"
   ],
   "ndk": "26.1.10909125",
-  "abi": "armeabi-v7a",
+  "abis": [
+    "armeabi-v7a",
+    "arm64-v8a"
+  ],
   "api": 23,
+  "max_page_size": 16384,
   "audio_decoders": [
     "vorbis",
     "opus",
@@ -55,8 +59,15 @@
     "truehd"
   ],
   "libraries": {
-    "libffmpegJNI.so": "46e04818bd9f3a205237db64fd984350cdaff0c5c98c78004abffa2f45095359",
-    "libgav1JNI.so": "aef236d674d98f34e69a494a6e7558250187762235db46008cec741f78ed84d3",
-    "libvpxV2JNI.so": "3498df92e825b69c276344bb4f75ca77d7601bb7851aef18df9ba223ce25e2dd"
+    "armeabi-v7a": {
+      "libffmpegJNI.so": "46e04818bd9f3a205237db64fd984350cdaff0c5c98c78004abffa2f45095359",
+      "libgav1JNI.so": "aef236d674d98f34e69a494a6e7558250187762235db46008cec741f78ed84d3",
+      "libvpxV2JNI.so": "3498df92e825b69c276344bb4f75ca77d7601bb7851aef18df9ba223ce25e2dd"
+    },
+    "arm64-v8a": {
+      "libffmpegJNI.so": "bad7c3675b7dcbdd3a98201315d8d3094932c9c14aa958e3c2563f4301628d4d",
+      "libgav1JNI.so": "9540b5c3aabe0406477ed25d737d1e444e78f4ba1e567f951fd82591c73b2587",
+      "libvpxV2JNI.so": "3262704bda1dbfea71071eb67881a86a5e40859af64fa205836bb93f6d065439"
+    }
   }
 }

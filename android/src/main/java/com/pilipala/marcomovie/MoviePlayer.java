@@ -319,7 +319,8 @@ public class MoviePlayer {
                                                     return;
                                                 } catch (Exception ignored) {
                                                 }
-                                            } else if (ijkMode
+                                            } else if ((ijkMode
+                                                            || options.optBoolean("live", false))
                                                     && MimeTypes.APPLICATION_M3U8.equalsIgnoreCase(
                                                             mediaMime)
                                                     && (error.errorCode
@@ -548,7 +549,8 @@ public class MoviePlayer {
 
                     String declared = MediaOptions.mime(options);
                     String fullLower = address.toString().toLowerCase(Locale.ROOT);
-                    boolean explicitHls = fullLower.contains(".m3u8");
+                    boolean explicitHls =
+                            fullLower.contains(".m3u8") || (isLive && fullLower.contains("m3u8"));
                     boolean explicitDash = fullLower.contains(".mpd");
                     boolean knownContainer =
                             !explicitHls
@@ -568,7 +570,8 @@ public class MoviePlayer {
                                     && !explicitHls
                                     && !explicitDash
                                     && isCloudDriveOrLocalProxyContainer(address, fullLower);
-                    if (declared != null
+                    if (isLive
+                            || declared != null
                             || explicitHls
                             || explicitDash
                             || knownContainer
@@ -625,7 +628,8 @@ public class MoviePlayer {
             int ticket) {
         if (released || (scope != null && scope.cancelled) || ticket != preparation) return;
         try {
-            String userAgent = "MarcoMovie/0.2.0";
+            String userAgent =
+                    options.optBoolean("live", false) ? Cms.USER_AGENT : "MarcoMovie/0.2.0";
             for (Map.Entry<String, String> header : requestHeaders.entrySet())
                 if (header.getKey().equalsIgnoreCase("User-Agent")) userAgent = header.getValue();
             DefaultHttpDataSource.Factory http =

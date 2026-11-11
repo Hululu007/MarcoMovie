@@ -206,6 +206,54 @@ public final class LiveCatalogChecks {
         check(
                 first(c).streams.get(0).url.endsWith("token=x$2"),
                 "dollar in URL query remains intact");
+        byte[] gbkBytes =
+                "央视频道,#genre#\nCCTV1综合,http://media.test/cctv1.m3u8\n".getBytes("GB18030");
+        LiveCatalog.Catalog gbkCatalog =
+                LiveCatalog.parse(
+                        LiveCatalog.decodePayloadBytes(gbkBytes, null),
+                        "http://media.test/iptv.php",
+                        inherited);
+        check(
+                "央视频道".equals(gbkCatalog.groups.get(0).name)
+                        && "CCTV1综合".equals(first(gbkCatalog).name),
+                "GB18030/GBK live list bytes without charset header decode cleanly");
+        String preVlcM3u =
+                "#EXTM3U\n"
+                        + "#EXTINF:-1 http-user-agent=\"Leaked-UA\",DanglingWithoutUrl\n"
+                        + "#EXTVLCOPT:http-user-agent=AptvPlayer/1.4.10\n"
+                        + "#EXTVLCOPT:http-referrer=https://live.test/\n"
+                        + "#EXTINF:-1 tvg-name=\"CCTV-5+\" group-title=\"体育\",\n"
+                        + "https://media.test/cctv5p.m3u8\n";
+        LiveCatalog.Catalog preVlcCatalog =
+                LiveCatalog.parse(preVlcM3u, "https://list.test/kimentanm.m3u", inherited);
+        LiveCatalog.Channel preVlcCh = first(preVlcCatalog);
+        check(
+                "CCTV-5+".equals(preVlcCh.name)
+                        && "AptvPlayer/1.4.10"
+                                .equals(preVlcCh.streams.get(0).headers.get("User-Agent"))
+                        && "https://live.test/"
+                                .equals(preVlcCh.streams.get(0).headers.get("Referer")),
+                "pre-EXTINF EXTVLCOPT preserved and empty trailing title falls back to tvg-name");
+        String plainEncoded =
+                "notice://placeholder**"
+                        + java.util.Base64.getEncoder()
+                                .encodeToString(
+                                        "卫视频道,https://media.test/ws.m3u8\n".getBytes("UTF-8"));
+        LiveCatalog.Catalog plainB64Catalog =
+                LiveCatalog.parse(plainEncoded, "https://list.test/enc.txt", inherited);
+        check(
+                plainB64Catalog.channelCount() == 1 && "卫视频道".equals(first(plainB64Catalog).name),
+                "**Base64 live list unwraps even with scheme prefix and without #genre#");
+        LiveCatalog.Source origSource = new LiveCatalog.Source();
+        origSource.name = "牛播一";
+        origSource.url = "http://127.0.0.1:9978/proxy?do=cctva";
+        origSource.options.put("playerType", "2");
+        LiveCatalog.Source copiedSource = origSource.copy();
+        copiedSource.url = "http://127.0.0.1:18888/proxy?do=cctva&_mm_token=abc";
+        check(
+                "http://127.0.0.1:9978/proxy?do=cctva".equals(origSource.url)
+                        && "2".equals(copiedSource.options.get("playerType")),
+                "Source.copy isolates local proxy rewrite from cached source URL");
         if (args.length > 1) {
             String base = args[1];
             LiveCatalog.Source s = new LiveCatalog.Source();

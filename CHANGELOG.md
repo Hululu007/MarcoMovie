@@ -1,3 +1,9 @@
+## 2026-11-11 Android 手机 / 平板 0.5.20
+
+- [手机 / 平板端 0.5.20](docs/releases/android-mobile-v0.5.20.md)：将手机端“我的云盘”（`AccountPanel`）重构为与 iOS 端一致的全屏二级页面（黑曜石深灰卡片、盘序优先横幅与夸父 / 优汐 / 嘟嘟 / 阿狸双层网盘卡），并修复 `PluginDialogStyler` 因窗口默认内边距与定宽容器导致扩展网盘弹窗右侧按钮越界被裁切的问题，统一为 iOS 深灰玻璃胶囊样式。
+- 修复浏览独立扩展片源后覆盖 `CspEngine` 全局代理加载器导致本地代理直播源（如“牛播一”）报“没有可识别的频道”的问题，补充 `Source.copy()` 令牌隔离、GB18030 / GBK 与前置 `#EXTVLCOPT` 直播列表解析，以及直播流去 `Range` 预探测、IJK 兼容解复用与 HLS / TS 双向自动回退。
+- 随手机端安装包内置 16KB 页面对齐的 `arm64-v8a` Media3 原生解码扩展（FFmpeg 音频、libgav1 AV1、libvpx VP9，`decoders-1.5.1-arm64-v1`），修复 64 位手机“解码组件”显示未能加载的问题。
+
 ## 2026-11-11 Windows 0.5.16 4K 连续缓冲与硬解优化、海报人物防误拉及界面流畅度提升
 
 - [Windows 0.5.16](docs/releases/windows-v0.5.16.md)：重构 `CloudMediaLease` 与 `LocalMediaLease` 为 `4 MiB` 阈值零停顿连续推流（消除逐分片 `StreamIterator` 套接字暂停），将桌面端 `libmpv` 点播内存缓冲提升至 `256–512 MiB`、`cache-pause-wait` 调至 `4–5s`、启用 Windows `auto-safe` / `d3d11va-copy` 硬解与 `bilinear` 轻量缩放并支持播放中持续卡顿自动降档，解决 4K 资源“放一秒卡一秒”问题。

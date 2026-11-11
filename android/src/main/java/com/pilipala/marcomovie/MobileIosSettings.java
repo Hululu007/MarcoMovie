@@ -794,7 +794,7 @@ final class MobileIosSettings {
                                     () ->
                                             new AppDialog.Builder(a)
                                                     .setTitle("解码组件")
-                                                    .setMessage(DecoderSupport.description())
+                                                    .setMessage(DecoderSupport.description(false))
                                                     .setPositiveButton("确定", null)
                                                     .show());
                         });

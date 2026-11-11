@@ -1111,6 +1111,13 @@ final class PlaybackController {
                                             Cms.inheritedHeaders(s.api, ep.url, s.headers);
                                     Cms.mergeHeaders(mediaHeaders, ep.headers);
                                     int engPref = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
+                                    boolean preferIjk =
+                                            engPref == 2
+                                                    || (engPref == 0
+                                                            && (ep.media.optBoolean("live")
+                                                                    || ep.media.optInt(
+                                                                                    "playerType", 0)
+                                                                            == 2));
                                     candidate =
                                             ep.media.optBoolean("_systemFallback") || engPref == 1
                                                     ? new SystemPlayer(a)
@@ -1119,8 +1126,8 @@ final class PlaybackController {
                                                                     a,
                                                                     ep.media.optInt(
                                                                             "_fallbackMode", 2),
-                                                                    engPref == 2)
-                                                            : engPref == 2
+                                                                    preferIjk)
+                                                            : preferIjk
                                                                     ? MoviePlayer.createIjk(a)
                                                                     : new MoviePlayer(a);
                                     candidate.configureDefaultAudio();
@@ -1328,8 +1335,8 @@ final class PlaybackController {
                                                                     JSONObject nextHeaders =
                                                                             nextQ.optJSONObject(
                                                                                     "headers");
+                                                                    ep.headers.clear();
                                                                     if (nextHeaders != null) {
-                                                                        ep.headers.clear();
                                                                         java.util.Iterator<String>
                                                                                 hk =
                                                                                         nextHeaders

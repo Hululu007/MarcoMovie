@@ -325,6 +325,31 @@ public final class CompatChecks {
         e.position = -50;
         history = WatchHistory.upsert("[]", e);
         check(WatchHistory.read(history).get(0).position == 0, "negative history position clamped");
+        String decoderManifest =
+                new String(
+                        java.nio.file.Files.readAllBytes(
+                                java.nio.file.Paths.get("android/decoder-dependencies.json")),
+                        "UTF-8");
+        JSONArray decoderItems = new JSONArray(decoderManifest);
+        boolean hasArmv7Decoders = false, hasArm64Decoders = false;
+        for (int i = 0; i < decoderItems.length(); i++) {
+            JSONArray members = decoderItems.getJSONObject(i).optJSONArray("native_members");
+            if (members == null) continue;
+            String joined = members.toString();
+            if (joined.contains("lib/armeabi-v7a/libffmpegJNI.so")
+                    && joined.contains("lib/armeabi-v7a/libgav1JNI.so")
+                    && joined.contains("lib/armeabi-v7a/libvpxV2JNI.so")) {
+                hasArmv7Decoders = true;
+            }
+            if (joined.contains("lib/arm64-v8a/libffmpegJNI.so")
+                    && joined.contains("lib/arm64-v8a/libgav1JNI.so")
+                    && joined.contains("lib/arm64-v8a/libvpxV2JNI.so")) {
+                hasArm64Decoders = true;
+            }
+        }
+        check(
+                hasArmv7Decoders && hasArm64Decoders,
+                "decoder manifest ships both armeabi-v7a and arm64-v8a Media3 native extensions");
         System.out.println(
                 "OK " + count + " compatibility checks; network and playback not implied");
     }

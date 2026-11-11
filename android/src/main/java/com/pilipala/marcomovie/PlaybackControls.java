@@ -272,16 +272,15 @@ final class PlaybackControls {
             registerHiddenAction("aspect", this::aspect);
             registerHiddenAction("subtitles", () -> tracks(3));
         } else {
-            if (!live) {
-                add(
-                        row,
-                        "上集",
-                        "prev-episode",
-                        () -> {
-                            if (!step(-1))
-                                showBubble("已是第一集", new String[] {"知道了"}, -1, i -> {}, "");
-                        });
-            }
+            add(
+                    row,
+                    live ? "上台" : "上集",
+                    "prev-episode",
+                    () -> {
+                        if (live) a.liveStep(-1);
+                        else if (!step(-1))
+                            showBubble("已是第一集", new String[] {"知道了"}, -1, i -> {}, "");
+                    });
             add(
                     row,
                     live ? "下台" : "下集",
@@ -316,6 +315,15 @@ final class PlaybackControls {
             add(row, "片头", "skip-intro-tool", () -> skip(true));
             add(row, "片尾", "skip-outro-tool", () -> skip(false));
             add(row, "循环", "repeat-tool", this::repeat);
+            if (live) {
+                for (String vodKey :
+                        new String[] {
+                            "speed", "skip-intro-tool", "skip-outro-tool", "repeat-tool"
+                        }) {
+                    Button vodBtn = buttons.get(vodKey);
+                    if (vodBtn != null) vodBtn.setVisibility(View.GONE);
+                }
+            }
             add(
                     row,
                     "重播",
@@ -2710,10 +2718,12 @@ final class PlaybackControls {
                 }
             }
         }
-        a.player.setSpeed(a.prefs.getFloat(Prefs.PLAY_SPEED, 1));
-        a.player.setRepeatOne(
-                a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1
-                        && a.prefs.getInt(Prefs.SKIP_OUTRO, 0) == 0);
+        if (!"live".equals(site.key)) {
+            a.player.setSpeed(a.prefs.getFloat(Prefs.PLAY_SPEED, 1));
+            a.player.setRepeatOne(
+                    a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1
+                            && a.prefs.getInt(Prefs.SKIP_OUTRO, 0) == 0);
+        }
         syncModernActionVisibility();
         refreshPlayPauseGlyph();
     }

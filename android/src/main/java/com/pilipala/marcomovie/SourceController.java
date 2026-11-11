@@ -138,6 +138,7 @@ final class SourceController {
 
     static void closeEngines(MainActivity a) {
         a.liveSession = null;
+        CspEngine.resetActiveProxy();
         if (a.detailPrefetch != null) a.detailPrefetch.cancel(true);
         a.detailCache.clear();
         a.homeData.clear();

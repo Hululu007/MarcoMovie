@@ -20,6 +20,7 @@ import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
@@ -159,6 +160,7 @@ final class MobileShell {
         a.generation++;
         ++homeRequest;
         if (resumeHome != null) resumeHome.run();
+        refreshHeaderNetdiskCapsule();
         a.root = retainedRoot;
         a.setContentView(retainedRoot);
         a.watchRootLayout(retainedRoot);
@@ -167,6 +169,25 @@ final class MobileShell {
         a.body = homeBody;
         if (a.current != null) a.current.home = true;
         return true;
+    }
+
+    private void refreshHeaderNetdiskCapsule() {
+        if (retainedRoot == null) return;
+        View existing = retainedRoot.findViewWithTag("home-netdisk-button");
+        if (existing == null || !(existing.getParent() instanceof ViewGroup)) return;
+        ViewGroup parent = (ViewGroup) existing.getParent();
+        int idx = parent.indexOfChild(existing);
+        if (idx < 0) return;
+        ViewGroup.LayoutParams lp = existing.getLayoutParams();
+        View replacement =
+                AccountPanel.buildHeaderCapsule(
+                        a,
+                        () -> {
+                            if (a.config == null) showMobileImportDialog(a);
+                            else AccountPanel.show(a, null);
+                        });
+        parent.removeViewAt(idx);
+        parent.addView(replacement, idx, lp);
     }
 
     MobileShell(MainActivity activity) {
@@ -776,19 +797,14 @@ final class MobileShell {
                 sitePill,
                 new FrameLayout.LayoutParams(-2, a.dp(34), Gravity.END | Gravity.CENTER_VERTICAL));
 
-        // Right 2: Netdisk / Config Liquid Glass capsule
-        TextView netdiskPill = a.text(a.config == null ? "＋配置" : "网盘", 12.5f, Color.WHITE);
-        netdiskPill.setTag("home-netdisk-button");
-        netdiskPill.setTypeface(null, Typeface.BOLD);
-        netdiskPill.setGravity(Gravity.CENTER);
-        netdiskPill.setPadding(a.dp(11), a.dp(7), a.dp(11), a.dp(7));
-        a.glass(netdiskPill, 999);
-        MobileDetailScreen.bindTouchFeedback(netdiskPill);
-        netdiskPill.setOnClickListener(
-                v -> {
-                    if (a.config == null) showMobileImportDialog(a);
-                    else AccountPanel.show(a, null);
-                });
+        // Right 2: Netdisk / Config Liquid Glass capsule (matches iOS home-netdisk-button)
+        View netdiskPill =
+                AccountPanel.buildHeaderCapsule(
+                        a,
+                        () -> {
+                            if (a.config == null) showMobileImportDialog(a);
+                            else AccountPanel.show(a, null);
+                        });
         LinearLayout.LayoutParams ndLp = new LinearLayout.LayoutParams(-2, a.dp(34));
         ndLp.rightMargin = a.dp(6);
         bar.addView(netdiskPill, ndLp);

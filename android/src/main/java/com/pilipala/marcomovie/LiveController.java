@@ -19,9 +19,13 @@ final class LiveController {
     static List<LiveCatalog.Source> sourcesFor(MainActivity a) {
         if (a == null) return java.util.Collections.emptyList();
         String raw = a.config != null ? a.config.raw : "";
+        String origin =
+                a.config != null && a.config.origin != null && !a.config.origin.isEmpty()
+                        ? a.config.origin
+                        : a.configOrigin;
         String customUrl = a.prefs != null ? a.prefs.getString(Prefs.LIVE_URL, "") : "";
         String customName = a.prefs != null ? a.prefs.getString(Prefs.LIVE_NAME, "自定义直播源") : "";
-        return LiveCatalog.sourcesFor(raw, a.configOrigin, customUrl, customName);
+        return LiveCatalog.sourcesFor(raw, origin, customUrl, customName);
     }
 
     static void liveSources(MainActivity a) {
@@ -109,13 +113,14 @@ final class LiveController {
 
     static LiveCatalog.Catalog loadCatalog(MainActivity a, LiveCatalog.Source source)
             throws Exception {
-        if (source.plugin != null || source.isLocalProxy()) {
+        LiveCatalog.Source effective = source.copy();
+        if (effective.plugin != null || effective.isLocalProxy()) {
             if (!a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true))
                 throw new IOException("请先启用来源扩展");
             a.ensureProxy(a.config);
-            if (source.plugin == null) source.url = LocalProxy.rewrite(source.url);
+            if (effective.plugin == null) effective.url = LocalProxy.rewrite(effective.url);
         }
-        return LiveCatalog.load(source, (site, url) -> a.engine(site).liveContent(url));
+        return LiveCatalog.load(effective, (site, url) -> a.engine(site).liveContent(url));
     }
 
     static void liveChannels(
@@ -199,6 +204,38 @@ final class LiveController {
         return Cms.isMedia(LocalProxy.rewrite(u));
     }
 
+    private static boolean isDirectExoLiveUrl(String rawUrl) {
+        if (rawUrl == null || rawUrl.trim().isEmpty()) return false;
+        String rewritten = LocalProxy.rewrite(rawUrl.trim());
+        if (rewritten == null) return false;
+        String lower = rewritten.trim().toLowerCase(java.util.Locale.ROOT);
+        return lower.startsWith("http://")
+                || lower.startsWith("https://")
+                || lower.startsWith("rtsp://")
+                || lower.startsWith("rtsps://")
+                || lower.startsWith("udp://")
+                || lower.startsWith("rtp://");
+    }
+
+    private static int resolveLivePlayerType(
+            LiveCatalog.Source source, LiveCatalog.Channel channel, LiveCatalog.Stream stream) {
+        String[] candidates =
+                new String[] {
+                    stream != null ? stream.options.get("playerType") : null,
+                    channel != null ? channel.options.get("playerType") : null,
+                    source != null ? source.options.get("playerType") : null
+                };
+        for (String val : candidates) {
+            if (val != null && !val.trim().isEmpty()) {
+                try {
+                    return Integer.parseInt(val.trim());
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        return 0;
+    }
+
     static void playLive(
             MainActivity a,
             LiveCatalog.Source source,
@@ -215,11 +252,19 @@ final class LiveController {
         LiveCatalog.Stream chosen = stream;
         if (channel != null
                 && !channel.streams.isEmpty()
-                && (chosen == null || !isPlayableLiveUrl(chosen.url))) {
+                && (chosen == null || !isDirectExoLiveUrl(chosen.url))) {
             for (LiveCatalog.Stream candidate : channel.streams) {
-                if (isPlayableLiveUrl(candidate.url)) {
+                if (isDirectExoLiveUrl(candidate.url)) {
                     chosen = candidate;
                     break;
+                }
+            }
+            if (chosen == null || !isPlayableLiveUrl(chosen.url)) {
+                for (LiveCatalog.Stream candidate : channel.streams) {
+                    if (isPlayableLiveUrl(candidate.url)) {
+                        chosen = candidate;
+                        break;
+                    }
                 }
             }
             if (chosen == null) chosen = channel.streams.get(0);
@@ -244,12 +289,16 @@ final class LiveController {
         ep.headers.putAll(chosen.headers);
         try {
             ep.media.put("live", true);
+            int playerType = resolveLivePlayerType(source, channel, chosen);
+            if (playerType > 0) {
+                ep.media.put("playerType", playerType);
+            }
             if (channel != null && channel.streams.size() > 1) {
                 org.json.JSONArray qualities = new org.json.JSONArray();
                 int selectedIdx = 0;
                 for (int i = 0; i < channel.streams.size(); i++) {
                     LiveCatalog.Stream st = channel.streams.get(i);
-                    if (!isPlayableLiveUrl(st.url)
+                    if (!isDirectExoLiveUrl(st.url)
                             || st.url.regionMatches(true, 0, "webview://", 0, 10)) continue;
                     if (st == chosen) selectedIdx = qualities.length();
                     org.json.JSONObject q = new org.json.JSONObject();

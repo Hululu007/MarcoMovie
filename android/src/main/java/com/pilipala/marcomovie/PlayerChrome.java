@@ -485,6 +485,11 @@ final class PlayerChrome {
             LinearLayout.LayoutParams centerLp = new LinearLayout.LayoutParams(a.dp(76), a.dp(76));
             centerLp.leftMargin = a.dp(28);
             centerLp.rightMargin = a.dp(28);
+            boolean liveStream = episode != null && episode.media.optBoolean("live");
+            if (liveStream) {
+                rewindBtn.setVisibility(View.GONE);
+                forwardBtn.setVisibility(View.GONE);
+            }
             centerRow.addView(rewindBtn, sideLp);
             centerRow.addView(state, centerLp);
             centerRow.addView(forwardBtn, sideLp);
@@ -648,12 +653,15 @@ final class PlayerChrome {
         episodeLabel.setTextSize(compact ? 12f : 13.5f);
         episodeLabel.setVisibility(modernTv || ultraShort ? View.GONE : View.VISIBLE);
         if (a.playStatus != null) {
+            boolean showStatusOnCompact = !a.prepared && !loading;
             a.playStatus.setVisibility(
-                    compact
-                            ? View.GONE
-                            : (modernTv && a.prepared && a.playing && !loading
+                    showStatusOnCompact
+                            ? View.VISIBLE
+                            : compact
                                     ? View.GONE
-                                    : View.VISIBLE));
+                                    : (modernTv && a.prepared && a.playing && !loading
+                                            ? View.GONE
+                                            : View.VISIBLE));
         }
         if (fsBtn != null) {
             fsBtn.setText(portrait ? "⛶ 全屏横屏" : "⛶ 退出全屏");
@@ -862,9 +870,15 @@ final class PlayerChrome {
                 if (badges != null && !badges.isEmpty()) renderBadgePills(badges);
             }
         }
-        if (modernTv && a.playStatus != null) {
-            a.playStatus.setVisibility(
-                    loading || !a.prepared || !a.playing ? View.VISIBLE : View.GONE);
+        if (a.playStatus != null) {
+            if (modernTv) {
+                a.playStatus.setVisibility(
+                        loading || !a.prepared || !a.playing ? View.VISIBLE : View.GONE);
+            } else if (!a.isTvDevice()) {
+                boolean compact = !a.isPortrait() || a.windowHeight() < a.dp(440);
+                a.playStatus.setVisibility(
+                        (!a.prepared && !loading) || !compact ? View.VISIBLE : View.GONE);
+            }
         }
         if (modernTv && cardTitleView != null && a.activeEpisode != null) {
             String expected = formatCardTitle(chromeVideo, a.activeEpisode);

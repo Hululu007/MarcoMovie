@@ -26,6 +26,19 @@ public final class LiveCatalog {
             if (liveDirectoryQuery(url) != null) return false;
             return ProxyAddress.isSourceProxy(url);
         }
+
+        public Source copy() {
+            Source c = new Source();
+            c.name = name;
+            c.url = url;
+            c.origin = origin;
+            c.timeoutMs = timeoutMs;
+            c.inline = inline;
+            c.plugin = plugin;
+            c.headers.putAll(headers);
+            c.options.putAll(options);
+            return c;
+        }
     }
 
     public interface PluginLoader {
@@ -254,23 +267,18 @@ public final class LiveCatalog {
                     }
                     bytes = out.toByteArray();
                 }
-                String charset = "UTF-8";
+                String explicitCharset = null;
                 if (mime != null) {
                     Matcher m =
                             Pattern.compile(
                                             "charset\\s*=\\s*[\"']?([A-Za-z0-9_-]+)",
                                             Pattern.CASE_INSENSITIVE)
                                     .matcher(mime);
-                    if (m.find()) charset = m.group(1);
+                    if (m.find()) explicitCharset = m.group(1);
                 }
                 try {
                     return parse(
-                            bytes.length >= 2
-                                            && ((bytes[0] & 255) == 255 && (bytes[1] & 255) == 254
-                                                    || (bytes[0] & 255) == 254
-                                                            && (bytes[1] & 255) == 255)
-                                    ? Cms.document(bytes)
-                                    : new String(bytes, Charset.forName(charset)),
+                            decodePayloadBytes(bytes, explicitCharset),
                             next.toString(),
                             requestHeaders);
                 } catch (java.nio.charset.UnsupportedCharsetException e) {
@@ -284,17 +292,80 @@ public final class LiveCatalog {
         throw new IOException("直播列表重定向次数过多");
     }
 
+    public static String decodePayloadBytes(byte[] bytes, String explicitCharset)
+            throws IOException {
+        if (bytes == null || bytes.length == 0) return "";
+        boolean gzipMagic =
+                bytes.length >= 2 && (bytes[0] & 0xff) == 0x1f && (bytes[1] & 0xff) == 0x8b;
+        boolean utf16Bom =
+                bytes.length >= 2
+                        && (((bytes[0] & 0xff) == 0xff && (bytes[1] & 0xff) == 0xfe)
+                                || ((bytes[0] & 0xff) == 0xfe && (bytes[1] & 0xff) == 0xff));
+        boolean imageCarrier =
+                (bytes.length >= 2 && (bytes[0] & 0xff) == 0xff && (bytes[1] & 0xff) == 0xd8)
+                        || (bytes.length >= 4
+                                && (bytes[0] & 0xff) == 0x89
+                                && bytes[1] == 'P'
+                                && bytes[2] == 'N'
+                                && bytes[3] == 'G')
+                        || (bytes.length >= 4
+                                && bytes[0] == 'G'
+                                && bytes[1] == 'I'
+                                && bytes[2] == 'F'
+                                && bytes[3] == '8');
+        if (gzipMagic || utf16Bom || imageCarrier) {
+            return Cms.document(bytes);
+        }
+        if (explicitCharset != null && !explicitCharset.trim().isEmpty()) {
+            return new String(bytes, Charset.forName(explicitCharset.trim()));
+        }
+        if (isValidUtf8(bytes)) {
+            return new String(bytes, Charset.forName("UTF-8"));
+        }
+        for (String fallback : new String[] {"GB18030", "GBK"}) {
+            try {
+                if (Charset.isSupported(fallback)) {
+                    return new String(bytes, Charset.forName(fallback));
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return new String(bytes, Charset.forName("UTF-8"));
+    }
+
+    private static boolean isValidUtf8(byte[] bytes) {
+        try {
+            Charset.forName("UTF-8")
+                    .newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(bytes));
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     public static Catalog parse(String text, String origin, Map<String, String> inheritedHeaders)
             throws Exception {
         if (text == null || text.length() > MAX_BYTES) throw new IOException("直播列表为空或超过大小限制");
         text = text.replaceFirst("^\\uFEFF", "").trim();
+        if (text.length() >= 2 && text.startsWith("\"") && text.endsWith("\"")) {
+            try {
+                Object unwrapped = new JSONTokener(text).nextValue();
+                if (unwrapped instanceof String) {
+                    text = ((String) unwrapped).replaceFirst("^\\uFEFF", "").trim();
+                }
+            } catch (Exception ignored) {
+            }
+        }
         if (!text.startsWith("{")
                 && !text.startsWith("[")
                 && !text.startsWith("#EXTM3U")
                 && !text.startsWith("<")
                 && !text.contains("#EXTINF:")
                 && !text.contains(",#genre#")
-                && !text.contains("://")) {
+                && (!text.contains("://") || text.contains("**"))) {
             try {
                 String doc =
                         Cms.document(text.getBytes("UTF-8")).replaceFirst("^\\uFEFF", "").trim();
@@ -447,20 +518,19 @@ public final class LiveCatalog {
                 pending = new Channel();
                 pending.options.putAll(attrs);
                 String tvgName = attrs.get("tvg-name");
+                String trailing = comma < 0 ? "" : line.substring(comma + 1).trim();
                 pending.name =
-                        comma < 0
-                                ? (tvgName != null ? tvgName : "未命名频道")
-                                : line.substring(comma + 1).trim();
+                        !trailing.isEmpty()
+                                ? trailing
+                                : (tvgName != null && !tvgName.trim().isEmpty()
+                                        ? tvgName.trim()
+                                        : "未命名频道");
                 String tvgLogo = attrs.get("tvg-logo");
                 pending.logo = resolve(out.origin, tvgLogo != null ? tvgLogo : "");
                 String tvgId = attrs.get("tvg-id");
                 pending.id = tvgId != null ? tvgId : "";
                 String grp = attrs.get("group-title");
                 group = grp != null ? grp : "默认";
-                local.clear();
-                opts.clear();
-                header(local, "User-Agent", attrs.get("http-user-agent"));
-                header(local, "Referer", attrs.get("http-referrer"));
                 continue;
             }
             if (line.startsWith("#EXTGRP:")) {
@@ -491,6 +561,10 @@ public final class LiveCatalog {
             if (line.startsWith("#")) continue;
             Map<String, String> hs = new LinkedHashMap<>();
             if (inherited != null) hs.putAll(inherited);
+            if (m3u && pending != null) {
+                header(hs, "User-Agent", pending.options.get("http-user-agent"));
+                header(hs, "Referer", pending.options.get("http-referrer"));
+            }
             hs.putAll(local);
             if (m3u) {
                 if (pending == null) {
