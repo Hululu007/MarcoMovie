@@ -66,7 +66,9 @@ class SourceHttp {
       if(!['GET','POST','HEAD','PUT','PATCH','DELETE','OPTIONS'].includes(method))throw Error('drpy_http_method');
       let body=options.body ?? options.data;
       if(body!=null && typeof body!=='string')body=JSON.stringify(body);
-      if(body && Buffer.byteLength(body)>MAX_RESULT)throw Error('drpy_http_body_too_large');
+      let bodyBuffer=body!=null && !['GET','HEAD'].includes(method)?Buffer.from(body,'utf8'):null;
+      if(bodyBuffer && bodyBuffer.length>MAX_RESULT)throw Error('drpy_http_body_too_large');
+      if(bodyBuffer)headers['content-length']=String(bodyBuffer.length);
       const request=(target,redirects)=>{
         if(!['http:','https:'].includes(target.protocol))return fail('drpy_http_protocol');
         if(target.username||target.password)return fail('drpy_redirect_credentials');
@@ -79,7 +81,7 @@ class SourceHttp {
             try{next=new URL(response.headers.location,target);}catch(_){return fail('drpy_http_redirect');}
             if(next.origin!==target.origin){delete headers.authorization;delete headers.cookie;delete headers.cookie2;delete headers['proxy-authorization'];}
             if(response.statusCode===303&&method!=='HEAD'||[301,302].includes(response.statusCode)&&method==='POST'){
-              method='GET';body=null;delete headers['content-type'];
+              method='GET';body=null;bodyBuffer=null;delete headers['content-type'];delete headers['content-length'];
             }
             return request(next,redirects+1);
           }
@@ -106,7 +108,7 @@ class SourceHttp {
           });
         });
         entry.request=client;client.on('error',()=>fail('drpy_http_connection_failed'));
-        if(body && !['GET','HEAD'].includes(method))client.write(body);
+        if(bodyBuffer)client.write(bodyBuffer);
         client.end();
       };
       request(url,0);

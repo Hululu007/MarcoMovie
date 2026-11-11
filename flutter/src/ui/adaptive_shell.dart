@@ -127,7 +127,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   List<LiveSource> get _visibleLives {
     final cfg = _config;
     if (cfg == null) return const [];
-    return _privateSessionUnlocked ? cfg.privateLives : cfg.publicLives;
+    return _privateSessionUnlocked
+        ? cfg.privateSupportedLives
+        : cfg.publicSupportedLives;
   }
   @override
   void initState() {
@@ -578,21 +580,50 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   String _searchSourceLabel(CmsSite site) => searchSourceLabel(
       site, _visibleSupportedSites, widget.storage.getSubscriptions());
 
+  static String _formatLiveError(String sourceName, Object error) {
+    if (error is FormatException) {
+      final msg = error.message.trim();
+      if (msg.isNotEmpty &&
+          !msg.contains('://') &&
+          RegExp(r'[\u4e00-\u9fff]').hasMatch(msg)) {
+        return '读取「$sourceName」失败：$msg';
+      }
+    }
+    if (error is TimeoutException) {
+      return '读取直播源「$sourceName」超时，请检查网络或切换其他直播源';
+    }
+    if (error is HttpException) {
+      final code = RegExp(r'HTTP\s+\d+').firstMatch(error.message)?.group(0);
+      return code != null
+          ? '直播源「$sourceName」响应异常（$code），请稍后重试或切换其他来源'
+          : '直播源「$sourceName」响应异常，请稍后重试或切换其他来源';
+    }
+    final raw = error.toString();
+    if (error is SocketException ||
+        raw.contains('SocketException') ||
+        raw.contains('ClientException')) {
+      return '无法连接直播源「$sourceName」，请检查网络后重试或切换其他直播源';
+    }
+    return '读取直播源「$sourceName」失败，请稍后重试或切换其他直播源';
+  }
+
   Future<void> _loadLivePlaylist(int sourceIndex) async {
     final lives = _visibleLives;
     if (sourceIndex < 0 || sourceIndex >= lives.length) return;
     if (_liveAbort != null && !_liveAbort!.isCompleted) _liveAbort!.complete();
     final abort = _liveAbort = Completer<void>();
     final epoch = ++_liveEpoch;
+    final source = lives[sourceIndex];
     setState(() {
       _selectedLiveSource = sourceIndex;
       _selectedLiveGroup = 0;
+      _liveGroups = const [];
       _liveLoading = true;
       _liveError = null;
     });
     try {
       final groups = await widget.client.runSourceOperation(
-        () => widget.client.fetchLiveGroups(lives[sourceIndex]), cancellation: abort,
+        () => widget.client.fetchLiveGroups(source), cancellation: abort,
       );
       if (!mounted ||
           epoch != _liveEpoch ||
@@ -605,13 +636,15 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       });
     } catch (e) {
       if (!mounted ||
+          abort.isCompleted ||
           epoch != _liveEpoch ||
           _selectedLiveSource != sourceIndex) {
         return;
       }
       setState(() {
+        _liveGroups = const [];
         _liveLoading = false;
-        _liveError = '读取直播列表失败：$e';
+        _liveError = _formatLiveError(source.name, e);
       });
     }
   }
@@ -1576,7 +1609,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   Widget _buildPluginOnlyConfigNotice(BuildContext context) {
     final pluginCount = _config?.pluginOnlySites.length ?? 0;
     final depotCount = _config?.depots.length ?? 0;
-    final liveCount = _config?.lives.length ?? 0;
+    final liveCount = _config?.supportedLives.length ?? 0;
     final String titleText;
     final String bodyText;
     if (pluginCount > 0) {
@@ -3679,7 +3712,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           final privateSubs =
               allSubs.where((s) => s.isEffectivelyPrivate).toList();
           final privateSites = _config?.privateSupportedSites ?? const [];
-          final privateLives = _config?.privateLives ?? const [];
+          final privateLives = _config?.privateSupportedLives ?? const [];
           return ListView(
             shrinkWrap: true,
             padding: const EdgeInsets.all(16),
@@ -3873,6 +3906,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     final lives = _visibleLives;
     final pad = useSidebar ? 28.0 : 16.0;
     if (lives.isEmpty) {
+      final rawLives = _privateSessionUnlocked
+          ? (_config?.privateLives ?? const [])
+          : (_config?.publicLives ?? const []);
+      final hasPluginOnlyLives = rawLives.isNotEmpty;
       return SafeArea(
         child: Center(
           child: Padding(
@@ -3886,19 +3923,23 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                   size: 48,
                 ),
                 const SizedBox(height: 12),
-                const Text(
-                  '当前配置未包含 M3U / TXT 直播源',
-                  style: TextStyle(
+                Text(
+                  hasPluginOnlyLives
+                      ? '当前订阅的直播源需要专用插件'
+                      : '当前配置未包含 M3U / TXT 直播源',
+                  style: const TextStyle(
                     color: AppleColors.labelPrimary,
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
                 const SizedBox(height: 6),
-                const Text(
-                  '可直接导入 M3U / TXT 直播订阅地址或包含 lives 节点的 JSON 配置。',
+                Text(
+                  hasPluginOnlyLives
+                      ? '所选订阅中的直播线路依赖 Android 本地代理插件，当前设备暂不支持；可导入 M3U / TXT 直播地址观看。'
+                      : '可直接导入 M3U / TXT 直播订阅地址或包含 lives 节点的 JSON 配置。',
                   textAlign: TextAlign.center,
-                  style: TextStyle(
+                  style: const TextStyle(
                     color: AppleColors.labelSecondary,
                     fontSize: 13,
                   ),
@@ -3971,7 +4012,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                   ),
                 ),
                 if (totalChannelCount > 0) ...[
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 8),
                   Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 9,
@@ -3987,6 +4028,8 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                     ),
                     child: Text(
                       '$totalChannelCount 频道',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: AppleColors.labelSecondary,
                         fontSize: 11.5,
@@ -3995,21 +4038,27 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                     ),
                   ),
                 ],
-                const Spacer(),
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: useSidebar ? 260 : 185,
-                  ),
-                  child: SizedBox(
-                    height: 36,
-                    child: AppleSearchField(
-                      controller: _liveSearchController,
-                      placeholder: '搜索频道…',
-                      onChanged: (v) => setState(() => _liveSearchQuery = v),
-                      onSuffixTap: () {
-                        _liveSearchController.clear();
-                        setState(() => _liveSearchQuery = '');
-                      },
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: useSidebar ? 260 : 176,
+                      ),
+                      child: SizedBox(
+                        height: 36,
+                        child: AppleSearchField(
+                          controller: _liveSearchController,
+                          placeholder: '搜索频道…',
+                          onChanged: (v) =>
+                              setState(() => _liveSearchQuery = v),
+                          onSuffixTap: () {
+                            _liveSearchController.clear();
+                            setState(() => _liveSearchQuery = '');
+                          },
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -4086,9 +4135,37 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             else if (_liveError != null)
               Expanded(
                 child: Center(
-                  child: Text(
-                    _liveError!,
-                    style: const TextStyle(color: AppleColors.systemRed),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          CupertinoIcons.wifi_exclamationmark,
+                          color: AppleColors.labelTertiary,
+                          size: 38,
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          _liveError!,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: AppleColors.labelSecondary,
+                            fontSize: 14,
+                            height: 1.5,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        AppleCapsuleButton(
+                          label: '重新加载',
+                          icon: CupertinoIcons.refresh,
+                          compact: true,
+                          onPressed: () => _loadLivePlaylist(
+                            _selectedLiveSource.clamp(0, lives.length - 1),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               )
@@ -5868,16 +5945,72 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     );
   }
 
+  Widget _buildIosWallpaperSection(VoidCallback refresh) {
+    const presets = <(String, String, String, Color)>[
+      ('obsidian', '曜石纯黑', '经典深邃纯黑影院底色', Color(0xFF141824)),
+      ('midnight', '午夜深蓝', '静谧冷调深海蓝', Color(0xFF0E2240)),
+      ('aurora', '极光紫韵', '灵动流光暗夜紫', Color(0xFF281542)),
+      ('amber', '流金琥珀', '温暖复古鎏金棕', Color(0xFF382210)),
+      ('emerald', '翡翠幽林', '沉稳护眼墨绿调', Color(0xFF0F3026)),
+    ];
+    final currentPreset = widget.storage.wallpaperPreset;
+    final hasCustom = widget.storage.customWallpaperUrl.isNotEmpty;
+    return IosSettingsGroup(
+      header: '预设主题背景',
+      dividerIndent: 56,
+      children: [
+        for (final (key, label, desc, swatch) in presets)
+          IosSettingsRow(
+            key: ValueKey('choice-壁纸预设-$key'),
+            title: label,
+            subtitle: desc,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 22,
+                  height: 22,
+                  decoration: BoxDecoration(
+                    color: swatch,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: const Color(0x55FFFFFF),
+                      width: 0.8,
+                    ),
+                  ),
+                ),
+                if (currentPreset == key && !hasCustom) ...[
+                  const SizedBox(width: 10),
+                  const Icon(
+                    CupertinoIcons.checkmark_alt,
+                    color: AppleColors.systemBlue,
+                    size: 18,
+                  ),
+                ],
+              ],
+            ),
+            onTap: () async {
+              await widget.storage.setCustomWallpaperUrl('');
+              await widget.storage.setWallpaperPreset(key);
+              refresh();
+            },
+          ),
+      ],
+    );
+  }
+
   List<SettingsPane> _iosSettingsPages(VoidCallback refresh) {
     final storage = widget.storage;
     Widget choices<T>(
       String title,
       T value,
       List<(T, String)> values,
-      Future<void> Function(T) save,
-    ) =>
+      Future<void> Function(T) save, {
+      String? footer,
+    }) =>
         SettingsChoices<T>(
           title: title,
+          footer: footer,
           value: value,
           choices: values,
           onSelected: (v) async {
@@ -5885,90 +6018,157 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             refresh();
           },
         );
-    Widget enabled(
+    Widget toggleRow(
       String title,
+      IconData icon,
+      Color color,
       bool value,
-      Future<void> Function(bool) save,
-    ) =>
-        choices(title, value, const [(true, '开启'), (false, '关闭')], save);
+      Future<void> Function(bool) save, {
+      String? subtitle,
+    }) =>
+        IosSettingsSwitchRow(
+          key: ValueKey('switch-$title'),
+          icon: icon,
+          iconColor: color,
+          title: title,
+          subtitle: subtitle,
+          value: value,
+          onChanged: (v) async {
+            await save(v);
+            refresh();
+          },
+        );
     Widget stack(List<Widget> children) => Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: children,
-    );
-    Widget action(String label, IconData icon, VoidCallback callback) =>
-        Padding(
-          padding: const EdgeInsets.only(bottom: 12),
-          child: AppleCapsuleButton(
-            label: label,
-            icon: icon,
-            onPressed: callback,
-          ),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: children,
         );
     final sites = _config?.publicSupportedSites ?? const [];
+    final publicSubs = storage
+        .getSubscriptions()
+        .where((s) => !s.isEffectivelyPrivate)
+        .toList();
+    final loggedDriveCount = NetdiskService.drives
+        .where((d) => storage.isNetdiskLoggedIn(d.key))
+        .length;
+    final speedLabel = storage.playSpeed == storage.playSpeed.roundToDouble()
+        ? '${storage.playSpeed.toInt()}×'
+        : '${storage.playSpeed}×';
     return [
       SettingsPane(
         'appearance',
         '外观',
-        '壁纸、流光与液态玻璃',
+        '',
         CupertinoIcons.sparkles,
         AppleColors.systemPurple,
+        sectionGroup: 'core',
+        trailingText: _wallpaperPresetLabel,
         children: [
           SettingsPane(
             'wallpaper',
             '壁纸与氛围',
-            '选择主题背景，调整动态流光',
-            CupertinoIcons.photo,
+            '',
+            CupertinoIcons.photo_fill,
             AppleColors.systemPurple,
+            trailingText: _wallpaperPresetLabel,
             content: stack([
-              _buildWallpaperDrawerBody(onStateChanged: refresh),
+              _buildIosWallpaperSection(refresh),
               const SizedBox(height: 20),
-              enabled(
-                '呼吸式流光背景',
-                storage.ambientGlowEnabled,
-                storage.setAmbientGlowEnabled,
+              IosSettingsGroup(
+                header: '动态氛围与自定义壁纸',
+                footer: '呼吸式流光随主题呈现柔和影院光晕；也可指定高清图片 URL 或本地路径。',
+                children: [
+                  toggleRow(
+                    '呼吸式流光背景',
+                    CupertinoIcons.sparkles,
+                    AppleColors.systemPurple,
+                    storage.ambientGlowEnabled,
+                    storage.setAmbientGlowEnabled,
+                  ),
+                  IosSettingsRow(
+                    key: const ValueKey('ios-open-custom-wallpaper'),
+                    icon: CupertinoIcons.link,
+                    iconColor: AppleColors.systemBlue,
+                    title: '自定义壁纸地址',
+                    trailingText:
+                        storage.customWallpaperUrl.isNotEmpty ? '已启用' : '未设置',
+                    showChevron: true,
+                    onTap: () async {
+                      await _showWallpaperSettingsSheet(
+                        iosBackLabel: '壁纸与氛围',
+                      );
+                      refresh();
+                    },
+                  ),
+                ],
               ),
             ]),
           ),
           SettingsPane(
             'glass',
             '液态玻璃',
-            '连续调节透明度，或选择预设效果',
-            CupertinoIcons.drop,
+            '',
+            CupertinoIcons.drop_fill,
             AppleColors.systemBlue,
+            trailingText: '${(storage.glassBlurStrength * 100).round()}%',
             content: stack([
-              ValueListenableBuilder<double>(
-                valueListenable: GlassworkBackdrop.intensity,
-                builder: (_, value, __) => Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '玻璃强度 ${(value * 100).round()}%',
-                      style: const TextStyle(
-                        color: AppleColors.labelPrimary,
-                        fontSize: 16,
+              IosSettingsGroup(
+                header: '毛玻璃折射强度',
+                footer: '支持 0%–100% 连续调节，调至 0% 即切换为不透明实色面板。',
+                dividerIndent: 16,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+                    child: ValueListenableBuilder<double>(
+                      valueListenable: GlassworkBackdrop.intensity,
+                      builder: (_, value, __) => Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text(
+                                '玻璃强度',
+                                style: TextStyle(
+                                  color: AppleColors.labelPrimary,
+                                  fontSize: 16,
+                                ),
+                              ),
+                              Text(
+                                '${(value * 100).round()}%',
+                                style: const TextStyle(
+                                  color: AppleColors.systemBlue,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          SizedBox(
+                            width: double.infinity,
+                            child: CupertinoSlider(
+                              key: const ValueKey('ios-glass-slider'),
+                              value: value,
+                              min: 0,
+                              max: 1,
+                              onChanged: (v) {
+                                GlassworkBackdrop.intensity.value = v;
+                                GlassworkBackdrop.reduceTransparency.value =
+                                    v <= .02;
+                              },
+                              onChangeEnd: (v) async {
+                                await storage.setGlassBlurStrength(v);
+                                refresh();
+                              },
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    SizedBox(
-                      width: double.infinity,
-                      child: CupertinoSlider(
-                        key: const ValueKey('ios-glass-slider'),
-                        value: value,
-                        min: 0,
-                        max: 1,
-                        onChanged: (v) {
-                          GlassworkBackdrop.intensity.value = v;
-                          GlassworkBackdrop.reduceTransparency.value =
-                              v <= .02;
-                        },
-                        onChangeEnd: (v) async {
-                          await storage.setGlassBlurStrength(v);
-                          refresh();
-                        },
-                      ),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
+              const SizedBox(height: 20),
               choices(
                 '玻璃预设',
                 storage.glassBlurLevel,
@@ -5991,16 +6191,19 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       SettingsPane(
         'browsing',
         '浏览',
-        '首页内容、海报与卡片信息',
-        CupertinoIcons.square_grid_2x2,
+        '',
+        CupertinoIcons.square_grid_2x2_fill,
         AppleColors.systemBlue,
+        sectionGroup: 'core',
+        trailingText: _gridDensityLabel,
         children: [
           SettingsPane(
             'cards',
             '海报与卡片',
-            '设置网格密度与副标题',
-            CupertinoIcons.rectangle_grid_2x2,
+            '',
+            CupertinoIcons.rectangle_grid_2x2_fill,
             AppleColors.systemBlue,
+            trailingText: _gridDensityLabel,
             content: stack([
               choices(
                 '海报密度',
@@ -6028,37 +6231,48 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           SettingsPane(
             'home',
             '首页模块',
-            '选择首页展示的内容',
-            CupertinoIcons.house,
+            '',
+            CupertinoIcons.house_fill,
             AppleColors.systemOrange,
-            content: stack([
-              enabled(
-                '今日首推',
-                storage.showHeroBanner,
-                storage.setShowHeroBanner,
-              ),
-              enabled(
-                '继续观看',
-                storage.showContinueWatching,
-                storage.setShowContinueWatching,
-              ),
-            ]),
+            content: IosSettingsGroup(
+              header: '主页展示模块',
+              footer: '关闭后对应推荐模块将不在主页顶部显示。',
+              children: [
+                toggleRow(
+                  '今日首推',
+                  CupertinoIcons.star_fill,
+                  AppleColors.systemOrange,
+                  storage.showHeroBanner,
+                  storage.setShowHeroBanner,
+                ),
+                toggleRow(
+                  '继续观看',
+                  CupertinoIcons.play_rectangle_fill,
+                  AppleColors.systemBlue,
+                  storage.showContinueWatching,
+                  storage.setShowContinueWatching,
+                ),
+              ],
+            ),
           ),
         ],
       ),
       SettingsPane(
         'playback',
         '播放',
-        '画质、倍速、选集与自动跳过',
-        CupertinoIcons.play_circle,
+        '',
+        CupertinoIcons.play_circle_fill,
         AppleColors.systemOrange,
+        sectionGroup: 'core',
+        trailingText: speedLabel,
         children: [
           SettingsPane(
             'picture',
             '画质与画面',
-            '设置首选线路、画面比例和解码偏好',
-            CupertinoIcons.tv,
+            '',
+            CupertinoIcons.tv_fill,
             AppleColors.systemPurple,
+            trailingText: _defaultAspectLabel,
             content: stack([
               choices(
                 '画质与线路',
@@ -6095,9 +6309,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           SettingsPane(
             'episodes',
             '倍速与选集',
-            '调整起播速度、剧集排序和连续播放',
+            '',
             CupertinoIcons.speedometer,
             AppleColors.systemOrange,
+            trailingText: speedLabel,
             content: stack([
               choices(
                 '起播倍速',
@@ -6117,102 +6332,192 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                 const [(false, '正序'), (true, '倒序')],
                 storage.setEpisodesDescending,
               ),
-              enabled(
-                '自动播放下一集',
-                storage.autoNext,
-                storage.setAutoNext,
+              IosSettingsGroup(
+                header: '连续播放',
+                children: [
+                  toggleRow(
+                    '自动播放下一集',
+                    CupertinoIcons.forward_end_fill,
+                    AppleColors.systemGreen,
+                    storage.autoNext,
+                    storage.setAutoNext,
+                  ),
+                ],
               ),
             ]),
           ),
           SettingsPane(
             'skip',
             '片头与片尾',
-            '按秒设置自动跳过，也可点选常用时长',
-            CupertinoIcons.forward,
+            '',
+            CupertinoIcons.forward_fill,
             AppleColors.systemIndigo,
-            content: _buildSkipIntroOutroDrawerBody(onStateChanged: refresh),
+            trailingText: _skipIntroOutroSummary,
+            content: IosSettingsGroup(
+              header: '自动跳过时长',
+              footer: '仅对点播剧集生效，电视直播频道将自动保持实时播放。',
+              dividerIndent: 16,
+              children: [
+                _buildSkipIntroOutroDrawerBody(onStateChanged: refresh),
+              ],
+            ),
           ),
         ],
       ),
       SettingsPane(
         'sources',
         '订阅与账号',
-        '片源管理、网盘扫码与配置',
-        CupertinoIcons.layers_alt,
+        '',
+        CupertinoIcons.layers_alt_fill,
         AppleColors.systemGreen,
+        sectionGroup: 'account',
+        trailingText: '${publicSubs.length} 订阅',
         content: stack([
-          action('订阅源与分组管理', CupertinoIcons.folder, () async {
-            await _showSubscriptionManagerSheet();
-            refresh();
-          }),
-          action(
-            '我的云盘 · 扫码与账号',
-            CupertinoIcons.qrcode,
-            () => showNetdiskAccountSheet(context, storage, onChanged: refresh),
+          IosSettingsGroup(
+            header: '片源与订阅管理',
+            footer: '支持 JSON 单仓/多仓、MacCMS 接口以及 M3U/TXT 直播源批量导入与分组。',
+            children: [
+              IosSettingsRow(
+                key: const ValueKey('ios-open-subscriptions'),
+                icon: CupertinoIcons.folder_fill,
+                iconColor: AppleColors.systemBlue,
+                title: '订阅源与分组管理',
+                trailingText: '${publicSubs.length} 个',
+                showChevron: true,
+                onTap: () async {
+                  await _showSubscriptionManagerSheet(
+                    iosBackLabel: '订阅与账号',
+                  );
+                  refresh();
+                },
+              ),
+              IosSettingsRow(
+                key: const ValueKey('ios-open-import-subscription'),
+                icon: CupertinoIcons.plus_app_fill,
+                iconColor: AppleColors.systemGreen,
+                title: '导入订阅资源',
+                showChevron: true,
+                onTap: () async {
+                  await _showImportConfigDialog(iosBackLabel: '订阅与账号');
+                  refresh();
+                },
+              ),
+            ],
           ),
-          if (sites.any((site) => site.isCatPaw))
-            action(
-              'CatPaw 本机配置',
-              CupertinoIcons.slider_horizontal_3,
-              _showCatPawSettings,
-            ),
+          const SizedBox(height: 20),
+          IosSettingsGroup(
+            header: '云盘账号与扩展',
+            footer: '绑定夸克、UC、百度或阿里云盘后，自动解锁对应 4K 原画直连线路。',
+            children: [
+              IosSettingsRow(
+                key: const ValueKey('ios-open-netdisk'),
+                icon: CupertinoIcons.qrcode,
+                iconColor: AppleColors.systemIndigo,
+                title: '我的云盘 · 扫码与账号',
+                trailingText:
+                    loggedDriveCount > 0 ? '已登录 $loggedDriveCount 个' : '未登录',
+                showChevron: true,
+                onTap: () => showNetdiskAccountSheet(
+                  context,
+                  storage,
+                  iosBackLabel: '订阅与账号',
+                  onChanged: refresh,
+                ),
+              ),
+              if (sites.any((site) => site.isCatPaw))
+                IosSettingsRow(
+                  icon: CupertinoIcons.slider_horizontal_3,
+                  iconColor: AppleColors.systemOrange,
+                  title: 'CatPaw 本机配置',
+                  showChevron: true,
+                  onTap: _showCatPawSettings,
+                ),
+            ],
+          ),
         ]),
       ),
       SettingsPane(
         'data',
         '数据',
-        '跨平台备份、恢复与缓存清理',
-        CupertinoIcons.tray,
+        '',
+        CupertinoIcons.tray_fill,
         AppleColors.systemTeal,
+        sectionGroup: 'account',
         children: [
           SettingsPane(
             'backup',
             '备份与恢复',
-            '备份可用于 Android、Windows、Mac 与 iPad',
+            '',
             CupertinoIcons.arrow_2_circlepath,
             AppleColors.systemGreen,
-            content: action(
-              '导出或恢复备份',
-              CupertinoIcons.arrow_2_circlepath,
-              _showBackupRestoreDialog,
+            content: _IosBackupRestorePanel(
+              storage: storage,
+              onRestored: () {
+                _reloadSavedConfig();
+                refresh();
+              },
+              onNotice: _showAppleNotice,
             ),
           ),
           SettingsPane(
             'cache',
             '缓存与搜索记录',
-            '清理海报缓存和当前空间的搜索记录；保留收藏与观看记录',
-            CupertinoIcons.trash,
+            '',
+            CupertinoIcons.trash_fill,
             AppleColors.systemRed,
+            trailingText: PosterLoader.memoryCacheSizeLabel,
             content: stack([
-              Text(
-                '海报内存缓存 ${PosterLoader.memoryCacheSizeLabel} · 搜索记录 ${storage.getSearchHistory(forPrivate: _privateSessionUnlocked).length} 条',
-                style: const TextStyle(
-                  color: AppleColors.labelSecondary,
-                  height: 1.5,
-                ),
-              ),
-              const SizedBox(height: 16),
-              action('清理缓存与搜索记录', CupertinoIcons.trash, () async {
-                await PosterLoader.clearCache();
-                await storage.clearSearchHistory(
-                  forPrivate: _privateSessionUnlocked,
-                );
-                refresh();
-                if (!mounted) return;
-                await showCupertinoDialog<void>(
-                  context: context,
-                  builder: (ctx) => CupertinoAlertDialog(
-                    title: const Text('缓存已清理'),
-                    content: const Text('已清空海报缓存与搜索记录。'),
-                    actions: [
-                      CupertinoDialogAction(
-                        onPressed: () => Navigator.pop(ctx),
-                        child: const Text('好的'),
-                      ),
-                    ],
+              IosSettingsGroup(
+                header: '存储概览',
+                footer: '清理海报缓存和当前空间的搜索历史，不会删除收藏和观看记录。',
+                children: [
+                  IosSettingsRow(
+                    icon: CupertinoIcons.photo_on_rectangle,
+                    iconColor: AppleColors.systemBlue,
+                    title: '海报内存缓存',
+                    trailingText: PosterLoader.memoryCacheSizeLabel,
                   ),
-                );
-              }),
+                  IosSettingsRow(
+                    icon: CupertinoIcons.search,
+                    iconColor: AppleColors.systemTeal,
+                    title: '搜索记录',
+                    trailingText:
+                        '${storage.getSearchHistory(forPrivate: _privateSessionUnlocked).length} 条',
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              IosSettingsGroup(
+                dividerIndent: 16,
+                children: [
+                  IosSettingsRow(
+                    key: const ValueKey('ios-clear-cache-row'),
+                    title: '清理缓存与搜索记录',
+                    titleColor: AppleColors.systemRed,
+                    onTap: () async {
+                      await PosterLoader.clearCache();
+                      await storage.clearSearchHistory(
+                        forPrivate: _privateSessionUnlocked,
+                      );
+                      refresh();
+                      if (!mounted) return;
+                      await showCupertinoDialog<void>(
+                        context: context,
+                        builder: (ctx) => CupertinoAlertDialog(
+                          title: const Text('缓存已清理'),
+                          content: const Text('已清空海报缓存与搜索记录。'),
+                          actions: [
+                            CupertinoDialogAction(
+                              onPressed: () => Navigator.pop(ctx),
+                              child: const Text('好的'),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
             ]),
           ),
         ],
@@ -6220,21 +6525,37 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       SettingsPane(
         'about',
         '关于与更新',
-        '版本信息与安装包下载',
-        CupertinoIcons.info_circle,
+        '',
+        CupertinoIcons.info_circle_fill,
         AppleColors.systemIndigo,
+        sectionGroup: 'about',
         content: stack([
-          const MarcoBrandLogo(iconSize: 48, fontSize: 22),
-          const SizedBox(height: 16),
-          Text(
-            '当前版本 $_currentAppVersion',
-            style: const TextStyle(color: AppleColors.labelSecondary),
+          const Padding(
+            padding: EdgeInsets.only(top: 6, bottom: 20),
+            child: Center(
+              child: MarcoBrandLogo(iconSize: 52, fontSize: 22),
+            ),
+          ),
+          IosSettingsGroup(
+            header: '关于本机应用',
+            dividerIndent: 16,
+            children: [
+              const IosSettingsRow(
+                title: '应用名称',
+                trailingText: 'Marco Movie',
+              ),
+              IosSettingsRow(
+                key: const ValueKey('ios-about-version'),
+                title: '版本',
+                trailingText: _currentAppVersion,
+              ),
+            ],
           ),
           const SizedBox(height: 20),
-          action(
-            '检查版本更新',
-            CupertinoIcons.arrow_down_circle,
-            _showUpdateCheckSheet,
+          IosUpdateSheet(
+            installedVersion: _currentAppVersion,
+            embedded: true,
+            autoCheck: false,
           ),
         ]),
       ),
@@ -7315,11 +7636,49 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     return false;
   }
 
+  Future<T?> _openIosOrModalPage<T>({
+    required String title,
+    BuildContext? hostContext,
+    String backLabel = '返回',
+    Widget? trailingAction,
+    double maxWidth = 640,
+    bool ignoreKeyboardInsets = false,
+    required WidgetBuilder builder,
+  }) {
+    final targetCtx = hostContext ?? context;
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return Navigator.of(targetCtx).push<T>(
+        CupertinoPageRoute<T>(
+          builder: (pageCtx) => IosSettingsScaffold(
+            title: title,
+            backLabel: backLabel,
+            trailing: trailingAction,
+            body: Align(
+              alignment: Alignment.topCenter,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: maxWidth),
+                child: builder(pageCtx),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    return showAppleModalSheet<T>(
+      context: targetCtx,
+      title: title,
+      maxWidth: maxWidth,
+      trailingAction: trailingAction,
+      ignoreKeyboardInsets: ignoreKeyboardInsets,
+      builder: builder,
+    );
+  }
+
   void _showUpdateCheckSheet() {
     if (defaultTargetPlatform == TargetPlatform.iOS) {
-      showAppleModalSheet<void>(
-        context: context,
-        title: '检查版本更新',
+      _openIosOrModalPage<void>(
+        title: '软件更新',
+        backLabel: '返回',
         builder: (_) => IosUpdateSheet(installedVersion: _currentAppVersion),
       );
       return;
@@ -7585,7 +7944,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     );
   }
 
-  void _showWallpaperSettingsSheet() {
+  Future<void> _showWallpaperSettingsSheet({
+    String iosBackLabel = '返回',
+  }) async {
     final urlCtrl = TextEditingController(
       text: widget.storage.customWallpaperUrl,
     );
@@ -7596,15 +7957,22 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       ('amber', '流金琥珀', Color(0xFF382210), Color(0xFF0D0805)),
       ('emerald', '翡翠幽林', Color(0xFF0F3026), Color(0xFF050E0B)),
     ];
-    showAppleModalSheet<void>(
-      context: context,
-      title: '背景壁纸与主题风格',
+    await _openIosOrModalPage<void>(
+      title: defaultTargetPlatform == TargetPlatform.iOS
+          ? '自定义壁纸'
+          : '背景壁纸与主题风格',
+      backLabel: iosBackLabel,
       ignoreKeyboardInsets: true,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setModalState) {
           final currentPreset = widget.storage.wallpaperPreset;
           return SingleChildScrollView(
-            padding: const EdgeInsets.all(18),
+            padding: EdgeInsets.fromLTRB(
+              18,
+              18,
+              18,
+              18 + MediaQuery.viewInsetsOf(ctx).bottom,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -7772,41 +8140,65 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       ),
     );
   }
-  Future<void> _showSubscriptionManagerSheet() async {
-    await showAppleModalSheet<void>(
-      context: context,
-      title: '订阅源与分组管理中心',
-      trailingAction: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          CupertinoButton(
-            padding: const EdgeInsets.symmetric(horizontal: 6),
-            minSize: 28,
-            onPressed: () {
-              Navigator.of(context).pop();
-              _quickImportFromClipboard();
-            },
-            child: const Text(
-              '剪贴板导入',
-              style: TextStyle(color: AppleColors.labelSecondary, fontSize: 13),
+  Future<void> _showSubscriptionManagerSheet({
+    String iosBackLabel = '返回',
+  }) async {
+    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+    StateSetter? refreshSubPage;
+    await _openIosOrModalPage<void>(
+      title: isIos ? '订阅管理' : '订阅源与分组管理中心',
+      backLabel: iosBackLabel,
+      trailingAction: isIos
+          ? CupertinoButton(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              minimumSize: const Size(36, 36),
+              onPressed: () async {
+                await _showImportConfigDialog(iosBackLabel: '订阅管理');
+                refreshSubPage?.call(() {});
+              },
+              child: const Text(
+                '添加',
+                style: TextStyle(color: AppleColors.systemBlue, fontSize: 16),
+              ),
+            )
+          : Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CupertinoButton(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  minSize: 28,
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _quickImportFromClipboard();
+                  },
+                  child: const Text(
+                    '剪贴板导入',
+                    style: TextStyle(
+                      color: AppleColors.labelSecondary,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+                CupertinoButton(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  minSize: 28,
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _showImportConfigDialog();
+                  },
+                  child: const Text(
+                    '+ 批量导入',
+                    style: TextStyle(
+                      color: AppleColors.systemBlue,
+                      fontSize: 13.5,
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ),
-          CupertinoButton(
-            padding: const EdgeInsets.symmetric(horizontal: 6),
-            minSize: 28,
-            onPressed: () {
-              Navigator.of(context).pop();
-              _showImportConfigDialog();
-            },
-            child: const Text(
-              '+ 批量导入',
-              style: TextStyle(color: AppleColors.systemBlue, fontSize: 13.5),
-            ),
-          ),
-        ],
-      ),
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheetState) {
+          refreshSubPage = setSheetState;
           final depots = _config?.depots ?? const [];
           final subs = widget.storage
               .getSubscriptions()
@@ -7852,18 +8244,30 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                         icon: CupertinoIcons.add,
                         primary: true,
                         compact: true,
-                        onPressed: () {
-                          Navigator.of(ctx).pop();
-                          _showImportConfigDialog();
+                        onPressed: () async {
+                          if (isIos) {
+                            await _showImportConfigDialog(
+                              iosBackLabel: '订阅管理',
+                            );
+                            if (ctx.mounted) setSheetState(() {});
+                          } else {
+                            Navigator.of(ctx).pop();
+                            _showImportConfigDialog();
+                          }
                         },
                       ),
                       AppleCapsuleButton(
                         label: '从剪贴板导入',
                         icon: CupertinoIcons.doc_on_clipboard,
                         compact: true,
-                        onPressed: () {
-                          Navigator.of(ctx).pop();
-                          _quickImportFromClipboard();
+                        onPressed: () async {
+                          if (isIos) {
+                            await _quickImportFromClipboard();
+                            if (ctx.mounted) setSheetState(() {});
+                          } else {
+                            Navigator.of(ctx).pop();
+                            _quickImportFromClipboard();
+                          }
                         },
                       ),
                     ],
@@ -7880,6 +8284,34 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             shrinkWrap: true,
             padding: const EdgeInsets.all(16),
             children: [
+              if (isIos) ...[
+                IosSettingsGroup(
+                  header: '快捷导入',
+                  children: [
+                    IosSettingsRow(
+                      icon: CupertinoIcons.plus_app_fill,
+                      iconColor: AppleColors.systemBlue,
+                      title: '批量导入订阅地址或 JSON',
+                      showChevron: true,
+                      onTap: () async {
+                        await _showImportConfigDialog(iosBackLabel: '订阅管理');
+                        if (ctx.mounted) setSheetState(() {});
+                      },
+                    ),
+                    IosSettingsRow(
+                      icon: CupertinoIcons.doc_on_clipboard_fill,
+                      iconColor: AppleColors.systemTeal,
+                      title: '从剪贴板快速导入',
+                      showChevron: true,
+                      onTap: () async {
+                        await _quickImportFromClipboard();
+                        if (ctx.mounted) setSheetState(() {});
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+              ],
               if (depots.isNotEmpty) ...[
                 AppleGroupedSection(
                   header: '多仓子仓库切换 (${depots.length})',
@@ -7892,9 +8324,14 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                           ? '共 ${depots.length} 个可选子仓库'
                           : '当前：${widget.storage.activeDepotName}',
                       trailingText: '${depots.length} 个',
-                      onTap: () {
-                        Navigator.of(ctx).pop();
-                        _showDepotPickerDialog();
+                      onTap: () async {
+                        if (isIos) {
+                          await _showDepotPickerDialog(iosBackLabel: '订阅管理');
+                          if (ctx.mounted) setSheetState(() {});
+                        } else {
+                          Navigator.of(ctx).pop();
+                          _showDepotPickerDialog();
+                        }
                       },
                     ),
                   ],
@@ -7964,12 +8401,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       ),
     );
   }
-  void _showDepotPickerDialog() {
+  Future<void> _showDepotPickerDialog({String iosBackLabel = '返回'}) async {
     final depots = _config?.depots ?? const [];
     if (depots.isEmpty) return;
-    showAppleModalSheet<void>(
-      context: context,
+    await _openIosOrModalPage<void>(
       title: '切换多仓子仓库 (${depots.length})',
+      backLabel: iosBackLabel,
       builder: (ctx) {
         bool loading = false;
         String? errorMsg;
@@ -8085,16 +8522,23 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     );
   }
   Future<void> _managePickerSites(bool privateGroup) async {
+    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
     final ordered = (_config?.sites ?? const <CmsSite>[])
         .where((s) => s.isEffectivelyPrivate == privateGroup).toList();
     final removed = <CmsSite>[];
     bool saving = false;
-    await showAppleModalSheet<void>(
-      context: context, title: '管理线路',
+    await _openIosOrModalPage<void>(
+      title: '管理线路',
+      backLabel: '返回',
       builder: (ctx) => StatefulBuilder(builder: (ctx, update) {
-        return SizedBox(height: MediaQuery.sizeOf(ctx).height * .62, child: Column(children: [
+        final safeBottom = MediaQuery.paddingOf(ctx).bottom;
+        final content = Column(children: [
           Expanded(child: ReorderableListView.builder(
-            buildDefaultDragHandles: false, itemCount: ordered.length,
+            buildDefaultDragHandles: false,
+            padding: isIos
+                ? const EdgeInsets.symmetric(horizontal: 8, vertical: 8)
+                : null,
+            itemCount: ordered.length,
             onReorder: (from, to) => update(() {
               if (to > from) to--;
               ordered.insert(to, ordered.removeAt(from));
@@ -8107,25 +8551,33 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                   onPressed: saving ? null : () => update(() => removed.add(ordered.removeAt(i)))));
             },
           )),
-          AppleCapsuleButton(label: removed.isEmpty ? '保存顺序' : '保存并移除 ${removed.length} 条线路',
-            onPressed: saving ? null : () async {
-              update(() => saving = true);
-              try {
-                await widget.storage.savePickerEdits(ordered, removed);
-                if (ctx.mounted) Navigator.of(ctx).pop();
-                if (mounted) _reloadSavedConfig();
-              } catch (_) {
-                if (mounted) _showAppleNotice('线路变更未保存', '保存未完成，请重试。');
-              } finally {
-                if (ctx.mounted) update(() => saving = false);
-              }
-            }),
-        ]));
+          Padding(
+            padding: isIos
+                ? EdgeInsets.fromLTRB(16, 8, 16, safeBottom + 16)
+                : EdgeInsets.zero,
+            child: AppleCapsuleButton(label: removed.isEmpty ? '保存顺序' : '保存并移除 ${removed.length} 条线路',
+              onPressed: saving ? null : () async {
+                update(() => saving = true);
+                try {
+                  await widget.storage.savePickerEdits(ordered, removed);
+                  if (ctx.mounted) Navigator.of(ctx).pop();
+                  if (mounted) _reloadSavedConfig();
+                } catch (_) {
+                  if (mounted) _showAppleNotice('线路变更未保存', '保存未完成，请重试。');
+                } finally {
+                  if (ctx.mounted) update(() => saving = false);
+                }
+              }),
+          ),
+        ]);
+        if (isIos) return content;
+        return SizedBox(height: MediaQuery.sizeOf(ctx).height * .62, child: content);
       }),
     );
   }
 
   void _showSitePickerDialog() {
+    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
     final inPrivacyMode = _privateSessionUnlocked;
     final defaultGroupName = inPrivacyMode ? '隐私分组' : '默认分组';
     final supported = inPrivacyMode
@@ -8152,53 +8604,56 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     final plugins = (_config?.pluginOnlySites ?? const <CmsSite>[])
         .where((s) => inPrivacyMode ? s.isEffectivelyPrivate : !s.isEffectivelyPrivate)
         .toList();
-    showAppleModalSheet<void>(
-      context: context,
+    final importPrivateButton = CupertinoButton(
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      minimumSize: const Size(28, 28),
+      onPressed: () {
+        Navigator.of(context).pop();
+        _showImportConfigDialog(
+          initialGroup: '隐私分组',
+          initialIsPrivate: true,
+        );
+      },
+      child: const Text(
+        '+ 导入隐私源',
+        style: TextStyle(color: AppleColors.systemBlue, fontSize: 13),
+      ),
+    );
+    _openIosOrModalPage<void>(
       title: inPrivacyMode
           ? '切换隐私片源 (${supported.length} 可用)'
           : '切换片源 (${supported.length} 可用)',
+      backLabel: '返回',
       maxWidth: 680,
       ignoreKeyboardInsets: true,
       trailingAction: inPrivacyMode
-          ? Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CupertinoButton(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  minSize: 28,
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                    _showPrivateResourcesSheet();
-                  },
-                  child: const Text(
-                    '管理 / 密码',
-                    style: TextStyle(
-                      color: Color(0xFFBF5AF2),
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
+          ? (isIos
+              ? importPrivateButton
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      minimumSize: const Size(28, 28),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        _showPrivateResourcesSheet();
+                      },
+                      child: const Text(
+                        '管理 / 密码',
+                        style: TextStyle(
+                          color: Color(0xFFBF5AF2),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-                CupertinoButton(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  minSize: 28,
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                    _showImportConfigDialog(
-                      initialGroup: '隐私分组',
-                      initialIsPrivate: true,
-                    );
-                  },
-                  child: const Text(
-                    '+ 导入隐私源',
-                    style: TextStyle(color: AppleColors.systemBlue, fontSize: 13),
-                  ),
-                ),
-              ],
-            )
+                    importPrivateButton,
+                  ],
+                ))
           : CupertinoButton(
               padding: const EdgeInsets.symmetric(horizontal: 8),
-              minSize: 28,
+              minimumSize: const Size(28, 28),
               onPressed: () {
                 Navigator.of(context).pop();
                 _showImportConfigDialog();
@@ -8211,6 +8666,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setPickerState) {
           final size = MediaQuery.sizeOf(ctx);
+          final safeBottom = MediaQuery.paddingOf(ctx).bottom;
           bool matchesFilter(CmsSite s) {
             final g =
                 s.group.trim().isEmpty ? defaultGroupName : s.group.trim();
@@ -8251,250 +8707,283 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             };
           }
 
+          final scrollView = CustomScrollView(
+            key: const ValueKey('site-picker-scroll'),
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+            physics: const BouncingScrollPhysics(),
+            slivers: [
+              SliverToBoxAdapter(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: AppleSearchField(
+                      controller: searchCtrl,
+                      placeholder: '快速筛选片源名称或分组…',
+                      onChanged: (v) => setPickerState(() => searchQuery = v),
+                    ),
+                  ),
+                  if (isIos && inPrivacyMode) ...[
+                    const SizedBox(width: 6),
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                      minimumSize: const Size(28, 28),
+                      onPressed: () {
+                        Navigator.of(ctx).pop();
+                        _showPrivateResourcesSheet();
+                      },
+                      child: const Text(
+                        '管理 / 密码',
+                        style: TextStyle(
+                          color: Color(0xFFBF5AF2),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(width: 10),
+                  CupertinoButton(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                    minimumSize: const Size(28, 28),
+                    child: const Text(
+                      '管理线路',
+                      style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+                    ),
+                    onPressed: () {
+                      Navigator.of(ctx).pop();
+                      _managePickerSites(inPrivacyMode);
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              // Centered Group Pills Row
+              SizedBox(
+                height: MediaQuery.textScalerOf(ctx).scale(16) + 20,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  physics: const BouncingScrollPhysics(),
+                  itemCount: groups.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                  itemBuilder: (ctx, idx) {
+                    final g = groups[idx];
+                    final count = groupCounts[g] ?? 0;
+                    final isSelected = selectedGroup == g;
+                    return GestureDetector(
+                      onTap: () => setPickerState(() => selectedGroup = g),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        curve: Curves.easeOutCubic,
+                        height: MediaQuery.textScalerOf(ctx).scale(16) + 20,
+                        alignment: Alignment.center,
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        decoration: BoxDecoration(
+                          gradient: isSelected
+                              ? const LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Color(0xFF0A84FF),
+                                    Color(0xFF0066CC),
+                                  ],
+                                )
+                              : const LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Color(0xCC2A2A32),
+                                    Color(0xB81D1D24),
+                                  ],
+                                ),
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: isSelected
+                                ? const Color(0x995AC8FA)
+                                : const Color(0x2EFFFFFF),
+                            width: 0.65,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Text(
+                              g,
+                              textAlign: TextAlign.center,
+                              strutStyle: const StrutStyle(
+                                forceStrutHeight: true,
+                                height: 1.1,
+                                fontSize: 13,
+                              ),
+                              style: TextStyle(
+                                color: isSelected
+                                    ? Colors.white
+                                    : AppleColors.labelPrimary,
+                                fontSize: 13,
+                                height: 1.1,
+                                fontWeight: isSelected
+                                    ? FontWeight.w700
+                                    : FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                                '$count',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  color: isSelected
+                                      ? Colors.white
+                                      : AppleColors.labelSecondary,
+                                  fontSize: 11,
+                                  height: 1.0,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 12),
+                ],
+              )),
+              if (filteredSites.isEmpty && filteredPlugins.isEmpty)
+                const SliverToBoxAdapter(child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text('未找到匹配的片源', style: TextStyle(
+                    color: AppleColors.labelSecondary, fontSize: 14)),
+                ))
+              else
+                          SourceChoiceSliver(
+                            sites: filteredSites,
+                            selectedKey: _activeSite?.key,
+                            preferredKey: widget.storage.preferredSiteKey,
+                            onPreferred: inPrivacyMode ? null : (s) async {
+                              await widget.storage.setPreferredSiteKey(
+                                widget.storage.preferredSiteKey == s.key ? '' : s.key);
+                              if (ctx.mounted) setPickerState(() {});
+                            },
+                            badgeLabel: siteBadgeLabel,
+                            badgeColor: siteBadgeColor,
+                            onSelected: (s) {
+                              Navigator.of(ctx).pop();
+                              if (s.isCatPaw && Uri.parse(s.api).path == '/api/baseset') {
+                                _showCatPawSettings(s);
+                                return;
+                              }
+                              if (inPrivacyMode) {
+                                setState(() {
+                                  _privateSessionUnlocked = true;
+                                  _selectedPrivateSiteKey = s.key;
+                                  _activeSite = s;
+                                });
+                              } else {
+                                widget.storage.setSelectedSiteKey(s.key);
+                                unawaited(CmsClient.retainScriptSessions(
+                                  (_config?.scriptOwners ?? const <CmsSite>[])
+                                      .where((site) => !site.isEffectivelyPrivate),
+                                ));
+                                setState(() {
+                                  _privateSessionUnlocked = false;
+                                  _activeSite = s;
+                                });
+                              }
+                              _loadSiteHome();
+                            },
+                          ),
+                          if (filteredPlugins.isNotEmpty) ...[
+                            SliverToBoxAdapter(
+                              child: Padding(
+                                padding: const EdgeInsets.only(top: 12),
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      onTap: () => setPickerState(
+                                        () => showUnsupported =
+                                            !showUnsupported,
+                                      ),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 6,
+                                          vertical: 6,
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            Text(
+                                              '当前设备未适配 (${filteredPlugins.length})',
+                                              style: const TextStyle(
+                                                color: AppleColors
+                                                    .labelSecondary,
+                                                fontSize: 12.5,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                            const Spacer(),
+                                            Icon(
+                                              (showUnsupported ||
+                                                      searchQuery
+                                                          .trim()
+                                                          .isNotEmpty ||
+                                                      filteredSites.isEmpty)
+                                                  ? CupertinoIcons
+                                                      .chevron_up
+                                                  : CupertinoIcons
+                                                      .chevron_down,
+                                              size: 13,
+                                              color: AppleColors
+                                                  .labelSecondary,
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                    if (showUnsupported ||
+                                        searchQuery.trim().isNotEmpty ||
+                                        filteredSites.isEmpty)
+                                      AppleGroupedSection(
+                                        children: filteredPlugins.map((s) {
+                                          return AppleGroupedTile(
+                                            icon: CupertinoIcons
+                                                .lock_shield_fill,
+                                            iconBgColor: AppleColors
+                                                .groupedTertiary,
+                                            title: s.name,
+                                            subtitle: s.unsupportedReason,
+                                          );
+                                        }).toList(),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+              if (isIos)
+                SliverToBoxAdapter(
+                  child: SizedBox(height: safeBottom + 28),
+                ),
+            ],
+          );
+
+          if (isIos) {
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: scrollView,
+            );
+          }
+
           return SizedBox(
             height: (size.height * 0.72).clamp(380.0, 620.0),
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-              child: CustomScrollView(
-                keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-                physics: const BouncingScrollPhysics(),
-                slivers: [
-                  SliverToBoxAdapter(child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: AppleSearchField(
-                          controller: searchCtrl,
-                          placeholder: '快速筛选片源名称或分组…',
-                          onChanged: (v) => setPickerState(() => searchQuery = v),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      CupertinoButton(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                        minSize: 28,
-                        child: const Text(
-                          '管理线路',
-                          style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
-                        ),
-                        onPressed: () {
-                          Navigator.of(ctx).pop();
-                          _managePickerSites(inPrivacyMode);
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  // Centered Group Pills Row
-                  SizedBox(
-                    height: MediaQuery.textScalerOf(ctx).scale(16) + 20,
-                    child: ListView.separated(
-                      scrollDirection: Axis.horizontal,
-                      physics: const BouncingScrollPhysics(),
-                      itemCount: groups.length,
-                      separatorBuilder: (_, __) => const SizedBox(width: 8),
-                      itemBuilder: (ctx, idx) {
-                        final g = groups[idx];
-                        final count = groupCounts[g] ?? 0;
-                        final isSelected = selectedGroup == g;
-                        return GestureDetector(
-                          onTap: () => setPickerState(() => selectedGroup = g),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            curve: Curves.easeOutCubic,
-                            height: MediaQuery.textScalerOf(ctx).scale(16) + 20,
-                            alignment: Alignment.center,
-                            padding: const EdgeInsets.symmetric(horizontal: 14),
-                            decoration: BoxDecoration(
-                              gradient: isSelected
-                                  ? const LinearGradient(
-                                      begin: Alignment.topCenter,
-                                      end: Alignment.bottomCenter,
-                                      colors: [
-                                        Color(0xFF0A84FF),
-                                        Color(0xFF0066CC),
-                                      ],
-                                    )
-                                  : const LinearGradient(
-                                      begin: Alignment.topCenter,
-                                      end: Alignment.bottomCenter,
-                                      colors: [
-                                        Color(0xCC2A2A32),
-                                        Color(0xB81D1D24),
-                                      ],
-                                    ),
-                              borderRadius: BorderRadius.circular(999),
-                              border: Border.all(
-                                color: isSelected
-                                    ? const Color(0x995AC8FA)
-                                    : const Color(0x2EFFFFFF),
-                                width: 0.65,
-                              ),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              crossAxisAlignment: CrossAxisAlignment.center,
-                              children: [
-                                Text(
-                                  g,
-                                  textAlign: TextAlign.center,
-                                  strutStyle: const StrutStyle(
-                                    forceStrutHeight: true,
-                                    height: 1.1,
-                                    fontSize: 13,
-                                  ),
-                                  style: TextStyle(
-                                    color: isSelected
-                                        ? Colors.white
-                                        : AppleColors.labelPrimary,
-                                    fontSize: 13,
-                                    height: 1.1,
-                                    fontWeight: isSelected
-                                        ? FontWeight.w700
-                                        : FontWeight.w500,
-                                  ),
-                                ),
-                                const SizedBox(width: 6),
-                                Text(
-                                    '$count',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      color: isSelected
-                                          ? Colors.white
-                                          : AppleColors.labelSecondary,
-                                      fontSize: 11,
-                                      height: 1.0,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                    ],
-                  )),
-                  if (filteredSites.isEmpty && filteredPlugins.isEmpty)
-                    const SliverToBoxAdapter(child: Padding(
-                      padding: EdgeInsets.all(24),
-                      child: Text('未找到匹配的片源', style: TextStyle(
-                        color: AppleColors.labelSecondary, fontSize: 14)),
-                    ))
-                  else
-                              SourceChoiceSliver(
-                                sites: filteredSites,
-                                selectedKey: _activeSite?.key,
-                                preferredKey: widget.storage.preferredSiteKey,
-                                onPreferred: inPrivacyMode ? null : (s) async {
-                                  await widget.storage.setPreferredSiteKey(
-                                    widget.storage.preferredSiteKey == s.key ? '' : s.key);
-                                  if (ctx.mounted) setPickerState(() {});
-                                },
-                                badgeLabel: siteBadgeLabel,
-                                badgeColor: siteBadgeColor,
-                                onSelected: (s) {
-                                  Navigator.of(ctx).pop();
-                                  if (s.isCatPaw && Uri.parse(s.api).path == '/api/baseset') {
-                                    _showCatPawSettings(s);
-                                    return;
-                                  }
-                                  if (inPrivacyMode) {
-                                    setState(() {
-                                      _privateSessionUnlocked = true;
-                                      _selectedPrivateSiteKey = s.key;
-                                      _activeSite = s;
-                                    });
-                                  } else {
-                                    widget.storage.setSelectedSiteKey(s.key);
-                                    unawaited(CmsClient.retainScriptSessions(
-                                      (_config?.scriptOwners ?? const <CmsSite>[])
-                                          .where((site) => !site.isEffectivelyPrivate),
-                                    ));
-                                    setState(() {
-                                      _privateSessionUnlocked = false;
-                                      _activeSite = s;
-                                    });
-                                  }
-                                  _loadSiteHome();
-                                },
-                              ),
-                              if (filteredPlugins.isNotEmpty) ...[
-                                SliverToBoxAdapter(
-                                  child: Padding(
-                                    padding: const EdgeInsets.only(top: 12),
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.stretch,
-                                      children: [
-                                        GestureDetector(
-                                          behavior: HitTestBehavior.opaque,
-                                          onTap: () => setPickerState(
-                                            () => showUnsupported =
-                                                !showUnsupported,
-                                          ),
-                                          child: Padding(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 6,
-                                              vertical: 6,
-                                            ),
-                                            child: Row(
-                                              children: [
-                                                Text(
-                                                  '当前设备未适配 (${filteredPlugins.length})',
-                                                  style: const TextStyle(
-                                                    color: AppleColors
-                                                        .labelSecondary,
-                                                    fontSize: 12.5,
-                                                    fontWeight: FontWeight.w600,
-                                                  ),
-                                                ),
-                                                const Spacer(),
-                                                Icon(
-                                                  (showUnsupported ||
-                                                          searchQuery
-                                                              .trim()
-                                                              .isNotEmpty ||
-                                                          filteredSites.isEmpty)
-                                                      ? CupertinoIcons
-                                                          .chevron_up
-                                                      : CupertinoIcons
-                                                          .chevron_down,
-                                                  size: 13,
-                                                  color: AppleColors
-                                                      .labelSecondary,
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ),
-                                        if (showUnsupported ||
-                                            searchQuery.trim().isNotEmpty ||
-                                            filteredSites.isEmpty)
-                                          AppleGroupedSection(
-                                            children: filteredPlugins.map((s) {
-                                              return AppleGroupedTile(
-                                                icon: CupertinoIcons
-                                                    .lock_shield_fill,
-                                                iconBgColor: AppleColors
-                                                    .groupedTertiary,
-                                                title: s.name,
-                                                subtitle: s.unsupportedReason,
-                                              );
-                                            }).toList(),
-                                          ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ],
-                ],
-              ),
+              child: scrollView,
             ),
           );
         },
@@ -8508,12 +8997,18 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   ) async {
     String server = '', username = '', password = '', error = '';
     bool busy = false;
-    return await showAppleModalSheet<bool>(
-          context: parent,
+    return await _openIosOrModalPage<bool>(
+          hostContext: parent,
           title: '连接 Emby 媒体库',
+          backLabel: '导入订阅',
           builder: (sheet) => StatefulBuilder(
             builder: (ctx, update) => SingleChildScrollView(
-              padding: const EdgeInsets.all(18),
+              padding: EdgeInsets.fromLTRB(
+                18,
+                18,
+                18,
+                18 + MediaQuery.viewInsetsOf(ctx).bottom,
+              ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -8581,12 +9076,13 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
         ) ??
         false;
   }
-  void _showImportConfigDialog({
+  Future<void> _showImportConfigDialog({
     String? initialInput,
     String? initialError,
     String initialGroup = '默认分组',
     bool initialIsPrivate = false,
-  }) {
+    String iosBackLabel = '返回',
+  }) async {
     final urlCtrl = TextEditingController(
       text: initialInput ??
           (initialIsPrivate ? '' : widget.storage.configOrigin),
@@ -8599,11 +9095,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     final showPrivacyToggle =
         initialIsPrivate || !widget.storage.hasPrivacyConfigured;
     const presetGroups = ['默认分组', '主力影视', '超清专线', '电视直播', '动漫番剧'];
-    showAppleModalSheet<void>(
-      context: context,
+    final isIos = defaultTargetPlatform == TargetPlatform.iOS;
+    await _openIosOrModalPage<void>(
       title: initialIsPrivate
-          ? '导入隐私订阅资源'
-          : '导入订阅资源（支持分组 / 批量导入）',
+          ? '导入隐私订阅'
+          : (isIos ? '导入订阅资源' : '导入订阅资源（支持分组 / 批量导入）'),
+      backLabel: iosBackLabel,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setModalState) {
           Future<void> handleImport() async {
@@ -8654,7 +9151,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             }
           }
           return SingleChildScrollView(
-            padding: const EdgeInsets.all(20),
+            padding: EdgeInsets.fromLTRB(
+              20,
+              20,
+              20,
+              20 + MediaQuery.viewInsetsOf(ctx).bottom,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -8956,15 +9458,17 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       ),
     );
   }
-  void _showBackupRestoreDialog() {
+  Future<void> _showBackupRestoreDialog({String iosBackLabel = '返回'}) async {
     final ctrl = TextEditingController(text: widget.storage.exportBackupJson());
     String? errorText;
-    showAppleModalSheet<void>(
-      context: context,
-      title: '跨平台备份导出 / 恢复',
+    await _openIosOrModalPage<void>(
+      title: defaultTargetPlatform == TargetPlatform.iOS
+          ? '备份与恢复'
+          : '跨平台备份导出 / 恢复',
+      backLabel: iosBackLabel,
       trailingAction: CupertinoButton(
         padding: const EdgeInsets.symmetric(horizontal: 10),
-        minSize: 28,
+        minimumSize: const Size(28, 28),
         onPressed: () {
           Clipboard.setData(ClipboardData(text: ctrl.text));
           _showAppleNotice('已复制备份', '备份 JSON 已复制到剪贴板，可发送至其他设备恢复。');
@@ -8976,7 +9480,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       ),
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setModalState) => SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
+          padding: EdgeInsets.fromLTRB(
+            20,
+            20,
+            20,
+            20 + MediaQuery.viewInsetsOf(ctx).bottom,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
@@ -9043,6 +9552,139 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _IosBackupRestorePanel extends StatefulWidget {
+  final StorageService storage;
+  final VoidCallback onRestored;
+  final void Function(String title, String message) onNotice;
+
+  const _IosBackupRestorePanel({
+    required this.storage,
+    required this.onRestored,
+    required this.onNotice,
+  });
+
+  @override
+  State<_IosBackupRestorePanel> createState() => _IosBackupRestorePanelState();
+}
+
+class _IosBackupRestorePanelState extends State<_IosBackupRestorePanel> {
+  late final TextEditingController _ctrl;
+  String? _errorText;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: widget.storage.exportBackupJson());
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        IosSettingsGroup(
+          header: '导出与复制',
+          footer: '与 iPad、Mac、Windows 及 Android 电视/手机端备份格式双向兼容。',
+          children: [
+            IosSettingsRow(
+              key: const ValueKey('ios-backup-copy'),
+              icon: CupertinoIcons.doc_on_doc_fill,
+              iconColor: AppleColors.systemBlue,
+              title: '复制当前备份 JSON',
+              onTap: () {
+                final latest = widget.storage.exportBackupJson();
+                _ctrl.text = latest;
+                Clipboard.setData(ClipboardData(text: latest));
+                widget.onNotice('已复制备份', '备份 JSON 已复制到剪贴板，可发送至其他设备恢复。');
+              },
+            ),
+            IosSettingsRow(
+              icon: CupertinoIcons.doc_on_clipboard_fill,
+              iconColor: AppleColors.systemTeal,
+              title: '从剪贴板粘贴备份文本',
+              onTap: () async {
+                final data = await Clipboard.getData(Clipboard.kTextPlain);
+                final text = (data?.text ?? '').trim();
+                if (text.isEmpty) return;
+                setState(() {
+                  _ctrl.text = text;
+                  _errorText = null;
+                });
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        IosSettingsGroup(
+          header: '备份文本（可编辑或粘贴恢复）',
+          dividerIndent: 16,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(14),
+              child: CupertinoTextField(
+                key: const ValueKey('ios-backup-textfield'),
+                controller: _ctrl,
+                maxLines: 8,
+                minLines: 5,
+                autocorrect: false,
+                enableSuggestions: false,
+                smartQuotesType: SmartQuotesType.disabled,
+                smartDashesType: SmartDashesType.disabled,
+                padding: const EdgeInsets.all(12),
+                style: const TextStyle(
+                  color: AppleColors.labelPrimary,
+                  fontSize: 12.5,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2C2C2E),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            ),
+            if (_errorText != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+                child: Text(
+                  _errorText!,
+                  style: const TextStyle(
+                    color: AppleColors.systemRed,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            IosSettingsRow(
+              key: const ValueKey('ios-backup-restore-btn'),
+              icon: CupertinoIcons.arrow_counterclockwise,
+              iconColor: AppleColors.systemGreen,
+              title: '从此备份文本恢复',
+              titleColor: AppleColors.systemBlue,
+              onTap: () async {
+                try {
+                  await widget.storage.importBackupJson(_ctrl.text);
+                  if (!mounted) return;
+                  setState(() => _errorText = null);
+                  widget.onRestored();
+                  widget.onNotice('恢复成功', '已从备份文本恢复订阅源、收藏与偏好设置。');
+                } catch (e) {
+                  if (mounted) {
+                    setState(() => _errorText = '恢复备份失败：$e');
+                  }
+                }
+              },
+            ),
+          ],
+        ),
+      ],
     );
   }
 }

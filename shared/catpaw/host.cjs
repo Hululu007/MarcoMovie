@@ -90,10 +90,11 @@ if (!isMainThread) {
         task.cancel = failed;
         req.on('data', data); req.once('end', end); req.once('error', failed);
       });
+      const needsExtension = ['t4-v1', 'apptt-v1'].includes(body?.adapter);
       if (!body || Array.isArray(body) || Object.keys(body).sort().join(',') !==
-          (body.adapter === 't4-v1' ? 'adapter,artifactHash,extension,version' : 'adapter,artifactHash,version') ||
-          body.version !== 1 || !['dm84-v1', 'auete-v1', 'bttwoo-v1', 'appgz-v1', 't4-v1', 'fy-v1'].includes(body.adapter) || typeof body.artifactHash !== 'string' || !HASH.test(body.artifactHash) ||
-          (body.adapter === 't4-v1' && (typeof body.extension !== 'string' || !body.extension.trim() || Buffer.byteLength(body.extension) > 16 * 1024))) throw Error('bootstrap_request');
+          (needsExtension ? 'adapter,artifactHash,extension,version' : 'adapter,artifactHash,version') ||
+          body.version !== 1 || !['dm84-v1', 'auete-v1', 'bttwoo-v1', 'appgz-v1', 't4-v1', 'apptt-v1', 'fy-v1'].includes(body.adapter) || typeof body.artifactHash !== 'string' || !HASH.test(body.artifactHash) ||
+          (needsExtension && (typeof body.extension !== 'string' || !body.extension.trim() || Buffer.byteLength(body.extension) > 16 * 1024))) throw Error('bootstrap_request');
       if (res.destroyed || closing || resetting) throw Error('bootstrap_cancelled');
       const imports = path.join(root, 'imports');
       try { if (fs.lstatSync(imports).isSymbolicLink() || !fs.lstatSync(imports).isDirectory()) throw Error(); }

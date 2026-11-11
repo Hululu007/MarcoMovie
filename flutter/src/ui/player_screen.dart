@@ -167,6 +167,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _introSkippedForSession = false;
   bool _outroSkippedForSession = false;
   final Set<int> _failedLinesForEpisode = <int>{};
+  final Set<int> _failedLiveEpisodes = <int>{};
   final Set<String> _failedQualityUrls = <String>{};
 
   CmsLine get _currentLine => _lines[_lineIndex.clamp(0, _lines.length - 1)];
@@ -195,7 +196,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       0,
       _currentLine.episodes.length - 1,
     );
-    _normalSpeed = widget.storage.playSpeed;
+    _normalSpeed = _isLiveStream ? 1.0 : widget.storage.playSpeed;
     _skipIntroSec = widget.storage.skipIntroSec;
     _skipOutroSec = widget.storage.skipOutroSec;
     _autoNext = widget.storage.autoNext;
@@ -302,7 +303,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       final effectiveDur = _duration.inMilliseconds > 0
           ? _duration
           : Duration(milliseconds: _lastKnownDurationMs);
-      if (!_outroSkippedForSession &&
+      if (!_isLiveStream &&
+          !_outroSkippedForSession &&
           _skipOutroSec > 0 &&
           effectiveDur.inSeconds > _skipOutroSec + 30 &&
           pos.inSeconds > 10 &&
@@ -338,7 +340,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _loading = false;
         }
       });
-      if (dur > Duration.zero && _pendingResumeMs > 0) {
+      if (!_isLiveStream && dur > Duration.zero && _pendingResumeMs > 0) {
         final sessionAtSeek = _playSession;
         final maxSeek = math.max(0, dur.inMilliseconds - 2000);
         final targetMs = _pendingResumeMs.clamp(0, maxSeek);
@@ -362,7 +364,8 @@ class _PlayerScreenState extends State<PlayerScreen>
             }
           });
         }
-      } else if (dur > Duration.zero &&
+      } else if (!_isLiveStream &&
+          dur > Duration.zero &&
           !_introSkippedForSession &&
           _skipIntroSec > 0 &&
           dur.inSeconds > _skipIntroSec + 30) {
@@ -622,6 +625,30 @@ class _PlayerScreenState extends State<PlayerScreen>
     _embySession?.stop(_position.inMilliseconds);
     _embySession = null;
     final cloudError = CmsClient.cloudPlaybackError(_currentEpisode, error);
+    if (_isLiveStream &&
+        !_startup.isPastStartupWindow &&
+        _currentLine.episodes.length > 1 &&
+        _failedLiveEpisodes.length < 4) {
+      _failedLiveEpisodes.add(_episodeIndex);
+      final total = _currentLine.episodes.length;
+      for (var step = 1; step < total; step++) {
+        final nextIdx = (_episodeIndex + step) % total;
+        if (_failedLiveEpisodes.contains(nextIdx)) continue;
+        final candidate = _currentLine.episodes[nextIdx];
+        if (candidate.url == _activeStreamUrl ||
+            candidate.url == _currentEpisode.url) {
+          continue;
+        }
+        setState(() {
+          _episodeIndex = nextIdx;
+          _lastKnownDurationMs = 0;
+          _duration = Duration.zero;
+        });
+        _showHud('当前线路连接失败，已自动切换至 ${_currentEpisode.name}');
+        unawaited(_openCurrentEpisode(resumeMs: 0));
+        return;
+      }
+    }
     if (cloudError.isEmpty &&
         !_isLiveStream &&
         !_startup.isPastStartupWindow &&
@@ -715,18 +742,25 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
     if (!mounted || session != _playSession) return;
-    final effectiveResumeMs = (resumeMs != null && resumeMs > 0)
-        ? resumeMs
-        : (resumeMs == null ? _lookupSavedResumeForCurrentEpisode() : 0);
+    final effectiveResumeMs = _isLiveStream
+        ? 0
+        : (resumeMs != null && resumeMs > 0)
+            ? resumeMs
+            : (resumeMs == null ? _lookupSavedResumeForCurrentEpisode() : 0);
     _pendingResumeMs = effectiveResumeMs > 0 ? effectiveResumeMs : 0;
     _lastKnownPositionMs = _pendingResumeMs;
     _lastKnownDurationMs = 0;
-    _lookupSavedResumeForCurrentEpisode();
+    if (!_isLiveStream) _lookupSavedResumeForCurrentEpisode();
     _introSkippedForSession = _pendingResumeMs > 0;
     _outroSkippedForSession = false;
 
-    if (!_currentEpisode.isDirectPlayable &&
-        !_currentEpisode.needsSourceResolution) {
+    final canOpenDirectly = _isLiveStream
+        ? (_currentEpisode.isLocalFile ||
+            const {'http', 'https', 'rtmp', 'rtsp'}.contains(
+              Uri.tryParse(_currentEpisode.url.trim())?.scheme.toLowerCase(),
+            ))
+        : _currentEpisode.isDirectPlayable;
+    if (!canOpenDirectly && !_currentEpisode.needsSourceResolution) {
       _pendingResumeMs = 0;
       if (mounted) {
         setState(() {
@@ -805,15 +839,19 @@ class _PlayerScreenState extends State<PlayerScreen>
       await _changeMedia(session, () async {
         _cloudMedia.adopt(pendingLease);
         _allowEvents = true;
-        final hasFallback = _nextFallbackQuality() != null ||
-            (PlaybackRecoveryPolicy.decide(
-                      episode: _currentEpisode,
-                      isTrial: false,
-                      hasNextQuality: false,
-                    ) ==
-                    PlaybackRecoveryDecision.alternateLine &&
-                _lines.length > 1 &&
-                _failedLinesForEpisode.length < 6);
+        final hasFallback = _isLiveStream
+            ? (_currentLine.episodes.length > 1 &&
+                _failedLiveEpisodes.length <
+                    math.min(_currentLine.episodes.length - 1, 4))
+            : (_nextFallbackQuality() != null ||
+                (PlaybackRecoveryPolicy.decide(
+                          episode: _currentEpisode,
+                          isTrial: false,
+                          hasNextQuality: false,
+                        ) ==
+                        PlaybackRecoveryDecision.alternateLine &&
+                    _lines.length > 1 &&
+                    _failedLinesForEpisode.length < 6));
         _startup.waitForProgress(
           () {
             if (mounted && session == _playSession && _allowEvents) {
@@ -874,7 +912,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         return;
       }
       _allowHistory = true;
-      await _player.setRate(_normalSpeed);
+      await _player.setRate(_isLiveStream ? 1.0 : _normalSpeed);
       if (!mounted || session != _playSession) return;
       _scheduleHide();
     } catch (error) {
@@ -1004,6 +1042,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (next < 0 || next >= _currentLine.episodes.length) return;
     _saveProgress();
     _failedLinesForEpisode.clear();
+    _failedLiveEpisodes.clear();
     setState(() => _episodeIndex = next);
     _openCurrentEpisode(resumeMs: 0);
   }
@@ -1395,6 +1434,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   compact: true,
                                   onPressed: () {
                                     _failedLinesForEpisode.clear();
+    _failedLiveEpisodes.clear();
                                     _failedQualityUrls.clear();
                                     _openCurrentEpisode();
                                   },
@@ -1425,6 +1465,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                     onChanged: () {
                                       if (mounted) {
                                         _failedLinesForEpisode.clear();
+    _failedLiveEpisodes.clear();
                                         _failedQualityUrls.clear();
                                         _openCurrentEpisode();
                                       }
@@ -2861,6 +2902,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 onTap: () {
                   Navigator.of(ctx).pop();
                   _failedLinesForEpisode.clear();
+    _failedLiveEpisodes.clear();
                   final keepPos = _position.inMilliseconds >= 1000
                       ? _position.inMilliseconds
                       : _lastKnownPositionMs;
@@ -2898,6 +2940,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         onSelect: (lineIdx, epIdx) {
           Navigator.of(ctx).pop();
           _failedLinesForEpisode.clear();
+    _failedLiveEpisodes.clear();
           final sameEpisode = epIdx == _episodeIndex;
           final keepPos = sameEpisode
               ? (_position.inMilliseconds >= 1000

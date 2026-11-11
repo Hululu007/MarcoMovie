@@ -1,6 +1,8 @@
 // Public synthetic data only. No imported plugin, site, key or binary.
 'use strict';
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const x = require('../shared/catpaw/drpy-t4-extractor.cjs');
 let checks=0;
 function test(name,fn){fn();checks++;}
@@ -8,6 +10,10 @@ function bad(fn,code='guard_artifact_invalid'){assert.throws(fn,e=>e.message===c
 const key=Buffer.from('fixture-key');
 const encrypted="ojCooVbjn2xw63uL/qpmj7ryRo2aYBx0y6XRJowW2GQKhPVJLfMJ+gzAtApjoSJ7JwsofN3eHMjeCdSFAM4WowaRKf/LfnLtzciF6OJ4529gD1ZGyDFVSjkyEizY2gviKSjWPIISXeuM495qu4AjfaA/UA/jUg==";
 test('RFC 6229 RC4 test vector',()=>assert.equal(x.rc4(Buffer.alloc(16),Buffer.from('0102030405','hex')).toString('hex'),'b2396305f03dc027ccc3524a0a1118a8'));
+test('no ICU TextDecoder instantiation for NodeMobile iOS',()=>assert.equal(/\bnew\s+TextDecoder\b/.test(fs.readFileSync(path.join(__dirname,'../shared/catpaw/drpy-t4-extractor.cjs'),'utf8')),false));
+test('strict RFC 3629 UTF-8 decoder handles ASCII, BMP and astral',()=>{const sample='ASCII 中文 🧀 🌞';assert.equal(x.decodeUtf8Fatal(Buffer.from(sample,'utf8')),sample);});
+test('strict RFC 3629 UTF-8 decoder rejects overlong, surrogate, out-of-range and truncated sequences',()=>{for(const seq of [[0x80],[0xc0,0xaf],[0xc1,0xbf],[0xe0,0x80,0xaf],[0xe0,0x9f,0xbf],[0xed,0xa0,0x80],[0xed,0xbf,0xbf],[0xf0,0x80,0x80,0xaf],[0xf4,0x90,0x80,0x80],[0xe4,0xb8],[0xf0,0x9f,0xa7]])bad(()=>x.decodeUtf8Fatal(Buffer.from(seq)));});
+test('decodeShiftedExt round-trip',()=>{const shiftKey=Buffer.from('shift-fixture');const text='http://127.0.0.1:9/api';const shiftedText=[...text].map(c=>String.fromCharCode((c.charCodeAt(0)+2)&65535)).join('');const encoded=x.rc4(Buffer.from(shiftedText,'utf8'),shiftKey).toString('base64');assert.equal(x.decodeShiftedExt(encoded,shiftKey),text);});
 test('fixed independent UTF8 Chinese configuration',()=>{const c=x.decodeT4Ext(encrypted,key);assert.equal(c.api,'http://127.0.0.1:9/cms?token=fixture');assert.deepEqual(c.categories,['电影','剧集']);assert.deepEqual(c.excludedCategories,['排除']);assert.equal(c.type,1);assert.equal(c.searchBase,'');});
 test('wrong key rejected',()=>bad(()=>x.decodeT4Ext(encrypted,Buffer.from('wrong'))));
 test('invalid Base64 and limits',()=>{for(const value of ['',encrypted+'=',encrypted.replace(/=/g,'')+'!', 'A'.repeat(16388),'{}',null,[]])bad(()=>x.decodeT4Ext(value,key));});

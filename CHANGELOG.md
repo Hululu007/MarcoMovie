@@ -1,3 +1,9 @@
+## 2026-11-11 iOS / iPadOS 0.5.21 电视直播修复、原生多级设置重构与 T4 / Appgz / AppTT 片源适配
+
+- [iOS / iPadOS 0.5.21](docs/releases/ios-v0.5.21.md)：修复电视直播 `proxy://` 包装地址解包、自动过滤不支持的本机 `127.0.0.1` 代理源、自动绕过失效本机系统 HTTP 代理，并支持单频道多线路自动回退起播。
+- 移除一级设置页版本号并归位至「关于与更新」（内嵌软件更新卡片）；将各级设置项、网盘账号中心、「切换片源」与「管理线路」统一重构为原生 iOS 系统设置风格全屏 `CupertinoPageRoute` 二级 / 三级页面，支持侧滑返回且不再与底部 Dock 重叠。
+- 修复 iOS `NodeMobile` 无 ICU 环境下 `TextDecoder({ fatal: true })` 导致 `T4` 点播源误报 `guard_artifact_invalid` 的问题；修复 `SourceHttp` `POST` 请求 `Content-Length` 头并正式启用 `csp_AppgzGuard`（瓜子）与新增 `csp_AppTTGuard`（热播）直连点播协议适配。
+
 ## 2026-11-11 Android 电视 / 盒子 0.5.20
 
 - [电视端 0.5.20](docs/releases/android-tv-v0.5.20.md)：新增默认启用的新版悬浮卡片播放界面（支持在播放设置中与经典工具栏切换），按屏幕物理分辨率比例自适应控制卡片、弹窗与各级字号，重绘全套圆形按钮与上拉菜单矢量图标、重做右上角细体双圆点时钟，并修复 Android 9（API 28）`SeekBar` 兼容性。

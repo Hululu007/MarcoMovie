@@ -2,6 +2,7 @@
 library;
 
 import 'csp_bridge.dart';
+import 'live_catalog_parser.dart';
 
 class CmsDepot {
   final String name;
@@ -350,6 +351,21 @@ class LiveSource {
   );
   bool get isEffectivelyPrivate =>
       isPrivate || group.contains('隐私') || group.contains('私密');
+  bool get isLocalPluginProxy =>
+      plugin == null &&
+      inlineContent.isEmpty &&
+      LiveCatalogParser.isLocalPluginProxy(url);
+  bool get supported {
+    if (inlineContent.isNotEmpty) return true;
+    if (plugin != null) return CspBridge.supportsLivePlugin(playbackSite);
+    final u = url.trim();
+    if (u.isEmpty || LiveCatalogParser.isLocalPluginProxy(u)) return false;
+    if (u.startsWith('data:')) return u.contains('base64,');
+    final uri = Uri.tryParse(u);
+    return uri != null &&
+        const {'http', 'https'}.contains(uri.scheme.toLowerCase()) &&
+        uri.host.isNotEmpty;
+  }
   LiveSource copyWith({
     String? name,
     String? url,
@@ -416,6 +432,14 @@ class CmsConfig {
       lives.where((l) => !l.isEffectivelyPrivate).toList(growable: false);
   List<LiveSource> get privateLives =>
       lives.where((l) => l.isEffectivelyPrivate).toList(growable: false);
+  List<LiveSource> get supportedLives =>
+      lives.where((l) => l.supported).toList(growable: false);
+  List<LiveSource> get publicSupportedLives => lives
+      .where((l) => l.supported && !l.isEffectivelyPrivate)
+      .toList(growable: false);
+  List<LiveSource> get privateSupportedLives => lives
+      .where((l) => l.supported && l.isEffectivelyPrivate)
+      .toList(growable: false);
   List<CmsSite> get pluginOnlySites => sites
       .where(
         (s) =>

@@ -19,10 +19,11 @@ try {
   } finally { fs.closeSync(descriptor); }
   if (crypto.createHash('sha256').update(data).digest('hex') !== workerData.hash) throw Error('guard_artifact_integrity');
   const adapter = workerData.adapter;
-  if (!['dm84-v1', 'auete-v1', 'bttwoo-v1', 'appgz-v1', 't4-v1', 'fy-v1'].includes(adapter)) throw Error('invalid_artifact');
+  if (!['dm84-v1', 'auete-v1', 'bttwoo-v1', 'appgz-v1', 't4-v1', 'apptt-v1', 'fy-v1'].includes(adapter)) throw Error('invalid_artifact');
   const config = adapter === 't4-v1' ? require('./drpy-t4-extractor.cjs').extractT4(data, workerData.extension) :
+    adapter === 'apptt-v1' ? require('./drpy-apptt-extractor.cjs').extractAppTT(data, workerData.extension) :
     adapter === 'fy-v1' ? require('./drpy-fy-extractor.cjs').extractFy(data) : extractKnownPlugin(data, adapter);
-  const factory = { 'dm84-v1': './drpy-dm84-adapter.cjs', 'auete-v1': './drpy-auete-adapter.cjs', 'bttwoo-v1': './drpy-bttwoo-adapter.cjs', 'appgz-v1': './drpy-appgz-adapter.cjs', 't4-v1': './drpy-t4-adapter.cjs', 'fy-v1':'./drpy-fy-adapter.cjs' }[adapter];
+  const factory = { 'dm84-v1': './drpy-dm84-adapter.cjs', 'auete-v1': './drpy-auete-adapter.cjs', 'bttwoo-v1': './drpy-bttwoo-adapter.cjs', 'appgz-v1': './drpy-appgz-adapter.cjs', 't4-v1': './drpy-t4-adapter.cjs', 'apptt-v1': './drpy-apptt-adapter.cjs', 'fy-v1':'./drpy-fy-adapter.cjs' }[adapter];
   const rule = require(factory)(config);
   parentPort.postMessage({ version: 1, rule, origin: config.origin });
 } catch (error) {

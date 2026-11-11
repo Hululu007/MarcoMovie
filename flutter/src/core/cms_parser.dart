@@ -1220,7 +1220,7 @@ class CmsParser {
           var extracted = false;
           for (final value in values) {
             final raw = value is Map ? value['url'] : value;
-            final target = raw is String ? LiveCatalogParser.directoryUrl(raw) : null;
+            final target = raw is String ? LiveCatalogParser.directoryUrl(raw, origin: origin) : null;
             if (target == null) { if (value != null) streams.add(value); continue; }
             extracted = true;
             lives.add(LiveSource(name: '${value is Map ? value['name'] ?? child['name'] ?? name : child['name'] ?? name}',
@@ -1238,7 +1238,7 @@ class CmsParser {
         }
       }
       // liveContent receives its original opaque argument, including an empty one.
-      final url = plugin != null ? rawUrl : LiveCatalogParser.directoryUrl(rawUrl) ?? resolveUrl(origin, rawUrl);
+      final url = plugin != null ? rawUrl : LiveCatalogParser.directoryUrl(rawUrl, origin: origin) ?? resolveUrl(origin, rawUrl);
       final data = Uri.tryParse(url)?.data;
       if (plugin != null || inline.isNotEmpty || url.startsWith('http://') || url.startsWith('https://') ||
           data != null && data.mimeType == 'text/plain' && data.isBase64) {

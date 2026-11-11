@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'package:flutter/cupertino.dart'
@@ -15,6 +16,7 @@ import 'package:marco_movie/core/cms_client.dart';
 import 'package:marco_movie/core/storage_service.dart';
 import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:marco_movie/ui/apple_theme.dart';
+import 'package:marco_movie/ui/ios_settings.dart';
 
 void main() {
   setUp(() {
@@ -119,7 +121,7 @@ void main() {
   }
 
   testWidgets(
-      'three settings levels keep selection, back navigation and persisted values',
+      'three settings levels push iOS system secondary pages without modal popups and persist values',
       (tester) async {
     final storage = await mount(tester, const Size(390, 844));
     await capture(tester, 'home-390');
@@ -128,28 +130,119 @@ void main() {
     await capture(tester, 'settings-root-390');
     expect(find.byKey(const ValueKey('settings-liquid-glass-slider')),
         findsNothing);
+    // Version number must NOT appear on Level-1 Settings root
+    expect(find.textContaining('0.5.18'), findsNothing);
+    expect(find.textContaining('Marco Movie ·'), findsNothing);
+    expect(find.byType(IosSettingsGroup), findsWidgets);
+
     await tapKey(tester, 'settings-category-playback');
     await capture(tester, 'settings-playback-390');
+    expect(find.byType(IosSettingsSubPage), findsOneWidget);
+
     await tapKey(tester, 'settings-open-episodes');
     await tapKey(tester, 'choice-起播倍速-1.5');
     expect(storage.playSpeed, 1.5);
     await capture(tester, 'settings-episodes-390');
+
     await tapKey(tester, 'settings-drawer-back');
+    expect(find.byKey(const ValueKey('settings-page-playback')), findsOneWidget);
     await tapKey(tester, 'settings-open-episodes');
     expect(
         tester
-            .widget<AppleCapsuleButton>(
+            .widget<IosSettingsChoiceTile>(
                 find.byKey(const ValueKey('choice-起播倍速-1.5')))
-            .primary,
+            .selected,
         isTrue);
     expect((await StorageService.init()).playSpeed, 1.5);
-    await tapKey(tester, 'settings-breadcrumb-0');
+
+    await tapKey(tester, 'settings-drawer-back');
     expect(find.byKey(const ValueKey('settings-open-picture')), findsOneWidget);
-    Navigator.of(tester
-            .element(find.byKey(const ValueKey('settings-page-playback'))))
-        .pop();
-    await tester.pumpAndSettle();
+    await tapKey(tester, 'settings-drawer-back');
     expect(find.byKey(const ValueKey('ios-settings-root')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets(
+      'version lives in About & Updates page and sub-tools push iOS pages instead of modal sheets',
+      (tester) async {
+    await mount(tester, const Size(390, 844));
+    await tester.tap(find.text('设置').last);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('0.5.18'), findsNothing);
+
+    await tapKey(tester, 'settings-category-about');
+    expect(find.byKey(const ValueKey('settings-page-about')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ios-about-version')), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('ios-about-version')),
+        matching: find.text('0.5.18'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('ios-check-update-row')), findsOneWidget);
+    await capture(tester, 'settings-about-390');
+
+    await tapKey(tester, 'settings-drawer-back');
+    expect(find.byKey(const ValueKey('ios-settings-root')), findsOneWidget);
+
+    await tapKey(tester, 'settings-category-sources');
+    await tapKey(tester, 'ios-open-subscriptions');
+    expect(find.text('订阅管理'), findsOneWidget);
+    await tapKey(tester, 'settings-drawer-back');
+    expect(find.byKey(const ValueKey('settings-page-sources')), findsOneWidget);
+
+    await tapKey(tester, 'settings-drawer-back');
+    await tapKey(tester, 'settings-category-data');
+    await tapKey(tester, 'settings-open-backup');
+    expect(find.byKey(const ValueKey('ios-backup-copy')), findsOneWidget);
+    expect(find.byKey(const ValueKey('ios-backup-restore-btn')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets(
+      'iOS Live TV tab filters out Android local spider proxy sources while loading valid M3U channels',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    SharedPreferences.setMockInitialValues({});
+    final storage = await StorageService.init();
+    await storage.saveConfig(
+      '{"sites":[{"key":"vod","name":"综合点播","type":1,"api":"https://source.example/api"}],'
+      '"lives":['
+      '{"name":"综合","url":"https://live.example/main.m3u"},'
+      '{"name":"牛播一","url":"http://127.0.0.1:9978/proxy?do=cctva"}'
+      ']}',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.dark(),
+        home: AdaptiveShell(
+          storage: storage,
+          client: CmsClient(
+            client: MockClient((req) async {
+              if (req.url.toString() == 'https://live.example/main.m3u') {
+                return http.Response.bytes(
+                  utf8.encode(
+                    '#EXTM3U\n#EXTINF:-1 group-title="央视",CCTV-1 综合\nhttps://stream.example/cctv1.m3u8\n',
+                  ),
+                  200,
+                );
+              }
+              return http.Response('{"class":[],"list":[]}', 200);
+            }),
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.tap(find.text('直播').last);
+    await tester.pumpAndSettle();
+    expect(find.text('牛播一'), findsNothing);
+    expect(find.text('CCTV-1 综合'), findsOneWidget);
+    expect(find.textContaining('Connection refused'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
@@ -217,6 +310,25 @@ void main() {
     expect(aboutRect.bottom, lessThanOrEqualTo(dockRect.top));
     await tapKey(tester, 'settings-category-about');
     expect(find.byKey(const ValueKey('settings-page-about')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets(
+      'site picker opens as full-screen secondary page on iOS instead of modal popup',
+      (tester) async {
+    await mount(tester, const Size(390, 844));
+    await tester.tap(find.text('玩偶哥哥 4K 弹幕').first);
+    await tester.pumpAndSettle();
+    expect(find.byType(IosSettingsScaffold), findsOneWidget);
+    expect(find.text('切换片源 (1 可用)'), findsOneWidget);
+    expect(find.byKey(const ValueKey('site-picker-scroll')), findsOneWidget);
+    // Tapping 管理线路 transitions cleanly to another full-screen secondary page.
+    await tester.tap(find.text('管理线路'));
+    await tester.pumpAndSettle();
+    expect(find.byType(IosSettingsScaffold), findsOneWidget);
+    expect(find.text('管理线路'), findsOneWidget);
+    await tapKey(tester, 'settings-drawer-back');
+    expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 }

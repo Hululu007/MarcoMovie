@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'cms_parser.dart';
 import 'csp_bridge.dart';
+import 'live_catalog_parser.dart';
 import 'js_source_host.dart';
 import 'python_source_assets.dart';
 import 'python_source_host.dart';
@@ -143,10 +144,38 @@ class CmsClient {
     this.timeout = const Duration(seconds: 15),
   }) : _http = client, _quark = quark, _scriptHost = scriptHost ?? CatPawHost.instance,
        _pythonHost = pythonHost ?? PythonSourceHost.instance;
-  static http.Client _createDefaultClient() {
+  static http.Client _createDefaultClient({bool directOnly = false}) {
     final ioHttp = HttpClient()
       ..connectionTimeout = const Duration(seconds: 12);
+    if (directOnly) {
+      ioHttp.findProxy = (_) => 'DIRECT';
+    }
     return IOClient(ioHttp);
+  }
+
+  /// Detects when an iOS/desktop system HTTP proxy points to a dead local tunnel
+  /// (`127.0.0.1` / `::1` `Connection refused`) while dialing a non-loopback host.
+  static bool isDeadLocalSystemProxyError(Uri targetUri, Object error) {
+    if (LiveCatalogParser.isLoopbackHost(targetUri.host)) return false;
+    if (error is SocketException) {
+      final host = error.address?.host ?? '';
+      if (error.address?.isLoopback == true ||
+          LiveCatalogParser.isLoopbackHost(host)) {
+        return true;
+      }
+    }
+    if (error is http.ClientException || error is SocketException) {
+      final msg = error.toString();
+      final hitsLoopback = msg.contains('address = 127.0.0.1') ||
+          msg.contains('address = ::1') ||
+          msg.contains('address = localhost');
+      final refused = msg.contains('Connection refused') ||
+          msg.contains('errno = 61') ||
+          msg.contains('errno = 111') ||
+          msg.contains('errno = 10061');
+      return hitsLoopback && refused;
+    }
+    return false;
   }
   Map<String, String> _buildHeaders(
     Map<String, String> custom, {
@@ -176,7 +205,8 @@ class CmsClient {
   }) async {
     final normalized = CmsParser.normalizeUrl(url);
     final uri = Uri.parse(normalized);
-    final transport = _http ?? _createDefaultClient();
+    var usedDirectFallback = LiveCatalogParser.isLoopbackHost(uri.host);
+    var transport = _http ?? _createDefaultClient(directOnly: usedDirectFallback);
     final abort = Completer<void>();
     void cancel() {
       if (!abort.isCompleted) abort.complete();
@@ -197,16 +227,42 @@ class CmsClient {
       }
       var current = uri.replace(userInfo: '').removeFragment();
       var requestForm = form;
-      late http.StreamedResponse response;
-      for (var redirects = 0; ; redirects++) {
-        final request = http.AbortableRequest(requestForm == null ? 'GET' : 'POST', current, abortTrigger: abort.future)
+      http.AbortableRequest buildRequest() {
+        final req = http.AbortableRequest(
+          requestForm == null ? 'GET' : 'POST',
+          current,
+          abortTrigger: abort.future,
+        )
           ..followRedirects = false
           ..headers.addAll(requestHeaders);
         if (requestForm != null) {
-          request.headers.removeWhere((key, _) => const ['content-type', 'content-length', 'transfer-encoding'].contains(key.toLowerCase()));
-          request.bodyFields = requestForm;
+          req.headers.removeWhere((key, _) => const [
+                'content-type',
+                'content-length',
+                'transfer-encoding',
+              ].contains(key.toLowerCase()));
+          req.bodyFields = requestForm;
         }
-        response = await transport.send(request);
+        return req;
+      }
+
+      late http.StreamedResponse response;
+      for (var redirects = 0; ; redirects++) {
+        try {
+          response = await transport.send(buildRequest());
+        } catch (error) {
+          if (_http == null &&
+              !usedDirectFallback &&
+              !abort.isCompleted &&
+              isDeadLocalSystemProxyError(current, error)) {
+            transport.close();
+            usedDirectFallback = true;
+            transport = _createDefaultClient(directOnly: true);
+            response = await transport.send(buildRequest());
+          } else {
+            rethrow;
+          }
+        }
         final location = response.headers['location'];
         if (![301, 302, 303, 307, 308].contains(response.statusCode) || location == null) break;
         await response.stream.listen(null).cancel();
@@ -1655,7 +1711,12 @@ class CmsClient {
       if (b64.length > maxResponseBytes * 4 ~/ 3 + 4) throw const FormatException('直播列表超过 6 MB');
       raw = utf8.decode(base64Decode(b64), allowMalformed: true);
     } else {
-      raw = CmsParser.decodeConfigDocument(await _getBytes(u, headers: source.headers,
+      final targetUrl =
+          LiveCatalogParser.directoryUrl(u, origin: origin) ?? u;
+      if (LiveCatalogParser.isLocalPluginProxy(targetUrl)) {
+        throw const FormatException('该直播线路依赖本地代理插件，当前设备暂不支持，请切换其他直播源');
+      }
+      raw = CmsParser.decodeConfigDocument(await _getBytes(targetUrl, headers: source.headers,
         onResponse: (uri, headers) {
           origin = uri.toString();
           playbackHeaders = headers..removeWhere((key, _) =>

@@ -51,32 +51,127 @@ class LiveCatalogParser {
     ]);
   }
 
+  static bool isLoopbackHost(String host) {
+    final lower = host.trim().toLowerCase();
+    return lower == '127.0.0.1' ||
+        lower == 'localhost' ||
+        lower == '::1' ||
+        lower == '[::1]';
+  }
+
+  static Uri? _parseLocalProxyUri(String raw) {
+    var candidate = raw.trim();
+    final schemeSep = candidate.indexOf('://');
+    if (schemeSep <= 0) return null;
+    final scheme = candidate.substring(0, schemeSep).toLowerCase();
+    if (scheme != 'http' && scheme != 'https') return null;
+    final rest = candidate.substring(schemeSep + 3);
+    final slashIdx = rest.indexOf('/');
+    final authority = slashIdx >= 0 ? rest.substring(0, slashIdx) : rest;
+    final suffix = slashIdx >= 0 ? rest.substring(slashIdx) : '';
+    for (final badPort in const [':-1', ':0']) {
+      if (authority.endsWith(badPort)) {
+        final host =
+            authority.substring(0, authority.length - badPort.length);
+        if (isLoopbackHost(host)) {
+          candidate = '${candidate.substring(0, schemeSep)}://$host:9978$suffix';
+        }
+        break;
+      }
+    }
+    final uri = Uri.tryParse(candidate);
+    if (uri == null ||
+        !const {'http', 'https'}.contains(uri.scheme.toLowerCase())) {
+      return null;
+    }
+    if (!isLoopbackHost(uri.host) || uri.path != '/proxy') return null;
+    return uri;
+  }
+
   /// Only TVBox's explicit live-directory wrapper is decoded. Other proxy
   /// protocols belong to an engine, and must never become remote file reads.
-  static String? directoryUrl(String raw) {
+  static String? directoryUrl(String raw, {String origin = ''}) {
     final value = raw.trim();
-    if (!value.startsWith('proxy://')) return null;
-    final query = value
-        .substring('proxy://'.length)
-        .replaceFirst(RegExp(r'^\?'), '');
+    if (value.isEmpty || value.length > 32768) return null;
+    String query;
+    if (value.toLowerCase().startsWith('proxy://')) {
+      query = value.substring('proxy://'.length);
+      while (query.startsWith('/') || query.startsWith('?')) {
+        query = query.substring(1);
+      }
+    } else {
+      final proxyUri = _parseLocalProxyUri(value);
+      if (proxyUri == null || !proxyUri.hasQuery) return null;
+      query = proxyUri.query;
+    }
     try {
-      final params = Uri(query: query).queryParametersAll;
-      if (params.values.any((v) => v.length != 1) ||
-          params['do']?.single != 'live' ||
-          params['type']?.single != 'txt')
+      final params = <String, String>{};
+      for (final pair in query.split('&')) {
+        if (pair.isEmpty) continue;
+        final eq = pair.indexOf('=');
+        if (eq < 0) continue;
+        final key =
+            Uri.decodeComponent(pair.substring(0, eq).replaceAll('+', '%2B'));
+        if (params.containsKey(key)) return null;
+        params[key] =
+            Uri.decodeComponent(pair.substring(eq + 1).replaceAll('+', '%2B'));
+      }
+      if (params['do'] != 'live' || params['type'] != 'txt') return null;
+      final rawExt = params['ext']?.trim();
+      if (rawExt == null || rawExt.isEmpty || rawExt.length > 32768) {
         return null;
-      final ext = params['ext']?.single;
-      if (ext == null || ext.length > 32768) return null;
-      final decoded = utf8.decode(base64Decode(base64.normalize(ext))).trim();
+      }
+      String decoded;
+      final directScheme = Uri.tryParse(rawExt)?.scheme.toLowerCase();
+      if (directScheme == 'http' ||
+          directScheme == 'https' ||
+          rawExt.startsWith('./') ||
+          rawExt.startsWith('../')) {
+        decoded = rawExt;
+      } else {
+        final compact = rawExt
+            .replaceAll(RegExp(r'\s+'), '')
+            .replaceAll('-', '+')
+            .replaceAll('_', '/');
+        if (!RegExp(r'^[A-Za-z0-9+/]+={0,2}$').hasMatch(compact) ||
+            compact.length % 4 == 1) {
+          return null;
+        }
+        decoded = utf8.decode(base64Decode(base64.normalize(compact))).trim();
+      }
+      if (decoded.startsWith('./') || decoded.startsWith('../')) {
+        final baseUri = Uri.tryParse(origin.trim());
+        if (baseUri == null ||
+            !const {'http', 'https'}.contains(baseUri.scheme.toLowerCase()) ||
+            baseUri.host.isEmpty) {
+          return null;
+        }
+        decoded = CmsParser.resolveUrl(origin, decoded);
+      }
       final uri = Uri.tryParse(decoded);
       return uri != null &&
-              ['http', 'https'].contains(uri.scheme) &&
-              uri.host.isNotEmpty
+              const {'http', 'https'}.contains(uri.scheme.toLowerCase()) &&
+              uri.host.isNotEmpty &&
+              !isLocalPluginProxy(uri.toString())
           ? uri.toString()
           : null;
     } on FormatException {
       return null;
     }
+  }
+
+  /// Recognizes TVBox local Spider proxy endpoints (`proxy://...` or
+  /// loopback `:9978..9999/proxy`) that require an Android plugin runtime,
+  /// excluding unwrappable `do=live&type=txt` catalogue wrappers.
+  static bool isLocalPluginProxy(String raw) {
+    final value = raw.trim();
+    if (value.isEmpty) return false;
+    if (directoryUrl(value) != null) return false;
+    if (value.toLowerCase().startsWith('proxy://')) return true;
+    final uri = _parseLocalProxyUri(value);
+    if (uri == null) return false;
+    if (!uri.hasPort) return true;
+    return uri.port == 0 || (uri.port >= 9978 && uri.port <= 9999);
   }
 
   static String? _tryDecodeBase64LiveText(String raw) {

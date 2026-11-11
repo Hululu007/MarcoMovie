@@ -9,8 +9,8 @@
     },
     {
       "name": "drpy-http.cjs",
-      "bytes": 7386,
-      "sha256": "d6e7bfde4eb8577bfc3f397e196cf0cb1bad5579a4b41e481eb29342ac0fdd5b"
+      "bytes": 7583,
+      "sha256": "f8c5a482b0ea5b215c60e08efb5229cca28fb6cb58b85a774edf25f350dbe8ce"
     },
     {
       "name": "drpy-schema.cjs",
@@ -44,8 +44,8 @@
     },
     {
       "name": "drpy-provenance.json",
-      "bytes": 18171,
-      "sha256": "57f328b4dd06fa083926d8f376717475633ba51a9ab900bad19bb0949b37d66d"
+      "bytes": 19079,
+      "sha256": "e0b48b3a0d8fb2f166c8f4646435834f604f36280ecea17c4aeaae5f4c5c40f0"
     },
     {
       "name": "drpy-guard-extractor.cjs",
@@ -59,8 +59,8 @@
     },
     {
       "name": "drpy-bootstrap-worker.cjs",
-      "bytes": 2190,
-      "sha256": "d796449fdb01009c6a7f793cd8042a3bd2c77fcf9d75bd3eff59a41493b76764"
+      "bytes": 2352,
+      "sha256": "6708f6234b66127962a3b7c1e846e1212834dfa82dde75879d0fe5f820e9c189"
     },
     {
       "name": "drpy-auete-adapter.cjs",
@@ -84,13 +84,23 @@
     },
     {
       "name": "drpy-t4-extractor.cjs",
-      "bytes": 6217,
-      "sha256": "d92aa22070cf49f2eef107c2c38bef9f5741d28c5e95a83aa2684f511de1acc2"
+      "bytes": 7911,
+      "sha256": "4c904bd4723f58c768b2b8219d4faf8bce68c87bcb49485bb2991bc19b9ae521"
     },
     {
       "name": "drpy-t4-adapter.cjs",
       "bytes": 10010,
       "sha256": "c3a08f04bb52d0fb950dcec3141ffbc77d9c95ad446cfd86a45cc373cfef63a8"
+    },
+    {
+      "name": "drpy-apptt-extractor.cjs",
+      "bytes": 3997,
+      "sha256": "3c3e907e3b69aeadf811c82e753601395e00a74e799e98f286a10292d8c8b6f8"
+    },
+    {
+      "name": "drpy-apptt-adapter.cjs",
+      "bytes": 9992,
+      "sha256": "23a1de7c222d9e3344e3611c6866dbcc285298aad6ef02a6de29fd80cf667804"
     },
     {
       "name": "drpy-fy-extractor.cjs",

@@ -412,7 +412,9 @@ class CatPawHost {
           'dm84-v1',
           'auete-v1',
           'bttwoo-v1',
+          'appgz-v1',
           't4-v1',
+          'apptt-v1',
           'fy-v1',
         ].contains(adapter) ||
         bytes.isEmpty ||
@@ -420,7 +422,8 @@ class CatPawHost {
         bytes.any((b) => b < 0 || b > 255)) {
       throw const FormatException('插件适配器或文件大小无效');
     }
-    if (adapter == 't4-v1'
+    final needsExtension = adapter == 't4-v1' || adapter == 'apptt-v1';
+    if (needsExtension
         ? extension == null ||
               extension.trim().isEmpty ||
               utf8.encode(extension).length > 16 * 1024

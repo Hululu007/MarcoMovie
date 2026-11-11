@@ -9,6 +9,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../core/app_update.dart';
 import 'apple_theme.dart';
+import 'ios_settings.dart';
 
 typedef IosUpdateCheck = Future<AppUpdate> Function(
     UpdateCancellation cancellation, void Function(String) onStage);
@@ -17,6 +18,8 @@ typedef IosUpdateCheck = Future<AppUpdate> Function(
 /// platform-channel or network result from the previous attempt.
 class IosUpdateSheet extends StatefulWidget {
   final String installedVersion;
+  final bool embedded;
+  final bool autoCheck;
   final Future<String> Function()? readVersion;
   final IosUpdateCheck? check;
   final Future<File> Function(
@@ -26,6 +29,8 @@ class IosUpdateSheet extends StatefulWidget {
   const IosUpdateSheet(
       {super.key,
       this.installedVersion = '',
+      this.embedded = false,
+      this.autoCheck = true,
       this.readVersion,
       this.check,
       this.download,
@@ -41,6 +46,7 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
   AppUpdate? _release;
   String _version = '';
   String _status = '正在连接镜像更新源…';
+  bool _hasChecked = false;
   bool _checking = false;
   bool _downloading = false;
   double? _progress;
@@ -68,7 +74,9 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
     if (_validVersion(widget.installedVersion)) {
       _version = widget.installedVersion;
     }
-    unawaited(_check());
+    if (widget.autoCheck) {
+      unawaited(_check());
+    }
   }
 
   @override
@@ -94,6 +102,7 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
     _operation?.cancel();
     final op = _operation = UpdateCancellation();
     setState(() {
+      _hasChecked = true;
       _checking = true;
       _downloading = false;
       _release = null;
@@ -288,6 +297,175 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
   Widget build(BuildContext context) {
     final busy = _checking || _downloading || _sharing;
     final release = _release;
+    if (widget.embedded) {
+      if (!_hasChecked && !_checking && release == null) {
+        return Column(
+          key: const ValueKey('ios-update-scroll'),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            IosSettingsGroup(
+              header: '软件更新',
+              children: [
+                IosSettingsRow(
+                  key: const ValueKey('ios-check-update-row'),
+                  icon: CupertinoIcons.arrow_down_circle_fill,
+                  iconColor: AppleColors.systemBlue,
+                  title: '检查版本更新',
+                  showChevron: true,
+                  onTap: _check,
+                ),
+                IosSettingsRow(
+                  icon: CupertinoIcons.globe,
+                  iconColor: AppleColors.systemIndigo,
+                  title: '打开官方下载站',
+                  showChevron: true,
+                  onTap: () =>
+                      _open(Uri.parse('https://marcotv.wlj9919.top/movie/')),
+                ),
+              ],
+            ),
+          ],
+        );
+      }
+      return Column(
+        key: const ValueKey('ios-update-scroll'),
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          IosSettingsGroup(
+            header: '软件更新',
+            dividerIndent: 16,
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        if (_checking || _downloading) ...[
+                          const CupertinoActivityIndicator(radius: 10),
+                          const SizedBox(width: 10),
+                        ] else ...[
+                          Icon(
+                            release != null && _newer
+                                ? CupertinoIcons.arrow_down_circle_fill
+                                : CupertinoIcons.checkmark_seal_fill,
+                            color: release != null && _newer
+                                ? AppleColors.systemBlue
+                                : AppleColors.systemGreen,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        Expanded(
+                          child: Text(
+                            release != null
+                                ? (_validVersion(_version)
+                                    ? (_newer
+                                        ? '发现新版本 ${release.version}'
+                                        : 'Marco Movie 已是最新版本')
+                                    : '可用版本 ${release.version}')
+                                : (_checking ? '正在检查软件更新…' : '软件更新状态'),
+                            style: const TextStyle(
+                              color: AppleColors.labelPrimary,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (busy) ...[
+                      const SizedBox(height: 12),
+                      LinearProgressIndicator(
+                        key: const ValueKey('ios-update-progress'),
+                        value: _downloading ? _progress : null,
+                      ),
+                    ],
+                    if (release == null ||
+                        _downloading ||
+                        _saved ||
+                        (!_checking && !_status.startsWith('正在连接'))) ...[
+                      const SizedBox(height: 10),
+                      Text(
+                        _status,
+                        key: const ValueKey('ios-update-status'),
+                        style: const TextStyle(
+                          color: AppleColors.labelSecondary,
+                          fontSize: 13,
+                          height: 1.45,
+                        ),
+                      ),
+                    ],
+                    if (release != null && release.notes.isNotEmpty) ...[
+                      const SizedBox(height: 14),
+                      const Text(
+                        '更新内容',
+                        style: TextStyle(
+                          color: AppleColors.labelPrimary,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        release.notes,
+                        style: const TextStyle(
+                          color: AppleColors.labelSecondary,
+                          fontSize: 13,
+                          height: 1.55,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (release != null &&
+                  !busy &&
+                  (!_validVersion(_version) || _newer || _saved)) ...[
+                IosSettingsRow(
+                  title: _saved ? '用巨魔更新' : '下载并用巨魔更新',
+                  titleColor: AppleColors.systemBlue,
+                  onTap: _installTrollStore,
+                ),
+                IosSettingsRow(
+                  title: _saved ? '用其他应用打开' : '下载并自签更新',
+                  titleColor: AppleColors.systemBlue,
+                  onTap: () => _share(trollStore: false),
+                ),
+                IosSettingsRow(
+                  title: _saved ? '检查已下载 IPA' : '仅下载 IPA',
+                  onTap: _download,
+                ),
+                IosSettingsRow(
+                  title: '浏览器下载安装包',
+                  showChevron: true,
+                  onTap: () => _open(release.iosUrl!),
+                ),
+              ],
+              if (_checking || _downloading)
+                IosSettingsRow(
+                  title: '取消',
+                  titleColor: AppleColors.systemRed,
+                  onTap: _cancel,
+                )
+              else if (!_sharing)
+                IosSettingsRow(
+                  title: '重新检查更新',
+                  titleColor: AppleColors.systemBlue,
+                  onTap: _check,
+                ),
+              IosSettingsRow(
+                title: '打开官方下载站',
+                showChevron: true,
+                onTap: () =>
+                    _open(Uri.parse('https://marcotv.wlj9919.top/movie/')),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
     return SingleChildScrollView(
       key: const ValueKey('ios-update-scroll'),
       padding: const EdgeInsets.all(20),

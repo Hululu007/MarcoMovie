@@ -533,4 +533,159 @@ https://cdn.test/next.m3u8
       expect(commentedLiveGroups.single.channels.single.name, 'CCTV-1');
     },
   );
+
+  test(
+    'HTTP loopback TVBox live directories unwrap Base64 while Android spider proxies are filtered out cleanly',
+    () async {
+      // Base64 containing '+' (RFC 3986 unreserved '~' = 0x7E has bottom 6 bits 62 -> '+')
+      const plusTarget = 'https://live.test/ab~';
+      final plusB64 = base64Encode(utf8.encode(plusTarget));
+      expect(plusB64, contains('+'));
+      final httpWrapped =
+          'http://127.0.0.1:9978/proxy?do=live&type=txt&ext=$plusB64';
+      expect(LiveCatalogParser.directoryUrl(httpWrapped), plusTarget);
+      expect(LiveCatalogParser.isLocalPluginProxy(httpWrapped), isFalse);
+
+      // Relative path inside URL-safe Base64 resolved against config origin
+      final relUrlSafe = base64UrlEncode(utf8.encode('./channels.txt'))
+          .replaceAll('=', '');
+      final relWrapped =
+          'http://localhost:9978/proxy?do=live&type=txt&ext=$relUrlSafe';
+      expect(
+        LiveCatalogParser.directoryUrl(
+          relWrapped,
+          origin: 'https://repo.test/sub/config.json',
+        ),
+        'https://repo.test/sub/channels.txt',
+      );
+
+      // Android DEX spider local proxy (e.g. 牛播一 do=cctva)
+      const spiderProxy = 'http://127.0.0.1:9978/proxy?do=cctva';
+      expect(LiveCatalogParser.directoryUrl(spiderProxy), isNull);
+      expect(LiveCatalogParser.isLocalPluginProxy(spiderProxy), isTrue);
+
+      final parsed = CmsParser.parseConfig(
+        jsonEncode({
+          'lives': [
+            {'name': '综合', 'url': httpWrapped},
+            {'name': '相对直播', 'url': relWrapped},
+            {'name': '牛播一', 'url': spiderProxy},
+          ],
+        }),
+        origin: 'https://repo.test/sub/config.json',
+      );
+      expect(parsed.lives.map((e) => e.name).toList(), ['综合', '相对直播', '牛播一']);
+      expect(parsed.publicSupportedLives.map((e) => e.name).toList(), [
+        '综合',
+        '相对直播',
+      ]);
+      expect(parsed.lives.first.url, plusTarget);
+      expect(parsed.lives[1].url, 'https://repo.test/sub/channels.txt');
+      expect(parsed.lives.last.supported, isFalse);
+
+      // Direct fetchLiveGroups on an unsupported local spider proxy fails fast
+      // with a clean Chinese FormatException and zero network calls.
+      var httpCalls = 0;
+      final client = CmsClient(
+        client: MockClient((_) async {
+          httpCalls++;
+          return http.Response('', 500);
+        }),
+      );
+      await expectLater(
+        client.fetchLiveGroups(parsed.lives.last),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('本地代理插件'),
+          ),
+        ),
+      );
+      expect(httpCalls, 0);
+    },
+  );
+
+  test(
+    'dead local system HTTP proxy on iOS falls back to DIRECT without breaking live playlist fetch',
+    () async {
+      // 1. Error classification unit checks
+      final deadProxyErr = SocketException(
+        'Connection refused (OS Error: Connection refused, errno = 61)',
+        address: InternetAddress.loopbackIPv4,
+        port: 51996,
+      );
+      expect(
+        CmsClient.isDeadLocalSystemProxyError(
+          Uri.parse('https://live.test/tv.m3u'),
+          deadProxyErr,
+        ),
+        isTrue,
+      );
+      expect(
+        CmsClient.isDeadLocalSystemProxyError(
+          Uri.parse('http://127.0.0.1:9978/proxy?do=cctva'),
+          deadProxyErr,
+        ),
+        isFalse,
+      );
+      final remoteRefused = SocketException(
+        'Connection refused',
+        address: InternetAddress('198.51.100.12'),
+        port: 443,
+      );
+      expect(
+        CmsClient.isDeadLocalSystemProxyError(
+          Uri.parse('https://live.test/tv.m3u'),
+          remoteRefused,
+        ),
+        isFalse,
+      );
+
+      // 2. Real socket integration check with a guaranteed dead local proxy port
+      final ephemeral = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        0,
+      );
+      final deadProxyPort = ephemeral.port;
+      await ephemeral.close();
+
+      final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => upstream.close(force: true));
+      upstream.listen((req) async {
+        req.response.statusCode = 200;
+        req.response.headers.contentType = ContentType.text;
+        req.response.write(
+          '#EXTM3U\n#EXTINF:-1 group-title="央视",CCTV-1\nhttps://stream.test/cctv1.m3u8\n',
+        );
+        await req.response.close();
+      });
+
+      final groups = await HttpOverrides.runZoned(
+        () async {
+          final client = CmsClient();
+          return client.fetchLiveGroups(
+            LiveSource(
+              name: 'LocalUpstream',
+              url: 'http://127.0.0.1:${upstream.port}/live.m3u',
+            ),
+          );
+        },
+        createHttpClient: (ctx) =>
+            _DeadLocalProxyHttpOverrides(deadProxyPort).build(ctx),
+      );
+      expect(groups.single.channels.single.name, 'CCTV-1');
+    },
+  );
+}
+
+class _DeadLocalProxyHttpOverrides extends HttpOverrides {
+  final int deadProxyPort;
+  _DeadLocalProxyHttpOverrides(this.deadProxyPort);
+
+  HttpClient build(SecurityContext? context) {
+    final client = super.createHttpClient(context);
+    client.findProxy = (_) => 'PROXY 127.0.0.1:$deadProxyPort';
+    return client;
+  }
 }

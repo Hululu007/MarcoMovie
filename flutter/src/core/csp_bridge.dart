@@ -55,13 +55,29 @@ class CspBridge {
     'csp_auete': 'auete-v1',
     'csp_bttwooguard': 'bttwoo-v1',
     'csp_bttwoo': 'bttwoo-v1',
+    'csp_appgzguard': 'appgz-v1',
+    'csp_appgz': 'appgz-v1',
     'csp_t4guard': 't4-v1',
     'csp_t4': 't4-v1',
+    'csp_appttguard': 'apptt-v1',
+    'csp_apptt': 'apptt-v1',
     'csp_fyguard': 'fy-v1',
     'csp_fy': 'fy-v1',
   }[site.api.toLowerCase()];
 
   static bool hasAdapter(CmsSite site) => WoggSource.supports(site) || (guardAdapterFor(site) != null && site.pluginReference.trim().isNotEmpty) || site.isDrpySource || site.isRemoteScriptSource || site.isJavaScriptSource || site.isPythonSource || TrailerSource.matches(site) || hasBuiltinAdapter(site);
+
+  static bool supportsLivePlugin(CmsSite site) =>
+      WoggSource.supports(site) ||
+      (guardAdapterFor(site) != null && site.pluginReference.trim().isNotEmpty) ||
+      site.isDrpySource ||
+      site.isPythonSource ||
+      ((site.isJavaScriptSource || site.isRemoteScriptSource) &&
+          !(isHuyaSite(site) ||
+              isDouyuSite(site) ||
+              isTuxiaobeiSite(site) ||
+              isMyDriveSite(site) ||
+              isBannerNoticeSite(site)));
 
   static bool hasBuiltinAdapter(CmsSite site) =>
       !site.api.startsWith('csp_Local') && (isDoubanSite(site) || isMyDriveSite(site) || isBiliSite(site) ||

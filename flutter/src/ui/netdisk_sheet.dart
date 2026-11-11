@@ -3,6 +3,8 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr/qr.dart';
@@ -14,6 +16,7 @@ import '../core/netdisk_session.dart';
 import '../core/storage_service.dart';
 import '../core/quark_account.dart';
 import 'apple_theme.dart';
+import 'ios_settings.dart';
 import 'local_qr_code.dart';
 import 'quark_library_sheet.dart';
 
@@ -29,7 +32,25 @@ Future<void> showNetdiskAccountSheet(
   String? initialDriveKey,
   VoidCallback? onChanged,
   NetdiskService? service,
+  String iosBackLabel = '返回',
 }) async {
+  if (defaultTargetPlatform == TargetPlatform.iOS) {
+    await Navigator.of(context).push<void>(
+      CupertinoPageRoute<void>(
+        builder: (_) => IosSettingsScaffold(
+          title: '我的云盘',
+          backLabel: iosBackLabel,
+          body: _NetdiskAccountSheet(
+            storage: storage,
+            initialDriveKey: initialDriveKey,
+            onChanged: onChanged,
+            service: service,
+          ),
+        ),
+      ),
+    );
+    return;
+  }
   await showAppleModalSheet<void>(
     context: context,
     title: '我的云盘 · 扫码与账号配置',

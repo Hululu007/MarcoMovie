@@ -2,7 +2,6 @@
 'use strict';
 // Data-only interoperability: no native, DEX, or imported script execution.
 const crypto = require('node:crypto');
-const { TextDecoder } = require('node:util');
 const { zipMember, MAX } = require('./drpy-guard-extractor.cjs');
 const PROFILES = {
   '88e67402129e7db92669fb351397ecd4d09709e6c70b577f22a19cfb0ad5f204': {
@@ -80,14 +79,60 @@ function normalizeConfig(value) {
   const playUrl = value.playUrl === undefined || value.playUrl === '' ? '' : endpoint(value.playUrl).href;
   return { origin: api.origin, api: api.href, type, categories: names('categories'), excludedCategories: names('rmCategories'), searchBase, playUrl, userAgent: 'Mozilla/5.0' };
 }
-function decodeT4Ext(ext, key) {
+// NodeMobile on iOS is built without ICU, where TextDecoder({ fatal: true })
+// throws ERR_NO_ICU. Validate RFC 3629 UTF-8 directly without ICU dependency.
+function decodeUtf8Fatal(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length > 65536) fail();
+  const units = [];
+  let p = 0;
+  while (p < bytes.length) {
+    const b0 = bytes[p];
+    if (b0 < 0x80) {
+      units.push(b0);
+      p += 1;
+    } else if (b0 >= 0xc2 && b0 <= 0xdf) {
+      if (p + 1 >= bytes.length) fail();
+      const b1 = bytes[p + 1];
+      if ((b1 & 0xc0) !== 0x80) fail();
+      units.push(((b0 & 0x1f) << 6) | (b1 & 0x3f));
+      p += 2;
+    } else if (b0 >= 0xe0 && b0 <= 0xef) {
+      if (p + 2 >= bytes.length) fail();
+      const b1 = bytes[p + 1], b2 = bytes[p + 2];
+      if ((b1 & 0xc0) !== 0x80 || (b2 & 0xc0) !== 0x80) fail();
+      if ((b0 === 0xe0 && b1 < 0xa0) || (b0 === 0xed && b1 >= 0xa0)) fail();
+      units.push(((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f));
+      p += 3;
+    } else if (b0 >= 0xf0 && b0 <= 0xf4) {
+      if (p + 3 >= bytes.length) fail();
+      const b1 = bytes[p + 1], b2 = bytes[p + 2], b3 = bytes[p + 3];
+      if ((b1 & 0xc0) !== 0x80 || (b2 & 0xc0) !== 0x80 || (b3 & 0xc0) !== 0x80) fail();
+      if ((b0 === 0xf0 && b1 < 0x90) || (b0 === 0xf4 && b1 >= 0x90)) fail();
+      const cp = (((b0 & 0x07) << 18) | ((b1 & 0x3f) << 12) | ((b2 & 0x3f) << 6) | (b3 & 0x3f)) - 0x10000;
+      units.push(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+      p += 4;
+    } else {
+      fail();
+    }
+  }
+  let result = '';
+  for (let i = 0; i < units.length; i += 4096) {
+    result += String.fromCharCode(...units.slice(i, i + 4096));
+  }
+  return result;
+}
+function decodeShiftedExt(ext, key) {
   if (typeof ext !== 'string' || !ext.length || ext.length > 16384 || ext.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(ext)) fail();
   const bytes = Buffer.from(ext, 'base64');
   if (bytes.toString('base64') !== ext) fail();
-  let shifted; try { shifted = new TextDecoder('utf-8', { fatal: true }).decode(rc4(bytes, key)); } catch (_) { fail(); }
+  const shifted = decodeUtf8Fatal(rc4(bytes, key));
   let plain = '';
   // JNI's decrypted UTF-16 output subtracts two from each uint16, not each byte.
   for (let i = 0; i < shifted.length; i++) plain += String.fromCharCode((shifted.charCodeAt(i) - 2) & 65535);
+  return plain;
+}
+function decodeT4Ext(ext, key) {
+  const plain = decodeShiftedExt(ext, key);
   let parsed; try { parsed = JSON.parse(plain); } catch (_) { fail(); }
   return normalizeConfig(parsed);
 }
@@ -101,4 +146,4 @@ function extractT4(bytes, ext) {
   const key = elfBytes(native, 0x19198, 13).map(value => value ^ profile.mask);
   return decodeT4Ext(ext, key);
 }
-module.exports = { extractT4, decodeT4Ext, normalizeConfig, elfBytes, rc4 };
+module.exports = { extractT4, decodeT4Ext, decodeShiftedExt, decodeUtf8Fatal, normalizeConfig, elfBytes, rc4 };

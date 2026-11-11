@@ -226,6 +226,99 @@ class HostChecks(unittest.TestCase):
         self.assertEqual(self.request(body | {'extension':'YQ=='}), (422, {'error':'guard_artifact_unsupported'}))
         self.assertEqual(self.request(self.payload(digest) | {'extension':'YQ=='}), (400, {'error':'bootstrap_request'}))
 
+    def test_apptt_extension_contract(self):
+        value = b'synthetic unknown AppTT artifact'; digest = hashlib.sha256(value).hexdigest()
+        (self.root/'imports'/(digest+'.jar')).write_bytes(value)
+        body = self.payload(digest) | {'adapter':'apptt-v1'}
+        self.assertEqual(self.request(body), (400, {'error':'bootstrap_request'}))
+        for extension in [None, {}, '', ' ', 'x'*16385, '\u6d4b'*5462]:
+            self.assertEqual(self.request(body | {'extension':extension}), (400, {'error':'bootstrap_request'}))
+        self.assertEqual(self.request(body | {'extension':'YQ=='}), (422, {'error':'guard_artifact_unsupported'}))
+
+    def test_apptt_parameterized_adapter_real_drpy_router(self):
+        class AppTTFixture(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                if self.path.startswith('/parse?url='):
+                    body = json.dumps({'code': 200, 'url': self.server.origin + '/resolved.m3u8'}).encode()
+                    self.send_response(200)
+                    self.send_header('Content-Length', str(len(body)))
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(404); self.end_headers()
+
+            def do_POST(self):
+                # Enforce explicit Content-Length (no chunked POST), matching upstream requirement.
+                if not self.headers.get('Content-Length') or self.headers.get('Transfer-Encoding') == 'chunked':
+                    self.send_response(411); self.end_headers(); return
+                raw = self.rfile.read(int(self.headers['Content-Length'])).decode('utf-8')
+                self.server.last_post = (self.path, raw, dict(self.headers))
+                if self.path == '/v3/type/top_type':
+                    payload = {'code': 1, 'data': {'list': [{'type_id': 10, 'type_name': '剧集'}]}}
+                elif self.path == '/v3/type/tj_vod':
+                    payload = {'code': 1, 'data': {'type_vod': [{'vod': [{'vod_id': 88, 'vod_name': 'Fixture Show', 'vod_pic': '/pic.jpg', 'vod_remarks': '更新至1集'}]}]}}
+                elif self.path == '/v3/home/type_search':
+                    payload = {'code': 1, 'data': {'pagecount': 2, 'total': 20, 'list': [{'vod_id': 88, 'vod_name': 'Fixture Show', 'vod_pic': '/pic.jpg', 'vod_remarks': 'HD'}]}}
+                elif self.path == '/v3/home/search':
+                    payload = {'code': 1, 'data': {'list': [{'vod_id': 88, 'vod_name': 'Fixture Show', 'vod_pic': '/pic.jpg', 'vod_remarks': 'HD'}, {'vod_id': 99, 'vod_name': 'Unrelated', 'vod_pic': '', 'vod_remarks': ''}]}}
+                elif self.path == '/v3/home/vod_details':
+                    payload = {'code': 1, 'data': {
+                        'vod_id': 88,
+                        'vod_name': 'Fixture Show',
+                        'vod_pic': '/pic.jpg',
+                        'vod_content': '<p>Clean summary</p>',
+                        'vod_play_list': [
+                            {'flag': 'DirectLine', 'urls': [{'name': 'EP1', 'url': self.server.origin + '/direct.m3u8'}], 'parse_urls': []},
+                            {'flag': 'ParsedLine', 'urls': [{'name': 'EP1', 'url': 'opaque-video-token'}], 'parse_urls': [self.server.origin + '/parse?url=']},
+                        ],
+                    }}
+                else:
+                    self.send_response(404); self.end_headers(); return
+                data = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(data)
+
+        fixture = ThreadingHTTPServer(('127.0.0.1', 0), AppTTFixture)
+        fixture.daemon_threads = True
+        fixture.origin = 'http://127.0.0.1:' + str(fixture.server_port)
+        threading.Thread(target=fixture.serve_forever, daemon=True).start()
+        try:
+            config = {'api': fixture.origin, 'signKey': 'fixtureSignKey123', 'userAgent': 'Fixture-AppTT-UA'}
+            js = "console.log(JSON.stringify(require(process.argv[1])(JSON.parse(process.argv[2]))))"
+            rule = json.loads(subprocess.check_output([NODE, '--jitless', '-e', js, str(ROOT/'shared/catpaw/drpy-apptt-adapter.cjs'), json.dumps(config)], stderr=subprocess.DEVNULL))
+            manifest = {'kind': 'drpy', 'version': 1, 'runtime': 'drpy2-ca23ffdb-1', 'sourceId': 'e'*64,
+                        'origin': fixture.origin, 'rule': rule, 'headers': {}, 'requestTimeoutMs': 2000}
+            data = json.dumps(manifest).encode(); digest = hashlib.sha256(data).hexdigest()
+            (self.root/digest).mkdir(); (self.root/digest/'drpy.json').write_bytes(data)
+            path = '/' + self.state['secret'] + '/' + digest + '/api/drpy'
+            def call(method, args):
+                status, value = self.request({'version': 1, 'method': method, 'args': args}, path=path)
+                self.assertEqual(status, 200, value)
+                return value
+            home = call('home', [True])
+            self.assertEqual(home['class'], [{'type_id': '10', 'type_name': '剧集'}])
+            self.assertIn('name="sign"', fixture.last_post[1])
+            self.assertEqual(call('homeVod', [])['list'][0]['vod_name'], 'Fixture Show')
+            self.assertEqual(call('category', ['10', 1, True, {}])['list'][0]['vod_id'], '88')
+            search = call('search', ['Fixture', False, 1])
+            self.assertEqual([item['vod_id'] for item in search['list']], ['88'])
+            detail = call('detail', ['88'])['list'][0]
+            self.assertEqual(detail['vod_content'], 'Clean summary')
+            self.assertEqual(detail['vod_play_from'], 'DirectLine$$$ParsedLine')
+            direct = call('play', ['DirectLine', fixture.origin + '/direct.m3u8', []])
+            self.assertEqual(direct['url'], fixture.origin + '/direct.m3u8')
+            parsed = call('play', ['ParsedLine', 'opaque-video-token', []])
+            self.assertEqual(parsed['url'], fixture.origin + '/resolved.m3u8')
+        finally:
+            fixture.shutdown(); fixture.server_close()
+
     def test_fy_exact_artifact_contract(self):
         value = b'synthetic unknown FY artifact'; digest = hashlib.sha256(value).hexdigest()
         (self.root/'imports'/(digest+'.jar')).write_bytes(value)

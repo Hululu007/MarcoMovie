@@ -103,8 +103,12 @@ void main() {
         'csp_Auete',
         'csp_BttwooGuard',
         'csp_Bttwoo',
+        'csp_AppgzGuard',
+        'csp_Appgz',
         'csp_T4Guard',
         'csp_T4',
+        'csp_AppTTGuard',
+        'csp_AppTT',
         'csp_FyGuard',
         'csp_Fy',
       ]) {
@@ -120,8 +124,9 @@ void main() {
         'csp_BttwooOtherGuard',
         'csp_Dm84Guard/extra',
         'csp_T4OtherGuard',
+        'csp_AppTTOtherGuard',
+        'csp_AppgzOtherGuard',
         'csp_FyOtherGuard',
-        'csp_AppgzGuard',
       ]) {
         final source = site(
           'https://import.invalid/plugin.jar',
@@ -166,6 +171,42 @@ void main() {
       expect(host.invoked.last['rule'], isNot(firstRule));
       await guard.invoke(first.copyWith(api: 'csp_T4'), 'home', [false]);
       expect(host.invoked.last['rule'], firstRule);
+      expect(host.extensions, ['Zmlyc3Q=', 'c2Vjb25k']);
+      expect(downloads, 2);
+      for (final invalid in ['', '汉' * 6000]) {
+        await expectLater(
+          guard.invoke(first.copyWith(ext: invalid), 'home', [false]),
+          throwsFormatException,
+        );
+      }
+      expect(downloads, 2);
+    },
+  );
+
+  test(
+    'AppTT extension is forwarded and separates cached configuration',
+    () async {
+      final host = PortHost();
+      var downloads = 0;
+      final guard = GuardSource(
+        host: host,
+        drpy: DrpySource(host: host, read: (_, __) async => ''),
+        read: (_, __) async {
+          downloads++;
+          return bytes;
+        },
+      );
+      final first = site(
+        'https://import.invalid/plugin.jar',
+      ).copyWith(api: 'csp_AppTTGuard', ext: 'Zmlyc3Q=');
+      final second = first.copyWith(ext: 'c2Vjb25k');
+      await guard.invoke(first, 'home', [false]);
+      final firstRule = host.invoked.last['rule'];
+      await guard.invoke(second, 'home', [false]);
+      expect(host.invoked.last['rule'], isNot(firstRule));
+      await guard.invoke(first.copyWith(api: 'csp_AppTT'), 'home', [false]);
+      expect(host.invoked.last['rule'], firstRule);
+      expect(host.adapters, ['apptt-v1', 'apptt-v1']);
       expect(host.extensions, ['Zmlyc3Q=', 'c2Vjb25k']);
       expect(downloads, 2);
       for (final invalid in ['', '汉' * 6000]) {
