@@ -18,6 +18,7 @@ final class Prefs {
     static final String UI_SCALE_PERCENT = "ui_scale_percent";
     static final String NAV_SCALE_PERCENT = "nav_scale_percent";
     static final String TV_DOCK_POSITION = "tv_dock_position";
+    static final String TV_PLAYER_STYLE = "tv_player_style";
     static final String STARTUP_ANIMATION = "startup_animation";
     static final String SHOW_HERO_BANNER = "show_hero_banner";
     static final String HOME_AMBIENT = "home_ambient";
@@ -82,6 +83,7 @@ final class Prefs {
         UI_SCALE_PERCENT,
         NAV_SCALE_PERCENT,
         TV_DOCK_POSITION,
+        TV_PLAYER_STYLE,
         STARTUP_ANIMATION,
         SHOW_HERO_BANNER,
         HOME_AMBIENT,
@@ -142,6 +144,7 @@ final class Prefs {
         ranges.put(HOME_COLUMNS, new int[] {5, 8});
         ranges.put(NAV_SCALE_PERCENT, new int[] {85, 140});
         ranges.put(TV_DOCK_POSITION, new int[] {0, 1});
+        ranges.put(TV_PLAYER_STYLE, new int[] {0, 1});
         ranges.put(HOME_ROWS, new int[] {1, 4});
         ranges.put(HOME_SECTIONS, new int[] {0, 5});
         ranges.put(WALLPAPER_DIM, new int[] {0, 100});

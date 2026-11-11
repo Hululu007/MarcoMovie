@@ -1,11 +1,12 @@
 package com.pilipala.glass;
 
 import android.graphics.Bitmap;
+import android.graphics.BitmapShader;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
 import android.graphics.LinearGradient;
+import android.graphics.Matrix;
 import android.graphics.Paint;
-import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.RectF;
 import android.graphics.Shader;
@@ -53,12 +54,21 @@ public final class GlassworkSurface extends Drawable
     private final Options options;
     private final float radius;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-    private final RectF rect = new RectF();
-    private final Path shape = new Path();
-    private Bitmap material;
+    private final RectF rect = new RectF(), srcRect = new RectF();
+    private final Matrix shaderMatrix = new Matrix();
+    private final int[] screen = new int[2], base = new int[2];
+    private Bitmap material, shaderBitmap;
+    private BitmapShader materialShader;
+    private LinearGradient bevelShader;
+    private float bevelTop = Float.NaN, bevelBottom = Float.NaN;
     private ViewTreeObserver observer;
     private boolean attached, pending, dirty = true, scheduled;
-    private int generation, opacity = 255;
+    private int generation,
+            opacity = 255,
+            lastW = -1,
+            lastH = -1,
+            lastL = Integer.MIN_VALUE,
+            lastT = Integer.MIN_VALUE;
     private long lastCapture;
     private final Runnable refresh =
             new Runnable() {
@@ -98,7 +108,7 @@ public final class GlassworkSurface extends Drawable
             GlassworkSurface s = SURFACES.get(i).get();
             if (s == null || !s.attached) SURFACES.remove(i);
             else if (root == s.backdrop || root.getRootView() == s.backdrop.getRootView())
-                s.changed();
+                s.backdropChanged();
         }
     }
 
@@ -118,6 +128,8 @@ public final class GlassworkSurface extends Drawable
         generation++;
         pending = false;
         material = null;
+        shaderBitmap = null;
+        materialShader = null;
         MAIN.removeCallbacks(refresh);
         scheduled = false;
         if (observer != null && observer.isAlive()) {
@@ -132,10 +144,23 @@ public final class GlassworkSurface extends Drawable
     }
 
     public void onScrollChanged() {
-        changed();
+        dirty = true;
+        if (!attached || options.reduceTransparency()) return;
+        MAIN.removeCallbacks(refresh);
+        scheduled = true;
+        MAIN.postDelayed(refresh, 180);
     }
 
     public void onGlobalLayout() {
+        int w = target.getWidth(),
+                h = target.getHeight(),
+                l = target.getLeft(),
+                t = target.getTop();
+        if (w == lastW && h == lastH && l == lastL && t == lastT && material != null) return;
+        lastW = w;
+        lastH = h;
+        lastL = l;
+        lastT = t;
         changed();
     }
 
@@ -143,6 +168,21 @@ public final class GlassworkSurface extends Drawable
         dirty = true;
         invalidateSelf();
         schedule();
+    }
+
+    private void backdropChanged() {
+        dirty = true;
+        if (material == null) {
+            changed();
+            return;
+        }
+        if (!attached || options.reduceTransparency()) {
+            invalidateSelf();
+            return;
+        }
+        MAIN.removeCallbacks(refresh);
+        scheduled = true;
+        MAIN.postDelayed(refresh, 160);
     }
 
     private void schedule() {
@@ -207,7 +247,6 @@ public final class GlassworkSurface extends Drawable
             scene = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             Canvas canvas = new Canvas(scene);
             canvas.drawColor(GlassworkMaterial.DARK_TINT);
-            int[] screen = new int[2], base = new int[2];
             target.getLocationOnScreen(screen);
             backdrop.getLocationOnScreen(base);
             canvas.scale(sx, (float) height / h);
@@ -311,38 +350,51 @@ public final class GlassworkSurface extends Drawable
     public void draw(Canvas canvas) {
         if (Boolean.TRUE.equals(CAPTURING.get())) return;
         rect.set(getBounds());
+        if (rect.width() <= 0 || rect.height() <= 0) return;
         float corner = Math.min(radius, Math.min(rect.width(), rect.height()) / 2);
-        shape.reset();
-        shape.addRoundRect(rect, corner, corner, Path.Direction.CW);
-        int save = canvas.save();
-        canvas.clipPath(shape);
-        paint.setShader(null);
         paint.setStyle(Paint.Style.FILL);
-        paint.setAlpha(opacity);
-        if (!options.reduceTransparency() && material != null)
-            canvas.drawBitmap(material, null, rect, paint);
-        else {
+        if (!options.reduceTransparency() && material != null && !material.isRecycled()) {
+            if (shaderBitmap != material || materialShader == null) {
+                shaderBitmap = material;
+                materialShader =
+                        new BitmapShader(material, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+            }
+            srcRect.set(0, 0, material.getWidth(), material.getHeight());
+            shaderMatrix.setRectToRect(srcRect, rect, Matrix.ScaleToFit.FILL);
+            materialShader.setLocalMatrix(shaderMatrix);
+            paint.setShader(materialShader);
+            paint.setAlpha(opacity);
+            canvas.drawRoundRect(rect, corner, corner, paint);
+            paint.setShader(null);
+        } else {
+            paint.setShader(null);
             paint.setColor(GlassworkMaterial.DARK_TINT);
             paint.setAlpha(opacity);
-            canvas.drawRect(rect, paint);
+            canvas.drawRoundRect(rect, corner, corner, paint);
         }
         float px = target.getResources().getDisplayMetrics().density;
+        if (bevelShader == null || bevelTop != rect.top || bevelBottom != rect.bottom) {
+            bevelTop = rect.top;
+            bevelBottom = rect.bottom;
+            bevelShader =
+                    new LinearGradient(
+                            0,
+                            rect.top,
+                            0,
+                            rect.bottom,
+                            new int[] {0x75ffffff, 0x12ffffff, 0x2effffff},
+                            new float[] {0, .45f, 1},
+                            Shader.TileMode.CLAMP);
+        }
         // Glasswork's narrow white upper bevel and darker lower edge; preserve original radius.
-        paint.setShader(
-                new LinearGradient(
-                        0,
-                        rect.top,
-                        0,
-                        rect.bottom,
-                        new int[] {0x75ffffff, 0x12ffffff, 0x2effffff},
-                        new float[] {0, .45f, 1},
-                        Shader.TileMode.CLAMP));
+        paint.setShader(bevelShader);
+        paint.setAlpha(opacity);
         paint.setStyle(Paint.Style.STROKE);
         paint.setStrokeWidth(Math.max(1, px));
         rect.inset(px / 2, px / 2);
-        canvas.drawRoundRect(rect, corner, corner, paint);
+        canvas.drawRoundRect(
+                rect, Math.max(0, corner - px / 2), Math.max(0, corner - px / 2), paint);
         paint.setShader(null);
-        canvas.restoreToCount(save);
         schedule();
     }
 

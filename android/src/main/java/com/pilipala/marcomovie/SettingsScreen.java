@@ -605,6 +605,14 @@ final class SettingsScreen {
 
     void playback() {
         page("播放与字幕", "作为之后播放的默认设置；播放界面中仍可随时调整。");
+        if (a.isTvDevice()) {
+            ints(
+                    "播放界面样式",
+                    Prefs.TV_PLAYER_STYLE,
+                    new String[] {"现代悬浮卡片（默认）", "经典双层工具栏"},
+                    new int[] {0, 1},
+                    0);
+        }
         ints(
                 "画面输出",
                 Prefs.VIDEO_OUTPUT,

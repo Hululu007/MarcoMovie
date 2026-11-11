@@ -1,16 +1,34 @@
 package com.pilipala.marcomovie;
 
 import android.app.Dialog;
-import android.content.res.ColorStateList;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.drawable.ClipDrawable;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.view.*;
 import android.widget.*;
+
 import java.util.*;
 
 /** Independent TV playback controls. Every visible action is wired to playback state. */
 final class PlaybackControls {
+    static final int ICON_PLAY_PAUSE = 0;
+    static final int ICON_NEXT = 1;
+    static final int ICON_EPISODES = 2;
+    static final int ICON_SUBTITLES = 3;
+    static final int ICON_AUDIO = 4;
+    static final int ICON_LINES = 5;
+    static final int ICON_SPEED = 6;
+    static final int ICON_MORE = 7;
+
     final MainActivity a;
+    final boolean modernTv;
     final Cms.Site site;
     final Cms.Video video;
     final Cms.Episode resolved;
@@ -23,6 +41,7 @@ final class PlaybackControls {
     boolean danmakuLoaded;
     boolean currentMobileLandscape;
     final Map<String, Button> buttons = new LinkedHashMap<>();
+    Button lastFocusedModernButton;
     Dialog activeDialog;
     View menuAnchor;
     String lastSubtitle = "";
@@ -61,10 +80,14 @@ final class PlaybackControls {
             Cms.Video v,
             Cms.Episode ep) {
         a = host;
+        modernTv = a.isTvDevice() && a.prefs.getInt(Prefs.TV_PLAYER_STYLE, 0) == 0;
         site = s;
         video = v;
         resolved = ep;
-        dockOverlay = overlay;
+        dockOverlay =
+                (modernTv && host.playerChrome != null && host.playerChrome.actionHost != null)
+                        ? host.playerChrome.actionHost
+                        : overlay;
         surface = texture;
         danmaku =
                 new DanmakuView(
@@ -91,25 +114,36 @@ final class PlaybackControls {
         timeline.setTag("timeline");
         timeline.setBackgroundColor(Color.TRANSPARENT);
         timeline.setFocusable(true);
-        timeline.setOnFocusChangeListener(
-                (focusedView, f) ->
-                        FocusMotion.style(
-                                a,
-                                timeline,
-                                f,
-                                0,
-                                0x16ffffff,
-                                16,
-                                MainActivity.WHITE,
-                                MainActivity.WHITE,
-                                false,
-                                1));
-        UiCompat.tintSeekBar(timeline, 0xfff5f5f7, Color.WHITE);
-        if (!a.isTvDevice()) {
-            timeline.setPadding(a.dp(8), 0, a.dp(8), 0);
+        if (modernTv) {
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                timeline.setMinHeight(0);
+            }
+            timeline.setMinimumHeight(0);
+            styleModernTimeline(false);
+            timeline.setOnFocusChangeListener((focusedView, f) -> styleModernTimeline(f));
+            timeline.setKeyProgressIncrement(15000);
+            progress.addView(timeline, new LinearLayout.LayoutParams(-1, PlayerChrome.vp(a, 15)));
+        } else {
+            timeline.setOnFocusChangeListener(
+                    (focusedView, f) ->
+                            FocusMotion.style(
+                                    a,
+                                    timeline,
+                                    f,
+                                    0,
+                                    0x16ffffff,
+                                    16,
+                                    MainActivity.WHITE,
+                                    MainActivity.WHITE,
+                                    false,
+                                    1));
+            UiCompat.tintSeekBar(timeline, 0xfff5f5f7, Color.WHITE);
+            if (!a.isTvDevice()) {
+                timeline.setPadding(a.dp(8), 0, a.dp(8), 0);
+            }
+            timeline.setKeyProgressIncrement(15000);
+            progress.addView(timeline, new LinearLayout.LayoutParams(-1, a.dp(32)));
         }
-        timeline.setKeyProgressIncrement(15000);
-        progress.addView(timeline, new LinearLayout.LayoutParams(-1, a.dp(32)));
         timeline.setOnSeekBarChangeListener(
                 new SeekBar.OnSeekBarChangeListener() {
                     public void onStartTrackingTouch(SeekBar b) {
@@ -158,7 +192,52 @@ final class PlaybackControls {
         currentMobileLandscape = mobileLandscape;
         LinearLayout row = a.row();
         boolean live = "live".equals(site.key);
-        if (a.isTvDevice()) {
+        if (modernTv) {
+            addModernIcon(
+                    row,
+                    "播放 / 暂停",
+                    "play-pause",
+                    ICON_PLAY_PAUSE,
+                    () -> {
+                        a.togglePlayback();
+                        a.showControls(true);
+                    });
+            addModernIcon(
+                    row,
+                    live ? "下台" : "下一集",
+                    "next-episode",
+                    ICON_NEXT,
+                    () -> {
+                        if (live) a.liveStep(1);
+                        else if (!step(1)) showBubble("无下集", new String[] {"知道了"}, -1, i -> {}, "");
+                    });
+            addModernIcon(
+                    row,
+                    live ? "频道" : "选集",
+                    "episodes",
+                    ICON_EPISODES,
+                    () -> {
+                        if (live) a.chooseLiveChannel();
+                        else chooseEpisodes();
+                    });
+            addModernIcon(row, "字幕", "subtitles", ICON_SUBTITLES, this::subtitleQuickMenu);
+            addModernIcon(row, "音轨", "audio-tracks", ICON_AUDIO, () -> tracks(1));
+            addModernIcon(
+                    row,
+                    live ? "线路" : "换源",
+                    "lines",
+                    ICON_LINES,
+                    () -> {
+                        if (live) a.chooseLiveStream();
+                        else chooseLine();
+                    });
+            addModernIcon(row, "倍速", "speed", ICON_SPEED, this::speed);
+            addModernIcon(row, "更多", "more", ICON_MORE, this::more);
+            registerHiddenAction("decoder", this::decoderMenu);
+            registerHiddenAction("aspect", this::aspect);
+            registerHiddenAction("skip-intro-tool", () -> skip(true));
+            registerHiddenAction("skip-outro-tool", () -> skip(false));
+        } else if (a.isTvDevice()) {
             add(
                     row,
                     live ? "下台" : "下一集",
@@ -257,28 +336,171 @@ final class PlaybackControls {
             if (child instanceof Button) all.add((Button) child);
         }
         for (Button b : all) b.setId(UiCompat.generateViewId());
-        for (Button b : all) b.setNextFocusUpId(timeline.getId());
-        timeline.setNextFocusDownId(all.get(0).getId());
-        all.get(0).setNextFocusLeftId(all.get(all.size() - 1).getId());
-        all.get(all.size() - 1).setNextFocusRightId(all.get(0).getId());
-        all.get(0)
-                .setOnKeyListener(
-                        (view, key, event) -> {
-                            if (key != KeyEvent.KEYCODE_DPAD_LEFT) return false;
-                            if (event.getAction() == KeyEvent.ACTION_DOWN)
-                                all.get(all.size() - 1).requestFocus();
-                            return true;
-                        });
-        all.get(all.size() - 1)
-                .setOnKeyListener(
-                        (view, key, event) -> {
-                            if (key != KeyEvent.KEYCODE_DPAD_RIGHT) return false;
-                            if (event.getAction() == KeyEvent.ACTION_DOWN)
-                                all.get(0).requestFocus();
-                            return true;
-                        });
+        if (!modernTv) {
+            for (Button b : all) b.setNextFocusUpId(timeline.getId());
+            timeline.setNextFocusDownId(all.get(0).getId());
+            all.get(0).setNextFocusLeftId(all.get(all.size() - 1).getId());
+            all.get(all.size() - 1).setNextFocusRightId(all.get(0).getId());
+            all.get(0)
+                    .setOnKeyListener(
+                            (view, key, event) -> {
+                                if (key != KeyEvent.KEYCODE_DPAD_LEFT) return false;
+                                if (event.getAction() == KeyEvent.ACTION_DOWN)
+                                    all.get(all.size() - 1).requestFocus();
+                                return true;
+                            });
+            all.get(all.size() - 1)
+                    .setOnKeyListener(
+                            (view, key, event) -> {
+                                if (key != KeyEvent.KEYCODE_DPAD_RIGHT) return false;
+                                if (event.getAction() == KeyEvent.ACTION_DOWN)
+                                    all.get(0).requestFocus();
+                                return true;
+                            });
+        }
         rebuildToolDock(mobileLandscape);
         updateLabels();
+    }
+
+    private void styleModernTimeline(boolean focused) {
+        float u = PlayerChrome.modernUnit(a);
+        final int barH = Math.max(2, Math.round(u * (focused ? 3.6f : 2.3f)));
+        GradientDrawable trackBg = new GradientDrawable();
+        trackBg.setColor(focused ? 0x4affffff : 0x32ffffff);
+        trackBg.setCornerRadius(barH * .5f);
+        GradientDrawable secBg = new GradientDrawable();
+        secBg.setColor(0x56ffffff);
+        secBg.setCornerRadius(barH * .5f);
+        GradientDrawable progBg = new GradientDrawable();
+        progBg.setColor(0xfff5f7fb);
+        progBg.setCornerRadius(barH * .5f);
+        Drawable[] layers =
+                new Drawable[] {
+                    trackBg,
+                    new ClipDrawable(secBg, Gravity.LEFT, ClipDrawable.HORIZONTAL),
+                    new ClipDrawable(progBg, Gravity.LEFT, ClipDrawable.HORIZONTAL)
+                };
+        LayerDrawable ld =
+                new LayerDrawable(layers) {
+                    @Override
+                    protected void onBoundsChange(Rect bounds) {
+                        int cy = bounds.centerY();
+                        int top = cy - barH / 2;
+                        int bottom = top + barH;
+                        for (int i = 0; i < getNumberOfLayers(); i++) {
+                            getDrawable(i).setBounds(bounds.left, top, bounds.right, bottom);
+                        }
+                    }
+                };
+        ld.setId(0, android.R.id.background);
+        ld.setId(1, android.R.id.secondaryProgress);
+        ld.setId(2, android.R.id.progress);
+        int curProg = timeline.getProgress();
+        int curMax = timeline.getMax();
+        timeline.setProgressDrawable(ld);
+        if (curMax > 0) timeline.setMax(curMax);
+        timeline.setProgress(curProg);
+
+        int thumbSize = Math.max(6, Math.round(u * (focused ? 10.5f : 7.2f)));
+        GradientDrawable thumb = new GradientDrawable();
+        thumb.setShape(GradientDrawable.OVAL);
+        thumb.setSize(thumbSize, thumbSize);
+        thumb.setColor(Color.WHITE);
+        if (focused) {
+            thumb.setStroke(Math.max(1, Math.round(u * 1.6f)), 0x55ffffff);
+        }
+        timeline.setThumb(thumb);
+        timeline.setThumbOffset(0);
+        if (android.os.Build.VERSION.SDK_INT >= 21) {
+            timeline.setSplitTrack(false);
+        }
+        int padH = Math.max(4, Math.round(u * 5.5f));
+        timeline.setPadding(padH, 0, padH, 0);
+    }
+
+    void refreshPlayPauseGlyph() {
+        Button pp = buttons.get("play-pause");
+        if (pp != null) {
+            pp.setContentDescription(a.playing ? "暂停" : "播放");
+            pp.invalidate();
+        }
+    }
+
+    void focusPrimaryAction() {
+        if (modernTv) {
+            if (lastFocusedModernButton != null
+                    && lastFocusedModernButton.getVisibility() == View.VISIBLE) {
+                lastFocusedModernButton.requestFocus();
+                return;
+            }
+            Button pp = buttons.get("play-pause");
+            if (pp != null && pp.getVisibility() == View.VISIBLE) {
+                pp.requestFocus();
+                return;
+            }
+        }
+        Button next = buttons.get("next-episode");
+        if (next != null && next.getVisibility() == View.VISIBLE) {
+            next.requestFocus();
+            return;
+        }
+        for (Button b : buttons.values()) {
+            if (b.getVisibility() == View.VISIBLE) {
+                b.requestFocus();
+                return;
+            }
+        }
+    }
+
+    void syncModernActionVisibility() {
+        if (!modernTv) return;
+        boolean multiOrLive =
+                "live".equals(site.key)
+                        || (a.activeLine != null
+                                && a.activeLine.episodes != null
+                                && a.activeLine.episodes.size() > 1);
+        Button nextBtn = buttons.get("next-episode");
+        Button epBtn = buttons.get("episodes");
+        if (nextBtn != null) nextBtn.setVisibility(multiOrLive ? View.VISIBLE : View.GONE);
+        if (epBtn != null) epBtn.setVisibility(multiOrLive ? View.VISIBLE : View.GONE);
+
+        final List<Button> vis = new ArrayList<>();
+        for (Button b : buttons.values()) {
+            if (b instanceof ModernIconButton && b.getVisibility() == View.VISIBLE) {
+                vis.add(b);
+            }
+        }
+        if (vis.isEmpty()) return;
+        boolean live = "live".equals(site.key);
+        for (int i = 0; i < vis.size(); i++) {
+            final Button cur = vis.get(i);
+            final Button prev = vis.get((i - 1 + vis.size()) % vis.size());
+            final Button nxt = vis.get((i + 1) % vis.size());
+            cur.setNextFocusLeftId(prev.getId());
+            cur.setNextFocusRightId(nxt.getId());
+            cur.setNextFocusUpId(cur.getId());
+            cur.setNextFocusDownId(live ? cur.getId() : timeline.getId());
+            final boolean isFirst = i == 0;
+            final boolean isLast = i == vis.size() - 1;
+            cur.setOnKeyListener(
+                    (view, key, event) -> {
+                        if (isFirst && key == KeyEvent.KEYCODE_DPAD_LEFT) {
+                            if (event.getAction() == KeyEvent.ACTION_DOWN) prev.requestFocus();
+                            return true;
+                        }
+                        if (isLast && key == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                            if (event.getAction() == KeyEvent.ACTION_DOWN) nxt.requestFocus();
+                            return true;
+                        }
+                        return false;
+                    });
+        }
+        if (lastFocusedModernButton == null
+                || lastFocusedModernButton.getVisibility() != View.VISIBLE) {
+            lastFocusedModernButton = vis.get(0);
+        }
+        timeline.setNextFocusUpId(lastFocusedModernButton.getId());
+        timeline.setNextFocusDownId(lastFocusedModernButton.getId());
     }
 
     void relayout(boolean mobileLandscape) {
@@ -348,6 +570,27 @@ final class PlaybackControls {
             dockOverlay.addView(vScroller, new LinearLayout.LayoutParams(-1, -1));
             return;
         }
+        if (modernTv) {
+            LinearLayout row = a.row();
+            row.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+            row.setClipChildren(false);
+            row.setClipToPadding(false);
+            int d = PlayerChrome.vp(a, 31);
+            int mH = PlayerChrome.vp(a, 3.2f);
+            int mV = PlayerChrome.vp(a, 1.5f);
+            for (Button b : buttons.values()) {
+                if (!(b instanceof ModernIconButton)) continue;
+                if (b.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) b.getParent()).removeView(b);
+                }
+                LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(d, d);
+                size.setMargins(mH, mV, mH, mV);
+                row.addView(b, size);
+            }
+            dockOverlay.addView(row, new LinearLayout.LayoutParams(-2, -2));
+            syncModernActionVisibility();
+            return;
+        }
         LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER);
         row.setClipChildren(false);
@@ -396,6 +639,209 @@ final class PlaybackControls {
                         });
         b.setVisibility(View.GONE);
         buttons.put(key, b);
+    }
+
+    Button addModernIcon(
+            LinearLayout row, String label, String key, int iconKind, Runnable action) {
+        ModernIconButton b = new ModernIconButton(iconKind);
+        b.setTag(key);
+        b.setContentDescription(label);
+        b.setText(label);
+        b.setHorizontallyScrolling(false);
+        b.setGravity(Gravity.LEFT | Gravity.TOP);
+        b.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, 0f);
+        b.setTextColor(Color.TRANSPARENT);
+        b.setFocusable(true);
+        b.setFocusableInTouchMode(true);
+        b.setClickable(true);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setPadding(0, 0, 0, 0);
+        int d = PlayerChrome.vp(a, 31);
+        final int radiusDp =
+                Math.max(12, Math.round((d * .5f) / a.getResources().getDisplayMetrics().density));
+        GradientDrawable idleCircle = new GradientDrawable();
+        idleCircle.setColor(0x20ffffff);
+        idleCircle.setCornerRadius(d * .5f);
+        b.setBackground(idleCircle);
+        a.pressFeedback(b);
+        b.setOnClickListener(
+                v -> {
+                    menuAnchor = buttons.get(key);
+                    action.run();
+                });
+        b.setOnFocusChangeListener(
+                (view, focused) -> {
+                    if (focused) {
+                        lastFocusedModernButton = b;
+                        timeline.setNextFocusUpId(b.getId());
+                        timeline.setNextFocusDownId(b.getId());
+                    }
+                    FocusMotion.style(
+                            a,
+                            b,
+                            focused,
+                            0x20ffffff,
+                            MainActivity.WHITE,
+                            radiusDp,
+                            Color.TRANSPARENT,
+                            Color.TRANSPARENT,
+                            false,
+                            1.06f);
+                    b.setPadding(0, 0, 0, 0);
+                    b.invalidate();
+                });
+        int mH = PlayerChrome.vp(a, 3.2f);
+        int mV = PlayerChrome.vp(a, 1.5f);
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(d, d);
+        size.setMargins(mH, mV, mH, mV);
+        row.addView(b, size);
+        buttons.put(key, b);
+        return b;
+    }
+
+    final class ModernIconButton extends Button {
+        final int kind;
+        final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Path path = new Path();
+        final RectF box = new RectF();
+
+        ModernIconButton(int kind) {
+            super(a);
+            this.kind = kind;
+            setIncludeFontPadding(false);
+            setAllCaps(false);
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            int w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float cx = getScrollX() + w * .5f, cy = getScrollY() + h * .5f;
+            float r = Math.min(w, h) * .5f;
+            boolean focused = hasFocus();
+            int fg = focused ? 0xff14161b : 0xfff3f6fb;
+            int cut = focused ? MainActivity.WHITE : 0xff282b34;
+            p.reset();
+            p.setAntiAlias(true);
+            p.setColor(fg);
+            p.setStrokeCap(Paint.Cap.ROUND);
+            p.setStrokeJoin(Paint.Join.ROUND);
+
+            switch (kind) {
+                case ICON_PLAY_PAUSE:
+                    p.setStyle(Paint.Style.FILL);
+                    if (a.playing) {
+                        float bw = r * .14f, bh = r * .29f, gap = r * .105f, cr = r * .065f;
+                        box.set(cx - gap - bw, cy - bh, cx - gap, cy + bh);
+                        c.drawRoundRect(box, cr, cr, p);
+                        box.set(cx + gap, cy - bh, cx + gap + bw, cy + bh);
+                        c.drawRoundRect(box, cr, cr, p);
+                    } else {
+                        path.reset();
+                        path.moveTo(cx - r * .17f, cy - r * .29f);
+                        path.lineTo(cx + r * .29f, cy);
+                        path.lineTo(cx - r * .17f, cy + r * .29f);
+                        path.close();
+                        p.setStrokeWidth(Math.max(1.5f, r * .075f));
+                        p.setStyle(Paint.Style.FILL_AND_STROKE);
+                        c.drawPath(path, p);
+                    }
+                    break;
+                case ICON_NEXT:
+                    p.setStyle(Paint.Style.FILL_AND_STROKE);
+                    p.setStrokeWidth(Math.max(1.4f, r * .065f));
+                    path.reset();
+                    path.moveTo(cx - r * .27f, cy - r * .25f);
+                    path.lineTo(cx + r * .09f, cy);
+                    path.lineTo(cx - r * .27f, cy + r * .25f);
+                    path.close();
+                    c.drawPath(path, p);
+                    p.setStyle(Paint.Style.FILL);
+                    box.set(cx + r * .17f, cy - r * .27f, cx + r * .28f, cy + r * .27f);
+                    c.drawRoundRect(box, r * .055f, r * .055f, p);
+                    break;
+                case ICON_EPISODES:
+                    {
+                        float sw = Math.max(1.8f, r * .095f);
+                        p.setStrokeWidth(sw);
+                        float[] ys = {cy - r * .23f, cy, cy + r * .23f};
+                        for (float y : ys) {
+                            p.setStyle(Paint.Style.FILL);
+                            c.drawCircle(cx - r * .29f, y, r * .068f, p);
+                            p.setStyle(Paint.Style.STROKE);
+                            c.drawLine(cx - r * .13f, y, cx + r * .31f, y, p);
+                        }
+                        break;
+                    }
+                case ICON_SUBTITLES:
+                    {
+                        p.setStyle(Paint.Style.FILL);
+                        box.set(cx - r * .37f, cy - r * .275f, cx + r * .37f, cy + r * .275f);
+                        c.drawRoundRect(box, r * .11f, r * .11f, p);
+                        p.setColor(cut);
+                        float cr = r * .04f;
+                        box.set(cx - r * .26f, cy + r * .005f, cx + r * .09f, cy + r * .085f);
+                        c.drawRoundRect(box, cr, cr, p);
+                        box.set(cx + r * .15f, cy + r * .005f, cx + r * .26f, cy + r * .085f);
+                        c.drawRoundRect(box, cr, cr, p);
+                        box.set(cx - r * .26f, cy + r * .13f, cx - r * .01f, cy + r * .21f);
+                        c.drawRoundRect(box, cr, cr, p);
+                        box.set(cx + r * .05f, cy + r * .13f, cx + r * .26f, cy + r * .21f);
+                        c.drawRoundRect(box, cr, cr, p);
+                        break;
+                    }
+                case ICON_AUDIO:
+                    {
+                        p.setStyle(Paint.Style.STROKE);
+                        p.setStrokeWidth(Math.max(1.8f, r * .095f));
+                        float[] xs = {
+                            cx - r * .29f, cx - r * .145f, cx, cx + r * .145f, cx + r * .29f
+                        };
+                        float[] hs = {r * .11f, r * .22f, r * .33f, r * .20f, r * .11f};
+                        for (int i = 0; i < xs.length; i++) {
+                            c.drawLine(xs[i], cy - hs[i], xs[i], cy + hs[i], p);
+                        }
+                        break;
+                    }
+                case ICON_LINES:
+                    {
+                        p.setStyle(Paint.Style.STROKE);
+                        p.setStrokeWidth(Math.max(1.7f, r * .088f));
+                        float xl = cx - r * .34f, xr = cx + r * .34f;
+                        float[] ys = {cy - r * .23f, cy, cy + r * .23f};
+                        float[] ks = {cx - r * .11f, cx + r * .13f, cx - r * .06f};
+                        for (int i = 0; i < 3; i++) {
+                            c.drawLine(xl, ys[i], xr, ys[i], p);
+                            c.drawLine(ks[i], ys[i] - r * .095f, ks[i], ys[i] + r * .095f, p);
+                        }
+                        break;
+                    }
+                case ICON_SPEED:
+                    {
+                        p.setStyle(Paint.Style.STROKE);
+                        p.setStrokeWidth(Math.max(1.8f, r * .095f));
+                        box.set(cx - r * .35f, cy - r * .31f, cx + r * .35f, cy + r * .39f);
+                        c.drawArc(box, 155f, 230f, false, p);
+                        c.drawLine(cx, cy + r * .06f, cx + r * .20f, cy - r * .15f, p);
+                        p.setStyle(Paint.Style.FILL);
+                        c.drawCircle(cx, cy + r * .06f, r * .08f, p);
+                        break;
+                    }
+                case ICON_MORE:
+                default:
+                    {
+                        p.setStyle(Paint.Style.FILL);
+                        float dr = Math.max(1.5f, r * .08f);
+                        c.drawCircle(cx - r * .24f, cy, dr, p);
+                        c.drawCircle(cx, cy, dr, p);
+                        c.drawCircle(cx + r * .24f, cy, dr, p);
+                        break;
+                    }
+            }
+        }
     }
 
     Button add(LinearLayout row, String title, String key, Runnable action) {
@@ -1708,6 +2154,53 @@ final class PlaybackControls {
         }
     }
 
+    void subtitleQuickMenu() {
+        List<String> rawTracks =
+                (a.player != null && a.prepared)
+                        ? a.player.trackLabels(3)
+                        : Collections.emptyList();
+        List<String> labels = new ArrayList<>();
+        labels.add("关闭");
+        int selectedIdx = 0;
+        for (int k = 0; k < rawTracks.size(); k++) {
+            String raw = rawTracks.get(k);
+            if (raw != null && raw.startsWith("✓")) {
+                selectedIdx = 1 + k;
+                raw = raw.replaceFirst("^✓\\s*", "");
+            }
+            labels.add(raw);
+        }
+        final int trackEnd = labels.size();
+        labels.add("字幕大小与位置调节");
+        labels.add("字幕颜色与样式 · " + subtitleStyleLabel());
+        labels.add("导入字幕文件…");
+        choose(
+                "字幕",
+                labels.toArray(new String[0]),
+                selectedIdx,
+                i -> {
+                    if (i == 0) {
+                        if (a.player != null && a.prepared) a.player.selectTrack(3, -2);
+                    } else if (i < trackEnd) {
+                        if (a.player != null && a.prepared) a.player.selectTrack(3, i - 1);
+                    } else if (i == trackEnd) {
+                        showSubtitleAdjuster(a, subtitle, this::applySubtitleStyle);
+                    } else if (i == trackEnd + 1) {
+                        int cur = Prefs.clampSubtitleStyle(a.prefs.getInt(Prefs.SUBTITLE_STYLE, 0));
+                        choose(
+                                "字幕颜色与样式",
+                                SubtitleOverlayView.STYLE_LABELS,
+                                cur,
+                                sIdx -> {
+                                    a.prefs.edit().putInt(Prefs.SUBTITLE_STYLE, sIdx).apply();
+                                    applySubtitleStyle();
+                                });
+                    } else {
+                        a.pickSubtitle();
+                    }
+                });
+    }
+
     void tracks(int type) {
         if (type == 3) {
             List<String> tracks =
@@ -1761,7 +2254,15 @@ final class PlaybackControls {
         List<String> tracks = a.player.trackLabels(type);
         List<String> labels = new ArrayList<>();
         labels.add("自动选择默认音轨");
-        labels.addAll(tracks);
+        int selectedIdx = 0;
+        for (int k = 0; k < tracks.size(); k++) {
+            String raw = tracks.get(k);
+            if (raw != null && raw.startsWith("✓")) {
+                selectedIdx = 1 + k;
+                raw = raw.replaceFirst("^✓\\s*", "");
+            }
+            labels.add(raw);
+        }
         final int trackOptionCount = labels.size();
         boolean swAudio = a.prefs.getBoolean(Prefs.SOFTWARE_AUDIO, false);
         labels.add("兼容音频解码：" + (swAudio ? "已开启" : "关闭"));
@@ -1769,7 +2270,7 @@ final class PlaybackControls {
         choose(
                 "音轨与音频",
                 labels.toArray(new String[0]),
-                0,
+                selectedIdx,
                 i -> {
                     if (i < trackOptionCount) {
                         if (a.player != null) a.player.selectTrack(type, i == 0 ? -1 : i - 1);
@@ -1995,7 +2496,7 @@ final class PlaybackControls {
             "上一集",
             "跳过片头 / 片尾",
             "弹幕",
-            "音效",
+            modernTv ? "播放器与解码" : "音效",
             "画面色彩",
             "循环播放",
             "自动播放下集：" + (a.prefs.getBoolean(Prefs.AUTO_NEXT, true) ? "开启" : "关闭"),
@@ -2047,7 +2548,8 @@ final class PlaybackControls {
                             danmaku();
                             break;
                         case 7:
-                            soundEffect();
+                            if (modernTv) decoderMenu();
+                            else soundEffect();
                             break;
                         case 8:
                             pictureEffect();
@@ -2082,7 +2584,10 @@ final class PlaybackControls {
         float rate = a.prefs.getFloat(Prefs.PLAY_SPEED, 1f);
         Button speedBtn = buttons.get("speed");
         if (speedBtn != null) {
-            if (a.isTvDevice()) {
+            if (speedBtn instanceof ModernIconButton) {
+                speedBtn.setContentDescription(
+                        Math.abs(rate - 1f) < 0.01f ? "倍速" : "倍速 " + rate + "×");
+            } else if (a.isTvDevice()) {
                 speedBtn.setText(Math.abs(rate - 1f) < 0.01f ? "倍速" : rate + "×");
             } else {
                 speedBtn.setText(rate + "×");
@@ -2209,6 +2714,8 @@ final class PlaybackControls {
         a.player.setRepeatOne(
                 a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1
                         && a.prefs.getInt(Prefs.SKIP_OUTRO, 0) == 0);
+        syncModernActionVisibility();
+        refreshPlayPauseGlyph();
     }
 
     void tick() {
@@ -2301,8 +2808,8 @@ final class PlaybackControls {
                 visible
                         ? a.dp(
                                 progressOnly
-                                        ? Math.max(82, bottomDp + 16)
-                                        : Math.max(168, bottomDp + 24))
+                                        ? Math.max(modernTv ? 104 : 82, bottomDp + 16)
+                                        : Math.max(modernTv ? 176 : 168, bottomDp + 24))
                         : basePx;
         subtitle.setTranslationY(-(targetPx - basePx));
     }

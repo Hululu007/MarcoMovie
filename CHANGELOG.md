@@ -1,3 +1,9 @@
+## 2026-11-11 Android 电视 / 盒子 0.5.20
+
+- [电视端 0.5.20](docs/releases/android-tv-v0.5.20.md)：新增默认启用的新版悬浮卡片播放界面（支持在播放设置中与经典工具栏切换），按屏幕物理分辨率比例自适应控制卡片、弹窗与各级字号，重绘全套圆形按钮与上拉菜单矢量图标、重做右上角细体双圆点时钟，并修复 Android 9（API 28）`SeekBar` 兼容性。
+- 保留 Dock 导航栏原版胶囊毛玻璃外框，将内部滑动焦点框收敛为低调方形圆角样式；将电视端“观看历史”重构为带集数角标、百分比与底部进度条的竖版海报墙。
+- 优化 `FocusMotion`、`GlassSelection`、`GlassworkSurface`、`TvScrollView` 与 `HomeAmbient` 的焦点动画、着色器矩阵复用与毛玻璃节流采样，改善滚动切换与连续移焦帧率。
+
 ## 2026-11-11 iOS / iPadOS 0.5.20 与 macOS 0.5.12 四大网盘跳转登录、百度播放与并发搜索修复
 
 - [iOS / iPadOS 0.5.20](docs/releases/ios-v0.5.20.md) · [macOS 0.5.12](docs/releases/macos-v0.5.12.md)：修复阿里云盘扫码确认后因官方 `bizExt` 采用 GBK 中文编码导致的验证报错；为 iOS / iPadOS 新增原生 `WKWebView` 授权壳层（`marco_movie/netdisk_auth`），打通百度网盘（`bdnetdisk://com.baidu.passport/grantweb` 原生授权页）、阿里云盘（本机免密 / 淘宝跳转 / 验证码与相册扫码）、夸克及 UC（iPhone / iPad 独立 `appkey` 协议）本机跳转授权与扫码双通道登录。

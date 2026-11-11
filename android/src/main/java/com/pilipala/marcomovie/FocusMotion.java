@@ -1,6 +1,5 @@
 package com.pilipala.marcomovie;
 
-import android.animation.ArgbEvaluator;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.view.*;
@@ -8,16 +7,32 @@ import android.widget.TextView;
 
 /** Shared frame clock and velocity-preserving focus/press springs. No layout animation. */
 final class FocusMotion {
-    static final ArgbEvaluator COLORS = new ArgbEvaluator();
-
     static final class State {
         final GradientDrawable background = new GradientDrawable();
-        final MotionSpring emphasis = new MotionSpring(0, 26, .002f),
-                compression = new MotionSpring(0, 40, .002f);
+        final MotionSpring emphasis = new MotionSpring(0, 30, .0025f),
+                compression = new MotionSpring(0, 40, .0025f);
         MotionLoop.Step animator;
         int targetColor, color, stroke, text, normal, active, idleText, activeText, radiusPx;
+        int appliedRadiusPx = -1, strokeWidthPx = -1;
         float scale = 1, elevation, gain = 1;
-        boolean ready, pressed, border;
+        boolean ready, pressed, border, unclipped;
+    }
+
+    static int lerpColor(int start, int end, float fraction) {
+        if (start == end || fraction <= 0f) return start;
+        if (fraction >= 1f) return end;
+        int a0 = (start >>> 24) & 0xff,
+                r0 = (start >>> 16) & 0xff,
+                g0 = (start >>> 8) & 0xff,
+                b0 = start & 0xff;
+        int a1 = (end >>> 24) & 0xff,
+                r1 = (end >>> 16) & 0xff,
+                g1 = (end >>> 8) & 0xff,
+                b1 = end & 0xff;
+        return ((a0 + Math.round((a1 - a0) * fraction)) << 24)
+                | ((r0 + Math.round((r1 - r0) * fraction)) << 16)
+                | ((g0 + Math.round((g1 - g0) * fraction)) << 8)
+                | (b0 + Math.round((b1 - b0) * fraction));
     }
 
     static boolean hasDirectScrollChild(ViewGroup g) {
@@ -70,11 +85,13 @@ final class FocusMotion {
                     new View.OnAttachStateChangeListener() {
                         public void onViewAttachedToWindow(View v) {
                             unclipAncestors(v);
+                            saved.unclipped = true;
                         }
 
                         public void onViewDetachedFromWindow(View v) {
                             cancel(saved);
                             saved.pressed = false;
+                            saved.unclipped = false;
                             saved.compression.snap(0);
                             v.setAlpha(1);
                         }
@@ -101,16 +118,21 @@ final class FocusMotion {
             int activeText,
             boolean border,
             float gain) {
-        unclipAncestors(view);
         State state = state(view);
-        int strokePx = Math.round(view.getResources().getDisplayMetrics().density * 2);
+        if (!state.unclipped) {
+            unclipAncestors(view);
+            if (view.isAttachedToWindow()) state.unclipped = true;
+        }
+        if (state.strokeWidthPx < 0)
+            state.strokeWidthPx =
+                    Math.max(1, Math.round(view.getResources().getDisplayMetrics().density * 2));
         if (!state.ready) {
             state.ready = true;
             state.color = normal;
             state.text = idleText;
             state.stroke = 0x00f5f5f7;
             state.background.setColor(normal);
-            state.background.setStroke(strokePx, state.stroke);
+            state.background.setStroke(state.strokeWidthPx, state.stroke);
             view.animate().cancel();
         }
         state.targetColor = focused ? active : normal;
@@ -121,7 +143,10 @@ final class FocusMotion {
         state.border = border;
         state.gain = gain;
         state.radiusPx = a.dp(radius);
-        state.background.setCornerRadius(state.radiusPx);
+        if (state.appliedRadiusPx != state.radiusPx && view.getWidth() == 0) {
+            state.appliedRadiusPx = state.radiusPx;
+            state.background.setCornerRadius(state.radiusPx);
+        }
         if (view.getBackground() != state.background) view.setBackground(state.background);
         if (!focused) {
             state.pressed = false;
@@ -162,21 +187,21 @@ final class FocusMotion {
     static void paint(View view, State state, boolean reduced) {
         float f = Math.max(0, Math.min(1, state.emphasis.value)),
                 p = Math.max(0, Math.min(1, state.compression.value));
-        int color = (Integer) COLORS.evaluate(f, state.normal, state.active),
-                outline =
-                        state.border
-                                ? (Integer) COLORS.evaluate(f, 0x00f5f5f7, MainActivity.WHITE)
-                                : 0x00f5f5f7;
+        int color = lerpColor(state.normal, state.active, f),
+                outline = state.border ? lerpColor(0x00f5f5f7, MainActivity.WHITE, f) : 0x00f5f5f7;
         int text = f < .5f ? state.idleText : state.activeText;
-        float light =
-                (Color.red(color) * .299f + Color.green(color) * .587f + Color.blue(color) * .114f);
-        if (view instanceof TextView && Color.alpha(color) > 220)
+        if (view instanceof TextView && Color.alpha(color) > 220) {
+            float light =
+                    (Color.red(color) * .299f
+                            + Color.green(color) * .587f
+                            + Color.blue(color) * .114f);
             text =
                     light > 150
                             ? MainActivity.DARK
                             : state.activeText == MainActivity.DARK
                                     ? MainActivity.WHITE
                                     : state.activeText;
+        }
         apply(
                 view,
                 state,
@@ -204,11 +229,19 @@ final class FocusMotion {
                         : state.radiusPx;
         int effectiveRadius = Math.min(state.radiusPx, maxRadius);
         if (state.stroke != stroke) {
-            state.background.setStroke(
-                    Math.round(view.getResources().getDisplayMetrics().density * 2), stroke);
+            int sw =
+                    state.strokeWidthPx > 0
+                            ? state.strokeWidthPx
+                            : Math.max(
+                                    1,
+                                    Math.round(
+                                            view.getResources().getDisplayMetrics().density * 2));
+            state.background.setStroke(sw, stroke);
             state.background.setCornerRadius(effectiveRadius);
-        } else if (effectiveRadius > 0) {
+            state.appliedRadiusPx = effectiveRadius;
+        } else if (state.appliedRadiusPx != effectiveRadius) {
             state.background.setCornerRadius(effectiveRadius);
+            state.appliedRadiusPx = effectiveRadius;
         }
         if (view instanceof TextView && ((TextView) view).getCurrentTextColor() != text)
             ((TextView) view).setTextColor(text);

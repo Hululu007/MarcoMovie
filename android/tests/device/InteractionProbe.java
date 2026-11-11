@@ -376,6 +376,126 @@ public final class InteractionProbe extends Instrumentation {
             while (SystemClock.elapsedRealtime() < until && !ui(() -> a.prepared))
                 SystemClock.sleep(100);
             check("real_video_prepared", ui(() -> a.prepared));
+            check(
+                    "modern_tv_default_style",
+                    ui(() -> a.playerChrome.modernTv && a.playbackControls.modernTv));
+            check(
+                    "modern_card_unified_region",
+                    ui(
+                            () ->
+                                    a.playerChrome.dock.getParent() == a.playerOverlay
+                                            && a.playerChrome.progress.getParent()
+                                                    == a.playerChrome.dock
+                                            && a.playerChrome.heading.getParent()
+                                                    == a.playerOverlay));
+            check(
+                    "modern_card_geometry",
+                    ui(
+                            () ->
+                                    ((android.widget.FrameLayout.LayoutParams)
+                                                                    a.playerChrome.dock
+                                                                            .getLayoutParams())
+                                                            .bottomMargin
+                                                    == PlayerChrome.vp(a, 22)
+                                            && a.playerChrome.dock.getWidth()
+                                                    > a.root.getWidth() * .55f
+                                            && a.playerChrome.dock.getWidth()
+                                                    < a.root.getWidth() * .92f
+                                            && a.playerChrome.dock.getHeight()
+                                                    < a.root.getHeight() * .28f));
+            check(
+                    "modern_adaptive_multi_buttons",
+                    ui(
+                            () ->
+                                    a.playbackControls.buttons.get("play-pause").getVisibility()
+                                                    == View.VISIBLE
+                                            && a.playbackControls
+                                                            .buttons
+                                                            .get("next-episode")
+                                                            .getVisibility()
+                                                    == View.VISIBLE
+                                            && a.playbackControls
+                                                            .buttons
+                                                            .get("episodes")
+                                                            .getVisibility()
+                                                    == View.VISIBLE
+                                            && a.playbackControls
+                                                            .buttons
+                                                            .get("subtitles")
+                                                            .getVisibility()
+                                                    == View.VISIBLE));
+            runOnMainSync(
+                    () -> {
+                        testLine.episodes.remove(second);
+                        a.playbackControls.syncModernActionVisibility();
+                    });
+            check(
+                    "modern_adaptive_single_movie_buttons",
+                    ui(
+                            () ->
+                                    a.playbackControls.buttons.get("next-episode").getVisibility()
+                                                    == View.GONE
+                                            && a.playbackControls
+                                                            .buttons
+                                                            .get("episodes")
+                                                            .getVisibility()
+                                                    == View.GONE
+                                            && a.playbackControls
+                                                            .buttons
+                                                            .get("play-pause")
+                                                            .getVisibility()
+                                                    == View.VISIBLE));
+            runOnMainSync(
+                    () -> {
+                        testLine.episodes.add(second);
+                        a.playbackControls.syncModernActionVisibility();
+                        a.showControls(true);
+                        a.playbackControls.buttons.get("subtitles").requestFocus();
+                    });
+            key(KeyEvent.KEYCODE_DPAD_CENTER);
+            check(
+                    "modern_subtitle_quick_popover",
+                    ui(
+                            () -> {
+                                if (a.playbackControls.activeDialog == null) return false;
+                                View opt0 =
+                                        a.playbackControls
+                                                .activeDialog
+                                                .findViewById(android.R.id.content)
+                                                .findViewWithTag("player-option:0");
+                                int[] dockLoc = new int[2];
+                                a.playerChrome.dock.getLocationOnScreen(dockLoc);
+                                Window w = a.playbackControls.activeDialog.getWindow();
+                                return opt0 instanceof android.widget.Button
+                                        && "关闭"
+                                                .equals(
+                                                        ((android.widget.Button) opt0)
+                                                                .getText()
+                                                                .toString())
+                                        && w.getAttributes().y + w.getDecorView().getHeight()
+                                                <= dockLoc[1];
+                            }));
+            frame("modern-dock");
+            key(KeyEvent.KEYCODE_BACK);
+            check(
+                    "modern_subtitle_focus_restored",
+                    ui(
+                            () ->
+                                    !a.playbackControls.dialogOpen
+                                            && a.getCurrentFocus()
+                                                    == a.playbackControls.buttons.get(
+                                                            "subtitles")));
+            runOnMainSync(
+                    () -> {
+                        a.prefs.edit().putInt(Prefs.TV_PLAYER_STYLE, 1).commit();
+                        a.activeLine = testLine;
+                        a.activeEpisode = ep;
+                        a.openPlayer(site, video, ep);
+                    });
+            until = SystemClock.elapsedRealtime() + 25000;
+            while (SystemClock.elapsedRealtime() < until && !ui(() -> a.prepared))
+                SystemClock.sleep(100);
+            check("classic_video_prepared", ui(() -> a.prepared && !a.playerChrome.modernTv));
             runOnMainSync(
                     () -> {
                         a.player.setRepeatOne(true);
@@ -754,7 +874,11 @@ public final class InteractionProbe extends Instrumentation {
             runOnMainSync(
                     () -> {
                         a.releasePlayer();
-                        a.prefs.edit().putString("favorites", "[]").commit();
+                        a.prefs
+                                .edit()
+                                .putInt(Prefs.TV_PLAYER_STYLE, 0)
+                                .putString("favorites", "[]")
+                                .commit();
                         a.engines.put(
                                 site.key,
                                 new SourceEngine() {
@@ -1010,6 +1134,38 @@ public final class InteractionProbe extends Instrumentation {
                     "confirmation_uses_app_dialog",
                     ui(() -> a.appDialog != null && a.appDialog.getButton(-2) != null));
             key(KeyEvent.KEYCODE_BACK);
+            WatchHistory.Entry histSample = new WatchHistory.Entry();
+            histSample.site = site.key;
+            histSample.id = video.id;
+            histSample.title = video.title;
+            histSample.poster = video.poster;
+            histSample.line = "测试线路";
+            histSample.episode = "第 1 集";
+            histSample.position = 45000;
+            histSample.duration = 120000;
+            histSample.updated = System.currentTimeMillis();
+            runOnMainSync(
+                    () -> {
+                        a.prefs
+                                .edit()
+                                .putString(
+                                        "watch_history",
+                                        WatchHistory.upsert(
+                                                a.prefs.getString("watch_history", "[]"),
+                                                histSample))
+                                .commit();
+                        a.open(new MainActivity.Screen(a::historyPage), true);
+                    });
+            check(
+                    "tv_history_poster_wall_with_progress",
+                    ui(
+                            () -> {
+                                View card = a.root.findViewWithTag("history:" + histSample.key());
+                                if (!(card instanceof android.view.ViewGroup)) return false;
+                                ArrayList<View> pct = new ArrayList<>();
+                                card.findViewsWithText(pct, "已看 38%", View.FIND_VIEWS_WITH_TEXT);
+                                return !pct.isEmpty() && card.getHeight() > card.getWidth();
+                            }));
             runOnMainSync(() -> a.open(new MainActivity.Screen(a::home), true));
             key(KeyEvent.KEYCODE_BACK);
             check(

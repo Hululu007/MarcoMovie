@@ -8,22 +8,37 @@ import android.widget.*;
 /** Three independent floating regions with one visibility/focus owner. */
 final class PlayerChrome {
     final MainActivity a;
+    final boolean modernTv;
     final FrameLayout overlay;
     final View topShade, bottomShade;
     final LinearLayout dock, progress, heading;
+    final LinearLayout actionHost, badgeRow;
     final LinearLayout loadingPill;
     final LinearLayout centerRow;
     final LinearLayout topActions;
     final Button backBtn;
     final TextView rewindBtn, forwardBtn;
-    final TextView loadingText, episodeLabel, titleView, seekHint;
+    final TextView loadingText, episodeLabel, titleView, seekHint, wallClock, cardTitleView;
     final Button fsBtn;
     final StateGlyph state;
     final TextView resolution;
+    final Cms.Video chromeVideo;
     boolean loading = true;
     boolean progressOnlyMode = false;
     final Rect windowInsets = new Rect();
     boolean layoutPending;
+    String lastBadgeSignature = "";
+    String lastWallClock = "";
+
+    static float modernUnit(MainActivity a) {
+        int w = Math.max(1, a.windowWidth());
+        int h = Math.max(1, a.windowHeight());
+        return Math.min(Math.max(w, h) / 960f, Math.min(w, h) / 540f);
+    }
+
+    static int vp(MainActivity a, float v) {
+        return Math.max(1, Math.round(v * modernUnit(a)));
+    }
 
     private GradientDrawable chromeSurface(int color, float radiusDp, int strokeColor) {
         GradientDrawable d = a.bg(color, radiusDp);
@@ -33,8 +48,129 @@ final class PlayerChrome {
         return d;
     }
 
+    private GradientDrawable modernSurface(int color, float radiusU, int strokeColor) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadius(modernUnit(a) * radiusU);
+        if (strokeColor != 0) {
+            d.setStroke(Math.max(1, Math.round(modernUnit(a) * .75f)), strokeColor);
+        }
+        return d;
+    }
+
+    private String formatWallTime() {
+        return String.valueOf(
+                android.text.format.DateFormat.format("HH:mm", System.currentTimeMillis()));
+    }
+
+    private CharSequence styledWallTime(String raw) {
+        if (raw == null) return "";
+        int colon = raw.indexOf(':');
+        if (colon < 0) return raw;
+        android.text.SpannableString sp = new android.text.SpannableString(raw);
+        sp.setSpan(
+                new android.text.style.ReplacementSpan() {
+                    @Override
+                    public int getSize(
+                            Paint paint,
+                            CharSequence text,
+                            int start,
+                            int end,
+                            Paint.FontMetricsInt fm) {
+                        return Math.round(paint.measureText(":") * 1.15f);
+                    }
+
+                    @Override
+                    public void draw(
+                            Canvas canvas,
+                            CharSequence text,
+                            int start,
+                            int end,
+                            float x,
+                            int top,
+                            int y,
+                            int bottom,
+                            Paint paint) {
+                        float w = Math.round(paint.measureText(":") * 1.15f);
+                        float cx = x + w * .5f;
+                        float capH = -paint.ascent() * .74f;
+                        float cy = y - capH * .5f;
+                        float gap = capH * .24f;
+                        float r = Math.max(1.2f, paint.getTextSize() * .058f);
+                        Paint.Style prevStyle = paint.getStyle();
+                        paint.setStyle(Paint.Style.FILL);
+                        canvas.drawCircle(cx, cy - gap, r, paint);
+                        canvas.drawCircle(cx, cy + gap, r, paint);
+                        paint.setStyle(prevStyle);
+                    }
+                },
+                colon,
+                colon + 1,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return sp;
+    }
+
+    private String formatCardTitle(Cms.Video video, Cms.Episode episode) {
+        String base = video != null && video.title != null ? video.title.trim() : "";
+        String ep = episode != null && episode.name != null ? episode.name.trim() : "";
+        boolean multi =
+                a.activeLine != null
+                        && a.activeLine.episodes != null
+                        && a.activeLine.episodes.size() > 1;
+        if (!ep.isEmpty() && !ep.equalsIgnoreCase(base)) {
+            if (multi
+                    || (!"正片".equals(ep)
+                            && !"HD".equalsIgnoreCase(ep)
+                            && !"4K".equalsIgnoreCase(ep)
+                            && !"1080P".equalsIgnoreCase(ep)
+                            && !"超清".equals(ep))) {
+                return base.isEmpty() ? ep : base + " · " + ep;
+            }
+        }
+        return base.isEmpty() ? ep : base;
+    }
+
+    private void renderBadgePills(java.util.List<String> badges) {
+        if (badgeRow == null) return;
+        float u = modernUnit(a);
+        StringBuilder sig = new StringBuilder();
+        sig.append(Math.round(u * 100)).append(':');
+        for (int i = 0; i < badges.size(); i++) {
+            if (i > 0) sig.append('|');
+            sig.append(badges.get(i));
+        }
+        String nextSig = sig.toString();
+        if (nextSig.equals(lastBadgeSignature)) return;
+        lastBadgeSignature = nextSig;
+        badgeRow.removeAllViews();
+        for (int i = 0; i < badges.size(); i++) {
+            String label = badges.get(i);
+            if (label == null || label.isEmpty()) continue;
+            TextView pill = a.text(label, 9f, 0xffcfd6e2);
+            pill.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 8.8f);
+            pill.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            if (android.os.Build.VERSION.SDK_INT >= 21) {
+                pill.setLetterSpacing(0.03f);
+            }
+            pill.setSingleLine(true);
+            pill.setIncludeFontPadding(false);
+            pill.setGravity(Gravity.CENTER);
+            pill.setPadding(
+                    Math.round(u * 6.5f),
+                    Math.round(u * 2.2f),
+                    Math.round(u * 6.5f),
+                    Math.round(u * 2.2f));
+            pill.setBackground(modernSurface(0x1cffffff, 4.2f, 0x1effffff));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+            if (i > 0) lp.leftMargin = Math.round(u * 5f);
+            badgeRow.addView(pill, lp);
+        }
+    }
+
     PlayerChrome(MainActivity host, Cms.Video video, Cms.Episode episode, boolean live) {
         a = host;
+        chromeVideo = video;
+        modernTv = a.isTvDevice() && a.prefs.getInt(Prefs.TV_PLAYER_STYLE, 0) == 0;
         overlay = new FrameLayout(a);
         overlay.setTag("player-chrome");
         overlay.setClipChildren(true);
@@ -48,21 +184,27 @@ final class PlayerChrome {
             topShade.setBackground(
                     new GradientDrawable(
                             GradientDrawable.Orientation.TOP_BOTTOM,
-                            new int[] {0xc4000000, 0x00000000}));
+                            new int[] {modernTv ? 0x8c000000 : 0xc4000000, 0x00000000}));
         } else {
             topShade.setBackgroundColor(Color.TRANSPARENT);
         }
-        overlay.addView(topShade, new FrameLayout.LayoutParams(-1, a.dp(160), Gravity.TOP));
+        float u = modernUnit(a);
+        overlay.addView(
+                topShade,
+                new FrameLayout.LayoutParams(-1, modernTv ? vp(a, 110) : a.dp(160), Gravity.TOP));
         bottomShade = new View(a);
         if (a.isTvDevice()) {
             bottomShade.setBackground(
                     new GradientDrawable(
                             GradientDrawable.Orientation.BOTTOM_TOP,
-                            new int[] {0xb8000000, 0x00000000}));
+                            new int[] {modernTv ? 0x84000000 : 0xb8000000, 0x00000000}));
         } else {
             bottomShade.setBackgroundColor(Color.TRANSPARENT);
         }
-        overlay.addView(bottomShade, new FrameLayout.LayoutParams(-1, a.dp(210), Gravity.BOTTOM));
+        overlay.addView(
+                bottomShade,
+                new FrameLayout.LayoutParams(
+                        -1, modernTv ? vp(a, 176) : a.dp(210), Gravity.BOTTOM));
         heading = a.vertical();
         heading.setTag("player-heading");
         if (!a.isTvDevice()) {
@@ -83,13 +225,23 @@ final class PlayerChrome {
         LinearLayout titleRow = a.row();
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
         titleView = a.text(video.title, a.isPortrait() ? 20 : 26, MainActivity.WHITE);
-        titleView.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
-        titleView.getPaint().setFakeBoldText(true);
+        if (modernTv) {
+            titleView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 20.5f);
+            titleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+            titleView.setIncludeFontPadding(false);
+            titleView.setShadowLayer(u * 3f, 0, u * 1.2f, 0xaa000000);
+        } else {
+            titleView.setTypeface(Typeface.create("sans-serif", Typeface.BOLD));
+            titleView.getPaint().setFakeBoldText(true);
+            titleView.setShadowLayer(a.dp(4), 0, a.dp(2), 0xdd000000);
+        }
         titleView.setSingleLine();
         titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        titleView.setShadowLayer(a.dp(4), 0, a.dp(2), 0xdd000000);
-        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(-2, -2);
-        titleLp.rightMargin = a.dp(10);
+        LinearLayout.LayoutParams titleLp =
+                modernTv
+                        ? new LinearLayout.LayoutParams(0, -2, 1)
+                        : new LinearLayout.LayoutParams(-2, -2);
+        titleLp.rightMargin = modernTv ? vp(a, 14) : a.dp(10);
         titleRow.addView(titleView, titleLp);
         resolution = a.text("分辨率读取中", 11, 0xffeeeef2);
         resolution.setTag("player-resolution");
@@ -97,7 +249,26 @@ final class PlayerChrome {
         resolution.setEllipsize(android.text.TextUtils.TruncateAt.END);
         resolution.setPadding(a.dp(9), a.dp(3), a.dp(9), a.dp(3));
         resolution.setBackground(chromeSurface(0xb824242c, 10, 0x28ffffff));
+        if (modernTv) resolution.setVisibility(View.GONE);
         titleRow.addView(resolution, new LinearLayout.LayoutParams(-2, -2));
+        if (modernTv) {
+            lastWallClock = formatWallTime();
+            wallClock = a.text("", 15f, 0xcaf0f4fb);
+            wallClock.setTag("player-wall-clock");
+            wallClock.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 15.0f);
+            wallClock.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+            wallClock.setFontFeatureSettings("tnum");
+            if (android.os.Build.VERSION.SDK_INT >= 21) {
+                wallClock.setLetterSpacing(0.055f);
+            }
+            wallClock.setIncludeFontPadding(false);
+            wallClock.setSingleLine();
+            wallClock.setShadowLayer(u * 2.2f, 0, u * .8f, 0x66000000);
+            wallClock.setText(styledWallTime(lastWallClock));
+            titleRow.addView(wallClock, new LinearLayout.LayoutParams(-2, -2));
+        } else {
+            wallClock = null;
+        }
         heading.addView(titleRow, new LinearLayout.LayoutParams(-1, -2));
         String line = a.activeLine == null ? "" : a.activeLine.name;
         episodeLabel =
@@ -106,101 +277,195 @@ final class PlayerChrome {
         episodeLabel.setSingleLine();
         episodeLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
         episodeLabel.setPadding(0, a.dp(6), 0, 0);
+        if (modernTv) episodeLabel.setVisibility(View.GONE);
         heading.addView(episodeLabel);
         a.playStatus = a.text("正在加载所选剧集…", 12, MainActivity.MUTED);
-        a.playStatus.setPadding(0, a.dp(6), 0, 0);
+        if (modernTv) {
+            a.playStatus.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 11f);
+            a.playStatus.setPadding(0, vp(a, 3), 0, 0);
+        } else {
+            a.playStatus.setPadding(0, a.dp(6), 0, 0);
+        }
         heading.addView(a.playStatus);
         FrameLayout.LayoutParams top = new FrameLayout.LayoutParams(-1, -2, Gravity.TOP);
-        int sideMargin = a.isPortrait() ? a.dp(20) : a.dp(44);
-        top.setMargins(sideMargin, a.dp(24), sideMargin, 0);
+        int width = a.windowWidth();
+        int initialCardW = Math.max(vp(a, 260), Math.min(vp(a, 824), Math.round(width * 0.855f)));
+        int sideMargin =
+                a.isPortrait()
+                        ? a.dp(20)
+                        : (modernTv ? Math.max(vp(a, 24), (width - initialCardW) / 2) : a.dp(44));
+        top.setMargins(sideMargin, modernTv ? vp(a, 22) : a.dp(24), sideMargin, 0);
         overlay.addView(heading, top);
 
-        progress = a.vertical();
-        progress.setTag("player-progress");
-        LinearLayout clockRow = a.row();
-        a.playClock = a.text("--:-- / --:--", 12, MainActivity.WHITE);
-        a.playClock.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
-        a.playClock.setPadding(a.dp(8), 0, a.dp(12), 0);
-        clockRow.addView(a.playClock, new LinearLayout.LayoutParams(0, -2, 1));
-        seekHint = a.text("", 12, 0xffe5e7eb);
-        seekHint.setTag("player-seek-hint");
-        seekHint.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        seekHint.setPadding(a.dp(8), 0, a.dp(8), 0);
-        seekHint.setVisibility(View.GONE);
-        clockRow.addView(seekHint, new LinearLayout.LayoutParams(-2, -2));
-        if (!a.isTvDevice()) {
-            fsBtn =
-                    a.navButton(
-                            a.isPortrait() ? "⛶ 全屏横屏" : "⛶ 退出全屏",
-                            "player-fullscreen",
-                            a::togglePlayerOrientation);
-            fsBtn.setTextColor(MainActivity.WHITE);
-            fsBtn.setTextSize(12);
-            fsBtn.setMinHeight(a.dp(30));
-            fsBtn.setMinimumHeight(a.dp(30));
-            fsBtn.setPadding(a.dp(12), a.dp(4), a.dp(12), a.dp(4));
-            fsBtn.setBackground(chromeSurface(0xcc22222a, 15, 0x33ffffff));
-            clockRow.addView(fsBtn, new LinearLayout.LayoutParams(-2, a.dp(30)));
-        } else {
-            fsBtn = null;
-        }
-        progress.addView(clockRow, new LinearLayout.LayoutParams(-1, -2));
-        int width = a.windowWidth();
         boolean mobileLandscape = !a.isTvDevice() && !a.isPortrait();
-        FrameLayout.LayoutParams track;
-        if (a.isTvDevice()) {
-            track =
-                    new FrameLayout.LayoutParams(
-                            Math.min(a.dp(760), Math.max(a.dp(220), width - a.dp(48))),
-                            -2,
-                            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-            track.bottomMargin = a.dp(94);
-        } else {
-            int trackSideMargin = a.dp(mobileLandscape ? 20 : 22);
-            track =
-                    new FrameLayout.LayoutParams(
-                            Math.max(a.dp(140), width - trackSideMargin * 2),
-                            -2,
-                            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-            track.leftMargin = trackSideMargin;
-            track.rightMargin = trackSideMargin;
-            track.bottomMargin = a.dp(mobileLandscape ? 12 : 20);
-        }
-        // Browsing live channels leaves a live session available for returning.
-        // Only the currently playing source decides whether seeking is hidden.
-        progress.setVisibility(live ? View.GONE : View.VISIBLE);
-        overlay.addView(progress, track);
+        if (modernTv) {
+            fsBtn = null;
+            dock = a.vertical();
+            dock.setTag("player-dock");
+            dock.setPadding(vp(a, 20), vp(a, 12.5f), vp(a, 20), vp(a, 11.5f));
+            dock.setClipChildren(false);
+            dock.setClipToPadding(false);
+            dock.setClipToOutline(true);
+            int cardColor =
+                    a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false) ? 0xf2191b22 : 0xdc181a21;
+            dock.setBackground(modernSurface(cardColor, 19f, 0x24ffffff));
+            UiCompat.setElevation(dock, vp(a, 10));
 
-        dock = a.vertical();
-        dock.setTag("player-dock");
-        if (a.isTvDevice()) {
-            dock.setPadding(a.dp(6), a.dp(5), a.dp(6), a.dp(5));
-        } else {
-            dock.setPadding(a.dp(3), a.dp(5), a.dp(3), a.dp(5));
-        }
-        dock.setClipChildren(true);
-        dock.setClipToPadding(true);
-        dock.setClipToOutline(true);
-        dock.setBackground(chromeSurface(0xd81c1c22, a.isTvDevice() ? 26 : 24, 0x2affffff));
-        UiCompat.setElevation(dock, a.dp(10));
-        FrameLayout.LayoutParams dockLp;
-        if (a.isTvDevice()) {
-            dockLp =
+            LinearLayout headerRow = a.row();
+            headerRow.setGravity(Gravity.CENTER_VERTICAL);
+            headerRow.setClipChildren(false);
+            headerRow.setClipToPadding(false);
+            cardTitleView = a.text(formatCardTitle(video, episode), 14.5f, 0xfff5f7fb);
+            cardTitleView.setTag("player-card-title");
+            cardTitleView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 14.5f);
+            cardTitleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            cardTitleView.setIncludeFontPadding(false);
+            cardTitleView.setSingleLine(true);
+            cardTitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams ctLp = new LinearLayout.LayoutParams(0, -2, 1);
+            ctLp.rightMargin = vp(a, 14);
+            headerRow.addView(cardTitleView, ctLp);
+
+            actionHost = a.row();
+            actionHost.setTag("player-action-host");
+            actionHost.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+            actionHost.setClipChildren(false);
+            actionHost.setClipToPadding(false);
+            headerRow.addView(actionHost, new LinearLayout.LayoutParams(-2, -2));
+            dock.addView(headerRow, new LinearLayout.LayoutParams(-1, -2));
+
+            progress = a.vertical();
+            progress.setTag("player-progress");
+            progress.setClipChildren(false);
+            progress.setClipToPadding(false);
+            progress.setVisibility(live ? View.GONE : View.VISIBLE);
+            LinearLayout.LayoutParams progLp = new LinearLayout.LayoutParams(-1, -2);
+            progLp.topMargin = vp(a, 6);
+            progLp.bottomMargin = vp(a, 5);
+            dock.addView(progress, progLp);
+
+            LinearLayout metaRow = a.row();
+            metaRow.setGravity(Gravity.CENTER_VERTICAL);
+            badgeRow = a.row();
+            badgeRow.setTag("player-badges");
+            badgeRow.setGravity(Gravity.CENTER_VERTICAL);
+            metaRow.addView(badgeRow, new LinearLayout.LayoutParams(0, -2, 1));
+            renderBadgePills(java.util.Collections.singletonList(live ? "直播频道" : "准备播放"));
+
+            seekHint = a.text("", 11f, 0xffdce2ec);
+            seekHint.setTag("player-seek-hint");
+            seekHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 10.5f);
+            seekHint.setIncludeFontPadding(false);
+            seekHint.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+            seekHint.setPadding(0, 0, vp(a, 10), 0);
+            seekHint.setVisibility(View.GONE);
+            metaRow.addView(seekHint, new LinearLayout.LayoutParams(-2, -2));
+
+            a.playClock = a.text(live ? "直播" : "--:-- / --:--", 11f, 0xffe4e9f2);
+            a.playClock.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 11.0f);
+            a.playClock.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            a.playClock.setFontFeatureSettings("tnum");
+            a.playClock.setIncludeFontPadding(false);
+            a.playClock.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+            metaRow.addView(a.playClock, new LinearLayout.LayoutParams(-2, -2));
+            LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(-1, -2);
+            if (live) metaLp.topMargin = vp(a, 8);
+            dock.addView(metaRow, metaLp);
+
+            FrameLayout.LayoutParams dockLp =
                     new FrameLayout.LayoutParams(
-                            Math.min(a.dp(612), Math.max(a.dp(240), width - a.dp(32))),
-                            -2,
-                            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-            dockLp.bottomMargin = a.dp(16);
+                            initialCardW, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            dockLp.bottomMargin = vp(a, 22);
+            overlay.addView(dock, dockLp);
         } else {
-            dockLp =
-                    new FrameLayout.LayoutParams(
-                            a.dp(mobileLandscape ? 48 : 52),
-                            a.dp(mobileLandscape ? 276 : 356),
-                            Gravity.RIGHT | Gravity.BOTTOM);
-            dockLp.rightMargin = a.dp(10);
-            dockLp.bottomMargin = a.dp(mobileLandscape ? 66 : 82);
+            actionHost = null;
+            badgeRow = null;
+            cardTitleView = null;
+            progress = a.vertical();
+            progress.setTag("player-progress");
+            LinearLayout clockRow = a.row();
+            a.playClock = a.text("--:-- / --:--", 12, MainActivity.WHITE);
+            a.playClock.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+            a.playClock.setPadding(a.dp(8), 0, a.dp(12), 0);
+            clockRow.addView(a.playClock, new LinearLayout.LayoutParams(0, -2, 1));
+            seekHint = a.text("", 12, 0xffe5e7eb);
+            seekHint.setTag("player-seek-hint");
+            seekHint.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+            seekHint.setPadding(a.dp(8), 0, a.dp(8), 0);
+            seekHint.setVisibility(View.GONE);
+            clockRow.addView(seekHint, new LinearLayout.LayoutParams(-2, -2));
+            if (!a.isTvDevice()) {
+                fsBtn =
+                        a.navButton(
+                                a.isPortrait() ? "⛶ 全屏横屏" : "⛶ 退出全屏",
+                                "player-fullscreen",
+                                a::togglePlayerOrientation);
+                fsBtn.setTextColor(MainActivity.WHITE);
+                fsBtn.setTextSize(12);
+                fsBtn.setMinHeight(a.dp(30));
+                fsBtn.setMinimumHeight(a.dp(30));
+                fsBtn.setPadding(a.dp(12), a.dp(4), a.dp(12), a.dp(4));
+                fsBtn.setBackground(chromeSurface(0xcc22222a, 15, 0x33ffffff));
+                clockRow.addView(fsBtn, new LinearLayout.LayoutParams(-2, a.dp(30)));
+            } else {
+                fsBtn = null;
+            }
+            progress.addView(clockRow, new LinearLayout.LayoutParams(-1, -2));
+            FrameLayout.LayoutParams track;
+            if (a.isTvDevice()) {
+                track =
+                        new FrameLayout.LayoutParams(
+                                Math.min(a.dp(760), Math.max(a.dp(220), width - a.dp(48))),
+                                -2,
+                                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                track.bottomMargin = a.dp(94);
+            } else {
+                int trackSideMargin = a.dp(mobileLandscape ? 20 : 22);
+                track =
+                        new FrameLayout.LayoutParams(
+                                Math.max(a.dp(140), width - trackSideMargin * 2),
+                                -2,
+                                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                track.leftMargin = trackSideMargin;
+                track.rightMargin = trackSideMargin;
+                track.bottomMargin = a.dp(mobileLandscape ? 12 : 20);
+            }
+            // Browsing live channels leaves a live session available for returning.
+            // Only the currently playing source decides whether seeking is hidden.
+            progress.setVisibility(live ? View.GONE : View.VISIBLE);
+            overlay.addView(progress, track);
+
+            dock = a.vertical();
+            dock.setTag("player-dock");
+            if (a.isTvDevice()) {
+                dock.setPadding(a.dp(6), a.dp(5), a.dp(6), a.dp(5));
+            } else {
+                dock.setPadding(a.dp(3), a.dp(5), a.dp(3), a.dp(5));
+            }
+            dock.setClipChildren(true);
+            dock.setClipToPadding(true);
+            dock.setClipToOutline(true);
+            dock.setBackground(chromeSurface(0xd81c1c22, a.isTvDevice() ? 26 : 24, 0x2affffff));
+            UiCompat.setElevation(dock, a.dp(10));
+            FrameLayout.LayoutParams dockLp;
+            if (a.isTvDevice()) {
+                dockLp =
+                        new FrameLayout.LayoutParams(
+                                Math.min(a.dp(612), Math.max(a.dp(240), width - a.dp(32))),
+                                -2,
+                                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                dockLp.bottomMargin = a.dp(16);
+            } else {
+                dockLp =
+                        new FrameLayout.LayoutParams(
+                                a.dp(mobileLandscape ? 48 : 52),
+                                a.dp(mobileLandscape ? 276 : 356),
+                                Gravity.RIGHT | Gravity.BOTTOM);
+                dockLp.rightMargin = a.dp(10);
+                dockLp.bottomMargin = a.dp(mobileLandscape ? 66 : 82);
+            }
+            overlay.addView(dock, dockLp);
         }
-        overlay.addView(dock, dockLp);
 
         state = new StateGlyph();
         state.setTag("player-state");
@@ -372,12 +637,24 @@ final class PlayerChrome {
             }
         }
         if (titleView != null) {
-            titleView.setTextSize(compact ? 17 : (portrait ? 20 : 26));
+            if (modernTv) {
+                titleView.setTextSize(
+                        android.util.TypedValue.COMPLEX_UNIT_PX, modernUnit(a) * 20.5f);
+            } else {
+                titleView.setTextSize(compact ? 17 : (portrait ? 20 : 26));
+            }
         }
         boolean ultraShort = !a.isTvDevice() && height < a.dp(325);
         episodeLabel.setTextSize(compact ? 12f : 13.5f);
-        episodeLabel.setVisibility(ultraShort ? View.GONE : View.VISIBLE);
-        if (a.playStatus != null) a.playStatus.setVisibility(compact ? View.GONE : View.VISIBLE);
+        episodeLabel.setVisibility(modernTv || ultraShort ? View.GONE : View.VISIBLE);
+        if (a.playStatus != null) {
+            a.playStatus.setVisibility(
+                    compact
+                            ? View.GONE
+                            : (modernTv && a.prepared && a.playing && !loading
+                                    ? View.GONE
+                                    : View.VISIBLE));
+        }
         if (fsBtn != null) {
             fsBtn.setText(portrait ? "⛶ 全屏横屏" : "⛶ 退出全屏");
         }
@@ -399,7 +676,34 @@ final class PlayerChrome {
                 state.setLayoutParams(cLp);
             }
         }
-        if (a.isTvDevice()) {
+        if (modernTv) {
+            float u = modernUnit(a);
+            if (wallClock != null) {
+                wallClock.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 15.0f);
+            }
+            if (cardTitleView != null) {
+                cardTitleView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 14.5f);
+            }
+            if (a.playClock != null) {
+                a.playClock.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 11.0f);
+            }
+            if (seekHint != null) {
+                seekHint.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 10.5f);
+            }
+            dock.setPadding(vp(a, 20), vp(a, 12.5f), vp(a, 20), vp(a, 11.5f));
+            int cardWidth = Math.max(vp(a, 260), Math.min(vp(a, 824), Math.round(width * 0.855f)));
+            place(
+                    dock,
+                    cardWidth,
+                    -2,
+                    Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL,
+                    0,
+                    0,
+                    0,
+                    vp(a, 22));
+            int side = Math.max(vp(a, 24), (width - cardWidth) / 2);
+            place(heading, -1, -2, Gravity.TOP, side, Math.min(vp(a, 22), height / 8), side, 0);
+        } else if (a.isTvDevice()) {
             dock.setPadding(a.dp(6), a.dp(5), a.dp(6), a.dp(5));
             int edge = Math.min(a.dp(16), width / 8);
             int maxDock = a.dp(612);
@@ -512,6 +816,9 @@ final class PlayerChrome {
         String lineName = line == null || line.name == null ? "" : line.name;
         String epName = episode == null || episode.name == null ? "" : episode.name;
         episodeLabel.setText(epName + (lineName.isEmpty() ? "" : "  ·  " + lineName));
+        if (cardTitleView != null) {
+            cardTitleView.setText(formatCardTitle(chromeVideo, episode));
+        }
         resolution.setText("分辨率读取中");
         String statusMsg = "正在加载" + (epName.isEmpty() ? "" : " " + epName) + "…";
         if (a.playStatus != null) a.playStatus.setText(statusMsg);
@@ -526,7 +833,12 @@ final class PlayerChrome {
         int otherVis = progressOnly ? View.INVISIBLE : View.VISIBLE;
         topShade.setVisibility(otherVis);
         heading.setVisibility(otherVis);
-        dock.setVisibility(otherVis);
+        if (modernTv) {
+            dock.setVisibility(View.VISIBLE);
+            if (actionHost != null) actionHost.setVisibility(otherVis);
+        } else {
+            dock.setVisibility(otherVis);
+        }
         seekHint.setVisibility(progressOnly ? View.VISIBLE : View.GONE);
         update();
         if (a.playbackControls != null) {
@@ -536,10 +848,41 @@ final class PlayerChrome {
 
     void update() {
         if (a.prepared) loading = false;
-        if (a.player != null && a.prepared) resolution.setText(a.player.videoResolution());
+        if (wallClock != null) {
+            String now = formatWallTime();
+            if (!now.equals(lastWallClock)) {
+                lastWallClock = now;
+                wallClock.setText(styledWallTime(now));
+            }
+        }
+        if (a.player != null && a.prepared) {
+            resolution.setText(a.player.videoResolution());
+            if (modernTv) {
+                java.util.List<String> badges = a.player.mediaBadges();
+                if (badges != null && !badges.isEmpty()) renderBadgePills(badges);
+            }
+        }
+        if (modernTv && a.playStatus != null) {
+            a.playStatus.setVisibility(
+                    loading || !a.prepared || !a.playing ? View.VISIBLE : View.GONE);
+        }
+        if (modernTv && cardTitleView != null && a.activeEpisode != null) {
+            String expected = formatCardTitle(chromeVideo, a.activeEpisode);
+            if (!expected.contentEquals(cardTitleView.getText())) {
+                cardTitleView.setText(expected);
+            }
+        }
+        if (a.playbackControls != null) {
+            a.playbackControls.refreshPlayPauseGlyph();
+        }
         boolean showSpinner = loading && !a.prepared && a.playbackLoading == null && !a.miniMode;
         loadingPill.setVisibility(showSpinner ? View.VISIBLE : View.GONE);
-        int stateVis = showSpinner ? View.GONE : (progressOnlyMode ? View.INVISIBLE : View.VISIBLE);
+        int stateVis =
+                showSpinner
+                        ? View.GONE
+                        : (progressOnlyMode
+                                ? View.INVISIBLE
+                                : (modernTv && a.prepared && a.playing ? View.GONE : View.VISIBLE));
         state.setVisibility(stateVis);
         if (centerRow != null) centerRow.setVisibility(stateVis);
         state.setContentDescription(!a.prepared ? "正在准备" : a.playing ? "正在播放，确认暂停" : "已暂停，确认继续");

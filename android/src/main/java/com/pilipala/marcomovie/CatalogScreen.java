@@ -1,8 +1,10 @@
 package com.pilipala.marcomovie;
 
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
@@ -243,6 +245,65 @@ final class CatalogScreen {
         a.resolvePlayer(site, video, line, episode);
     }
 
+    private static String historyProgressBadge(WatchHistory.Entry e) {
+        if (e.complete()) return "已看完";
+        if (e.duration > 0) {
+            int pct = Math.max(1, Math.min(99, Math.round(e.position * 100f / e.duration)));
+            return "已看 " + pct + "%";
+        }
+        if (e.position > 0) return "已看 " + PlaybackController.formatTime(e.position);
+        return "刚刚观看";
+    }
+
+    private static String historyTimeSummary(WatchHistory.Entry e) {
+        String ep = e.episode == null ? "" : e.episode.trim();
+        if (e.complete()) return ep.isEmpty() ? "已看完" : ep + " · 已看完";
+        if (e.duration > 0)
+            return PlaybackController.formatTime(e.position)
+                    + " / "
+                    + PlaybackController.formatTime(e.duration);
+        if (e.position > 0) return "观看至 " + PlaybackController.formatTime(e.position);
+        return ep.isEmpty() ? "继续观看" : ep;
+    }
+
+    private static void confirmClearHistory(MainActivity a) {
+        new AppDialog.Builder(a)
+                .setTitle("清空观看历史？")
+                .setMessage("只清除本机观看记录，保留配置和账号。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton(
+                        "清空",
+                        (d, n) -> {
+                            a.prefs.edit().remove(Prefs.WATCH_HISTORY).apply();
+                            a.refresh();
+                        })
+                .show();
+    }
+
+    private static void manageHistoryEntry(MainActivity a, WatchHistory.Entry e) {
+        new AppDialog.Builder(a)
+                .setTitle(e.title == null || e.title.isEmpty() ? "观看记录" : e.title)
+                .setItems(
+                        new String[] {"继续观看", "移除此记录"},
+                        (d, n) -> {
+                            if (n == 0) resumeHistory(a, e);
+                            else {
+                                a.prefs
+                                        .edit()
+                                        .putString(
+                                                Prefs.WATCH_HISTORY,
+                                                WatchHistory.remove(
+                                                        a.prefs.getString(
+                                                                Prefs.WATCH_HISTORY, "[]"),
+                                                        e.key()))
+                                        .apply();
+                                a.refresh();
+                            }
+                        })
+                .setNegativeButton("返回", null)
+                .show();
+    }
+
     static void historyPage(MainActivity a) {
         a.renderPage("观看历史", "CONTINUE WATCHING");
         List<WatchHistory.Entry> entries = a.watchHistory();
@@ -250,26 +311,185 @@ final class CatalogScreen {
             a.paragraph("播放后会在这里记录集数和进度。");
             return;
         }
-        a.addButton(
-                a.body,
-                a.navButton(
-                        "清空观看历史",
-                        "history-clear",
-                        () ->
-                                new AppDialog.Builder(a)
-                                        .setTitle("清空观看历史？")
-                                        .setMessage("只清除本机观看记录，保留配置和账号。")
-                                        .setNegativeButton("取消", null)
-                                        .setPositiveButton(
-                                                "清空",
-                                                (d, n) -> {
-                                                    a.prefs
-                                                            .edit()
-                                                            .remove(Prefs.WATCH_HISTORY)
-                                                            .apply();
-                                                    a.refresh();
-                                                })
-                                        .show()));
+        if (a.isTvDevice()) {
+            LinearLayout topBar = a.row();
+            topBar.setClipChildren(false);
+            topBar.setClipToPadding(false);
+            topBar.setGravity(Gravity.CENTER_VERTICAL);
+            TextView summary =
+                    a.text(entries.size() + " 部观看记录 · 确认继续观看，长按确认或按菜单键管理", 13, MainActivity.MUTED);
+            topBar.addView(summary, new LinearLayout.LayoutParams(0, -2, 1));
+            Button clearBtn = a.navButton("清空观看历史", "history-clear", () -> confirmClearHistory(a));
+            topBar.addView(clearBtn, new LinearLayout.LayoutParams(-2, a.dp(36)));
+            a.body.addView(topBar, new LinearLayout.LayoutParams(-1, -2));
+            a.gap(a.body, 10);
+
+            float screen = a.windowWidth() / a.getResources().getDisplayMetrics().density;
+            int columns = Math.max(4, Math.min(6, a.prefs.getInt(Prefs.HOME_COLUMNS, 6)));
+            int width = Math.max(108, (int) ((screen - 92) / columns) - 20);
+            int height = Math.round(width * 1.5f);
+            LinearLayout row = null;
+            for (int i = 0; i < entries.size(); i++) {
+                final WatchHistory.Entry e = entries.get(i);
+                if (i % columns == 0) {
+                    row = a.row();
+                    row.setGravity(Gravity.TOP);
+                    row.setClipChildren(false);
+                    row.setClipToPadding(false);
+                    a.body.addView(row);
+                }
+                LinearLayout card = a.vertical();
+                card.setPadding(a.dp(5), a.dp(5), a.dp(5), a.dp(8));
+                card.setGravity(Gravity.CENTER_HORIZONTAL);
+                card.setClipChildren(false);
+                card.setClipToPadding(false);
+                card.setId(View.generateViewId());
+                card.setTag("history:" + e.key());
+                card.setFocusable(true);
+                card.setFocusableInTouchMode(true);
+                card.setClickable(true);
+
+                FrameLayout art = new FrameLayout(a);
+                GradientDrawable artBg =
+                        new GradientDrawable(
+                                GradientDrawable.Orientation.TL_BR,
+                                new int[] {0xff282d38, 0xff171a22});
+                artBg.setCornerRadius(a.dp(10));
+                art.setBackground(artBg);
+                art.setClipToOutline(true);
+
+                TextView fallback =
+                        a.text(
+                                e.title == null || e.title.isEmpty() ? "影片" : e.title,
+                                13,
+                                0x55ffffff);
+                fallback.setGravity(Gravity.CENTER);
+                fallback.setMaxLines(2);
+                fallback.setEllipsize(TextUtils.TruncateAt.END);
+                fallback.setPadding(a.dp(12), a.dp(12), a.dp(12), a.dp(28));
+                art.addView(fallback, new FrameLayout.LayoutParams(-1, -1));
+
+                ImageView poster = new ImageView(a);
+                poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                art.addView(poster, new FrameLayout.LayoutParams(-1, -1));
+                a.poster(e.poster, poster);
+
+                String ep = e.episode == null ? "" : e.episode.trim();
+                if (!ep.isEmpty()) {
+                    TextView epBadge = a.text(ep, 10.5f, 0xffedf1f7);
+                    epBadge.setSingleLine(true);
+                    epBadge.setEllipsize(TextUtils.TruncateAt.END);
+                    epBadge.setMaxWidth(a.dp(Math.max(48, width - 16)));
+                    epBadge.setPadding(a.dp(7), a.dp(2.5f), a.dp(7), a.dp(2.5f));
+                    GradientDrawable badgeBg = new GradientDrawable();
+                    badgeBg.setColor(0xd214171f);
+                    badgeBg.setCornerRadius(a.dp(6));
+                    badgeBg.setStroke(Math.max(1, a.dp(.8f)), 0x24ffffff);
+                    epBadge.setBackground(badgeBg);
+                    FrameLayout.LayoutParams bp =
+                            new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
+                    bp.setMargins(a.dp(6), a.dp(6), a.dp(6), 0);
+                    art.addView(epBadge, bp);
+                }
+
+                LinearLayout overlay = a.vertical();
+                overlay.setGravity(Gravity.BOTTOM);
+                overlay.setPadding(a.dp(8), a.dp(14), a.dp(8), a.dp(7));
+                GradientDrawable scrim =
+                        new GradientDrawable(
+                                GradientDrawable.Orientation.TOP_BOTTOM,
+                                new int[] {0x00000000, 0xaa0e1016, 0xeb0b0d12});
+                overlay.setBackground(scrim);
+
+                TextView progLabel = a.text(historyProgressBadge(e), 10.5f, 0xfff3f5f9);
+                progLabel.setTypeface(null, Typeface.BOLD);
+                progLabel.setSingleLine(true);
+                progLabel.setEllipsize(TextUtils.TruncateAt.END);
+                overlay.addView(progLabel, new LinearLayout.LayoutParams(-1, -2));
+
+                FrameLayout track = new FrameLayout(a);
+                track.setBackground(a.bg(0x3affffff, 2));
+                LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(-1, a.dp(3.5f));
+                tp.topMargin = a.dp(4);
+                float ratio =
+                        e.complete()
+                                ? 1f
+                                : e.duration > 0
+                                        ? Math.max(
+                                                .04f, Math.min(1f, (float) e.position / e.duration))
+                                        : (e.position > 0 ? .18f : 0f);
+                if (ratio > 0f) {
+                    View fill = new View(a);
+                    fill.setBackground(a.bg(0xfff5f7fb, 2));
+                    int barInnerPx = Math.max(a.dp(6), a.dp(width - 16));
+                    int fillPx = Math.max(a.dp(4), Math.round(barInnerPx * ratio));
+                    track.addView(fill, new FrameLayout.LayoutParams(fillPx, -1, Gravity.LEFT));
+                }
+                overlay.addView(track, tp);
+                art.addView(overlay, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+
+                card.addView(art, new LinearLayout.LayoutParams(a.dp(width), a.dp(height)));
+
+                TextView title =
+                        a.text(
+                                e.title == null || e.title.isEmpty() ? "未命名影片" : e.title,
+                                13,
+                                MainActivity.WHITE);
+                title.setSingleLine(true);
+                title.setEllipsize(TextUtils.TruncateAt.END);
+                title.setPadding(a.dp(2), a.dp(8), a.dp(2), 0);
+                card.addView(title, new LinearLayout.LayoutParams(-1, -2));
+
+                TextView sub = a.text(historyTimeSummary(e), 11, MainActivity.MUTED);
+                sub.setSingleLine(true);
+                sub.setEllipsize(TextUtils.TruncateAt.END);
+                sub.setPadding(a.dp(2), a.dp(2), a.dp(2), 0);
+                card.addView(sub, new LinearLayout.LayoutParams(-1, -2));
+
+                card.setOnClickListener(v -> resumeHistory(a, e));
+                card.setOnLongClickListener(
+                        v -> {
+                            manageHistoryEntry(a, e);
+                            return true;
+                        });
+                a.pressFeedback(card);
+                card.setOnKeyListener(
+                        (v, key, event) -> {
+                            if (key == KeyEvent.KEYCODE_MENU) {
+                                if (event.getAction() == KeyEvent.ACTION_UP)
+                                    manageHistoryEntry(a, e);
+                                return true;
+                            }
+                            return false;
+                        });
+                card.setOnFocusChangeListener(
+                        (v, f) ->
+                                FocusMotion.style(
+                                        a,
+                                        card,
+                                        f,
+                                        0,
+                                        0xff29292f,
+                                        14,
+                                        MainActivity.WHITE,
+                                        MainActivity.WHITE,
+                                        true,
+                                        1.035f));
+                LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, -2, 1);
+                size.setMargins(a.dp(4), a.dp(5), a.dp(4), a.dp(16));
+                row.addView(card, size);
+                if (i == 0 && a.current != null && a.current.focus == null)
+                    a.ui.post(card::requestFocus);
+            }
+            if (row != null)
+                for (int i = entries.size() % columns; i > 0 && i < columns; i++) {
+                    LinearLayout.LayoutParams blank = new LinearLayout.LayoutParams(0, 1, 1);
+                    blank.setMargins(a.dp(4), a.dp(5), a.dp(4), a.dp(16));
+                    row.addView(new View(a), blank);
+                }
+            return;
+        }
+        a.addButton(a.body, a.navButton("清空观看历史", "history-clear", () -> confirmClearHistory(a)));
         for (WatchHistory.Entry e : entries) {
             LinearLayout line = a.row();
             line.setClipChildren(false);

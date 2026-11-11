@@ -44,17 +44,55 @@ final class HomeAmbient extends View {
                     if (image != wanted
                             || !isAttachedToWindow()
                             || !(image.getDrawable() instanceof BitmapDrawable)) return;
+                    if (!a.reduced
+                            && a.scroll instanceof TvScrollView
+                            && ((TvScrollView) a.scroll).motion != null) {
+                        posterReady(image);
+                        return;
+                    }
                     Bitmap bitmap = ((BitmapDrawable) image.getDrawable()).getBitmap();
                     if (bitmap == null || bitmap.isRecycled()) return;
                     String key = String.valueOf(image.getTag());
-                    int[] target = colors.get(key);
-                    if (target == null) {
-                        target = new int[] {sample(bitmap, 0), sample(bitmap, 1)};
-                        colors.put(key, target);
+                    int[] cached = colors.get(key);
+                    if (cached != null) {
+                        if (left == cached[0] && right == cached[1]) return;
+                        if (a.reduced) {
+                            transition(cached[0], cached[1]);
+                        } else {
+                            final int c0 = cached[0], c1 = cached[1];
+                            a.artwork.execute(
+                                    () -> {
+                                        Bitmap nextField = field(c0, c1);
+                                        post(
+                                                () -> {
+                                                    if (image == wanted && isAttachedToWindow())
+                                                        transitionReady(c0, c1, nextField);
+                                                });
+                                    });
+                        }
+                        return;
                     }
-                    transition(target[0], target[1]);
+                    if (a.reduced) {
+                        int[] target = new int[] {sample(bitmap, 0), sample(bitmap, 1)};
+                        colors.put(key, target);
+                        transition(target[0], target[1]);
+                        return;
+                    }
+                    a.artwork.execute(
+                            () -> {
+                                if (bitmap.isRecycled()) return;
+                                final int c0 = sample(bitmap, 0), c1 = sample(bitmap, 1);
+                                final int[] target = new int[] {c0, c1};
+                                colors.put(key, target);
+                                final Bitmap nextField = field(c0, c1);
+                                post(
+                                        () -> {
+                                            if (image == wanted && isAttachedToWindow())
+                                                transitionReady(c0, c1, nextField);
+                                        });
+                            });
                 };
-        postDelayed(pending, a.reduced ? 0 : 160);
+        postDelayed(pending, a.reduced ? 0 : 240);
     }
 
     static int sample(Bitmap bitmap, int side) {
@@ -136,6 +174,11 @@ final class HomeAmbient extends View {
 
     void transition(int first, int second) {
         if (left == first && right == second) return;
+        transitionReady(first, second, field(first, second));
+    }
+
+    void transitionReady(int first, int second, Bitmap nextField) {
+        if (left == first && right == second) return;
         cancelAnimation();
         applied++;
         // Retarget from the displayed blend, including rapid remote moves.
@@ -151,7 +194,7 @@ final class HomeAmbient extends View {
         } else from = to;
         left = first;
         right = second;
-        to = field(first, second);
+        to = nextField;
         fraction = 0;
         if (a.reduced) {
             fraction = 1;
@@ -161,13 +204,12 @@ final class HomeAmbient extends View {
             return;
         }
         animation = ValueAnimator.ofFloat(0, 1);
-        animation.setDuration(650);
+        animation.setDuration(560);
         animation.setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator());
         animation.addUpdateListener(
                 v -> {
                     fraction = (Float) v.getAnimatedValue();
                     invalidate();
-                    com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
                 });
         animation.addListener(
                 new AnimatorListenerAdapter() {
@@ -175,6 +217,7 @@ final class HomeAmbient extends View {
                         if (animation == animator) {
                             animation = null;
                             from = null;
+                            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
                         }
                     }
                 });

@@ -1813,17 +1813,14 @@ final class PlaybackController {
                         || key == KeyEvent.KEYCODE_MENU)) {
             if (down) {
                 showControls(a, true, false);
-                if (a.playbackControls != null)
-                    a.playbackControls.buttons.get("next-episode").requestFocus();
+                if (a.playbackControls != null) a.playbackControls.focusPrimaryAction();
             }
             return true;
         }
         if (a.controlsVisible && key == KeyEvent.KEYCODE_MENU) {
             if (down && event.getRepeatCount() == 0) {
-                if (a.playbackControls != null
-                        && focus == a.playbackControls.timeline
-                        && a.playbackControls.buttons.get("next-episode") != null) {
-                    a.playbackControls.buttons.get("next-episode").requestFocus();
+                if (a.playbackControls != null && focus == a.playbackControls.timeline) {
+                    a.playbackControls.focusPrimaryAction();
                 } else {
                     showControls(a, false);
                 }

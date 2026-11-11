@@ -923,6 +923,103 @@ public class MoviePlayer {
                 });
     }
 
+    public java.util.List<String> mediaBadges() {
+        return onMain(
+                () -> {
+                    java.util.List<String> out = new java.util.ArrayList<>(4);
+                    if (released) return out;
+                    androidx.media3.common.Format vf = exo.getVideoFormat();
+                    androidx.media3.common.Format af = exo.getAudioFormat();
+                    int w = vf != null && vf.width > 0 ? vf.width : exo.getVideoSize().width;
+                    int h = vf != null && vf.height > 0 ? vf.height : exo.getVideoSize().height;
+                    int longEdge = Math.max(w, h);
+                    String tier =
+                            longEdge >= 3800
+                                    ? "4K"
+                                    : longEdge >= 2500
+                                            ? "2K"
+                                            : longEdge >= 1900
+                                                    ? "1080P"
+                                                    : longEdge >= 1200
+                                                            ? "720P"
+                                                            : (w > 0 && h > 0 ? h + "P" : "");
+                    String vMime =
+                            vf != null && vf.sampleMimeType != null
+                                    ? vf.sampleMimeType.toLowerCase(Locale.ROOT)
+                                    : "";
+                    String vCodecs =
+                            vf != null && vf.codecs != null
+                                    ? vf.codecs.toLowerCase(Locale.ROOT)
+                                    : "";
+                    boolean isDv =
+                            vMime.contains("dolby-vision")
+                                    || vCodecs.contains("dvhe")
+                                    || vCodecs.contains("dvh1")
+                                    || vCodecs.contains("dav1");
+                    String dvProfile = "";
+                    if (isDv) {
+                        java.util.regex.Matcher m =
+                                java.util.regex.Pattern.compile("(?:dvhe|dvh1|dav1)\\.0*(\\d+)")
+                                        .matcher(vCodecs);
+                        if (m.find()) dvProfile = "P" + m.group(1);
+                    }
+                    if (!dvProfile.isEmpty() && !tier.isEmpty()) {
+                        out.add("DOLBY " + dvProfile + " · " + tier);
+                    } else if (!tier.isEmpty()) {
+                        out.add(tier);
+                    }
+
+                    if (isDv) {
+                        out.add("DOLBY VISION");
+                    } else if (vf != null
+                            && vf.colorInfo != null
+                            && androidx.media3.common.ColorInfo.isTransferHdr(vf.colorInfo)) {
+                        out.add(
+                                vf.colorInfo.colorTransfer == C.COLOR_TRANSFER_HLG
+                                        ? "HLG HDR"
+                                        : "HDR10");
+                    } else if (vf != null) {
+                        String vc = shortVideoCodec(vf.sampleMimeType);
+                        if (!vc.isEmpty() && !"杜比视界".equals(vc)) out.add(vc);
+                    }
+
+                    if (af != null && af.sampleMimeType != null) {
+                        String am = af.sampleMimeType.toLowerCase(Locale.ROOT);
+                        int ch = af.channelCount;
+                        String chTag =
+                                ch >= 8
+                                        ? " 7.1"
+                                        : ch == 6
+                                                ? " 5.1"
+                                                : ch == 2
+                                                        ? " 2.0"
+                                                        : ch == 1
+                                                                ? " 1.0"
+                                                                : (ch > 0 ? " " + ch + "CH" : "");
+                        if (am.contains("eac3-joc")) out.add("DD+ ATMOS" + chTag);
+                        else if (am.contains("eac3")) out.add("DD+" + chTag);
+                        else if (am.contains("ac3")) out.add("DOLBY AUDIO" + chTag);
+                        else if (am.contains("truehd")) out.add("TRUEHD" + chTag);
+                        else if (am.contains("vnd.dts.hd")) out.add("DTS-HD" + chTag);
+                        else if (am.contains("dts")) out.add("DTS" + chTag);
+                        else if (am.contains("flac")) out.add("FLAC" + chTag);
+                        else if (am.contains("opus")) out.add("OPUS" + chTag);
+                        else if (am.contains("mp4a") || am.contains("aac")) out.add("AAC" + chTag);
+                        else if (am.contains("mpeg") || am.contains("mp3")) out.add("MP3");
+                    }
+
+                    String dec = videoDecoder == null ? "" : videoDecoder.toLowerCase(Locale.ROOT);
+                    boolean swDec =
+                            dec.contains("ffmpeg")
+                                    || dec.contains("dav1d")
+                                    || dec.contains("libvpx")
+                                    || dec.startsWith("c2.android.")
+                                    || dec.startsWith("omx.google.");
+                    out.add(ijkMode ? "IJK 播放" : (swDec ? "软解播放" : "原生播放"));
+                    return out;
+                });
+    }
+
     public int getVideoHeight() {
         return onMain(() -> released ? 0 : exo.getVideoSize().height);
     }

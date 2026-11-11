@@ -644,6 +644,31 @@ public final class SystemPlayer extends MoviePlayer {
     }
 
     @Override
+    public List<String> mediaBadges() {
+        return onMain(
+                () -> {
+                    List<String> out = new ArrayList<>(2);
+                    if (released) return out;
+                    int longEdge = Math.max(width, height);
+                    String tier =
+                            longEdge >= 3800
+                                    ? "4K"
+                                    : longEdge >= 2500
+                                            ? "2K"
+                                            : longEdge >= 1900
+                                                    ? "1080P"
+                                                    : longEdge >= 1200
+                                                            ? "720P"
+                                                            : (width > 0 && height > 0
+                                                                    ? height + "P"
+                                                                    : "");
+                    if (!tier.isEmpty()) out.add(tier);
+                    out.add("系统播放");
+                    return out;
+                });
+    }
+
+    @Override
     public void release() {
         onMain(
                 () -> {

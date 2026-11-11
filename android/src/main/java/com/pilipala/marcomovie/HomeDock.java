@@ -48,7 +48,7 @@ final class HomeDock {
                     }
                 };
         rail.setOrientation(horizontal ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
-        selection = new GlassSelection(a, rail);
+        selection = new GlassSelection(a, rail, 10.5f * navScale, true);
         rail.setTag("home-dock");
         rail.setGravity(Gravity.CENTER);
         rail.setClipChildren(false);
@@ -137,15 +137,14 @@ final class HomeDock {
                         FocusMotion.style(
                                 a,
                                 icon,
-                                false,
+                                focused,
                                 Color.TRANSPARENT,
                                 Color.TRANSPARENT,
-                                // Half of the cell or more: a true circle, not a squircle.
-                                Math.max(24, (cellDp + 2) / 2),
+                                Math.max(8, Math.round(10.5f * navScale)),
                                 MainActivity.WHITE,
                                 MainActivity.WHITE,
                                 false,
-                                1f);
+                                1.04f);
                         icon.setBackground(null);
                         if (focused) selection.select(icon);
                         if (focused && !bottomMode) showLabel(index);
@@ -285,6 +284,8 @@ final class HomeDock {
 
     final class LabelBubble extends android.graphics.drawable.Drawable {
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final RectF box = new RectF();
+        final Path tip = new Path();
 
         @Override
         public void draw(Canvas c) {
@@ -292,35 +293,40 @@ final class HomeDock {
             if (horizontal) {
                 if (topMode) {
                     float edge = b.top + a.dp(4);
-                    paint.setColor(0xff303036);
+                    box.set(b.left, edge, b.right, b.bottom);
+                    float corner = Math.min(box.width(), box.height()) * .5f;
+                    paint.setColor(0xe8252830);
                     paint.setStyle(Paint.Style.FILL);
-                    c.drawRoundRect(
-                            new RectF(b.left, edge, b.right, b.bottom), a.dp(9), a.dp(9), paint);
-                    Path point = new Path();
-                    point.moveTo(b.exactCenterX() - a.dp(4), edge + a.dp(1));
-                    point.lineTo(b.exactCenterX(), b.top);
-                    point.lineTo(b.exactCenterX() + a.dp(4), edge + a.dp(1));
-                    point.close();
-                    c.drawPath(point, paint);
+                    c.drawRoundRect(box, corner, corner, paint);
+                    tip.reset();
+                    tip.moveTo(b.exactCenterX() - a.dp(4), edge + a.dp(1));
+                    tip.lineTo(b.exactCenterX(), b.top);
+                    tip.lineTo(b.exactCenterX() + a.dp(4), edge + a.dp(1));
+                    tip.close();
+                    c.drawPath(tip, paint);
                     return;
                 }
                 float edge = b.bottom - a.dp(4);
-                paint.setColor(0xff303036);
+                box.set(b.left, b.top, b.right, edge);
+                float corner = Math.min(box.width(), box.height()) * .5f;
+                paint.setColor(0xe8252830);
                 paint.setStyle(Paint.Style.FILL);
-                c.drawRoundRect(new RectF(b.left, b.top, b.right, edge), a.dp(9), a.dp(9), paint);
-                Path point = new Path();
-                point.moveTo(b.exactCenterX() - a.dp(4), edge - a.dp(1));
-                point.lineTo(b.exactCenterX(), b.bottom);
-                point.lineTo(b.exactCenterX() + a.dp(4), edge - a.dp(1));
-                point.close();
-                c.drawPath(point, paint);
+                c.drawRoundRect(box, corner, corner, paint);
+                tip.reset();
+                tip.moveTo(b.exactCenterX() - a.dp(4), edge - a.dp(1));
+                tip.lineTo(b.exactCenterX(), b.bottom);
+                tip.lineTo(b.exactCenterX() + a.dp(4), edge - a.dp(1));
+                tip.close();
+                c.drawPath(tip, paint);
                 return;
             }
             float edge = b.right - a.dp(4), middle = b.exactCenterY();
-            paint.setColor(0xff303036);
+            box.set(b.left, b.top, edge, b.bottom);
+            float corner = Math.min(box.width(), box.height()) * .5f;
+            paint.setColor(0xe8252830);
             paint.setStyle(Paint.Style.FILL);
-            c.drawRoundRect(new RectF(b.left, b.top, edge, b.bottom), a.dp(9), a.dp(9), paint);
-            Path tip = new Path();
+            c.drawRoundRect(box, corner, corner, paint);
+            tip.reset();
             tip.moveTo(edge - a.dp(1), middle - a.dp(4));
             tip.lineTo(b.right, middle);
             tip.lineTo(edge - a.dp(1), middle + a.dp(4));

@@ -7,7 +7,8 @@ import android.widget.ScrollView;
 /** A single focus reveal policy; retargeting retains position and velocity. */
 final class TvScrollView extends ScrollView {
     final MainActivity a;
-    final MotionSpring spring = new MotionSpring(0, 18, .35f);
+    final MotionSpring spring = new MotionSpring(0, 20, .4f);
+    final Rect tempRect = new Rect();
     MotionLoop.Step motion;
     boolean focusing, layingOut;
     boolean readingMode, readingFocus;
@@ -73,7 +74,7 @@ final class TvScrollView extends ScrollView {
                     }
                     boolean moving = spring.step(seconds);
                     int next = bound(Math.round(spring.value));
-                    TvScrollView.super.scrollTo(0, next);
+                    if (next != getScrollY()) TvScrollView.super.scrollTo(0, next);
                     if (!moving) {
                         motion = null;
                         return false;
@@ -85,9 +86,9 @@ final class TvScrollView extends ScrollView {
 
     void reveal(View focused) {
         if (focused == null || getHeight() == 0) return;
-        Rect area = new Rect(0, 0, focused.getWidth(), focused.getHeight());
-        offsetDescendantRectToMyCoords(focused, area);
-        reveal(area);
+        tempRect.set(0, 0, focused.getWidth(), focused.getHeight());
+        offsetDescendantRectToMyCoords(focused, tempRect);
+        reveal(tempRect);
     }
 
     void reveal(Rect area) {

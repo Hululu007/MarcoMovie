@@ -185,14 +185,20 @@ public final class ReviewFixChecks {
                 "image memory cache budget scales within 10MB..32MB bounds");
 
         check(
-                Prefs.KEYS.length == 37,
-                "backup settings key table includes TV dock position, tunneled playback, and existing appearance settings");
+                Prefs.KEYS.length == 38,
+                "backup settings key table includes TV dock position, TV player style, tunneled playback, and existing appearance settings");
         check(
                 Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_DOCK_POSITION, 0))
                         && Integer.valueOf(1)
                                 .equals(Prefs.sanitizeSetting(Prefs.TV_DOCK_POSITION, 1))
                         && Prefs.sanitizeSetting(Prefs.TV_DOCK_POSITION, 2) == null,
                 "TV dock position round-trips only right and top");
+        check(
+                Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_PLAYER_STYLE, 0))
+                        && Integer.valueOf(1)
+                                .equals(Prefs.sanitizeSetting(Prefs.TV_PLAYER_STYLE, 1))
+                        && Prefs.sanitizeSetting(Prefs.TV_PLAYER_STYLE, 2) == null,
+                "TV player style round-trips only modern card and classic dual-bar");
         check(
                 Prefs.clampSubtitleWeight(-10) == 0
                         && Prefs.clampSubtitleWeight(120) == 100
