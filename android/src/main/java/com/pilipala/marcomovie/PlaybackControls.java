@@ -1368,6 +1368,7 @@ final class PlaybackControls {
         final Dialog drawer = new Dialog(a);
         drawer.requestWindowFeature(Window.FEATURE_NO_TITLE);
         if (drawer.getWindow() != null) {
+            drawer.getWindow().getDecorView().setTag("app-dialog");
             drawer.getWindow()
                     .setBackgroundDrawable(
                             new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
@@ -1464,6 +1465,7 @@ final class PlaybackControls {
         final Dialog dlg = new Dialog(a);
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
         if (dlg.getWindow() != null) {
+            dlg.getWindow().getDecorView().setTag("app-dialog");
             dlg.getWindow()
                     .setBackgroundDrawable(
                             new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
@@ -2307,6 +2309,7 @@ final class PlaybackControls {
         final Dialog dlg = new Dialog(a);
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
         if (dlg.getWindow() != null) {
+            dlg.getWindow().getDecorView().setTag("app-dialog");
             dlg.getWindow()
                     .setBackgroundDrawable(
                             new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));

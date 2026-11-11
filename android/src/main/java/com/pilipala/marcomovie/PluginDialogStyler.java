@@ -52,6 +52,8 @@ final class PluginDialogStyler {
             Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
     private static final Set<View> STYLED_LIST_VIEWS =
             Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
+    private static final Set<View> STYLED_LIST_ITEMS =
+            Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
     private static final int[] WATCH_DELAYS_MS = {0, 45, 120, 260, 520, 950, 1600, 2400};
 
     private PluginDialogStyler() {}
@@ -107,28 +109,34 @@ final class PluginDialogStyler {
 
     private static boolean isAppOwnedWindow(View decor) {
         Object tag = decor.getTag();
-        if ("app-dialog".equals(tag)
-                || "source-picker".equals(tag)
-                || "player-bubble".equals(tag)) {
+        if (isAppOwnedTagValue(tag)) {
             return true;
         }
-        return containsAppOwnedTag(decor, 0);
+        return containsAppOwnedMarker(decor, 0);
     }
 
-    private static boolean containsAppOwnedTag(View v, int depth) {
-        if (v == null || depth > 4) return false;
-        Object tag = v.getTag();
-        if ("app-dialog".equals(tag)
+    private static boolean isAppOwnedTagValue(Object tag) {
+        return "app-dialog".equals(tag)
                 || "source-picker".equals(tag)
                 || "player-bubble".equals(tag)
-                || "mobile-drawer".equals(tag)) {
+                || "mobile-drawer".equals(tag)
+                || "account-panel".equals(tag);
+    }
+
+    private static boolean containsAppOwnedMarker(View v, int depth) {
+        if (v == null || depth > 8) return false;
+        if (isAppOwnedTagValue(v.getTag())) {
+            return true;
+        }
+        String className = v.getClass().getName();
+        if (className.startsWith("com.pilipala.")) {
             return true;
         }
         if (v instanceof ViewGroup) {
             ViewGroup vg = (ViewGroup) v;
-            int n = Math.min(vg.getChildCount(), 6);
+            int n = vg.getChildCount();
             for (int i = 0; i < n; i++) {
-                if (containsAppOwnedTag(vg.getChildAt(i), depth + 1)) return true;
+                if (containsAppOwnedMarker(vg.getChildAt(i), depth + 1)) return true;
             }
         }
         return false;
@@ -529,20 +537,22 @@ final class PluginDialogStyler {
     }
 
     private static void stylePluginHorizontalButtonBar(MainActivity a, LinearLayout row) {
-        STYLED_BUTTON_ROWS.add(row);
-        row.setBackgroundColor(Color.TRANSPARENT);
-        row.setMinimumWidth(0);
-        row.setPadding(0, a.dp(6), 0, a.dp(2));
-        ViewGroup.LayoutParams rawLp = row.getLayoutParams();
-        if (rawLp != null) {
-            rawLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-            if (rawLp instanceof ViewGroup.MarginLayoutParams) {
-                ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) rawLp;
-                mlp.leftMargin = 0;
-                mlp.rightMargin = 0;
-                zeroRelativeMargins(mlp);
+        boolean firstPass = STYLED_BUTTON_ROWS.add(row);
+        if (firstPass) {
+            row.setBackgroundColor(Color.TRANSPARENT);
+            row.setMinimumWidth(0);
+            row.setPadding(0, a.dp(6), 0, a.dp(2));
+            ViewGroup.LayoutParams rawLp = row.getLayoutParams();
+            if (rawLp != null) {
+                rawLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                if (rawLp instanceof ViewGroup.MarginLayoutParams) {
+                    ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) rawLp;
+                    mlp.leftMargin = 0;
+                    mlp.rightMargin = 0;
+                    zeroRelativeMargins(mlp);
+                }
+                row.setLayoutParams(rawLp);
             }
-            row.setLayoutParams(rawLp);
         }
 
         List<Button> buttons = new ArrayList<>();
@@ -550,7 +560,7 @@ final class PluginDialogStyler {
             View c = row.getChildAt(i);
             if (c instanceof Button && c.getVisibility() != View.GONE) {
                 buttons.add((Button) c);
-            } else if (!(c instanceof Button)) {
+            } else if (firstPass && !(c instanceof Button)) {
                 // Collapse fixed-width spacers that push trailing [取消] off screen
                 ViewGroup.LayoutParams slp = c.getLayoutParams();
                 if (slp instanceof LinearLayout.LayoutParams) {
@@ -565,41 +575,49 @@ final class PluginDialogStyler {
         }
 
         if (buttons.size() == 1) {
-            row.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
             Button only = buttons.get(0);
-            only.setMinWidth(0);
-            only.setMinimumWidth(0);
-            only.setMinHeight(a.dp(36));
-            only.setMinimumHeight(a.dp(36));
-            if (only.getLayoutParams() instanceof LinearLayout.LayoutParams) {
-                LinearLayout.LayoutParams blp = (LinearLayout.LayoutParams) only.getLayoutParams();
-                blp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
-                blp.height = a.dp(36);
-                blp.weight = 0f;
-                blp.setMargins(0, 0, 0, 0);
-                zeroRelativeMargins(blp);
-                only.setLayoutParams(blp);
+            if (firstPass) {
+                row.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+                only.setMinWidth(0);
+                only.setMinimumWidth(0);
+                only.setMinHeight(a.dp(36));
+                only.setMinimumHeight(a.dp(36));
+                if (only.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+                    LinearLayout.LayoutParams blp =
+                            (LinearLayout.LayoutParams) only.getLayoutParams();
+                    blp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+                    blp.height = a.dp(36);
+                    blp.weight = 0f;
+                    blp.setMargins(0, 0, 0, 0);
+                    zeroRelativeMargins(blp);
+                    only.setLayoutParams(blp);
+                }
+                only.setPadding(a.dp(18), 0, a.dp(18), 0);
             }
-            only.setPadding(a.dp(18), 0, a.dp(18), 0);
             applyIosActionCapsuleStyle(a, only, false);
         } else if (buttons.size() > 1) {
-            row.setGravity(Gravity.CENTER_VERTICAL);
+            if (firstPass) {
+                row.setGravity(Gravity.CENTER_VERTICAL);
+            }
             for (int i = 0; i < buttons.size(); i++) {
                 Button b = buttons.get(i);
-                b.setMinWidth(0);
-                b.setMinimumWidth(0);
-                b.setMinHeight(a.dp(38));
-                b.setMinimumHeight(a.dp(38));
-                if (b.getLayoutParams() instanceof LinearLayout.LayoutParams) {
-                    LinearLayout.LayoutParams blp = (LinearLayout.LayoutParams) b.getLayoutParams();
-                    blp.width = 0;
-                    blp.height = a.dp(38);
-                    blp.weight = 1f;
-                    blp.setMargins(0, 0, i < buttons.size() - 1 ? a.dp(8) : 0, 0);
-                    zeroRelativeMargins(blp);
-                    b.setLayoutParams(blp);
+                if (firstPass) {
+                    b.setMinWidth(0);
+                    b.setMinimumWidth(0);
+                    b.setMinHeight(a.dp(38));
+                    b.setMinimumHeight(a.dp(38));
+                    if (b.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+                        LinearLayout.LayoutParams blp =
+                                (LinearLayout.LayoutParams) b.getLayoutParams();
+                        blp.width = 0;
+                        blp.height = a.dp(38);
+                        blp.weight = 1f;
+                        blp.setMargins(0, 0, i < buttons.size() - 1 ? a.dp(8) : 0, 0);
+                        zeroRelativeMargins(blp);
+                        b.setLayoutParams(blp);
+                    }
+                    b.setPadding(a.dp(8), 0, a.dp(8), 0);
                 }
-                b.setPadding(a.dp(8), 0, a.dp(8), 0);
                 applyIosActionCapsuleStyle(a, b, i == 0 && !isCancelLabel(textOf(b)));
             }
         }
@@ -622,65 +640,74 @@ final class PluginDialogStyler {
                         || accountLabel.contains("已配置");
         boolean enabled = statusLabel.contains("启用中") || statusLabel.contains("已启用");
 
-        STYLED_DRIVE_ROWS.add(row);
-        // Match iOS _buildDriveTile obsidian-slate gradient (#2E2E36 -> #1E1E24)
-        GradientDrawable rowCard =
-                new GradientDrawable(
-                        GradientDrawable.Orientation.TOP_BOTTOM,
-                        new int[] {0xc42e2e36, 0xc41e1e24});
-        rowCard.setCornerRadius(a.dp(16));
-        rowCard.setStroke(
-                Math.max(1, a.dp(0.8f)),
-                (loggedIn && enabled) ? 0x7a30d158 : (loggedIn ? 0x4830d158 : 0x24ffffff));
-        row.setBackground(rowCard);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(a.dp(10), a.dp(7), a.dp(9), a.dp(7));
+        boolean firstPass = STYLED_DRIVE_ROWS.add(row);
+        String rowStateKey = "row:" + accountLabel + "|" + statusLabel;
+        Drawable existingRowBg = row.getBackground();
+        if (!(existingRowBg instanceof StyledSpiderButtonBg)
+                || !rowStateKey.equals(((StyledSpiderButtonBg) existingRowBg).appliedKey)) {
+            // Match iOS _buildDriveTile obsidian-slate gradient (#2E2E36 -> #1E1E24)
+            StyledSpiderButtonBg rowCard =
+                    new StyledSpiderButtonBg(
+                            rowStateKey,
+                            GradientDrawable.Orientation.TOP_BOTTOM,
+                            new int[] {0xc42e2e36, 0xc41e1e24});
+            rowCard.setCornerRadius(a.dp(16));
+            rowCard.setStroke(
+                    Math.max(1, a.dp(0.8f)),
+                    (loggedIn && enabled) ? 0x7a30d158 : (loggedIn ? 0x4830d158 : 0x24ffffff));
+            row.setBackground(rowCard);
+        }
 
-        ViewGroup.LayoutParams rawLp = row.getLayoutParams();
-        if (rawLp != null) {
-            rawLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-            if (rawLp instanceof ViewGroup.MarginLayoutParams) {
-                ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) rawLp;
-                mlp.leftMargin = 0;
-                mlp.rightMargin = 0;
-                mlp.topMargin = 0;
-                mlp.bottomMargin = a.dp(9);
-                zeroRelativeMargins(mlp);
+        if (firstPass) {
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(a.dp(10), a.dp(7), a.dp(9), a.dp(7));
+
+            ViewGroup.LayoutParams rawLp = row.getLayoutParams();
+            if (rawLp != null) {
+                rawLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                if (rawLp instanceof ViewGroup.MarginLayoutParams) {
+                    ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) rawLp;
+                    mlp.leftMargin = 0;
+                    mlp.rightMargin = 0;
+                    mlp.topMargin = 0;
+                    mlp.bottomMargin = a.dp(9);
+                    zeroRelativeMargins(mlp);
+                }
+                row.setLayoutParams(rawLp);
             }
-            row.setLayoutParams(rawLp);
-        }
 
-        accountBtn.setMinWidth(0);
-        accountBtn.setMinimumWidth(0);
-        accountBtn.setMinHeight(0);
-        accountBtn.setMinimumHeight(0);
-        if (accountBtn.getLayoutParams() instanceof LinearLayout.LayoutParams) {
-            LinearLayout.LayoutParams leftLp =
-                    (LinearLayout.LayoutParams) accountBtn.getLayoutParams();
-            leftLp.width = 0;
-            leftLp.weight = 1f;
-            leftLp.height = a.dp(38);
-            leftLp.setMargins(0, 0, a.dp(8), 0);
-            zeroRelativeMargins(leftLp);
-            accountBtn.setLayoutParams(leftLp);
-        }
-        accountBtn.setPadding(a.dp(8), 0, a.dp(6), 0);
+            accountBtn.setMinWidth(0);
+            accountBtn.setMinimumWidth(0);
+            accountBtn.setMinHeight(0);
+            accountBtn.setMinimumHeight(0);
+            if (accountBtn.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+                LinearLayout.LayoutParams leftLp =
+                        (LinearLayout.LayoutParams) accountBtn.getLayoutParams();
+                leftLp.width = 0;
+                leftLp.weight = 1f;
+                leftLp.height = a.dp(38);
+                leftLp.setMargins(0, 0, a.dp(8), 0);
+                zeroRelativeMargins(leftLp);
+                accountBtn.setLayoutParams(leftLp);
+            }
+            accountBtn.setPadding(a.dp(8), 0, a.dp(6), 0);
 
-        statusBtn.setMinWidth(0);
-        statusBtn.setMinimumWidth(0);
-        statusBtn.setMinHeight(0);
-        statusBtn.setMinimumHeight(0);
-        if (statusBtn.getLayoutParams() instanceof LinearLayout.LayoutParams) {
-            LinearLayout.LayoutParams rightLp =
-                    (LinearLayout.LayoutParams) statusBtn.getLayoutParams();
-            rightLp.width = a.dp(68);
-            rightLp.weight = 0f;
-            rightLp.height = a.dp(32);
-            rightLp.setMargins(0, 0, 0, 0);
-            zeroRelativeMargins(rightLp);
-            statusBtn.setLayoutParams(rightLp);
+            statusBtn.setMinWidth(0);
+            statusBtn.setMinimumWidth(0);
+            statusBtn.setMinHeight(0);
+            statusBtn.setMinimumHeight(0);
+            if (statusBtn.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+                LinearLayout.LayoutParams rightLp =
+                        (LinearLayout.LayoutParams) statusBtn.getLayoutParams();
+                rightLp.width = a.dp(68);
+                rightLp.weight = 0f;
+                rightLp.height = a.dp(32);
+                rightLp.setMargins(0, 0, 0, 0);
+                zeroRelativeMargins(rightLp);
+                statusBtn.setLayoutParams(rightLp);
+            }
+            statusBtn.setPadding(a.dp(6), 0, a.dp(6), 0);
         }
-        statusBtn.setPadding(a.dp(6), 0, a.dp(6), 0);
 
         applySpiderDriveAccountButton(a, accountBtn);
         applySpiderDriveStatusPill(a, statusBtn);
@@ -717,6 +744,11 @@ final class PluginDialogStyler {
         final String appliedKey;
 
         StyledSpiderButtonBg(String appliedKey) {
+            this.appliedKey = appliedKey;
+        }
+
+        StyledSpiderButtonBg(String appliedKey, Orientation orientation, int[] colors) {
+            super(orientation, colors);
             this.appliedKey = appliedKey;
         }
     }
@@ -1038,6 +1070,7 @@ final class PluginDialogStyler {
 
     private static void styleListItem(MainActivity a, View child) {
         if (child instanceof TextView) {
+            if (!STYLED_LIST_ITEMS.add(child)) return;
             TextView tv = (TextView) child;
             tv.setTextColor(0xfff5f5f7);
             tv.setTextSize(14.5f);

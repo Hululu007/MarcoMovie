@@ -294,6 +294,9 @@ final class AccountPanel {
         final Dialog dialog = new Dialog(a);
         a.accountDialog = dialog;
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().getDecorView().setTag("app-dialog");
+        }
         LinearLayout panel = a.vertical();
         panel.setTag("account-panel");
         panel.setPadding(a.dp(24), a.dp(22), a.dp(24), a.dp(18));

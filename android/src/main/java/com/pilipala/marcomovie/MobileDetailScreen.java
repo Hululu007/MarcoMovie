@@ -1568,6 +1568,9 @@ final class MobileDetailScreen {
         int total = line.episodes.size();
         final Dialog dialog = new Dialog(a);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().getDecorView().setTag("app-dialog");
+        }
 
         int dialogWidth = Math.min(a.windowWidth() - a.dp(28), a.dp(420));
         LinearLayout sheet = a.vertical();

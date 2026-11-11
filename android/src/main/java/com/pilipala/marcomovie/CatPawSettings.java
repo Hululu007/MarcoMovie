@@ -45,6 +45,9 @@ final class CatPawSettings {
                                 () -> {
                                     if (a.isFinishing() || a.isDestroyed()) return;
                                     Dialog dialog = new Dialog(a);
+                                    if (dialog.getWindow() != null) {
+                                        dialog.getWindow().getDecorView().setTag("app-dialog");
+                                    }
                                     LinearLayout page = a.vertical();
                                     page.setBackgroundColor(MainActivity.DARK);
                                     page.addView(
