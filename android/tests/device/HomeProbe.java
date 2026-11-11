@@ -1000,7 +1000,13 @@ public final class HomeProbe extends Instrumentation {
                     "retry_recovers",
                     ui(() -> a.current.homeState.videos.get(0).id.startsWith("c3")));
             click("home-tab:7");
-            await(() -> a.current.homeState.ready && a.current.homeState.category.equals("c7"));
+            await(
+                    () ->
+                            a.current.homeState.ready
+                                    && a.current.homeState.category.equals("c7")
+                                    && ((HorizontalScrollView) tag("home-category-scroll"))
+                                                    .getScrollX()
+                                            > 0);
             check("empty_category_no_stale_posters", ui(() -> tag("home-video:0") == null));
             check(
                     "direct_tail_category_scrolled_and_complete",

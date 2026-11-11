@@ -1025,7 +1025,11 @@ final class HomeScreen {
     }
 
     void collapseFiltersForBrowsing() {
-        if (!a.isTvDevice() || state == null || !state.filtersExpanded) return;
+        if (!a.isTvDevice()
+                || buildingTabs
+                || applyingFilters
+                || state == null
+                || !state.filtersExpanded) return;
         state.filtersExpanded = false;
         if (inlineFilters != null) inlineFilters.render();
         updateTabs();

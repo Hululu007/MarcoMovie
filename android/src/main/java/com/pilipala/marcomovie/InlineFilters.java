@@ -41,6 +41,16 @@ final class InlineFilters extends LinearLayout {
     }
 
     void clearViews() {
+        if (hasFocus()) {
+            boolean wasApplying = home.applyingFilters;
+            home.applyingFilters = true;
+            try {
+                View safe = home.selectedTab();
+                if (safe != null) safe.requestFocus();
+            } finally {
+                home.applyingFilters = wasApplying;
+            }
+        }
         removeAllViews();
         rows.clear();
         choices.clear();
@@ -133,12 +143,18 @@ final class InlineFilters extends LinearLayout {
                             "修改",
                             "home-filter-expand",
                             () -> {
-                                home.state.filtersExpanded = true;
-                                render();
-                                home.updateTabs();
-                                home.wireNavigation();
-                                View target = firstSelectedChip();
-                                if (target != null) target.requestFocus();
+                                boolean wasApplying = home.applyingFilters;
+                                home.applyingFilters = true;
+                                try {
+                                    home.state.filtersExpanded = true;
+                                    render();
+                                    home.updateTabs();
+                                    home.wireNavigation();
+                                    View target = firstSelectedChip();
+                                    if (target != null) target.requestFocus();
+                                } finally {
+                                    home.applyingFilters = wasApplying;
+                                }
                             });
             LayoutParams expandLp = new LayoutParams(-2, a.dp(Math.round(30 * home.navScale)));
             expandLp.leftMargin = a.dp(10);
