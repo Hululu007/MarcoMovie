@@ -52,22 +52,33 @@ final class CatPawSettings {
                                                     "返回 · CatPaw 配置",
                                                     "catpaw-settings-back",
                                                     dialog::dismiss));
-                                    WebView web = new WebView(a);
-                                    web.getSettings().setJavaScriptEnabled(true);
-                                    web.getSettings().setDomStorageEnabled(true);
-                                    web.getSettings().setAllowFileAccess(false);
-                                    web.getSettings().setAllowContentAccess(false);
-                                    web.setWebViewClient(
-                                            new WebViewClient() {
-                                                @Override
-                                                public boolean shouldOverrideUrlLoading(
-                                                        WebView view, String url) {
-                                                    String scheme =
-                                                            android.net.Uri.parse(url).getScheme();
-                                                    return !"https".equals(scheme)
-                                                            && !"http".equals(scheme);
-                                                }
-                                            });
+                                    final WebView web;
+                                    try {
+                                        web = new WebView(a);
+                                        web.getSettings().setJavaScriptEnabled(true);
+                                        web.getSettings().setDomStorageEnabled(true);
+                                        web.getSettings().setAllowFileAccess(false);
+                                        web.getSettings().setAllowContentAccess(false);
+                                        web.setWebViewClient(
+                                                new WebViewClient() {
+                                                    @Override
+                                                    public boolean shouldOverrideUrlLoading(
+                                                            WebView view, String url) {
+                                                        String scheme =
+                                                                android.net.Uri.parse(url)
+                                                                        .getScheme();
+                                                        return !"https".equals(scheme)
+                                                                && !"http".equals(scheme);
+                                                    }
+                                                });
+                                    } catch (Throwable unavailable) {
+                                        AppLog.w(
+                                                "CatPawSettings",
+                                                "System WebView unavailable",
+                                                unavailable);
+                                        a.notice("当前系统缺少 WebView 组件，无法打开本机网页配置");
+                                        return;
+                                    }
                                     page.addView(web, new LinearLayout.LayoutParams(-1, 0, 1));
                                     dialog.setContentView(page);
                                     dialog.setOnDismissListener(

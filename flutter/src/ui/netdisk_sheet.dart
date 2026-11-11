@@ -1,8 +1,13 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:qr/qr.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../core/netdisk_service.dart';
 import '../core/netdisk_session.dart';
@@ -63,6 +68,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
   int _qrAttempt = 0;
   int? _pollingAttempt;
   bool _foreground = true;
+  bool _resumedImmediateRetry = false;
 
   @override
   void initState() {
@@ -83,12 +89,18 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _foreground = state == AppLifecycleState.resumed;
     if (!_foreground) {
+      _resumedImmediateRetry = false;
       _pollTimer?.cancel();
       return;
     }
     final session = _qrSession;
-    if (session != null && _pollingAttempt == null) {
-      _pollQr(_qrAttempt, session);
+    if (session != null) {
+      if (_pollingAttempt == null) {
+        _pollQr(_qrAttempt, session);
+      } else {
+        _resumedImmediateRetry = true;
+        _service.abortBaiduLongPoll();
+      }
     }
   }
 
@@ -176,17 +188,98 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
         setState(() => _qrStatusText = res.message);
         if (res.state == NetdiskPollState.waiting ||
             res.state == NetdiskPollState.scanned) {
-          if (_foreground) _pollTimer = Timer(
-            const Duration(seconds: 3),
+          if (_foreground) {
+            final immediate = _resumedImmediateRetry;
+            _resumedImmediateRetry = false;
+            _pollTimer = Timer(
+              immediate
+                  ? const Duration(milliseconds: 80)
+                  : const Duration(seconds: 3),
+              () => _pollQr(attempt, session),
+            );
+          }
+        }
+      }
+    } catch (_) {
+      if (current()) {
+        setState(() => _qrStatusText = '正在等待手机端确认登录…');
+        if (_foreground) {
+          final immediate = _resumedImmediateRetry;
+          _resumedImmediateRetry = false;
+          _pollTimer = Timer(
+            immediate
+                ? const Duration(milliseconds: 80)
+                : const Duration(seconds: 3),
             () => _pollQr(attempt, session),
           );
         }
       }
-    } catch (_) {
-      if (current()) setState(() => _qrStatusText = '登录状态获取失败，请重试');
     } finally {
       if (_pollingAttempt == attempt) _pollingAttempt = null;
     }
+  }
+
+  Future<void> _shareQrImage(String qrData, NetdiskDriveInfo drive) async {
+    if (qrData.isEmpty) return;
+    final box = context.findRenderObject() as RenderBox?;
+    final origin = box != null && box.hasSize
+        ? Rect.fromCenter(
+            center: box.localToGlobal(box.size.center(Offset.zero)),
+            width: 1,
+            height: 1,
+          )
+        : const Rect.fromLTWH(0, 0, 1, 1);
+    try {
+      final matrix = QrImage(
+        QrCode.fromData(data: qrData, errorCorrectLevel: QrErrorCorrectLevel.M),
+      );
+      const quietZone = 4;
+      final modules = matrix.moduleCount + quietZone * 2;
+      const imageSize = 512.0;
+      final cell = imageSize / modules;
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      canvas.drawRect(
+        const Rect.fromLTWH(0, 0, imageSize, imageSize),
+        Paint()..color = const Color(0xFFFFFFFF),
+      );
+      final darkPaint = Paint()
+        ..color = const Color(0xFF000000)
+        ..isAntiAlias = false;
+      for (var r = 0; r < matrix.moduleCount; r++) {
+        for (var c = 0; c < matrix.moduleCount; c++) {
+          if (matrix.isDark(r, c)) {
+            canvas.drawRect(
+              Rect.fromLTRB(
+                ((c + quietZone) * cell).floorToDouble(),
+                ((r + quietZone) * cell).floorToDouble(),
+                ((c + quietZone + 1) * cell).floorToDouble(),
+                ((r + quietZone + 1) * cell).floorToDouble(),
+              ),
+              darkPaint,
+            );
+          }
+        }
+      }
+      final picture = recorder.endRecording();
+      final img = await picture.toImage(imageSize.toInt(), imageSize.toInt());
+      final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+      img.dispose();
+      if (byteData == null) return;
+      final tmpFile = File(
+        '${Directory.systemTemp.path}/marco-${drive.key}-qr.png',
+      );
+      await tmpFile.writeAsBytes(byteData.buffer.asUint8List(), flush: true);
+      await Share.shareXFiles(
+        [XFile(tmpFile.path, mimeType: 'image/png')],
+        sharePositionOrigin: origin,
+      );
+      if (mounted) {
+        setState(() {
+          _qrStatusText = '可存储二维码到相册后，打开${drive.providerName} App「扫一扫 → 相册」确认登录';
+        });
+      }
+    } catch (_) {}
   }
 
   Future<void> _showManualInputDialog(String driveKey) async {
@@ -505,7 +598,13 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                 compact: true,
                 onPressed: () {
                   final session = _qrSession;
-                  if (session != null) _pollQr(_qrAttempt, session);
+                  if (session == null) return;
+                  if (_pollingAttempt != null) {
+                    _resumedImmediateRetry = true;
+                    _service.abortBaiduLongPoll();
+                  } else {
+                    _pollQr(_qrAttempt, session);
+                  }
                 },
               ),
               AppleCapsuleButton(
@@ -513,6 +612,58 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                 label: '刷新二维码',
                 compact: true,
                 onPressed: () => _startQrLogin(drive.key),
+              ),
+              AppleCapsuleButton(
+                icon: CupertinoIcons.arrow_up_right_square,
+                label: '本机跳转授权',
+                compact: true,
+                onPressed: () async {
+                  if (qrData.isEmpty) return;
+                  _pollTimer?.cancel();
+                  final deepLink = NetdiskService.buildNativeAppDeepLink(
+                    drive.key,
+                    qrData,
+                  );
+                  if (deepLink != null) {
+                    final deepUri = Uri.tryParse(deepLink);
+                    if (deepUri != null) {
+                      try {
+                        final launched = await launchUrl(
+                          deepUri,
+                          mode: LaunchMode.externalApplication,
+                        );
+                        if (launched) return;
+                      } catch (_) {}
+                    }
+                    if (drive.key == 'quark') {
+                      final cloudDeep = deepLink.replaceFirst(
+                        'qklink://www.uc.cn/656bdcddd4758b39206a8181c91a7d14?src_pkg=kuake&',
+                        'qkcloudlink://www.uc.cn/ca7b1fad21e741b3a4aa4284ce58d686?',
+                      );
+                      final cloudUri = Uri.tryParse(cloudDeep);
+                      if (cloudUri != null) {
+                        try {
+                          final launched = await launchUrl(
+                            cloudUri,
+                            mode: LaunchMode.externalApplication,
+                          );
+                          if (launched) return;
+                        } catch (_) {}
+                      }
+                    }
+                  }
+                  final uri = Uri.tryParse(qrData);
+                  if (uri == null) return;
+                  try {
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  } catch (_) {}
+                },
+              ),
+              AppleCapsuleButton(
+                icon: CupertinoIcons.square_arrow_up,
+                label: '保存/分享二维码',
+                compact: true,
+                onPressed: () => _shareQrImage(qrData, drive),
               ),
               AppleCapsuleButton(
                 icon: CupertinoIcons.doc_on_clipboard,

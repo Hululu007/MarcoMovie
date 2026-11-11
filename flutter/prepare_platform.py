@@ -60,6 +60,11 @@ def main() -> None:
     src = ROOT / "src"
     lib = ROOT / "lib"
     if src.exists():
+        if lib.exists():
+            for existing in list(lib.rglob("*.dart")):
+                rel = existing.relative_to(lib)
+                if not (src / rel).exists():
+                    existing.unlink()
         shutil.copytree(src, lib, dirs_exist_ok=True)
     # Bundle user's brand logo into flutter/assets/logo_mark.png
     assets_dir = ROOT / "assets"
@@ -120,6 +125,35 @@ def main() -> None:
         window_swift = macos_runner / "MainFlutterWindow.swift"
         if window_swift.exists():
             swift_text = window_swift.read_text(encoding="utf-8")
+            if "playbackActivity" not in swift_text:
+                swift_text = swift_text.replace(
+                    "class MainFlutterWindow: NSWindow {",
+                    "class MainFlutterWindow: NSWindow {\n"
+                    "  private var playbackActivity: NSObjectProtocol?",
+                    1,
+                )
+            if "marco_movie/wakelock" not in swift_text and "RegisterGeneratedPlugins(registry: flutterViewController)" in swift_text:
+                swift_text = swift_text.replace(
+                    "RegisterGeneratedPlugins(registry: flutterViewController)",
+                    "RegisterGeneratedPlugins(registry: flutterViewController)\n"
+                    "    let wakelockChannel = FlutterMethodChannel(name: \"marco_movie/wakelock\", binaryMessenger: flutterViewController.engine.binaryMessenger)\n"
+                    "    wakelockChannel.setMethodCallHandler { [weak self] call, result in\n"
+                    "      if call.method == \"setEnabled\", let enabled = call.arguments as? Bool {\n"
+                    "        if enabled {\n"
+                    "          if self?.playbackActivity == nil {\n"
+                    "            self?.playbackActivity = ProcessInfo.processInfo.beginActivity(options: .idleDisplaySleepDisabled, reason: \"Marco Movie Video Playback\")\n"
+                    "          }\n"
+                    "        } else if let token = self?.playbackActivity {\n"
+                    "          ProcessInfo.processInfo.endActivity(token)\n"
+                    "          self?.playbackActivity = nil\n"
+                    "        }\n"
+                    "        result(nil)\n"
+                    "      } else {\n"
+                    "        result(FlutterMethodNotImplemented)\n"
+                    "      }\n"
+                    "    }",
+                    1,
+                )
             if "titlebarAppearsTransparent" not in swift_text:
                 swift_text = swift_text.replace(
                     "super.awakeFromNib()",
@@ -130,7 +164,7 @@ def main() -> None:
                     "    self.minSize = NSSize(width: 900, height: 600)\n"
                     "    super.awakeFromNib()",
                 )
-                window_swift.write_text(swift_text, encoding="utf-8")
+            window_swift.write_text(swift_text, encoding="utf-8")
     macos_podfile = ROOT / "macos" / "Podfile"
     if macos_podfile.exists():
         text = macos_podfile.read_text(encoding="utf-8")
@@ -161,14 +195,50 @@ def main() -> None:
             info = plistlib.loads(ios_plist.read_bytes())
             info.update({
                 'CFBundleDisplayName': 'Marco Movie',
+                'CFBundleAllowMixedLocalizations': True,
                 'UIStatusBarStyle': 'UIStatusBarStyleLightContent',
                 'UIViewControllerBasedStatusBarAppearance': False,
                 'NSLocalNetworkUsageDescription': '连接你添加的局域网 Emby 服务器及片源。',
                 'UIFileSharingEnabled': True,
                 'LSSupportsOpeningDocumentsInPlace': True,
+                'LSApplicationQueriesSchemes': [
+                    'apple-magnifier',
+                    'qklink',
+                    'uclink',
+                    'qkcloudlink',
+                    'quark',
+                    'ucbrowser',
+                    'baiduyun',
+                    'bdnetdisk',
+                    'alipan',
+                    'smartdrive',
+                ],
             })
             info.setdefault('NSAppTransportSecurity', {})['NSAllowsArbitraryLoads'] = True
             ios_plist.write_bytes(plistlib.dumps(info, sort_keys=False))
+        ios_app_delegate = ios_runner / "AppDelegate.swift"
+        if ios_app_delegate.exists():
+            ad_text = ios_app_delegate.read_text(encoding="utf-8")
+            if "marco_movie/wakelock" not in ad_text and "GeneratedPluginRegistrant.register(with: self)" in ad_text:
+                ad_text = ad_text.replace(
+                    "GeneratedPluginRegistrant.register(with: self)",
+                    "GeneratedPluginRegistrant.register(with: self)\n"
+                    "    if let controller = window?.rootViewController as? FlutterViewController {\n"
+                    "      let wakelockChannel = FlutterMethodChannel(name: \"marco_movie/wakelock\", binaryMessenger: controller.binaryMessenger)\n"
+                    "      wakelockChannel.setMethodCallHandler { call, result in\n"
+                    "        if call.method == \"setEnabled\", let enabled = call.arguments as? Bool {\n"
+                    "          DispatchQueue.main.async {\n"
+                    "            UIApplication.shared.isIdleTimerDisabled = enabled\n"
+                    "            result(nil)\n"
+                    "          }\n"
+                    "        } else {\n"
+                    "          result(FlutterMethodNotImplemented)\n"
+                    "        }\n"
+                    "      }\n"
+                    "    }",
+                    1,
+                )
+                ios_app_delegate.write_text(ad_text, encoding="utf-8")
     ios_app_fw_plist = ROOT / "ios" / "Flutter" / "AppFrameworkInfo.plist"
     if ios_app_fw_plist.exists():
         text = ios_app_fw_plist.read_text(encoding="utf-8")
@@ -258,6 +328,32 @@ def main() -> None:
     win_fw = win_runner / "flutter_window.cpp"
     if win_fw.exists():
         text = win_fw.read_text(encoding="utf-8")
+        changed = False
+        if "marco_movie/wakelock" not in text and "RegisterPlugins(flutter_controller_->engine());" in text:
+            if "<flutter/method_channel.h>" not in text:
+                text = "#include <flutter/method_channel.h>\n#include <flutter/standard_method_codec.h>\n" + text
+            text = text.replace(
+                "RegisterPlugins(flutter_controller_->engine());",
+                "RegisterPlugins(flutter_controller_->engine());\n"
+                "  flutter::MethodChannel<flutter::EncodableValue> wakelock_channel(\n"
+                "      flutter_controller_->engine()->messenger(), \"marco_movie/wakelock\",\n"
+                "      &flutter::StandardMethodCodec::GetInstance());\n"
+                "  wakelock_channel.SetMethodCallHandler(\n"
+                "      [](const flutter::MethodCall<flutter::EncodableValue>& call,\n"
+                "         std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {\n"
+                "        if (call.method_name() == \"setEnabled\") {\n"
+                "          const auto* enabled = std::get_if<bool>(call.arguments());\n"
+                "          ::SetThreadExecutionState((enabled && *enabled)\n"
+                "              ? (ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED)\n"
+                "              : ES_CONTINUOUS);\n"
+                "          result->Success();\n"
+                "        } else {\n"
+                "          result->NotImplemented();\n"
+                "        }\n"
+                "      });",
+                1,
+            )
+            changed = True
         if "this->Show();" in text and "// Immediate Show on Windows" not in text:
             text = text.replace(
                 "SetChildContent(flutter_controller_->view()->GetNativeWindow());",
@@ -266,6 +362,8 @@ def main() -> None:
                 "  this->Show();",
                 1,
             )
+            changed = True
+        if changed:
             win_fw.write_text(text, encoding="utf-8")
 
 if __name__ == "__main__":

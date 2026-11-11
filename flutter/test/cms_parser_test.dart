@@ -475,7 +475,7 @@ https://depot.example/config.json
   ]
 }
 ''';
-    final gzipped = const GZipEncoder().encode(utf8.encode(rawConfig))!;
+    final gzipped = const GZipEncoder().encode(utf8.encode(rawConfig));
     final decodedGzip = CmsParser.decodeConfigDocument(gzipped);
     final parsedBundle = CmsParser.parseConfig(
       decodedGzip,

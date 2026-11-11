@@ -1491,13 +1491,15 @@ final class MobileShell {
                                     AppLog.w("MobileShell", "fetchCategoryPage failed", e);
                                     a.ui.post(
                                             () -> {
-                                                if (ticket != a.generation
-                                                        || a.isFinishing()
-                                                        || request != homeRequest) return;
-                                                a.prefs
-                                                        .edit()
-                                                        .putString(Prefs.LOADING_SITE, "")
-                                                        .apply();
+                                                if (siteSnapshot != null
+                                                        && siteSnapshot.key.equals(
+                                                                a.prefs.getString(
+                                                                        Prefs.LOADING_SITE, ""))) {
+                                                    a.prefs
+                                                            .edit()
+                                                            .putString(Prefs.LOADING_SITE, "")
+                                                            .apply();
+                                                }
                                                 if (ticket != a.generation
                                                         || a.isFinishing()
                                                         || request != homeRequest) return;
@@ -1510,6 +1512,12 @@ final class MobileShell {
                                                 loadMoreBtn.setVisibility(View.VISIBLE);
                                                 loadMoreBtn.setText("点击重试");
                                             });
+                                } finally {
+                                    if (siteSnapshot != null
+                                            && siteSnapshot.key.equals(
+                                                    a.prefs.getString(Prefs.LOADING_SITE, ""))) {
+                                        a.prefs.edit().putString(Prefs.LOADING_SITE, "").commit();
+                                    }
                                 }
                             });
                 };
@@ -3333,7 +3341,9 @@ final class MobileShell {
                 addSectionHeader(body, "播放器与解码器");
                 final int engine = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);
                 final String[] engineNames = {
-                    "Exo 播放器（Media3 · 4K HDR 与字幕增强）", "IJK 播放器（FFmpeg · 直播与特殊封装兼容）", "Android 系统播放器"
+                    "Exo 播放器（Media3 · 4K HDR 与字幕增强）",
+                    "IJK 兼容模式（Media3 + FFmpeg · 直播与特殊封装优化）",
+                    "Android 系统播放器"
                 };
                 final int[] engineVals = {0, 2, 1};
                 final int curEngIdx = engine == 2 ? 1 : (engine == 1 ? 2 : 0);

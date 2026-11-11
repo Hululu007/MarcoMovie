@@ -483,10 +483,23 @@ class AliShareClient {
       if (response.statusCode == 401) {
         throw const AliShareException('阿里登录已失效，请重新登录');
       }
+      final data = jsonDecode(utf8.decode(bytes));
+      if (data is Map) {
+        final errCode = '${data['code'] ?? ''}'.toLowerCase();
+        final errMsg = '${data['message'] ?? ''}'.toLowerCase();
+        if (errCode.contains('quota') ||
+            errCode.contains('exceeded') ||
+            errCode.contains('capacity') ||
+            errMsg.contains('quota') ||
+            errMsg.contains('空间不足') ||
+            errMsg.contains('容量不足')) {
+          throw const AliShareException(
+              '阿里云盘剩余空间不足，请清理「MarcoMovie分享播放」目录后重试');
+        }
+      }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw const AliShareException('阿里请求失败，请检查账号或分享权限');
       }
-      final data = jsonDecode(utf8.decode(bytes));
       if (data is! Map) throw const AliShareException('阿里返回了无效响应');
       if (data['code'] != null &&
           data['code'] != '' &&

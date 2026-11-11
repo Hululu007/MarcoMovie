@@ -211,10 +211,12 @@ public class MoviePlayer {
                                             .setExceedRendererCapabilitiesIfNecessary(true)
                                             .setExceedVideoConstraintsIfNecessary(true)
                                             .setExceedAudioConstraintsIfNecessary(true);
-                    if (this.context
-                            .getSharedPreferences(Prefs.FILE, 0)
-                            .getBoolean(Prefs.PREFER_AAC, false))
+                    android.content.SharedPreferences sp =
+                            this.context.getSharedPreferences(Prefs.FILE, 0);
+                    if (sp.getBoolean(Prefs.PREFER_AAC, false))
                         trackParams.setPreferredAudioMimeTypes(MimeTypes.AUDIO_AAC);
+                    if (!this.ijkMode && sp.getBoolean(Prefs.TUNNELED_PLAYBACK, false))
+                        trackParams.setTunnelingEnabled(true);
                     exo.setTrackSelectionParameters(trackParams.build());
                     exo.addAnalyticsListener(
                             new androidx.media3.exoplayer.analytics.AnalyticsListener() {
@@ -969,7 +971,7 @@ public class MoviePlayer {
 
     public String playbackInfo() {
         org.json.JSONObject d = decoderDiagnostics();
-        return (ijkMode ? "IJK (FFmpeg)\n视频：" : "Exo (Media3)\n视频：")
+        return (ijkMode ? "IJK 兼容模式 (Media3 + FFmpeg)\n视频：" : "Exo (Media3)\n视频：")
                 + d.optString("video_mime", "尚未识别")
                 + " · "
                 + d.optString("video_decoder", "尚未启动")

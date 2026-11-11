@@ -1,8 +1,10 @@
-# Native Python source loader — integration candidate
+# Native Python source loader
 
-This is a shared loader for a Python Spider in one dedicated interpreter. It is
-not selected by the production subscription dispatcher yet. The existing
-Skulpt backend and published installers remain unchanged.
+This is a shared loader for a Python Spider in one dedicated interpreter. The
+current iOS source dispatcher selects the registered native CPython plugin;
+Android and desktop keep their existing backends. Source-code integration and
+validation builds do not update previously published installers or establish
+compatibility with every imported source.
 
 The loader preserves the supplied extension string, constructs and initializes
 the Spider once, and retains source/module/session state through home,
@@ -30,9 +32,45 @@ the existing three-to-five-item protocol; binary data is explicitly base64.
 Closing a source revokes its resources, loaders and HTTP sessions. Proxy URLs
 are supplied by the native owner and refer to the originating source instance.
 This loader does not implement secure filesystem isolation or hard interruption
-of arbitrary Python/C code. Its current failure policy retires a failed source;
-production routing still needs bounded lifetime, cancellation and playback-lease
-integration. Native extensions such as lxml are not enabled by this work.
+of arbitrary Python/C code. Its current failure policy retires a failed source.
+The iOS validation package includes the pinned pure-Python dependencies, the
+verified [Crypto libraries](../scripts/ios_cpython_crypto/README.md), and the
+[native lxml port](../scripts/ios_lxml/README.md). lxml passed the focused ARM64
+iOS 18.5 owner-lifecycle probe, and all three of its frameworks were checked in
+the full validation IPA. These results do not establish compatibility with
+every Python extension or actual playback from every subscription.
+
+The native `base.spider.Spider` also supplies the common text/JSON helpers
+`regStr`, `removeHtmlTags`, `cleanText`, `str2json`, `json2str`, `log`, and the
+local/remote `page` result helper. `html` lazily imports the bundled lxml parser
+and returns a real element supporting XPath. Sources that call inherited helpers
+therefore need not provide their own replacement base class. This follows the
+helper interfaces in the upstream
+[legacy Python base](https://github.com/FongMi/TV/blob/01d2d56e335f3d751d02446a799e2fa120231189/chaquo/src/main/python/base/spider.py)
+and [paging contract](https://github.com/FongMi/TV/blob/4512b4c9f82534ff66acfde06ccdd68f35b074f0/chaquo/src/main/python/base/spider.py).
+The added host tests exercise these methods through an owned Spider; the HTML
+case additionally needs an installed native lxml and is selected with
+`--case base_html`. No Android Java bridge or empty catalogue fallback is added.
+
+The shared `PythonSourceSessions` coordinator now supplies a two-owner capacity,
+four-call per-source queue, playback leases and the existing `ScriptProxyServer`.
+Budgets include opening and queue time. Cancelling a queued request does not
+interrupt the running source or allow a later request to overtake it. Cancelling
+running work immediately revokes its route, closes its HTTP client and drops late
+results, but keeps the native owner allocated until execution and destruction
+actually finish. A failed teardown remains quarantined. Deleting a subscription
+also advances the generation, so an older download cannot recreate its source.
+
+The backend contract requires `open` failures to leave no owner and `close` to
+resolve only after actual destruction. A native implementation must bind HTTP
+callbacks to the correct source and operation. Dart timeouts cannot substitute
+for that native ownership contract. The simulator app exercises the same
+`MMPythonOwner` used by the registered product plugin: independent native threads
+and own-GIL interpreters, bounded queues and destruction acknowledgments.
+`CmsClient` routes iOS Python sources through this coordinator. The product
+preparer stages and verifies the native package before embedding it. Real
+subscription behavior, missing native dependencies and physical-iPhone playback
+remain separate acceptance requirements.
 
 `scripts/test_native_python_source.py` runs each owned source in a fresh host
 process using the pinned requests wheels. The iOS Flutter experiment additionally

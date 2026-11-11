@@ -661,6 +661,10 @@ public final class MainActivity extends Activity {
                                                 .putString(Prefs.SELECTED_SITE, "")
                                                 .commit();
                                     }
+                                    worker.execute(
+                                            () ->
+                                                    MagnetStream.cleanStaleSessions(
+                                                            MainActivity.this));
                                     if (!reduced && config != null) {
                                         final String savedKey =
                                                 prefs.getString(Prefs.SELECTED_SITE, "");

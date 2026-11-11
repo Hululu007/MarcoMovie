@@ -185,8 +185,8 @@ public final class ReviewFixChecks {
                 "image memory cache budget scales within 10MB..32MB bounds");
 
         check(
-                Prefs.KEYS.length == 36,
-                "backup settings key table includes TV dock position and existing appearance settings");
+                Prefs.KEYS.length == 37,
+                "backup settings key table includes TV dock position, tunneled playback, and existing appearance settings");
         check(
                 Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_DOCK_POSITION, 0))
                         && Integer.valueOf(1)
@@ -262,6 +262,11 @@ public final class ReviewFixChecks {
                 "backup format validator accepts Android and Flutter backup envelopes");
         check(
                 "{\"sites\":[]}".equals(Prefs.extractBackupConfigJson("  {\"sites\":[]}  "))
+                        && "// header\n{\"sites\":[]}"
+                                .equals(Prefs.extractBackupConfigJson("// header\n{\"sites\":[]}"))
+                        && "[{\"api\":\"x\"}]"
+                                .equals(Prefs.extractBackupConfigJson("[{\"api\":\"x\"}]"))
+                        && Boolean.TRUE.equals(Prefs.sanitizeSetting(Prefs.TUNNELED_PLAYBACK, true))
                         && Prefs.extractBackupConfigJson("not-json") == null
                         && Prefs.extractBackupConfigJson("") == null,
                 "backup config extractor accepts raw JSON string or object and rejects invalid text");

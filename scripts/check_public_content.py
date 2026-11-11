@@ -29,15 +29,17 @@ TEST_AUTHORITIES = {
     'flutter/test/guard_bootstrap_host_test.dart': {'user:secret@fixture.invalid'},
     'flutter/test/subscription_redirect_test.dart': {'injected:secret@127.0.0.1:${origin.port}'},
     'flutter/test/ali_share_test.dart': {'user@www.alipan.com'},
-    'flutter/test/cloud_share_test.dart': {'x@drive.uc.cn', 'fast.uc.cn', 'video.uc.cn'},
+    'flutter/test/cloud_share_test.dart': {'x@drive.uc.cn', 'fast.uc.cn', 'video.uc.cn', 'd.pcs.baidu.com', 'qdall01.baidupcs.com'},
     'flutter/test/desktop_cloud_media_test.dart': {'media.uc.cn'},
-    'flutter/test/cloud_media_proxy_test.dart': {'video.uc.cn', 'video.uc.cn:444'},
+    'flutter/test/cloud_media_proxy_test.dart': {'video.uc.cn', 'video.uc.cn:444', 'd.pcs.baidu.com', 'qdall01.baidupcs.com'},
     'flutter/test/quark_drive_test.dart': {'media.quark.cn'},
     'flutter/test/quark_media_proxy_test.dart': {'media.quark.cn', 'next.quark.cn', 'media.quark.cn:444', 'user@media.quark.cn', 'media.uc.cn'},
     'flutter/test/native_cloud_playback_test.dart': {'media.quark.cn'},
+    'flutter/test/wogg_client_test.dart': {'media.uc.cn'},
     'flutter/test/wogg_source_test.dart': {'user:password@catalogue.invalid', 'alipan.com', 'aliyundrive.com', 'fast.uc.cn'},
     'android/tests/JsHttpChecks.java': {'new:secret@', 'us%40er:pa%2Bss@'},
     'flutter/test/python_host_compat_test.dart': {'user:pass@[::1]:8443'},
+    'flutter/test/python_source_channel_test.dart': {'user:password@source.invalid'},
     'scripts/test_python_host.js': {'user:pass@[::1]:8443', '127.0.0.2', '127.0.0.2:'},
     'scripts/test_python_proxy.js': {'0.0.0.0:18345'},
     'scripts/test_t4_adapter.cjs': {'name:secret@127.0.0.1'},
@@ -52,8 +54,12 @@ TEST_AUTHORITIES = {
 EXPERIMENT_HOSTS = {
     'scripts/ios_cpython/run_cpython_probe.py': {'files.pythonhosted.org'},
     'scripts/ios_cpython/pure-dependencies.lock.json': {'files.pythonhosted.org', 'pypi.org'},
+    'scripts/ios_cpython_crypto/source.lock.json': {'files.pythonhosted.org'},
+    'scripts/ios_lxml/source.lock.json': {'files.pythonhosted.org'},
+    'scripts/ios_lxml/native-libraries.lock.json': {'download.gnome.org'},
+    'scripts/ios_lxml/owner_fixture.py': {'www.w3.org'},
     'scripts/ios_cpython/README.md': {'docs.python.org', 'briefcase.beeware.org'},
-    'scripts/ios_cpython_transport/README.md': {'requests.readthedocs.io'},
+    'scripts/ios_cpython_transport/README.md': {'requests.readthedocs.io', 'www.rfc-editor.org'},
 }
 
 # Original cloud-provider endpoints used only for an explicitly selected share

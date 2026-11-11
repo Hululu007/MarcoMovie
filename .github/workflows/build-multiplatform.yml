@@ -54,10 +54,25 @@ jobs:
           python scripts/test_drpy_assets.py
           python scripts/update_drpy_assets.py --check
       - name: Check Java formatting
-        run: python scripts/format_java.py --check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import subprocess
+          from scripts.format_java import VERSION, JAR, formatter
+          JAR.parent.mkdir(parents=True, exist_ok=True)
+          if not JAR.exists():
+              subprocess.run(['gh', 'release', 'download', 'v' + VERSION,
+                              '--repo', 'google/google-java-format',
+                              '--pattern', JAR.name, '--dir', str(JAR.parent)],
+                             check=True, timeout=180)
+          formatter()
+          PY
+          python scripts/format_java.py --check
       - name: Run pure-JVM regression checks
         run: |
           python android/tests/run_checks.py
+          python android/tests/run_direct_cms_import_checks.py
           python android/tests/run_global_search_checks.py
           python android/tests/run_scheduling_checks.py
           python android/tests/run_config_library_checks.py
@@ -82,6 +97,8 @@ jobs:
           python -m unittest discover -s flutter -p "test_*.py"
           python scripts/test_movie_mirror.py
           python scripts/test_platform_packages.py
+          python scripts/test_ios_python_packaging.py
+          python scripts/test_ios_crypto.py
           python scripts/test_catpaw_host.py
           python scripts/test_guard_bootstrap.py
           python scripts/test_appgz_host.py
@@ -169,9 +186,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           flutter test
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          flutter build windows --release
+          $editions = Get-Content edition-versions.json -Raw | ConvertFrom-Json
+          $version = $editions.windows.versionName
+          $buildNum = $editions.windows.buildNumber
+          flutter build windows --release --build-name="$version" --build-number="$buildNum"
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          $version = ((Select-String pubspec.yaml -Pattern '^version:').Line -replace '^version:\s*','' -replace '\+.*','').Trim()
           $releaseDir = "build/windows/x64/runner/Release"
           $env:MARCOMOVIE_TEST_MPV = "$PWD/$releaseDir/libmpv-2.dll"
           flutter test test/native_cloud_playback_test.dart
@@ -278,8 +297,9 @@ jobs:
           cmake -S packages/quickjs_engine/native -B packages/quickjs_engine/native/build -DCMAKE_BUILD_TYPE=Release
           cmake --build packages/quickjs_engine/native/build --parallel 4
           flutter test
-          VERSION="0.5.10"
-          flutter build macos --release --build-name="$VERSION" --build-number=60
+          VERSION=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['macos']['versionName'])")
+          BUILD_NUM=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['macos']['buildNumber'])")
+          flutter build macos --release --build-name="$VERSION" --build-number="$BUILD_NUM"
           APP=$(find "$PWD/build/macos/Build/Products/Release" -maxdepth 1 -name '*.app' -print -quit)
           DYLD_FRAMEWORK_PATH="$APP/Contents/Frameworks" MARCOMOVIE_TEST_MPV="$APP/Contents/Frameworks/Mpv.framework/Mpv" flutter test test/native_cloud_playback_test.dart
           python3 ../scripts/prepare_catpaw_runtime.py --platform macos --destination "$APP/Contents/Frameworks/node"
@@ -311,23 +331,77 @@ jobs:
         with:
           channel: "stable"
           flutter-version: "3.38.9"
-      - name: Generate platform runner & build iOS/iPadOS IPA
+      - name: Fetch verified iOS runtime inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, subprocess
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          from scripts.ios_cpython.run_cpython_probe import URL, SHA256
+          from scripts.prepare_catpaw_runtime import ASSETS
+          for url, expected, folder in [(URL, SHA256, Path('tools/python-ios')), (*ASSETS['ios'], Path('tools/catpaw'))]:
+              parts = urlsplit(url).path.strip('/').split('/')
+              if urlsplit(url).hostname != 'github.com' or len(parts) != 6 or parts[2:4] != ['releases', 'download']:
+                  raise ValueError('Expected a pinned GitHub release asset')
+              folder.mkdir(parents=True, exist_ok=True)
+              target = folder / parts[-1]
+              if not target.exists():
+                  subprocess.run(['gh', 'release', 'download', parts[4], '--repo', '/'.join(parts[:2]),
+                                  '--pattern', parts[-1], '--dir', str(folder)], check=True, timeout=180)
+              if hashlib.sha256(target.read_bytes()).hexdigest() != expected:
+                  raise ValueError('Runtime asset SHA-256 mismatch')
+          PY
+      - name: Generate iOS platform runner
         working-directory: flutter
         run: |
           python3 prepare_platform.py
           flutter create --platforms=ios --org com.pilipala --project-name=marco_movie .
           python3 prepare_platform.py
+      - name: Identify iOS Python stage inputs and toolchain
+        id: ios-python-cache-key
+        run: |
+          python3 -m unittest scripts.test_ios_runtime_cache
+          python3 scripts/ios_runtime_cache.py key --target device --arch arm64 --github-output "$GITHUB_OUTPUT"
+      - name: Restore exact iOS Python stage
+        id: ios-python-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: flutter/build/python-runtime
+          key: ${{ steps.ios-python-cache-key.outputs.key }}
+      - name: Prepare verified iOS Python stage
+        working-directory: flutter
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 ../scripts/ios_runtime_cache.py validate --stage-dir build/python-runtime --target device --arch arm64
+          python3 ../scripts/prepare_ios_python_runtime.py prepare --stage-dir build/python-runtime --frameworks packages/python_source_runtime/ios/Frameworks
+      - name: Save verified iOS Python stage
+        if: steps.ios-python-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: flutter/build/python-runtime
+          key: ${{ steps.ios-python-cache-key.outputs.key }}
+      - name: Build iOS/iPadOS IPA
+        working-directory: flutter
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
           python3 ../scripts/prepare_catpaw_runtime.py --platform ios --destination packages/catpaw_runtime/ios/Frameworks
           flutter pub get
+          python3 ../scripts/prepare_ios_media_runtime.py --package-config .dart_tool/package_config.json
           cmake -S packages/quickjs_engine/native -B packages/quickjs_engine/native/build -DCMAKE_BUILD_TYPE=Release
           cmake --build packages/quickjs_engine/native/build --parallel 4
           flutter test
-          if ! flutter build ios --release --no-codesign --verbose > build/ios-build.log 2>&1; then
+          VERSION=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['ios']['versionName'])")
+          BUILD_NUM=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['ios']['buildNumber'])")
+          if ! flutter build ios --release --no-codesign --build-name="$VERSION" --build-number="$BUILD_NUM" --verbose > build/ios-build.log 2>&1; then
             tail -n 160 build/ios-build.log
             exit 1
           fi
+          python3 ../scripts/prepare_ios_python_runtime.py embed --stage-dir build/python-runtime --app build/ios/iphoneos/Runner.app
           python3 patch_ios_ipa.py build/ios/iphoneos/Runner.app
-          VERSION=$(sed -n 's/^version:[[:space:]]*\([^+]*\).*/\1/p' pubspec.yaml)
           IPA_NAME="MarcoMovie-$VERSION-ios-unsigned.ipa"
           mkdir -p build/ios/ipa/Payload dist
           cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
@@ -349,6 +423,9 @@ jobs:
           retention-days: 7
           path: |
             flutter/build/ios-build.log
+            flutter/build/python-runtime/crypto-logs/*.log
+            flutter/build/python-runtime/lxml-logs/*.log
+            flutter/build/python-runtime/lxml-logs/*.json
             flutter/ios/Pods/Target Support Files/catpaw_runtime/*.xcconfig
 
   publish-release:

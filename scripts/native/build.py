@@ -1,4 +1,4 @@
-"""Build official Media3 software decoders on Linux, for Android API 23 ARMv7.
+"""Build official Media3 software decoders on Linux, for Android API 23 ARMv7 and ARM64.
 
 No application credentials or content are inputs. Every source is commit-pinned.
 The resulting source archive accompanies distributed native binaries.
@@ -12,9 +12,29 @@ OUT = ROOT / 'native-output'
 SOURCES = json.loads(Path(__file__).with_name('sources.json').read_text())
 NDK = Path(os.environ.get('ANDROID_NDK_HOME') or os.environ['ANDROID_HOME'] + '/ndk/26.1.10909125')
 BIN = NDK / 'toolchains/llvm/prebuilt/linux-x86_64/bin'
-CC = BIN / 'armv7a-linux-androideabi23-clang'
-CXX = BIN / 'armv7a-linux-androideabi23-clang++'
 JOBS = str(min(os.cpu_count() or 2, 4))
+PAGE_SIZE_FLAG = '-Wl,-z,max-page-size=16384'
+
+TARGETS = [
+    {
+        'abi': 'armeabi-v7a',
+        'zip_suffix': 'armv7',
+        'cc': BIN / 'armv7a-linux-androideabi23-clang',
+        'cxx': BIN / 'armv7a-linux-androideabi23-clang++',
+        'ffmpeg_arch': 'arm',
+        'ffmpeg_extra': ['--cpu=armv7-a', '--extra-cflags=-march=armv7-a -mfloat-abi=softfp'],
+        'vpx_target': 'armv7-linux-gcc',
+    },
+    {
+        'abi': 'arm64-v8a',
+        'zip_suffix': 'arm64',
+        'cc': BIN / 'aarch64-linux-android23-clang',
+        'cxx': BIN / 'aarch64-linux-android23-clang++',
+        'ffmpeg_arch': 'aarch64',
+        'ffmpeg_extra': ['--extra-cflags=-O2'],
+        'vpx_target': 'arm64-linux-gcc',
+    },
+]
 
 def run(*args, cwd=None, env=None):
     subprocess.run([str(x) for x in args], cwd=cwd or ROOT, env=env, check=True)
@@ -31,13 +51,70 @@ def checkout(name):
         raise RuntimeError('Unexpected source checkout: ' + name)
     return target
 
-def cmake(jni, build):
+def cmake(jni, build, abi):
     run('cmake', '-S', jni, '-B', build, '-G', 'Ninja',
         '-DCMAKE_TOOLCHAIN_FILE=' + str(NDK / 'build/cmake/android.toolchain.cmake'),
-        '-DANDROID_ABI=armeabi-v7a', '-DANDROID_PLATFORM=android-23',
+        '-DANDROID_ABI=' + abi, '-DANDROID_PLATFORM=android-23',
         '-DANDROID_STL=c++_static', '-DCMAKE_BUILD_TYPE=Release',
+        '-DCMAKE_SHARED_LINKER_FLAGS=' + PAGE_SIZE_FLAG,
         '-DBUILD_TESTING=OFF', '-DLIBGAV1_ENABLE_TESTS=OFF', '-DLIBGAV1_ENABLE_EXAMPLES=OFF')
     run('cmake', '--build', build, '--parallel', JOBS)
+
+def build_abi(target, src, decoders):
+    abi = target['abi']
+    cc = target['cc']
+    cxx = target['cxx']
+    media = src['media'] / 'libraries'
+    ff = src['ffmpeg']
+    if (ff / 'config.h').exists() or (ff / 'ffbuild/config.mak').exists():
+        subprocess.run(['make', 'distclean'], cwd=ff, check=False)
+    run(ff / 'configure', '--target-os=android', '--arch=' + target['ffmpeg_arch'],
+        *target['ffmpeg_extra'],
+        '--enable-cross-compile', '--cc=' + str(cc), '--cxx=' + str(cxx),
+        '--ar=' + str(BIN / 'llvm-ar'), '--nm=' + str(BIN / 'llvm-nm'),
+        '--ranlib=' + str(BIN / 'llvm-ranlib'), '--strip=' + str(BIN / 'llvm-strip'),
+        '--enable-static', '--disable-shared', '--enable-pic', '--disable-doc',
+        '--disable-programs', '--disable-everything', '--disable-avdevice',
+        '--disable-avformat', '--disable-swscale', '--disable-postproc',
+        '--disable-avfilter', '--disable-symver', '--disable-v4l2-m2m',
+        '--disable-vulkan', '--enable-swresample',
+        '--libdir=' + str(ff / ('android-libs/' + abi)),
+        *['--enable-decoder=' + d for d in decoders], cwd=ff)
+    run('make', '-j' + JOBS, cwd=ff); run('make', 'install-libs', cwd=ff)
+    ffjni = media / 'decoder_ffmpeg/src/main/jni'
+    avjni = media / 'decoder_av1/src/main/jni'
+    ff_build = WORK / f'ffmpeg-jni-build-{abi}'
+    gav1_build = WORK / f'gav1-jni-build-{abi}'
+    cmake(ffjni, ff_build, abi)
+    cmake(avjni, gav1_build, abi)
+    vpx = src['libvpx']
+    if (vpx / 'Makefile').exists() or (vpx / 'config.mk').exists():
+        subprocess.run(['make', 'distclean'], cwd=vpx, check=False)
+    env = dict(os.environ, CC=str(cc), CXX=str(cxx), AR=str(BIN / 'llvm-ar'),
+               LD=str(cxx), AS=str(cc) + ' -c', STRIP=str(BIN / 'llvm-strip'))
+    run(vpx / 'configure', '--target=' + target['vpx_target'], '--disable-examples',
+        '--disable-tools', '--disable-docs', '--disable-unit-tests',
+        '--disable-vp8', '--disable-vp9-encoder', '--enable-vp9-highbitdepth',
+        '--enable-pic', '--disable-shared', '--enable-static',
+        '--disable-runtime-cpu-detect', '--enable-neon', cwd=vpx, env=env)
+    run('make', '-j' + JOBS, cwd=vpx, env=env)
+    cpu = NDK / 'sources/android/cpufeatures'
+    cpu_obj = WORK / f'cpu-features-{abi}.o'
+    vpx_so = WORK / f'libvpxV2JNI-{abi}.so'
+    run(cc, '-fPIC', '-O2', '-I' + str(cpu), '-c', cpu / 'cpu-features.c', '-o', cpu_obj)
+    run(cxx, '-shared', '-fPIC', '-O2', '-std=c++11', '-static-libstdc++',
+        '-I' + str(vpx), '-I' + str(cpu), media / 'decoder_vp9/src/main/jni/vpx_jni.cc',
+        cpu_obj, vpx / 'libvpx.a', '-llog', '-landroid', '-lz', '-lm',
+        PAGE_SIZE_FLAG, '-o', vpx_so)
+    out_dir = WORK / f'out-{abi}'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ff_build / 'libffmpegJNI.so', out_dir / 'libffmpegJNI.so')
+    shutil.copy2(gav1_build / 'libgav1JNI.so', out_dir / 'libgav1JNI.so')
+    shutil.copy2(vpx_so, out_dir / 'libvpxV2JNI.so')
+    libs = [out_dir / 'libffmpegJNI.so', out_dir / 'libgav1JNI.so', out_dir / 'libvpxV2JNI.so']
+    for lib in libs:
+        run(BIN / 'llvm-strip', '--strip-unneeded', lib)
+    return libs
 
 def main():
     WORK.mkdir(exist_ok=True); OUT.mkdir(exist_ok=True)
@@ -46,57 +123,45 @@ def main():
     ff = src['ffmpeg']
     decoders = ['vorbis','opus','flac','alac','pcm_mulaw','pcm_alaw','mp3',
                 'amrnb','amrwb','aac','ac3','eac3','dca','mlp','truehd']
-    run(ff / 'configure', '--target-os=android', '--arch=arm', '--cpu=armv7-a',
-        '--enable-cross-compile', '--cc=' + str(CC), '--cxx=' + str(CXX),
-        '--ar=' + str(BIN / 'llvm-ar'), '--nm=' + str(BIN / 'llvm-nm'),
-        '--ranlib=' + str(BIN / 'llvm-ranlib'), '--strip=' + str(BIN / 'llvm-strip'),
-        '--enable-static', '--disable-shared', '--enable-pic', '--disable-doc',
-        '--disable-programs', '--disable-everything', '--disable-avdevice',
-        '--disable-avformat', '--disable-swscale', '--disable-postproc',
-        '--disable-avfilter', '--disable-symver', '--disable-v4l2-m2m',
-        '--disable-vulkan', '--enable-swresample',
-        '--extra-cflags=-march=armv7-a -mfloat-abi=softfp',
-        '--libdir=' + str(ff / 'android-libs/armeabi-v7a'),
-        *['--enable-decoder=' + d for d in decoders], cwd=ff)
-    run('make', '-j' + JOBS, cwd=ff); run('make', 'install-libs', cwd=ff)
     ffjni = media / 'decoder_ffmpeg/src/main/jni'
     from patch_ffmpeg import patch
     patch(ffjni / 'ffmpeg_jni.cc')
-    (ffjni / 'ffmpeg').symlink_to(ff, target_is_directory=True)
-    cmake(ffjni, WORK / 'ffmpeg-jni-build')
+    if not (ffjni / 'ffmpeg').exists():
+        (ffjni / 'ffmpeg').symlink_to(ff, target_is_directory=True)
     avjni = media / 'decoder_av1/src/main/jni'
-    (avjni / 'cpu_features').symlink_to(src['cpu_features'], target_is_directory=True)
-    (avjni / 'libgav1').symlink_to(src['libgav1'], target_is_directory=True)
+    if not (avjni / 'cpu_features').exists():
+        (avjni / 'cpu_features').symlink_to(src['cpu_features'], target_is_directory=True)
+    if not (avjni / 'libgav1').exists():
+        (avjni / 'libgav1').symlink_to(src['libgav1'], target_is_directory=True)
     abseil = src['libgav1'] / 'third_party/abseil-cpp'
     abseil.parent.mkdir(exist_ok=True)
-    if abseil.exists() and not any(abseil.iterdir()): abseil.rmdir()
-    abseil.symlink_to(src['abseil'], target_is_directory=True)
-    cmake(avjni, WORK / 'gav1-jni-build')
-    # Build libvpx directly with clang; the JNI library statically links it.
-    vpx = src['libvpx']
-    env = dict(os.environ, CC=str(CC), CXX=str(CXX), AR=str(BIN / 'llvm-ar'),
-               LD=str(CXX), AS=str(CC)+' -c', STRIP=str(BIN / 'llvm-strip'))
-    run(vpx / 'configure', '--target=armv7-linux-gcc', '--disable-examples',
-        '--disable-tools', '--disable-docs', '--disable-unit-tests',
-        '--disable-vp8', '--disable-vp9-encoder', '--enable-vp9-highbitdepth',
-        '--enable-pic', '--disable-shared', '--enable-static',
-        '--disable-runtime-cpu-detect', '--enable-neon', cwd=vpx, env=env)
-    run('make', '-j' + JOBS, cwd=vpx, env=env)
-    cpu = NDK / 'sources/android/cpufeatures'
-    run(CC, '-fPIC', '-O2', '-I' + str(cpu), '-c', cpu / 'cpu-features.c', '-o', WORK / 'cpu-features.o')
-    run(CXX, '-shared', '-fPIC', '-O2', '-std=c++11', '-static-libstdc++',
-        '-I' + str(vpx), '-I' + str(cpu), media / 'decoder_vp9/src/main/jni/vpx_jni.cc',
-        WORK / 'cpu-features.o', vpx / 'libvpx.a', '-llog', '-landroid', '-lz', '-lm',
-        '-Wl,-z,max-page-size=16384', '-o', WORK / 'libvpxV2JNI.so')
-    libs = [WORK / 'ffmpeg-jni-build/libffmpegJNI.so',
-            WORK / 'gav1-jni-build/libgav1JNI.so', WORK / 'libvpxV2JNI.so']
-    provenance = {'sources': SOURCES, 'patches': ['patch_ffmpeg.py: TrueHD channel layout and flush'], 'ndk': '26.1.10909125', 'abi': 'armeabi-v7a',
-                  'api': 23, 'audio_decoders': decoders, 'libraries': {}}
-    with zipfile.ZipFile(OUT / 'marco-decoders-armv7.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
-        for lib in libs:
-            run(BIN / 'llvm-strip', '--strip-unneeded', lib)
-            provenance['libraries'][lib.name] = hashlib.sha256(lib.read_bytes()).hexdigest()
-            archive.write(lib, 'lib/armeabi-v7a/' + lib.name)
+    if abseil.exists() and not abseil.is_symlink() and not any(abseil.iterdir()):
+        abseil.rmdir()
+    if not abseil.exists():
+        abseil.symlink_to(src['abseil'], target_is_directory=True)
+
+    provenance = {
+        'sources': SOURCES,
+        'patches': ['patch_ffmpeg.py: TrueHD channel layout and flush'],
+        'ndk': NDK.name,
+        'abis': [t['abi'] for t in TARGETS],
+        'api': 23,
+        'max_page_size': 16384,
+        'audio_decoders': decoders,
+        'libraries': {},
+    }
+    with zipfile.ZipFile(OUT / 'marco-decoders-all.zip', 'w', zipfile.ZIP_DEFLATED) as combined:
+        for target in TARGETS:
+            abi = target['abi']
+            libs = build_abi(target, src, decoders)
+            provenance['libraries'][abi] = {}
+            zip_path = OUT / f"marco-decoders-{target['zip_suffix']}.zip"
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as archive:
+                for lib in libs:
+                    provenance['libraries'][abi][lib.name] = hashlib.sha256(lib.read_bytes()).hexdigest()
+                    arc = f'lib/{abi}/{lib.name}'
+                    archive.write(lib, arc)
+                    combined.write(lib, arc)
     (OUT / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
     with tarfile.open(OUT / 'marco-decoder-sources.tar.xz', 'w:xz') as archive:
         for name, folder in src.items():

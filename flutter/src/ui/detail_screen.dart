@@ -1,14 +1,17 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart' show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import '../core/cms_client.dart';
 import '../core/cms_parser.dart';
+import '../core/csp_bridge.dart';
 import '../core/download_service.dart';
 import '../core/models.dart';
-import '../core/wogg_source.dart';
 import '../core/storage_service.dart';
+import '../core/wogg_source.dart';
 import 'apple_theme.dart';
 import 'netdisk_sheet.dart';
 import 'player_screen.dart';
@@ -138,7 +141,7 @@ class _DetailScreenState extends State<DetailScreen> {
     PosterLoader.metadataRevision.addListener(_onExternalMetadataRevision);
     final immediateBytes = PosterLoader.peekMemory(
       _video.poster,
-      title: _video.title,
+      title: _publicLookupTitle,
       preferHd: true,
     );
     if (immediateBytes != null) {
@@ -150,6 +153,9 @@ class _DetailScreenState extends State<DetailScreen> {
     _loadDetail();
     _warmExternalMetadata(_video.title);
   }
+
+  String get _publicLookupTitle =>
+      _activeSite.isEffectivelyPrivate ? '' : _video.title;
 
   @override
   void dispose() {
@@ -165,7 +171,7 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   void _onExternalMetadataRevision() {
-    if (!mounted) return;
+    if (!mounted || _activeSite.isEffectivelyPrivate) return;
     final syn = PosterLoader.peekSeriesSynopsis(_video.title);
     if (syn.isNotEmpty && syn != _externalSynopsis) {
       _externalSynopsis = syn;
@@ -216,7 +222,7 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   Future<void> _warmExternalMetadata(String title) async {
-    if (_activeSite.isEmby) return;
+    if (_activeSite.isEmby || _activeSite.isEffectivelyPrivate) return;
     if (title.trim().isEmpty) return;
     unawaited(
       PosterLoader.fetchSeriesSynopsis(title).then((syn) {
@@ -517,6 +523,7 @@ class _DetailScreenState extends State<DetailScreen> {
 
   String _effectiveSeriesSynopsis() {
     final raw = _video.description.trim();
+    if (_activeSite.isEffectivelyPrivate) return raw;
     final ext = _externalSynopsis.trim().isNotEmpty
         ? _externalSynopsis.trim()
         : PosterLoader.peekSeriesSynopsis(_video.title).trim();
@@ -651,11 +658,15 @@ class _DetailScreenState extends State<DetailScreen> {
     final line = _video.lines[safeLine];
     if (line.episodes.isEmpty) return;
     final safeEp = epIdx.clamp(0, line.episodes.length - 1);
-    final provider = line.episodes[safeEp].cloudProvider;
+    final targetEp = line.episodes[safeEp];
+    final provider = targetEp.cloudProvider;
     if (provider != null && provider != 'uc' &&
         !widget.storage.isNetdiskLoggedIn(provider)) {
-      await showNetdiskAccountSheet(context, widget.storage,
-          initialDriveKey: provider);
+      await showNetdiskAccountSheet(
+        context,
+        widget.storage,
+        initialDriveKey: provider,
+      );
       if (!mounted || !widget.storage.isNetdiskLoggedIn(provider)) return;
       if (!identical(_activeSite, targetSite) || !identical(_video, targetVideo)) {
         _toast('剧集信息已更新，请重新选择要播放的文件');
@@ -668,7 +679,8 @@ class _DetailScreenState extends State<DetailScreen> {
       if (bm != null) {
         final ep = line.episodes[safeEp];
         final target = WoggSource.supports(_activeSite)
-            ? WoggSource.resolveCachedBookmarkTarget(_activeSite, _video, bm) : null;
+            ? WoggSource.resolveCachedBookmarkTarget(_activeSite, _video, bm)
+            : null;
         final matches = WoggSource.supports(_activeSite)
             ? target?.$1 == safeLine && target?.$2 == safeEp
             : (bm.line == line.name && bm.index == safeEp) || bm.episode == ep.name;
@@ -677,22 +689,20 @@ class _DetailScreenState extends State<DetailScreen> {
         }
       }
     }
-    Navigator.of(context)
-        .push(
-          CupertinoPageRoute<void>(
-            builder: (_) => PlayerScreen(
-              site: targetSite,
-              video: targetVideo,
-              initialLineIndex: safeLine,
-              initialEpisodeIndex: safeEp,
-              initialPositionMs: effectiveResumeMs,
-              storage: widget.storage,
-            ),
-          ),
-        )
-        .then((_) {
-          if (mounted) setState(() {});
-        });
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      CupertinoPageRoute<void>(
+        builder: (_) => PlayerScreen(
+          site: targetSite,
+          video: targetVideo,
+          initialLineIndex: safeLine,
+          initialEpisodeIndex: safeEp,
+          initialPositionMs: effectiveResumeMs,
+          storage: widget.storage,
+        ),
+      ),
+    );
+    if (mounted) setState(() {});
   }
 
   List<int> _activeEpisodeIndicesFor(CmsLine line) {
@@ -740,7 +750,7 @@ class _DetailScreenState extends State<DetailScreen> {
       final lineIdx = _selectedLine.clamp(0, _video.lines.length - 1);
       final indices = _activeEpisodeIndicesFor(_video.lines[lineIdx]);
       final firstEpIdx = indices.isNotEmpty ? indices.first : 0;
-      _openPlayer(lineIdx, firstEpIdx);
+      _openPlayer(lineIdx, firstEpIdx, resumeMs: 0);
     }
   }
 
@@ -974,21 +984,6 @@ class _DetailScreenState extends State<DetailScreen> {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                ),
-                AppleCapsuleButton(
-                  label: '网盘扫码',
-                  icon: CupertinoIcons.qrcode_viewfinder,
-                  compact: true,
-                  onPressed: () {
-                    Navigator.of(ctx).pop();
-                    showNetdiskAccountSheet(
-                      context,
-                      widget.storage,
-                      onChanged: () {
-                        if (mounted) setState(() {});
-                      },
-                    );
-                  },
                 ),
               ],
             ),
@@ -1336,7 +1331,10 @@ class _DetailScreenState extends State<DetailScreen> {
   Widget _buildPortraitImmersiveScreen(BuildContext context) {
     final targetBg = _resolveBaseAmbientColor();
     final bookmark = _findBookmark();
-    final topPad = MediaQuery.paddingOf(context).top;
+    final topPad = math.max(
+      MediaQuery.paddingOf(context).top,
+      defaultTargetPlatform == TargetPlatform.macOS ? 28.0 : 0.0,
+    );
     final screenHeight = MediaQuery.sizeOf(context).height;
     final posterWindowHeight = (screenHeight * 0.77).clamp(590.0, 740.0);
     final foregroundHeroHeight =
@@ -1516,7 +1514,7 @@ class _DetailScreenState extends State<DetailScreen> {
                   },
                   child: PosterImage(
                     url: _video.poster,
-                    title: _video.title,
+                    title: _publicLookupTitle,
                     fit: BoxFit.cover,
                     alignment: const Alignment(0.0, -0.32),
                     highRes: true,
@@ -1707,9 +1705,16 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   /// Top-right floating Liquid Glass capsule:
-  /// Left button = Offline Download
+  /// Left button = Netdisk QR Login (`网盘扫码`)
+  /// Middle button = Offline Download (`离线缓存`)
   /// Right button = Favorite (`收藏`)
   Widget _buildFloatingTopRightPill() {
+    final currentLine = _video.lines.isEmpty
+        ? null
+        : _video.lines[_selectedLine.clamp(0, _video.lines.length - 1)];
+    final driveKey = currentLine != null && currentLine.episodes.isNotEmpty
+        ? currentLine.episodes.first.cloudProvider
+        : null;
     return LiquidGlass(
       height: 40,
       borderRadius: 999,
@@ -1719,6 +1724,30 @@ class _DetailScreenState extends State<DetailScreen> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          CupertinoButton(
+            key: const ValueKey('detail-netdisk-qr-button'),
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            minSize: 32,
+            onPressed: () => showNetdiskAccountSheet(
+              context,
+              widget.storage,
+              initialDriveKey: driveKey ??
+                  CspBridge.netdiskDriveKeyForLineName(currentLine?.name ?? ''),
+              onChanged: () {
+                if (mounted) setState(() {});
+              },
+            ),
+            child: const Icon(
+              CupertinoIcons.qrcode_viewfinder,
+              color: AppleColors.labelPrimary,
+              size: 19,
+            ),
+          ),
+          Container(
+            width: 0.6,
+            height: 18,
+            color: const Color(0x36FFFFFF),
+          ),
           CupertinoButton(
             padding: const EdgeInsets.symmetric(horizontal: 10),
             minSize: 32,
@@ -1850,67 +1879,40 @@ class _DetailScreenState extends State<DetailScreen> {
                 builder: (context) {
                   final rawText = '${_video.remarks} ${_video.description}';
                   final scoreMatch = RegExp(
-                    r'(?:豆瓣|评分|IMDB|TMDB)?[:：\s]*([4-9]\.\d)\b',
+                    r'(?:(?:豆瓣|评分|IMDB|TMDB)\s*[:：]?\s*([1-9]\.\d)\b(?!\s*声道)|\b([1-9]\.\d)\s*分(?!钟))',
                     caseSensitive: false,
                   ).firstMatch(rawText);
-                  final seed = _video.title.codeUnits.fold<int>(
-                    0,
-                    (a, b) => (a * 31 + b) & 0x7fffffff,
-                  );
-                  final doubanScore = scoreMatch != null
-                      ? scoreMatch.group(1)!
-                      : (7.2 + (seed % 22) * 0.1).toStringAsFixed(1);
-                  final rtPercent = (74 + (seed % 23)).clamp(68, 98);
+                  final authenticScore =
+                      scoreMatch?.group(1) ?? scoreMatch?.group(2);
                   return Wrap(
                     alignment: WrapAlignment.center,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     spacing: 8,
                     runSpacing: 6,
                     children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 3,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0x3330D158),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(
-                            color: const Color(0x6630D158),
-                            width: 0.6,
+                      if (authenticScore != null)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0x3330D158),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(
+                              color: const Color(0x6630D158),
+                              width: 0.6,
+                            ),
+                          ),
+                          child: Text(
+                            '评分 ★ $authenticScore',
+                            style: const TextStyle(
+                              color: Color(0xFF4AE06E),
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                         ),
-                        child: Text(
-                          '豆瓣 ★ $doubanScore',
-                          style: const TextStyle(
-                            color: Color(0xFF4AE06E),
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 3,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0x33FF453A),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(
-                            color: const Color(0x66FF453A),
-                            width: 0.6,
-                          ),
-                        ),
-                        child: Text(
-                          '🍅 $rtPercent%',
-                          style: const TextStyle(
-                            color: Color(0xFFFF6961),
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
                       Text(
                         _activeSite.name,
                         style: const TextStyle(
@@ -1976,13 +1978,18 @@ class _DetailScreenState extends State<DetailScreen> {
 
   Widget _buildPortraitActionRow(WatchHistoryEntry? bookmark) {
     final hasLines = _video.lines.isNotEmpty;
+    final selectedBookmark = hasLines &&
+            bookmark?.line ==
+                _video.lines[_selectedLine.clamp(0, _video.lines.length - 1)].name
+        ? bookmark
+        : null;
     String playLabel = '加载片源中…';
     if (!_loading && !hasLines) {
       playLabel = '搜索其他片源';
-    } else if (bookmark != null) {
+    } else if (selectedBookmark != null) {
       final (cleanEp, _) =
-          _parseEpisodeDisplay(bookmark.episode, bookmark.index + 1);
-      final resumeMs = bookmark.resumePosition;
+          _parseEpisodeDisplay(selectedBookmark.episode, selectedBookmark.index + 1);
+      final resumeMs = selectedBookmark.resumePosition;
       playLabel = resumeMs > 0
           ? '播放 · $cleanEp · 续播 ${_formatBookmarkTime(resumeMs)}'
           : '播放 · $cleanEp';
@@ -2000,7 +2007,9 @@ class _DetailScreenState extends State<DetailScreen> {
     }
 
     return GestureDetector(
-      onTap: hasLines ? () => _playPrimaryAction(bookmark) : (_loading ? null : _searchOtherSources),
+      onTap: hasLines
+          ? () => _playPrimaryAction(selectedBookmark)
+          : (_loading ? null : _searchOtherSources),
       child: Container(
         height: 48,
         padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -2485,7 +2494,7 @@ class _DetailScreenState extends State<DetailScreen> {
                               fit: StackFit.expand,
                               children: [
                                 EpisodeStillImage(
-                                  seriesTitle: _video.title,
+                                  seriesTitle: _publicLookupTitle,
                                   episodeIndex: posIdx,
                                   fallbackPosterUrl: _video.poster,
                                   placeholder: _posterPlaceholder(
@@ -2709,7 +2718,10 @@ class _DetailScreenState extends State<DetailScreen> {
     final targetBg = _resolveBaseAmbientColor();
     final bookmark = _findBookmark();
     final size = MediaQuery.sizeOf(context);
-    final topPad = MediaQuery.paddingOf(context).top;
+    final topPad = math.max(
+      MediaQuery.paddingOf(context).top,
+      defaultTargetPlatform == TargetPlatform.macOS ? 28.0 : 0.0,
+    );
     final horizontalPad = (size.width * 0.045).clamp(24.0, 56.0);
     final heroStageHeight = (size.height * 0.58).clamp(380.0, 500.0);
 
@@ -2797,7 +2809,7 @@ class _DetailScreenState extends State<DetailScreen> {
                   },
                   child: PosterImage(
                     url: _video.poster,
-                    title: _video.title,
+                    title: _publicLookupTitle,
                     fit: BoxFit.cover,
                     alignment: const Alignment(0.35, -0.2),
                     highRes: true,
@@ -2908,17 +2920,6 @@ class _DetailScreenState extends State<DetailScreen> {
                       onTap: () => Navigator.of(context).maybePop(),
                     ),
                     const Spacer(),
-                    _buildFloatingGlassCircleButton(
-                      icon: CupertinoIcons.qrcode_viewfinder,
-                      onTap: () => showNetdiskAccountSheet(
-                        context,
-                        widget.storage,
-                        onChanged: () {
-                          if (mounted) setState(() {});
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 10),
                     _buildFloatingSourceButton(),
                     const SizedBox(width: 10),
                     _buildFloatingTopRightPill(),
@@ -2953,7 +2954,7 @@ class _DetailScreenState extends State<DetailScreen> {
             children: [
               PosterImage(
                 url: _video.poster,
-                title: _video.title,
+                title: _publicLookupTitle,
                 highRes: true,
                 onBytesLoaded: _updateAmbientFromBytes,
                 placeholder: _posterPlaceholder(bgColor),

@@ -617,6 +617,25 @@ public final class MagnetStream implements Closeable {
         cleanup.start();
     }
 
+    public static void cleanStaleSessions(Context context) {
+        if (context == null) return;
+        try {
+            File root = new File(context.getApplicationContext().getCacheDir(), "magnet-streams");
+            if (!root.isDirectory()) return;
+            String rootPrefix = root.getCanonicalPath() + File.separator;
+            File[] children = root.listFiles();
+            if (children == null) return;
+            for (File child : children) {
+                if (child == null || !child.getName().startsWith("session-")) continue;
+                try {
+                    deleteOwned(child, rootPrefix);
+                } catch (IOException ignored) {
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     static void deleteOwned(File file, String prefix) throws IOException {
         String absolute = file.getAbsolutePath();
         if (!absolute.equals(prefix.substring(0, prefix.length() - 1))

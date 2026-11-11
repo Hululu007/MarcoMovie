@@ -45,8 +45,8 @@ class _QrPainter extends CustomPainter {
         if (matrix.isDark(row, col)) {
           final left = (x + (col + quietZone) * cell).floorToDouble();
           final top = (y + (row + quietZone) * cell).floorToDouble();
-          final right = (x + (col + quietZone + 1) * cell).ceilToDouble();
-          final bottom = (y + (row + quietZone + 1) * cell).ceilToDouble();
+          final right = (x + (col + quietZone + 1) * cell).floorToDouble();
+          final bottom = (y + (row + quietZone + 1) * cell).floorToDouble();
           canvas.drawRect(
             Rect.fromLTRB(left, top, right, bottom),
             paint,

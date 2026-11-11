@@ -254,7 +254,24 @@ class CatPawHost {
       if (_lastSyncedPanJson == payload && await cfgFile.exists()) return;
       await _writeAtomic(cfgFile, utf8.encode('$payload\n'));
       _lastSyncedPanJson = payload;
+      await for (final entity in root.list(followLinks: false)) {
+        if (entity is Directory) {
+          final stateDir = Directory('${entity.path}/state');
+          if (await stateDir.exists()) {
+            await _writeAtomic(
+                File('${stateDir.path}/wexfnwconfig.json'), utf8.encode('$payload\n'));
+          }
+        }
+      }
     } catch (_) {}
+  }
+
+  /// Immediately updates or clears `wexfnwconfig.json` when the user logs into
+  /// or logs out of a cloud drive while the local CatPaw runtime directory exists.
+  Future<void> syncNetdiskConfig() async {
+    final root = _root;
+    if (root == null) return;
+    await _syncNetdiskConfig(root);
   }
 
   static Future<void> _writeAtomic(File file, List<int> bytes) async {

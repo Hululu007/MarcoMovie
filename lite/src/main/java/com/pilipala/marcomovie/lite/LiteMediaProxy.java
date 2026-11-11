@@ -40,17 +40,22 @@ public final class LiteMediaProxy {
     private static LiteMediaProxy instance;
     private final ServerSocket server;
     private final String token = UUID.randomUUID().toString();
-    private final ExecutorService pool = Executors.newCachedThreadPool();
+    private final ExecutorService pool = Executors.newFixedThreadPool(8);
+    private final Thread acceptThread;
     private volatile boolean closed;
 
     private LiteMediaProxy() throws IOException {
         server = new ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"));
-        pool.execute(
-                new Runnable() {
-                    public void run() {
-                        acceptLoop();
-                    }
-                });
+        acceptThread =
+                new Thread(
+                        new Runnable() {
+                            public void run() {
+                                acceptLoop();
+                            }
+                        },
+                        "LiteMediaProxy-Accept");
+        acceptThread.setDaemon(true);
+        acceptThread.start();
     }
 
     public static synchronized LiteMediaProxy get() throws IOException {
@@ -125,15 +130,23 @@ public final class LiteMediaProxy {
 
     private void acceptLoop() {
         while (!closed) {
+            Socket client = null;
             try {
-                final Socket client = server.accept();
+                client = server.accept();
+                final Socket accepted = client;
                 pool.execute(
                         new Runnable() {
                             public void run() {
-                                handleClient(client);
+                                handleClient(accepted);
                             }
                         });
             } catch (Exception e) {
+                if (client != null) {
+                    try {
+                        client.close();
+                    } catch (Exception ignored) {
+                    }
+                }
                 if (closed) break;
             }
         }
@@ -346,8 +359,8 @@ public final class LiteMediaProxy {
                 hdr.append("Accept-Ranges: ")
                         .append(acceptRanges != null ? acceptRanges : "bytes")
                         .append("\r\n");
-                int contentLen = c.getContentLength();
-                if (contentLen >= 0) {
+                long contentLen = parseContentLength(c.getHeaderField("Content-Length"));
+                if (contentLen >= 0L) {
                     hdr.append("Content-Length: ").append(contentLen).append("\r\n");
                 }
                 hdr.append("Connection: close\r\n\r\n");
@@ -437,12 +450,25 @@ public final class LiteMediaProxy {
         out.flush();
     }
 
+    static long parseContentLength(String raw) {
+        if (raw == null) return -1L;
+        String trimmed = raw.trim();
+        if (trimmed.length() == 0) return -1L;
+        try {
+            long parsed = Long.parseLong(trimmed);
+            return parsed >= 0L ? parsed : -1L;
+        } catch (NumberFormatException invalid) {
+            return -1L;
+        }
+    }
+
     public void close() {
         closed = true;
         try {
             server.close();
         } catch (Exception ignored) {
         }
+        acceptThread.interrupt();
         pool.shutdownNow();
     }
 }

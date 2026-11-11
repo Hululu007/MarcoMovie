@@ -6,21 +6,30 @@ import 'dart:io';
 import 'dart:math';
 import 'package:flutter/services.dart';
 import 'python_http_transport.dart';
+import 'python_source_sessions.dart';
 
 class NativeSourceFixture {
-  NativeSourceFixture._(this.channel, this.server, this.origin);
+  NativeSourceFixture._(this.channel, this.server, this.origin, this.actors);
   final MethodChannel channel;
   final HttpServer server;
   final Uri origin;
+  final bool actors;
+  final pool = PythonSourceSessions();
   final handles = <String>{};
+  final owners = <String, FixtureSourceOwner>{};
+  final pending = <String, PythonHttpRequest>{};
   final failures = <String>[];
   final operations = <String>{};
-  PythonHttpTransport? active;
+  final slowReceived = Completer<void>();
+  final blockEntered = Completer<void>();
   int sequence = 0;
   int httpRequests = 0;
   int proxyCalls = 0;
 
-  static Future<NativeSourceFixture> start(MethodChannel channel) async {
+  static Future<NativeSourceFixture> start(
+    MethodChannel channel, {
+    bool actors = false,
+  }) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final random = Random.secure();
     final token = List.generate(
@@ -31,6 +40,7 @@ class NativeSourceFixture {
       channel,
       server,
       Uri.parse('http://127.0.0.1:${server.port}/$token'),
+      actors,
     );
     server.listen(
       (request) => unawaited(fixture.serve(request)),
@@ -40,19 +50,20 @@ class NativeSourceFixture {
   }
 
   Future<Object?> onMethod(MethodCall call) async {
-    final args = Map<String, Object?>.from(call.arguments as Map);
-    final transport = active;
-    if (call.method == 'transport.cancel') {
-      transport?.cancel(args['callId'] as String);
+    if (call.method == 'owner.blockEntered' && actors) {
+      if (!blockEntered.isCompleted) blockEntered.complete();
       return null;
     }
-    if (call.method != 'transport.request' || transport == null) {
+    final args = Map<String, Object?>.from(call.arguments as Map);
+    if (call.method == 'transport.cancel') return null;
+    final request = pending[args['callId']];
+    if (call.method != 'transport.request' || request == null) {
       throw PlatformException(code: 'protocol');
     }
     try {
       operations.add(args['callId'] as String);
       httpRequests++;
-      return await transport.request(args);
+      return await request(args);
     } on PythonTransportException catch (error) {
       throw PlatformException(code: error.kind);
     } on FormatException {
@@ -61,51 +72,56 @@ class NativeSourceFixture {
   }
 
   Future<String> open() async {
-    final reply = await channel.invokeMapMethod<String, Object?>('openSource', {
-      'version': 1,
-      'source': 'native-source-v1',
-      'origin': '$origin',
-    });
-    final handle = reply!['handle'] as String;
-    if (!handles.add(handle)) throw StateError('Repeated native source handle');
-    return handle;
+    final key = 'owned-source-${++sequence}';
+    handles.add(key);
+    return key;
   }
 
-  Future<Object?> call(String handle, String method, List<Object?> args) async {
-    if (active != null) throw StateError('Fixture calls must be serialized');
-    final id = (++sequence).toRadixString(16).padLeft(32, '0');
-    final transport = PythonHttpTransport(
-      callId: id,
-      budget: const Duration(seconds: 12),
+  Future<Object?> call(
+    String key,
+    String method,
+    List<Object?> args, {
+    Completer<void>? cancellation,
+  }) async {
+    if (!handles.contains(key)) throw StateError('Removed fixture source');
+    final value = await pool.invoke(
+      sessionKey: key,
+      method: method,
+      arguments: args,
+      expectedGeneration: pool.generation,
+      cancellation: cancellation,
       allowUrl: (url) =>
           url.origin == origin.origin && url.path.startsWith('${origin.path}/'),
-    );
-    active = transport;
-    try {
-      return await channel
-          .invokeMethod<Object?>('callSource', {
+      open: (proxy, request) async {
+        final reply = await channel.invokeMapMethod<String, Object?>(
+          actors ? 'openActor' : 'openSource',
+          {
             'version': 1,
-            'handle': handle,
-            'method': method,
-            'args': args,
-            'callId': id,
-          })
-          .timeout(const Duration(seconds: 15));
-    } finally {
-      if (transport.activeRequestCount != 0)
-        failures.add('Native call returned with pending HTTP');
-      transport.close();
-      active = null;
-    }
+            'source': 'native-source-v1',
+            'origin': '$origin',
+            'proxy': '$proxy',
+          },
+        );
+        final owner = FixtureSourceOwner(
+          this,
+          reply!['handle'] as String,
+          request,
+        );
+        owners[key] = owner;
+        return owner;
+      },
+    );
+    if (method == 'liveContent' && value.startsWith('#EXTM3U')) return value;
+    return jsonDecode(value);
   }
 
-  Future<bool> release(String handle) async {
-    handles.remove(handle);
-    final result = await channel.invokeMapMethod<String, Object?>('release', {
-      'version': 1,
-      'handle': handle,
-    });
-    return result!['released'] == true;
+  Future<bool> release(String key) async {
+    final removed = handles.remove(key);
+    pool.release(key);
+    final owner = owners[key];
+    if (owner != null)
+      await owner.closed.future.timeout(const Duration(seconds: 10));
+    return removed;
   }
 
   Future<void> serve(HttpRequest request) async {
@@ -115,37 +131,9 @@ class NativeSourceFixture {
       if (request.uri.path == '${origin.path}/echo') {
         response.headers.contentType = ContentType.json;
         response.write(jsonEncode({'method': request.method}));
-      } else if (request.uri.path == '${origin.path}/proxy' &&
-          request.uri.queryParameters['do'] == 'py') {
-        final handle = request.uri.queryParameters['siteKey'];
-        if (handle == null || !handles.contains(handle)) {
-          response.statusCode = HttpStatus.notFound;
-        } else {
-          final value =
-              await call(handle, 'proxy', [
-                    {
-                      ...request.uri.queryParameters,
-                      'range':
-                          request.headers.value(HttpHeaders.rangeHeader) ?? '',
-                      'method': request.method,
-                    },
-                  ])
-                  as List;
-          proxyCalls++;
-          response.statusCode = value[0] as int;
-          response.headers.set(
-            HttpHeaders.contentTypeHeader,
-            value[1] as String,
-          );
-          (value[3] as Map).forEach(
-            (key, value) => response.headers.set('$key', '$value'),
-          );
-          final body = value[4] == 1
-              ? base64Decode(value[2] as String)
-              : utf8.encode(value[2] as String);
-          response.contentLength = body.length;
-          if (request.method != 'HEAD') response.add(body);
-        }
+      } else if (request.uri.path == '${origin.path}/slow') {
+        if (!slowReceived.isCompleted) slowReceived.complete();
+        return; // Owned cancellation fixture: deliberately leave response pending.
       } else {
         response.statusCode = HttpStatus.notFound;
       }
@@ -153,18 +141,72 @@ class NativeSourceFixture {
     } catch (error) {
       failures.add('$error');
       try {
-        response.statusCode = HttpStatus.internalServerError;
+        response.statusCode = 500;
         await response.close();
       } catch (_) {}
     }
   }
 
   Future<void> close() async {
-    active?.close();
-    for (final handle in handles.toList()) {
-      await release(handle);
+    for (final key in handles.toList()) {
+      await release(key);
     }
+    await pool.close();
     await server.close(force: true);
+  }
+}
+
+class FixtureSourceOwner extends PythonNativeSession {
+  FixtureSourceOwner(this.fixture, this.handle, this.request);
+  final NativeSourceFixture fixture;
+  final String handle;
+  final PythonHttpRequest request;
+  final closed = Completer<void>();
+  int cancellations = 0;
+  @override
+  Future<Object?> invoke(
+    String callId,
+    String method,
+    List<Object?> args,
+    Duration budget,
+  ) async {
+    fixture.pending[callId] = request;
+    try {
+      if (method == 'proxy') fixture.proxyCalls++;
+      return await fixture.channel.invokeMethod<Object?>(
+        fixture.actors ? 'callActor' : 'callSource',
+        {
+          'version': 1,
+          'handle': handle,
+          'method': method,
+          'args': args,
+          'callId': callId,
+          if (fixture.actors) 'budgetMs': budget.inMilliseconds.clamp(1, 45000),
+        },
+      );
+    } finally {
+      fixture.pending.remove(callId);
+    }
+  }
+
+  @override
+  Future<void> cancel(String callId) async {
+    cancellations++;
+    await fixture.channel.invokeMethod<Object?>(
+      fixture.actors ? 'cancelActor' : 'cancelTransport',
+      {'version': 1, 'callId': callId, if (fixture.actors) 'handle': handle},
+    );
+  }
+
+  @override
+  Future<void> close() async {
+    final reply = await fixture.channel.invokeMapMethod<String, Object?>(
+      fixture.actors ? 'releaseActor' : 'release',
+      {'version': 1, 'handle': handle},
+    );
+    if (reply?['released'] != true)
+      throw StateError('Native owner was not released');
+    if (!closed.isCompleted) closed.complete();
   }
 }
 
@@ -241,8 +283,7 @@ Future<void> runNativeSourceFixture(
     final proxy = Uri.parse(play['url'] as String);
     check(
       'source_play_proxy_url',
-      proxy.origin == fixture.origin.origin &&
-          proxy.queryParameters['siteKey'] == a &&
+      fixture.pool.ownsProxyUrl(a, proxy) &&
           proxy.queryParameters['item'] == 'episode-1',
     );
     final get = await http.getUrl(proxy);
@@ -297,7 +338,13 @@ Future<void> runNativeSourceFixture(
       staleResponse.statusCode == 404 && fresh != a && fixture.proxyCalls == 2,
     );
     try {
-      await call(a, 'home', [false]);
+      await channel.invokeMethod<Object?>('callSource', {
+        'version': 1,
+        'handle': fixture.owners[a]!.handle,
+        'method': 'home',
+        'args': [false],
+        'callId': '0' * 32,
+      });
       check('source_stale_handle', false);
     } on PlatformException catch (error) {
       check('source_stale_handle', error.code == 'invalid_handle');
@@ -313,7 +360,51 @@ Future<void> runNativeSourceFixture(
           reset['initializations'] == 1 &&
           reset['module_instances'] == 1,
     );
-    check('source_transport_drained', fixture.active == null);
+    check('source_transport_drained', fixture.pending.isEmpty);
+    final stop = Completer<void>();
+    final owner = fixture.owners[fresh]!;
+    final slow = fixture.call(fresh, 'liveContent', [
+      'slow',
+    ], cancellation: stop);
+    final cancellationObserved = slow.then(
+      (_) => false,
+      onError: (Object error) => error is StateError,
+    );
+    await fixture.slowReceived.future.timeout(const Duration(seconds: 5));
+    stop.complete();
+    check(
+      'source_session_cancel_returns',
+      await cancellationObserved.timeout(const Duration(seconds: 2)),
+    );
+    check('source_cancel_proxy_revoked', fixture.pool.activeCount == 1);
+    await owner.closed.future.timeout(const Duration(seconds: 5));
+    check(
+      'source_cancel_other_session_survives',
+      (await call(b, 'home', [false]))['calls'] == 3,
+    );
+    check(
+      'source_cancel_actual_owner_closed',
+      owner.cancellations == 1 &&
+          fixture.pool.allocatedCount == 1 &&
+          fixture.pending.isEmpty,
+    );
+    final generation = fixture.pool.generation;
+    fixture.pool.retainSessions({b});
+    try {
+      await fixture.pool.invoke(
+        sessionKey: 'deleted-loading',
+        open: (_, __) async => throw StateError('Factory must not run'),
+        method: 'home',
+        arguments: [],
+        expectedGeneration: generation,
+      );
+      check('source_stale_generation_rejected', false);
+    } on StateError catch (error) {
+      check(
+        'source_stale_generation_rejected',
+        !error.toString().contains('Factory'),
+      );
+    }
     check('source_server_clean', fixture.failures.isEmpty);
     check('source_ui_responsive', heartbeat() - before >= 2);
   } finally {

@@ -113,19 +113,85 @@ Python/native work. Existing production script runtimes remain unchanged.
 
 ## Shared source-loader integration
 
-An additional 29 required checks execute the shared `NativePythonSource` loader
-and the product `PythonHttpTransport` in this real Flutter/native process. A
+An additional 34 required checks execute the shared `NativePythonSource` loader,
+`PythonSourceSessions` and product `PythonHttpTransport` in this real Flutter/native process. A
 bundled memory package supplies relative modules, a JSON resource, all seven
 Spider/proxy operations and `liveContent` returning JSON or raw M3U text. The
 same source is retained through playback resolution and actual HTTP GET/HEAD
 binary proxy requests. Two same-name packages run in separate interpreters;
 release revokes the old proxy URL, even after a new source is created.
 
-The suite now requires 89 uniquely passing checks per launch, 178 per CPU over
+The shared-loader/lifecycle section requires 94 uniquely passing checks per launch, 188 per CPU over
 both launch orders. This is a new acceptance target, not a reinterpretation of
 the older 120-check result. Input manifests hash the shared Python files and
 product Dart transport separately. The experiment accepts only the bundled
 `native-source-v1` package and does not open arbitrary-source production routing.
+
+The shared coordinator supplies the actual product proxy route instead of the
+fixture's former HTTP proxy implementation. Native `openSource` accepts only a
+strictly shaped loopback capability URL and the fixed bundled source. A pending
+HTTP response is cancelled through the native bridge, then the report requires
+the actual native release and continued operation of the other source. An old
+generation must fail before its open callback runs. Additional Dart regressions
+exercise queue cancellation, playback pins, late opens, and quarantined capacity;
+they do not claim an arbitrary C call can be terminated or that the experimental
+single native worker provides independent production source threads.
+
+### Dedicated native owners
+
+Another 24 checks compile the reusable `MMPythonOwner` implementation from
+`flutter/packages/python_source_runtime/ios/Classes`. The suite now requires
+118 unique passing checks per launch and 236 per CPU over both launch orders.
+The native owner files are recorded in a separate `native_owner_inputs` manifest.
+The adapter still accepts only `native-source-v1` in the disposable app.
+
+Two sources run on distinct native threads and own-GIL interpreters. The fixture
+enters a bounded C callback while holding one interpreter's GIL, and the other
+source must finish a real HTTP-backed operation before that callback returns.
+Checks also cover binary GET/HEAD proxy responses, a full native queue, queued
+cancellation, immediate proxy revocation, retained capacity while cancellation
+cannot terminate C execution, actual interpreter destruction and fresh reuse.
+Node, QuickJS and the Flutter heartbeat must survive. The C callback is deliberately
+finite; passing it does not establish termination of arbitrary blocked native code.
+These checks are an acceptance target until an exact-commit run is recorded below.
+They do not activate generic user Python subscriptions in the production app.
+
+### Generic package channel
+
+The next 19 checks exercise the shared `PythonSourceChannel`, native
+`MMPythonSourceRegistry`, source-bound HTTP transport and trusted Python entrypoint.
+The app supplies file bytes, entry path and unchanged extension text through the
+same generic protocol needed by imported subscriptions. A native fixture ID is
+not accepted by this registry. The tested package is still app-owned.
+
+The generic protocol passed 137 unique checks per launch, 274 per CPU, at
+`2b0fa96` in run `42457911248`; 146 exact-commit input hashes were verified. Coverage
+includes all Spider methods, relative imports and resources, raw live text,
+1.28 MB binary GET/HEAD proxy data, actual HTTP cancellation, failed-package
+destruction and subsequent capacity reuse. New input manifests cover the trusted
+Python entrypoint and source package.
+
+`e76008b` registers the actual product `MMPythonRuntimePlugin` and shares its
+off-UI initialization with this runner. Run `42458771800` passed 138 checks per
+launch, 276 total, with 150 exact-commit hashes verified on ARM64/iOS 18.5. This
+proves the registered generic channel and initializer coexist with Node/QuickJS;
+it does not replace the real-subscription/device release gate. `CmsClient` still
+needs native backend selection and remote module loading. The full product build
+is a separate gate: its first attempt stopped before native compilation on ten
+widget regressions, subsequently traced to awaiting cancellation-listener cleanup.
+
+Startup diagnostics record native plugin registration, worker readiness and
+method entry/exit before Python initialization. Dart obtains its report path
+without waiting for that worker and records its last completed check separately.
+These app-owned records distinguish a missing Flutter startup from a blocked
+source operation; they contain no imported source strings or authenticated URLs.
+
+Unless an existing simulator is explicitly selected with `--udid`, the experiment
+creates one dedicated device using the selected runtime and exact iPhone device
+type. Both launch orders reuse that device. Diagnostics are collected before
+bounded shutdown/deletion of only its recorded creation UUID. Explicitly selected
+and preinstalled simulator devices are never deleted. Host ownership checks run
+with `python scripts/test_owned_ios_simulator.py`; they are not runtime tests.
 
 ## Recorded simulator result
 
@@ -139,3 +205,39 @@ run; it was not counted as an application check. Intel Flutter execution and the
 production/physical-device limitations above remain unverified. This result
 predates the added HTTP transport probe and does not enable arbitrary Python
 subscriptions in Marco Movie.
+
+[Run 42452168547](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42452168547)
+at `8c28f57` passed the shared source-loader suite on ARM64/iOS 18.5: 89 uniquely
+passing checks per launch order, 178 total, with all 127 recorded repository-input
+hashes matching the commit. The Intel job built successfully but returned no app
+result within the observation window; no Intel runtime acceptance is claimed for
+that run. Its available diagnostics do not identify the stopped application
+phase, motivating the startup records above. This result predates the 94-check
+shared lifecycle suite and does not establish production user-source support.
+
+[Run 42453647478](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42453647478)
+at `18ce8af` passed the shared lifecycle suite on ARM64/iOS 18.5: 94 unique
+checks in each launch order, 188 total, including real native HTTP cancellation
+and source release. All 130 repository-input hashes matched that commit. The
+Intel build completed, but installing it into the preinstalled simulator timed
+out before the application could launch. The dedicated-device setup above is
+the follow-up to that observed installation failure; the failed job is retained
+and is not counted as Intel application acceptance.
+
+[Run 42456473807](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42456473807)
+at `19a665d` passed all 118 unique checks in each launch order on the ARM64/iOS 18.5
+simulator, 236 total. All 135 recorded repository input hashes match that exact
+commit, including the shared native owner implementation. The new checks verified
+separate native thread/interpreter identities, another source completing during
+a bounded C call, native queue limits and cancellation, retained capacity until
+actual destruction, fresh reuse, and surviving Node/QuickJS engines. This is
+owned-source simulator evidence, not generic user-source or physical-iPhone
+playback acceptance. The earlier `1b4d845` attempt failed compilation due to an
+Objective-C++ block/null conditional; that failure was corrected and is not
+counted as runtime evidence.
+
+The separate [HTTP/UI run 42456472710](https://github.com/Pilipala9919/MarcoMovie/actions/runs/42456472710)
+at the same commit passed 62 tests on Windows and 62 on macOS. It includes
+cancellation of superseded home/live loads, late initial-home suppression after
+category selection, and a filter's obsolete second-page probe. These Flutter
+widget/socket checks do not substitute for iPhone device validation.

@@ -71,6 +71,11 @@ void main() {
     final ios = await AppUpdate.check(client: client, platform: 'ios');
     expect(ios.version, '0.5.1');
     expect(ios.windowsUrl, isNull);
+    expect(ios.iosUrl, isNotNull);
+    expect(
+      ios.trollStoreInstallUrl.toString(),
+      startsWith('apple-magnifier://install?url='),
+    );
     final windows = await AppUpdate.check(client: client, platform: 'windows');
     expect(windows.version, '0.8.0');
     expect(windows.windowsUrl, isNotNull);
@@ -81,6 +86,8 @@ void main() {
       expect(request.url.path, '/movie/updates/ios.json');
       return http.Response(jsonEncode({
         'platform': 'ios', 'versionName': '0.5.1', 'notes': 'iPhone update',
+        'package': {'url':'https://marcotv.wlj9919.top/movie/MarcoMovie-0.5.1-ios-unsigned.ipa',
+          'size':100, 'sha256':'a' * 64},
       }), 200);
     });
     final release = await AppUpdate.check(client: client, platform: 'ios');

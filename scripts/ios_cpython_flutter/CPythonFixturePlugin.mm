@@ -1,8 +1,30 @@
 // Experimental: accepts only the bundled synthetic-v1 fixture, never user code.
 #import "CPythonFixturePlugin.h"
 #import "FlutterPythonTransport.h"
+#import "OwnerFixtureBridge.h"
+#import "MMPythonRuntime.h"
+#import "MMPythonRuntimePlugin.h"
 #import <Python/Python.h>
 #include <signal.h>
+
+static NSString *MMFixtureDocuments(void) {
+    NSString *documents=[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES) firstObject];
+    [[NSFileManager defaultManager] createDirectoryAtPath:documents withIntermediateDirectories:YES attributes:nil error:nil];
+    return documents;
+}
+
+static void MMFixtureProgress(NSString *phase) {
+    // Owned disposable app only. No source strings, URLs or credentials.
+    @synchronized(CPythonFixturePlugin.class) {
+        static NSMutableArray *entries;
+        if (!entries) entries=[NSMutableArray array];
+        if (entries.count>=256) [entries removeObjectAtIndex:0];
+        [entries addObject:@{@"phase":phase,@"uptime":@(NSProcessInfo.processInfo.systemUptime),
+                             @"mainThread":@(NSThread.isMainThread)}];
+        NSData *data=[NSJSONSerialization dataWithJSONObject:entries options:0 error:nil];
+        [data writeToFile:[MMFixtureDocuments() stringByAppendingPathComponent:@"progress.json"] atomically:YES];
+    }
+}
 
 @interface MMFixtureSession : NSObject
 @property(nonatomic,assign) PyThreadState *state;
@@ -68,13 +90,19 @@ static id toJSON(PyObject *value) {
 @property(nonatomic,strong) NSDictionary *afterPython;
 @property(nonatomic,assign) BOOL preservedInterrupt;
 @property(nonatomic,strong) FlutterPythonTransport *transport;
+@property(nonatomic,strong) FlutterMethodChannel *channel;
+@property(nonatomic,strong) OwnerFixtureBridge *actorBridge;
+@property(nonatomic,assign) PyInterpreterState *mainInterpreter;
 @end
 
 @implementation CPythonFixturePlugin
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
+    if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.pilipala.experimental.cpythonflutter"]) MMFixtureProgress(@"plugin_register");
     FlutterMethodChannel *channel=[FlutterMethodChannel methodChannelWithName:@"marco_movie/experimental_python" binaryMessenger:registrar.messenger];
     CPythonFixturePlugin *plugin=[[self alloc] init];
     plugin.transport=[[FlutterPythonTransport alloc] initWithChannel:channel];
+    plugin.channel=channel;
+    [MMPythonRuntimePlugin registerWithRegistrar:registrar];
     [registrar addMethodCallDelegate:plugin channel:channel];
 }
 - (instancetype)init {
@@ -87,6 +115,7 @@ static id toJSON(PyObject *value) {
 }
 - (void)workerMain {
     @autoreleasepool {
+        if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.pilipala.experimental.cpythonflutter"]) MMFixtureProgress(@"python_worker_ready");
         NSRunLoop *loop=NSRunLoop.currentRunLoop;
         [loop addPort:[NSPort port] forMode:NSDefaultRunLoopMode];
         while (YES) { @autoreleasepool { [loop runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]; } }
@@ -96,38 +125,31 @@ static id toJSON(PyObject *value) {
     if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.pilipala.experimental.cpythonflutter"]) {
         self.failure=@"Fixture plugin may run only in its disposable experiment app";return;
     }
-    struct sigaction action={},interruptBefore={},interruptAfter={};action.sa_handler=SIG_IGN;sigemptyset(&action.sa_mask);
-    self.beforePython=signals();
-    if (sigaction(SIGINT,NULL,&interruptBefore)!=0) { self.failure=@"Host SIGINT inspection failed";return; }
-    if (sigaction(SIGPIPE,&action,NULL)!=0) { self.failure=@"Host SIGPIPE policy failed";return; }
-    NSString *bundle=NSBundle.mainBundle.resourcePath;
-    PyPreConfig pre;PyPreConfig_InitIsolatedConfig(&pre);pre.utf8_mode=1;
-    PyConfig config;PyConfig_InitIsolatedConfig(&config);
-    config.write_bytecode=0;config.buffered_stdio=0;config.install_signal_handlers=0;
-    config.site_import=0;config.parse_argv=0;config.use_system_logger=1;
-    PyStatus status=Py_PreInitialize(&pre);
-    if (PyStatus_Exception(status)) goto failed;
-    status=PyConfig_SetBytesString(&config,&config.home,[[bundle stringByAppendingPathComponent:@"python"] UTF8String]);
-    if (PyStatus_Exception(status)) goto failed;
-    status=PyConfig_SetBytesString(&config,&config.executable,NSBundle.mainBundle.executablePath.UTF8String);
-    if (PyStatus_Exception(status)) goto failed;
-    for (NSString *relative in @[@"python/lib/python3.14",@"python/lib/python3.14/lib-dynload",@"app_packages",@"app"]) {
-        wchar_t *path=Py_DecodeLocale([[bundle stringByAppendingPathComponent:relative] UTF8String],NULL);
-        if (!path) { self.failure=@"Fixture module path decoding failed";PyConfig_Clear(&config);return; }
-        status=PyWideStringList_Append(&config.module_search_paths,path);PyMem_RawFree(path);
-        if (PyStatus_Exception(status)) goto failed;
-    }
-    config.module_search_paths_set=1;status=Py_InitializeFromConfig(&config);
-    if (PyStatus_Exception(status)) goto failed;
-    PyConfig_Clear(&config);self.runtime=[NSString stringWithUTF8String:Py_GetVersion()];
-    self.afterPython=signals();
-    self.preservedInterrupt=sigaction(SIGINT,NULL,&interruptAfter)==0 && interruptBefore.sa_handler==interruptAfter.sa_handler && interruptBefore.sa_flags==interruptAfter.sa_flags;
-    self.mainState=PyEval_SaveThread();return;
-failed:
-    self.failure=status.err_msg?[NSString stringWithUTF8String:status.err_msg]:@"Fixture Python initialization failed";
-    PyConfig_Clear(&config);
+    MMPythonRuntime *runtime=[MMPythonRuntime sharedRuntime];
+    self.failure=runtime.failure;self.runtime=runtime.version;
+    self.beforePython=runtime.signalsBefore;self.afterPython=runtime.signalsAfter;
+    self.preservedInterrupt=runtime.preservedInterrupt;
+    self.mainInterpreter=runtime.interpreter;
+    // Production initialization belongs to another OS thread. The diagnostic
+    // adapter must own its own bootstrap state instead of migrating that state.
+    self.mainState=runtime.interpreter?PyThreadState_New(runtime.interpreter):NULL;
+    if (runtime.interpreter && !self.mainState) self.failure=@"Fixture thread state creation failed";
 }
 - (void)handleMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result {
+    if ([@[@"openActor",@"callActor",@"cancelActor",@"releaseActor",@"actorStatus"] containsObject:call.method]) {
+        if (!self.actorBridge) result([FlutterError errorWithCode:@"runtime_unavailable" message:@"Initialize the owned fixture runtime first" details:nil]);
+        else [self.actorBridge handle:call result:result];
+        return;
+    }
+    if ([call.method isEqualToString:@"diagnostics"]) {
+        if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.pilipala.experimental.cpythonflutter"] || call.arguments!=nil) {
+            result([FlutterError errorWithCode:@"invalid_request" message:@"Invalid fixture diagnostics request" details:nil]);return;
+        }
+        // Do not queue this path lookup behind a native worker: the app must be
+        // able to report a startup failure even if that worker cannot answer.
+        MMFixtureProgress(@"dart_channel_ready");
+        result(@{@"documents":MMFixtureDocuments()});return;
+    }
     if ([call.method isEqualToString:@"cancelTransport"]) {
         NSDictionary *args=[call.arguments isKindOfClass:NSDictionary.class]?call.arguments:nil;
         NSString *identity=[args[@"callId"] isKindOfClass:NSString.class]?args[@"callId"]:nil;
@@ -152,6 +174,7 @@ failed:
         FlutterResult reply=job[@"result"];id output=nil;NSString *code=nil,*message=nil;
         NSDictionary *args=[job[@"arguments"] isKindOfClass:NSDictionary.class]?job[@"arguments"]:nil;
         NSString *method=job[@"method"];
+        if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.pilipala.experimental.cpythonflutter"]) MMFixtureProgress([@"begin_" stringByAppendingString:method]);
         BOOL inspectOnly=[method isEqualToString:@"capabilities"] && keysAre(args,@[@"initialize"]) && [args[@"initialize"] isEqual:@NO];
         if (!inspectOnly && !self.mainState && !self.failure) [self initializePython];
         if (self.failure) { code=@"runtime_unavailable";message=self.failure; }
@@ -215,7 +238,21 @@ failed:
             NSURLComponents *url=[args[@"origin"] isKindOfClass:NSString.class]?[NSURLComponents componentsWithString:args[@"origin"]]:nil;
             NSRegularExpression *path=[NSRegularExpression regularExpressionWithPattern:@"^/[a-f0-9]{32}$" options:0 error:nil];
             BOOL origin=url && [url.scheme isEqualToString:@"http"] && [url.host isEqualToString:@"127.0.0.1"] && url.port.integerValue>0 && url.port.integerValue<=65535 && !url.user && !url.password && !url.query && !url.fragment && [path numberOfMatchesInString:url.path options:0 range:NSMakeRange(0,url.path.length)]==1;
-            if (!keysAre(args,@[@"version",@"source",@"origin"])
+            NSString *suppliedProxy=[args[@"proxy"] isKindOfClass:NSString.class]?args[@"proxy"]:nil;
+            NSURLComponents *proxyURL=suppliedProxy?[NSURLComponents componentsWithString:suppliedProxy]:nil;
+            NSRegularExpression *proxyPath=[NSRegularExpression regularExpressionWithPattern:@"^/_spider/[A-Za-z0-9_-]{43}/proxy$" options:0 error:nil];
+            NSMutableDictionary *proxyQuery=[NSMutableDictionary dictionary];
+            for (NSURLQueryItem *item in proxyURL.queryItems) { if (item.value) proxyQuery[item.name]=item.value; }
+            NSArray *proxyParts=[proxyURL.path componentsSeparatedByString:@"/"];
+            BOOL validProxy=nativeSource && proxyURL && [proxyURL.scheme isEqualToString:@"http"]
+                && [proxyURL.host isEqualToString:@"127.0.0.1"] && proxyURL.port.integerValue>0 && proxyURL.port.integerValue<=65535
+                && !proxyURL.user && !proxyURL.password && !proxyURL.fragment
+                && [proxyURL.path isEqualToString:proxyURL.percentEncodedPath]
+                && [proxyPath numberOfMatchesInString:proxyURL.path options:0 range:NSMakeRange(0,proxyURL.path.length)]==1
+                && proxyURL.queryItems.count==2 && [proxyQuery[@"do"] isEqualToString:@"py"]
+                && proxyParts.count==4 && [proxyQuery[@"siteKey"] isEqualToString:proxyParts[2]];
+            if (!(keysAre(args,@[@"version",@"source",@"origin"]) ||
+                    (keysAre(args,@[@"version",@"source",@"origin",@"proxy"]) && validProxy))
                     || CFGetTypeID((__bridge CFTypeRef)args[@"version"])==CFBooleanGetTypeID()
                     || ![args[@"source"] isEqual:nativeSource?@"native-source-v1":@"synthetic-v1"] || !origin) code=@"invalid_request";
             else if (self.sessions.count>=2) code=@"runtime_limit";
@@ -231,7 +268,7 @@ failed:
                     PyObject *module=PyImport_ImportModule(nativeSource?"source_session_fixture":"session_fixture");
                     PyObject *bridge=module&&nativeSource?MMCreateFixtureTransportBridge(self.transport):NULL;
                     NSString *handle=NSUUID.UUID.UUIDString;
-                    NSString *proxy=[NSString stringWithFormat:@"%@/proxy?do=py&siteKey=%@",args[@"origin"],handle];
+                    NSString *proxy=suppliedProxy?:[NSString stringWithFormat:@"%@/proxy?do=py&siteKey=%@",args[@"origin"],handle];
                     PyObject *spider=NULL;
                     if (nativeSource) {
                         if (bridge) spider=PyObject_CallMethod(module,"create","ssO",[args[@"origin"] UTF8String],proxy.UTF8String,bridge);
@@ -285,7 +322,11 @@ failed:
             } else code=@"invalid_request";
         }
         id answer=code?[FlutterError errorWithCode:code message:message?:@"Invalid owned fixture operation" details:nil]:output;
-        dispatch_async(dispatch_get_main_queue(),^{ reply(answer); });
+        if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.pilipala.experimental.cpythonflutter"]) MMFixtureProgress([@"end_" stringByAppendingString:method]);
+        dispatch_async(dispatch_get_main_queue(),^{
+            if (self.mainInterpreter && !self.actorBridge) self.actorBridge=[[OwnerFixtureBridge alloc] initWithChannel:self.channel interpreter:self.mainInterpreter];
+            reply(answer);
+        });
     }
 }
 @end

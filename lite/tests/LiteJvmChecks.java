@@ -60,6 +60,40 @@ public final class LiteJvmChecks {
         return code + ":" + new String(out.toByteArray(), StandardCharsets.UTF_8);
     }
 
+    private static String rawPostConfigServer(int port, String token, String origin, byte[] body)
+            throws Exception {
+        java.net.Socket sock = new java.net.Socket("127.0.0.1", port);
+        try {
+            sock.setSoTimeout(5000);
+            String headers =
+                    "POST /"
+                            + token
+                            + " HTTP/1.1\r\n"
+                            + "Host: 127.0.0.1:"
+                            + port
+                            + "\r\n"
+                            + "Origin: "
+                            + origin
+                            + "\r\n"
+                            + "Content-Type: application/x-www-form-urlencoded\r\n"
+                            + "Content-Length: "
+                            + body.length
+                            + "\r\n\r\n";
+            OutputStream out = sock.getOutputStream();
+            out.write(headers.getBytes(StandardCharsets.US_ASCII));
+            out.write(body);
+            out.flush();
+            InputStream in = sock.getInputStream();
+            ByteArrayOutputStream resp = new ByteArrayOutputStream();
+            byte[] buf = new byte[512];
+            int n;
+            while ((n = in.read(buf)) != -1) resp.write(buf, 0, n);
+            return new String(resp.toByteArray(), StandardCharsets.UTF_8);
+        } finally {
+            sock.close();
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         testConfigDecodingAndSites();
         testXmlAndJsonCmsParsing();
@@ -271,6 +305,23 @@ public final class LiteJvmChecks {
         check(LiteActivity.computeLongPressSeekStepMs(7) == 45000, "seek repeat 7 = 45s");
         check(LiteActivity.computeLongPressSeekStepMs(12) == 75000, "seek repeat 12 = 75s");
         check(LiteActivity.computeLongPressSeekStepMs(20) == 120000, "seek repeat 20 = 120s");
+
+        // 64-bit Content-Length (>2 GB 4K files on API 14+)
+        check(LiteMediaProxy.parseContentLength("8589934592") == 8589934592L, "64-bit Content-Length >2GB parsed");
+        check(LiteMediaProxy.parseContentLength(null) == -1L, "null Content-Length returns -1");
+
+        // Consistent play line ordering across detail, in-player line switch, and resume
+        JSONObject vod = new JSONObject();
+        try {
+            vod.put("vod_play_from", "解析源$$$m3u8直连$$$备用直连");
+            vod.put("vod_play_url", "第1集$https://example.invalid/page.html$$$第1集$http://127.0.0.1:9/a.m3u8$$$第1集$http://127.0.0.1:9/b.mp4");
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        String[][] ordered = LiteActivity.orderedPlayLines(vod, "备用直连");
+        check(ordered[0].length == 3 && ordered[1].length == 3, "orderedPlayLines preserves all 3 lines");
+        check("备用直连".equals(ordered[1][0]) && "解析源".equals(ordered[1][1]) && "m3u8直连".equals(ordered[1][2]),
+            "orderedPlayLines promotes preferred line to index 0 while preserving remaining order");
     }
 
     private static void testMediaProxyLoopback() throws Exception {
@@ -358,6 +409,23 @@ public final class LiteJvmChecks {
             String m3u8Resp = readHttp(proxiedM3u8, null);
             check(m3u8Resp.startsWith("200:"), "proxy serves rewritten M3U8");
             check(m3u8Resp.contains("URI=\"http://127.0.0.1:") && m3u8Resp.contains("/stream.ts?u="), "proxy rewrites EXT-X-KEY URI and relative .ts segment URLs");
+            // 5. ConfigServer CSRF cross-origin POST rejection vs same-origin acceptance
+            final String[] importedUrl = new String[1];
+            ConfigServer cs = new ConfigServer(new ConfigServer.Importer() {
+                @Override
+                public void apply(String address) {
+                    importedUrl[0] = address;
+                }
+            });
+            try {
+                byte[] postBody = "url=http%3A%2F%2F127.0.0.1%3A9%2Fcfg.json".getBytes(StandardCharsets.UTF_8);
+                check(rawPostConfigServer(cs.port(), cs.token, "http://evil.example", postBody).startsWith("HTTP/1.1 403")
+                    && importedUrl[0] == null, "ConfigServer rejects cross-origin POST with 403");
+                check(rawPostConfigServer(cs.port(), cs.token, "http://127.0.0.1:" + cs.port(), postBody).startsWith("HTTP/1.1 200")
+                    && "http://127.0.0.1:9/cfg.json".equals(importedUrl[0]), "ConfigServer accepts same-origin POST");
+            } finally {
+                cs.close();
+            }
         } finally {
             LiteMediaProxy.get().close();
             upstream.stop(0);

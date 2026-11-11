@@ -4,6 +4,7 @@ Reuses ios_cpython's pinned staging, signing and app-scoped diagnostic helpers.
 No product source routing, existing app package or distribution is modified.
 """
 import argparse
+import base64
 import importlib.util
 import json
 import os
@@ -22,6 +23,10 @@ ROOT = HERE.parents[1]
 TRANSPORT = HERE.parent / "ios_cpython_transport"
 NATIVE_SOURCE = ROOT / "android/src/main/assets/python-native"
 PRODUCT_TRANSPORT = ROOT / "flutter/src/core/python_http_transport.dart"
+PRODUCT_SESSIONS = [ROOT / "flutter/src/core" / name for name in (
+    "python_source_sessions.dart", "python_source_channel.dart", "python_source_host.dart", "script_proxy_protocol.dart", "script_proxy_server.dart")]
+NATIVE_RUNTIME = ROOT / "flutter/packages/python_source_runtime"
+PACKAGE_FIXTURE = ROOT / "scripts/fixtures/native_python_package"
 sys.path.insert(0, str(HERE.parent / "ios_cpython"))
 import run_cpython_probe as native
 
@@ -35,6 +40,10 @@ TRANSPORT_REQUIRED = frozenset((
     "transport_closed_adapter",
 ))
 REQUIRED = frozenset((
+    "crypto_native_inventory", "crypto_known_answers", "crypto_rsa_ecc", "crypto_owner_modules",
+    "crypto_stream_state", "crypto_parallel_owners", "crypto_survives_peer_close",
+    "crypto_reopened_owner", "crypto_ui_responsive", "crypto_quickjs_survives", "crypto_node_survives",
+    "remote_native_encoding_negotiation", "remote_native_encoding_preference",
     "actual_ios_flutter", "pinned_cpython", "owned_fixture_gate", "pinned_node18", "quickjs_execution",
     "opaque_unique_sessions", "unknown_source_rejected", "external_origin_rejected", "session_capacity_bounded",
     "home_classes", "source_instance_initial_count", "native_requests_version", "source_instance_state_separate",
@@ -64,6 +73,28 @@ REQUIRED = frozenset((
     "source_other_session_survives", "source_recreate_state",
     "source_transport_drained", "source_server_clean", "source_ui_responsive",
     "source_quickjs_survives", "source_node_survives", "source_live_json", "source_live_text",
+    "source_session_cancel_returns", "source_cancel_proxy_revoked",
+    "source_cancel_actual_owner_closed", "source_cancel_other_session_survives",
+    "source_stale_generation_rejected",
+    "owner_shared_source_http", "owner_distinct_threads", "owner_distinct_interpreters",
+    "owner_instance_isolation", "owner_binary_proxy", "owner_proxy_head",
+    "owner_other_runs_during_c_block", "owner_queue_bounded", "owner_queued_cancel",
+    "owner_queued_cancel_preserves_active", "owner_active_cancel_returns",
+    "owner_proxy_revoked_before_close", "owner_cancel_not_termination",
+    "owner_closing_capacity_retained", "owner_other_runs_during_close",
+    "owner_close_drains_queue", "owner_real_destruction", "owner_stale_handle",
+    "owner_capacity_reused", "owner_other_survives_destruction", "owner_ui_responsive",
+    "owner_transport_clean", "owner_quickjs_survives", "owner_node_survives",
+    "package_registered_native_plugin", "package_channel_real_http", "package_relative_module_and_resource", "package_raw_extension",
+    "remote_native_package_modules", "remote_native_resources", "remote_native_default_headers", "remote_native_deferred_import_cache", "registered_plugin_bootstrap",
+    "package_independent_instances", "package_recommendations", "package_category_filter",
+    "package_search_unicode", "package_detail_and_episodes", "package_play_owned_proxy",
+    "package_builtin_file_io", "package_file_retained_for_detail",
+    "product_python_ios_selection", "product_python_retained_detail", "product_python_proxy_bytes", "product_python_removed_proxy",
+    "package_large_binary_proxy", "package_proxy_head_retains_owner", "package_live_text",
+    "package_cancel_active_http", "package_revoked_proxy", "package_failed_open_released",
+    "package_capacity_after_failed_open", "package_other_owner_survives",
+    "package_quickjs_survives", "package_node_survives",
 ))
 
 
@@ -126,9 +157,16 @@ def stage_layout(out, arch, cache, node_cache):
     staged = out / "python-staged.app"
     staged.mkdir()
     inputs = native.stage(staged, "simulator", arch, cache)
+    crypto_spec = importlib.util.spec_from_file_location("ios_crypto", HERE.parent / "ios_cpython_crypto/build.py")
+    crypto = importlib.util.module_from_spec(crypto_spec)
+    crypto_spec.loader.exec_module(crypto)
+    inputs["crypto"] = crypto.stage(staged, cache, target="simulator", arch=arch,
+                                   identifier=IDENTIFIER + ".crypto", log_dir=out / "crypto-logs")
     shutil.copyfile(HERE / "session_fixture.py", staged / "app/session_fixture.py")
     shutil.copyfile(HERE / "source_session_fixture.py", staged / "app/source_session_fixture.py")
     shutil.copyfile(NATIVE_SOURCE / "host.py", staged / "app/native_source_host.py")
+    for path in (NATIVE_RUNTIME / "python").glob("*.py"):
+        shutil.copyfile(path, staged / "app" / path.name)
     shutil.copytree(NATIVE_SOURCE / "base", staged / "app/base", ignore=shutil.ignore_patterns("__pycache__"))
     for name in ("requests_adapter.py", "transport_fixture.py"):
         shutil.copyfile(TRANSPORT / name, staged / "app" / name)
@@ -136,8 +174,13 @@ def stage_layout(out, arch, cache, node_cache):
     plugin = packages / "cpython_fixture"
     classes = plugin / "ios/Classes"
     classes.mkdir(parents=True)
-    for name in ("CPythonFixturePlugin.h", "CPythonFixturePlugin.mm"):
+    for name in ("CPythonFixturePlugin.h", "CPythonFixturePlugin.mm", "OwnerFixtureBridge.h", "OwnerFixtureBridge.mm"):
         shutil.copyfile(HERE / name, classes / name)
+    owner_files = sorted((NATIVE_RUNTIME / "ios/Classes").glob("MMPython*.*"))
+    if len(owner_files) != 10:
+        raise ValueError("Shared native source owner missing")
+    for path in owner_files:
+        shutil.copyfile(path, classes / path.name)
     for name in ("FlutterPythonTransport.h", "FlutterPythonTransport.mm"):
         shutil.copyfile(TRANSPORT / name, classes / name)
     shutil.copyfile(ROOT / "LICENSE", plugin / "LICENSE")
@@ -197,7 +240,13 @@ end
         and not any(part in ("__pycache__", ".dart_tool", "build") for part in p.parts)}
     inputs["native_source_inputs"] = {p.relative_to(ROOT).as_posix(): native.digest(p)
         for p in sorted(NATIVE_SOURCE.rglob("*.py"))}
-    inputs["product_transport_inputs"] = {PRODUCT_TRANSPORT.relative_to(ROOT).as_posix(): native.digest(PRODUCT_TRANSPORT)}
+    inputs["product_transport_inputs"] = {p.relative_to(ROOT).as_posix(): native.digest(p)
+        for p in [PRODUCT_TRANSPORT, *PRODUCT_SESSIONS]}
+    inputs["native_owner_inputs"] = {p.relative_to(ROOT).as_posix(): native.digest(p) for p in owner_files}
+    inputs["native_runtime_inputs"] = {p.relative_to(ROOT).as_posix(): native.digest(p)
+        for p in sorted((NATIVE_RUNTIME / "python").glob("*.py"))}
+    inputs["native_package_fixture_inputs"] = {p.relative_to(ROOT).as_posix(): native.digest(p)
+        for p in sorted(PACKAGE_FIXTURE.rglob("*")) if p.is_file() and "__pycache__" not in p.parts}
     inputs["existing_runtime_inputs"] = {p.relative_to(ROOT).as_posix(): native.digest(p)
         for parent in (ROOT / "flutter/packages/catpaw_runtime/ios/Classes", ROOT / "flutter/packages/quickjs_engine")
         for p in sorted(parent.rglob("*")) if p.is_file()
@@ -240,14 +289,26 @@ flutter:
   uses-material-design: true
   assets:
     - assets/node-fixture.cjs
+    - assets/python-package.json
+    - assets/crypto_spider.py
 """, encoding="utf-8")
     shutil.copyfile(HERE / "main.dart", project / "lib/main.dart")
     shutil.copyfile(HERE / "transport_fixture.dart", project / "lib/transport_fixture.dart")
     shutil.copyfile(HERE / "source_fixture.dart", project / "lib/source_fixture.dart")
+    shutil.copyfile(HERE / "owner_fixture.dart", project / "lib/owner_fixture.dart")
+    shutil.copyfile(HERE / "package_fixture.dart", project / "lib/package_fixture.dart")
+    shutil.copyfile(HERE / "crypto_fixture.dart", project / "lib/crypto_fixture.dart")
     shutil.copyfile(PRODUCT_TRANSPORT, project / "lib/python_http_transport.dart")
+    for source in PRODUCT_SESSIONS:
+        shutil.copyfile(source, project / "lib" / source.name)
     shutil.copyfile(TRANSPORT / "dart/fixture_http_transport.dart", project / "lib/fixture_http_transport.dart")
     (project / "assets").mkdir(exist_ok=True)
     shutil.copyfile(HERE / "node-fixture.cjs", project / "assets/node-fixture.cjs")
+    shutil.copyfile(HERE / "crypto_spider.py", project / "assets/crypto_spider.py")
+    (project / "assets/python-package.json").write_text(json.dumps({
+        p.relative_to(PACKAGE_FIXTURE).as_posix(): base64.b64encode(p.read_bytes()).decode("ascii")
+        for p in sorted(PACKAGE_FIXTURE.rglob("*")) if p.is_file() and "__pycache__" not in p.parts
+    }), encoding="utf-8")
     # This touches only the generated disposable project. Product preparation is
     # intentionally not imported: it has unrelated icon/layout/source side effects.
     pbx = project / "ios/Runner.xcodeproj/project.pbxproj"
@@ -320,7 +381,8 @@ def main():
             native.run("codesign", "--force", "--sign", "-", "--timestamp=none", app, progress=progress)
             native.run("codesign", "--verify", "--strict", app, progress=progress)
             try:
-                report = native.simulator_run(app, progress.get("simulator_udid", args.udid), progress, IDENTIFIER, APP_NAME)
+                report = native.simulator_run(app, progress.get("simulator_udid", args.udid),
+                                              progress, IDENTIFIER, APP_NAME, fresh=not args.udid)
                 native.write_json(order_out / "app-result.json", report)
                 validate_report(report, arch, order)
                 reports[order] = report
@@ -335,6 +397,7 @@ def main():
         raise
     finally:
         native.collect_diagnostics(out, progress, started, IDENTIFIER, APP_NAME)
+        native.cleanup_owned_simulator(progress)
         native.write_json(out / "result.json", progress)
         print(json.dumps({"output": str(out), **progress}, ensure_ascii=False, indent=2))
 

@@ -732,6 +732,18 @@ class QuarkDriveClient {
         );
       }
       if (code != 0 || (status != null && status != 200)) {
+        final rawMsg = '${value['message'] ?? value['msg'] ?? ''}'.toLowerCase();
+        if (code == 31003 ||
+            code == 41016 ||
+            rawMsg.contains('capacity') ||
+            rawMsg.contains('space') ||
+            rawMsg.contains('空间不足') ||
+            rawMsg.contains('容量不足')) {
+          throw const QuarkDriveException(
+            'quota_exceeded',
+            '夸克网盘剩余空间不足，请清理网盘空间（如 0000temp 目录）后重试',
+          );
+        }
         throw const QuarkDriveException('unavailable', '夸克暂时无法提供此文件');
       }
       _operationCookies[session] = QuarkAccountSession.refreshOperationCookie(

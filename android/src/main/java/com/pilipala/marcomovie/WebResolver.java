@@ -66,21 +66,40 @@ public final class WebResolver {
         origin = address;
         initial = new LinkedHashMap<>(headers);
         callback = listener;
-        view = new WebView(activity);
-        WebSettings settings = view.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(true);
-        settings.setAllowFileAccess(false);
-        settings.setAllowContentAccess(false);
-        if (Build.VERSION.SDK_INT >= 17) {
-            settings.setMediaPlaybackRequiresUserGesture(false);
+        WebView created = null;
+        try {
+            created = new WebView(activity);
+            WebSettings settings = created.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
+            settings.setAllowFileAccess(false);
+            settings.setAllowContentAccess(false);
+            if (Build.VERSION.SDK_INT >= 17) {
+                settings.setMediaPlaybackRequiresUserGesture(false);
+            }
+            if (Build.VERSION.SDK_INT >= 21) {
+                settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+            }
+            if (headers.containsKey("User-Agent"))
+                settings.setUserAgentString(headers.get("User-Agent"));
+            created.setWebViewClient(
+                    Build.VERSION.SDK_INT >= 21 ? new Api21Client() : new LegacyClient());
+        } catch (Throwable unavailable) {
+            AppLog.w("WebResolver", "System WebView unavailable", unavailable);
+            if (created != null) {
+                try {
+                    created.destroy();
+                } catch (Throwable ignored) {
+                }
+                created = null;
+            }
         }
-        if (Build.VERSION.SDK_INT >= 21) {
-            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        view = created;
+        if (view == null) {
+            stopped = true;
+            main.post(() -> callback.failed("当前系统缺少 WebView 组件，无法网页嗅探此播放地址。"));
+            return;
         }
-        if (headers.containsKey("User-Agent"))
-            settings.setUserAgentString(headers.get("User-Agent"));
-        view.setWebViewClient(Build.VERSION.SDK_INT >= 21 ? new Api21Client() : new LegacyClient());
         main.postDelayed(
                 () -> {
                     if (!stopped) {
@@ -102,7 +121,7 @@ public final class WebResolver {
     }
 
     void scan() {
-        if (stopped) return;
+        if (stopped || view == null) return;
         if (Build.VERSION.SDK_INT >= 19) {
             view.evaluateJavascript(
                     "JSON.stringify(Array.from(document.querySelectorAll('video,audio')).map(function(v){return v.currentSrc||v.src;}))",
@@ -149,6 +168,7 @@ public final class WebResolver {
         if (stopped) return;
         stopped = true;
         main.removeCallbacksAndMessages(null);
+        if (view == null) return;
         view.stopLoading();
         view.loadUrl("about:blank");
         if (view.getParent() instanceof ViewGroup) ((ViewGroup) view.getParent()).removeView(view);

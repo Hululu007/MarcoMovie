@@ -9,6 +9,9 @@ import 'package:quickjs_engine/quickjs_engine.dart';
 
 import 'transport_fixture.dart';
 import 'source_fixture.dart';
+import 'owner_fixture.dart';
+import 'package_fixture.dart';
+import 'crypto_fixture.dart';
 
 const python = MethodChannel('marco_movie/experimental_python');
 const node = MethodChannel('marco_movie/catpaw');
@@ -46,6 +49,7 @@ Future<void> runFixture() async {
     'hard_cancellation_tested': false,
   };
   String? output;
+  String? progressOutput;
   QuickJsRuntime2? js;
   PythonTransportFixture? pythonHttp;
   var beats = 0;
@@ -67,6 +71,16 @@ Future<void> runFixture() async {
   final http = HttpClient()..connectionTimeout = const Duration(seconds: 3);
   void check(String name, bool passed) {
     checks.add({'name': name, 'passed': passed});
+    if (progressOutput != null) {
+      File(progressOutput).writeAsStringSync(
+        jsonEncode({
+          'phase': name,
+          'passed': passed,
+          'completed_checks': checks.length,
+          'heartbeat': beats,
+        }),
+      );
+    }
     if (!passed) throw StateError(name);
   }
 
@@ -106,13 +120,26 @@ Future<void> runFixture() async {
     check(name, false);
   }
 
+  Map<String, Object?>? nativeCapabilities;
+  Future<void> initializeRuntime() async {
+    nativeCapabilities = await const MethodChannel(
+      'marco_movie/python_source',
+    ).invokeMapMethod<String, Object?>('python.capabilities');
+    await bridge('capabilities');
+  }
+
   try {
+    final diagnostic = await bridge('diagnostics');
+    output = '${diagnostic['documents']}/result.json';
+    progressOutput = '${diagnostic['documents']}/flutter-progress.json';
+    File(
+      progressOutput,
+    ).writeAsStringSync(jsonEncode({'phase': 'dart_started'}));
     final initial = await bridge('capabilities', {'initialize': false});
-    output = '${initial['documents']}/result.json';
     final order = initial['order'] as String;
     report['order'] = order;
     report['initial_signals'] = initial['signals'];
-    if (order == 'python-first') await bridge('capabilities');
+    if (order == 'python-first') await initializeRuntime();
     final beforeNode = await bridge('capabilities', {'initialize': false});
     check(
       'launch_order_observed',
@@ -148,7 +175,14 @@ Future<void> runFixture() async {
     check('pinned_node18', ping['runtime'] == 'v18.20.4');
     final afterNode = await bridge('capabilities', {'initialize': false});
     report['after_node_signals'] = afterNode['signals'];
+    if (order == 'node-first') await initializeRuntime();
     final capabilities = await bridge('capabilities');
+    check(
+      'registered_plugin_bootstrap',
+      nativeCapabilities?['version'] == 1 &&
+          nativeCapabilities?['runtime'] == capabilities['runtime'] &&
+          nativeCapabilities?['hardCancel'] == false,
+    );
     report['capabilities'] = {...capabilities}..remove('documents');
     check(
       'pinned_cpython',
@@ -374,6 +408,36 @@ Future<void> runFixture() async {
       'source_node_survives',
       (jsonDecode(await getText('$origin/ping?q=source')) as Map)['q'] ==
           'source',
+    );
+    await runNativeOwnerFixture(python, check, () => beats);
+    check(
+      'owner_quickjs_survives',
+      js.evaluate('++fixtureCount').stringResult == '5',
+    );
+    check(
+      'owner_node_survives',
+      (jsonDecode(await getText('$origin/ping?q=owner')) as Map)['q'] ==
+          'owner',
+    );
+    await runGenericPackageFixture(check);
+    check(
+      'package_quickjs_survives',
+      js.evaluate('++fixtureCount').stringResult == '6',
+    );
+    check(
+      'package_node_survives',
+      (jsonDecode(await getText('$origin/ping?q=package')) as Map)['q'] ==
+          'package',
+    );
+    await runCryptoFixture(check, () => beats);
+    check(
+      'crypto_quickjs_survives',
+      js.evaluate('++fixtureCount').stringResult == '7',
+    );
+    check(
+      'crypto_node_survives',
+      (jsonDecode(await getText('$origin/ping?q=crypto')) as Map)['q'] ==
+          'crypto',
     );
     report['passed'] = true;
   } catch (error, stack) {

@@ -6,7 +6,7 @@ import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'quark_account.dart';
 
-enum CloudMediaProvider { uc, quark }
+enum CloudMediaProvider { uc, quark, baidu }
 
 /// A player-owned capability for one cloud file and its quality variants.
 /// Account headers stay here, scoped to the selected provider's HTTPS hosts.
@@ -53,9 +53,24 @@ class CloudMediaLease {
       (!uri.hasPort || uri.port == 443) &&
       (uri.host == 'quark.cn' || uri.host.endsWith('.quark.cn'));
 
-  bool _trusted(Uri uri) => _provider == CloudMediaProvider.quark
-      ? isTrustedQuarkMedia(uri)
-      : isTrustedUcMedia(uri);
+  static bool isTrustedBaiduAccountMedia(Uri uri) =>
+      uri.scheme == 'https' &&
+      uri.userInfo.isEmpty &&
+      (!uri.hasPort || uri.port == 443) &&
+      (uri.host == 'baidu.com' || uri.host.endsWith('.baidu.com'));
+
+  static bool isTrustedBaiduMedia(Uri uri) =>
+      isTrustedBaiduAccountMedia(uri) ||
+      (uri.scheme == 'https' &&
+          uri.userInfo.isEmpty &&
+          (!uri.hasPort || uri.port == 443) &&
+          (uri.host == 'baidupcs.com' || uri.host.endsWith('.baidupcs.com')));
+
+  bool _trusted(Uri uri) => switch (_provider) {
+        CloudMediaProvider.quark => isTrustedQuarkMedia(uri),
+        CloudMediaProvider.baidu => isTrustedBaiduMedia(uri),
+        CloudMediaProvider.uc => isTrustedUcMedia(uri),
+      };
 
   /// Only provider API responses or a provider playlist can register a target.
   /// The incoming HTTP request never supplies an upstream URL.
@@ -89,9 +104,12 @@ class CloudMediaLease {
       CloudMediaProvider provider = CloudMediaProvider.uc,
       DateTime Function()? clock,
       http.Client? client}) async {
-    if (!(provider == CloudMediaProvider.quark
-        ? isTrustedQuarkMedia(target)
-        : isTrustedUcMedia(target))) {
+    final validTarget = switch (provider) {
+      CloudMediaProvider.quark => isTrustedQuarkMedia(target),
+      CloudMediaProvider.baidu => isTrustedBaiduMedia(target),
+      CloudMediaProvider.uc => isTrustedUcMedia(target),
+    };
+    if (!validTarget) {
       client?.close();
       throw const FormatException('网盘返回的媒体域名无法安全携带账号会话');
     }
@@ -149,6 +167,10 @@ class CloudMediaLease {
       final upstream = http.Request(request.method, target)
         ..followRedirects = false;
       upstream.headers.addAll(_headers);
+      if (_provider == CloudMediaProvider.baidu &&
+          !isTrustedBaiduAccountMedia(target)) {
+        upstream.headers.removeWhere((k, _) => k.toLowerCase() == 'cookie');
+      }
       upstream.headers['Accept-Encoding'] = 'identity';
       final range = request.headers.value('range');
       if (range != null) {
@@ -262,14 +284,17 @@ class CloudMediaLease {
           }
         }
       }
-      if (_provider != CloudMediaProvider.quark ||
+      final allowsRedirect = _provider == CloudMediaProvider.quark ||
+          _provider == CloudMediaProvider.baidu;
+      final maxRedirects = _provider == CloudMediaProvider.baidu ? 5 : 3;
+      if (!allowsRedirect ||
           !const [301, 302, 303, 307, 308].contains(response.statusCode)) {
         return (response, request.url);
       }
       await response.stream.listen((_) {}).cancel();
       final location = response.headers['location'];
       final next = location == null ? null : request.url.resolve(location);
-      if (redirects >= 3 ||
+      if (redirects >= maxRedirects ||
           next == null ||
           !_trusted(next) ||
           _closed ||
@@ -281,6 +306,10 @@ class CloudMediaLease {
         ..followRedirects = false
         ..headers.addAll(initial.headers)
         ..headers.addAll(_headers);
+      if (_provider == CloudMediaProvider.baidu &&
+          !isTrustedBaiduAccountMedia(next)) {
+        request.headers.removeWhere((k, _) => k.toLowerCase() == 'cookie');
+      }
     }
   }
 

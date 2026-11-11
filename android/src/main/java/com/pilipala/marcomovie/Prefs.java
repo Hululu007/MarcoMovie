@@ -90,6 +90,7 @@ final class Prefs {
         DECODER_MODE,
         SOFTWARE_AUDIO,
         PREFER_AAC,
+        TUNNELED_PLAYBACK,
         ASPECT,
         BUFFER_SECONDS,
         PLAY_SPEED,
@@ -124,6 +125,7 @@ final class Prefs {
                                     DANMAKU_DEFAULT,
                                     SOFTWARE_AUDIO,
                                     PREFER_AAC,
+                                    TUNNELED_PLAYBACK,
                                     EPISODES_DESCENDING)));
 
     private static final Map<String, int[]> INT_RANGES;
@@ -234,9 +236,50 @@ final class Prefs {
     static String extractBackupConfigJson(Object raw) {
         if (raw == null) return null;
         String text = raw instanceof String ? ((String) raw).trim() : String.valueOf(raw).trim();
+        if (!text.isEmpty() && text.charAt(0) == '\uFEFF') text = text.substring(1).trim();
         if (text.isEmpty() || "null".equals(text)) return null;
-        if (text.startsWith("{") && text.endsWith("}")) return text;
+        String clean = stripOuterJsonComments(text);
+        if ((clean.startsWith("{") && clean.endsWith("}"))
+                || (clean.startsWith("[") && clean.endsWith("]"))) {
+            return text;
+        }
         return null;
+    }
+
+    private static String stripOuterJsonComments(String source) {
+        StringBuilder out = new StringBuilder(source.length());
+        boolean quoted = false, escaped = false;
+        for (int i = 0; i < source.length(); i++) {
+            char ch = source.charAt(i);
+            if (quoted) {
+                out.append(ch);
+                if (escaped) escaped = false;
+                else if (ch == '\\') escaped = true;
+                else if (ch == '"') quoted = false;
+                continue;
+            }
+            if (ch == '"') {
+                quoted = true;
+                out.append(ch);
+                continue;
+            }
+            if (ch == '/' && i + 1 < source.length() && source.charAt(i + 1) == '/') {
+                while (i < source.length() && source.charAt(i) != '\n') i++;
+                out.append('\n');
+                continue;
+            }
+            if (ch == '/' && i + 1 < source.length() && source.charAt(i + 1) == '*') {
+                i += 2;
+                while (i + 1 < source.length()
+                        && !(source.charAt(i) == '*' && source.charAt(i + 1) == '/')) i++;
+                if (i + 1 >= source.length()) return "";
+                i++;
+                out.append(' ');
+                continue;
+            }
+            out.append(ch);
+        }
+        return out.toString().trim();
     }
 
     static String sanitizeUserData(String key, Object value) {

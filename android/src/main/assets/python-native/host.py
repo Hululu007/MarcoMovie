@@ -1,4 +1,4 @@
-"""Candidate shared Python loader, not enabled for production execution.
+"""Shared Python loader for the bundled native iOS source runtime.
 
 Android's automatic assets packaging may include these files; presence alone
 does not enable native CPython source dispatch.
@@ -14,13 +14,16 @@ import importlib.resources.abc
 import importlib.util
 import inspect
 import io
+import builtins
+import os
+import operator
 import json
 from pathlib import Path
 import re
 import sys
 import types
 import unicodedata
-from urllib.parse import quote, unquote, urlsplit, urlencode
+from urllib.parse import quote, unquote, urlsplit, urlencode, urljoin
 import uuid
 import weakref
 import base64
@@ -29,7 +32,7 @@ import requests
 import requests.api
 import requests.sessions
 import requests.adapters
-from requests_adapter import BridgeSession, CallContext, UnsupportedFeature, MAX_BODY
+from requests_adapter import BridgeSession, CallContext, UnsupportedFeature, MAX_BODY, _url, _headers, _origin
 
 _INTERPRETER_USED = False
 _TOKEN = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
@@ -115,9 +118,7 @@ class _MemoryPath(importlib.resources.abc.Traversable):
         self.source._ensure_open()
         if mode not in ("r", "rb"):
             raise UnsupportedFeature("Package resources are read-only")
-        if not self.is_file():
-            raise FileNotFoundError(self.path)
-        raw = io.BytesIO(self.source.files[self.path])
+        raw = io.BytesIO(self.source._read_file(self.path))
         self.source._resource_streams.add(raw)
         if mode == "rb":
             if args or kwargs:
@@ -135,6 +136,44 @@ class _Resources(importlib.resources.abc.TraversableResources):
         return _MemoryPath(self.source, self.directory)
 
 
+class _PackageFile(io.RawIOBase):
+    """Read-only memory file using CPython's own buffering and text codecs."""
+    def __init__(self, data, name):
+        super().__init__()
+        self._data = io.BytesIO(data)
+        self.name, self.mode = name, "rb"
+
+    def readable(self):
+        self._checkClosed()
+        return True
+
+    def seekable(self):
+        self._checkClosed()
+        return True
+
+    def readinto(self, buffer):
+        self._checkClosed()
+        return self._data.readinto(buffer)
+
+    def tell(self):
+        self._checkClosed()
+        return self._data.tell()
+
+    def seek(self, offset, whence=0):
+        self._checkClosed()
+        offset, whence = operator.index(offset), operator.index(whence)
+        if whence not in (0, 1, 2):
+            raise ValueError("Invalid seek origin")
+        position = offset + (self._data.tell() if whence == 1 else len(self._data.getbuffer()) if whence == 2 else 0)
+        if position < 0:
+            raise OSError("Negative file position")
+        return self._data.seek(position)
+
+    def close(self):
+        self._data.close()
+        super().close()
+
+
 class _MemoryLoader(importlib.abc.SourceLoader):
     def __init__(self, source, path, directory, package):
         self.source, self.path, self.directory, self.package = source, path, directory, package
@@ -149,10 +188,7 @@ class _MemoryLoader(importlib.abc.SourceLoader):
         if not isinstance(path, str) or not path.startswith(self.source.origin):
             raise SourceContractError("Resource address is outside this source")
         relative = _path(unquote(path[len(self.source.origin):].replace("\\", "/")))
-        try:
-            return self.source.files[relative]
-        except KeyError as error:
-            raise FileNotFoundError(relative) from error
+        return self.source._read_file(relative)
 
     def get_code(self, fullname):
         self.source._ensure_open()
@@ -180,6 +216,16 @@ class _Finder(importlib.abc.MetaPathFinder):
         if source.entry == "__init__.py" and (name == "_movie_source" or name.startswith("_movie_source.")):
             name = name[len("_movie_source"):].lstrip(".")
         relative = name.replace(".", "/")
+        # Like running a Python entry script, unqualified sibling imports start
+        # in the entry directory. Qualified package imports keep their root.
+        directory = source.entry.rpartition("/")[0]
+        if path is None and directory and "." not in name:
+            sibling = directory + "/" + relative
+            if sibling + ".py" in source.files or any(p.startswith(sibling + "/") for p in source.files):
+                relative = sibling
+        elif path and len(path) == 1 and str(path[0]).startswith(source.origin):
+            parent = unquote(str(path[0])[len(source.origin):]).strip("/")
+            relative = (parent + "/" if parent else "") + name.rsplit(".", 1)[-1]
         package_path = relative + "/__init__.py" if relative else "__init__.py"
         if package_path in source.files:
             file, directory, package = package_path, relative, True
@@ -206,9 +252,33 @@ class _OperationContext(CallContext):
         return super().cancelled or self.external is not None and bool(self.external())
 
 
+class _RemoteFinder(importlib.abc.MetaPathFinder):
+    """Only missing source siblings; installed Python packages always win."""
+    def __init__(self, source):
+        self.source = source
+
+    def find_spec(self, fullname, path=None, target=None):
+        source = self.source
+        name = fullname
+        if source.entry == "__init__.py" and name.startswith("_movie_source."):
+            name = name[len("_movie_source."):]
+        names = name.split(".")
+        if (not all(name.isidentifier() for name in names) or names[0] in source._reserved
+                or path is not None and not all(str(p).startswith(source.origin) for p in path)):
+            return None
+        relative = "/".join(names)
+        for candidate in (relative + "/__init__.py", relative + ".py"):
+            try:
+                source._read_file(candidate)
+            except FileNotFoundError:
+                continue
+            return source._finder.find_spec(fullname, path, target)
+        return None
+
+
 class NativePythonSource:
-    """Candidate host: exactly one instance lifetime in a dedicated interpreter."""
-    def __init__(self, entry, files, *, bridge, extension="", raw_extension=None, proxy_url=None):
+    """Exactly one source instance lifetime in a dedicated interpreter."""
+    def __init__(self, entry, files, *, bridge, extension="", raw_extension=None, proxy_url=None, remote=None):
         global _INTERPRETER_USED
         if _INTERPRETER_USED:
             raise SourceContractError("Each native source requires a fresh dedicated interpreter")
@@ -219,7 +289,15 @@ class NativePythonSource:
         if len(self.ext.encode("utf-8")) > 64 * 1024:
             raise SourceContractError("Source extension exceeds limit")
         self._proxy = self._validate_proxy(proxy_url)
+        self._remote_url = None
+        self._remote_headers = {}
+        if remote is not None:
+            if not isinstance(remote, dict) or set(remote) != {"url", "headers"} or not isinstance(remote["headers"], dict):
+                raise SourceContractError("Invalid remote Python source descriptor")
+            self._remote_url = _url(remote["url"])
+            self._remote_headers = dict(_headers(list(remote["headers"].items())))
         reserved = set(sys.stdlib_module_names) | {"base", "requests", "urllib3", "requests_adapter", "host", "_movie_source"}
+        self._reserved = reserved | set(sys.modules)
         for path in self.files:
             root = path.split("/", 1)[0]
             root = root[:-3] if root.endswith(".py") else root
@@ -247,6 +325,8 @@ class NativePythonSource:
         self._loaded = {}
         self._patches = []
         self._finder = _Finder(self)
+        self._remote_finder = _RemoteFinder(self) if self._remote_url else None
+        self._missing_files = set()
         self._spider = None
         self._requests = 0
 
@@ -286,8 +366,96 @@ class NativePythonSource:
             raise SourceContractError("Source operation exceeds 32 HTTP hops")
         return self.bridge(envelope, context)
 
+    def _read_file(self, relative):
+        self._ensure_open()
+        relative = _path(relative)
+        if relative in self.files:
+            return self.files[relative]
+        if not self._remote_url or relative in self._missing_files:
+            raise FileNotFoundError(relative)
+        root = relative.split("/", 1)[0]
+        root = root[:-3] if root.endswith(".py") else root
+        if root in self._reserved:
+            raise SourceContractError("Remote package cannot shadow a host module")
+        if relative.lower().endswith((".so", ".dylib", ".dll", ".pyd", ".pth")):
+            raise UnsupportedFeature("Remote native extensions and path hooks are unsupported")
+        self._current()
+        # The entry may be PHP or extensionless. Resolve helpers relative to
+        # its directory; do not copy entry-only query arguments or credentials.
+        address = urljoin(self._remote_url, quote(relative, safe="/"))
+        with requests.Session() as session:
+            response = session.get(address, headers=self._remote_headers)
+        if response.status_code == 404:
+            if len(self._missing_files) >= 256:
+                raise SourceContractError("Too many missing remote package files")
+            self._missing_files.add(relative)
+            raise FileNotFoundError(relative)
+        response.raise_for_status()
+        # The same archive limits apply to files fetched after import begins.
+        _, files = validate_package(self.entry, {**self.files, relative: response.content})
+        self.files = files
+        return self.files[relative]
+
     def _install(self):
         owner = self
+
+        original_open = builtins.open
+        def package_open(file, mode="r", buffering=-1, encoding=None, errors=None,
+                         newline=None, closefd=True, opener=None):
+            if isinstance(file, int):
+                return original_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
+            name = os.fsdecode(os.fspath(file))
+            # Absolute host paths remain ordinary Python I/O (this is not a
+            # security sandbox). Source-relative paths never fall back to disk.
+            virtual = name.startswith(("pkg:", "/__package__/"))
+            if os.path.isabs(name) and not virtual:
+                return original_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
+            owner._ensure_open()
+            if not isinstance(mode, str) or mode not in ("r", "rt", "rb", "br", "tr"):
+                raise ValueError("Package files only support read mode")
+            binary = "b" in mode
+            buffering = operator.index(buffering)
+            if not closefd or opener is not None:
+                raise ValueError("Package files have no filesystem descriptor")
+            if binary and any(v is not None for v in (encoding, errors, newline)):
+                raise ValueError("Binary mode does not accept text options")
+            if not binary and buffering == 0:
+                raise ValueError("Unbuffered text I/O is unavailable")
+            if name.startswith(owner.origin):
+                relative = unquote(name[len(owner.origin):])
+            elif name.startswith(owner.origin.replace("://", ":/")):
+                relative = unquote(name[len(owner.origin.replace("://", ":/")):])
+            elif name.startswith("/__package__/"):
+                relative = name[len("/__package__/"):]
+            elif name.startswith("pkg:"):
+                raise SourceContractError("File belongs to another source")
+            else:
+                directory = owner.entry.rpartition("/")[0]
+                relative = (directory + "/" if directory else "") + name
+            parts = []
+            for part in relative.replace("\\", "/").split("/"):
+                if part in ("", "."):
+                    continue
+                if part == "..":
+                    if not parts:
+                        raise SourceContractError("File escapes package root")
+                    parts.pop()
+                else:
+                    parts.append(part)
+            relative = _path("/".join(parts))
+            if any(p.startswith(relative + "/") for p in owner.files):
+                raise IsADirectoryError(name)
+            raw = _PackageFile(owner._read_file(relative), name)
+            try:
+                stream = raw if buffering == 0 else io.BufferedReader(raw, buffering if buffering > 1 else io.DEFAULT_BUFFER_SIZE)
+                if not binary:
+                    stream = io.TextIOWrapper(stream, encoding or "utf-8", errors, newline)
+                    stream.mode = mode
+            except BaseException:
+                raw.close()
+                raise
+            owner._resource_streams.add(stream)
+            return stream
 
         class ManagedSession(BridgeSession):
             def __init__(self):
@@ -295,7 +463,20 @@ class NativePythonSource:
                 if len(owner._sessions) >= 32:
                     raise SourceContractError("Too many retained HTTP sessions")
                 super().__init__(owner._network)
+                self._initial_headers = self.headers.copy()
                 owner._sessions.add(self)
+
+            def prepare_request(self, request):
+                prepared = super().prepare_request(request)
+                if owner._remote_url and _origin(prepared.url) == _origin(owner._remote_url):
+                    headers = requests.structures.CaseInsensitiveDict(request.headers or {})
+                    for name, value in owner._remote_headers.items():
+                        # Explicit source/session headers take precedence. Only
+                        # inherit the subscription defaults for its own origin.
+                        if (name not in headers and self.headers.get(name) == self._initial_headers.get(name)
+                                and not (name == "cookie" and "cookie" in prepared.headers)):
+                            prepared.headers[name] = value
+                return prepared
 
             def send(self, request, **kwargs):
                 with self.call(owner._current()):
@@ -337,6 +518,11 @@ class NativePythonSource:
         sys.modules["base"], sys.modules["base.spider"] = base, spider
         self._loaded.update({"base": base, "base.spider": spider})
         sys.meta_path.insert(0, self._finder)
+        if self._remote_finder:
+            sys.meta_path.append(self._remote_finder)
+        for module in (builtins, io):
+            self._patches.append((module, "open", module.open))
+            module.open = package_open
 
     def _initialize(self):
         if self._state != "new":
@@ -356,7 +542,8 @@ class NativePythonSource:
         if not inspect.isclass(cls):
             raise SourceContractError("Python source must export a Spider class")
         self._spider = cls()
-        self._call("init", [self.ext])
+        if getattr(self._spider, "init", None) is not None:
+            self._call("init", [self.ext])
         self._state = "ready"
 
     def _call(self, name, args):
@@ -470,6 +657,8 @@ class NativePythonSource:
         self._resource_streams.clear()
         if self._finder in sys.meta_path:
             sys.meta_path.remove(self._finder)
+        if self._remote_finder in sys.meta_path:
+            sys.meta_path.remove(self._remote_finder)
         for name, module in self._loaded.items():
             if sys.modules.get(name) is module:
                 del sys.modules[name]

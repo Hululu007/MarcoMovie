@@ -21,6 +21,7 @@ import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -42,6 +43,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -105,6 +109,7 @@ public final class LiteActivity extends Activity {
     LiteCatalog.LiveGroup playingLiveGroup;
     int playingLiveChannelIndex = -1;
     int playingLiveUrlIndex = 0;
+    Map<String, String> playingLiveSourceHeaders = Collections.emptyMap();
     final Object importLock = new Object();
     boolean homeVisible, inPlayback, backgrounded, inDetail;
     String lastQuery = "", lastCategory = "";
@@ -330,6 +335,7 @@ public final class LiteActivity extends Activity {
         homeVisible = false;
         inPlayback = false;
         playingLiveGroup = null;
+        playingLiveSourceHeaders = Collections.emptyMap();
         ui.removeCallbacks(clockTick);
         ui.removeCallbacks(hideOsdTask);
         epoch++;
@@ -1159,8 +1165,11 @@ public final class LiteActivity extends Activity {
         if (ch.urls.isEmpty()) return;
         int safeUrl = ((urlIndex % ch.urls.size()) + ch.urls.size()) % ch.urls.size();
         String url = ch.urls.get(safeUrl);
-        Map<String, String> mergedHeaders = new LinkedHashMap<String, String>();
-        if (sourceHeaders != null) mergedHeaders.putAll(sourceHeaders);
+        Map<String, String> cleanSourceHeaders =
+                sourceHeaders != null
+                        ? new LinkedHashMap<String, String>(sourceHeaders)
+                        : Collections.<String, String>emptyMap();
+        Map<String, String> mergedHeaders = new LinkedHashMap<String, String>(cleanSourceHeaders);
         mergedHeaders.putAll(ch.headers);
         String title =
                 ch.name
@@ -1170,10 +1179,8 @@ public final class LiteActivity extends Activity {
         playingLiveGroup = group;
         playingLiveChannelIndex = safeCh;
         playingLiveUrlIndex = safeUrl;
+        playingLiveSourceHeaders = cleanSourceHeaders;
         playResolved(url, url, title, mergedHeaders, null);
-        playingLiveGroup = group;
-        playingLiveChannelIndex = safeCh;
-        playingLiveUrlIndex = safeUrl;
     }
 
     String sitePrefsKey() {
@@ -2067,29 +2074,76 @@ public final class LiteActivity extends Activity {
                         final List<JSONObject> merged = new ArrayList<JSONObject>();
                         final List<LiteCatalog.Site> matchedSites =
                                 new ArrayList<LiteCatalog.Site>();
-                        for (int i = 0; i < searchableSites.size(); i++) {
-                            if (dead || id != epoch || Thread.currentThread().isInterrupted())
-                                return;
-                            LiteCatalog.Site s = searchableSites.get(i);
-                            try {
-                                String u =
-                                        LiteCatalog.query(
-                                                s.api, "ac", "detail", "pg", "1", "wd", keyword);
-                                JSONObject resp =
-                                        LiteCatalog.parseCmsResponse(
-                                                LiteCatalog.fetch(u, s.headers));
-                                JSONArray arr = resp.optJSONArray("list");
-                                if (arr != null) {
-                                    for (int j = 0; j < Math.min(arr.length(), 8); j++) {
-                                        JSONObject v = arr.optJSONObject(j);
-                                        if (v != null && v.optString("vod_id").length() > 0) {
-                                            merged.add(v);
-                                            matchedSites.add(s);
-                                        }
-                                    }
-                                }
-                            } catch (Throwable ignored) {
+                        ExecutorService searchPool =
+                                Executors.newFixedThreadPool(Math.min(4, searchableSites.size()));
+                        try {
+                            List<Future<List<JSONObject>>> futures =
+                                    new ArrayList<Future<List<JSONObject>>>(searchableSites.size());
+                            for (int i = 0; i < searchableSites.size(); i++) {
+                                final LiteCatalog.Site s = searchableSites.get(i);
+                                futures.add(
+                                        searchPool.submit(
+                                                new Callable<List<JSONObject>>() {
+                                                    public List<JSONObject> call() {
+                                                        List<JSONObject> found =
+                                                                new ArrayList<JSONObject>();
+                                                        if (dead
+                                                                || id != epoch
+                                                                || Thread.currentThread()
+                                                                        .isInterrupted()) {
+                                                            return found;
+                                                        }
+                                                        try {
+                                                            String u =
+                                                                    LiteCatalog.query(
+                                                                            s.api, "ac", "detail",
+                                                                            "pg", "1", "wd",
+                                                                            keyword);
+                                                            JSONObject resp =
+                                                                    LiteCatalog.parseCmsResponse(
+                                                                            LiteCatalog.fetch(
+                                                                                    u, s.headers));
+                                                            JSONArray arr =
+                                                                    resp.optJSONArray("list");
+                                                            if (arr != null) {
+                                                                for (int j = 0;
+                                                                        j < Math.min(arr.length(), 8);
+                                                                        j++) {
+                                                                    JSONObject v =
+                                                                            arr.optJSONObject(j);
+                                                                    if (v != null
+                                                                            && v.optString("vod_id")
+                                                                                            .length()
+                                                                                    > 0) {
+                                                                        found.add(v);
+                                                                    }
+                                                                }
+                                                            }
+                                                        } catch (Throwable ignored) {
+                                                        }
+                                                        return found;
+                                                    }
+                                                }));
                             }
+                            for (int i = 0; i < futures.size(); i++) {
+                                if (dead || id != epoch || Thread.currentThread().isInterrupted()) {
+                                    return;
+                                }
+                                LiteCatalog.Site s = searchableSites.get(i);
+                                try {
+                                    List<JSONObject> siteItems = futures.get(i).get();
+                                    for (int j = 0; j < siteItems.size(); j++) {
+                                        merged.add(siteItems.get(j));
+                                        matchedSites.add(s);
+                                    }
+                                } catch (InterruptedException ie) {
+                                    Thread.currentThread().interrupt();
+                                    return;
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                        } finally {
+                            searchPool.shutdownNow();
                         }
                         ui.post(
                                 new Runnable() {
@@ -2156,7 +2210,7 @@ public final class LiteActivity extends Activity {
                                 new Runnable() {
                                     public void run() {
                                         if (!dead && epoch == id) {
-                                            activeDetailLine = 0;
+                                            activeDetailLine = -1;
                                             activeEpisodeGroup = 0;
                                             episodeReversed = false;
                                             showDetail(video);
@@ -2165,6 +2219,33 @@ public final class LiteActivity extends Activity {
                                 });
                     }
                 });
+    }
+
+    public static String[][] orderedPlayLines(JSONObject video, String preferredLine) {
+        String[] rawLines = video.optString("vod_play_url").split("\\$\\$\\$");
+        String[] rawNames = video.optString("vod_play_from").split("\\$\\$\\$");
+        String[] lines = new String[rawLines.length];
+        String[] names = new String[rawLines.length];
+        for (int i = 0; i < rawLines.length; i++) {
+            lines[i] = rawLines[i];
+            names[i] =
+                    i < rawNames.length && rawNames[i].trim().length() > 0
+                            ? rawNames[i].trim()
+                            : ("线路 " + (i + 1));
+        }
+        if (preferredLine != null && preferredLine.length() > 0) {
+            for (int n = 1; n < lines.length; n++) {
+                if (names[n].equals(preferredLine)) {
+                    String preferName = names[n], preferLine = lines[n];
+                    System.arraycopy(names, 0, names, 1, n);
+                    System.arraycopy(lines, 0, lines, 1, n);
+                    names[0] = preferName;
+                    lines[0] = preferLine;
+                    break;
+                }
+            }
+        }
+        return new String[][] {lines, names};
     }
 
     @SuppressWarnings("deprecation")
@@ -2188,36 +2269,20 @@ public final class LiteActivity extends Activity {
         status.setMaxLines(3);
         status.setEllipsize(TextUtils.TruncateAt.END);
 
-        String[] rawLines = video.optString("vod_play_url").split("\\$\\$\\$");
-        String[] rawNames = video.optString("vod_play_from").split("\\$\\$\\$");
-        final String[] lines = new String[rawLines.length];
-        final String[] names = new String[rawLines.length];
-        for (int i = 0; i < rawLines.length; i++) {
-            lines[i] = rawLines[i];
-            names[i] =
-                    i < rawNames.length && rawNames[i].trim().length() > 0
-                            ? rawNames[i].trim()
-                            : ("线路 " + (i + 1));
-        }
-
         String preferredLine = getPreferences(0).getString("preferred_line", "");
-        for (int n = 0; n < lines.length; n++) {
-            if (names[n].equals(preferredLine)) {
-                String oldName = names[0], oldLine = lines[0];
-                names[0] = names[n];
-                lines[0] = lines[n];
-                names[n] = oldName;
-                lines[n] = oldLine;
-                break;
-            }
-        }
+        String[][] orderedLines = orderedPlayLines(video, preferredLine);
+        final String[] lines = orderedLines[0];
+        final String[] names = orderedLines[1];
 
         final LiteStore.HistoryEntry savedHist = LiteStore.findHistory(this, siteKey, vodId);
-        if (savedHist != null && activeDetailLine == 0 && savedHist.lineName.length() > 0) {
-            for (int n = 0; n < names.length; n++) {
-                if (names[n].equals(savedHist.lineName)) {
-                    activeDetailLine = n;
-                    break;
+        if (activeDetailLine < 0) {
+            activeDetailLine = 0;
+            if (savedHist != null && savedHist.lineName.length() > 0) {
+                for (int n = 0; n < names.length; n++) {
+                    if (names[n].equals(savedHist.lineName)) {
+                        activeDetailLine = n;
+                        break;
+                    }
                 }
             }
         }
@@ -2365,7 +2430,7 @@ public final class LiteActivity extends Activity {
                                                                                 ? ""
                                                                                 : names[which - 1])
                                                                 .commit();
-                                                        activeDetailLine = 0;
+                                                        activeDetailLine = -1;
                                                         showDetail(video);
                                                     }
                                                 })
@@ -2522,6 +2587,8 @@ public final class LiteActivity extends Activity {
     }
 
     void play(final String address, final String name) {
+        playingLiveGroup = null;
+        playingLiveSourceHeaders = Collections.emptyMap();
         final LiteCatalog.Site source = selected;
         String finalAddress = address;
         if (source != null
@@ -2572,7 +2639,15 @@ public final class LiteActivity extends Activity {
             final String name,
             final Map<String, String> headers,
             com.pilipala.emby.EmbyLibrary.Reporter reporter) {
+        LiteCatalog.LiveGroup savedLiveGroup = playingLiveGroup;
+        int savedLiveCh = playingLiveChannelIndex;
+        int savedLiveUrl = playingLiveUrlIndex;
+        Map<String, String> savedLiveHeaders = playingLiveSourceHeaders;
         base(name);
+        playingLiveGroup = savedLiveGroup;
+        playingLiveChannelIndex = savedLiveCh;
+        playingLiveUrlIndex = savedLiveUrl;
+        playingLiveSourceHeaders = savedLiveHeaders;
         embyReporter = reporter;
         playbackTitle = name;
         playbackAddress = identity;
@@ -2728,6 +2803,7 @@ public final class LiteActivity extends Activity {
                                                         expected.seekTo(resumeMs);
                                                     }
                                                     expected.start();
+                                                    updateKeepScreenOn(true);
                                                     updatePauseResumeLabel();
                                                     status.setText(
                                                             expected.name()
@@ -2740,6 +2816,7 @@ public final class LiteActivity extends Activity {
                                                 public void error(int what, int extra) {
                                                     if (expected != player) return;
                                                     ready = false;
+                                                    updateKeepScreenOn(false);
                                                     stopEmbySession();
                                                     setOsdVisibility(View.VISIBLE);
                                                     status.setText(
@@ -2767,6 +2844,7 @@ public final class LiteActivity extends Activity {
 
                                                 public void completed() {
                                                     if (expected == player) {
+                                                        updateKeepScreenOn(false);
                                                         stopEmbySession();
                                                         if (playNextEpisodeIfAvailable()) return;
                                                         setOsdVisibility(View.VISIBLE);
@@ -2824,7 +2902,7 @@ public final class LiteActivity extends Activity {
                                     playingLiveGroup,
                                     playingLiveChannelIndex - 1,
                                     0,
-                                    headers);
+                                    playingLiveSourceHeaders);
                         }
                     });
             addPlayerToolbarButton(
@@ -2835,7 +2913,7 @@ public final class LiteActivity extends Activity {
                                     playingLiveGroup,
                                     playingLiveChannelIndex + 1,
                                     0,
-                                    headers);
+                                    playingLiveSourceHeaders);
                         }
                     });
             final LiteCatalog.LiveChannel ch =
@@ -2849,7 +2927,7 @@ public final class LiteActivity extends Activity {
                                         playingLiveGroup,
                                         playingLiveChannelIndex,
                                         playingLiveUrlIndex + 1,
-                                        headers);
+                                        playingLiveSourceHeaders);
                             }
                         });
             }
@@ -2871,14 +2949,17 @@ public final class LiteActivity extends Activity {
                             showInPlayerEpisodeDialog();
                         }
                     });
-            final String[] rawLines = currentDetail.optString("vod_play_url").split("\\$\\$\\$");
-            final String[] rawNames = currentDetail.optString("vod_play_from").split("\\$\\$\\$");
-            if (rawLines.length > 1) {
+            final String[][] orderedLines =
+                    orderedPlayLines(
+                            currentDetail, getPreferences(0).getString("preferred_line", ""));
+            final String[] orderedUrls = orderedLines[0];
+            final String[] orderedNames = orderedLines[1];
+            if (orderedUrls.length > 1) {
                 addPlayerToolbarButton(
                         "换线路",
                         new Runnable() {
                             public void run() {
-                                showInPlayerLineDialog(rawLines, rawNames);
+                                showInPlayerLineDialog(orderedUrls, orderedNames);
                             }
                         });
             }
@@ -3004,6 +3085,7 @@ public final class LiteActivity extends Activity {
                 play(playbackAddress, playbackTitle);
                 return;
             } else player.start();
+            updateKeepScreenOn(player.isPlaying());
             updatePauseResumeLabel();
             if (embyReporter != null && player != null) {
                 embyReporter.update(player.getCurrentPosition(), !player.isPlaying());
@@ -3215,9 +3297,7 @@ public final class LiteActivity extends Activity {
                                 playingLiveGroup,
                                 playingLiveChannelIndex + delta,
                                 0,
-                                selected != null
-                                        ? selected.headers
-                                        : Collections.<String, String>emptyMap());
+                                playingLiveSourceHeaders);
                         return true;
                     }
                     setOsdVisibility(View.VISIBLE);
@@ -3318,11 +3398,13 @@ public final class LiteActivity extends Activity {
                 entry.vodId = currentDetail.optString("vod_id", "");
                 entry.vodName = currentDetail.optString("vod_name", playbackTitle);
                 entry.vodPic = currentDetail.optString("vod_pic", "");
-                String[] rawNames =
-                        currentDetail.optString("vod_play_from").split("\\$\\$\\$");
+                String[] orderedNames =
+                        orderedPlayLines(
+                                        currentDetail,
+                                        getPreferences(0).getString("preferred_line", ""))[1];
                 entry.lineName =
-                        activeDetailLine >= 0 && activeDetailLine < rawNames.length
-                                ? rawNames[activeDetailLine]
+                        activeDetailLine >= 0 && activeDetailLine < orderedNames.length
+                                ? orderedNames[activeDetailLine]
                                 : "";
                 entry.lineIndex = activeDetailLine;
                 entry.epName = playbackTitle;
@@ -3348,7 +3430,19 @@ public final class LiteActivity extends Activity {
         embyReporter = null;
     }
 
+    void updateKeepScreenOn(boolean keepOn) {
+        try {
+            if (keepOn) {
+                getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            } else {
+                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     void release() {
+        updateKeepScreenOn(false);
         saveResume();
         stopEmbySession();
         ready = false;

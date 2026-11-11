@@ -26,7 +26,8 @@ class BaiduLoginCookies {
   ];
   static bool trusted(Uri uri) =>
       uri.scheme == 'https' &&
-      const ['passport.baidu.com', 'pan.baidu.com'].contains(uri.host) &&
+      const ['passport.baidu.com', 'wappass.baidu.com', 'pan.baidu.com']
+          .contains(uri.host) &&
       uri.userInfo.isEmpty &&
       (!uri.hasPort || uri.port == 443);
 
@@ -279,14 +280,20 @@ class NetdiskSession {
     }
     // Passport login and the Netdisk web session are separate. The latter may
     // set host-only pan.baidu.com STOKEN/PANPSC cookies via redirects.
-    await baiduRequest(client, Uri.https('pan.baidu.com', '/disk/home'), jar,
-        timeout: const Duration(seconds: 15));
-    await baiduRequest(
-        client,
-        Uri.https('pan.baidu.com', '/api/loginStatus',
-            {'clienttype': '0', 'app_id': '250528', 'web': '1'}),
-        jar,
-        timeout: const Duration(seconds: 15));
+    try {
+      await baiduRequest(client, Uri.https('pan.baidu.com', '/disk/home'), jar,
+          timeout: const Duration(seconds: 15));
+    } on FormatException catch (_) {
+      // Optional web session warmup; membership verification below is authoritative.
+    }
+    try {
+      await baiduRequest(
+          client,
+          Uri.https('pan.baidu.com', '/api/loginStatus',
+              {'clienttype': '0', 'app_id': '250528', 'web': '1'}),
+          jar,
+          timeout: const Duration(seconds: 15));
+    } on FormatException catch (_) {}
     final verified = await baiduRequest(
         client,
         Uri.https('pan.baidu.com', '/rest/2.0/membership/user/info', {
@@ -300,9 +307,12 @@ class NetdiskSession {
     final account = decodeObject(utf8.decode(verified.bodyBytes));
     final info = account['user_info'];
     final uid = info is Map ? info['uk'] ?? info['user_id'] : null;
+    final loginState = info is Map ? info['loginstate'] : null;
+    final statusCode = (account['errno'] ?? account['error_code'])?.toString();
     final values = jar.accountCookies;
     bduss = values['BDUSS'] ?? '';
-    if (account['errno']?.toString() != '0' ||
+    if (statusCode != '0' ||
+        (loginState != null && loginState.toString() == '0') ||
         (int.tryParse(uid?.toString() ?? '') ?? 0) <= 0 ||
         !_value(bduss) ||
         bduss == ticket) {
@@ -316,34 +326,55 @@ class NetdiskSession {
 
   static Future<http.Response> baiduRequest(
       http.Client client, Uri uri, BaiduLoginCookies cookies,
-      {Duration timeout = const Duration(seconds: 8)}) async {
-    bool allowed(Uri target) =>
-        BaiduLoginCookies.trusted(target) &&
-        (target.host == 'passport.baidu.com'
-            ? const {
-                '/v2/api/getqrcode',
-                '/v2/api/qrcode',
-                '/channel/unicast',
-                '/v3/login/main/qrbdusslogin',
-              }.contains(target.path)
-            : const {
-                '/disk/home',
-                '/disk/main',
-                '/api/loginStatus',
-                '/rest/2.0/membership/user/info',
-              }.contains(target.path));
+      {Duration timeout = const Duration(seconds: 8),
+      Future<void>? externalAbort}) async {
+    bool allowed(Uri target) {
+      if (!BaiduLoginCookies.trusted(target)) return false;
+      final path = target.path;
+      if (target.host == 'passport.baidu.com' ||
+          target.host == 'wappass.baidu.com') {
+        return const {
+              '/v2/api/getqrcode',
+              '/v2/api/qrcode',
+              '/channel/unicast',
+              '/v3/login/main/qrbdusslogin',
+              '/v3/login/api/auth',
+              '/v3/login/api/auth/',
+              '/v3/login/main/auth',
+              '/wp/',
+              '/wp',
+            }.contains(path) ||
+            path.startsWith('/passApi/');
+      }
+      return const {
+            '/',
+            '/login',
+            '/v3/login/api/auth',
+            '/v3/login/api/auth/',
+            '/disk/home',
+            '/disk/main',
+            '/api/loginStatus',
+            '/rest/2.0/membership/user/info',
+          }.contains(path) ||
+          path.startsWith('/disk/') ||
+          path.startsWith('/passport/');
+    }
     if (!allowed(uri)) {
       throw const FormatException('百度登录请求地址无效');
     }
     var acceptsResponse = true;
     final abort = Completer<void>();
+    externalAbort?.then((_) {
+      acceptsResponse = false;
+      if (!abort.isCompleted) abort.complete();
+    });
     final elapsed = Stopwatch()..start();
     bool expired() => !acceptsResponse || elapsed.elapsed >= timeout;
     void checkDeadline() {
       if (expired()) throw TimeoutException('百度登录请求超时，请重试');
     }
 
-    return (() async {
+    final sendAndRead = () async {
       var current = uri;
       for (var redirects = 0; redirects <= 5; redirects++) {
         checkDeadline();
@@ -402,8 +433,14 @@ class NetdiskSession {
         return response;
       }
       throw const FormatException('百度登录跳转次数过多');
-    })()
-        .timeout(timeout, onTimeout: () {
+    }();
+    // Prevent unhandled async errors if abort/timeout wins the race first.
+    sendAndRead.ignore();
+    return Future.any<http.Response>([
+      sendAndRead,
+      abort.future.then<http.Response>(
+          (_) => throw TimeoutException('百度登录请求超时，请重试')),
+    ]).timeout(timeout, onTimeout: () {
       acceptsResponse = false;
       if (!abort.isCompleted) abort.complete();
       throw TimeoutException('百度登录请求超时，请重试');

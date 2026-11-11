@@ -614,7 +614,7 @@ final class SettingsScreen {
         ints(
                 "播放器",
                 Prefs.PLAYER_ENGINE,
-                new String[] {"Exo (Media3)", "IJK (FFmpeg)", "系统播放器"},
+                new String[] {"Exo (Media3)", "IJK 兼容模式 (Media3 + FFmpeg)", "系统播放器"},
                 new int[] {0, 2, 1},
                 0);
         ints(
@@ -623,6 +623,7 @@ final class SettingsScreen {
                 new String[] {"自动", "硬件解码", "软件解码优先"},
                 new int[] {0, 1, 2},
                 0);
+        toggle("4K HDR 隧道模式", Prefs.TUNNELED_PLAYBACK, false, null);
         toggle("优先使用兼容音频解码", Prefs.SOFTWARE_AUDIO, false, null);
         toggle("优先选择 AAC 音轨", Prefs.PREFER_AAC, false, null);
         link("解码组件", "查看本机已加载的音频与视频扩展", "settings-decoders", () -> open(this::decoders));
@@ -1077,18 +1078,26 @@ final class SettingsScreen {
                                 saveWallpaper(a, input);
                             }
                         } else if (request == 45) {
+                            Object exportedConfig = org.json.JSONObject.NULL;
+                            if (a.config != null && a.config.raw != null) {
+                                try {
+                                    String cleanRaw = Cms.withoutComments(a.config.raw).trim();
+                                    exportedConfig =
+                                            cleanRaw.startsWith("{")
+                                                    ? new org.json.JSONObject(cleanRaw)
+                                                    : a.config.raw;
+                                } catch (Exception ignored) {
+                                    exportedConfig = a.config.raw;
+                                }
+                            }
                             org.json.JSONObject backup =
                                     new org.json.JSONObject()
                                             .put("format", "MarcoMovie-1")
                                             .put("schema", "marco-movie-backup")
                                             .put("version", 1)
                                             .put("origin", a.configOrigin)
-                                            .put(
-                                                    "config",
-                                                    a.config == null
-                                                            ? org.json.JSONObject.NULL
-                                                            : new org.json.JSONObject(
-                                                                    a.config.raw));
+                                            .put("configOrigin", a.configOrigin)
+                                            .put("config", exportedConfig);
                             org.json.JSONObject settings = new org.json.JSONObject();
                             for (String key : KEYS)
                                 if (a.prefs.contains(key))
@@ -1104,6 +1113,27 @@ final class SettingsScreen {
                                     settings.put(dataKey, a.prefs.getString(dataKey, ""));
                                 }
                             }
+                            try {
+                                ConfigLibrary lib = new ConfigLibrary(a.configStore.directory);
+                                org.json.JSONArray subs = new org.json.JSONArray();
+                                for (ConfigLibrary.Entry entry : lib.entries()) {
+                                    String rawSub = lib.raw(entry);
+                                    if (rawSub != null && !rawSub.trim().isEmpty()) {
+                                        subs.put(
+                                                new org.json.JSONObject()
+                                                        .put("id", entry.id)
+                                                        .put("name", entry.name)
+                                                        .put("url", entry.origin)
+                                                        .put("rawContent", rawSub)
+                                                        .put("enabled", true)
+                                                        .put("isPrivate", false));
+                                    }
+                                }
+                                if (subs.length() > 0) {
+                                    settings.put("saved_subscriptions", subs);
+                                }
+                            } catch (Exception ignored) {
+                            }
                             backup.put("settings", settings);
                             try (OutputStream output =
                                     a.getContentResolver().openOutputStream(uri, "wt")) {
@@ -1112,14 +1142,19 @@ final class SettingsScreen {
                         } else if (request == 46) {
                             org.json.JSONObject backup;
                             try (InputStream input = a.getContentResolver().openInputStream(uri)) {
-                                backup = new org.json.JSONObject(Cms.read(input, Cms.MAX_JSON));
+                                backup =
+                                        new org.json.JSONObject(
+                                                Cms.withoutComments(Cms.read(input, Cms.MAX_JSON)));
                             }
                             if (!Prefs.isBackupObject(
                                     backup.optString("format", null),
                                     backup.optString("schema", null),
                                     backup.optInt("version", 0)))
                                 throw new IOException("Invalid backup");
-                            final String origin = backup.optString("origin", "");
+                            final String origin =
+                                    backup.has("origin") && !backup.optString("origin").isEmpty()
+                                            ? backup.optString("origin", "")
+                                            : backup.optString("configOrigin", "");
                             final String configJson;
                             if (!backup.has("config") || backup.isNull("config")) {
                                 configJson = null;
@@ -1131,6 +1166,20 @@ final class SettingsScreen {
                             final Cms.Config config =
                                     configJson == null ? null : Cms.parseConfig(configJson, origin);
                             final org.json.JSONObject settings = backup.optJSONObject("settings");
+                            final org.json.JSONArray savedSubscriptions =
+                                    settings == null
+                                            ? null
+                                            : settings.optJSONArray("saved_subscriptions");
+                            if (savedSubscriptions != null) {
+                                for (int i = 0; i < savedSubscriptions.length(); i++) {
+                                    org.json.JSONObject sub = savedSubscriptions.getJSONObject(i);
+                                    String subRaw = sub.optString("rawContent", "").trim();
+                                    String subOrigin = sub.optString("url", "");
+                                    if (!subRaw.isEmpty()) {
+                                        Cms.parseConfig(subRaw, subOrigin);
+                                    }
+                                }
+                            }
                             if (settings != null) {
                                 for (String key :
                                         new String[] {
@@ -1171,6 +1220,50 @@ final class SettingsScreen {
                                                                                             .UI_SCALE_PERCENT,
                                                                                     100);
                                                                     restoreSettings(a, settings);
+                                                                    if (savedSubscriptions
+                                                                            != null) {
+                                                                        try {
+                                                                            ConfigLibrary lib =
+                                                                                    new ConfigLibrary(
+                                                                                            a.configStore
+                                                                                                    .directory);
+                                                                            for (int idx = 0;
+                                                                                    idx
+                                                                                            < savedSubscriptions
+                                                                                                    .length();
+                                                                                    idx++) {
+                                                                                org.json.JSONObject
+                                                                                        sub =
+                                                                                                savedSubscriptions
+                                                                                                        .optJSONObject(
+                                                                                                                idx);
+                                                                                if (sub == null)
+                                                                                    continue;
+                                                                                String subRaw =
+                                                                                        sub.optString(
+                                                                                                        "rawContent",
+                                                                                                        "")
+                                                                                                .trim();
+                                                                                if (subRaw
+                                                                                        .isEmpty())
+                                                                                    continue;
+                                                                                lib
+                                                                                        .rememberIfAbsent(
+                                                                                                subRaw,
+                                                                                                sub
+                                                                                                        .optString(
+                                                                                                                "url",
+                                                                                                                ""),
+                                                                                                sub
+                                                                                                        .optString(
+                                                                                                                "name",
+                                                                                                                "已恢复的订阅"),
+                                                                                                "");
+                                                                            }
+                                                                        } catch (
+                                                                                Exception ignored) {
+                                                                        }
+                                                                    }
                                                                     if (config != null)
                                                                         a.saveConfig(
                                                                                 config, origin);

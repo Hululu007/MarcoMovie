@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -176,5 +177,130 @@ void main() {
             Uri.https('pan.baidu.com', '/disk/home'), BaiduLoginCookies()),
         throwsFormatException);
     expect(count, 6);
+  });
+
+  test(
+      'Baidu accepts real error_code:0 user/info payload and wappass/passport SSO redirect chain',
+      () async {
+    final visited = <String>[];
+    final client = MockClient((request) async {
+      visited.add('${request.url.host}${request.url.path}');
+      if (request.url.host == 'passport.baidu.com' &&
+          request.url.path == '/v3/login/main/qrbdusslogin') {
+        return http.Response('', 302, headers: {
+          'set-cookie': 'BDUSS=live-ios-bduss; Domain=.baidu.com; Path=/',
+          'location': 'https://wappass.baidu.com/wp/?action=login',
+        });
+      }
+      if (request.url.host == 'wappass.baidu.com') {
+        return http.Response('', 302, headers: {
+          'location': 'https://pan.baidu.com/login',
+        });
+      }
+      if (request.url.path == '/login') {
+        return http.Response('', 302, headers: {
+          'location': 'https://passport.baidu.com/v3/login/api/auth?tpl=netdisk',
+        });
+      }
+      if (request.url.host == 'passport.baidu.com' &&
+          request.url.path == '/v3/login/api/auth') {
+        return http.Response('', 302, headers: {
+          'location': 'https://pan.baidu.com/v3/login/api/auth?tpl=netdisk',
+        });
+      }
+      if (request.url.host == 'pan.baidu.com' &&
+          request.url.path == '/v3/login/api/auth') {
+        return http.Response('', 302, headers: {
+          'set-cookie': 'STOKEN=pan-stoken; Domain=pan.baidu.com; Path=/',
+          'location': 'https://pan.baidu.com/disk/main',
+        });
+      }
+      if (request.url.path == '/disk/main') {
+        return jsonResponse({},
+            cookie: 'PANPSC=pan-psc; Domain=pan.baidu.com; Path=/');
+      }
+      if (request.url.path == '/disk/home') {
+        // Simulate real Baidu redirecting /disk/home to an unrecognised marketing landing path;
+        // warmup failure must be non-fatal as long as membership/user/info verifies the account!
+        return http.Response('', 302,
+            headers: {'location': 'https://pan.baidu.com/aipan/welcome'});
+      }
+      if (request.url.path == '/api/loginStatus') {
+        return http.Response('gateway timeout', 502);
+      }
+      expect(request.url.path, '/rest/2.0/membership/user/info');
+      return jsonResponse({
+        'error_code': 0,
+        'error_msg': 'success',
+        'request_id': 987654321,
+        'user_info': {
+          'loginstate': 1,
+          'uk': 246801357,
+          'username': 'MarcoUser',
+        },
+      });
+    });
+
+    final cookie = await NetdiskSession.exchangeBaidu(client, 'qr-ticket');
+    expect(cookie, 'BDUSS=live-ios-bduss; STOKEN=pan-stoken; PANPSC=pan-psc');
+    expect(
+      visited,
+      containsAll(<String>[
+        'passport.baidu.com/v3/login/main/qrbdusslogin',
+        'wappass.baidu.com/wp/',
+        'pan.baidu.com/login',
+        'passport.baidu.com/v3/login/api/auth',
+        'pan.baidu.com/rest/2.0/membership/user/info',
+      ]),
+    );
+  });
+
+  test(
+      'abortBaiduLongPoll cancels suspended /channel/unicast poll without invalidating QR session',
+      () async {
+    var pollCount = 0;
+    final service = NetdiskService(httpClient: MockClient((request) async {
+      if (request.url.path == '/channel/unicast') {
+        pollCount++;
+        if (pollCount == 1) {
+          // Simulate an iOS background-suspended 38s long-poll
+          return Completer<http.Response>().future;
+        }
+        return jsonResponse({
+          'errno': 0,
+          'channel_v': {'status': 0, 'v': 'resume-ticket'},
+        });
+      }
+      if (request.url.path == '/v3/login/main/qrbdusslogin') {
+        return jsonResponse({},
+            cookie: 'BDUSS=resumed-bduss; Domain=.baidu.com; Path=/');
+      }
+      if (request.url.path == '/rest/2.0/membership/user/info') {
+        return jsonResponse({
+          'error_code': 0,
+          'user_info': {'loginstate': 1, 'uk': 998877},
+        });
+      }
+      return jsonResponse({});
+    }));
+    addTearDown(service.close);
+
+    const session = NetdiskQrSession(
+      driveKey: 'baidu',
+      token: 'qr-resume-token',
+      qrContentUrl: 'https://wappass.baidu.com/wp/?qrlogin&sign=qr-resume-token',
+      qrImageUrl: '',
+    );
+
+    final stuckPoll = service.pollQrSession(session);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    service.abortBaiduLongPoll();
+
+    final cancelledResult = await stuckPoll;
+    expect(cancelledResult.state, NetdiskPollState.waiting);
+
+    final freshResult = await service.pollQrSession(session);
+    expect(freshResult.state, NetdiskPollState.confirmed);
+    expect(freshResult.credential, 'BDUSS=resumed-bduss');
   });
 }

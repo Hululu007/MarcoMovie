@@ -696,7 +696,7 @@ final class PlaybackControls {
         choose(
                 "选择播放器内核",
                 new String[] {
-                    "Exo 播放器 (Media3 · 默认)", "IJK 播放器 (FFmpeg · 兼容)", "系统播放器 (Android Native)"
+                    "Exo 播放器 (Media3 · 默认)", "IJK 兼容模式 (Media3 + FFmpeg)", "系统播放器 (Android Native)"
                 },
                 selected,
                 i -> {
@@ -738,7 +738,7 @@ final class PlaybackControls {
         String engLabel = engMode == 2 ? "IJK" : (engMode == 1 ? "系统" : "Exo");
         String[] items = {
             (engMode == 0 ? "✓ " : "") + "播放器内核 · Exo (Media3)",
-            (engMode == 2 ? "✓ " : "") + "播放器内核 · IJK (FFmpeg)",
+            (engMode == 2 ? "✓ " : "") + "播放器内核 · IJK 兼容模式 (Media3 + FFmpeg)",
             (engMode == 1 ? "✓ " : "") + "播放器内核 · 系统播放器",
             (decMode == 0 ? "✓ " : "") + "解码方式 · 自动解码（默认）",
             (decMode == 1 ? "✓ " : "") + "解码方式 · 设备硬件解码 (HW)",

@@ -1,6 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'catpaw_host.dart';
 import 'cms_parser.dart';
+import 'csp_bridge.dart';
 import 'models.dart';
 import 'quark_account.dart';
 import 'netdisk_session.dart';
@@ -132,15 +136,46 @@ class StorageService {
       return const [];
     }
   }
+  static final RegExp _hashedPinPattern =
+      RegExp(r'^sha256:(\d+):([0-9a-f]{64})$');
+  static String _hashPin(String pin) =>
+      sha256.convert(utf8.encode('mm_pin_v1:$pin')).toString();
+
   String get privacyPassword => _prefs.getString(keyPrivacyPassword) ?? '';
   bool get hasPrivacyPassword => privacyPassword.trim().isNotEmpty;
+  int get privacyPasswordLength {
+    final saved = privacyPassword.trim();
+    final match = _hashedPinPattern.firstMatch(saved);
+    if (match != null) {
+      return (int.tryParse(match.group(1)!) ?? 4).clamp(4, 8);
+    }
+    return saved.length.clamp(4, 8);
+  }
   bool get hasPrivacyConfigured =>
       hasPrivacyPassword ||
       getSubscriptions().any((s) => s.isEffectivelyPrivate);
-  bool verifyPrivacyPassword(String input) =>
-      hasPrivacyPassword && input.trim() == privacyPassword.trim();
+  bool verifyPrivacyPassword(String input) {
+    final trimmed = input.trim();
+    final saved = privacyPassword.trim();
+    if (saved.isEmpty || trimmed.isEmpty) return false;
+    final match = _hashedPinPattern.firstMatch(saved);
+    if (match != null) {
+      final expectedLen = int.tryParse(match.group(1)!) ?? 0;
+      return trimmed.length == expectedLen &&
+          _hashPin(trimmed) == match.group(2);
+    }
+    return trimmed == saved;
+  }
   Future<void> setPrivacyPassword(String password) async {
-    await _prefs.setString(keyPrivacyPassword, password.trim());
+    final trimmed = password.trim();
+    if (trimmed.isEmpty) {
+      await _prefs.setString(keyPrivacyPassword, '');
+      return;
+    }
+    await _prefs.setString(
+      keyPrivacyPassword,
+      'sha256:${trimmed.length}:${_hashPin(trimmed)}',
+    );
   }
 
   List<SubscriptionEntry> getSubscriptions() {
@@ -267,9 +302,13 @@ class StorageService {
     if (merged != null &&
         merged.publicSupportedSites.isNotEmpty &&
         !merged.supportedSites.any((s) => s.key == selectedSiteKey)) {
+      final preferredDefault = merged.publicSupportedSites.firstWhere(
+        (s) => !CspBridge.isBannerNoticeSite(s),
+        orElse: () => merged.publicSupportedSites.first,
+      );
       await _prefs.setString(
         keySelectedSite,
-        merged.publicSupportedSites.first.key,
+        preferredDefault.key,
       );
     }
     return merged;
@@ -774,6 +813,7 @@ class StorageService {
         await _prefs.setString(keyAliToken, trimmed);
         break;
     }
+    unawaited(CatPawHost.instance.syncNetdiskConfig());
   }
   Future<void> setDriveOrder(List<String> order) async {
     await _prefs.setStringList(keyDriveOrder, order);

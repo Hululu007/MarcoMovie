@@ -548,23 +548,52 @@ class CloudShareClient {
       }
     }
 
-    final info = await _json(
-        Uri.https('mbd.baidu.com', '/userx/v1/info/get', {
-          'appname': 'baiduboxapp',
-          'fields': '["bg_image","member","uid","avatar","avatar_member"]',
-          'client': '',
-          'clientfrom': '',
-          'lang': 'zh-cn',
-          'tpl': '',
-          'ttt': '',
-        }),
-        provider: 'baidu',
-        budget: share.budget,
-        cookies: cookies,
-        userAgent: 'netdisk;P2SP;2.2.91.136;android-android');
-    await checkAccount();
-    _checkBaidu(info);
-    final uid = _string(_map(_map(info['data'])['fields'])['uid']);
+    Map info = const {};
+    var uid = '';
+    try {
+      info = await _json(
+          Uri.https('mbd.baidu.com', '/userx/v1/info/get', {
+            'appname': 'baiduboxapp',
+            'fields': '["bg_image","member","uid","avatar","avatar_member"]',
+            'client': '',
+            'clientfrom': '',
+            'lang': 'zh-cn',
+            'tpl': '',
+            'ttt': '',
+          }),
+          provider: 'baidu',
+          budget: share.budget,
+          cookies: cookies,
+          userAgent: 'netdisk;P2SP;2.2.91.136;android-android');
+      await checkAccount();
+      _checkBaidu(info);
+      uid = _string(_map(_map(info['data'])['fields'])['uid']);
+    } on _CloudHttpException {
+      await checkAccount();
+    } on FormatException {
+      await checkAccount();
+    }
+    if (uid.isEmpty) {
+      final membership = await _json(
+          Uri.https('pan.baidu.com', '/rest/2.0/membership/user/info', {
+            'method': 'query',
+            'clienttype': '0',
+            'app_id': '250528',
+            'web': '1',
+          }),
+          provider: 'baidu',
+          budget: share.budget,
+          cookies: cookies,
+          referer: 'https://pan.baidu.com/',
+          userAgent: _baiduMediaUa);
+      await checkAccount();
+      final errCode =
+          _string(membership['error_code'] ?? membership['errno']);
+      final userInfo = _map(membership['user_info']);
+      if (errCode == '0' && _string(userInfo['loginstate']) != '0') {
+        uid = _string(userInfo['uk'] ?? userInfo['user_id']);
+      }
+    }
     if (uid.isEmpty) throw const FormatException('百度登录会话已失效，请重新登录');
     final time = '${_clock().millisecondsSinceEpoch}';
     const device = '73CED981D0F186D12BC18CAE1684FFD5|VSRCQTF6W';
@@ -608,7 +637,35 @@ class CloudShareClient {
             (list.length == 1 && _string(_map(list.first)['fs_id']).isEmpty
                 ? _map(list.first)
                 : const {});
-    return _mediaUrl(row['dlink'], '百度未返回该原始文件的播放地址');
+    final rawUrl = _mediaUrl(row['dlink'], '百度未返回该原始文件的播放地址');
+    final target = Uri.parse(rawUrl);
+    if (!CloudMediaLease.isTrustedBaiduAccountMedia(target)) {
+      return rawUrl;
+    }
+    Future<bool> current() async =>
+        !_isCancelled() && await credentialReader('baidu') == credential;
+    final accountCookie = cookies.entries
+        .map((entry) => '${entry.key}=${entry.value}')
+        .join('; ');
+    final lease = await CloudMediaLease.open(
+        target: target,
+        provider: CloudMediaProvider.baidu,
+        headers: {
+          'Cookie': accountCookie,
+          'User-Agent': _baiduMediaUa,
+          'Referer': 'https://pan.baidu.com/',
+        },
+        isCancelled: _isCancelled,
+        isCurrent: current,
+        client: _mediaClientFactory());
+    try {
+      await checkAccount();
+    } catch (_) {
+      await lease.close();
+      rethrow;
+    }
+    file.lease = lease;
+    return lease.url.toString();
   }
 
   static const _ucQuery = {

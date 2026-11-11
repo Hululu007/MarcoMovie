@@ -11,6 +11,7 @@ import 'cms_parser.dart';
 import 'csp_bridge.dart';
 import 'js_source_host.dart';
 import 'python_source_assets.dart';
+import 'python_source_host.dart';
 import 'emby_library.dart';
 import 'checksum_source.dart';
 import 'catpaw_host.dart';
@@ -44,7 +45,7 @@ class CmsClient {
     if (cancellation.isCompleted) throw StateError('片源加载已取消');
     final parent = Zone.current[_cancelKey] as Completer<void>?;
     final parentLifetime = Zone.current[_lifetimeCancelKey] as bool Function()?;
-    if (parent?.isCompleted == true) throw StateError('片源加载已取消');
+    if (parent?.isCompleted == true || parentLifetime?.call() == true) throw StateError('片源加载已取消');
     final abort = Completer<void>();
     final interrupted = Completer<T>();
     void cancel() {
@@ -63,7 +64,7 @@ class CmsClient {
           zoneValues: {_cancelKey: abort, _lifetimeCancelKey: () =>
               cancellation.isCompleted || parent?.isCompleted == true || parentLifetime?.call() == true}));
       final value = await Future.any([work, interrupted.future]);
-      if (abort.isCompleted || cancellation.isCompleted || parent?.isCompleted == true) {
+      if (abort.isCompleted || cancellation.isCompleted || parent?.isCompleted == true || parentLifetime?.call() == true) {
         throw StateError('片源加载已取消');
       }
       return value;
@@ -77,6 +78,7 @@ class CmsClient {
   final http.Client? _http;
   final Duration timeout;
   final CatPawHost _scriptHost;
+  final PythonSourceHost _pythonHost;
   final QuarkDriveClient? _quark;
   final Expando<Future<String>> _t4Extensions = Expando<Future<String>>();
   late final DrpySource _drpy = DrpySource(host: _scriptHost,
@@ -136,9 +138,11 @@ class CmsClient {
   CmsClient({
     http.Client? client,
     CatPawHost? scriptHost,
+    PythonSourceHost? pythonHost,
     QuarkDriveClient? quark,
     this.timeout = const Duration(seconds: 15),
-  }) : _http = client, _quark = quark, _scriptHost = scriptHost ?? CatPawHost.instance;
+  }) : _http = client, _quark = quark, _scriptHost = scriptHost ?? CatPawHost.instance,
+       _pythonHost = pythonHost ?? PythonSourceHost.instance;
   static http.Client _createDefaultClient() {
     final ioHttp = HttpClient()
       ..connectionTimeout = const Duration(seconds: 12);
@@ -803,7 +807,8 @@ class CmsClient {
 
   bool _usesJs(CmsSite site) => WoggSource.supports(site) || GuardSource.supports(site) || site.isDrpySource || site.isPythonSource || (site.isJavaScriptSource || site.isRemoteScriptSource) &&
       !(CspBridge.isHuyaSite(site) || CspBridge.isDouyuSite(site) ||
-        CspBridge.isTuxiaobeiSite(site) || CspBridge.isMyDriveSite(site));
+        CspBridge.isTuxiaobeiSite(site) || CspBridge.isMyDriveSite(site) ||
+        CspBridge.isBannerNoticeSite(site));
 
   static String _scriptSessionKey(CmsSite site) => sha256.convert(utf8.encode(jsonEncode([
     site.subscriptionId, site.sourceKey, site.isEffectivelyPrivate,
@@ -812,13 +817,24 @@ class CmsClient {
   ]))).toString();
 
   /// Shared by catalogue, detail, and the player's separate CmsClient instance.
-  static Future<void> retainScriptSessions(Iterable<CmsSite> sites) =>
-      JsSourceHost.retainSessions(sites.map(_scriptSessionKey).toSet());
+  static Future<void> retainScriptSessions(Iterable<CmsSite> sites) {
+    final keys = sites.map(_scriptSessionKey).toSet();
+    PythonSourceHost.instance.retainSessions(keys);
+    return JsSourceHost.retainSessions(keys);
+  }
 
-  static Future<void> closeScriptSessions() => JsSourceHost.closeAll();
+  static Future<void> closeScriptSessions() {
+    PythonSourceHost.instance.retainSessions({});
+    return JsSourceHost.closeAll();
+  }
 
-  void Function() pinPlaybackSource(CmsSite site) =>
-      _usesJs(site) ? JsSourceHost.pinForPlayback(_scriptSessionKey(site)) : () {};
+  void Function() pinPlaybackSource(CmsSite site) {
+    if (!_usesJs(site)) return () {};
+    final key = _scriptSessionKey(site);
+    final js = JsSourceHost.pinForPlayback(key);
+    final python = _pythonHost.pinForPlayback(key);
+    return () { js(); python(); };
+  }
 
   static bool canVerifySource(CmsSite site) =>
       GuardSource.supports(site) &&
@@ -868,12 +884,16 @@ class CmsClient {
   Future<String> _callJs(CmsSite site, String method, List<Object?> args) async {
     final cancellation = Zone.current[_cancelKey] as Completer<void>?;
     final generation = JsSourceHost.generation;
+    final pythonGeneration = _pythonHost.generation;
     if (WoggSource.supports(site)) return _wogg.invoke(site, method, args, cancellation: cancellation);
     if (GuardSource.supports(site)) return _guard.invoke(site, method, args, cancellation: cancellation);
     if (site.isDrpySource) return _drpy.invoke(site, method, args, cancellation: cancellation);
     final cachedRule = await _drpy.callCached(site, method, args, cancellation: cancellation);
     if (cachedRule != null) return cachedRule;
     final sessionKey = _scriptSessionKey(site);
+    final cachedPython = await _pythonHost.callCached(sessionKey: sessionKey,
+        method: method, arguments: args, cancellation: cancellation);
+    if (cachedPython != null) return cachedPython;
     final cachedScript = await JsSourceHost.callCached(sessionKey: sessionKey,
         method: method, arguments: args, cancellation: cancellation);
     if (cachedScript != null) return cachedScript;
@@ -905,6 +925,14 @@ class CmsClient {
       try { extension = jsonDecode(site.ext); } on FormatException { /* Plain-text extension. */ }
     }
     if (site.isPythonSource || CmsParser.looksLikePythonScript(modules[entry]!)) {
+      if (_pythonHost.enabled) {
+        return _pythonHost.invoke(sessionKey: sessionKey,
+            expectedGeneration: pythonGeneration, method: method, arguments: args,
+            cancellation: cancellation,
+            package: PythonSourceHost.packageFromSource(entry: entry,
+                source: modules[entry]!, extension: rawExtension,
+                packageData: pythonPackage, headers: _buildHeaders(site.headers)));
+      }
       final prelude = await loadPythonSourcePrelude();
       return JsSourceHost.invoke(entry: entry, modules: modules, method: method, arguments: args,
           extension: extension, headers: site.headers, pythonPrelude: prelude,
@@ -1578,7 +1606,8 @@ class CmsClient {
   CmsEpisode _localScriptPlaybackHeaders(CmsSite site, CmsEpisode episode) {
     final headers = Map<String, String>.of(episode.headers);
     final uri = Uri.tryParse(episode.url);
-    if (uri != null && JsSourceHost.ownsProxyUrl(_scriptSessionKey(site), uri)) {
+    if (uri != null && (JsSourceHost.ownsProxyUrl(_scriptSessionKey(site), uri) ||
+        _pythonHost.ownsProxyUrl(_scriptSessionKey(site), uri))) {
       String? origin;
       final connectionHeaders = <String>{};
       for (final entry in headers.entries) {

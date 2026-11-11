@@ -19,6 +19,7 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+import uuid
 import zipfile
 
 HERE = Path(__file__).resolve().parent
@@ -180,7 +181,7 @@ def stage_wheels(destination, cache):
     return files
 
 
-def stage(app, target, arch, cache):
+def stage(app, target, arch, cache, *, include_fixture=True, identifier=IDENTIFIER):
     archive = download_verified(URL, cache / ARCHIVE, SHA256)
     slice_name = "ios-arm64" if target == "device" else "ios-arm64_x86_64-simulator"
     framework_prefix = "Python.xcframework/" + slice_name + "/Python.framework/"
@@ -234,7 +235,7 @@ def stage(app, target, arch, cache):
         marker = binary.with_suffix(".fwork")
         marker.write_text(final_binary.relative_to(app).as_posix() + "\n", encoding="utf-8")
         (framework / (module + ".origin")).write_text(marker.relative_to(app).as_posix() + "\n", encoding="utf-8")
-        info = {"CFBundleIdentifier": IDENTIFIER + "." + module.replace("_", "-"),
+        info = {"CFBundleIdentifier": identifier + "." + module.replace("_", "-"),
                 "CFBundleExecutable": module, "CFBundleName": module,
                 "CFBundlePackageType": "FMWK", "CFBundleInfoDictionaryVersion": "6.0",
                 "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1",
@@ -250,7 +251,8 @@ def stage(app, target, arch, cache):
     package_dir.mkdir()
     dependencies = stage_wheels(package_dir, cache)
     (app / "app").mkdir()
-    shutil.copyfile(HERE / "probe_fixture.py", app / "app/probe_fixture.py")
+    if include_fixture:
+        shutil.copyfile(HERE / "probe_fixture.py", app / "app/probe_fixture.py")
     info = {"CFBundleIdentifier": IDENTIFIER, "CFBundleExecutable": "CPythonProbe",
             "CFBundleName": "CPythonProbe", "CFBundlePackageType": "APPL",
             "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
@@ -258,7 +260,8 @@ def stage(app, target, arch, cache):
             "CFBundleSupportedPlatforms": ["iPhoneOS" if target == "device" else "iPhoneSimulator"],
             "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
             "NSLocalNetworkUsageDescription": "Owned local Python runtime fixture only."}
-    (app / "Info.plist").write_bytes(plistlib.dumps(info))
+    if include_fixture:
+        (app / "Info.plist").write_bytes(plistlib.dumps(info))
     return {"support_archive": {"url": URL, "sha256": SHA256, "bytes": archive.stat().st_size},
             "target": target, "architecture": arch, "minimum_target": "14.0",
             "runtime_copied_bytes_before_framework_thinning": input_bytes,
@@ -316,7 +319,7 @@ def sign_app(app, out, arch, identity, progress):
     return signed
 
 
-def simulator_run(app, udid, progress, identifier=IDENTIFIER, app_name="CPythonProbe"):
+def simulator_run(app, udid, progress, identifier=IDENTIFIER, app_name="CPythonProbe", fresh=False):
     diagnostic_identity(identifier, app_name)
     inventory = json.loads(run("xcrun", "simctl", "list", "devices", "available", "--json", capture=True, progress=progress))
     candidates = [(runtime, device) for runtime, devices in inventory["devices"].items()
@@ -330,6 +333,17 @@ def simulator_run(app, udid, progress, identifier=IDENTIFIER, app_name="CPythonP
     if not candidates:
         raise RuntimeError("No matching iOS 14 or newer simulator")
     runtime, device = sorted(candidates, key=version)[0]
+    if fresh and not udid:
+        device_type = device.get("deviceTypeIdentifier", "")
+        if not device_type.startswith("com.apple.CoreSimulator.SimDeviceType.iPhone-"):
+            raise ValueError("No exact iPhone simulator type for owned creation")
+        name = "iPhone " + app_name + "-" + uuid.uuid4().hex[:12]
+        created = run("xcrun", "simctl", "create", name, device_type, runtime,
+                      capture=True, progress=progress).strip()
+        created = str(uuid.UUID(created)).upper()
+        progress["owned_simulator_udid"] = created
+        progress["simulator_template_udid"] = device["udid"]
+        device = dict(device, udid=created, name=name, state="Shutdown")
     udid = device["udid"]
     progress.update(simulator=device["name"], simulator_udid=udid, os_runtime=runtime,
                     minimum_ios14_runtime_tested=version((runtime, device))[0] == 14)
@@ -342,11 +356,15 @@ def simulator_run(app, udid, progress, identifier=IDENTIFIER, app_name="CPythonP
     watchdog_file = container / "Documents/watchdog.json"
     result_file.unlink(missing_ok=True)
     watchdog_file.unlink(missing_ok=True)
-    for name in ("progress.json", "exception.json", "native-stderr.log", "native-stdout.log", "python-progress.log"):
+    for name in ("progress.json", "flutter-progress.json", "exception.json", "native-stderr.log", "native-stdout.log", "python-progress.log"):
         (container / "Documents" / name).unlink(missing_ok=True)
     launched = False
     try:
-        run("xcrun", "simctl", "launch", "--terminate-running-process", udid, identifier, timeout=90, progress=progress)
+        # A newly owned simulator has no previous app process; subsequent orders
+        # are explicitly terminated in finally below. Asking FrontBoard to first
+        # terminate a nonexistent process can stall its first-boot launch queue.
+        restart = () if progress.get("owned_simulator_udid") == udid else ("--terminate-running-process",)
+        run("xcrun", "simctl", "launch", *restart, udid, identifier, timeout=90, progress=progress)
         launched = True
         deadline = time.monotonic() + 70
         while time.monotonic() < deadline:
@@ -360,7 +378,7 @@ def simulator_run(app, udid, progress, identifier=IDENTIFIER, app_name="CPythonP
     finally:
         diagnostics = app.parent / "diagnostics"
         diagnostics.mkdir(exist_ok=True)
-        for name in ("progress.json", "exception.json", "native-stderr.log", "native-stdout.log", "python-progress.log"):
+        for name in ("progress.json", "flutter-progress.json", "exception.json", "native-stderr.log", "native-stdout.log", "python-progress.log"):
             source = container / "Documents" / name
             if source.is_file() and not source.is_symlink():
                 with source.open("rb") as stream:
@@ -370,6 +388,23 @@ def simulator_run(app, udid, progress, identifier=IDENTIFIER, app_name="CPythonP
             # This is an external CI runner ending its own disposable app, not a
             # capability available to the production app to kill one source.
             subprocess.run(["xcrun", "simctl", "terminate", udid, identifier], check=False, timeout=30)
+
+
+def cleanup_owned_simulator(progress):
+    """Only remove a simulator returned by this run's explicit create call."""
+    owned = progress.get("owned_simulator_udid")
+    if not owned:
+        return
+    if str(uuid.UUID(owned)).upper() != owned or progress.get("simulator_udid") != owned:
+        raise ValueError("Owned simulator cleanup identity mismatch")
+    try:
+        subprocess.run(["xcrun", "simctl", "shutdown", owned], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, timeout=30)
+        subprocess.run(["xcrun", "simctl", "delete", owned], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, timeout=30)
+        progress["owned_simulator_cleanup"] = "deleted"
+    except (OSError, subprocess.SubprocessError) as error:
+        progress["owned_simulator_cleanup"] = type(error).__name__
 
 
 def main():

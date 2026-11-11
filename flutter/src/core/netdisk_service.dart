@@ -115,6 +115,7 @@ class _BaiduLoginAttempt {
   bool scanned = false;
   String? ticket;
   String? credential;
+  Completer<void>? unicastAbort;
   Future<NetdiskPollResult>? pending;
 
   _BaiduLoginAttempt(this.gid, this.cookies);
@@ -157,8 +158,21 @@ class NetdiskService {
         'qklink://www.uc.cn/656bdcddd4758b39206a8181c91a7d14?src_pkg=kuake&src_ch=default&action=open_url&url=$encoded',
       'uc' =>
         'uclink://www.uc.cn/f11f7cb5d16fa0969d670c1eccc6053d?src_pkg=kuake&src_ch=default&action=open_url&url=$encoded',
+      'baidu' =>
+        'bdnetdisk://n/action.EXTERNAL_LINK?m_params=${Uri.encodeComponent(jsonEncode({'url': trimmed}))}',
       _ => null,
     };
+  }
+
+  /// Cancels any suspended `/channel/unicast` long-poll socket without
+  /// invalidating the active Baidu QR session or interrupting ticket exchange.
+  void abortBaiduLongPoll() {
+    for (final attempt in _baiduAttempts.values) {
+      final abort = attempt.unicastAbort;
+      if (abort != null && !abort.isCompleted) {
+        abort.complete();
+      }
+    }
   }
 
   NetdiskService({http.Client? httpClient, QuarkAccountProvider? quarkAccounts})
@@ -565,20 +579,30 @@ class NetdiskService {
     try {
       if (attempt.credential == null && attempt.ticket == null) {
         final ts = DateTime.now().millisecondsSinceEpoch;
-        final response = await NetdiskSession.baiduRequest(
-            _http,
-            Uri.https('passport.baidu.com', '/channel/unicast', {
-              'channel_id': session.token,
-              'gid': attempt.gid,
-              'tpl': 'netdisk',
-              '_sdkFrom': '1',
-              'callback': 'tangram_guid_$ts',
-              'apiver': 'v3',
-              'tt': '$ts',
-              '_': '$ts',
-            }),
-            attempt.cookies,
-            timeout: const Duration(seconds: 45));
+        final pollAbort = Completer<void>();
+        attempt.unicastAbort = pollAbort;
+        final http.Response response;
+        try {
+          response = await NetdiskSession.baiduRequest(
+              _http,
+              Uri.https('passport.baidu.com', '/channel/unicast', {
+                'channel_id': session.token,
+                'gid': attempt.gid,
+                'tpl': 'netdisk',
+                '_sdkFrom': '1',
+                'callback': 'tangram_guid_$ts',
+                'apiver': 'v3',
+                'tt': '$ts',
+                '_': '$ts',
+              }),
+              attempt.cookies,
+              timeout: const Duration(seconds: 38),
+              externalAbort: pollAbort.future);
+        } finally {
+          if (identical(attempt.unicastAbort, pollAbort)) {
+            attempt.unicastAbort = null;
+          }
+        }
         final data =
             NetdiskSession.decodeObject(utf8.decode(response.bodyBytes));
         final errno = _baiduStatus(data['errno']);
