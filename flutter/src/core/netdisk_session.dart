@@ -182,8 +182,8 @@ class NetdiskSession {
         // 0.5.14 could persist the entire QR bizExt when it contained no
         // refreshToken. An unpadded base64 wrapper can pass token shape checks.
         try {
-          final oldEnvelope =
-              jsonDecode(utf8.decode(base64.decode(base64.normalize(token))));
+          final oldEnvelope = jsonDecode(
+              decodeAliBizExtBytes(base64.decode(_normalizeBase64(token))));
           if (oldEnvelope is Map &&
               oldEnvelope.containsKey('pds_login_result')) {
             return false;
@@ -278,6 +278,45 @@ class NetdiskSession {
     if (!_value(bduss) || bduss == ticket) {
       throw const FormatException('已确认百度授权，但尚未取得有效登录会话，请重试');
     }
+    return _verifyAndFormatBaiduJar(client, jar, forbiddenTicket: ticket);
+  }
+
+  /// Verifies a cookie header obtained from an official native WebKit login
+  /// session (`BDUSS=...; STOKEN=...`), warming `/disk/home` if needed so
+  /// `pan.baidu.com` session cookies are present and `uk > 0` is confirmed.
+  static Future<String> verifyBaiduWebCredential(
+      http.Client client, String rawCredential) async {
+    final jar = BaiduLoginCookies();
+    for (final part in rawCredential.split(';')) {
+      final idx = part.indexOf('=');
+      if (idx <= 0) continue;
+      final name = part.substring(0, idx).trim();
+      final val = part.substring(idx + 1).trim();
+      if (!BaiduLoginCookies.accountNames.contains(name) || !_value(val)) {
+        continue;
+      }
+      if (name == 'STOKEN' || name == 'PANPSC' || name == 'csrfToken') {
+        jar.receive(
+          http.Response('', 200, headers: {'set-cookie': '$name=$val; Path=/'}),
+          Uri.https('pan.baidu.com', '/disk/home'),
+        );
+      } else {
+        jar.receive(
+          http.Response('', 200,
+              headers: {'set-cookie': '$name=$val; Domain=.baidu.com; Path=/'}),
+          Uri.https('passport.baidu.com', '/v3/login/api/auth'),
+        );
+      }
+    }
+    if (!_value(jar.accountCookies['BDUSS'] ?? '')) {
+      throw const FormatException('尚未取得有效的百度账号登录状态');
+    }
+    return _verifyAndFormatBaiduJar(client, jar);
+  }
+
+  static Future<String> _verifyAndFormatBaiduJar(
+      http.Client client, BaiduLoginCookies jar,
+      {String? forbiddenTicket}) async {
     // Passport login and the Netdisk web session are separate. The latter may
     // set host-only pan.baidu.com STOKEN/PANPSC cookies via redirects.
     try {
@@ -310,12 +349,12 @@ class NetdiskSession {
     final loginState = info is Map ? info['loginstate'] : null;
     final statusCode = (account['errno'] ?? account['error_code'])?.toString();
     final values = jar.accountCookies;
-    bduss = values['BDUSS'] ?? '';
+    final bduss = values['BDUSS'] ?? '';
     if (statusCode != '0' ||
         (loginState != null && loginState.toString() == '0') ||
         (int.tryParse(uid?.toString() ?? '') ?? 0) <= 0 ||
         !_value(bduss) ||
-        bduss == ticket) {
+        (forbiddenTicket != null && bduss == forbiddenTicket)) {
       throw const FormatException('百度授权尚未通过网盘账号验证，请重新扫码');
     }
     return [
@@ -447,14 +486,68 @@ class NetdiskSession {
     });
   }
 
+  static String _normalizeBase64(String input) {
+    final sanitized =
+        input.trim().replaceAll('-', '+').replaceAll('_', '/');
+    return base64.normalize(sanitized);
+  }
+
+  /// Decodes Aliyun Passport `bizExt` JSON bytes. Aliyun's `qrcode/query.do`
+  /// and `mini_login.htm` encode Chinese fields (such as `nickName`) in GBK
+  /// rather than UTF-8; consuming full 2-byte GBK sequences together prevents
+  /// GBK trail bytes like `0x5C` (`\`) or `0x22` (`"`) from corrupting JSON
+  /// string delimiters.
+  static String decodeAliBizExtBytes(List<int> bytes) {
+    try {
+      return utf8.decode(bytes);
+    } on FormatException {
+      final units = <int>[];
+      var i = 0;
+      while (i < bytes.length) {
+        final b = bytes[i] & 0xFF;
+        if (b < 0x80) {
+          units.add(b);
+          i += 1;
+        } else if (b >= 0x81 &&
+            b <= 0xFE &&
+            i + 1 < bytes.length &&
+            (bytes[i + 1] & 0xFF) >= 0x40 &&
+            (bytes[i + 1] & 0xFF) <= 0xFE &&
+            (bytes[i + 1] & 0xFF) != 0x7F) {
+          units.add(0xFFFD);
+          i += 2;
+        } else {
+          units.add(0xFFFD);
+          i += 1;
+        }
+      }
+      return String.fromCharCodes(units);
+    }
+  }
+
   static String aliCredential(Object? bizExt) {
-    if (bizExt is! String || bizExt.isEmpty) {
+    final Object? decoded;
+    if (bizExt is Map) {
+      decoded = bizExt;
+    } else if (bizExt is String && bizExt.trim().isNotEmpty) {
+      final trimmed = bizExt.trim();
+      if (trimmed.startsWith('{')) {
+        decoded = jsonDecode(trimmed);
+      } else {
+        decoded = jsonDecode(
+            decodeAliBizExtBytes(base64.decode(_normalizeBase64(trimmed))));
+      }
+    } else {
       throw const FormatException('阿里扫码授权未完成');
     }
-    final decoded =
-        jsonDecode(utf8.decode(base64.decode(base64.normalize(bizExt))));
     final pds = decoded is Map ? decoded['pds_login_result'] : null;
-    final token = pds is Map ? (pds['refreshToken'] ?? '').toString() : '';
+    final rawToken = (pds is Map
+            ? (pds['refreshToken'] ?? pds['refresh_token'])
+            : null) ??
+        (decoded is Map
+            ? (decoded['refreshToken'] ?? decoded['refresh_token'])
+            : null);
+    final token = (rawToken ?? '').toString().trim();
     final credential = 'ali_token=$token';
     if (!isUsable('ali', credential)) {
       throw const FormatException('阿里账号会话交换失败，请重新扫码');

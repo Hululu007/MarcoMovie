@@ -1,3 +1,9 @@
+## 2026-11-11 iOS / iPadOS 0.5.20 与 macOS 0.5.12 四大网盘跳转登录、百度播放与并发搜索修复
+
+- [iOS / iPadOS 0.5.20](docs/releases/ios-v0.5.20.md) · [macOS 0.5.12](docs/releases/macos-v0.5.12.md)：修复阿里云盘扫码确认后因官方 `bizExt` 采用 GBK 中文编码导致的验证报错；为 iOS / iPadOS 新增原生 `WKWebView` 授权壳层（`marco_movie/netdisk_auth`），打通百度网盘（`bdnetdisk://com.baidu.passport/grantweb` 原生授权页）、阿里云盘（本机免密 / 淘宝跳转 / 验证码与相册扫码）、夸克及 UC（iPhone / iPad 独立 `appkey` 协议）本机跳转授权与扫码双通道登录。
+- 修复带提取码百度网盘分享 `sekey` 二次编码及区域 CDN 重定向问题、夸克分享目录末页误报与详情页失效备用分享刷屏折叠、全站搜索共享插件包并发下载争抢报错，以及 iOS 设置页底部 Dock 高遮罩遮挡问题。
+- 658 项 Flutter 自动化测试及多端原生构建回归（`ba5e9a0240af0d2b8dd4a770e65430e4ac861a4a`）通过，未声明用户私人账号实机全片验收。
+
 ## 2026-11-11 Android 手机 / 平板 0.5.19
 
 - [手机 / 平板端 0.5.19](docs/releases/android-mobile-v0.5.19.md)：将手机端设置页改为页面内一级分类 → 二级详情全屏导航（移除底部弹窗抽屉），并将网盘账号中心、全部剧集、通用选择器及扩展弹窗统一改为屏幕居中悬浮液态玻璃卡片。

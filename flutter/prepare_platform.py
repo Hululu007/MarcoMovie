@@ -11,6 +11,599 @@ REPO_ROOT = ROOT.parent
 LOGO_MARK = REPO_ROOT / "android" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png"
 OPAQUE_ICON = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
 
+IOS_NETDISK_AUTH_CHANNEL_SNIPPET = r'''
+      let authChannel = FlutterMethodChannel(name: "marco_movie/netdisk_auth", binaryMessenger: controller.binaryMessenger)
+      authChannel.setMethodCallHandler { [weak controller] call, result in
+        if call.method == "startWebAuth", let args = call.arguments as? [String: Any] {
+          let drive = (args["drive"] as? String) ?? ""
+          let urlStr = (args["url"] as? String) ?? ""
+          let qrUrl = (args["qrUrl"] as? String) ?? ""
+          DispatchQueue.main.async {
+            NetdiskWebAuthController.present(
+              from: controller,
+              drive: drive,
+              urlString: urlStr,
+              qrUrlString: qrUrl,
+              completion: result
+            )
+          }
+        } else {
+          result(FlutterMethodNotImplemented)
+        }
+      }'''
+
+IOS_NETDISK_AUTH_CONTROLLER_SWIFT = r'''
+
+private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+  weak var target: WKScriptMessageHandler?
+  init(_ target: WKScriptMessageHandler) {
+    self.target = target
+  }
+  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    target?.userContentController(userContentController, didReceive: message)
+  }
+}
+
+final class NetdiskWebAuthController: UIViewController, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKHTTPCookieStoreObserver, UIAdaptivePresentationControllerDelegate {
+  private static let mobileSafariUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+  private static let desktopSafariUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
+
+  private static let baiduAppJumpScript = #"""
+  (function() {
+    if (location.hostname !== 'wappass.baidu.com') return;
+    if (window.__marcoBaiduAppJumpTried) return;
+    var tries = 0;
+    var timer = setInterval(function() {
+      tries++;
+      var btn = document.querySelector('.other-button');
+      if (btn && btn.offsetParent !== null) {
+        var txt = String(btn.innerText || btn.textContent || '');
+        if (txt.indexOf('登录') !== -1 || txt.indexOf('授权') !== -1) {
+          window.__marcoBaiduAppJumpTried = true;
+          clearInterval(timer);
+          setTimeout(function() { btn.click(); }, 120);
+          return;
+        }
+      }
+      if (tries >= 24) clearInterval(timer);
+    }, 250);
+  })();
+  """#
+
+  private static let aliHookScript = #"""
+  (function() {
+    var host = String(location.hostname || '').toLowerCase();
+    if (!host.endsWith('aliyundrive.com') && !host.endsWith('alipan.com')) return;
+    function post(payload) {
+      try {
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.marcoAuth) {
+          window.webkit.messageHandlers.marcoAuth.postMessage(payload);
+        }
+      } catch (_) {}
+    }
+    function inspectObject(obj) {
+      if (!obj) return;
+      if (typeof obj === 'string') {
+        var s = obj.trim();
+        if (s.charCodeAt(0) === 123) {
+          try { obj = JSON.parse(s); } catch (_) { return; }
+        } else {
+          return;
+        }
+      }
+      if (typeof obj !== 'object') return;
+      var rt = (obj.tokenInfo && (obj.tokenInfo.refresh_token || obj.tokenInfo.refreshToken))
+        || obj.refresh_token || obj.refreshToken
+        || (obj.pds_login_result && (obj.pds_login_result.refreshToken || obj.pds_login_result.refresh_token))
+        || (obj.data && (obj.data.refresh_token || obj.data.refreshToken));
+      if (typeof rt === 'string' && rt.length >= 16 && rt.indexOf('=') === -1) {
+        post({ type: 'credential', credential: 'ali_token=' + rt });
+        return;
+      }
+      var biz = obj.bizExt || (obj.data && obj.data.bizExt) || (obj.content && obj.content.data && obj.content.data.bizExt);
+      if (typeof biz === 'string' && biz.length >= 16) {
+        post({ type: 'bizExt', bizExt: biz });
+      }
+    }
+    window.addEventListener('message', function(e) {
+      try { inspectObject(e && e.data); } catch (_) {}
+    }, true);
+    try {
+      var origSetItem = Storage.prototype.setItem;
+      Storage.prototype.setItem = function(k, v) {
+        try {
+          if (k === 'token' && typeof v === 'string') inspectObject(v);
+        } catch (_) {}
+        return origSetItem.apply(this, arguments);
+      };
+    } catch (_) {}
+    try {
+      var origOpen = XMLHttpRequest.prototype.open;
+      var origSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function(m, u) {
+        this.__marcoUrl = String(u || '');
+        return origOpen.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.send = function() {
+        this.addEventListener('load', function() {
+          try {
+            var u = this.__marcoUrl || '';
+            if (u.indexOf('token') !== -1 || u.indexOf('login') !== -1 || u.indexOf('oauth') !== -1) {
+              inspectObject(this.responseText);
+            }
+          } catch (_) {}
+        });
+        return origSend.apply(this, arguments);
+      };
+    } catch (_) {}
+    try {
+      if (window.fetch) {
+        var origFetch = window.fetch;
+        window.fetch = function() {
+          var first = arguments[0];
+          var u = String(first && first.url ? first.url : first || '');
+          return origFetch.apply(this, arguments).then(function(res) {
+            try {
+              if (u.indexOf('token') !== -1 || u.indexOf('login') !== -1 || u.indexOf('oauth') !== -1) {
+                res.clone().text().then(inspectObject).catch(function() {});
+              }
+            } catch (_) {}
+            return res;
+          });
+        };
+      }
+    } catch (_) {}
+  })();
+  """#
+
+  private let driveKey: String
+  private let initialUrlString: String
+  private let qrUrlString: String
+  private var completion: FlutterResult?
+  private var completed = false
+  private var panAuthTriggered = false
+  private var webView: WKWebView!
+  private var dataStore: WKWebsiteDataStore?
+  private let hintLabel = UILabel()
+  private var observers: [NSObjectProtocol] = []
+
+  init(drive: String, urlString: String, qrUrlString: String, completion: @escaping FlutterResult) {
+    self.driveKey = drive
+    self.initialUrlString = urlString
+    self.qrUrlString = qrUrlString
+    self.completion = completion
+    super.init(nibName: nil, bundle: nil)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  deinit {
+    if !completed {
+      completed = true
+      let callback = completion
+      completion = nil
+      DispatchQueue.main.async {
+        callback?(nil)
+      }
+    }
+  }
+
+  static func present(from root: UIViewController?, drive: String, urlString: String, qrUrlString: String, completion: @escaping FlutterResult) {
+    var presenter = root
+    if presenter == nil {
+      presenter = UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .flatMap { $0.windows }
+        .first(where: { $0.isKeyWindow })?.rootViewController
+    }
+    while let presented = presenter?.presentedViewController, !presented.isBeingDismissed {
+      presenter = presented
+    }
+    guard let host = presenter else {
+      completion(nil)
+      return
+    }
+    let vc = NetdiskWebAuthController(drive: drive, urlString: urlString, qrUrlString: qrUrlString, completion: completion)
+    let nav = UINavigationController(rootViewController: vc)
+    nav.modalPresentationStyle = .pageSheet
+    nav.presentationController?.delegate = vc
+    nav.overrideUserInterfaceStyle = .dark
+    host.present(nav, animated: true, completion: nil)
+  }
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    overrideUserInterfaceStyle = .dark
+    view.backgroundColor = UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+    switch driveKey {
+    case "baidu":
+      navigationItem.title = "百度网盘登录授权"
+    case "ali":
+      navigationItem.title = "阿里云盘登录授权"
+    case "quark":
+      navigationItem.title = "夸克网盘登录授权"
+    case "uc":
+      navigationItem.title = "UC网盘登录授权"
+    default:
+      navigationItem.title = "网盘账号授权"
+    }
+    navigationItem.leftBarButtonItem = UIBarButtonItem(
+      title: "关闭",
+      style: .plain,
+      target: self,
+      action: #selector(closeTapped)
+    )
+    if driveKey == "ali" {
+      navigationItem.rightBarButtonItem = UIBarButtonItem(
+        title: "App扫码",
+        style: .plain,
+        target: self,
+        action: #selector(openScanAppTapped)
+      )
+    }
+
+    let config = WKWebViewConfiguration()
+    let store = WKWebsiteDataStore.nonPersistent()
+    self.dataStore = store
+    config.websiteDataStore = store
+    let contentController = WKUserContentController()
+    contentController.add(WeakScriptMessageHandler(self), name: "marcoAuth")
+    if driveKey == "ali" {
+      contentController.addUserScript(
+        WKUserScript(source: Self.aliHookScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+      )
+    } else if driveKey == "baidu" {
+      contentController.addUserScript(
+        WKUserScript(source: Self.baiduAppJumpScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+      )
+    }
+    config.userContentController = contentController
+    store.httpCookieStore.add(self)
+
+    let banner = UIView()
+    banner.translatesAutoresizingMaskIntoConstraints = false
+    banner.backgroundColor = UIColor(red: 0.13, green: 0.14, blue: 0.18, alpha: 1.0)
+    hintLabel.translatesAutoresizingMaskIntoConstraints = false
+    hintLabel.font = UIFont.systemFont(ofSize: 12.5, weight: .medium)
+    hintLabel.textColor = UIColor(white: 0.88, alpha: 1.0)
+    hintLabel.numberOfLines = 2
+    hintLabel.textAlignment = .center
+    hintLabel.text = initialHintText()
+    banner.addSubview(hintLabel)
+
+    let wv = WKWebView(frame: .zero, configuration: config)
+    wv.translatesAutoresizingMaskIntoConstraints = false
+    wv.navigationDelegate = self
+    wv.uiDelegate = self
+    wv.allowsBackForwardNavigationGestures = true
+    wv.customUserAgent = (driveKey == "baidu" || driveKey == "ali") ? Self.mobileSafariUA : Self.desktopSafariUA
+    self.webView = wv
+
+    view.addSubview(banner)
+    view.addSubview(wv)
+    let guide = view.safeAreaLayoutGuide
+    NSLayoutConstraint.activate([
+      banner.topAnchor.constraint(equalTo: guide.topAnchor),
+      banner.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      banner.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      hintLabel.topAnchor.constraint(equalTo: banner.topAnchor, constant: 7),
+      hintLabel.bottomAnchor.constraint(equalTo: banner.bottomAnchor, constant: -7),
+      hintLabel.leadingAnchor.constraint(equalTo: banner.leadingAnchor, constant: 12),
+      hintLabel.trailingAnchor.constraint(equalTo: banner.trailingAnchor, constant: -12),
+      wv.topAnchor.constraint(equalTo: banner.bottomAnchor),
+      wv.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      wv.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      wv.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+    ])
+
+    let center = NotificationCenter.default
+    for name in [UIApplication.didBecomeActiveNotification, UIApplication.willEnterForegroundNotification] {
+      let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+        self?.handleAppForegrounded()
+      }
+      observers.append(token)
+    }
+
+    if let targetUrl = URL(string: resolvedInitialUrl()) {
+      wv.load(URLRequest(url: targetUrl))
+    }
+  }
+
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    if isBeingDismissed || navigationController?.isBeingDismissed == true {
+      finish(with: nil, dismissModal: false)
+    }
+  }
+
+  func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+    finish(with: nil, dismissModal: false)
+  }
+
+  @objc private func closeTapped() {
+    finish(with: nil, dismissModal: true)
+  }
+
+  @objc private func openScanAppTapped() {
+    finish(with: ["type": "openScanApp"], dismissModal: true)
+  }
+
+  private func initialHintText() -> String {
+    switch driveKey {
+    case "baidu":
+      for scheme in ["bdnetdisk://", "baiduyunipad://", "baiduyun://"] {
+        if let u = URL(string: scheme), UIApplication.shared.canOpenURL(u) {
+          return "正在唤起百度网盘 App，确认「授权登录」后返回即可自动完成登录"
+        }
+      }
+      return "支持唤起百度 App 授权或直接在此页面登录，完成后自动同步"
+    case "ali":
+      return "支持本机免密 / 淘宝跳转 / 验证码登录，或点右上角用阿里云盘相册扫码"
+    default:
+      return "登录完成后将自动同步网盘状态并返回"
+    }
+  }
+
+  private func resolvedInitialUrl() -> String {
+    guard driveKey == "baidu" else { return initialUrlString }
+    let candidates: [(scheme: String, authApp: String, appScheme: String)] = [
+      ("bdnetdisk://", "netDisk", "bdnetdisk"),
+      ("baiduyunipad://", "netDisk", "baiduyunipad"),
+      ("baiduyun://", "netDisk", "baiduyun"),
+      ("baiduboxapp://", "baidu", "baiduboxapp"),
+    ]
+    for item in candidates {
+      if let probe = URL(string: item.scheme), UIApplication.shared.canOpenURL(probe) {
+        let sep = initialUrlString.contains("?") ? "&" : "?"
+        return "\(initialUrlString)\(sep)authApp=\(item.authApp)&appScheme=\(item.appScheme)"
+      }
+    }
+    return initialUrlString
+  }
+
+  private func handleAppForegrounded() {
+    guard !completed, let wv = webView else { return }
+    if driveKey == "baidu" {
+      wv.evaluateJavaScript(
+        "try { document.dispatchEvent(new Event('visibilitychange')); window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('pageshow')); } catch (_) {}",
+        completionHandler: nil
+      )
+    }
+    inspectCookies()
+  }
+
+  func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    guard let url = navigationAction.request.url else {
+      decisionHandler(.allow)
+      return
+    }
+    let scheme = (url.scheme ?? "").lowercased()
+    if ["http", "https", "about", "data", "blob", "javascript"].contains(scheme) {
+      decisionHandler(.allow)
+      return
+    }
+    if scheme == "marcomovie" {
+      handleAppForegrounded()
+      decisionHandler(.cancel)
+      return
+    }
+    var targetUrl = url
+    let raw = url.absoluteString
+    if raw.contains("com.baidu.passport/grantweb") {
+      let patched = raw.replacingOccurrences(of: "browserScheme=&", with: "browserScheme=marcomovie%3A%2F%2Fauth&")
+      let finalStr = patched.hasSuffix("browserScheme=") ? (patched + "marcomovie%3A%2F%2Fauth") : patched
+      if let rewritten = URL(string: finalStr) {
+        targetUrl = rewritten
+      }
+    }
+    UIApplication.shared.open(targetUrl, options: [:], completionHandler: nil)
+    decisionHandler(.cancel)
+  }
+
+  func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+    if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
+      let scheme = (url.scheme ?? "").lowercased()
+      if ["http", "https"].contains(scheme) {
+        webView.load(navigationAction.request)
+      } else {
+        UIApplication.shared.open(url, options: [:], completionHandler: nil)
+      }
+    }
+    return nil
+  }
+
+  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    inspectCookies()
+  }
+
+  func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
+    inspectCookies()
+  }
+
+  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    guard message.name == "marcoAuth", !completed else { return }
+    guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+    if type == "credential", let cred = body["credential"] as? String, !cred.isEmpty {
+      finish(with: ["type": "credential", "credential": cred], dismissModal: true)
+    } else if type == "bizExt", let biz = body["bizExt"] as? String, !biz.isEmpty {
+      finish(with: ["type": "bizExt", "bizExt": biz], dismissModal: true)
+    }
+  }
+
+  private func inspectCookies() {
+    guard !completed, let store = dataStore?.httpCookieStore else { return }
+    store.getAllCookies { [weak self] cookies in
+      guard let self = self, !self.completed else { return }
+      let now = Date()
+      let valid = cookies.filter { c in
+        if c.value.isEmpty { return false }
+        if let exp = c.expiresDate, exp <= now { return false }
+        return true
+      }
+      switch self.driveKey {
+      case "baidu":
+        self.evaluateBaiduCookies(valid)
+      case "quark":
+        self.evaluateQuarkCookies(valid)
+      case "uc":
+        self.evaluateUcCookies(valid)
+      default:
+        break
+      }
+    }
+  }
+
+  private func evaluateBaiduCookies(_ valid: [HTTPCookie]) {
+    var bduss = ""
+    var panStoken = ""
+    var rootStoken = ""
+    var extra: [String: String] = [:]
+    let allowedNames: Set<String> = ["BDUSS", "STOKEN", "PTOKEN", "BAIDUID", "PANPSC", "csrfToken"]
+    for c in valid {
+      guard allowedNames.contains(c.name) else { continue }
+      let dom = c.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+      guard dom == "baidu.com" || dom == "pan.baidu.com" else { continue }
+      if c.name == "BDUSS" {
+        bduss = c.value
+      } else if c.name == "STOKEN" {
+        if dom == "pan.baidu.com" {
+          panStoken = c.value
+        } else {
+          rootStoken = c.value
+        }
+      } else if dom == "pan.baidu.com" || extra[c.name] == nil {
+        extra[c.name] = c.value
+      }
+    }
+    guard !bduss.isEmpty else { return }
+    let bestStoken = !panStoken.isEmpty ? panStoken : rootStoken
+    if !panStoken.isEmpty {
+      finishBaiduWith(bduss: bduss, stoken: bestStoken, extra: extra)
+      return
+    }
+    if !panAuthTriggered {
+      panAuthTriggered = true
+      hintLabel.text = "已获取百度授权，正在同步网盘会话…"
+      webView.customUserAgent = Self.desktopSafariUA
+      if let authUrl = URL(string: "https://passport.baidu.com/v3/login/api/auth?return_type=3&tpl=netdisk&u=https%3A%2F%2Fpan.baidu.com%2Fdisk%2Fhome") {
+        webView.load(URLRequest(url: authUrl))
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+        guard let self = self, !self.completed else { return }
+        self.dataStore?.httpCookieStore.getAllCookies { [weak self] latest in
+          guard let self = self, !self.completed else { return }
+          let now = Date()
+          var finalBduss = ""
+          var finalStoken = ""
+          var finalExtra: [String: String] = [:]
+          for c in latest {
+            if c.value.isEmpty { continue }
+            if let exp = c.expiresDate, exp <= now { continue }
+            let dom = c.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+            guard dom == "baidu.com" || dom == "pan.baidu.com" else { continue }
+            if c.name == "BDUSS" {
+              finalBduss = c.value
+            } else if c.name == "STOKEN" {
+              if dom == "pan.baidu.com" || finalStoken.isEmpty {
+                finalStoken = c.value
+              }
+            } else if ["PTOKEN", "BAIDUID", "PANPSC", "csrfToken"].contains(c.name) {
+              if dom == "pan.baidu.com" || finalExtra[c.name] == nil {
+                finalExtra[c.name] = c.value
+              }
+            }
+          }
+          if !finalBduss.isEmpty {
+            self.finishBaiduWith(bduss: finalBduss, stoken: finalStoken, extra: finalExtra)
+          }
+        }
+      }
+    } else if webView.url?.host?.lowercased() == "pan.baidu.com" && !bestStoken.isEmpty {
+      finishBaiduWith(bduss: bduss, stoken: bestStoken, extra: extra)
+    }
+  }
+
+  private func finishBaiduWith(bduss: String, stoken: String, extra: [String: String]) {
+    var parts: [String] = ["BDUSS=\(bduss)"]
+    if !stoken.isEmpty {
+      parts.append("STOKEN=\(stoken)")
+    }
+    for key in ["PTOKEN", "BAIDUID", "PANPSC", "csrfToken"] {
+      if let v = extra[key], !v.isEmpty {
+        parts.append("\(key)=\(v)")
+      }
+    }
+    finish(with: ["type": "credential", "credential": parts.joined(separator: "; ")], dismissModal: true)
+  }
+
+  private func evaluateQuarkCookies(_ valid: [HTTPCookie]) {
+    var map: [String: String] = [:]
+    for c in valid {
+      let dom = c.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+      if dom == "quark.cn" || dom.hasSuffix(".quark.cn") {
+        map[c.name] = c.value
+      }
+    }
+    guard let pus = map["__pus"], !pus.isEmpty, let puus = map["__puus"], !puus.isEmpty else { return }
+    let header = map.map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
+    finish(with: ["type": "credential", "credential": header], dismissModal: true)
+  }
+
+  private func evaluateUcCookies(_ valid: [HTTPCookie]) {
+    var map: [String: String] = [:]
+    for c in valid {
+      let dom = c.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")).lowercased()
+      if dom == "uc.cn" || dom.hasSuffix(".uc.cn") {
+        map[c.name] = c.value
+      }
+    }
+    let pus = map["__pus"] ?? ""
+    let puus = map["__puus"] ?? ""
+    guard !pus.isEmpty || !puus.isEmpty else { return }
+    let header = map.map { "\($0.key)=\($0.value)" }.joined(separator: "; ")
+    finish(with: ["type": "credential", "credential": header], dismissModal: true)
+  }
+
+  private func cleanupObservers() {
+    let center = NotificationCenter.default
+    for token in observers {
+      center.removeObserver(token)
+    }
+    observers.removeAll()
+    if let store = dataStore?.httpCookieStore {
+      store.remove(self)
+    }
+    webView?.configuration.userContentController.removeScriptMessageHandler(forName: "marcoAuth")
+    webView?.stopLoading()
+  }
+
+  private func finish(with value: Any?, dismissModal: Bool) {
+    if !Thread.isMainThread {
+      DispatchQueue.main.async { [weak self] in
+        self?.finish(with: value, dismissModal: dismissModal)
+      }
+      return
+    }
+    guard !completed else { return }
+    completed = true
+    cleanupObservers()
+    let callback = completion
+    completion = nil
+    let target = navigationController ?? self
+    if dismissModal, target.presentingViewController != nil, !target.isBeingDismissed {
+      target.dismiss(animated: true) {
+        callback?(value)
+      }
+    } else {
+      callback?(value)
+    }
+  }
+}
+'''
+
 def _png_dimensions(path: Path) -> tuple[int, int]:
     data = path.read_bytes()
     if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n":
@@ -201,24 +794,43 @@ def main() -> None:
                 'NSLocalNetworkUsageDescription': '连接你添加的局域网 Emby 服务器及片源。',
                 'UIFileSharingEnabled': True,
                 'LSSupportsOpeningDocumentsInPlace': True,
+                'FlutterDeepLinkingEnabled': False,
                 'LSApplicationQueriesSchemes': [
                     'apple-magnifier',
                     'qklink',
-                    'uclink',
                     'qkcloudlink',
                     'quark',
+                    'uclink',
+                    'ucliteioslink',
                     'ucbrowser',
-                    'baiduyun',
                     'bdnetdisk',
-                    'alipan',
+                    'baiduyun',
+                    'baiduyunipad',
+                    'baiduboxapp',
                     'smartdrive',
+                    'alipan',
+                    'aliyundrive',
+                    'tbopen',
+                    'taobao',
                 ],
             })
+            url_types = list(info.get('CFBundleURLTypes') or [])
+            if not any('marcomovie' in (entry.get('CFBundleURLSchemes') or []) for entry in url_types if isinstance(entry, dict)):
+                url_types.append({
+                    'CFBundleTypeRole': 'Editor',
+                    'CFBundleURLName': 'com.pilipala.marcoMovie',
+                    'CFBundleURLSchemes': ['marcomovie'],
+                })
+            info['CFBundleURLTypes'] = url_types
             info.setdefault('NSAppTransportSecurity', {})['NSAllowsArbitraryLoads'] = True
             ios_plist.write_bytes(plistlib.dumps(info, sort_keys=False))
         ios_app_delegate = ios_runner / "AppDelegate.swift"
         if ios_app_delegate.exists():
             ad_text = ios_app_delegate.read_text(encoding="utf-8")
+            ad_changed = False
+            if "import WebKit" not in ad_text and "import UIKit" in ad_text:
+                ad_text = ad_text.replace("import UIKit", "import UIKit\nimport WebKit", 1)
+                ad_changed = True
             if "marco_movie/wakelock" not in ad_text and "GeneratedPluginRegistrant.register(with: self)" in ad_text:
                 ad_text = ad_text.replace(
                     "GeneratedPluginRegistrant.register(with: self)",
@@ -238,6 +850,17 @@ def main() -> None:
                     "    }",
                     1,
                 )
+                ad_changed = True
+            if "marco_movie/netdisk_auth" not in ad_text and "if let controller = window?.rootViewController as? FlutterViewController {" in ad_text:
+                ad_text = ad_text.replace(
+                    "    if let controller = window?.rootViewController as? FlutterViewController {",
+                    "    if let controller = window?.rootViewController as? FlutterViewController {"
+                    + IOS_NETDISK_AUTH_CHANNEL_SNIPPET,
+                    1,
+                )
+                ad_text = ad_text.rstrip() + "\n" + IOS_NETDISK_AUTH_CONTROLLER_SWIFT
+                ad_changed = True
+            if ad_changed:
                 ios_app_delegate.write_text(ad_text, encoding="utf-8")
     ios_app_fw_plist = ROOT / "ios" / "Flutter" / "AppFrameworkInfo.plist"
     if ios_app_fw_plist.exists():

@@ -66,6 +66,45 @@ class DeploymentChecks(unittest.TestCase):
             self.assertIn('NSLocalNetworkUsageDescription', result)
             self.assertTrue(result['NSAppTransportSecurity']['NSAllowsArbitraryLoads'])
             self.assertEqual(result['UIApplicationSceneManifest'], nested['UIApplicationSceneManifest'])
+            self.assertIs(result['FlutterDeepLinkingEnabled'], False)
+            for scheme in ('qklink', 'qkcloudlink', 'uclink', 'ucliteioslink', 'bdnetdisk', 'baiduyunipad', 'baiduboxapp', 'smartdrive', 'alipan', 'tbopen'):
+                self.assertIn(scheme, result['LSApplicationQueriesSchemes'])
+            url_types = result['CFBundleURLTypes']
+            self.assertEqual(len([u for u in url_types if 'marcomovie' in u.get('CFBundleURLSchemes', [])]), 1)
+
+    def test_ios_app_delegate_injects_wakelock_and_netdisk_auth_idempotently(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runner = root / 'ios/Runner'
+            runner.mkdir(parents=True)
+            (runner / 'Info.plist').write_bytes(plistlib.dumps({'MinimumOSVersion': '14.0'}))
+            app_delegate = runner / 'AppDelegate.swift'
+            app_delegate.write_text(
+                'import Flutter\n'
+                'import UIKit\n\n'
+                '@main\n'
+                '@objc class AppDelegate: FlutterAppDelegate {\n'
+                '  override func application(\n'
+                '    _ application: UIApplication,\n'
+                '    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?\n'
+                '  ) -> Bool {\n'
+                '    GeneratedPluginRegistrant.register(with: self)\n'
+                '    return super.application(application, didFinishLaunchingWithOptions: launchOptions)\n'
+                '  }\n'
+                '}\n',
+                encoding='utf-8',
+            )
+            with patch.object(prepare_platform, 'ROOT', root):
+                prepare_platform.main()
+                prepare_platform.main()
+            swift = app_delegate.read_text(encoding='utf-8')
+            self.assertEqual(swift.count('import WebKit'), 1)
+            self.assertEqual(swift.count('marco_movie/wakelock'), 1)
+            self.assertEqual(swift.count('marco_movie/netdisk_auth'), 1)
+            self.assertEqual(swift.count('final class NetdiskWebAuthController'), 1)
+            self.assertEqual(swift.count('{'), swift.count('}'))
+            plist = plistlib.loads((runner / 'Info.plist').read_bytes())
+            self.assertEqual(len([u for u in plist['CFBundleURLTypes'] if 'marcomovie' in u.get('CFBundleURLSchemes', [])]), 1)
 
 
 if __name__ == '__main__':

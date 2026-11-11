@@ -135,14 +135,18 @@ class NetdiskService {
   int _baiduGeneration = 0;
   bool _closed = false;
 
-  /// Builds the official native App deep-link scheme (`qklink://` / `uclink://`)
-  /// so iOS "本机跳转授权" opens the login confirmation page directly inside
-  /// the Quark / UC App WebView (`inApp=true`) with `client_id` preserved,
-  /// avoiding Safari's redirect to `h5.sm.cn` which drops `client_id=532` and
-  /// triggers "登录请求已过期".
-  static String? buildNativeAppDeepLink(String driveKey, String qrContent) {
+  /// Builds ordered native App deep-link schemes (`qklink://` / `qkcloudlink://`
+  /// for Quark, `uclink://` / `ucliteioslink://` for UC, `baiduboxapp://` for
+  /// Baidu App fallback) so iPhone & iPad "本机跳转授权" open the login
+  /// confirmation page directly inside the native App WebView with `client_id`
+  /// preserved.
+  static List<String> buildNativeAppDeepLinks(
+    String driveKey,
+    String qrContent, {
+    bool isTablet = false,
+  }) {
     final trimmed = qrContent.trim();
-    if (trimmed.isEmpty) return null;
+    if (trimmed.isEmpty) return const [];
     final parsed = Uri.tryParse(trimmed);
     final token = parsed?.queryParameters['token'] ?? '';
     final targetUrl = switch (driveKey) {
@@ -153,15 +157,94 @@ class NetdiskService {
       _ => trimmed,
     };
     final encoded = Uri.encodeComponent(targetUrl);
+    switch (driveKey) {
+      case 'quark':
+        final phoneLink =
+            'qklink://www.uc.cn/656bdcddd4758b39206a8181c91a7d14?src_pkg=kuake&src_ch=default&action=open_url&url=$encoded';
+        final padLink =
+            'qklink://www.uc.cn/e7d506280d7f0140e2ee4ba5b030d82d?src_pkg=kuake&src_ch=default&action=open_url&url=$encoded';
+        final cloudLink =
+            'qkcloudlink://www.uc.cn/ca7b1fad21e741b3a4aa4284ce58d686?src_ch=default&action=open_url&url=$encoded';
+        return isTablet
+            ? [padLink, phoneLink, cloudLink]
+            : [phoneLink, padLink, cloudLink];
+      case 'uc':
+        final phoneLink =
+            'uclink://www.uc.cn/f11f7cb5d16fa0969d670c1eccc6053d?src_pkg=kuake&src_ch=default&action=open_url&url=$encoded';
+        final padLink =
+            'uclink://www.uc.cn/3898f2889dfc4651a3726ffbc5d1e198?src_pkg=kuake&src_ch=default&action=open_url&url=$encoded';
+        final liteLink =
+            'ucliteioslink://www.uc.cn/8c09be3332aa631fcbad0c5834ef68fd?src_pkg=kuake&src_ch=default&action=open_url&url=$encoded';
+        return isTablet
+            ? [padLink, phoneLink, liteLink]
+            : [phoneLink, padLink, liteLink];
+      case 'baidu':
+        return [
+          'baiduboxapp://easybrowse?openurl=${Uri.encodeComponent(trimmed)}&opentype=0&isla=0&append=0&minver=5.3.0.0',
+        ];
+      default:
+        return const [];
+    }
+  }
+
+  static String? buildNativeAppDeepLink(
+    String driveKey,
+    String qrContent, {
+    bool isTablet = false,
+  }) {
+    final links =
+        buildNativeAppDeepLinks(driveKey, qrContent, isTablet: isTablet);
+    return links.isEmpty ? null : links.first;
+  }
+
+  /// Official first-party mobile/web authorization URL loaded inside the native
+  /// Apple `WKWebView` controller (`marco_movie/netdisk_auth`):
+  /// - `baidu`: `wappass.baidu.com` Passport SSO (`bdnetdisk://com.baidu.passport/grantweb`)
+  /// - `ali`: `auth.aliyundrive.com` mobile OAuth (`25dzX3vbYqktVxyX`, supports
+  ///   SIM 1-tap, Taobao `tbopen://` jump, SMS, and password)
+  /// - `quark` / `uc`: official web drive fallback when the native app is not installed.
+  static String buildNativeWebAuthUrl(String driveKey, {String qrContent = ''}) {
     return switch (driveKey) {
-      'quark' =>
-        'qklink://www.uc.cn/656bdcddd4758b39206a8181c91a7d14?src_pkg=kuake&src_ch=default&action=open_url&url=$encoded',
-      'uc' =>
-        'uclink://www.uc.cn/f11f7cb5d16fa0969d670c1eccc6053d?src_pkg=kuake&src_ch=default&action=open_url&url=$encoded',
       'baidu' =>
-        'bdnetdisk://n/action.EXTERNAL_LINK?m_params=${Uri.encodeComponent(jsonEncode({'url': trimmed}))}',
-      _ => null,
+        'https://wappass.baidu.com/passport/?login&tpl=netdisk&authsite=1&overseas=1&smsLoginLink=1&display=mobile&realName=1&force=true&u=https%3A%2F%2Fwww.baidu.com',
+      'ali' =>
+        'https://auth.aliyundrive.com/v2/oauth/authorize?client_id=25dzX3vbYqktVxyX&redirect_uri=https%3A%2F%2Fwww.aliyundrive.com%2Fsign%2Fcallback&response_type=code&login_type=custom&state=%7B%22origin%22%3A%22https%3A%2F%2Fwww.aliyundrive.com%22%7D#/nestedlogin?keepLogin=true&hidePhoneCode=true&isMobile=true',
+      'quark' => 'https://pan.quark.cn/',
+      'uc' => 'https://drive.uc.cn/',
+      _ => qrContent.trim(),
     };
+  }
+
+  /// Validates and normalizes credentials returned by the native WebKit
+  /// authorization flow before saving to [StorageService].
+  Future<String> verifyWebAuthCredential(
+    String driveKey,
+    String rawCredential,
+  ) async {
+    final trimmed = rawCredential.trim();
+    if (trimmed.isEmpty) {
+      throw const FormatException('尚未取得有效网盘登录凭据');
+    }
+    switch (driveKey) {
+      case 'quark':
+        return (await _quarkAccounts.validateCredential(trimmed)).toCredential();
+      case 'uc':
+        if (!NetdiskSession.isUsable('uc', trimmed)) {
+          throw const FormatException('UC 网盘登录状态无效，请重试');
+        }
+        return trimmed;
+      case 'baidu':
+        return NetdiskSession.verifyBaiduWebCredential(_http, trimmed);
+      case 'ali':
+        final normalized =
+            trimmed.startsWith('ali_token=') ? trimmed : 'ali_token=$trimmed';
+        if (!NetdiskSession.isUsable('ali', normalized)) {
+          throw const FormatException('阿里云盘登录凭据无效，请重试');
+        }
+        return normalized;
+      default:
+        throw const FormatException('未知的网盘类型');
+    }
   }
 
   /// Cancels any suspended `/channel/unicast` long-poll socket without

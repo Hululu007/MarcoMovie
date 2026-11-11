@@ -17,6 +17,10 @@ import 'apple_theme.dart';
 import 'local_qr_code.dart';
 import 'quark_library_sheet.dart';
 
+const MethodChannel netdiskAuthChannel = MethodChannel(
+  'marco_movie/netdisk_auth',
+);
+
 /// Opens the Apple-styled Netdisk QR Code Login & Account Management sheet
 /// matching Android TV's `🗂我的云盘┃配置` (`我的夸父 / 我的优汐 / 我的嘟嘟 / 我的阿狸`).
 Future<void> showNetdiskAccountSheet(
@@ -280,6 +284,183 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
         });
       }
     } catch (_) {}
+    _ensurePollingActive();
+  }
+
+  void _ensurePollingActive({bool immediate = false}) {
+    final session = _qrSession;
+    if (!mounted ||
+        !_foreground ||
+        session == null ||
+        _pollingAttempt != null) {
+      return;
+    }
+    if (immediate || _pollTimer == null || !_pollTimer!.isActive) {
+      _pollTimer?.cancel();
+      _pollTimer = Timer(
+        immediate
+            ? const Duration(milliseconds: 120)
+            : const Duration(seconds: 3),
+        () => _pollQr(_qrAttempt, session),
+      );
+    }
+  }
+
+  Future<void> _shareQrAndOpenAliApp(
+    String qrData,
+    NetdiskDriveInfo drive,
+  ) async {
+    if (qrData.isEmpty) return;
+    await _shareQrImage(qrData, drive);
+    for (final scheme in const ['smartdrive://', 'alipan://']) {
+      final uri = Uri.tryParse(scheme);
+      if (uri == null) continue;
+      try {
+        if (await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+          break;
+        }
+      } catch (_) {}
+    }
+    if (mounted) {
+      setState(() {
+        _qrStatusText = '已准备二维码：打开阿里云盘右上角「+ → 扫一扫 → 相册」选码即可确认登录';
+      });
+    }
+    _ensurePollingActive();
+  }
+
+  Future<bool> _startNativeWebAuth(
+    NetdiskDriveInfo drive,
+    String qrData,
+  ) async {
+    Map<String, dynamic>? result;
+    try {
+      result = await netdiskAuthChannel.invokeMapMethod<String, dynamic>(
+        'startWebAuth',
+        <String, dynamic>{
+          'drive': drive.key,
+          'url': NetdiskService.buildNativeWebAuthUrl(
+            drive.key,
+            qrContent: qrData,
+          ),
+          'qrUrl': qrData,
+        },
+      );
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      _ensurePollingActive();
+      return true;
+    }
+    if (!mounted) return true;
+    if (result == null) {
+      _ensurePollingActive(immediate: true);
+      return true;
+    }
+    final type = (result['type'] ?? '').toString();
+    if (type == 'openScanApp') {
+      await _shareQrAndOpenAliApp(qrData, drive);
+      return true;
+    }
+    if (type == 'credential' || type == 'bizExt') {
+      final attemptAtStart = _qrAttempt;
+      setState(() {
+        _qrStatusText = '正在验证${drive.providerName}账号会话…';
+      });
+      try {
+        final rawCredential = type == 'bizExt'
+            ? NetdiskSession.aliCredential(result['bizExt'])
+            : (result['credential'] ?? '').toString();
+        final verified = await _service.verifyWebAuthCredential(
+          drive.key,
+          rawCredential,
+        );
+        if (!mounted || attemptAtStart != _qrAttempt) return true;
+        await widget.storage.setNetdiskCredential(drive.key, verified);
+        if (!mounted || attemptAtStart != _qrAttempt) return true;
+        widget.onChanged?.call();
+        setState(_cancelQr);
+      } catch (_) {
+        if (mounted && attemptAtStart == _qrAttempt) {
+          setState(() {
+            _qrStatusText = '${drive.providerName}账号验证未完成，请重试或刷新二维码';
+          });
+          _ensurePollingActive();
+        }
+      }
+      return true;
+    }
+    _ensurePollingActive();
+    return true;
+  }
+
+  Future<void> _openSameDeviceAuth(
+    NetdiskDriveInfo drive,
+    String qrData,
+  ) async {
+    if (qrData.isEmpty) return;
+    final isTablet = MediaQuery.sizeOf(context).shortestSide >= 600;
+    if (drive.key == 'quark' || drive.key == 'uc') {
+      final deepLinks = NetdiskService.buildNativeAppDeepLinks(
+        drive.key,
+        qrData,
+        isTablet: isTablet,
+      );
+      for (final deepLink in deepLinks) {
+        final deepUri = Uri.tryParse(deepLink);
+        if (deepUri == null) continue;
+        try {
+          final launched = await launchUrl(
+            deepUri,
+            mode: LaunchMode.externalApplication,
+          );
+          if (launched) {
+            if (mounted) {
+              setState(() {
+                _qrStatusText = '已打开${drive.providerName}，确认登录返回后将自动同步状态';
+              });
+            }
+            _ensurePollingActive();
+            return;
+          }
+        } catch (_) {}
+      }
+      if (await _startNativeWebAuth(drive, qrData)) return;
+      final fallbackUri = Uri.tryParse(qrData);
+      if (fallbackUri != null) {
+        try {
+          await launchUrl(fallbackUri, mode: LaunchMode.externalApplication);
+        } catch (_) {}
+      }
+      _ensurePollingActive();
+      return;
+    }
+
+    if (await _startNativeWebAuth(drive, qrData)) return;
+
+    for (final deepLink in NetdiskService.buildNativeAppDeepLinks(
+      drive.key,
+      qrData,
+      isTablet: isTablet,
+    )) {
+      final deepUri = Uri.tryParse(deepLink);
+      if (deepUri == null) continue;
+      try {
+        if (await launchUrl(deepUri, mode: LaunchMode.externalApplication)) {
+          _ensurePollingActive();
+          return;
+        }
+      } catch (_) {}
+    }
+    final webUri = Uri.tryParse(
+      NetdiskService.buildNativeWebAuthUrl(drive.key, qrContent: qrData),
+    );
+    if (webUri != null) {
+      try {
+        await launchUrl(webUri, mode: LaunchMode.externalApplication);
+      } catch (_) {}
+    }
+    _ensurePollingActive();
   }
 
   Future<void> _showManualInputDialog(String driveKey) async {
@@ -614,51 +795,20 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                 onPressed: () => _startQrLogin(drive.key),
               ),
               AppleCapsuleButton(
+                key: ValueKey('netdisk-jump-${drive.key}'),
                 icon: CupertinoIcons.arrow_up_right_square,
                 label: '本机跳转授权',
                 compact: true,
-                onPressed: () async {
-                  if (qrData.isEmpty) return;
-                  _pollTimer?.cancel();
-                  final deepLink = NetdiskService.buildNativeAppDeepLink(
-                    drive.key,
-                    qrData,
-                  );
-                  if (deepLink != null) {
-                    final deepUri = Uri.tryParse(deepLink);
-                    if (deepUri != null) {
-                      try {
-                        final launched = await launchUrl(
-                          deepUri,
-                          mode: LaunchMode.externalApplication,
-                        );
-                        if (launched) return;
-                      } catch (_) {}
-                    }
-                    if (drive.key == 'quark') {
-                      final cloudDeep = deepLink.replaceFirst(
-                        'qklink://www.uc.cn/656bdcddd4758b39206a8181c91a7d14?src_pkg=kuake&',
-                        'qkcloudlink://www.uc.cn/ca7b1fad21e741b3a4aa4284ce58d686?',
-                      );
-                      final cloudUri = Uri.tryParse(cloudDeep);
-                      if (cloudUri != null) {
-                        try {
-                          final launched = await launchUrl(
-                            cloudUri,
-                            mode: LaunchMode.externalApplication,
-                          );
-                          if (launched) return;
-                        } catch (_) {}
-                      }
-                    }
-                  }
-                  final uri = Uri.tryParse(qrData);
-                  if (uri == null) return;
-                  try {
-                    await launchUrl(uri, mode: LaunchMode.externalApplication);
-                  } catch (_) {}
-                },
+                onPressed: () => _openSameDeviceAuth(drive, qrData),
               ),
+              if (drive.key == 'ali')
+                AppleCapsuleButton(
+                  key: const ValueKey('netdisk-ali-scan-app'),
+                  icon: CupertinoIcons.viewfinder,
+                  label: 'App相册扫码',
+                  compact: true,
+                  onPressed: () => _shareQrAndOpenAliApp(qrData, drive),
+                ),
               AppleCapsuleButton(
                 icon: CupertinoIcons.square_arrow_up,
                 label: '保存/分享二维码',

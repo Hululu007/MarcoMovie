@@ -67,6 +67,7 @@ EXPERIMENT_HOSTS = {
 # hosts in arbitrary public files. Synthetic media URLs stay test-scoped above.
 CLOUD_SHARE_HOSTS = {
     'flutter/src/core/ali_share.dart': {'api.aliyundrive.com', 'auth.aliyundrive.com', 'bj29.api.aliyunpds.com'},
+    'flutter/src/core/netdisk_service.dart': {'auth.aliyundrive.com'},
     'flutter/src/core/cloud_share.dart': {'fast.uc.cn'},
 }
 

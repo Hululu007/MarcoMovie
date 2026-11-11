@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:marco_movie/core/netdisk_service.dart';
@@ -14,6 +15,7 @@ import 'package:marco_movie/ui/netdisk_sheet.dart';
 class PendingLogin extends NetdiskService {
   final creations = <Completer<NetdiskQrSession>>[];
   final polls = <Completer<NetdiskPollResult>>[];
+  String Function(String driveKey, String raw)? onVerifyWebAuth;
   @override
   Future<NetdiskQrSession> createQrSession(String driveKey) {
     final result = Completer<NetdiskQrSession>();
@@ -26,6 +28,17 @@ class PendingLogin extends NetdiskService {
     final result = Completer<NetdiskPollResult>();
     polls.add(result);
     return result.future;
+  }
+
+  @override
+  Future<String> verifyWebAuthCredential(
+    String driveKey,
+    String rawCredential,
+  ) async {
+    if (onVerifyWebAuth != null) {
+      return onVerifyWebAuth!(driveKey, rawCredential);
+    }
+    return super.verifyWebAuthCredential(driveKey, rawCredential);
   }
 }
 
@@ -307,5 +320,134 @@ void main() {
     service.polls.single.complete(NetdiskPollResult(
       state: NetdiskPollState.waiting, message: 'Waiting'));
     await tester.pump();
+  });
+
+  test('all 4 netdisk drives expose valid phone/tablet deep links and web auth URLs', () {
+    final quarkPhone = NetdiskService.buildNativeAppDeepLinks(
+      'quark',
+      'https://su.quark.cn/4_eMHBJ?token=qtoken123',
+    );
+    final quarkPad = NetdiskService.buildNativeAppDeepLinks(
+      'quark',
+      'https://su.quark.cn/4_eMHBJ?token=qtoken123',
+      isTablet: true,
+    );
+    expect(quarkPhone.first, startsWith('qklink://www.uc.cn/656bdcddd4758b39206a8181c91a7d14?'));
+    expect(quarkPad.first, startsWith('qklink://www.uc.cn/e7d506280d7f0140e2ee4ba5b030d82d?'));
+    expect(quarkPhone.last, startsWith('qkcloudlink://www.uc.cn/ca7b1fad21e741b3a4aa4284ce58d686?'));
+
+    final ucPhone = NetdiskService.buildNativeAppDeepLinks(
+      'uc',
+      'https://su.uc.cn/1_n0ZCv?token=utoken456',
+    );
+    final ucPad = NetdiskService.buildNativeAppDeepLinks(
+      'uc',
+      'https://su.uc.cn/1_n0ZCv?token=utoken456',
+      isTablet: true,
+    );
+    expect(ucPhone.first, startsWith('uclink://www.uc.cn/f11f7cb5d16fa0969d670c1eccc6053d?'));
+    expect(ucPad.first, startsWith('uclink://www.uc.cn/3898f2889dfc4651a3726ffbc5d1e198?'));
+    expect(ucPhone.last, startsWith('ucliteioslink://www.uc.cn/8c09be3332aa631fcbad0c5834ef68fd?'));
+
+    final baiduLinks = NetdiskService.buildNativeAppDeepLinks(
+      'baidu',
+      'https://wappass.baidu.com/wp/?qrlogin&sign=abc',
+    );
+    expect(baiduLinks.single, startsWith('baiduboxapp://easybrowse?openurl='));
+    expect(
+      NetdiskService.buildNativeWebAuthUrl('baidu'),
+      contains('wappass.baidu.com/passport/?login&tpl=netdisk'),
+    );
+    expect(
+      NetdiskService.buildNativeWebAuthUrl('ali'),
+      contains('auth.aliyundrive.com/v2/oauth/authorize?client_id=25dzX3vbYqktVxyX'),
+    );
+  });
+
+  testWidgets('Baidu and Aliyun same-device jump saves verified credentials and keeps polling on cancel',
+      (tester) async {
+    final calls = <MethodCall>[];
+    Map<String, dynamic>? nextResult;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(netdiskAuthChannel, (call) async {
+      calls.add(call);
+      return nextResult;
+    });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(netdiskAuthChannel, null);
+    });
+
+    // 1. Baidu: first cancel modal (polling must stay alive), then confirm via App jump
+    final baiduService = PendingLogin()
+      ..onVerifyWebAuth = (driveKey, raw) {
+        expect(driveKey, 'baidu');
+        return raw;
+      };
+    var baiduChanges = 0;
+    final storage = await open(
+      tester,
+      baiduService,
+      driveKey: 'baidu',
+      onChanged: () => baiduChanges++,
+    );
+    baiduService.creations.single.complete(challenge('baidu-jump', driveKey: 'baidu'));
+    await tester.pump();
+
+    nextResult = null; // User dismisses modal without authorizing yet
+    await tester.ensureVisible(find.byKey(const ValueKey('netdisk-jump-baidu')));
+    await tester.tap(find.byKey(const ValueKey('netdisk-jump-baidu')));
+    await tester.pump();
+    expect(calls.last.method, 'startWebAuth');
+    expect((calls.last.arguments as Map)['drive'], 'baidu');
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(baiduService.polls, hasLength(1),
+        reason: 'Cancelling same-device modal must re-arm QR polling');
+    baiduService.polls.single.complete(
+      const NetdiskPollResult(state: NetdiskPollState.waiting, message: 'Waiting'),
+    );
+    await tester.pump();
+
+    nextResult = <String, dynamic>{
+      'type': 'credential',
+      'credential': 'BDUSS=jump-bduss; STOKEN=jump-stoken',
+    };
+    await tester.tap(find.byKey(const ValueKey('netdisk-jump-baidu')));
+    await tester.pump();
+    await tester.pump();
+    expect(storage.isNetdiskLoggedIn('baidu'), isTrue);
+    expect(storage.getNetdiskCred('baidu'), 'BDUSS=jump-bduss; STOKEN=jump-stoken');
+    expect(baiduChanges, 1);
+    expect(find.byType(LocalQrCode), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+
+    // 2. Aliyun: GBK bizExt returned from native mobile OAuth modal
+    final aliService = PendingLogin();
+    var aliChanges = 0;
+    final aliStorage = await open(
+      tester,
+      aliService,
+      driveKey: 'ali',
+      onChanged: () => aliChanges++,
+    );
+    aliService.creations.single.complete(challenge('ali-jump', driveKey: 'ali'));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('netdisk-ali-scan-app')), findsOneWidget);
+
+    final gbkBizExt = base64Encode([
+      ...utf8.encode('{"pds_login_result":{"nickName":"'),
+      0xB2, 0x5C, // GBK '餐' with 0x5C trail byte
+      ...utf8.encode('","refreshToken":"ali-mobile-jump-token-123456"}}'),
+    ]);
+    nextResult = <String, dynamic>{'type': 'bizExt', 'bizExt': gbkBizExt};
+    await tester.ensureVisible(find.byKey(const ValueKey('netdisk-jump-ali')));
+    await tester.tap(find.byKey(const ValueKey('netdisk-jump-ali')));
+    await tester.pump();
+    await tester.pump();
+    expect(aliStorage.isNetdiskLoggedIn('ali'), isTrue);
+    expect(aliStorage.getNetdiskCred('ali'), 'ali_token=ali-mobile-jump-token-123456');
+    expect(aliChanges, 1);
+    expect(find.byType(LocalQrCode), findsNothing);
+    await tester.pumpWidget(const SizedBox());
   });
 }
