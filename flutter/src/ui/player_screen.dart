@@ -10,6 +10,7 @@ import '../core/cms_client.dart';
 import '../core/emby_library.dart';
 import '../core/csp_bridge.dart';
 import '../core/cloud_media_proxy.dart';
+import '../core/local_media_proxy.dart';
 import '../core/models.dart';
 import '../core/playback_recovery_policy.dart';
 import '../core/playback_startup.dart';
@@ -144,6 +145,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _playSession = 0;
   Completer<void>? _sourceAbort;
   final _cloudMedia = PlayerCloudMediaSession();
+  final _localMedia = PlayerLocalMediaSession();
   final _startup = PlaybackStartup();
   int _pendingResumeMs = 0;
   int _lastKnownPositionMs = 0;
@@ -736,6 +738,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       await _changeMedia(session, () async {
         await _player.stop();
         await _cloudMedia.releaseUnless(qualityLease);
+        await _localMedia.releaseUnless(null);
       });
     } catch (_) {
       if (session == _playSession) _failPlayback();
@@ -791,14 +794,21 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
 
     CloudMediaLease? pendingLease;
+    LocalMediaLease? pendingLocalLease;
     try {
+      final configuredParses =
+          widget.storage.loadSavedConfig()?.parses ?? const [];
       var resolvedEpisode = quality ?? (_currentEpisode.isLocalFile
           ? _currentEpisode
           : widget.isLive
           ? _client.resolveLiveEpisodeForPlayback(widget.site, _currentEpisode)
           : await _client.runSourceOperation<CmsEpisode>(
               () async {
-                final result = await _client.resolveEpisodeForPlayback(widget.site, _currentEpisode);
+                final result = await _client.resolveEpisodeForPlayback(
+                  widget.site,
+                  _currentEpisode,
+                  parses: configuredParses,
+                );
                 if (!mounted || session != _playSession || sourceAbort.isCompleted) {
                   await _cloudMedia.discard(PlayerCloudMediaSession.of(result));
                   throw StateError('片源加载已取消');
@@ -833,11 +843,50 @@ class _PlayerScreenState extends State<PlayerScreen>
               RegExp(r'[^\x00-\x7F]').hasMatch(rawResolvedUrl)
           ? Uri.encodeFull(rawResolvedUrl)
           : rawResolvedUrl;
+      final baseMedia = widget.mediaForPlayback(
+        resolvedEpisode,
+        start: _pendingResumeMs > 0
+            ? Duration(milliseconds: _pendingResumeMs)
+            : null,
+      );
+      final headers = Map<String, String>.of(baseMedia.httpHeaders ?? const {});
+      if (!headers.keys.any((k) => k.toLowerCase() == 'user-agent')) {
+        headers['User-Agent'] =
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+      }
+      final parsedTargetUri = Uri.tryParse(safePlayUrl);
+      if (pendingLease == null &&
+          parsedTargetUri != null &&
+          LocalMediaLease.shouldProxy(parsedTargetUri)) {
+        pendingLocalLease = await LocalMediaLease.open(
+          target: parsedTargetUri,
+          headers: headers,
+          isCancelled: () => !mounted || session != _playSession,
+        );
+      }
+      if (!mounted || session != _playSession) {
+        report?.stop();
+        await _cloudMedia.discard(pendingLease);
+        await _localMedia.discard(pendingLocalLease);
+        return;
+      }
+      var effectiveAudioUrl = resolvedEpisode.externalAudioUrl;
+      if (pendingLocalLease != null && effectiveAudioUrl.isNotEmpty) {
+        final proxiedAudio =
+            pendingLocalLease.tryRegisterCompanionMedia(effectiveAudioUrl);
+        if (proxiedAudio != null) {
+          effectiveAudioUrl = proxiedAudio.toString();
+        }
+      }
+      final effectiveOpenUrl = pendingLocalLease?.url.toString() ?? safePlayUrl;
+      final effectiveOpenHeaders =
+          pendingLocalLease != null ? const <String, String>{} : headers;
       _activeStreamUrl = safePlayUrl;
-      _activeMediaUri = Media(safePlayUrl).uri;
+      _activeMediaUri = Media(effectiveOpenUrl).uri;
 
       await _changeMedia(session, () async {
         _cloudMedia.adopt(pendingLease);
+        _localMedia.adopt(pendingLocalLease);
         _allowEvents = true;
         final hasFallback = _isLiveStream
             ? (_currentLine.episodes.length > 1 &&
@@ -864,17 +913,6 @@ class _PlayerScreenState extends State<PlayerScreen>
               ? Duration(milliseconds: _pendingResumeMs)
               : Duration.zero,
         );
-        final baseMedia = widget.mediaForPlayback(
-          resolvedEpisode,
-          start: _pendingResumeMs > 0
-              ? Duration(milliseconds: _pendingResumeMs)
-              : null,
-        );
-        final headers = Map<String, String>.of(baseMedia.httpHeaders ?? const {});
-        if (!headers.keys.any((k) => k.toLowerCase() == 'user-agent')) {
-          headers['User-Agent'] =
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-        }
         try {
           final dyn = _player.platform as dynamic;
           await dyn.setProperty('tls-verify', 'yes');
@@ -887,28 +925,31 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (ua.isNotEmpty) {
             await dyn.setProperty('user-agent', ua);
           }
-          final ref = headers.entries
-              .firstWhere(
-                (e) => e.key.toLowerCase() == 'referer',
-                orElse: () => const MapEntry('Referer', ''),
-              )
-              .value;
+          final ref = pendingLocalLease != null
+              ? ''
+              : headers.entries
+                  .firstWhere(
+                    (e) => e.key.toLowerCase() == 'referer',
+                    orElse: () => const MapEntry('Referer', ''),
+                  )
+                  .value;
           await dyn.setProperty('referrer', ref);
         } catch (_) {}
         await _player.open(
           Media(
-            safePlayUrl,
-            httpHeaders: headers,
+            effectiveOpenUrl,
+            httpHeaders: effectiveOpenHeaders,
             start: baseMedia.start,
           ),
           play: true,
         );
-        if (resolvedEpisode.externalAudioUrl.isNotEmpty) {
-          await _player.setAudioTrack(AudioTrack.uri(resolvedEpisode.externalAudioUrl));
+        if (effectiveAudioUrl.isNotEmpty) {
+          await _player.setAudioTrack(AudioTrack.uri(effectiveAudioUrl));
         }
       });
       if (!mounted || session != _playSession || !_allowEvents) {
         await _cloudMedia.discard(pendingLease);
+        await _localMedia.discard(pendingLocalLease);
         return;
       }
       _allowHistory = true;
@@ -917,6 +958,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _scheduleHide();
     } catch (error) {
       await _cloudMedia.discard(pendingLease);
+      await _localMedia.discard(pendingLocalLease);
       if (mounted && session == _playSession) _failPlayback(error);
     }
   }
@@ -1301,6 +1343,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final releaseSource = _releaseSourceSession;
     _releaseSourceSession = null;
     final cloudLease = _cloudMedia.detach();
+    final localLease = _localMedia.detach();
     _mediaChanges.whenComplete(() async {
       try {
         await _player.dispose();
@@ -1308,7 +1351,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         try {
           await cloudLease?.close();
         } finally {
-          releaseSource?.call();
+          try {
+            await localLease?.close();
+          } finally {
+            releaseSource?.call();
+          }
         }
       }
     });

@@ -981,6 +981,16 @@ class StorageService {
     } catch (_) { /* Inline playlists have no JSON container to filter. */ }
     return jsonEncode({
       'spider': parsed.spider,
+      if (parsed.parses.isNotEmpty)
+        'parses': [
+          for (final p in parsed.parses)
+            {
+              'name': p.name,
+              'url': p.url,
+              'type': p.type,
+              if (p.headers.isNotEmpty) 'header': p.headers,
+            },
+        ],
       'sites': [for (final s in parsed.sites.where((s) => !s.isEffectivelyPrivate)) {
         'key': s.key, 'name': s.name, 'api': s.api, 'type': s.type,
         'playUrl': s.playUrl, 'ext': s.rawExtension ?? s.ext, 'header': s.headers, 'group': s.group, 'searchable': s.searchable,

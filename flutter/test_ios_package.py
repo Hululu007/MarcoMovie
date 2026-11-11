@@ -101,10 +101,43 @@ class DeploymentChecks(unittest.TestCase):
             self.assertEqual(swift.count('import WebKit'), 1)
             self.assertEqual(swift.count('marco_movie/wakelock'), 1)
             self.assertEqual(swift.count('marco_movie/netdisk_auth'), 1)
+            self.assertEqual(swift.count('marco_movie/web_sniffer'), 1)
             self.assertEqual(swift.count('final class NetdiskWebAuthController'), 1)
+            self.assertEqual(swift.count('private final class HeadlessMediaWebSniffer'), 1)
             self.assertEqual(swift.count('{'), swift.count('}'))
             plist = plistlib.loads((runner / 'Info.plist').read_bytes())
             self.assertEqual(len([u for u in plist['CFBundleURLTypes'] if 'marcomovie' in u.get('CFBundleURLSchemes', [])]), 1)
+
+    def test_macos_main_window_injects_wakelock_and_web_sniffer_idempotently(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runner = root / 'macos/Runner'
+            runner.mkdir(parents=True)
+            window_swift = runner / 'MainFlutterWindow.swift'
+            window_swift.write_text(
+                'import Cocoa\n'
+                'import FlutterMacOS\n\n'
+                'class MainFlutterWindow: NSWindow {\n'
+                '  override func awakeFromNib() {\n'
+                '    let flutterViewController = FlutterViewController()\n'
+                '    let windowFrame = self.frame\n'
+                '    self.contentViewController = flutterViewController\n'
+                '    self.setFrame(windowFrame, display: true)\n'
+                '    RegisterGeneratedPlugins(registry: flutterViewController)\n'
+                '    super.awakeFromNib()\n'
+                '  }\n'
+                '}\n',
+                encoding='utf-8',
+            )
+            with patch.object(prepare_platform, 'ROOT', root):
+                prepare_platform.main()
+                prepare_platform.main()
+            swift = window_swift.read_text(encoding='utf-8')
+            self.assertEqual(swift.count('import WebKit'), 1)
+            self.assertEqual(swift.count('marco_movie/wakelock'), 1)
+            self.assertEqual(swift.count('marco_movie/web_sniffer'), 1)
+            self.assertEqual(swift.count('private final class HeadlessMediaWebSniffer'), 1)
+            self.assertEqual(swift.count('{'), swift.count('}'))
 
 
 if __name__ == '__main__':

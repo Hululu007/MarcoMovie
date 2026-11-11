@@ -1295,6 +1295,7 @@ class _DetailScreenState extends State<DetailScreen> {
                               video: _video,
                               line: line,
                               episodeIndexes: list,
+                              parses: widget.storage.loadSavedConfig()?.parses ?? const [],
                             );
                             Navigator.of(ctx).pop();
                             _toast(

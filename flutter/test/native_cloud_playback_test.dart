@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:marco_movie/core/cloud_media_proxy.dart';
+import 'package:marco_movie/core/local_media_proxy.dart';
 
 void main() {
   final library = Platform.environment['MARCOMOVIE_TEST_MPV'];
@@ -135,6 +136,90 @@ void main() {
       await player.open(Media(transport.url.toString()));
       await progressed;
       expect(errors, isEmpty);
+    } finally {
+      await player.dispose();
+      await transport.close();
+    }
+  },
+      skip: library == null
+          ? 'Set MARCOMOVIE_TEST_MPV to the built desktop library'
+          : false);
+
+  test(
+      'LocalMediaLease plays cross-domain 302 anti-leech extensionless HLS with dynamic Set-Cookie in native libmpv',
+      () async {
+    MediaKit.ensureInitialized(libmpv: library);
+    final bytes = await File('test/fixtures/cloud-playback.mkv').readAsBytes();
+    var segmentVerifiedCookieAndReferer = false;
+
+    final transport = await LocalMediaLease.open(
+      target: Uri.parse('https://portal.stream.test/entry/play'),
+      headers: {
+        'Referer': 'https://portal.stream.test/watch/1',
+        'Authorization': 'Bearer portal-only-secret',
+      },
+      isCancelled: () => false,
+      client: MockClient((request) async {
+        if (request.url.toString() == 'https://portal.stream.test/entry/play') {
+          expect(request.headers['authorization'], 'Bearer portal-only-secret');
+          return http.Response(
+            '',
+            302,
+            headers: {
+              'location': 'https://cdn-node.stream.test/hls/manifest_stream',
+            },
+          );
+        }
+        if (request.url.toString() ==
+            'https://cdn-node.stream.test/hls/manifest_stream') {
+          expect(request.headers['authorization'], isNull);
+          expect(request.headers['referer'], 'https://portal.stream.test/watch/1');
+          return http.Response(
+            '#EXTM3U\n'
+            '#EXT-X-VERSION:3\n'
+            '#EXT-X-TARGETDURATION:6\n'
+            '#EXTINF:5.0,\n'
+            'segment.mkv\n'
+            '#EXT-X-ENDLIST\n',
+            200,
+            headers: {
+              'content-type': 'text/plain',
+              'set-cookie': 'edge_token=mpv_ok; Path=/hls',
+            },
+          );
+        }
+        if (request.url.toString() ==
+            'https://cdn-node.stream.test/hls/segment.mkv') {
+          expect(request.headers['authorization'], isNull);
+          expect(request.headers['referer'], 'https://portal.stream.test/watch/1');
+          expect(request.headers['cookie'], 'edge_token=mpv_ok');
+          segmentVerifiedCookieAndReferer = true;
+          return http.Response.bytes(bytes, 200, headers: {
+            'content-type': 'video/mp2t',
+          });
+        }
+        return http.Response('missing', 404);
+      }),
+    );
+
+    final player = Player(
+      configuration: const PlayerConfiguration(vo: 'null', muted: true),
+    );
+    try {
+      final dyn = player.platform as dynamic;
+      await dyn.setProperty('ao', 'null');
+      await dyn.setProperty(
+        'demuxer-lavf-o',
+        'seg_max_retry=5,strict=experimental,allowed_extensions=ALL,'
+            'protocol_whitelist=[udp,rtp,tcp,tls,data,file,http,https,crypto],'
+            'reconnect=1,reconnect_delay_max=4',
+      );
+      final progressed = player.stream.position
+          .firstWhere((p) => p.inMilliseconds >= 1000)
+          .timeout(const Duration(seconds: 15));
+      await player.open(Media(transport.url.toString()));
+      await progressed;
+      expect(segmentVerifiedCookieAndReferer, isTrue);
     } finally {
       await player.dispose();
       await transport.close();

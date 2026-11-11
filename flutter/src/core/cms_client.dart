@@ -27,6 +27,7 @@ import 'models.dart';
 import 'quark_drive.dart';
 import 'quark_account.dart';
 import 'storage_service.dart';
+import 'web_media_resolver.dart';
 /// HTTP CMS client with TVBox `okhttp/3.15` User-Agent parity, system certificate validation for third-party
 /// CMS hosts, multi-depot (`urls`/`storeHouse`) resolution, and bounded concurrent search.
 class CmsClient {
@@ -246,6 +247,38 @@ class CmsClient {
         return req;
       }
 
+      final redirectCookies = <String,
+          ({String name, String value, String domain, bool hostOnly, String path})>{};
+      void mergeRedirectCookiesIntoHeaders(Uri target) {
+        final matched = redirectCookies.values
+            .where((c) => WebMediaResolver.redirectCookieMatches(c, target))
+            .toList();
+        if (matched.isEmpty) return;
+        final combined = <String, String>{};
+        String? existingKey;
+        for (final entry in requestHeaders.entries) {
+          if (entry.key.toLowerCase() == 'cookie') {
+            existingKey = entry.key;
+            for (final pair in entry.value.split(';')) {
+              final trimmed = pair.trim();
+              final eq = trimmed.indexOf('=');
+              if (eq > 0) {
+                combined[trimmed.substring(0, eq).trim()] =
+                    trimmed.substring(eq + 1).trim();
+              }
+            }
+          }
+        }
+        for (final c in matched) {
+          combined[c.name] = c.value;
+        }
+        if (existingKey != null && existingKey != 'Cookie') {
+          requestHeaders.remove(existingKey);
+        }
+        requestHeaders['Cookie'] =
+            combined.entries.map((e) => '${e.key}=${e.value}').join('; ');
+      }
+
       late http.StreamedResponse response;
       for (var redirects = 0; ; redirects++) {
         try {
@@ -263,6 +296,10 @@ class CmsClient {
             rethrow;
           }
         }
+        for (final c in WebMediaResolver.parseRedirectSetCookies(
+            response.headers, current)) {
+          redirectCookies['${c.domain}|${c.hostOnly}|${c.path}|${c.name}'] = c;
+        }
         final location = response.headers['location'];
         if (![301, 302, 303, 307, 308].contains(response.statusCode) || location == null) break;
         await response.stream.listen(null).cancel();
@@ -276,12 +313,14 @@ class CmsClient {
             'authorization', 'proxy-authorization', 'cookie', 'cookie2',
           ].contains(name.toLowerCase()));
         }
+        mergeRedirectCookiesIntoHeaders(next);
         current = next;
         if ([301, 302, 303].contains(response.statusCode)) requestForm = null;
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw HttpException('HTTP ${response.statusCode}');
       }
+      mergeRedirectCookiesIntoHeaders(current);
       if ((response.contentLength ?? 0) > byteLimit) {
         throw FormatException('响应体超过大小上限（${byteLimit ~/ (1024 * 1024)} MB）');
       }
@@ -1524,45 +1563,260 @@ class CmsClient {
     ).hasMatch(uri.path);
   }
 
-  Future<Map<String, dynamic>?> _tryResolveJsonParser(
-    CmsSite site,
-    String playPrefix,
-    String targetUrl,
-  ) async {
-    final prefix = playPrefix.trim();
-    final target = targetUrl.trim();
-    if (prefix.isEmpty ||
-        target.isEmpty ||
-        (!prefix.startsWith('http://') && !prefix.startsWith('https://'))) {
-      return null;
+  Future<ResolverHttpDocument> _fetchResolverDocument(
+    String url, {
+    Map<String, String> headers = const {},
+    Duration? timeout,
+  }) async {
+    final normalized = CmsParser.normalizeUrl(url);
+    final uri = Uri.parse(normalized);
+    var usedDirectFallback = LiveCatalogParser.isLoopbackHost(uri.host);
+    var transport = _http ?? _createDefaultClient(directOnly: usedDirectFallback);
+    final abort = Completer<void>();
+    void cancel() {
+      if (!abort.isCompleted) abort.complete();
+      if (_http == null) transport.close();
     }
+    final sessionAbort = Zone.current[_cancelKey] as Completer<void>?;
+    if (sessionAbort?.isCompleted == true) {
+      cancel();
+      throw http.RequestAbortedException(uri);
+    }
+    sessionAbort?.future.then((_) => cancel());
+    final deadline = Timer(timeout ?? const Duration(seconds: 10), cancel);
     try {
-      final parserUrl = '$prefix${Uri.encodeComponent(target)}';
-      final resp = await _getText(
-        parserUrl,
-        headers: SourcePlayback.headersForOrigin(
-            site.headers, _sourceCredentialOrigin(site), Uri.tryParse(parserUrl)),
+      final requestHeaders = _buildHeaders(headers, defaultUa: tvBoxUserAgent);
+      var current = uri.replace(userInfo: '').removeFragment();
+      final redirectCookies = <String,
+          ({String name, String value, String domain, bool hostOnly, String path})>{};
+      void mergeRedirectCookies(Uri target) {
+        final matched = redirectCookies.values
+            .where((c) => WebMediaResolver.redirectCookieMatches(c, target))
+            .toList();
+        if (matched.isEmpty) return;
+        final combined = <String, String>{};
+        String? existingKey;
+        for (final entry in requestHeaders.entries) {
+          if (entry.key.toLowerCase() == 'cookie') {
+            existingKey = entry.key;
+            for (final pair in entry.value.split(';')) {
+              final trimmed = pair.trim();
+              final eq = trimmed.indexOf('=');
+              if (eq > 0) {
+                combined[trimmed.substring(0, eq).trim()] =
+                    trimmed.substring(eq + 1).trim();
+              }
+            }
+          }
+        }
+        for (final c in matched) {
+          combined[c.name] = c.value;
+        }
+        if (existingKey != null && existingKey != 'Cookie') {
+          requestHeaders.remove(existingKey);
+        }
+        requestHeaders['Cookie'] =
+            combined.entries.map((e) => '${e.key}=${e.value}').join('; ');
+      }
+
+      http.AbortableRequest buildRequest() =>
+          http.AbortableRequest('GET', current, abortTrigger: abort.future)
+            ..followRedirects = false
+            ..headers.addAll(requestHeaders);
+
+      late http.StreamedResponse response;
+      for (var redirects = 0;; redirects++) {
+        try {
+          response = await transport.send(buildRequest());
+        } catch (error) {
+          if (_http == null &&
+              !usedDirectFallback &&
+              !abort.isCompleted &&
+              isDeadLocalSystemProxyError(current, error)) {
+            transport.close();
+            usedDirectFallback = true;
+            transport = _createDefaultClient(directOnly: true);
+            response = await transport.send(buildRequest());
+          } else {
+            rethrow;
+          }
+        }
+        for (final c in WebMediaResolver.parseRedirectSetCookies(
+            response.headers, current)) {
+          redirectCookies['${c.domain}|${c.hostOnly}|${c.path}|${c.name}'] = c;
+        }
+        final location = response.headers['location'];
+        if (![301, 302, 303, 307, 308].contains(response.statusCode) ||
+            location == null) {
+          break;
+        }
+        await response.stream.listen(null).cancel();
+        if (redirects >= 5) throw const FormatException('来源跳转次数过多');
+        final next = Uri.parse(
+                CmsParser.normalizeUrl(current.resolve(location).toString()))
+            .removeFragment();
+        if (!['http', 'https'].contains(next.scheme) ||
+            next.host.isEmpty ||
+            next.userInfo.isNotEmpty) {
+          throw const FormatException('来源返回了不支持的跳转地址');
+        }
+        if (current.scheme != next.scheme ||
+            current.host != next.host ||
+            current.port != next.port) {
+          requestHeaders.removeWhere((name, _) => const [
+                'authorization',
+                'proxy-authorization',
+                'cookie',
+                'cookie2',
+              ].contains(name.toLowerCase()));
+        }
+        mergeRedirectCookies(next);
+        current = next;
+      }
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        await response.stream.listen(null).cancel();
+        throw HttpException('HTTP ${response.statusCode}');
+      }
+      mergeRedirectCookies(current);
+
+      const maxResolverDocBytes = 1024 * 1024;
+      final builder = BytesBuilder(copy: false);
+      var checkedPrefix = false;
+      final sub = StreamIterator<List<int>>(response.stream);
+      try {
+        while (await sub.moveNext()) {
+          builder.add(sub.current);
+          if (!checkedPrefix && builder.length >= 16) {
+            checkedPrefix = true;
+            if (WebMediaResolver.looksLikeBinaryMediaResponse(
+                response.headers, builder.toBytes())) {
+              return ResolverHttpDocument(
+                finalUri: current,
+                statusCode: response.statusCode,
+                responseHeaders: response.headers,
+                effectiveRequestHeaders: Map<String, String>.of(requestHeaders),
+                body: '',
+                isDirectMediaResponse: true,
+              );
+            }
+          }
+          if (builder.length > maxResolverDocBytes) {
+            throw const FormatException('网页内容超过解析上限');
+          }
+        }
+      } finally {
+        try {
+          await sub.cancel();
+        } catch (_) {}
+      }
+
+      final allBytes = builder.takeBytes();
+      if (!checkedPrefix &&
+          WebMediaResolver.looksLikeBinaryMediaResponse(
+              response.headers, allBytes)) {
+        return ResolverHttpDocument(
+          finalUri: current,
+          statusCode: response.statusCode,
+          responseHeaders: response.headers,
+          effectiveRequestHeaders: Map<String, String>.of(requestHeaders),
+          body: '',
+          isDirectMediaResponse: true,
+        );
+      }
+      return ResolverHttpDocument(
+        finalUri: current,
+        statusCode: response.statusCode,
+        responseHeaders: response.headers,
+        effectiveRequestHeaders: Map<String, String>.of(requestHeaders),
+        body: CmsParser.decodeTextDocument(allBytes),
       );
-      final trimmed = resp.trim();
-      if (!trimmed.startsWith('{')) return null;
-      final decoded = jsonDecode(trimmed);
-      if (decoded is Map) {
-        final mediaUrl = (decoded['url'] ?? '').toString().trim();
-        final mediaUri = Uri.tryParse(mediaUrl);
-        if (mediaUri != null &&
-            const {'http', 'https', 'rtsp', 'rtmp'}.contains(mediaUri.scheme) &&
-            mediaUri.host.isNotEmpty) {
-          return Map<String, dynamic>.from(decoded)..['parse'] = 0;
+    } finally {
+      deadline.cancel();
+      cancel();
+    }
+  }
+
+  static Map<String, String> _extractPayloadHeaders(dynamic rawHeader) {
+    if (rawHeader is String && rawHeader.trim().startsWith('{')) {
+      try {
+        rawHeader = jsonDecode(rawHeader);
+      } catch (_) {
+        return const {};
+      }
+    }
+    if (rawHeader is Map) {
+      return rawHeader.map((k, v) => MapEntry(k.toString(), v.toString()));
+    }
+    return const {};
+  }
+
+  Future<Map<String, dynamic>?> _resolveSecondaryPlayback(
+    CmsSite site,
+    String targetUrl, {
+    String explicitPlayUrl = '',
+    List<CmsParse> parses = const [],
+    Map<String, String> extraHeaders = const {},
+  }) {
+    return WebMediaResolver.resolve(
+      site: site,
+      targetUrl: targetUrl,
+      explicitPlayUrl: explicitPlayUrl,
+      parses: parses,
+      extraHeaders: extraHeaders,
+      sourceOrigin:
+          GuardSource.supports(site) ? null : _sourceCredentialOrigin(site),
+      fetchDocument: _fetchResolverDocument,
+      isCancelled: _sourceCancelled,
+    );
+  }
+
+  Future<Map<String, dynamic>> _maybeUnwrapSpiderPayload(
+    CmsSite site,
+    Map rawPayload, {
+    List<CmsParse> parses = const [],
+  }) async {
+    final payload = Map<String, dynamic>.from(rawPayload);
+    final rawUrl = (payload['url'] ?? '').toString().trim();
+    if (_isDirectStreamUrl(rawUrl)) {
+      payload['parse'] = 0;
+      payload['jx'] = 0;
+      return payload;
+    }
+    if ('${payload['parse'] ?? 0}' != '0' || '${payload['jx'] ?? 0}' != '0') {
+      final spiderHeaders =
+          _extractPayloadHeaders(payload['header'] ?? payload['headers']);
+      final parsed = await _resolveSecondaryPlayback(
+        site,
+        rawUrl,
+        explicitPlayUrl: (payload['playUrl'] ?? '').toString(),
+        parses: parses,
+        extraHeaders: spiderHeaders,
+      );
+      if (parsed != null) {
+        final parsedHeaders =
+            _extractPayloadHeaders(parsed['header'] ?? parsed['headers']);
+        final mergedHeaders = <String, String>{
+          ...spiderHeaders,
+          ...parsedHeaders,
+        };
+        payload
+          ..addAll(parsed)
+          ..['parse'] = 0
+          ..['jx'] = 0;
+        if (mergedHeaders.isNotEmpty) {
+          payload['header'] = mergedHeaders;
         }
       }
-    } catch (_) {}
-    return null;
+    }
+    return payload;
   }
 
   Future<CmsEpisode> resolveEpisodeForPlayback(
     CmsSite site,
-    CmsEpisode episode,
-  ) async {
+    CmsEpisode episode, {
+    List<CmsParse> parses = const [],
+  }) async {
     if (CloudShareClient.supportsEpisode(episode.url)) {
       final cloud = CloudShareClient(client: _http, credentialReader: _cloudCredential, isCancelled: _sourceCancelled);
       try { return await cloud.resolve(episode); } finally { cloud.close(); }
@@ -1598,7 +1852,9 @@ class CmsClient {
       final parameters = Uri.parse(episode.url).queryParameters;
       final raw = jsonDecode(await _callT4(site,
         {'play': parameters['id'] ?? '', 'flag': parameters['flag'] ?? ''}));
-      return SourcePlayback.decode(raw as Map, episode, localUrl: _scriptHost.resolve,
+      if (raw is! Map) throw const FormatException('T4 没有返回播放结果');
+      final payload = await _maybeUnwrapSpiderPayload(site, raw, parses: parses);
+      return SourcePlayback.decode(payload, episode, localUrl: _scriptHost.resolve,
         sourceHeaders: site.headers, sourceOrigin: _sourceCredentialOrigin(site));
     }
     if (site.isCatPaw && episode.url.startsWith('mmpaw://play?')) {
@@ -1606,7 +1862,8 @@ class CmsClient {
       final raw = jsonDecode(await _getText(_appendQuery(site.api,
         {'play':parameters['id'] ?? '', 'flag':parameters['flag'] ?? ''}).toString()));
       if (raw is! Map) throw const FormatException('CatPaw 没有返回播放结果');
-      return SourcePlayback.decode(raw,episode,localUrl:CatPawHost.instance.resolve,sourceHeaders:site.headers,sourceOrigin:_sourceCredentialOrigin(site));
+      final payload = await _maybeUnwrapSpiderPayload(site, raw, parses: parses);
+      return SourcePlayback.decode(payload,episode,localUrl:CatPawHost.instance.resolve,sourceHeaders:site.headers,sourceOrigin:_sourceCredentialOrigin(site));
     }
     if (site.isEmby && episode.url.startsWith('mmemby://play?')) {
       return (await EmbyLibrary.open(site)).resolve(episode);
@@ -1615,25 +1872,7 @@ class CmsClient {
       final params = Uri.parse(episode.url).queryParameters;
       final raw = jsonDecode(await _callJs(site, 'play', [params['flag'], params['id'], []]));
       if (raw is! Map) throw const FormatException('脚本没有返回播放地址');
-      final payload = Map.of(raw);
-      final url = Uri.tryParse((raw['url'] ?? '').toString());
-      if (url != null && ['http', 'https', 'rtsp', 'rtmp'].contains(url.scheme) &&
-          RegExp(r'\.(mp4|m3u8|mpd|webm|flv|ts|mkv)$', caseSensitive: false).hasMatch(url.path)) {
-        payload['parse'] = 0;
-        payload['jx'] = 0;
-      } else if ('${payload['parse'] ?? 0}' != '0' || '${payload['jx'] ?? 0}' != '0') {
-        final parsed = await _tryResolveJsonParser(
-          site,
-          (payload['playUrl'] ?? site.playUrl).toString(),
-          (payload['url'] ?? '').toString(),
-        );
-        if (parsed != null) {
-          payload
-            ..addAll(parsed)
-            ..['parse'] = 0
-            ..['jx'] = 0;
-        }
-      }
+      final payload = await _maybeUnwrapSpiderPayload(site, raw, parses: parses);
       final resolved = await SourcePlayback.decode(payload, episode,
           localUrl: _scriptHost.resolve,
           // A plugin's import headers are not the adapted media server's
@@ -1643,8 +1882,22 @@ class CmsClient {
       return _localScriptPlaybackHeaders(site, resolved);
     }
     var resolved = await CspBridge.resolveEpisodeForPlayback(site, episode, _getText);
-    if (site.playUrl.isNotEmpty && !_isDirectStreamUrl(resolved.url)) {
-      final parsed = await _tryResolveJsonParser(site, site.playUrl, resolved.url);
+    final resolvedUri = Uri.tryParse(resolved.url);
+    final ownedLocalProxy = resolvedUri != null &&
+        (JsSourceHost.ownsProxyUrl(_scriptSessionKey(site), resolvedUri) ||
+            _pythonHost.ownsProxyUrl(_scriptSessionKey(site), resolvedUri) ||
+            CatPawHost.matches(resolved.url));
+    if (!_isDirectStreamUrl(resolved.url) &&
+        !ownedLocalProxy &&
+        (site.playUrl.isNotEmpty ||
+            parses.isNotEmpty ||
+            WebMediaResolver.looksLikeWebPlayerPageUrl(resolved.url))) {
+      final parsed = await _resolveSecondaryPlayback(
+        site,
+        resolved.url,
+        parses: parses,
+        extraHeaders: resolved.headers,
+      );
       if (parsed != null) {
         resolved = await SourcePlayback.decode(
           parsed,

@@ -272,4 +272,57 @@ void main() {
       await lease.close();
     }
   });
+
+  test('UC and Baidu HLS m3u8 transcode playlists rewrite provider segments and strip Range on manifests',
+      () async {
+    for (final providerCase in [
+      (
+        provider: CloudMediaProvider.uc,
+        playlistUrl: 'https://video.uc.cn/hls/master.m3u8',
+        cookie: '__pus=uc_token',
+      ),
+      (
+        provider: CloudMediaProvider.baidu,
+        playlistUrl: 'https://pan.baidu.com/rest/2.0/xpan/file?method=streaming&type=M3U8_AUTO_1080',
+        cookie: 'BDUSS=baidu_token',
+      ),
+    ]) {
+      final lease = await CloudMediaLease.open(
+        target: Uri.parse(providerCase.playlistUrl),
+        provider: providerCase.provider,
+        headers: {'Cookie': providerCase.cookie},
+        isCancelled: () => false,
+        isCurrent: () async => true,
+        client: MockClient((request) async {
+          expect(request.headers['cookie'], providerCase.cookie);
+          if (request.url.path.endsWith('.ts')) {
+            return http.Response.bytes([0x47, 1, 2, 3], 200,
+                headers: {'content-type': 'video/mp2t'});
+          }
+          expect(request.headers.containsKey('range'), isFalse,
+              reason: 'Range header must be stripped on HLS playlist fetches');
+          return http.Response(
+            '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:5.0,\nseg01.ts\n#EXT-X-ENDLIST\n',
+            200,
+            headers: {'content-type': 'application/vnd.apple.mpegurl'},
+          );
+        }),
+      );
+      try {
+        final manifest = await http.get(
+          lease.url,
+          headers: const {'Range': 'bytes=0-'},
+        );
+        expect(manifest.statusCode, 200);
+        final segUrl = manifest.body
+            .split('\n')
+            .firstWhere((l) => l.startsWith('http://127.0.0.1:'));
+        final seg = await http.get(Uri.parse(segUrl));
+        expect(seg.statusCode, 200);
+        expect(seg.bodyBytes, [0x47, 1, 2, 3]);
+      } finally {
+        await lease.close();
+      }
+    }
+  });
 }

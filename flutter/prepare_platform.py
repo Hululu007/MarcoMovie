@@ -604,6 +604,346 @@ final class NetdiskWebAuthController: UIViewController, WKNavigationDelegate, WK
 }
 '''
 
+IOS_WEB_SNIFFER_CHANNEL_SNIPPET = r'''
+      let snifferChannel = FlutterMethodChannel(name: "marco_movie/web_sniffer", binaryMessenger: controller.binaryMessenger)
+      snifferChannel.setMethodCallHandler { call, result in
+        if call.method == "sniffMedia", let args = call.arguments as? [String: Any] {
+          let urlStr = (args["url"] as? String) ?? ""
+          let rawHeaders = (args["headers"] as? [String: Any]) ?? [:]
+          var headers: [String: String] = [:]
+          for (k, v) in rawHeaders {
+            headers[k] = String(describing: v)
+          }
+          let timeoutMs = (args["timeoutMs"] as? Int) ?? 12000
+          HeadlessMediaWebSniffer.sniff(urlString: urlStr, headers: headers, timeoutMs: timeoutMs, completion: result)
+        } else {
+          result(FlutterMethodNotImplemented)
+        }
+      }'''
+
+MACOS_WEB_SNIFFER_CHANNEL_SNIPPET = r'''
+    let snifferChannel = FlutterMethodChannel(name: "marco_movie/web_sniffer", binaryMessenger: flutterViewController.engine.binaryMessenger)
+    snifferChannel.setMethodCallHandler { call, result in
+      if call.method == "sniffMedia", let args = call.arguments as? [String: Any] {
+        let urlStr = (args["url"] as? String) ?? ""
+        let rawHeaders = (args["headers"] as? [String: Any]) ?? [:]
+        var headers: [String: String] = [:]
+        for (k, v) in rawHeaders {
+          headers[k] = String(describing: v)
+        }
+        let timeoutMs = (args["timeoutMs"] as? Int) ?? 12000
+        HeadlessMediaWebSniffer.sniff(urlString: urlStr, headers: headers, timeoutMs: timeoutMs, completion: result)
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }'''
+
+APPLE_WEB_SNIFFER_SWIFT = r'''
+
+private final class WeakSnifferScriptHandler: NSObject, WKScriptMessageHandler {
+  weak var target: WKScriptMessageHandler?
+  init(_ target: WKScriptMessageHandler) {
+    self.target = target
+  }
+  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    target?.userContentController(userContentController, didReceive: message)
+  }
+}
+
+private final class HeadlessMediaWebSniffer: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+  private static var activeSniffers: Set<HeadlessMediaWebSniffer> = []
+  private static let desktopSafariUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+
+  private static let hookScript = #"""
+  (function() {
+    if (window.__marcoMediaSnifferInstalled) return;
+    window.__marcoMediaSnifferInstalled = true;
+    function looksMedia(raw) {
+      if (!raw || typeof raw !== 'string') return false;
+      var s = raw.trim();
+      if (!s || s.indexOf('blob:') === 0 || s.indexOf('data:') === 0 || s.indexOf('javascript:') === 0) return false;
+      var abs = s;
+      try { abs = new URL(s, location.href).href; } catch (_) { return false; }
+      if (abs.indexOf('http://') !== 0 && abs.indexOf('https://') !== 0 && abs.indexOf('rtmp://') !== 0 && abs.indexOf('rtsp://') !== 0) return false;
+      var lower = abs.toLowerCase();
+      if (/\.(?:js|mjs|css|png|jpe?g|gif|webp|svg|ico|woff2?|ttf|json|xml|vtt|srt|html?|php)(?:$|[?#])/.test(lower)) return false;
+      return /\.(?:m3u8?|mp4|flv|mkv|mpd|webm|m4v|mov)(?:$|[?#])/.test(lower) || /[?&](?:type|format|mime)=[^&#]*(?:m3u8|mp4|flv|mpegurl|video)/.test(lower);
+    }
+    function report(raw) {
+      try {
+        if (!looksMedia(raw)) return;
+        var abs = new URL(raw.trim(), location.href).href;
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.marcoSniffer) {
+          window.webkit.messageHandlers.marcoSniffer.postMessage({
+            url: abs,
+            pageUrl: String(location.href || '')
+          });
+        }
+      } catch (_) {}
+    }
+    try {
+      var origOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function(m, u) {
+        try { report(String(u || '')); } catch (_) {}
+        return origOpen.apply(this, arguments);
+      };
+    } catch (_) {}
+    try {
+      if (window.fetch) {
+        var origFetch = window.fetch;
+        window.fetch = function() {
+          try {
+            var first = arguments[0];
+            report(String(first && first.url ? first.url : first || ''));
+          } catch (_) {}
+          return origFetch.apply(this, arguments);
+        };
+      }
+    } catch (_) {}
+    try {
+      var desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
+      if (desc && desc.set) {
+        Object.defineProperty(HTMLMediaElement.prototype, 'src', {
+          configurable: true,
+          get: desc.get,
+          set: function(v) {
+            try { report(String(v || '')); } catch (_) {}
+            return desc.set.call(this, v);
+          }
+        });
+      }
+    } catch (_) {}
+    function scanDom() {
+      try {
+        var videos = document.querySelectorAll('video, source');
+        for (var i = 0; i < videos.length; i++) {
+          var el = videos[i];
+          if (el.tagName === 'VIDEO') {
+            try { el.muted = true; } catch (_) {}
+            if (el.currentSrc) report(el.currentSrc);
+          }
+          if (el.src) report(el.src);
+          var attr = el.getAttribute && el.getAttribute('src');
+          if (attr) report(attr);
+        }
+      } catch (_) {}
+    }
+    setInterval(scanDom, 350);
+    document.addEventListener('DOMContentLoaded', scanDom, true);
+  })();
+  """#
+
+  private let targetUrl: URL
+  private let headers: [String: String]
+  private let timeoutMs: Int
+  private var effectiveUa: String
+  private var completion: FlutterResult?
+  private var completed = false
+  private var webView: WKWebView?
+  private var dataStore: WKWebsiteDataStore?
+
+  private init(targetUrl: URL, headers: [String: String], timeoutMs: Int, completion: @escaping FlutterResult) {
+    self.targetUrl = targetUrl
+    self.headers = headers
+    self.timeoutMs = timeoutMs
+    self.effectiveUa = Self.desktopSafariUA
+    for (k, v) in headers {
+      if k.lowercased() == "user-agent" && !v.trimmingCharacters(in: .whitespaces).isEmpty && !v.lowercased().hasPrefix("okhttp/") {
+        self.effectiveUa = v
+        break
+      }
+    }
+    self.completion = completion
+    super.init()
+  }
+
+  static func sniff(urlString: String, headers: [String: String], timeoutMs: Int, completion: @escaping FlutterResult) {
+    DispatchQueue.main.async {
+      guard let url = URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)),
+            let scheme = url.scheme?.lowercased(),
+            (scheme == "http" || scheme == "https"),
+            url.host != nil else {
+        completion(nil)
+        return
+      }
+      let instance = HeadlessMediaWebSniffer(targetUrl: url, headers: headers, timeoutMs: timeoutMs, completion: completion)
+      activeSniffers.insert(instance)
+      instance.start()
+    }
+  }
+
+  private static func looksLikePlayableMedia(_ raw: String) -> Bool {
+    let lower = raw.lowercased()
+    if lower.range(of: #"\.(?:js|mjs|css|png|jpe?g|gif|webp|svg|ico|woff2?|ttf|json|xml|vtt|srt|html?|php)(?:$|[?#])"#, options: .regularExpression) != nil {
+      return false
+    }
+    if lower.range(of: #"\.(?:m3u8?|mp4|flv|mkv|mpd|webm|m4v|mov)(?:$|[?#])"#, options: .regularExpression) != nil {
+      return true
+    }
+    return lower.range(of: #"[?&](?:type|format|mime)=[^&#]*(?:m3u8|mp4|flv|mpegurl|video)"#, options: .regularExpression) != nil
+  }
+
+  private func start() {
+    let config = WKWebViewConfiguration()
+    let store = WKWebsiteDataStore.nonPersistent()
+    self.dataStore = store
+    config.websiteDataStore = store
+    #if os(iOS)
+    config.allowsInlineMediaPlayback = true
+    config.mediaTypesRequiringUserActionForPlayback = .all
+    #elseif os(macOS)
+    config.mediaTypesRequiringUserActionForPlayback = .all
+    #endif
+
+    let contentController = WKUserContentController()
+    contentController.add(WeakSnifferScriptHandler(self), name: "marcoSniffer")
+    contentController.addUserScript(
+      WKUserScript(source: Self.hookScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+    )
+    config.userContentController = contentController
+
+    let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: 1280, height: 720), configuration: config)
+    wv.navigationDelegate = self
+    wv.uiDelegate = self
+    wv.customUserAgent = effectiveUa
+    self.webView = wv
+
+    var req = URLRequest(url: targetUrl, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 12.0)
+    for (k, v) in headers {
+      if k.lowercased() == "user-agent" { continue }
+      req.setValue(v, forHTTPHeaderField: k)
+    }
+    wv.load(req)
+
+    let boundedMs = min(max(timeoutMs, 2000), 20000)
+    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(boundedMs)) { [weak self] in
+      self?.finish(with: nil)
+    }
+  }
+
+  func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    guard let url = navigationAction.request.url else {
+      decisionHandler(.cancel)
+      return
+    }
+    let scheme = (url.scheme ?? "").lowercased()
+    if scheme == "rtmp" || scheme == "rtsp" {
+      completeWithMedia(url: url, referer: webView.url?.absoluteString ?? targetUrl.absoluteString)
+      decisionHandler(.cancel)
+      return
+    }
+    guard ["http", "https", "about", "blob", "data"].contains(scheme) else {
+      decisionHandler(.cancel)
+      return
+    }
+    if (scheme == "http" || scheme == "https") && Self.looksLikePlayableMedia(url.absoluteString) {
+      let ref = navigationAction.request.value(forHTTPHeaderField: "Referer") ?? webView.url?.absoluteString ?? targetUrl.absoluteString
+      completeWithMedia(url: url, referer: ref)
+      decisionHandler(.cancel)
+      return
+    }
+    decisionHandler(.allow)
+  }
+
+  func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+    if let url = navigationResponse.response.url,
+       let scheme = url.scheme?.lowercased(),
+       (scheme == "http" || scheme == "https") {
+      let mime = (navigationResponse.response.mimeType ?? "").lowercased()
+      if mime.contains("mpegurl") || mime.hasPrefix("video/") || mime.contains("dash+xml") || Self.looksLikePlayableMedia(url.absoluteString) {
+        completeWithMedia(url: url, referer: webView.url?.absoluteString ?? targetUrl.absoluteString)
+        decisionHandler(.cancel)
+        return
+      }
+    }
+    decisionHandler(.allow)
+  }
+
+  func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+    return nil
+  }
+
+  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    guard message.name == "marcoSniffer", !completed else { return }
+    guard let body = message.body as? [String: Any],
+          let rawUrl = body["url"] as? String,
+          let mediaUrl = URL(string: rawUrl),
+          let scheme = mediaUrl.scheme?.lowercased(),
+          ["http", "https", "rtmp", "rtsp"].contains(scheme),
+          mediaUrl.host != nil,
+          Self.looksLikePlayableMedia(mediaUrl.absoluteString) else {
+      return
+    }
+    let pageUrl = (body["pageUrl"] as? String) ?? ""
+    let referer = (pageUrl.hasPrefix("http://") || pageUrl.hasPrefix("https://"))
+      ? pageUrl
+      : (webView?.url?.absoluteString ?? targetUrl.absoluteString)
+    completeWithMedia(url: mediaUrl, referer: referer)
+  }
+
+  private func completeWithMedia(url: URL, referer: String) {
+    guard !completed else { return }
+    let mediaHost = (url.host ?? "").lowercased()
+    guard let store = dataStore?.httpCookieStore else {
+      finish(with: [
+        "url": url.absoluteString,
+        "headers": ["Referer": referer, "User-Agent": effectiveUa]
+      ])
+      return
+    }
+    store.getAllCookies { [weak self] cookies in
+      guard let self = self, !self.completed else { return }
+      let now = Date()
+      var cookiePairs: [String] = []
+      for c in cookies {
+        if c.value.isEmpty { continue }
+        if let exp = c.expiresDate, exp <= now { continue }
+        let rawDom = c.domain.lowercased()
+        let cleanDom = rawDom.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let matched = rawDom.hasPrefix(".")
+          ? (mediaHost == cleanDom || mediaHost.hasSuffix("." + cleanDom))
+          : (mediaHost == cleanDom)
+        if matched {
+          cookiePairs.append("\(c.name)=\(c.value)")
+        }
+      }
+      var outHeaders: [String: String] = [
+        "Referer": referer,
+        "User-Agent": self.effectiveUa
+      ]
+      if !cookiePairs.isEmpty {
+        outHeaders["Cookie"] = cookiePairs.joined(separator: "; ")
+      }
+      self.finish(with: [
+        "url": url.absoluteString,
+        "headers": outHeaders
+      ])
+    }
+  }
+
+  private func finish(with payload: [String: Any]?) {
+    if !Thread.isMainThread {
+      DispatchQueue.main.async { [weak self] in
+        self?.finish(with: payload)
+      }
+      return
+    }
+    guard !completed else { return }
+    completed = true
+    webView?.configuration.userContentController.removeScriptMessageHandler(forName: "marcoSniffer")
+    webView?.stopLoading()
+    webView?.navigationDelegate = nil
+    webView?.uiDelegate = nil
+    webView = nil
+    dataStore = nil
+    let callback = completion
+    completion = nil
+    Self.activeSniffers.remove(self)
+    callback?(payload)
+  }
+}
+'''
+
 def _png_dimensions(path: Path) -> tuple[int, int]:
     data = path.read_bytes()
     if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n":
@@ -718,6 +1058,8 @@ def main() -> None:
         window_swift = macos_runner / "MainFlutterWindow.swift"
         if window_swift.exists():
             swift_text = window_swift.read_text(encoding="utf-8")
+            if "import WebKit" not in swift_text and "import FlutterMacOS" in swift_text:
+                swift_text = swift_text.replace("import FlutterMacOS", "import FlutterMacOS\nimport WebKit", 1)
             if "playbackActivity" not in swift_text:
                 swift_text = swift_text.replace(
                     "class MainFlutterWindow: NSWindow {",
@@ -747,6 +1089,15 @@ def main() -> None:
                     "    }",
                     1,
                 )
+            if "marco_movie/web_sniffer" not in swift_text and "RegisterGeneratedPlugins(registry: flutterViewController)" in swift_text:
+                swift_text = swift_text.replace(
+                    "RegisterGeneratedPlugins(registry: flutterViewController)",
+                    "RegisterGeneratedPlugins(registry: flutterViewController)"
+                    + MACOS_WEB_SNIFFER_CHANNEL_SNIPPET,
+                    1,
+                )
+            if "private final class HeadlessMediaWebSniffer" not in swift_text:
+                swift_text = swift_text.rstrip() + "\n" + APPLE_WEB_SNIFFER_SWIFT
             if "titlebarAppearsTransparent" not in swift_text:
                 swift_text = swift_text.replace(
                     "super.awakeFromNib()",
@@ -859,6 +1210,17 @@ def main() -> None:
                     1,
                 )
                 ad_text = ad_text.rstrip() + "\n" + IOS_NETDISK_AUTH_CONTROLLER_SWIFT
+                ad_changed = True
+            if "marco_movie/web_sniffer" not in ad_text and "if let controller = window?.rootViewController as? FlutterViewController {" in ad_text:
+                ad_text = ad_text.replace(
+                    "    if let controller = window?.rootViewController as? FlutterViewController {",
+                    "    if let controller = window?.rootViewController as? FlutterViewController {"
+                    + IOS_WEB_SNIFFER_CHANNEL_SNIPPET,
+                    1,
+                )
+                ad_changed = True
+            if "private final class HeadlessMediaWebSniffer" not in ad_text:
+                ad_text = ad_text.rstrip() + "\n" + APPLE_WEB_SNIFFER_SWIFT
                 ad_changed = True
             if ad_changed:
                 ios_app_delegate.write_text(ad_text, encoding="utf-8")

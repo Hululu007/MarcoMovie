@@ -28,6 +28,7 @@ class DownloadTask {
   final String sourceUrl;
   final Map<String, String> headers;
   final CmsSite? sourceSite;
+  final List<CmsParse> sourceParses;
   final int createdAt;
   Uri? _credentialOrigin;
   final Map<String, String> _redirectedUrls = {};
@@ -55,6 +56,7 @@ class DownloadTask {
     required this.headers,
     required this.createdAt,
     this.sourceSite,
+    this.sourceParses = const [],
     this.status = DownloadStatus.queued,
     this.progress = 0,
     this.receivedBytes = 0,
@@ -89,6 +91,12 @@ class DownloadTask {
           'searchable': sourceSite!.searchable, 'group': sourceSite!.group,
           'isPrivate': sourceSite!.isPrivate, 'subscriptionId': sourceSite!.subscriptionId,
         },
+        if (sourceParses.isNotEmpty) 'sourceParses': [
+          for (final p in sourceParses) {
+            'name': p.name, 'url': p.url, 'type': p.type,
+            if (p.headers.isNotEmpty) 'headers': p.headers,
+          },
+        ],
         'createdAt': createdAt,
         'status': status.name,
         'progress': progress,
@@ -122,6 +130,23 @@ class DownloadTask {
       searchable: source['searchable'] != false, group: '${source['group'] ?? '默认分组'}',
       isPrivate: source['isPrivate'] == true, subscriptionId: '${source['subscriptionId'] ?? ''}',
     ) : null;
+    final rawParses = j['sourceParses'];
+    final sourceParses = <CmsParse>[];
+    if (rawParses is List) {
+      for (final item in rawParses) {
+        if (item is! Map) continue;
+        final url = '${item['url'] ?? ''}'.trim();
+        if (url.isEmpty) continue;
+        sourceParses.add(CmsParse(
+          name: '${item['name'] ?? '解析'}'.trim(),
+          url: url,
+          type: asInt(item['type']),
+          headers: item['headers'] is Map
+              ? (item['headers'] as Map).map((k, v) => MapEntry('$k', '$v'))
+              : const {},
+        ));
+      }
+    }
     return DownloadTask(
       id: (j['id'] ?? '').toString(),
       siteKey: (j['siteKey'] ?? '').toString(),
@@ -137,6 +162,7 @@ class DownloadTask {
       sourceUrl: (j['sourceUrl'] ?? '').toString(),
       headers: headers,
       sourceSite: sourceSite,
+      sourceParses: sourceParses,
       createdAt: asInt(j['createdAt']),
       status: status,
       progress: (j['progress'] is num) ? (j['progress'] as num).toDouble() : 0,
@@ -300,6 +326,7 @@ class DownloadService extends ChangeNotifier {
     required CmsVideo video,
     required CmsLine line,
     required List<int> episodeIndexes,
+    List<CmsParse> parses = const [],
   }) {
     var added = 0;
     for (final idx in episodeIndexes) {
@@ -332,6 +359,7 @@ class DownloadService extends ChangeNotifier {
           sourceUrl: ep.url,
           headers: Map.of(ep.headers),
           sourceSite: site,
+          sourceParses: List.unmodifiable(parses),
           createdAt: DateTime.now().millisecondsSinceEpoch + added,
         ),
       );
@@ -508,8 +536,11 @@ class DownloadService extends ChangeNotifier {
       final mediaHeaders = t.sourceSite == null
           ? headersForOrigin(t.headers, Uri.tryParse(t.siteApi), Uri.tryParse(t.sourceUrl))
           : t.headers;
-      final episode = await client.resolveEpisodeForPlayback(site,
-          CmsEpisode(name: t.episodeName, url: t.sourceUrl, headers: mediaHeaders));
+      final episode = await client.resolveEpisodeForPlayback(
+        site,
+        CmsEpisode(name: t.episodeName, url: t.sourceUrl, headers: mediaHeaders),
+        parses: t.sourceParses,
+      );
       final headers = Map<String, String>.of(episode.headers);
       final url = episode.url.trim();
       t._credentialOrigin = Uri.tryParse(url);

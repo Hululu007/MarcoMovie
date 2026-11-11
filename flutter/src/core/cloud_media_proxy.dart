@@ -189,7 +189,10 @@ class CloudMediaLease {
           request.response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
           return;
         }
-        if (!target.path.toLowerCase().endsWith('.m3u8')) {
+        final isPlaylistTarget = target.path.toLowerCase().endsWith('.m3u8') ||
+            (!target.path.toLowerCase().endsWith('.ts') &&
+                target.query.toLowerCase().contains('m3u8'));
+        if (!isPlaylistTarget) {
           upstream.headers['Range'] = range;
         }
       }
@@ -233,9 +236,8 @@ class CloudMediaLease {
         await response.stream.listen((_) {}).cancel();
         return;
       }
-      if (_provider == CloudMediaProvider.quark &&
-          (mime.toLowerCase().contains('mpegurl') ||
-              finalTarget.path.toLowerCase().endsWith('.m3u8'))) {
+      if (mime.toLowerCase().contains('mpegurl') ||
+          finalTarget.path.toLowerCase().endsWith('.m3u8')) {
         final body = <int>[];
         await for (final chunk
             in response.stream.timeout(const Duration(seconds: 30))) {
