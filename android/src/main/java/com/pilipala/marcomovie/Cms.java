@@ -1272,6 +1272,8 @@ public final class Cms {
         if (v.remarks.isEmpty()) v.remarks = xmlTagValue(block, "vod_remarks");
         v.action = "";
         v.tag = xmlTagValue(block, "type");
+        v.genre = xmlTagValue(block, "vod_class");
+        if (v.genre.isEmpty()) v.genre = v.tag;
         v.year = xmlTagValue(block, "year");
         v.area = xmlTagValue(block, "area");
         v.actor = xmlTagValue(block, "actor");

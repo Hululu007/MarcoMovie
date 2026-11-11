@@ -44,6 +44,12 @@ exports.start = async () => {
       res.setHeader('Content-Type','application/octet-stream');res.end(Buffer.from([0,1,255,42]));
     } else if (req.url === '/api/demo?headers') {
       res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.headers));
+    } else if (req.method === 'POST' && req.url === '/spider/demo/3/category') {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      res.setHeader('Content-Type','application/json');
+      res.end(JSON.stringify({received: payload, list: []}));
     } else {res.statusCode=404;res.end();}
   });
   await new Promise(resolve => server.listen(9321,'0.0.0.0',resolve));
@@ -177,6 +183,24 @@ class HostChecks(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as failure:browser.open(foreign)
         self.assertEqual(failure.exception.code,403)
         with browser.open(origin+'/website') as response:self.assertEqual(response.status,200)
+
+    def test_10_spider_category_forwards_json_and_base64_ext_filters(self):
+        import base64
+        import urllib.parse
+
+        plain_ext = urllib.parse.quote(json.dumps({'cateId': 'scifi', 'area': 'US', 'yr': '2026'}))
+        with self.get('/'+self.hash+'/api/spider/demo/3?ac=detail&t=1&pg=2&ext='+plain_ext) as response:
+            received = json.load(response)['received']
+        self.assertEqual(received['id'], '1')
+        self.assertEqual(received['page'], 2)
+        self.assertEqual(received['extend'], {'cateId': 'scifi', 'area': 'US', 'yr': '2026'})
+
+        b64_ext = base64.urlsafe_b64encode(
+            json.dumps({'class': '喜剧', 'area': '大陆', 'year': '2025', '__proto__': 'bad'}).encode('utf-8')
+        ).decode('ascii').rstrip('=')
+        with self.get('/'+self.hash+'/api/spider/demo/3?ac=detail&t=2&pg=1&ext='+b64_ext) as response:
+            received_b64 = json.load(response)['received']
+        self.assertEqual(received_b64['extend'], {'class': '喜剧', 'area': '大陆', 'year': '2025'})
 
 
 if __name__=='__main__': unittest.main()

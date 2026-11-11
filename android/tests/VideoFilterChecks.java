@@ -58,6 +58,51 @@ public final class VideoFilterChecks {
                 VideoFilters.definitions("not json", "movie", videos).size() == 3,
                 "malformed schema retains usable metadata filters");
 
+        String spiderSchema =
+                "{\"filters\":{\"1\":[{\"key\":\"cateId\",\"name\":\"剧情\",\"value\":[{\"n\":\"全部\",\"v\":\"\"},{\"n\":\"科幻\",\"v\":\"scifi-1\"}]},{\"key\":\"area\",\"name\":\"产地\",\"value\":[{\"n\":\"全部\",\"v\":\"\"},{\"n\":\"欧美\",\"v\":\"west\"}]},{\"key\":\"yr\",\"name\":\"年份\",\"value\":[{\"n\":\"全部\",\"v\":\"\"},{\"n\":\"2025\",\"v\":\"2025\"}]}]}}";
+        List<VideoFilters.Definition> spiderDefs =
+                VideoFilters.definitions(spiderSchema, "1", Collections.emptyList());
+        Map<String, String> spiderSelected = new LinkedHashMap<>();
+        spiderSelected.put("class", "scifi-1");
+        spiderSelected.put("area", "west");
+        spiderSelected.put("year", "2025");
+        Map<String, String> spiderWire = VideoFilters.remoteValues(spiderDefs, spiderSelected);
+        check(
+                "scifi-1".equals(spiderWire.get("cateId"))
+                        && "west".equals(spiderWire.get("area"))
+                        && "2025".equals(spiderWire.get("yr")),
+                "spider filter keys (cateId/产地/yr) map cleanly to TV filter rows and wire keys");
+
+        Map<String, String> cmsFallbackWire = VideoFilters.remoteValues(fallback, local, true);
+        check(
+                "剧情".equals(cmsFallbackWire.get("class"))
+                        && "大陆".equals(cmsFallbackWire.get("area"))
+                        && "2026".equals(cmsFallbackWire.get("year"))
+                        && VideoFilters.hasLocal(fallback, local),
+                "HTTP CMS fallback sends normalized query params while retaining local verification");
+
+        List<Cms.Video> xmlVideos =
+                Cms.listing(
+                                "<rss><list page=\"1\" pagecount=\"2\"><video><id>x1</id><name>星际样本</name><type>科幻片</type><area>美国</area><year>2026</year></video><video><id>x2</id><name>古装样本</name><type>电影</type><note>HD / 2025 / 大陆 / 喜剧</note></video></list></rss>")
+                        .videos;
+        List<VideoFilters.Definition> xmlDefs = VideoFilters.definitions("{}", "1", xmlVideos);
+        Map<String, String> xmlSelect = new LinkedHashMap<>();
+        xmlSelect.put("class", "科幻");
+        xmlSelect.put("area", "美国");
+        xmlSelect.put("year", "2026");
+        List<Cms.Video> xmlMatched = VideoFilters.apply(xmlVideos, xmlDefs, xmlSelect);
+        check(
+                xmlMatched.size() == 1 && "x1".equals(xmlMatched.get(0).id),
+                "XML listing populates genre from <type> and filters accurately");
+        Map<String, String> remarksSelect = new LinkedHashMap<>();
+        remarksSelect.put("class", "喜剧");
+        remarksSelect.put("area", "中国大陆");
+        remarksSelect.put("year", "2025");
+        List<Cms.Video> remarksMatched = VideoFilters.apply(xmlVideos, xmlDefs, remarksSelect);
+        check(
+                remarksMatched.size() == 1 && "x2".equals(remarksMatched.get(0).id),
+                "remarks metadata fallback matches when structured area/year/genre are generic");
+
         AtomicReference<String> query = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext(

@@ -26,6 +26,7 @@ final class HomeScreen {
     final List<View> historyCards = new ArrayList<>(), tabs = new ArrayList<>();
     final List<List<View>> rows = new ArrayList<>();
     LinearLayout content;
+    android.widget.HorizontalScrollView categoryScroll;
     CategoryFlow filters;
     InlineFilters inlineFilters;
     HomeAmbient ambient;
@@ -36,7 +37,7 @@ final class HomeScreen {
     /** Tag of the card that should take focus once drawn after "加载更多". */
     String pendingFocus;
 
-    boolean busy, buildingTabs;
+    boolean busy, buildingTabs, applyingFilters, switchedOnFocus;
     Snapshot snapshot;
     State state;
     FrameLayout retainedRoot;
@@ -48,7 +49,7 @@ final class HomeScreen {
     Map<String, Object> retainedAppearance;
 
     static final class Snapshot {
-        final long time = System.currentTimeMillis();
+        long time = System.currentTimeMillis();
         final List<Cms.Video> videos;
         final List<Cms.Category> categories;
         final String skip;
@@ -144,7 +145,20 @@ final class HomeScreen {
         a.body.addView(heading);
         filters = new CategoryFlow(a, this::wireNavigation);
         filters.setPadding(0, a.dp(2), 0, a.dp(8));
-        a.body.addView(filters);
+        if (a.isTvDevice()) {
+            categoryScroll = new android.widget.HorizontalScrollView(a);
+            categoryScroll.setTag("home-category-scroll");
+            categoryScroll.setHorizontalScrollBarEnabled(false);
+            categoryScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+            categoryScroll.setFocusable(false);
+            categoryScroll.setClipToPadding(false);
+            categoryScroll.addView(
+                    filters, new android.widget.HorizontalScrollView.LayoutParams(-2, -2));
+            a.body.addView(categoryScroll, new LinearLayout.LayoutParams(-1, -2));
+        } else {
+            categoryScroll = null;
+            a.body.addView(filters);
+        }
         inlineFilters = new InlineFilters(this);
         a.body.addView(inlineFilters, new LinearLayout.LayoutParams(-1, -2));
         status = a.text("正在整理片单…", 13, MainActivity.MUTED);
@@ -267,13 +281,15 @@ final class HomeScreen {
                         a.ui.post(
                                 () -> {
                                     a.homeData.put(site.key, fresh);
-                                    if (!active() || busy || token != request) return;
+                                    if (!active() || snapshot == null) return;
                                     boolean onDefaultTab =
-                                            state != null
+                                            !busy
+                                                    && token == request
+                                                    && state != null
                                                     && (state.category == null
                                                             || state.category.isEmpty())
                                                     && state.page == 1;
-                                    if (onDefaultTab && snapshot != null) {
+                                    if (onDefaultTab) {
                                         String oldFirst =
                                                 snapshot.videos.isEmpty()
                                                         ? ""
@@ -283,11 +299,17 @@ final class HomeScreen {
                                                         ? ""
                                                         : fresh.videos.get(0).id;
                                         snapshot = fresh;
+                                        state.snapshot = fresh;
                                         if (!Objects.equals(oldFirst, newFirst)
                                                 || state.videos.size() != fresh.videos.size()) {
                                             state.ready = false;
                                             renderSnapshot();
+                                        } else if (inlineFilters != null) {
+                                            inlineFilters.render();
                                         }
+                                    } else {
+                                        snapshot.filterSchema = fresh.filterSchema;
+                                        if (inlineFilters != null) inlineFilters.render();
                                     }
                                 });
                     } catch (Throwable ignored) {
@@ -486,6 +508,7 @@ final class HomeScreen {
                 vj.put("remarks", v.remarks == null ? "" : v.remarks);
                 vj.put("year", v.year == null ? "" : v.year);
                 vj.put("area", v.area == null ? "" : v.area);
+                vj.put("genre", v.genre == null ? "" : v.genre);
                 vj.put("actor", v.actor == null ? "" : v.actor);
                 vj.put("director", v.director == null ? "" : v.director);
                 vj.put("description", v.description == null ? "" : v.description);
@@ -539,6 +562,7 @@ final class HomeScreen {
                         v.remarks = vj.optString("remarks", "");
                         v.year = vj.optString("year", "");
                         v.area = vj.optString("area", "");
+                        v.genre = vj.optString("genre", vj.optString("tag", ""));
                         v.actor = vj.optString("actor", "");
                         v.director = vj.optString("director", "");
                         v.description = vj.optString("description", "");
@@ -552,6 +576,7 @@ final class HomeScreen {
             }
             if (videos.isEmpty()) return null;
             Snapshot snap = new Snapshot(videos, categories, skip, pages);
+            snap.time = file.lastModified();
             snap.filterSchema = root.optString("filterSchema", "{}");
             return snap;
         } catch (Throwable ignored) {
@@ -730,19 +755,22 @@ final class HomeScreen {
         tabs.clear();
         tabIds.clear();
         boolean configSite = SourceController.isConfigOrNetdiskSite(site);
+        boolean tv = a.isTvDevice();
         int tabIdx = 0;
         if (!configSite || snapshot.skip.isEmpty()) {
             addTab("推荐", "", tabIdx++);
         }
         int visible =
-                configSite
-                        ? Math.min(16, snapshot.categories.size())
-                        : Math.min(4, snapshot.categories.size());
+                tv
+                        ? Math.min(128, snapshot.categories.size())
+                        : configSite
+                                ? Math.min(16, snapshot.categories.size())
+                                : Math.min(4, snapshot.categories.size());
         for (int i = 0; i < visible; i++) {
             Cms.Category c = snapshot.categories.get(i);
             addTab(c.name, c.id, tabIdx++);
         }
-        if (snapshot.categories.size() > visible) {
+        if (!tv && snapshot.categories.size() > visible) {
             TextView extra =
                     pill(
                             "更多分类  ⌄",
@@ -769,7 +797,7 @@ final class HomeScreen {
             extra.setOnFocusChangeListener((v, f) -> updateTabs());
             addTabView(extra);
         }
-        if (!configSite) {
+        if (!tv && !configSite) {
             addTabView(pill("筛选", "home-filters", this::showFilters));
         }
         updateTabs();
@@ -860,42 +888,89 @@ final class HomeScreen {
         }
         // A new filter starts at page one; detail/back keeps this exact state.
         View currentFocus = a.getCurrentFocus();
+        String currentTag = currentFocus == null ? "" : String.valueOf(currentFocus.getTag());
+        boolean fromReset = "home-filter-reset".equals(currentTag);
         String focusTag =
-                currentFocus != null
-                                && String.valueOf(currentFocus.getTag()).startsWith("home-filter:")
-                        ? String.valueOf(currentFocus.getTag())
-                        : "home-filters";
-        state.category = category;
-        state.ready = false;
-        busy = false;
-        if (a.current != null) a.current.focus = focusTag;
-        choose(category, false);
-        View filter = a.root.findViewWithTag(focusTag);
-        if (filter != null) {
-            filter.requestFocus();
+                currentTag.startsWith("home-filter:")
+                        ? currentTag
+                        : a.isTvDevice()
+                                ? (fromReset
+                                        ? "home-video:0"
+                                        : String.valueOf(selectedTab().getTag()))
+                                : "home-filters";
+        applyingFilters = true;
+        try {
+            if (fromReset && a.isTvDevice()) {
+                selectedTab().requestFocus();
+            }
+            state.category = category;
+            state.ready = false;
+            busy = false;
+            if (a.current != null) a.current.focus = focusTag;
+            choose(category, false);
+            if (fromReset && a.isTvDevice()) {
+                View firstCard = a.root.findViewWithTag("home-video:0");
+                if (firstCard != null) firstCard.requestFocus();
+                else pendingFocus = "home-video:0";
+            } else {
+                View filter = a.root.findViewWithTag(focusTag);
+                if (filter != null) {
+                    filter.requestFocus();
+                }
+            }
+        } finally {
+            applyingFilters = false;
         }
     }
 
     void addTab(String label, String id, int index) {
-        TextView button = pill(label, "home-tab:" + index, () -> choose(id, true));
+        TextView button =
+                pill(
+                        label,
+                        "home-tab:" + index,
+                        () -> {
+                            if (a.isTvDevice()
+                                    && !switchedOnFocus
+                                    && id.equals(state.category)
+                                    && !id.isEmpty()
+                                    && !SourceController.isConfigOrNetdiskSite(site)
+                                    && (state.ready || busy)) {
+                                state.filtersExpanded = !state.filtersExpanded;
+                                inlineFilters.render();
+                                updateTabs();
+                                wireNavigation();
+                                return;
+                            }
+                            choose(id, true);
+                        });
         tabIds.put(button, id);
         button.setOnFocusChangeListener(
                 (v, f) -> {
                     styleTab(button);
-                    if (f
-                            && !buildingTabs
-                            && a.isTvDevice()
-                            && active()
-                            && !id.equals(state.category)) {
+                    if (!f || buildingTabs || applyingFilters || !a.isTvDevice() || !active())
+                        return;
+                    scrollCategoryIntoView(button);
+                    if (!id.equals(state.category)) {
+                        switchedOnFocus = true;
+                        v.post(() -> switchedOnFocus = false);
                         choose(id, true);
+                    } else if (!id.isEmpty()
+                            && !SourceController.isConfigOrNetdiskSite(site)
+                            && !state.filtersExpanded
+                            && state.selectedFilters.isEmpty()) {
+                        state.filtersExpanded = true;
+                        inlineFilters.render();
+                        updateTabs();
+                        wireNavigation();
                     }
                 });
         addTabView(button);
     }
 
     void addTabView(TextView button) {
-        button.setSingleLine(false);
-        button.setMaxLines(Integer.MAX_VALUE);
+        boolean tv = a.isTvDevice();
+        button.setSingleLine(tv);
+        button.setMaxLines(tv ? 1 : Integer.MAX_VALUE);
         button.setEllipsize(null);
         button.setMinHeight(a.dp(Math.round(34 * navScale)));
         int padH = a.dp(Math.round(15 * navScale));
@@ -925,7 +1000,45 @@ final class HomeScreen {
                 1f);
         b.setBackground(null);
         b.setTextColor(selected ? Color.WHITE : 0xffc8d0df);
-        if (selected) filters.selection.select(b);
+        if (selected) {
+            filters.selection.select(b);
+            scrollCategoryIntoView(b);
+        }
+    }
+
+    void scrollCategoryIntoView(View tab) {
+        if (categoryScroll == null || tab == null) return;
+        categoryScroll.post(
+                () -> {
+                    if (categoryScroll == null || !tab.isAttachedToWindow()) return;
+                    int vw = categoryScroll.getWidth();
+                    if (vw <= 0) return;
+                    int maxScroll = Math.max(0, filters.getWidth() - vw);
+                    int desired =
+                            tab.getWidth() >= vw
+                                    ? tab.getLeft()
+                                    : tab.getLeft() - (vw - tab.getWidth()) / 2;
+                    int targetX = Math.max(0, Math.min(maxScroll, desired));
+                    if (a.reduced) categoryScroll.scrollTo(targetX, 0);
+                    else categoryScroll.smoothScrollTo(targetX, 0);
+                });
+    }
+
+    void collapseFiltersForBrowsing() {
+        if (!a.isTvDevice() || state == null || !state.filtersExpanded) return;
+        state.filtersExpanded = false;
+        if (inlineFilters != null) inlineFilters.render();
+        updateTabs();
+        wireNavigation();
+        a.body.post(
+                () -> {
+                    if (!active()) return;
+                    wireNavigation();
+                    View focused = a.getCurrentFocus();
+                    if (focused != null && a.scroll instanceof TvScrollView) {
+                        ((TvScrollView) a.scroll).reveal(focused);
+                    }
+                });
     }
 
     void updateTabs() {
@@ -984,8 +1097,16 @@ final class HomeScreen {
         a.cancelPageRequests();
         request++;
         busy = false;
-        if (!state.category.equals(category)) state.selectedFilters.clear();
+        boolean categoryChanged = !state.category.equals(category);
+        if (categoryChanged) state.selectedFilters.clear();
         state.category = category;
+        if (a.isTvDevice()) {
+            if (category.isEmpty() || SourceController.isConfigOrNetdiskSite(site)) {
+                state.filtersExpanded = false;
+            } else if (categoryChanged || user) {
+                state.filtersExpanded = true;
+            }
+        }
         state.ready = false;
         state.videos.clear();
         state.windowStart = 0;
@@ -1003,8 +1124,9 @@ final class HomeScreen {
                 a.current.scroll = 0;
             }
             selectedTab().requestFocus();
-            filters.requestRectangleOnScreen(
-                    new Rect(0, -a.dp(8), filters.getWidth(), filters.getHeight()), false);
+            View bar = categoryScroll != null ? categoryScroll : filters;
+            bar.requestRectangleOnScreen(
+                    new Rect(0, -a.dp(8), bar.getWidth(), bar.getHeight()), false);
         }
         if (category.isEmpty() && snapshot.recommendationsPending) {
             loadHome();
@@ -1035,7 +1157,8 @@ final class HomeScreen {
         int page = first ? 1 : state.page + 1;
         List<VideoFilters.Definition> definitions = filterDefinitions();
         Map<String, String> selections = new LinkedHashMap<>(state.selectedFilters);
-        Map<String, String> remoteFilters = VideoFilters.remoteValues(definitions, selections);
+        Map<String, String> remoteFilters =
+                VideoFilters.remoteValues(definitions, selections, site.supported());
         status.setVisibility(first ? View.VISIBLE : View.GONE);
         status.setText("正在读取分类…");
         more.setText("正在加载…");
@@ -1060,7 +1183,35 @@ final class HomeScreen {
                         clean(list.videos);
                         int received = list.videos.size();
                         List<Cms.Video> matching =
-                                VideoFilters.apply(list.videos, definitions, selections);
+                                new ArrayList<>(
+                                        VideoFilters.apply(list.videos, definitions, selections));
+                        int resolvedPage = page;
+                        int resolvedPageCount =
+                                received == 0 ? page : Math.max(page, list.pageCount);
+                        boolean localOnly = VideoFilters.hasLocal(definitions, selections);
+                        int scanned = 1;
+                        while (localOnly
+                                && matching.size() < COLUMNS
+                                && received > 0
+                                && resolvedPage < resolvedPageCount
+                                && scanned < 3) {
+                            int nextPage = resolvedPage + 1;
+                            String extraRaw = engine.category(category, nextPage, remoteFilters);
+                            RequestScope.checkCurrent();
+                            Cms.Listing extra = Cms.listing(extraRaw);
+                            clean(extra.videos);
+                            if (extra.videos.isEmpty()) {
+                                resolvedPageCount = resolvedPage;
+                                break;
+                            }
+                            resolvedPage = nextPage;
+                            resolvedPageCount = Math.max(resolvedPage, extra.pageCount);
+                            matching.addAll(
+                                    VideoFilters.apply(extra.videos, definitions, selections));
+                            scanned++;
+                        }
+                        final int finalPage = resolvedPage;
+                        final int finalPageCount = resolvedPageCount;
                         timing.parsed = android.os.SystemClock.elapsedRealtime();
                         a.ui.post(
                                 () -> {
@@ -1083,9 +1234,8 @@ final class HomeScreen {
                                                 (previous / windowSize()) * windowSize();
                                     }
                                     boolean changedWindow = oldWindow != state.windowStart;
-                                    state.page = page;
-                                    state.pages =
-                                            received == 0 ? page : Math.max(page, list.pageCount);
+                                    state.page = finalPage;
+                                    state.pages = finalPageCount;
                                     state.ready = true;
                                     if (first && selections.isEmpty() && !state.videos.isEmpty()) {
                                         Cms.Listing cached = new Cms.Listing();
@@ -1316,6 +1466,7 @@ final class HomeScreen {
                     title.setTextColor(f ? Color.WHITE : 0xffc8c8d0);
                     if (f && ambient != null) ambient.follow(art);
                     if (f) {
+                        collapseFiltersForBrowsing();
                         v.requestRectangleOnScreen(
                                 new Rect(0, -a.dp(8), v.getWidth(), v.getHeight() + a.dp(10)),
                                 false);
@@ -1436,7 +1587,9 @@ final class HomeScreen {
                         : rows.isEmpty()
                                 ? (more.isShown() ? more.getId() : -1)
                                 : rows.get(0).get(0).getId();
-        boolean inline = inlineFilters != null && inlineFilters.expanded();
+        boolean inlineExpanded = inlineFilters != null && inlineFilters.expanded();
+        boolean inlineSummary = inlineFilters != null && inlineFilters.summaryShown();
+        View firstFilterChip = inlineExpanded ? inlineFilters.entryChip(0) : null;
         for (int r = 0; r < filters.lines.size(); r++) {
             List<View> line = filters.lines.get(r);
             horizontal(line);
@@ -1458,9 +1611,11 @@ final class HomeScreen {
                                 ? source.getId()
                                 : filters.nearest(filters.lines.get(r - 1), tab).getId());
                 int downId =
-                        inline
-                                ? inlineFilters.nearest(inlineFilters.rows.get(0), tab).getId()
-                                : contentDownId != -1 ? contentDownId : tab.getId();
+                        firstFilterChip != null
+                                ? firstFilterChip.getId()
+                                : inlineSummary
+                                        ? inlineFilters.expandButton.getId()
+                                        : contentDownId != -1 ? contentDownId : tab.getId();
                 if (r + 1 < filters.lines.size()) {
                     View below = filters.nearest(filters.lines.get(r + 1), tab);
                     boolean overlaps =
@@ -1476,7 +1631,7 @@ final class HomeScreen {
             if (a.homeDock != null && !line.isEmpty() && r + 1 == filters.lines.size())
                 a.homeDock.rightEdge(line.get(line.size() - 1));
         }
-        if (inline) {
+        if (inlineExpanded) {
             for (int r = 0; r < inlineFilters.rows.size(); r++) {
                 List<View> line = inlineFilters.rows.get(r);
                 horizontal(line);
@@ -1497,8 +1652,23 @@ final class HomeScreen {
                                             ? inlineFilters.nearest(rows.get(0), option).getId()
                                             : contentDownId == -1 ? option.getId() : contentDownId);
                 }
+                if (a.homeDock != null && !line.isEmpty())
+                    a.homeDock.rightEdge(line.get(line.size() - 1));
             }
+        } else if (inlineSummary) {
+            List<View> actions =
+                    Arrays.asList(inlineFilters.expandButton, inlineFilters.resetButton);
+            horizontal(actions);
+            int summaryUpId = selectedTab().getId();
+            inlineFilters.expandButton.setNextFocusUpId(summaryUpId);
+            inlineFilters.expandButton.setNextFocusDownId(
+                    contentDownId != -1 ? contentDownId : inlineFilters.expandButton.getId());
+            inlineFilters.resetButton.setNextFocusUpId(summaryUpId);
+            inlineFilters.resetButton.setNextFocusDownId(
+                    contentDownId != -1 ? contentDownId : inlineFilters.resetButton.getId());
+            if (a.homeDock != null) a.homeDock.rightEdge(inlineFilters.resetButton);
         }
+        int lastInlineRow = inlineExpanded ? inlineFilters.rows.size() - 1 : -1;
         for (int r = Math.max(0, firstRow); r < rows.size(); r++) {
             List<View> row = rows.get(r);
             horizontal(row);
@@ -1508,11 +1678,16 @@ final class HomeScreen {
                         r == 0
                                 ? (earlier.isShown()
                                         ? earlier.getId()
-                                        : inline
+                                        : inlineExpanded
                                                 ? inlineFilters
-                                                        .nearest(inlineFilters.rows.get(2), card)
+                                                        .nearest(
+                                                                inlineFilters.rows.get(
+                                                                        lastInlineRow),
+                                                                card)
                                                         .getId()
-                                                : selectedTab().getId())
+                                                : inlineSummary
+                                                        ? inlineFilters.expandButton.getId()
+                                                        : selectedTab().getId())
                                 : rows.get(r - 1)
                                         .get(Math.min(c, rows.get(r - 1).size() - 1))
                                         .getId());
@@ -1524,13 +1699,16 @@ final class HomeScreen {
                                 : more.isShown() ? more.getId() : card.getId());
             }
         }
-        earlier.setNextFocusUpId(
-                inline ? inlineFilters.rows.get(2).get(0).getId() : selectedTab().getId());
+        int aboveGridId =
+                inlineExpanded
+                        ? inlineFilters.rows.get(lastInlineRow).get(0).getId()
+                        : inlineSummary
+                                ? inlineFilters.expandButton.getId()
+                                : selectedTab().getId();
+        earlier.setNextFocusUpId(aboveGridId);
         earlier.setNextFocusDownId(rows.isEmpty() ? more.getId() : rows.get(0).get(0).getId());
         more.setNextFocusUpId(
-                rows.isEmpty()
-                        ? inline ? inlineFilters.rows.get(2).get(0).getId() : selectedTab().getId()
-                        : rows.get(rows.size() - 1).get(0).getId());
+                rows.isEmpty() ? aboveGridId : rows.get(rows.size() - 1).get(0).getId());
         if (a.homeDock != null) {
             a.homeDock.rightEdge(source);
             a.homeDock.rightEdge(allHistory);

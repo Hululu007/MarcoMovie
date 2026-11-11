@@ -474,7 +474,15 @@ public final class HomeProbe extends Instrumentation {
                             () ->
                                     a.current.homeState.category.equals("c1")
                                             && tag("source-switcher").hasFocus()));
-            runOnMainSync(() -> tag("home-filters").requestFocus());
+            check(
+                    "concrete_category_auto_shows_inline_filters_without_rail_buttons",
+                    ui(
+                            () ->
+                                    tag("home-filters") == null
+                                            && tag("home-category-more") == null
+                                            && tag("home-tab:7") != null
+                                            && tag("home-inline-filters").isShown()));
+            runOnMainSync(() -> tag("home-filter:class:0").requestFocus());
             SystemClock.sleep(250);
             check(
                     "filter_focus_does_not_open_or_switch",
@@ -484,6 +492,7 @@ public final class HomeProbe extends Instrumentation {
                     () ->
                             a.current.homeState.ready
                                     && a.current.homeState.category.isEmpty()
+                                    && !tag("home-inline-filters").isShown()
                                     && tag("home-video:11") != null);
             check(
                     "history_has_four_cards_in_one_list",
@@ -661,26 +670,31 @@ public final class HomeProbe extends Instrumentation {
                                                     .toString()
                                                     .equals("豆瓣电影Top250")));
             check(
-                    "category_oversized_title_wraps",
+                    "all_categories_shown_in_single_scrollable_row",
                     ui(
                             () ->
-                                    fullLabel((TextView) tag("home-tab:4"))
-                                            && ((TextView) tag("home-tab:4")).getLineCount() > 1));
-            check(
-                    "category_flow_uses_multiple_rows",
-                    ui(() -> tag("home-tab:4").getTop() > tag("home-tab:0").getTop()));
+                                    tag("home-category-scroll") != null
+                                            && tag("home-category-more") == null
+                                            && tag("home-tab:7") != null
+                                            && fullLabel((TextView) tag("home-tab:4"))
+                                            && fullLabel((TextView) tag("home-tab:7"))
+                                            && ((TextView) tag("home-tab:4")).getLineCount() == 1
+                                            && tag("home-tab:4").getTop()
+                                                    == tag("home-tab:0").getTop()
+                                            && tag("home-tab:7").getTop()
+                                                    == tag("home-tab:0").getTop()));
             runOnMainSync(() -> tag("home-tab:4").requestFocus());
-            pacedUp();
-            check(
-                    "wrapped_category_up_stays_in_categories",
-                    ui(() -> String.valueOf(a.getCurrentFocus().getTag()).startsWith("home-tab:")));
             await(
                     () ->
                             a.current.homeState.category.equals(
                                     a.current.retainedHome.tabIds.get(a.getCurrentFocus())));
             check(
-                    "wrapped_category_up_selects_focused_category",
+                    "single_row_category_focus_selects_category",
                     ui(() -> a.getCurrentFocus().isSelected()));
+            pacedUp();
+            check(
+                    "single_row_category_up_reaches_source",
+                    ui(() -> tag("source-switcher").hasFocus()));
             runOnMainSync(() -> tag("home-tab:0").requestFocus());
             await(
                     () ->
@@ -854,10 +868,11 @@ public final class HomeProbe extends Instrumentation {
             check(
                     "detail_return_sends_no_catalogue_requests",
                     homeRequests.get() == homeCount && categoryRequests.get() == categoryCount);
-            click("home-filters");
+            runOnMainSync(() -> tag("home-tab:2").requestFocus());
             await(
                     () ->
                             tag("home-inline-filters").isShown()
+                                    && tag("home-filter:class:0") != null
                                     && tag("home-filter:class:0").getWidth() > 0);
             check(
                     "filters_expand_as_three_inline_rows",
@@ -867,10 +882,10 @@ public final class HomeProbe extends Instrumentation {
                                             && a.current.retainedHome.inlineFilters.getChildCount()
                                                     == 3
                                             && tag("home-inline-filters").getTop()
-                                                    >= a.current.retainedHome.filters.getBottom()));
+                                                    >= tag("home-category-scroll").getBottom()));
             key(KeyEvent.KEYCODE_DPAD_DOWN);
             check(
-                    "filter_button_down_enters_first_row",
+                    "category_down_enters_first_filter_row",
                     ui(
                             () ->
                                     String.valueOf(a.getCurrentFocus().getTag())
@@ -885,20 +900,6 @@ public final class HomeProbe extends Instrumentation {
             key(KeyEvent.KEYCODE_DPAD_DOWN);
             check(
                     "inline_filter_down_enters_year_row",
-                    ui(
-                            () ->
-                                    String.valueOf(a.getCurrentFocus().getTag())
-                                            .startsWith("home-filter:year:")));
-            key(KeyEvent.KEYCODE_DPAD_DOWN);
-            check(
-                    "last_filter_row_down_enters_posters",
-                    ui(
-                            () ->
-                                    String.valueOf(a.getCurrentFocus().getTag())
-                                            .startsWith("home-video:")));
-            key(KeyEvent.KEYCODE_DPAD_UP);
-            check(
-                    "poster_up_returns_to_last_filter_row",
                     ui(
                             () ->
                                     String.valueOf(a.getCurrentFocus().getTag())
@@ -920,6 +921,24 @@ public final class HomeProbe extends Instrumentation {
             check(
                     "all_three_tv_filters_reach_engine",
                     receivedFilters.size() == 3 && receivedFilters.get("year").equals("2026"));
+            key(KeyEvent.KEYCODE_DPAD_DOWN);
+            check(
+                    "last_filter_row_down_enters_posters_and_folds_summary",
+                    ui(
+                            () ->
+                                    String.valueOf(a.getCurrentFocus().getTag())
+                                                    .startsWith("home-video:")
+                                            && tag("home-filter-summary") != null
+                                            && tag("home-filter-expand") != null
+                                            && tag("home-filter-reset") != null
+                                            && ((TextView) tag("home-filter-summary-text"))
+                                                    .getText()
+                                                    .toString()
+                                                    .startsWith("已选：")));
+            key(KeyEvent.KEYCODE_DPAD_UP);
+            check(
+                    "poster_up_targets_filter_summary_expand",
+                    ui(() -> tag("home-filter-expand").hasFocus()));
             View filteredHome = a.root;
             int filteredCount = categoryRequests.get();
             click("home-video:2");
@@ -935,24 +954,30 @@ public final class HomeProbe extends Instrumentation {
                                             && tag("home-video:2").hasFocus()));
             check("filtered_return_does_not_reload", categoryRequests.get() == filteredCount);
             check(
-                    "inline_filters_stay_expanded_on_detail_return",
-                    ui(() -> tag("home-inline-filters").isShown()));
-            click("home-filters");
-            check(
-                    "filter_button_collapses_without_clearing_selection",
-                    ui(
-                            () ->
-                                    !tag("home-inline-filters").isShown()
-                                            && a.current.homeState.selectedFilters.size() == 3
-                                            && tag("home-filters").hasFocus()));
-            click("home-filters");
-            check(
-                    "filter_button_reopens_existing_selection",
+                    "filter_summary_stays_visible_on_detail_return",
                     ui(
                             () ->
                                     tag("home-inline-filters").isShown()
+                                            && tag("home-filter-summary") != null));
+            click("home-filter-expand");
+            check(
+                    "summary_expand_reopens_existing_selection",
+                    ui(
+                            () ->
+                                    tag("home-inline-filters").isShown()
+                                            && tag("home-filter:year:1") != null
                                             && tag("home-filter:year:1").isSelected()));
-            click("home-filters");
+            runOnMainSync(() -> tag("home-video:0").requestFocus());
+            await(() -> tag("home-filter-reset") != null);
+            click("home-filter-reset");
+            await(
+                    () ->
+                            a.current.homeState.ready
+                                    && a.current.homeState.selectedFilters.isEmpty()
+                                    && tag("home-video:0") != null);
+            check(
+                    "summary_reset_clears_filters_and_hides_bar",
+                    ui(() -> !tag("home-inline-filters").isShown()));
 
             runOnMainSync(
                     () -> {
@@ -974,36 +999,18 @@ public final class HomeProbe extends Instrumentation {
             check(
                     "retry_recovers",
                     ui(() -> a.current.homeState.videos.get(0).id.startsWith("c3")));
-            click("home-category-more");
-            check(
-                    "overflow_custom_dialog",
-                    ui(
-                            () ->
-                                    a.appDialog != null
-                                            && a.appDialog
-                                                            .findViewById(android.R.id.content)
-                                                            .findViewWithTag("app-dialog")
-                                                    != null));
-            check(
-                    "category_dialog_long_title_complete",
-                    ui(
-                            () ->
-                                    fullLabel(
-                                            (TextView)
-                                                    a.appDialog
-                                                            .findViewById(android.R.id.content)
-                                                            .findViewWithTag("dialog-option:6"))));
-            runOnMainSync(
-                    () ->
-                            a.appDialog
-                                    .findViewById(android.R.id.content)
-                                    .findViewWithTag("dialog-option:6")
-                                    .performClick());
+            click("home-tab:7");
             await(() -> a.current.homeState.ready && a.current.homeState.category.equals("c7"));
             check("empty_category_no_stale_posters", ui(() -> tag("home-video:0") == null));
             check(
-                    "selected_overflow_title_complete",
-                    ui(() -> fullLabel((TextView) tag("home-category-more"))));
+                    "direct_tail_category_scrolled_and_complete",
+                    ui(
+                            () ->
+                                    tag("home-category-more") == null
+                                            && ((HorizontalScrollView) tag("home-category-scroll"))
+                                                            .getScrollX()
+                                                    > 0
+                                            && fullLabel((TextView) tag("home-tab:7"))));
             click("home-tab:0");
             await(() -> tag("home-video:0") != null);
             click("nav-search");
@@ -1404,6 +1411,22 @@ public final class HomeProbe extends Instrumentation {
                                                 > tag("home-dock").getHeight()
                                         && tag("home-dock").getTop() == a.dp(16)));
         check(
+                "top_dock_logo_fixed_and_level_with_dock",
+                ui(
+                        () -> {
+                            View brand = tag("home-brand");
+                            View dockBar = tag("home-dock");
+                            return brand != null
+                                    && brand.getParent() == a.root
+                                    && brand.getTop() == dockBar.getTop()
+                                    && Math.abs(
+                                                    (brand.getTop() + brand.getBottom())
+                                                            - (dockBar.getTop()
+                                                                    + dockBar.getBottom()))
+                                            <= 2
+                                    && brand.getRight() + a.dp(12) <= dockBar.getLeft();
+                        }));
+        check(
                 "top_dock_reserves_content_viewport",
                 ui(() -> a.scroll.getTop() >= tag("home-dock").getBottom() + a.dp(12)));
         runOnMainSync(() -> tag("source-switcher").requestFocus());
@@ -1471,6 +1494,14 @@ public final class HomeProbe extends Instrumentation {
                                                 <= a.root.getWidth() - a.dp(16)
                                         && a.scroll.getTop()
                                                 >= tag("home-dock").getBottom() + a.dp(12)));
+        check(
+                "large_top_dock_logo_aligned_and_clear",
+                ui(
+                        () ->
+                                tag("home-brand") != null
+                                        && tag("home-brand").getTop() == tag("home-dock").getTop()
+                                        && tag("home-brand").getRight()
+                                                <= tag("home-dock").getLeft()));
         frame("glass-top-large");
         check(
                 "large_top_dock_label_clears_content",

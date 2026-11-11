@@ -993,20 +993,43 @@ public final class MainActivity extends Activity {
             } else {
                 body.setPadding(dp(34), dp(18), dp(100), dp(36));
             }
+            homeDock = new HomeDock(this);
             LinearLayout brandRow = row();
             brandRow.setTag("home-brand");
+            brandRow.setGravity(Gravity.CENTER_VERTICAL);
             ImageView brandMark = new ImageView(this);
             brandMark.setImageResource(R.drawable.logo_mark);
             LinearLayout.LayoutParams brandSize = new LinearLayout.LayoutParams(dp(30), dp(30));
             brandSize.rightMargin = dp(10);
             brandRow.addView(brandMark, brandSize);
             TextView brand = text("MARCO MOVIE", 14, WHITE);
+            brand.setIncludeFontPadding(false);
+            brand.setSingleLine(true);
             brand.setLetterSpacing(.10f);
             brand.setTypeface(null, Typeface.BOLD);
             brandRow.addView(brand);
-            body.addView(brandRow);
-            gap(body, title.isEmpty() ? 14 : 22);
-            homeDock = new HomeDock(this);
+            if (homeDock.topMode) {
+                int dockLeftPx = Math.max(0, (windowWidth() - dp(homeDock.mainDp)) / 2);
+                int maxBrandWidth = dockLeftPx - dp(34 + 14);
+                if (maxBrandWidth < dp(90)) {
+                    brand.setVisibility(View.GONE);
+                } else {
+                    brand.setMaxWidth(Math.max(dp(50), maxBrandWidth - dp(40)));
+                    brand.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                }
+                FrameLayout.LayoutParams brandLayout =
+                        new FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                dp(homeDock.crossDp),
+                                Gravity.LEFT | Gravity.TOP);
+                brandLayout.leftMargin = dp(34);
+                brandLayout.topMargin = dp(16);
+                root.addView(brandRow, brandLayout);
+                if (!title.isEmpty()) gap(body, 14);
+            } else {
+                body.addView(brandRow);
+                gap(body, title.isEmpty() ? 14 : 22);
+            }
         }
         if (!title.isEmpty()) {
             TextView eye = text(eyebrow, 12, 0xffa9c9f3);

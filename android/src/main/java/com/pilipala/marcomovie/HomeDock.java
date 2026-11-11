@@ -347,82 +347,207 @@ final class HomeDock {
     final class Icon extends View {
         final int kind;
         final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        final Path glyph = new Path();
+        final Path path = new Path();
+        final RectF box = new RectF();
 
         Icon(int kind) {
             super(a);
             this.kind = kind;
-            switch (kind) {
-                case 0:
-                    line(2, 10, 12, 2, 22, 10);
-                    line(5, 9, 5, 21, 10, 21, 10, 15, 14, 15, 14, 21, 19, 21, 19, 9);
-                    break;
-                case 1:
-                    glyph.addCircle(10, 10, 7, Path.Direction.CW);
-                    line(15.5f, 15.5f, 22, 22);
-                    break;
-                case 2:
-                    glyph.addRoundRect(new RectF(2, 4, 22, 18), 3, 3, Path.Direction.CW);
-                    line(9, 8, 16, 11, 9, 14, 9, 8);
-                    line(12, 18, 12, 22);
-                    line(8, 22, 16, 22);
-                    break;
-                case 3:
-                    glyph.moveTo(12, 21);
-                    glyph.cubicTo(8, 18, 2, 14, 2, 8);
-                    glyph.cubicTo(2, 2, 9, 1, 12, 6);
-                    glyph.cubicTo(15, 1, 22, 2, 22, 8);
-                    glyph.cubicTo(22, 14, 16, 18, 12, 21);
-                    glyph.close();
-                    break;
-                case 4:
-                    glyph.moveTo(6, 19);
-                    glyph.cubicTo(0, 19, 0, 11, 6, 11);
-                    glyph.cubicTo(6, 3, 17, 2, 19, 11);
-                    glyph.cubicTo(24, 11, 24, 19, 19, 19);
-                    glyph.close();
-                    line(8, 15, 16, 15);
-                    break;
-                case 5:
-                    line(2, 5, 6, 5);
-                    line(12, 5, 22, 5);
-                    line(2, 12, 12, 12);
-                    line(18, 12, 22, 12);
-                    line(2, 19, 6, 19);
-                    line(12, 19, 22, 19);
-                    glyph.addCircle(9, 5, 3, Path.Direction.CW);
-                    glyph.addCircle(15, 12, 3, Path.Direction.CW);
-                    glyph.addCircle(9, 19, 3, Path.Direction.CW);
-                    break;
-            }
         }
 
-        void line(float... xy) {
-            glyph.moveTo(xy[0], xy[1]);
-            for (int i = 2; i < xy.length; i += 2) glyph.lineTo(xy[i], xy[i + 1]);
+        float snap(float value, int strokePx) {
+            return (strokePx & 1) == 0 ? Math.round(value) : (float) Math.floor(value) + 0.5f;
         }
 
         @Override
         protected void onDraw(Canvas c) {
             super.onDraw(c);
-            c.save();
-            float size = a.dp((a.isTvDevice() ? 26f : 22f) * navScale);
-            float scale = size / 24f;
-            // Draw paths at display resolution with a constant, whole-pixel stroke.
-            c.translate(
-                    Math.round((getWidth() - size) / 2f), Math.round((getHeight() - size) / 2f));
-            c.scale(scale, scale);
-            p.setColor(hasFocus() ? MainActivity.WHITE : 0xffe0e6ef);
+            int w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float size = a.dp((a.isTvDevice() ? 25f : 22f) * navScale);
+            float r = size * 0.5f;
+            float cx = w * 0.5f + (!horizontal && isSelected() ? a.dp(1f) : 0f);
+            float cy = h * 0.5f - (horizontal && isSelected() ? a.dp(1.2f) : 0f);
+            int strokePx =
+                    Math.max(2, Math.round(a.dp((a.isTvDevice() ? 2.0f : 1.75f) * navScale)));
+            int fg = hasFocus() ? MainActivity.WHITE : 0xffedf2f8;
+            p.reset();
+            p.setAntiAlias(true);
+            p.setColor(fg);
             p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(Math.max(2, Math.round(size / 12f)) / scale);
+            p.setStrokeWidth(strokePx);
             p.setStrokeCap(Paint.Cap.ROUND);
             p.setStrokeJoin(Paint.Join.ROUND);
-            c.drawPath(glyph, p);
-            c.restore();
+
+            switch (kind) {
+                case 0:
+                    {
+                        path.reset();
+                        float roofY = snap(cy - r * 0.06f, strokePx);
+                        float peakY = snap(cy - r * 0.84f, strokePx);
+                        path.moveTo(cx - r * 0.88f, roofY);
+                        path.lineTo(cx, peakY);
+                        path.lineTo(cx + r * 0.88f, roofY);
+                        c.drawPath(path, p);
+
+                        path.reset();
+                        float leftX = snap(cx - r * 0.58f, strokePx);
+                        float rightX = snap(cx + r * 0.58f, strokePx);
+                        float wallTop = snap(cy - r * 0.12f, strokePx);
+                        float bottomY = snap(cy + r * 0.80f, strokePx);
+                        float doorLeft = snap(cx - r * 0.18f, strokePx);
+                        float doorRight = snap(cx + r * 0.18f, strokePx);
+                        float doorTop = snap(cy + r * 0.26f, strokePx);
+                        path.moveTo(leftX, wallTop);
+                        path.lineTo(leftX, bottomY);
+                        path.lineTo(doorLeft, bottomY);
+                        path.lineTo(doorLeft, doorTop);
+                        path.lineTo(doorRight, doorTop);
+                        path.lineTo(doorRight, bottomY);
+                        path.lineTo(rightX, bottomY);
+                        path.lineTo(rightX, wallTop);
+                        c.drawPath(path, p);
+                        break;
+                    }
+                case 1:
+                    {
+                        float lx = cx - r * 0.14f;
+                        float ly = cy - r * 0.14f;
+                        float lensR = r * 0.55f;
+                        c.drawCircle(lx, ly, lensR, p);
+                        float start = lensR * 0.72f;
+                        c.drawLine(lx + start, ly + start, cx + r * 0.80f, cy + r * 0.80f, p);
+                        break;
+                    }
+                case 2:
+                    {
+                        float left = snap(cx - r * 0.84f, strokePx);
+                        float top = snap(cy - r * 0.72f, strokePx);
+                        float right = snap(cx + r * 0.84f, strokePx);
+                        float bottom = snap(cy + r * 0.42f, strokePx);
+                        box.set(left, top, right, bottom);
+                        float corner = r * 0.22f;
+                        c.drawRoundRect(box, corner, corner, p);
+                        float stemX = snap(cx, strokePx);
+                        float standY = snap(cy + r * 0.80f, strokePx);
+                        c.drawLine(stemX, bottom, stemX, standY, p);
+                        c.drawLine(
+                                snap(cx - r * 0.42f, strokePx),
+                                standY,
+                                snap(cx + r * 0.42f, strokePx),
+                                standY,
+                                p);
+                        p.setStyle(Paint.Style.FILL);
+                        path.reset();
+                        float midY = (top + bottom) * 0.5f;
+                        path.moveTo(cx - r * 0.15f, midY - r * 0.25f);
+                        path.lineTo(cx + r * 0.25f, midY);
+                        path.lineTo(cx - r * 0.15f, midY + r * 0.25f);
+                        path.close();
+                        c.drawPath(path, p);
+                        break;
+                    }
+                case 3:
+                    {
+                        path.reset();
+                        float topDipY = cy - r * 0.36f;
+                        float bottomTipY = cy + r * 0.78f;
+                        float lobePeakY = cy - r * 0.84f;
+                        float sideX = r * 0.86f;
+                        float sideY = cy - r * 0.16f;
+                        path.moveTo(cx, bottomTipY);
+                        path.cubicTo(
+                                cx - r * 0.38f,
+                                cy + r * 0.48f,
+                                cx - sideX,
+                                cy + r * 0.18f,
+                                cx - sideX,
+                                sideY);
+                        path.cubicTo(cx - sideX, lobePeakY, cx - r * 0.24f, lobePeakY, cx, topDipY);
+                        path.cubicTo(
+                                cx + r * 0.24f,
+                                lobePeakY,
+                                cx + sideX,
+                                lobePeakY,
+                                cx + sideX,
+                                sideY);
+                        path.cubicTo(
+                                cx + sideX,
+                                cy + r * 0.18f,
+                                cx + r * 0.38f,
+                                cy + r * 0.48f,
+                                cx,
+                                bottomTipY);
+                        path.close();
+                        c.drawPath(path, p);
+                        break;
+                    }
+                case 4:
+                    {
+                        path.reset();
+                        float baseY = snap(cy + r * 0.54f, strokePx);
+                        float leftTop = snap(cy - r * 0.08f, strokePx);
+                        float rightTop = snap(cy - r * 0.02f, strokePx);
+                        path.moveTo(cx - r * 0.52f, baseY);
+                        path.cubicTo(
+                                cx - r * 0.94f,
+                                baseY,
+                                cx - r * 0.94f,
+                                leftTop,
+                                cx - r * 0.50f,
+                                leftTop);
+                        path.cubicTo(
+                                cx - r * 0.44f,
+                                cy - r * 0.78f,
+                                cx + r * 0.36f,
+                                cy - r * 0.82f,
+                                cx + r * 0.52f,
+                                rightTop);
+                        path.cubicTo(
+                                cx + r * 0.92f,
+                                rightTop,
+                                cx + r * 0.92f,
+                                baseY,
+                                cx + r * 0.52f,
+                                baseY);
+                        path.close();
+                        c.drawPath(path, p);
+                        break;
+                    }
+                case 5:
+                    {
+                        float xLeft = snap(cx - r * 0.82f, strokePx);
+                        float xRight = snap(cx + r * 0.82f, strokePx);
+                        float knobR = r * 0.20f;
+                        float clearance = knobR + strokePx * 0.65f;
+                        float[] rowsY = {
+                            snap(cy - r * 0.58f, strokePx),
+                            snap(cy, strokePx),
+                            snap(cy + r * 0.58f, strokePx)
+                        };
+                        float[] knobsX = {cx - r * 0.24f, cx + r * 0.26f, cx - r * 0.24f};
+                        for (int i = 0; i < 3; i++) {
+                            float y = rowsY[i], kx = knobsX[i];
+                            if (kx - clearance > xLeft) {
+                                c.drawLine(xLeft, y, kx - clearance, y, p);
+                            }
+                            if (xRight > kx + clearance) {
+                                c.drawLine(kx + clearance, y, xRight, y, p);
+                            }
+                            c.drawCircle(kx, y, knobR, p);
+                        }
+                        break;
+                    }
+            }
             if (isSelected()) {
                 p.setStyle(Paint.Style.FILL);
                 p.setColor(MainActivity.WHITE);
-                c.drawCircle(a.dp(5), getHeight() / 2f, a.dp(1.5f), p);
+                float dotRadius = Math.max(1.5f, a.dp(1.6f * navScale));
+                if (horizontal) {
+                    c.drawCircle(w * 0.5f, h - a.dp(3.5f * navScale), dotRadius, p);
+                } else {
+                    c.drawCircle(a.dp(3.5f * navScale), h * 0.5f, dotRadius, p);
+                }
             }
         }
 

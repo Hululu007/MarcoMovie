@@ -1395,7 +1395,8 @@ final class MobileShell {
                                                                 pageSnapshot,
                                                                 VideoFilters.remoteValues(
                                                                         definitions,
-                                                                        filterSnapshot)));
+                                                                        filterSnapshot,
+                                                                        siteSnapshot.supported())));
                                     }
                                     final HomeScreen.Snapshot finalHomeSnapshot = homeSnapshot;
                                     final List<Cms.Category> finalCats = cats;

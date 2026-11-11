@@ -37,16 +37,26 @@ final class VideoFilters {
     }
 
     static boolean allowedKey(String key) {
-        return Arrays.asList("class", "genre", "area", "region", "country", "year").contains(key);
+        return Arrays.asList("class", "genre", "area", "region", "country", "year", "lang", "by")
+                .contains(key);
     }
 
     static String dimension(String key, String label) {
-        if (key.equals("year") || label.contains("年份") || label.equals("年代")) return "year";
-        if (Arrays.asList("area", "region", "country").contains(key)
-                || label.contains("地区")
-                || label.contains("国家")) return "area";
-        if (key.equals("class") || key.equals("genre") || label.equals("类型") || label.equals("题材"))
-            return "class";
+        String k = key == null ? "" : key.trim().toLowerCase(Locale.ROOT);
+        String l = label == null ? "" : label.trim();
+        if (k.equals("year") || k.equals("yr") || l.contains("年份") || l.contains("年代"))
+            return "year";
+        if (Arrays.asList("area", "region", "country").contains(k)
+                || l.contains("地区")
+                || l.contains("国家")
+                || l.contains("产地")
+                || l.contains("区域")) return "area";
+        if (Arrays.asList("class", "genre", "type", "cateid", "plot", "style").contains(k)
+                || l.contains("类型")
+                || l.contains("题材")
+                || l.contains("剧情")
+                || l.contains("分类")
+                || l.contains("风格")) return "class";
         return "";
     }
 
@@ -91,7 +101,9 @@ final class VideoFilters {
                             if (!value.isEmpty() && !name.isEmpty() && seen.add(value))
                                 def.choices.add(new Choice(name, value));
                         }
-                    if (def.choices.size() > 1) remote.put(dim, def);
+                    if (def.choices.size() > 1
+                            && (!remote.containsKey(dim) || key.equalsIgnoreCase(dim)))
+                        remote.put(dim, def);
                 }
         } catch (JSONException ignored) {
         }
@@ -134,17 +146,39 @@ final class VideoFilters {
 
     static Map<String, String> remoteValues(
             List<Definition> definitions, Map<String, String> selected) {
+        return remoteValues(definitions, selected, false);
+    }
+
+    static Map<String, String> remoteValues(
+            List<Definition> definitions,
+            Map<String, String> selected,
+            boolean includeHttpCmsFallback) {
         Map<String, String> values = new LinkedHashMap<>();
         for (Definition def : definitions) {
             String value = selected.get(def.dimension);
-            if (def.remote && value != null && !value.isEmpty()) values.put(def.key, value);
+            if (value == null || value.isEmpty()) continue;
+            if (def.remote) {
+                values.put(def.key, value);
+            } else if (includeHttpCmsFallback && allowedKey(def.dimension)) {
+                String queryValue = value;
+                if (def.dimension.equals("area")) {
+                    queryValue =
+                            queryValue
+                                    .replace("中国大陆", "大陆")
+                                    .replace("中国香港", "香港")
+                                    .replace("中国台湾", "台湾");
+                }
+                values.put(def.dimension, queryValue);
+            }
         }
         return values;
     }
 
     static boolean hasLocal(List<Definition> definitions, Map<String, String> selected) {
-        for (Definition def : definitions)
-            if (!def.remote && selected.containsKey(def.dimension)) return true;
+        for (Definition def : definitions) {
+            String value = selected.get(def.dimension);
+            if (!def.remote && value != null && !value.isEmpty()) return true;
+        }
         return false;
     }
 
@@ -156,11 +190,7 @@ final class VideoFilters {
             for (Definition def : definitions) {
                 String value = selected.get(def.dimension);
                 if (def.remote || value == null || value.isEmpty()) continue;
-                String raw =
-                        def.dimension.equals("class")
-                                ? video.genre
-                                : def.dimension.equals("area") ? video.area : video.year;
-                if (!matches(raw, def.labelFor(value), def.dimension)) {
+                if (!matchesVideo(video, def.labelFor(value), def.dimension)) {
                     match = false;
                     break;
                 }
@@ -170,23 +200,100 @@ final class VideoFilters {
         return result;
     }
 
-    static boolean matches(String raw, String value, String dimension) {
-        if (raw == null || raw.trim().isEmpty()) return false;
+    private static boolean meaningfulGenre(String raw) {
+        if (raw == null) return false;
+        String cleaned =
+                raw.replace("电影", "")
+                        .replace("电视剧", "")
+                        .replace("连续剧", "")
+                        .replace("剧集", "")
+                        .replace("综艺", "")
+                        .replace("动漫", "")
+                        .replace("影视", "")
+                        .replaceAll("[ /、,，;；|]+", "")
+                        .trim();
+        return !cleaned.isEmpty();
+    }
+
+    private static String joinFields(String... parts) {
+        StringBuilder sb = new StringBuilder();
+        for (String p : parts) {
+            if (p != null && !p.trim().isEmpty()) {
+                if (sb.length() > 0) sb.append(' ');
+                sb.append(p.trim());
+            }
+        }
+        return sb.toString();
+    }
+
+    static boolean matchesVideo(Cms.Video video, String label, String dimension) {
+        if (video == null) return false;
+        if (dimension.equals("year")) {
+            if (video.year != null && !video.year.trim().isEmpty()) {
+                return matches(video.year, label, "year");
+            }
+            return matches(joinFields(video.remarks, video.tag, video.title), label, "year");
+        }
         if (dimension.equals("area")) {
-            raw =
-                    raw.replace("中国大陆", "大陆")
-                            .replace("内地", "大陆")
-                            .replace("中国香港", "香港")
-                            .replace("中国台湾", "台湾");
-            value =
-                    value.replace("中国大陆", "大陆")
-                            .replace("内地", "大陆")
-                            .replace("中国香港", "香港")
-                            .replace("中国台湾", "台湾");
+            if (video.area != null && !video.area.trim().isEmpty()) {
+                return matches(video.area, label, "area");
+            }
+            return matches(
+                    joinFields(video.remarks, video.tag, video.description, video.title),
+                    label,
+                    "area");
+        }
+        if (meaningfulGenre(video.genre)) {
+            return matches(video.genre, label, "class")
+                    || matches(joinFields(video.tag, video.remarks), label, "class");
+        }
+        return matches(
+                joinFields(video.genre, video.tag, video.remarks, video.description, video.title),
+                label,
+                "class");
+    }
+
+    private static String normalizeAreaText(String s) {
+        return s.replace("中国大陆", "大陆")
+                .replace("内地", "大陆")
+                .replace("国产", "大陆")
+                .replace("国语", "大陆")
+                .replace("普通话", "大陆")
+                .replace("中国香港", "香港")
+                .replace("港剧", "香港")
+                .replace("港片", "香港")
+                .replace("粤语", "香港")
+                .replace("中国台湾", "台湾")
+                .replace("台剧", "台湾")
+                .replace("欧美", "美国")
+                .replace("好莱坞", "美国")
+                .replace("美剧", "美国")
+                .replace("韩剧", "韩国")
+                .replace("韩语", "韩国")
+                .replace("日剧", "日本")
+                .replace("日语", "日本")
+                .replace("日漫", "日本")
+                .replace("英剧", "英国")
+                .replace("泰剧", "泰国");
+    }
+
+    static boolean matches(String raw, String value, String dimension) {
+        if (raw == null || raw.trim().isEmpty() || value == null || value.trim().isEmpty())
+            return false;
+        if (dimension.equals("area")) {
+            raw = normalizeAreaText(raw);
+            value = normalizeAreaText(value);
         }
         if (dimension.equals("year"))
             return raw.matches(
                     ".*(?<![0-9])" + java.util.regex.Pattern.quote(value) + "(?![0-9]).*");
-        return raw.toLowerCase(Locale.ROOT).contains(value.toLowerCase(Locale.ROOT));
+        String lowerRaw = raw.toLowerCase(Locale.ROOT);
+        String lowerVal = value.toLowerCase(Locale.ROOT);
+        if (lowerRaw.contains(lowerVal)) return true;
+        if (dimension.equals("class") && lowerVal.length() > 2) {
+            String stem = lowerVal.replaceAll("[片剧漫]$", "");
+            if (stem.length() >= 2 && lowerRaw.contains(stem)) return true;
+        }
+        return false;
     }
 }

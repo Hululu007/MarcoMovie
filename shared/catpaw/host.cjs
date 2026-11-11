@@ -503,7 +503,29 @@ if (!isMainThread) {
           const tid = params.get('t') || '';
           const pg = parseInt(params.get('pg') || '1', 10) || 1;
           const extend = {};
-          for (const k of ['class', 'area', 'year', 'by', 'lang']) {
+          const rawExt = params.get('ext') || '';
+          if (rawExt && rawExt.length <= 8192) {
+            let parsedExt = null;
+            try {
+              parsedExt = JSON.parse(rawExt);
+            } catch (_) {
+              try {
+                const b64 = rawExt.replace(/-/g, '+').replace(/_/g, '/');
+                const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+                parsedExt = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+              } catch (_) {}
+            }
+            if (parsedExt && typeof parsedExt === 'object' && !Array.isArray(parsedExt)) {
+              for (const [ek, ev] of Object.entries(parsedExt)) {
+                if (!ek || ek.length > 64 || ek === '__proto__' || ek === 'constructor' || ek === 'prototype') continue;
+                if (typeof ev === 'string' || typeof ev === 'number' || typeof ev === 'boolean') {
+                  const sv = String(ev);
+                  if (sv) extend[ek] = sv;
+                }
+              }
+            }
+          }
+          for (const k of ['class', 'area', 'year', 'by', 'lang', 'cateId', 'type', 'tid']) {
             if (params.get(k)) extend[k] = params.get(k);
           }
           resp = await requestBackend(backend, 'POST', spiderPath + '/category', {

@@ -22,6 +22,7 @@ final class CategoryFlow extends ViewGroup {
 
     @Override
     protected void onMeasure(int widthSpec, int heightSpec) {
+        boolean singleRow = MeasureSpec.getMode(widthSpec) == MeasureSpec.UNSPECIFIED;
         int width = MeasureSpec.getSize(widthSpec),
                 available = Math.max(1, width - getPaddingLeft() - getPaddingRight());
         int x = 0, height = getPaddingTop(), lineHeight = 0;
@@ -29,9 +30,11 @@ final class CategoryFlow extends ViewGroup {
             View child = getChildAt(i);
             if (child.getVisibility() == GONE) continue;
             child.measure(
-                    MeasureSpec.makeMeasureSpec(available, MeasureSpec.AT_MOST),
+                    singleRow
+                            ? MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED)
+                            : MeasureSpec.makeMeasureSpec(available, MeasureSpec.AT_MOST),
                     MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
-            if (x > 0 && x + child.getMeasuredWidth() > available) {
+            if (!singleRow && x > 0 && x + child.getMeasuredWidth() > available) {
                 height += lineHeight + gap;
                 x = 0;
                 lineHeight = 0;
@@ -39,13 +42,17 @@ final class CategoryFlow extends ViewGroup {
             x += child.getMeasuredWidth() + gap;
             lineHeight = Math.max(lineHeight, child.getMeasuredHeight());
         }
+        int contentWidth =
+                singleRow ? getPaddingLeft() + Math.max(0, x - gap) + getPaddingRight() : width;
         setMeasuredDimension(
-                width, resolveSize(height + lineHeight + getPaddingBottom(), heightSpec));
+                resolveSize(contentWidth, widthSpec),
+                resolveSize(height + lineHeight + getPaddingBottom(), heightSpec));
     }
 
     @Override
     protected void onLayout(boolean changed, int l, int t, int r, int b) {
         lines.clear();
+        boolean singleRow = getParent() instanceof android.widget.HorizontalScrollView;
         int start = getPaddingLeft(),
                 x = start,
                 y = getPaddingTop(),
@@ -56,7 +63,7 @@ final class CategoryFlow extends ViewGroup {
             View child = getChildAt(i);
             if (child.getVisibility() == GONE) continue;
             int w = child.getMeasuredWidth(), h = child.getMeasuredHeight();
-            if (x > start && x + w > end) {
+            if (!singleRow && x > start && x + w > end) {
                 lines.add(line);
                 line = new ArrayList<>();
                 y += lineHeight + gap;
