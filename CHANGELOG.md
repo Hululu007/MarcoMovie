@@ -3,6 +3,7 @@
 - [iOS / iPadOS 0.5.21](docs/releases/ios-v0.5.21.md)：修复电视直播 `proxy://` 包装地址解包、自动过滤不支持的本机 `127.0.0.1` 代理源、自动绕过失效本机系统 HTTP 代理，并支持单频道多线路自动回退起播。
 - 移除一级设置页版本号并归位至「关于与更新」（内嵌软件更新卡片）；将各级设置项、网盘账号中心、「切换片源」与「管理线路」统一重构为原生 iOS 系统设置风格全屏 `CupertinoPageRoute` 二级 / 三级页面，支持侧滑返回且不再与底部 Dock 重叠。
 - 修复 iOS `NodeMobile` 无 ICU 环境下 `TextDecoder({ fatal: true })` 导致 `T4` 点播源误报 `guard_artifact_invalid` 的问题；修复 `SourceHttp` `POST` 请求 `Content-Length` 头并正式启用 `csp_AppgzGuard`（瓜子）与新增 `csp_AppTTGuard`（热播）直连点播协议适配。
+- 665 项 Flutter 自动化测试与多端原生构建回归（`6b2c7b7c0972d54c1159a5f941fc6c62c957b0a2`，构建记录 `43002694017`）全部通过。
 
 ## 2026-11-11 Android 电视 / 盒子 0.5.20
 

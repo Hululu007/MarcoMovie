@@ -21,8 +21,9 @@
 
 ## 包信息与构建记录
 
-- **未签名 IPA（iPhone / iPad 通用）**：`MarcoMovie-0.5.21-ios-iphone-ipad-unsigned.ipa`（更新兼容别名 `MarcoMovie-0.5.21-ios-unsigned.ipa`），构建与校验信息将在多端构建完成后回填。
-- **对应源码包**：`MarcoMovie-ios-v0.5.21-source.zip`。
+- **未签名 IPA（iPhone / iPad 通用）**：`MarcoMovie-0.5.21-ios-iphone-ipad-unsigned.ipa`（更新兼容别名 `MarcoMovie-0.5.21-ios-unsigned.ipa`），SHA-256：`4b0bacde4326ef1ca082bfae4164da8f54ffa6c74fd84c7f7cc7d7f24ee93325`。
+- **对应源码包**：`MarcoMovie-ios-v0.5.21-source.zip`，SHA-256：`c8a178a0fd97d6850c1dc7b182253aeafedc83e9c3f202754fa59e3fdfb42b7a`。
+- **构建提交**：`6b2c7b7c0972d54c1159a5f941fc6c62c957b0a2`。[多端构建与门禁检查记录（43002694017）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/43002694017)。
 
 ## 验证范围与已知限制
 
