@@ -8,7 +8,8 @@
 
 - [Windows 0.5.16](docs/releases/windows-v0.5.16.md)：重构 `CloudMediaLease` 与 `LocalMediaLease` 为 `4 MiB` 阈值零停顿连续推流（消除逐分片 `StreamIterator` 套接字暂停），将桌面端 `libmpv` 点播内存缓冲提升至 `256–512 MiB`、`cache-pause-wait` 调至 `4–5s`、启用 Windows `auto-safe` / `d3d11va-copy` 硬解与 `bilinear` 轻量缩放并支持播放中持续卡顿自动降档，解决 4K 资源“放一秒卡一秒”问题。
 - 修复豆瓣 `subject_suggest` 未拦截 `celebrity` 人物词条与 `/view/personage/` 头像路径导致《谷雨》（2026）等剧集海报拉取错误的问题；补齐影视年份匹配、`title@year` 缓存隔离、百科人物/节气过滤与源站有效海报保护，并升级磁盘缓存至 `marco_poster_cache_v5` 自动清理旧污染缓存。
-- 新增 Windows 桌面 UI 渲染与路由快路径（关闭逐组件离屏 `BackdropFilter` 拷贝、采用 185ms 单层 `RepaintBoundary` 页面过渡、按需构建当前底栏标签页、移除全视口滚动 `ShaderMask` 并改为静态降采样缓存模糊背景与按键精准海报通知），大幅改善切换动画与滚动掉帧；686 项 Flutter 与原生 `libmpv` 回归检查全部通过。
+- 新增 Windows 桌面 UI 渲染与路由快路径（关闭逐组件离屏 `BackdropFilter` 拷贝、采用 185ms 单层 `RepaintBoundary` 页面过渡、按需构建当前底栏标签页、移除全视口滚动 `ShaderMask` 并改为静态降采样缓存模糊背景与按键精准海报通知），大幅改善切换动画与滚动掉帧。
+- 686 项 Flutter 自动化测试与 Windows x64 原生构建及打包 `libmpv` 回放回归（`b2a23f1b082ca471b6d9f4d4590d09cf0d46527a`，构建记录 `43051022050` / `130629223487`、片源回归 `43051022516`、内容守卫 `43051021918`）全部通过，未声明用户私人网盘账号实机全片验收。
 
 ## 2026-11-11 Windows 0.5.15、macOS 0.5.13 与 iOS / iPadOS 0.5.22 内置本地媒体代理网关与三级二次解析更新
 

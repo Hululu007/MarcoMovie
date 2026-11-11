@@ -8,6 +8,13 @@
 - **海报与剧照精准匹配、人物头像拦截及年份缓存隔离**：修复豆瓣 `subject_suggest` 未过滤 `celebrity` 人物词条导致《谷雨》（2026）等剧集误拉取同名人物/主播自拍（`/view/personage/`、`/celebrity/`、`/avatar/` 等）的问题；新增影视词条类型与年份偏差校验（精确年份优先，剔除偏差 `>= 2` 年的旧同名条目），增强百科人物传记/节气/非影视词条识别并兼容以年代背景开头的剧情简介；全链路透传 `year`（`title@year` 隔离缓存）且禁止仅标题缓存覆盖有效源站海报地址，同时将本地海报磁盘缓存升级至 `marco_poster_cache_v5` 并自动清理旧版污染缓存。
 - **Windows 全局 UI 切换动画与滚动高帧率优化**：新增 Windows 桌面渲染快路径，关闭同屏 20–35 处 `GlassworkBackdrop` 的逐帧离屏 `BackdropFilter` 拷贝并替换为感知通透度的深色高光半透明玻璃绘制；新增 `WindowsSmoothPageTransitionsBuilder` 与 `buildApplePageRoute`（185ms 单层 `RepaintBoundary` 轻量过渡）替代高开销双页视差 `CupertinoPageRoute`；将 `AdaptiveShell` 改为按需构建当前激活标签页、消除切页时全屏双层高斯模糊交叉重绘及首页滚动外层全视口 `ShaderMask` `saveLayer`，将详情页桌面端滚动动态模糊改为静态缓存降采样海报 + 轻量遮罩渐变，并将 `PosterLoader` 改为按键精准通知。
 
+## 包信息与构建记录
+
+- **安装版（推荐）**：`MarcoMovie-0.5.16-windows-x64-setup.exe`（更新兼容别名 `MarcoMovie-0.5.16-windows-setup.exe`），SHA-256：`3eefd662aebc328c22b7e3e5196df0166cf3fcbf3b379cc2b5d266f83f4eee13`。
+- **绿色便携版**：`MarcoMovie-0.5.16-windows-x64-portable.zip`（兼容别名 `MarcoMovie-0.5.16-windows-x64.zip`），SHA-256：`6d775b55d38d76d4fe89576554f16fb92843fb064ff7322d946109de7f75b406`。
+- **对应源码包**：`MarcoMovie-windows-v0.5.16-source.zip`，SHA-256：`69cefbd489a7a14b4062bcf356d661d329fbfbf9b5d0db55d4910b7a9b19a609`。
+- **构建提交**：`b2a23f1b082ca471b6d9f4d4590d09cf0d46527a`。[Windows x64 原生构建与解码校验记录（43051022050 / 130629223487）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/43051022050/job/130629223487) · [跨平台片源回归（43051022516）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/43051022516) · [公共内容守卫（43051021918）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/43051021918)。
+
 ## 验证范围与已知限制
 
 - 通过公共内容守卫检查、Python / JS / CatPaw / T4 共享宿主检查，以及全部 `686` 项 Flutter 自动化测试与打包 `libmpv-2.dll` 原生解码回放回归（覆盖 5 MiB 分片零停顿 Range 推流、《谷雨》2026 人物自拍拦截与年份筛选、源站海报保留及 Windows `BackdropFilter` 与路由过渡快路径）。
