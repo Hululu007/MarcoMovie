@@ -27,7 +27,7 @@ class WoggSource {
     required this.readBytes,
     required this.listShare,
     this.listShareWithCancellation,
-    this.shareTimeout = const Duration(seconds: 40),
+    this.shareTimeout = const Duration(seconds: 8),
   });
 
   static bool supports(CmsSite site) {

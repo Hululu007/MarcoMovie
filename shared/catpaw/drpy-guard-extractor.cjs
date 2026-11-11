@@ -279,6 +279,43 @@ class Dex {
     if (sha(this.bytes.subarray(selected, selected + 16 + size * 2)) !== expectedHash) fail();
     return { offset: selected, size };
   }
+  reviewedCodeByHash(className, methodName, expectedHash) {
+    const classes = this.table(96, 32).filter(p => this.at(this.types, this.u32(p)) === className);
+    if (classes.length !== 1) fail();
+    let p = this.u32(classes[0] + 24), counts = [], selected = null;
+    if (!p) fail();
+    for (let i = 0; i < 4; i++) { let n; [n, p] = this.uleb(p); if (n > 65536) fail(); counts.push(n); }
+    for (let i = 0; i < counts[0] + counts[1]; i++) { [, p] = this.uleb(p); [, p] = this.uleb(p); }
+    for (const count of counts.slice(2)) {
+      let index = 0;
+      for (let i = 0; i < count; i++) {
+        let delta, code; [delta, p] = this.uleb(p); [, p] = this.uleb(p); [code, p] = this.uleb(p); index += delta;
+        const [owner, , name] = this.at(this.methods, index);
+        if (owner === className && name === methodName && code) {
+          const size = this.u32(code + 12);
+          if (!size || size > 65536) fail();
+          bounds(this.bytes, code, 16 + size * 2);
+          if (sha(this.bytes.subarray(code, code + 16 + size * 2)) === expectedHash) {
+            if (selected !== null) fail();
+            selected = { offset: code, size };
+          }
+        }
+      }
+    }
+    if (selected === null) fail();
+    return selected;
+  }
+  reviewedLiteralByHash(className, methodName, expectedHash, unit) {
+    const { offset: selected, size } = this.reviewedCodeByHash(className, methodName, expectedHash);
+    if (!Number.isInteger(unit) || unit < 0 || unit + 1 >= size) fail();
+    const instruction = selected + 16 + unit * 2, op = this.u16(instruction) & 255;
+    if (op === 0x1a) return this.at(this.strings, this.u16(instruction + 2));
+    if (op === 0x1b) {
+      if (unit + 2 >= size) fail();
+      return this.at(this.strings, this.u32(instruction + 2));
+    }
+    fail();
+  }
   reviewedShortArray(className, expectedHash, fieldName, payloadUnit, count) {
     const { offset, size } = this.reviewedCode(className, '<clinit>', expectedHash);
     if (!Number.isInteger(payloadUnit) || payloadUnit < 10 || !Number.isInteger(count) || count < 1 || count > 4096 || payloadUnit + 4 + count > size || this.u16(offset + 2) !== 0) fail();

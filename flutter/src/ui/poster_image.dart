@@ -111,6 +111,11 @@ class PosterLoader {
   static final Map<String, Future<List<String>>> _inflightSeriesStills = {};
   static final Map<String, Future<Map<int, EpisodeRealMeta>>>
       _inflightEpisodeMeta = {};
+  static final LinkedHashMap<String, ({double? douban, int? rt})>
+      _ratingsCache = LinkedHashMap<String, ({double? douban, int? rt})>();
+  static final Map<String, Future<({double? douban, int? rt})>>
+      _inflightRatings = {};
+  static final Map<String, ({String id, bool isTv})> _doubanSubjectIdCache = {};
   static final Map<int, Color> _ambientColorCache = {};
   static final Map<int, bool> _hdDimensionCache = {};
   static final Map<int, bool> _clearDimensionCache = {};
@@ -164,6 +169,9 @@ class PosterLoader {
     _seriesEpisodeStillsCache.clear();
     _seriesEpisodeCaptionsCache.clear();
     _seriesEpisodeMetaCache.clear();
+    _ratingsCache.clear();
+    _inflightRatings.clear();
+    _doubanSubjectIdCache.clear();
     _ambientColorCache.clear();
     _hdDimensionCache.clear();
     _clearDimensionCache.clear();
@@ -444,6 +452,129 @@ class PosterLoader {
 
   static bool _isFilmOrTvEntryText(String text) =>
       isFilmOrTvEncyclopediaEntry(abstractText: text);
+
+  /// Extracts the highest-scoring verified Douban `{id, isTv}` from `subject_suggest`.
+  @visibleForTesting
+  static ({String id, bool isTv})? parseDoubanSuggestSubject(
+    Object? decoded,
+    String rawTitle, {
+    String year = '',
+  }) {
+    if (decoded is! List || decoded.isEmpty) return null;
+    final cleanTitle = _cleanTitle(rawTitle);
+    if (cleanTitle.isEmpty) return null;
+    final targetYear = _extractTargetYear(rawTitle, year);
+    final candidates = <({String id, bool isTv, int score, int order})>[];
+    var order = 0;
+    for (final item in decoded) {
+      if (item is! Map) continue;
+      final itemType = (item['type'] ?? '').toString().trim().toLowerCase();
+      if (itemType.isNotEmpty && itemType != 'movie' && itemType != 'tv') {
+        continue;
+      }
+      final itemUrl = (item['url'] ?? '').toString().trim().toLowerCase();
+      if (itemUrl.contains('/celebrity/') || itemUrl.contains('/personage/')) {
+        continue;
+      }
+      var subjectId = (item['id'] ?? '').toString().trim();
+      if (!RegExp(r'^\d+$').hasMatch(subjectId)) {
+        final m = RegExp(r'/subject/(\d+)').firstMatch(itemUrl);
+        subjectId = m?.group(1) ?? '';
+      }
+      if (subjectId.isEmpty) continue;
+      final itemTitle = (item['title'] ?? '').toString().trim();
+      final itemSubTitle = (item['sub_title'] ?? '').toString().trim();
+      if (!_isSameWorkTitle(itemTitle, cleanTitle) &&
+          !_isSameWorkTitle(itemSubTitle, cleanTitle)) {
+        continue;
+      }
+      final itemYear = int.tryParse((item['year'] ?? '').toString().trim());
+      var score = 10;
+      if (targetYear != null) {
+        if (itemYear != null) {
+          final diff = (itemYear - targetYear).abs();
+          if (diff >= 2) continue;
+          score = diff == 0 ? 100 : 50;
+        } else {
+          score = 5;
+        }
+      } else if (itemYear != null) {
+        score = 20;
+      }
+      candidates.add((
+        id: subjectId,
+        isTv: itemType == 'tv',
+        score: score,
+        order: order++,
+      ));
+    }
+    if (candidates.isEmpty) return null;
+    candidates.sort((a, b) {
+      final cmp = b.score.compareTo(a.score);
+      return cmp != 0 ? cmp : a.order.compareTo(b.order);
+    });
+    return (id: candidates.first.id, isTv: candidates.first.isTv);
+  }
+
+  /// Extracts verified Rotten Tomatoes Tomatometer (`1..100`) from Bing search result blocks.
+  @visibleForTesting
+  static int? extractRtPercentFromBingHtml(
+    String html,
+    String rawTitle, {
+    int? targetYear,
+  }) {
+    final cleanTitle = _cleanTitle(rawTitle);
+    if (html.isEmpty || cleanTitle.isEmpty) return null;
+    final lowerClean = cleanTitle.toLowerCase();
+    final compactClean =
+        lowerClean.replaceAll(RegExp(r'[\s·:：\-—_（）()《》]+'), '');
+    final algoBlocks = RegExp(
+      r'<li\s+class="b_algo"[\s\S]*?</li>',
+      caseSensitive: false,
+    ).allMatches(html);
+    final rtPattern = RegExp(
+      r'(?:烂番茄(?:新鲜度|指数|好评率|评分|口碑)?|Rotten\s*Tomatoes[^0-9%\n]{0,24}|Tomatometer[^0-9%\n]{0,20})\s*[:：为是达获]?\s*(\d{1,3})\s*%|(\d{1,3})\s*%\s*(?:的)?(?:烂番茄|新鲜度)',
+      caseSensitive: false,
+    );
+    for (final m in algoBlocks) {
+      final plain = m
+          .group(0)!
+          .replaceAll(RegExp(r'<[^>]*>'), ' ')
+          .replaceAll('&nbsp;', ' ')
+          .replaceAll('&quot;', '"')
+          .replaceAll('&amp;', '&')
+          .replaceAll('&#39;', "'")
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+      final lowerPlain = plain.toLowerCase();
+      final compactPlain =
+          lowerPlain.replaceAll(RegExp(r'[\s·:：\-—_（）()《》]+'), '');
+      if (!lowerPlain.contains(lowerClean) &&
+          (compactClean.isEmpty || !compactPlain.contains(compactClean))) {
+        continue;
+      }
+      if (targetYear != null) {
+        final years = RegExp(r'\b((?:19|20)\d{2})\b')
+            .allMatches(plain)
+            .map((ym) => int.tryParse(ym.group(1) ?? ''))
+            .whereType<int>()
+            .toList();
+        if (years.isNotEmpty &&
+            !years.any((y) => (y - targetYear).abs() <= 2) &&
+            years.any((y) => (y - targetYear).abs() >= 4)) {
+          continue;
+        }
+      }
+      final rtMatch = rtPattern.firstMatch(plain);
+      if (rtMatch != null) {
+        final pct = int.tryParse(rtMatch.group(1) ?? rtMatch.group(2) ?? '');
+        if (pct != null && pct >= 1 && pct <= 100) {
+          return pct;
+        }
+      }
+    }
+    return null;
+  }
 
   /// Parses Douban `subject_suggest` JSON list, strictly rejecting `celebrity`
   /// / `personage` entries and mismatched release years while ranking exact-year
@@ -971,6 +1102,256 @@ class PosterLoader {
   static String peekSeriesSynopsis(String rawTitle) {
     final clean = _cleanTitle(rawTitle);
     return _titleSynopsisCache[clean] ?? '';
+  }
+
+  /// Synchronously peeks cached verified Douban & Rotten Tomatoes ratings for [rawTitle].
+  static ({double? douban, int? rt})? peekRatings(
+    String rawTitle, {
+    String year = '',
+  }) {
+    final clean = _cleanTitle(rawTitle);
+    if (clean.isEmpty) return null;
+    final targetYear = _extractTargetYear(rawTitle, year);
+    final scoped = _scopedTitleToken(clean, targetYear);
+    final hit = _ratingsCache.remove(scoped);
+    if (hit != null) {
+      _ratingsCache[scoped] = hit;
+      return hit;
+    }
+    return null;
+  }
+
+  @visibleForTesting
+  static void debugSeedRatings(
+    String rawTitle, {
+    String year = '',
+    double? douban,
+    int? rt,
+  }) {
+    final clean = _cleanTitle(rawTitle);
+    if (clean.isEmpty) return;
+    final targetYear = _extractTargetYear(rawTitle, year);
+    final scoped = _scopedTitleToken(clean, targetYear);
+    _ratingsCache[scoped] = (douban: douban, rt: rt);
+  }
+
+  static Future<String?> _getRatingTextUrl(
+    Uri uri, {
+    required Map<String, String> headers,
+    Duration timeout = const Duration(milliseconds: 2300),
+  }) async {
+    final useEphemeral = HttpOverrides.current != null;
+    final client = useEphemeral ? HttpClient() : _client;
+    HttpClientRequest? req;
+    try {
+      req = await client.getUrl(uri).timeout(timeout);
+      headers.forEach(req.headers.set);
+      final resp = await req.close().timeout(timeout);
+      if (resp.statusCode >= 200 && resp.statusCode < 300) {
+        return await utf8.decoder.bind(resp).join().timeout(timeout);
+      }
+      await resp.drain<void>();
+    } catch (_) {
+      try {
+        req?.abort();
+      } catch (_) {}
+    } finally {
+      if (useEphemeral) {
+        client.close(force: true);
+      }
+    }
+    return null;
+  }
+
+  /// Resolves authentic Douban (`2.0..10.0`) and Rotten Tomatoes (`1..100%`)
+  /// ratings for [rawTitle] using only approved domestic/Douban endpoints.
+  /// Never fabricates or hash-estimates missing scores; caches misses so absent
+  /// badges stay hidden without repeated network traffic.
+  static Future<({double? douban, int? rt})> fetchRatings(
+    String rawTitle, {
+    String year = '',
+  }) {
+    final clean = _cleanTitle(rawTitle);
+    if (clean.isEmpty) {
+      return SynchronousFuture<({double? douban, int? rt})>(
+        (douban: null, rt: null),
+      );
+    }
+    final targetYear = _extractTargetYear(rawTitle, year);
+    final scoped = _scopedTitleToken(clean, targetYear);
+    final cached = peekRatings(rawTitle, year: year);
+    if (cached != null) {
+      return SynchronousFuture<({double? douban, int? rt})>(cached);
+    }
+    final pending = _inflightRatings[scoped];
+    if (pending != null) return pending;
+
+    final future = () async {
+      final variants = _queryVariantsForTitle(clean);
+      final primary = variants.isNotEmpty ? variants.first : clean;
+      final bidCookie = 'bid=${_randomDoubanBid()}';
+      double? resolvedDouban;
+      int? resolvedRt;
+
+      await Future.wait([
+        // 1. Verified Douban rating (`subject_suggest` -> `m.douban.com/rexxar` -> `m.douban.com/search`)
+        () async {
+          var subject = _doubanSubjectIdCache[scoped];
+          if (subject == null) {
+            for (final variant in variants.take(2)) {
+              final q = Uri.encodeQueryComponent(variant);
+              final body = await _getRatingTextUrl(
+                Uri.parse('https://movie.douban.com/j/subject_suggest?q=$q'),
+                headers: {
+                  'User-Agent': _desktopChromeUa,
+                  'Referer': 'https://movie.douban.com/',
+                  'Cookie': bidCookie,
+                  'Accept': 'application/json, text/plain, */*',
+                },
+              );
+              if (body == null) continue;
+              try {
+                final decoded = jsonDecode(body);
+                final matched = parseDoubanSuggestSubject(
+                  decoded,
+                  clean,
+                  year: year.isNotEmpty ? year : (targetYear?.toString() ?? ''),
+                );
+                if (matched != null) {
+                  subject = matched;
+                  _doubanSubjectIdCache[scoped] = matched;
+                  break;
+                }
+              } catch (_) {}
+            }
+          }
+
+          if (subject != null) {
+            final endpoints = subject.isTv
+                ? ['tv', 'movie']
+                : ['movie', 'tv'];
+            for (final kind in endpoints) {
+              final body = await _getRatingTextUrl(
+                Uri.parse(
+                  'https://m.douban.com/rexxar/api/v2/$kind/${subject.id}',
+                ),
+                headers: {
+                  'User-Agent': _mobileSafariUa,
+                  'Referer': 'https://m.douban.com/movie/subject/${subject.id}/',
+                  'Cookie': bidCookie,
+                  'Accept': 'application/json, text/plain, */*',
+                },
+              );
+              if (body == null) continue;
+              try {
+                final decoded = jsonDecode(body);
+                if (decoded is Map && decoded['rating'] is Map) {
+                  final rawVal = decoded['rating']['value'];
+                  final val = rawVal is num
+                      ? rawVal.toDouble()
+                      : double.tryParse('$rawVal');
+                  if (val != null && val >= 2.0 && val <= 10.0) {
+                    resolvedDouban = val;
+                    break;
+                  }
+                }
+              } catch (_) {}
+            }
+          }
+
+          if (resolvedDouban == null) {
+            final q = Uri.encodeQueryComponent(primary);
+            final html = await _getRatingTextUrl(
+              Uri.parse('https://m.douban.com/search/?query=$q&type=movie'),
+              headers: {
+                'User-Agent': _mobileSafariUa,
+                'Referer': 'https://m.douban.com/',
+                'Cookie': bidCookie,
+              },
+            );
+            if (html != null && html.isNotEmpty) {
+              final blockPattern = RegExp(
+                r'<a\s+href="/movie/subject/(\d+)/"[^>]*>([\s\S]*?)</a>',
+                caseSensitive: false,
+              );
+              for (final m in blockPattern.allMatches(html)) {
+                final inner = m.group(2) ?? '';
+                final titleMatch = RegExp(
+                  r'<span\s+class="subject-title"[^>]*>([^<]+)</span>',
+                  caseSensitive: false,
+                ).firstMatch(inner);
+                final candTitle = titleMatch?.group(1)?.trim() ?? '';
+                if (candTitle.isEmpty || !_isSameWorkTitle(candTitle, clean)) {
+                  continue;
+                }
+                final rMatch = RegExp(
+                  r'data-rating="([0-9.]+)"|<span>([2-9]\.[0-9]|10\.0)(?:分)?</span>',
+                ).firstMatch(inner);
+                final val = double.tryParse(
+                  rMatch?.group(1) ?? rMatch?.group(2) ?? '',
+                );
+                if (val != null && val >= 2.0 && val <= 10.0) {
+                  resolvedDouban = val;
+                  break;
+                }
+              }
+            }
+          }
+        }(),
+
+        // 2. Verified Rotten Tomatoes (`烂番茄`) score from cached Baike abstract or Bing snippets
+        () async {
+          final cachedSyn = _titleSynopsisCache[clean] ?? '';
+          if (cachedSyn.isNotEmpty) {
+            final synMatch = RegExp(
+              r'(?:烂番茄(?:新鲜度|指数|好评率|评分)?|新鲜度|Tomatometer|Rotten\s*Tomatoes)\s*[:：为是达]?\s*(\d{1,3})\s*%|(\d{1,3})\s*%\s*(?:的)?(?:烂番茄|新鲜度)',
+              caseSensitive: false,
+            ).firstMatch(cachedSyn);
+            final pct = int.tryParse(
+              synMatch?.group(1) ?? synMatch?.group(2) ?? '',
+            );
+            if (pct != null && pct >= 1 && pct <= 100) {
+              resolvedRt = pct;
+              return;
+            }
+          }
+
+          final yearHint = targetYear != null ? '$targetYear ' : '';
+          final q = Uri.encodeQueryComponent('"$primary" ${yearHint}烂番茄 新鲜度');
+          final html = await _getRatingTextUrl(
+            Uri.parse('https://cn.bing.com/search?q=$q'),
+            headers: {
+              'User-Agent': _desktopChromeUa,
+              'Referer': 'https://cn.bing.com/',
+              'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            },
+            timeout: const Duration(milliseconds: 2400),
+          );
+          if (html != null && html.isNotEmpty) {
+            resolvedRt = extractRtPercentFromBingHtml(
+              html,
+              clean,
+              targetYear: targetYear,
+            );
+          }
+        }(),
+      ]);
+
+      final entry = (douban: resolvedDouban, rt: resolvedRt);
+      while (_ratingsCache.length >= 160) {
+        _ratingsCache.remove(_ratingsCache.keys.first);
+      }
+      _ratingsCache[scoped] = entry;
+      if (resolvedDouban != null || resolvedRt != null) {
+        metadataRevision.value++;
+      }
+      return entry;
+    }().whenComplete(() {
+      _inflightRatings.remove(scoped);
+    });
+
+    _inflightRatings[scoped] = future;
+    return future;
   }
 
   /// Returns cached or fetched series synopsis from Baidu Baike / Bangumi / Douban.
@@ -2114,6 +2495,14 @@ class PosterLoader {
                   .join()
                   .timeout(const Duration(milliseconds: 2200));
               final decoded = jsonDecode(body);
+              final matchedSubject = parseDoubanSuggestSubject(
+                decoded,
+                cleanTitle,
+                year: year.isNotEmpty ? year : (targetYear?.toString() ?? ''),
+              );
+              if (matchedSubject != null) {
+                _doubanSubjectIdCache[scopedKey] = matchedSubject;
+              }
               final matchedUrls = parseDoubanSuggestCoverUrls(
                 decoded,
                 cleanTitle,

@@ -18,6 +18,18 @@ const PROFILES = {
     ua: [0, 21, 2548],
     signKey: [73, 38, 3051]
   },
+  'e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e': {
+    nativeSha: 'fac9e3937d9928e437ebff79bc5164df418a6adb212494ef21c273579b045dcb',
+    mask: 0xb7,
+    methods: {
+      '<init>': 'd491883dce8e8bdbcede7dae9731e25dc4e1c75568b1a7241d5dc2a9d83afaf6',
+      'yq': 'da0daf12bc489a7ff502c0022b30353bceb9d2327f5416faa13887a271e2b24b'
+    },
+    clinit: 'd3a5b53dc5e0400c08c0d3f8b3b34fb9f5e4bc5ac8d45bc2356a245c01244476',
+    count: 726,
+    ua: [0, 21, 2843],
+    signKey: [73, 38, 900]
+  },
   'da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096': {
     nativeSha: 'd5d8adee01e1bdc4c18b445e19ce7c94fb296ca6dce6f18a08786504fc961f01',
     mask: 0x15,

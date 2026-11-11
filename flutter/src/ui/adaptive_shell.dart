@@ -661,6 +661,23 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       );
       return;
     }
+    if (_searchSubscription != null) {
+      _searchEpoch++;
+      final activeSub = _searchSubscription;
+      _searchSubscription = null;
+      unawaited(activeSub!.cancel());
+      if (_searching) {
+        setState(() => _searching = false);
+        _searchSheetListener?.call();
+      }
+    }
+    if (_loadingMore &&
+        _categoryAbort != null &&
+        !_categoryAbort!.isCompleted) {
+      _categoryEpoch++;
+      _categoryAbort!.complete();
+      setState(() => _loadingMore = false);
+    }
     Navigator.of(context)
         .push(
           buildApplePageRoute<void>(
@@ -8608,13 +8625,25 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
     final inPrivacyMode = _privateSessionUnlocked;
     final defaultGroupName = inPrivacyMode ? '隐私分组' : '默认分组';
-    final supported = inPrivacyMode
+    final rawSupported = inPrivacyMode
         ? (_config?.privateSupportedSites ?? const <CmsSite>[])
         : (_config?.publicSupportedSites ?? const <CmsSite>[]);
+    final hasRealSupported = rawSupported.any(
+      (s) => !CspBridge.isPickerHiddenUtilitySite(s),
+    );
+    final supported = hasRealSupported
+        ? rawSupported
+            .where((s) =>
+                !CspBridge.isPickerHiddenUtilitySite(s) ||
+                s.key == _activeSite?.key)
+            .toList()
+        : rawSupported;
     final countSource = supported.isNotEmpty
         ? supported
         : (_config?.sites ?? const <CmsSite>[])
-            .where((s) => inPrivacyMode ? s.isEffectivelyPrivate : !s.isEffectivelyPrivate)
+            .where((s) =>
+                (inPrivacyMode ? s.isEffectivelyPrivate : !s.isEffectivelyPrivate) &&
+                !CspBridge.isPickerHiddenUtilitySite(s))
             .toList();
     final groupCounts = <String, int>{'全部': countSource.length};
     final groups = <String>['全部'];
@@ -8630,7 +8659,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     bool showUnsupported = false;
     final searchCtrl = TextEditingController();
     final plugins = (_config?.pluginOnlySites ?? const <CmsSite>[])
-        .where((s) => inPrivacyMode ? s.isEffectivelyPrivate : !s.isEffectivelyPrivate)
+        .where((s) =>
+            (inPrivacyMode ? s.isEffectivelyPrivate : !s.isEffectivelyPrivate) &&
+            !CspBridge.isPickerHiddenUtilitySite(s))
         .toList();
     final importPrivateButton = CupertinoButton(
       padding: const EdgeInsets.symmetric(horizontal: 6),
@@ -8959,8 +8990,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                                               (showUnsupported ||
                                                       searchQuery
                                                           .trim()
-                                                          .isNotEmpty ||
-                                                      filteredSites.isEmpty)
+                                                          .isNotEmpty)
                                                   ? CupertinoIcons
                                                       .chevron_up
                                                   : CupertinoIcons
@@ -8974,8 +9004,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                                       ),
                                     ),
                                     if (showUnsupported ||
-                                        searchQuery.trim().isNotEmpty ||
-                                        filteredSites.isEmpty)
+                                        searchQuery.trim().isNotEmpty)
                                       AppleGroupedSection(
                                         children: filteredPlugins.map((s) {
                                           return AppleGroupedTile(

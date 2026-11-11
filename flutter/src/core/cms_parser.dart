@@ -1141,7 +1141,21 @@ class CmsParser {
           key = '$key-$i';
           seenKeys.add(key);
         }
-        var extStr = _stringifyExt(item['ext']);
+        var rawItemExt = item['ext'];
+        if (rawItemExt is Map && origin.trim().isNotEmpty) {
+          final normalizedExtMap = Map<dynamic, dynamic>.from(rawItemExt);
+          for (final field in const ['json', 'url', 'rule']) {
+            final val = normalizedExtMap[field];
+            if (val is String) {
+              final trimmedVal = val.trim();
+              if (trimmedVal.startsWith('./') || trimmedVal.startsWith('../')) {
+                normalizedExtMap[field] = resolveUrl(origin, trimmedVal);
+              }
+            }
+          }
+          rawItemExt = normalizedExtMap;
+        }
+        var extStr = _stringifyExt(rawItemExt);
         if (api.toLowerCase() == 'csp_drpy' && item['ext'] is String &&
             !looksLikeScript(extStr) && !extStr.trimLeft().startsWith('{')) {
           extStr = resolveUrl(origin, extStr);
@@ -1699,7 +1713,12 @@ class CmsParser {
     final rawClass = decoded['class'] ??
         (decoded['data'] is List
             ? decoded['data']
-            : (decoded['data'] is Map ? (decoded['data'] as Map)['list'] ?? (decoded['data'] as Map)['class'] : null));
+            : (decoded['data'] is Map
+                ? (decoded['data'] as Map)['list'] ??
+                    (decoded['data'] as Map)['class'] ??
+                    (decoded['data'] as Map)['typelist'] ??
+                    (decoded['data'] as Map)['type_list']
+                : null));
     if (rawClass is! List) return const [];
     final categories = <CmsCategory>[];
     for (final item in rawClass) {
@@ -1742,6 +1761,34 @@ class CmsParser {
     }
     return categories;
   }
+  static double? extractDoubanScoreFromText(String text) {
+    if (text.trim().isEmpty) return null;
+    final m = RegExp(r'豆瓣(?:评分)?\s*[:：★]?\s*([2-9]\.\d|10\.0)\b').firstMatch(text);
+    if (m == null) return null;
+    final v = double.tryParse(m.group(1) ?? '');
+    if (v != null && v >= 2.0 && v <= 10.0) return v;
+    return null;
+  }
+
+  static int? extractRtScoreFromText(String text) {
+    if (text.trim().isEmpty) return null;
+    final m = RegExp(
+      r'(?:烂番茄(?:新鲜度|指数|好评率|评分)?|新鲜度|Tomatometer|Rotten\s*Tomatoes)\s*[:：为是达]?\s*(\d{1,3})\s*%|(\d{1,3})\s*%\s*(?:的)?(?:烂番茄|新鲜度)',
+      caseSensitive: false,
+    ).firstMatch(text);
+    if (m == null) return null;
+    final pct = int.tryParse(m.group(1) ?? m.group(2) ?? '');
+    if (pct != null && pct >= 1 && pct <= 100) return pct;
+    return null;
+  }
+
+  static double? _parseCmsDoubanField(Object? rawField) {
+    if (rawField == null) return null;
+    final v = double.tryParse(rawField.toString().trim());
+    if (v != null && v >= 2.0 && v <= 9.9) return v;
+    return null;
+  }
+
   static CmsListing parseListing(String rawJson) {
     final trimmed = rawJson.trimLeft();
     if (trimmed.startsWith('<')) {
@@ -1749,9 +1796,22 @@ class CmsParser {
     }
     final decoded = jsonDecode(stripJsonComments(rawJson));
     if (decoded is! Map<String, dynamic>) return const CmsListing();
-    final page = int.tryParse((decoded['page'] ?? '1').toString()) ?? 1;
-    final pageCount =
-        int.tryParse((decoded['pagecount'] ?? '1').toString()) ?? 1;
+    final page = int.tryParse((decoded['page'] ??
+                (decoded['data'] is Map ? (decoded['data'] as Map)['page'] : null) ??
+                '1')
+            .toString()) ??
+        1;
+    final total = int.tryParse(
+            '${decoded['data'] is Map ? (decoded['data'] as Map)['total'] ?? '' : ''}') ??
+        0;
+    final limit = int.tryParse(
+            '${decoded['data'] is Map ? (decoded['data'] as Map)['limit'] ?? '' : ''}') ??
+        20;
+    final pageCount = int.tryParse((decoded['pagecount'] ??
+                (decoded['data'] is Map ? (decoded['data'] as Map)['pagecount'] : null) ??
+                (total > 0 && limit > 0 ? '${(total + limit - 1) ~/ limit}' : '1'))
+            .toString()) ??
+        1;
     final dataField = decoded['data'];
     final rawList = decoded['list'] ??
         (dataField is List
@@ -1784,18 +1844,59 @@ class CmsParser {
         playFrom = froms.join(r'$$$');
         playUrl = urls.join(r'$$$');
       }
+      if (playUrl.trim().isEmpty && item['vod_play_list'] != null) {
+        final rawPlayList = item['vod_play_list'];
+        final entries = rawPlayList is List
+            ? rawPlayList
+            : (rawPlayList is Map ? rawPlayList.values : const []);
+        final froms = <String>[];
+        final urls = <String>[];
+        for (final p in entries) {
+          if (p is! Map) continue;
+          String u = (p['url'] ?? '').toString().trim();
+          if (u.isEmpty && p['urls'] is Map) {
+            final segs = <String>[];
+            for (final ep in (p['urls'] as Map).values.whereType<Map>()) {
+              final epUrl = (ep['url'] ?? '').toString().trim();
+              if (epUrl.isEmpty) continue;
+              final epName = (ep['name'] ?? '正片').toString().trim();
+              segs.add('$epName\$$epUrl');
+            }
+            u = segs.join('#');
+          }
+          if (u.isEmpty) continue;
+          final pInfo = p['player_info'];
+          final showName = pInfo is Map
+              ? (pInfo['show'] ?? pInfo['from'] ?? '').toString().trim()
+              : '';
+          froms.add(showName.isNotEmpty
+              ? showName
+              : (p['from'] ?? p['name'] ?? '默认线路').toString().trim());
+          urls.add(u);
+        }
+        playFrom = froms.join(r'$$$');
+        playUrl = urls.join(r'$$$');
+      }
       if (id.isEmpty && title.isEmpty) continue;
+      final remarks = (item['vod_remarks'] ?? '').toString().trim();
+      final desc = _cleanHtml((item['vod_content'] ?? '').toString());
+      final combinedScoreText = '$remarks $desc';
+      final doubanScore = _parseCmsDoubanField(item['vod_douban_score']) ??
+          extractDoubanScoreFromText(combinedScoreText);
+      final rtScore = extractRtScoreFromText(combinedScoreText);
       videos.add(
         CmsVideo(
           id: id,
           title: title,
           poster: _cleanPosterUrl((item['vod_pic'] ?? '').toString().trim()),
-          remarks: (item['vod_remarks'] ?? '').toString().trim(),
+          remarks: remarks,
           year: (item['vod_year'] ?? '').toString().trim(),
           area: (item['vod_area'] ?? '').toString().trim(),
           actor: (item['vod_actor'] ?? '').toString().trim(),
-          description: _cleanHtml((item['vod_content'] ?? '').toString()),
+          description: desc,
           tag: (item['vod_tag'] ?? '').toString().trim(),
+          doubanScore: doubanScore,
+          rtScore: rtScore,
           sourceWarnings: item['wogg_share_errors'] is List
               ? (item['wogg_share_errors'] as List).whereType<Map>()
                   .map((error) => '${error['line'] ?? '网盘线路'}：${error['message'] ?? '读取失败'}').toList()
@@ -1989,16 +2090,22 @@ class CmsParser {
           urlParts.add(body);
         }
       }
+      final xmlRemarks = _extractXmlTag(block, 'note');
+      final xmlDesc = _cleanHtml(_extractXmlTag(block, 'des'));
+      final xmlScoreText = '$xmlRemarks $xmlDesc';
       videos.add(
         CmsVideo(
           id: id,
           title: title,
           poster: _cleanPosterUrl(_extractXmlTag(block, 'pic')),
-          remarks: _extractXmlTag(block, 'note'),
+          remarks: xmlRemarks,
           year: _extractXmlTag(block, 'year'),
           area: _extractXmlTag(block, 'area'),
           actor: _extractXmlTag(block, 'actor'),
-          description: _cleanHtml(_extractXmlTag(block, 'des')),
+          description: xmlDesc,
+          doubanScore: _parseCmsDoubanField(_extractXmlTag(block, 'douban')) ??
+              extractDoubanScoreFromText(xmlScoreText),
+          rtScore: extractRtScoreFromText(xmlScoreText),
           lines: _parseLines(fromParts.join(r'$$$'), urlParts.join(r'$$$')),
         ),
       );

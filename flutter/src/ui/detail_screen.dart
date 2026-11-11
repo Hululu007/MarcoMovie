@@ -115,10 +115,47 @@ class _DetailScreenState extends State<DetailScreen> {
   final ValueNotifier<double> _scrollOffset = ValueNotifier<double>(0.0);
   Color? _posterAmbientColor;
   String _externalSynopsis = '';
+  double? _resolvedDoubanScore;
+  int? _resolvedRtScore;
   int _lastMetadataSnapshotSig = 0;
   Completer<void>? _detailAbort;
   Completer<void>? _seasonAbort;
   int _detailEpoch = 0;
+
+  static bool _canShowInitialLinesImmediately(CmsSite site, CmsVideo video) {
+    if (!video.lines.any((l) => l.episodes.isNotEmpty)) return false;
+    if (WoggSource.supports(site) ||
+        CspBridge.isDoubanSite(site) ||
+        CspBridge.isMyDriveSite(site)) {
+      return false;
+    }
+    if (site.isScriptOrJarApi) {
+      return video.lines.every(
+        (l) => l.episodes.every(
+          (e) => !e.url.startsWith('mmshare://') && e.needsSourceResolution,
+        ),
+      );
+    }
+    return true;
+  }
+
+  void _seedCachedExternalFields() {
+    if (_activeSite.isEffectivelyPrivate || _activeSite.isEmby) {
+      _resolvedDoubanScore = null;
+      _resolvedRtScore = null;
+      return;
+    }
+    final syn = PosterLoader.peekSeriesSynopsis(_video.title);
+    if (syn.isNotEmpty) {
+      _externalSynopsis = syn;
+    }
+    final cachedRatings = PosterLoader.peekRatings(
+      _video.title,
+      year: _video.year,
+    );
+    _resolvedDoubanScore = cachedRatings?.douban;
+    _resolvedRtScore = cachedRatings?.rt;
+  }
 
   @override
   void initState() {
@@ -140,6 +177,7 @@ class _DetailScreenState extends State<DetailScreen> {
       _video.id,
       forPrivate: _activeSite.isEffectivelyPrivate,
     );
+    _seedCachedExternalFields();
     PosterLoader.metadataRevision.addListener(_onExternalMetadataRevision);
     final immediateBytes = PosterLoader.peekMemory(
       _video.poster,
@@ -154,7 +192,10 @@ class _DetailScreenState extends State<DetailScreen> {
       }
     }
     _loadDetail();
-    _warmExternalMetadata(_video.title);
+    _warmRatings(_video.title, year: _video.year);
+    if (!_loading) {
+      _warmExternalMetadata(_video.title);
+    }
   }
 
   String get _publicLookupTitle =>
@@ -178,11 +219,22 @@ class _DetailScreenState extends State<DetailScreen> {
     final syn = PosterLoader.peekSeriesSynopsis(_video.title);
     final epMetaLen = PosterLoader.peekAllEpisodeMeta(_video.title).length;
     final capLen = PosterLoader.peekSeriesEpisodeCaptions(_video.title).length;
-    final sig = Object.hash(syn, epMetaLen, capLen);
+    final ratings = PosterLoader.peekRatings(_video.title, year: _video.year);
+    final sig = Object.hash(
+      syn,
+      epMetaLen,
+      capLen,
+      ratings?.douban,
+      ratings?.rt,
+    );
     if (sig == _lastMetadataSnapshotSig) return;
     _lastMetadataSnapshotSig = sig;
     if (syn.isNotEmpty && syn != _externalSynopsis) {
       _externalSynopsis = syn;
+    }
+    if (ratings != null) {
+      _resolvedDoubanScore = ratings.douban ?? _resolvedDoubanScore;
+      _resolvedRtScore = ratings.rt ?? _resolvedRtScore;
     }
     setState(() {});
   }
@@ -229,6 +281,22 @@ class _DetailScreenState extends State<DetailScreen> {
     return false;
   }
 
+  Future<void> _warmRatings(String title, {String year = ''}) async {
+    if (_activeSite.isEmby || _activeSite.isEffectivelyPrivate) return;
+    final trimmed = title.trim();
+    if (trimmed.isEmpty) return;
+    final epoch = _detailEpoch;
+    final ratings = await PosterLoader.fetchRatings(trimmed, year: year);
+    if (!mounted || epoch != _detailEpoch) return;
+    if ((ratings.douban != null && ratings.douban != _resolvedDoubanScore) ||
+        (ratings.rt != null && ratings.rt != _resolvedRtScore)) {
+      setState(() {
+        _resolvedDoubanScore = ratings.douban ?? _resolvedDoubanScore;
+        _resolvedRtScore = ratings.rt ?? _resolvedRtScore;
+      });
+    }
+  }
+
   Future<void> _warmExternalMetadata(String title) async {
     if (_activeSite.isEmby || _activeSite.isEffectivelyPrivate) return;
     if (title.trim().isEmpty) return;
@@ -254,8 +322,31 @@ class _DetailScreenState extends State<DetailScreen> {
     final abort = _detailAbort = Completer<void>();
     final targetSite = _activeSite;
     final targetVideo = _video;
+    final showImmediately = _canShowInitialLinesImmediately(
+      targetSite,
+      targetVideo,
+    );
+    int initialImmediateLine = _selectedLine;
+    if (showImmediately && targetVideo.lines.isNotEmpty) {
+      final immediateBookmark = _findBookmark(targetVideo);
+      if (immediateBookmark != null) {
+        final found = targetVideo.lines.indexWhere(
+          (l) => l.name == immediateBookmark.line,
+        );
+        initialImmediateLine = found >= 0
+            ? found
+            : widget.storage.pickRecommendedLineIndex(targetVideo.lines);
+      } else {
+        initialImmediateLine = widget.storage.pickRecommendedLineIndex(
+          targetVideo.lines,
+        );
+      }
+    }
     setState(() {
-      _loading = true;
+      _loading = !showImmediately;
+      if (showImmediately) {
+        _selectedLine = initialImmediateLine;
+      }
       _error = null;
       _errorCause = null;
       _discoveringSeasons = false;
@@ -291,6 +382,7 @@ class _DetailScreenState extends State<DetailScreen> {
       });
       _mergeSeasonCandidates(_activeSite, [detailed]);
       if (detailed.title.trim().isNotEmpty) {
+        _warmRatings(detailed.title, year: detailed.year);
         _warmExternalMetadata(detailed.title);
         unawaited(_discoverRelatedSeasons(detailed.title));
       }
@@ -299,8 +391,10 @@ class _DetailScreenState extends State<DetailScreen> {
           targetSite != _activeSite || targetVideo.id != _video.id) return;
       setState(() {
         _loading = false;
-        _error = '读取详情失败：$e';
-        _errorCause = e;
+        if (!showImmediately || _video.lines.isEmpty) {
+          _error = '读取详情失败：$e';
+          _errorCause = e;
+        }
       });
     }
   }
@@ -321,6 +415,7 @@ class _DetailScreenState extends State<DetailScreen> {
     final epoch = _detailEpoch;
     if (site.isEmby) return;
     final info = CmsParser.parseSeriesSeasonInfo(title);
+    if (!info.hasExplicitSeason) return;
     final base = info.baseTitle.trim();
     if (base.isEmpty) return;
     _mergeSeasonCandidates(site, [_video]);
@@ -459,6 +554,7 @@ class _DetailScreenState extends State<DetailScreen> {
       _selectedPage = 0;
       _selectedInLineSeason = null;
       _externalSynopsis = '';
+      _seedCachedExternalFields();
       _isFavorite = widget.storage.isFavorite(
         _activeSite.key,
         _video.id,
@@ -479,7 +575,10 @@ class _DetailScreenState extends State<DetailScreen> {
       }
     }
     _loadDetail();
-    _warmExternalMetadata(_video.title);
+    _warmRatings(_video.title, year: _video.year);
+    if (!_loading) {
+      _warmExternalMetadata(_video.title);
+    }
   }
 
   String _currentSeasonLabel([CmsLine? activeLine]) {
@@ -1972,60 +2071,117 @@ class _DetailScreenState extends State<DetailScreen> {
                 ),
               ],
               const SizedBox(height: 10),
-              Builder(
-                builder: (context) {
-                  final rawText = '${_video.remarks} ${_video.description}';
-                  final scoreMatch = RegExp(
-                    r'(?:(?:豆瓣|评分|IMDB|TMDB)\s*[:：]?\s*([1-9]\.\d)\b(?!\s*声道)|\b([1-9]\.\d)\s*分(?!钟))',
-                    caseSensitive: false,
-                  ).firstMatch(rawText);
-                  final authenticScore =
-                      scoreMatch?.group(1) ?? scoreMatch?.group(2);
-                  return Wrap(
-                    alignment: WrapAlignment.center,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 8,
-                    runSpacing: 6,
-                    children: [
-                      if (authenticScore != null)
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 3,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0x3330D158),
-                            borderRadius: BorderRadius.circular(6),
-                            border: Border.all(
-                              color: const Color(0x6630D158),
-                              width: 0.6,
-                            ),
-                          ),
-                          child: Text(
-                            '评分 ★ $authenticScore',
-                            style: const TextStyle(
-                              color: Color(0xFF4AE06E),
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      Text(
-                        _activeSite.name,
-                        style: const TextStyle(
-                          color: Color(0xCCFFFFFF),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  );
-                },
-              ),
+              _buildRatingsAndSiteWrap(alignment: WrapAlignment.center),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  double? _effectiveDoubanScore() {
+    final direct = _video.doubanScore;
+    if (direct != null && direct >= 2.0 && direct <= 10.0) return direct;
+    if (!_activeSite.isEffectivelyPrivate) {
+      final resolved = _resolvedDoubanScore;
+      if (resolved != null && resolved >= 2.0 && resolved <= 10.0) {
+        return resolved;
+      }
+    }
+    final textBlob = _activeSite.isEffectivelyPrivate
+        ? '${_video.remarks} ${_video.description}'
+        : '${_video.remarks} ${_video.description} $_externalSynopsis';
+    return CmsParser.extractDoubanScoreFromText(textBlob);
+  }
+
+  int? _effectiveRtScore() {
+    final direct = _video.rtScore;
+    if (direct != null && direct >= 1 && direct <= 100) return direct;
+    if (!_activeSite.isEffectivelyPrivate) {
+      final resolved = _resolvedRtScore;
+      if (resolved != null && resolved >= 1 && resolved <= 100) {
+        return resolved;
+      }
+    }
+    final textBlob = _activeSite.isEffectivelyPrivate
+        ? '${_video.remarks} ${_video.description}'
+        : '${_video.remarks} ${_video.description} $_externalSynopsis';
+    return CmsParser.extractRtScoreFromText(textBlob);
+  }
+
+  Widget _buildRatingsAndSiteWrap({required WrapAlignment alignment}) {
+    final doubanScore = _effectiveDoubanScore();
+    final rtPercent = _effectiveRtScore();
+    final siteName = _activeSite.name.trim();
+    return Wrap(
+      alignment: alignment,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: 8,
+      runSpacing: 6,
+      children: [
+        if (doubanScore != null && doubanScore >= 2.0 && doubanScore <= 10.0)
+          Container(
+            key: const ValueKey('detail-douban-badge'),
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+            decoration: BoxDecoration(
+              color: const Color(0x3800B51D),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: const Color(0x6634D399),
+                width: 0.8,
+              ),
+            ),
+            child: Text(
+              '豆瓣 ★ ${doubanScore.toStringAsFixed(1)}',
+              style: const TextStyle(
+                color: Color(0xFF6EE7B7),
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        if (rtPercent != null && rtPercent >= 1 && rtPercent <= 100)
+          Container(
+            key: const ValueKey('detail-rt-badge'),
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+            decoration: BoxDecoration(
+              color: const Color(0x38FA320A),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: const Color(0x66FF6B4A),
+                width: 0.8,
+              ),
+            ),
+            child: Text(
+              '烂番茄 $rtPercent%',
+              style: const TextStyle(
+                color: Color(0xFFFFB4A2),
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        if (siteName.isNotEmpty)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+            decoration: BoxDecoration(
+              color: const Color(0x26FFFFFF),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: const Color(0x38FFFFFF),
+                width: 0.8,
+              ),
+            ),
+            child: Text(
+              siteName,
+              style: const TextStyle(
+                color: Color(0xE6FFFFFF),
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+      ],
     );
   }
 
@@ -3243,6 +3399,8 @@ class _DetailScreenState extends State<DetailScreen> {
               ),
           ],
         ),
+        const SizedBox(height: 10),
+        _buildRatingsAndSiteWrap(alignment: WrapAlignment.start),
         if (desc.isNotEmpty || cast.isNotEmpty) ...[
           const SizedBox(height: 12),
           GestureDetector(

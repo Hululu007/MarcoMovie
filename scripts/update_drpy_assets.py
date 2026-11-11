@@ -12,7 +12,9 @@ NAMES = ['drpy-worker.cjs', 'drpy-http.cjs', 'drpy-schema.cjs', 'drpy-core.js',
          'drpy-appgz-adapter.cjs', 'drpy-rsa.cjs',
          'drpy-t4-extractor.cjs', 'drpy-t4-adapter.cjs',
          'drpy-apptt-extractor.cjs', 'drpy-apptt-adapter.cjs',
-         'drpy-fy-extractor.cjs', 'drpy-fy-adapter.cjs']
+         'drpy-fy-extractor.cjs', 'drpy-fy-adapter.cjs',
+         'drpy-fty-extractor.cjs', 'drpy-fty-vod-adapter.cjs',
+         'drpy-fty-live-adapter.cjs', 'drpy-fty-pan-adapter.cjs']
 
 
 def update(check=False):

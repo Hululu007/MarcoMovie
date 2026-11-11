@@ -262,7 +262,8 @@ class _SourceWorker {
   final List<Object?> configuration;
   final bool catDetails;
   Future<SendPort>? _ready;
-  Future<void> _tail = Future.value();
+  bool _active = false;
+  final List<({bool urgent, Completer<void> turn})> _waiters = [];
   Future<void>? _closing;
   final _exited = Completer<void>();
   final _exitEvents = StreamController<void>.broadcast(sync: true);
@@ -363,11 +364,38 @@ class _SourceWorker {
     List<Object?> arguments,
     Duration budget,
     Completer<void>? cancellation,
-  ) {
-    if (_closed) return Future.error(StateError('脚本会话已关闭'));
-    if (budget <= Duration.zero) return Future.error(ArgumentError('budget'));
+  ) async {
+    if (_closed) throw StateError('脚本会话已关闭');
+    if (budget <= Duration.zero) throw ArgumentError('budget');
     _pending++;
-    final task = _tail.then((_) async {
+    final urgent = method == 'detail' || method == 'play' || method == 'proxy';
+    var ownsSlot = false;
+    try {
+      if (_active) {
+        final turn = Completer<void>();
+        final waiter = (urgent: urgent, turn: turn);
+        if (urgent) {
+          final insertIdx = _waiters.indexWhere((w) => !w.urgent);
+          if (insertIdx < 0) {
+            _waiters.add(waiter);
+          } else {
+            _waiters.insert(insertIdx, waiter);
+          }
+        } else {
+          _waiters.add(waiter);
+        }
+        await Future.any([
+          turn.future,
+          if (cancellation != null) cancellation.future,
+        ]);
+        if (!turn.isCompleted) {
+          _waiters.remove(waiter);
+          throw StateError('脚本操作已取消');
+        }
+      } else {
+        _active = true;
+      }
+      ownsSlot = true;
       if (_closed || cancellation?.isCompleted == true) {
         throw StateError('脚本操作已取消');
       }
@@ -408,12 +436,24 @@ class _SourceWorker {
         finished = true;
         reply.close();
       }
-    });
-    _tail = task.then<void>((_) {}, onError: (Object _) {}).whenComplete(() {
+    } finally {
+      if (ownsSlot) {
+        var handedOff = false;
+        while (_waiters.isNotEmpty) {
+          final next = _waiters.removeAt(0);
+          if (!next.turn.isCompleted) {
+            next.turn.complete();
+            handedOff = true;
+            break;
+          }
+        }
+        if (!handedOff) {
+          _active = false;
+        }
+      }
       _pending--;
       if (!busy) JsSourceHost._notifyCapacity();
-    });
-    return task;
+    }
   }
 
   Future<void> close() {

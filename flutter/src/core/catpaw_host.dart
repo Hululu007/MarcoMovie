@@ -33,6 +33,7 @@ class CatPawHost {
   bool _needsReset = false;
   Directory? _root;
   String? _lastSyncedPanJson;
+  final _verifiedDrpySizes = <String, int>{};
   final _activeDrpy = <String, int>{};
   final _releasingDrpy = <String, Future<void>>{};
   Future<void> _bootstrapQueue = Future<void>.value();
@@ -408,26 +409,62 @@ class CatPawHost {
     Completer<void>? cancellation,
   }) async {
     _checkCancellation(cancellation);
-    if (!const [
-          'dm84-v1',
-          'auete-v1',
-          'bttwoo-v1',
-          'appgz-v1',
-          't4-v1',
-          'apptt-v1',
-          'fy-v1',
-        ].contains(adapter) ||
+    const baseAdapters = [
+      'dm84-v1',
+      'auete-v1',
+      'bttwoo-v1',
+      'appgz-v1',
+      't4-v1',
+      'apptt-v1',
+      'fy-v1',
+    ];
+    const ftyAdapters = [
+      'jpys-v1',
+      'jpj-v1',
+      'nmyswv-v1',
+      'hmys-v1',
+      'app99-v1',
+      'appsx-v1',
+      'newcz-v1',
+      'libvio-v1',
+      'ygp-v1',
+      'kanqiu-v1',
+      'doubao-v1',
+      'livegz-v1',
+      'alllive-v1',
+      'tingshu275-v1',
+      'yueting-v1',
+      'seedhub-v1',
+      'szps-v1',
+      'ypanso-v1',
+      'bpanso-v1',
+      'kkss-v1',
+      'uuss-v1',
+    ];
+    final isFty = ftyAdapters.contains(adapter);
+    if ((!isFty && !baseAdapters.contains(adapter)) ||
         bytes.isEmpty ||
         bytes.length > _maxBundleBytes ||
         bytes.any((b) => b < 0 || b > 255)) {
       throw const FormatException('插件适配器或文件大小无效');
     }
-    final needsExtension = adapter == 't4-v1' || adapter == 'apptt-v1';
-    if (needsExtension
-        ? extension == null ||
-              extension.trim().isEmpty ||
-              utf8.encode(extension).length > 16 * 1024
-        : extension != null) {
+    final needsExtension = const [
+      't4-v1',
+      'apptt-v1',
+      'app99-v1',
+      'appsx-v1',
+    ].contains(adapter);
+    if (needsExtension) {
+      if (extension == null ||
+          extension.trim().isEmpty ||
+          utf8.encode(extension).length > 16 * 1024) {
+        throw const FormatException('插件扩展配置无效');
+      }
+    } else if (isFty) {
+      if (extension != null && utf8.encode(extension).length > 16 * 1024) {
+        throw const FormatException('插件扩展配置无效');
+      }
+    } else if (extension != null) {
       throw const FormatException('插件扩展配置无效');
     }
     final artifact = Uint8List.fromList(bytes);
@@ -743,18 +780,25 @@ class CatPawHost {
     _checkCancellation(cancellation);
     final drpy = File('${root.path}/${logical.host}/drpy.json');
     if (await drpy.exists()) {
+      final drpyLen = await drpy.length();
       if (!const ['/api/drpy', '/_release', '/proxy'].contains(logical.path) ||
           (logical.hasQuery && logical.path != '/proxy') ||
           logical.hasFragment ||
-          await drpy.length() > _maxBundleBytes) {
+          drpyLen > _maxBundleBytes) {
         throw const FormatException('DRPY 本机地址无效');
       }
-      final bytes = await drpy.readAsBytes();
-      _checkCancellation(cancellation);
-      if (sha256.convert(bytes).toString() != logical.host) {
-        throw const FormatException('DRPY 本机规则包校验失败');
+      if (_verifiedDrpySizes[logical.host] != drpyLen) {
+        final bytes = await drpy.readAsBytes();
+        _checkCancellation(cancellation);
+        if (sha256.convert(bytes).toString() != logical.host) {
+          throw const FormatException('DRPY 本机规则包校验失败');
+        }
+        _drpyManifest(bytes);
+        if (_verifiedDrpySizes.length >= 128) {
+          _verifiedDrpySizes.remove(_verifiedDrpySizes.keys.first);
+        }
+        _verifiedDrpySizes[logical.host] = drpyLen;
       }
-      _drpyManifest(bytes);
     } else if (!await File('${root.path}/${logical.host}/index.cjs').exists()) {
       throw StateError('此设备没有对应的 CatPaw 服务包，请重新导入原订阅');
     } else if (logical.path.startsWith('/api/spider/')) {

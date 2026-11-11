@@ -48,11 +48,45 @@ class GuardSource {
     checkCancelled();
     final adapter = CspBridge.guardAdapterFor(site);
     if (adapter == null) throw const FormatException('此插件没有已审阅的移植适配器');
-    final needsExtension = adapter == 't4-v1' || adapter == 'apptt-v1';
+    const requiredExtAdapters = {
+      't4-v1',
+      'apptt-v1',
+      'app99-v1',
+      'appsx-v1',
+    };
+    const optionalExtAdapters = {
+      'jpys-v1',
+      'jpj-v1',
+      'nmyswv-v1',
+      'hmys-v1',
+      'newcz-v1',
+      'libvio-v1',
+      'ygp-v1',
+      'kanqiu-v1',
+      'doubao-v1',
+      'livegz-v1',
+      'alllive-v1',
+      'tingshu275-v1',
+      'yueting-v1',
+      'seedhub-v1',
+      'szps-v1',
+      'ypanso-v1',
+      'bpanso-v1',
+      'kkss-v1',
+      'uuss-v1',
+    };
+    final needsExtension = requiredExtAdapters.contains(adapter);
+    final optionalExtension = optionalExtAdapters.contains(adapter);
     if (needsExtension &&
         (site.ext.trim().isEmpty || utf8.encode(site.ext).length > 16 * 1024)) {
       throw const FormatException('此插件需要订阅中的完整扩展配置');
     }
+    if (optionalExtension && utf8.encode(site.ext).length > 16 * 1024) {
+      throw const FormatException('此插件扩展配置超过上限');
+    }
+    final forwardedExtension = needsExtension
+        ? site.ext
+        : (optionalExtension && site.ext.trim().isNotEmpty ? site.ext : null);
     if (adapter == 'auete-v1' || adapter == 'bttwoo-v1') {
       Object? extension;
       try {
@@ -77,7 +111,7 @@ class GuardSource {
               site.isEffectivelyPrivate,
               site.pluginReference,
               site.headers,
-              if (needsExtension) site.ext,
+              if (forwardedExtension != null) forwardedExtension,
             ]),
           ),
         )
@@ -141,7 +175,7 @@ class GuardSource {
           final generated = await host.bootstrapGuard(
             bytes,
             adapter: adapter,
-            extension: needsExtension ? site.ext : null,
+            extension: forwardedExtension,
             cancellation: sharedCancel,
           );
           if (sharedCancel.isCompleted) {
@@ -150,9 +184,9 @@ class GuardSource {
           final resolved = (
             rule: generated['rule'] as String,
             origin: generated['origin'] as String,
-            expires: DateTime.now().add(const Duration(minutes: 5)),
+            expires: DateTime.now().add(const Duration(minutes: 30)),
           );
-          if (_cache.length >= 32) _cache.remove(_cache.keys.first);
+          if (_cache.length >= 128) _cache.remove(_cache.keys.first);
           _cache[key] = resolved;
           return resolved;
         }();

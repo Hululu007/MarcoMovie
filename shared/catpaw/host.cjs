@@ -90,11 +90,19 @@ if (!isMainThread) {
         task.cancel = failed;
         req.on('data', data); req.once('end', end); req.once('error', failed);
       });
+      const ftyAdapters = ['jpys-v1', 'jpj-v1', 'nmyswv-v1', 'hmys-v1', 'app99-v1', 'appsx-v1', 'newcz-v1', 'libvio-v1', 'ygp-v1', 'kanqiu-v1', 'doubao-v1', 'livegz-v1', 'alllive-v1', 'tingshu275-v1', 'yueting-v1', 'seedhub-v1', 'szps-v1', 'ypanso-v1', 'bpanso-v1', 'kkss-v1', 'uuss-v1'];
       const needsExtension = ['t4-v1', 'apptt-v1'].includes(body?.adapter);
-      if (!body || Array.isArray(body) || Object.keys(body).sort().join(',') !==
-          (needsExtension ? 'adapter,artifactHash,extension,version' : 'adapter,artifactHash,version') ||
-          body.version !== 1 || !['dm84-v1', 'auete-v1', 'bttwoo-v1', 'appgz-v1', 't4-v1', 'apptt-v1', 'fy-v1'].includes(body.adapter) || typeof body.artifactHash !== 'string' || !HASH.test(body.artifactHash) ||
-          (needsExtension && (typeof body.extension !== 'string' || !body.extension.trim() || Buffer.byteLength(body.extension) > 16 * 1024))) throw Error('bootstrap_request');
+      const optionalExtension = ftyAdapters.includes(body?.adapter);
+      const bodyKeys = body && !Array.isArray(body) ? Object.keys(body).sort().join(',') : '';
+      const validKeys = needsExtension
+        ? bodyKeys === 'adapter,artifactHash,extension,version'
+        : optionalExtension
+          ? (bodyKeys === 'adapter,artifactHash,version' || bodyKeys === 'adapter,artifactHash,extension,version')
+          : bodyKeys === 'adapter,artifactHash,version';
+      if (!validKeys ||
+          body.version !== 1 || (!optionalExtension && !['dm84-v1', 'auete-v1', 'bttwoo-v1', 'appgz-v1', 't4-v1', 'apptt-v1', 'fy-v1'].includes(body.adapter)) || typeof body.artifactHash !== 'string' || !HASH.test(body.artifactHash) ||
+          (needsExtension && (typeof body.extension !== 'string' || !body.extension.trim() || Buffer.byteLength(body.extension) > 16 * 1024)) ||
+          (optionalExtension && Object.prototype.hasOwnProperty.call(body, 'extension') && (typeof body.extension !== 'string' || Buffer.byteLength(body.extension) > 16 * 1024))) throw Error('bootstrap_request');
       if (res.destroyed || closing || resetting) throw Error('bootstrap_cancelled');
       const imports = path.join(root, 'imports');
       try { if (fs.lstatSync(imports).isSymbolicLink() || !fs.lstatSync(imports).isDirectory()) throw Error(); }

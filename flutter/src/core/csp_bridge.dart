@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'cms_parser.dart';
+import 'csp_rule_engines.dart';
 import 'trailer_source.dart';
 import 'models.dart';
 import 'wogg_source.dart';
@@ -48,6 +49,17 @@ class CspBridge {
     return false;
   }
 
+  static bool isPickerHiddenUtilitySite(CmsSite site) {
+    final lowerKey = site.key.trim().toLowerCase();
+    final lowerApi = site.api.trim().toLowerCase();
+    final name = site.name.trim();
+    return lowerKey == 'cc' ||
+        lowerKey == 'push_agent' ||
+        lowerApi.startsWith('csp_push') ||
+        name.contains('请勿信') ||
+        isBannerNoticeSite(site);
+  }
+
   static String? guardAdapterFor(CmsSite site) => site.type != 3 ? null : const {
     'csp_dm84guard': 'dm84-v1',
     'csp_dm84': 'dm84-v1',
@@ -63,6 +75,48 @@ class CspBridge {
     'csp_apptt': 'apptt-v1',
     'csp_fyguard': 'fy-v1',
     'csp_fy': 'fy-v1',
+    'csp_jpysguard': 'jpys-v1',
+    'csp_jpys': 'jpys-v1',
+    'csp_jpjguard': 'jpj-v1',
+    'csp_jpj': 'jpj-v1',
+    'csp_nmyswvguard': 'nmyswv-v1',
+    'csp_nmyswv': 'nmyswv-v1',
+    'csp_hmysguard': 'hmys-v1',
+    'csp_hmys': 'hmys-v1',
+    'csp_app99guard': 'app99-v1',
+    'csp_app99': 'app99-v1',
+    'csp_appsxguard': 'appsx-v1',
+    'csp_appsx': 'appsx-v1',
+    'csp_newczguard': 'newcz-v1',
+    'csp_newcz': 'newcz-v1',
+    'csp_libvioguard': 'libvio-v1',
+    'csp_libvio': 'libvio-v1',
+    'csp_ygpguard': 'ygp-v1',
+    'csp_ygp': 'ygp-v1',
+    'csp_kanqiuguard': 'kanqiu-v1',
+    'csp_kanqiu': 'kanqiu-v1',
+    'csp_doubaoguard': 'doubao-v1',
+    'csp_doubao': 'doubao-v1',
+    'csp_livegzguard': 'livegz-v1',
+    'csp_livegz': 'livegz-v1',
+    'csp_allliveguard': 'alllive-v1',
+    'csp_alllive': 'alllive-v1',
+    'csp_tingshu275guard': 'tingshu275-v1',
+    'csp_tingshu275': 'tingshu275-v1',
+    'csp_yuetingguard': 'yueting-v1',
+    'csp_yueting': 'yueting-v1',
+    'csp_seedhubguard': 'seedhub-v1',
+    'csp_seedhub': 'seedhub-v1',
+    'csp_s_zpsguard': 'szps-v1',
+    'csp_s_zps': 'szps-v1',
+    'csp_ypansoguard': 'ypanso-v1',
+    'csp_ypanso': 'ypanso-v1',
+    'csp_bpansoguard': 'bpanso-v1',
+    'csp_bpanso': 'bpanso-v1',
+    'csp_kkssguard': 'kkss-v1',
+    'csp_kkss': 'kkss-v1',
+    'csp_uussguard': 'uuss-v1',
+    'csp_uuss': 'uuss-v1',
   }[site.api.toLowerCase()];
 
   static bool hasAdapter(CmsSite site) => WoggSource.supports(site) || (guardAdapterFor(site) != null && site.pluginReference.trim().isNotEmpty) || site.isDrpySource || site.isRemoteScriptSource || site.isJavaScriptSource || site.isPythonSource || TrailerSource.matches(site) || hasBuiltinAdapter(site);
@@ -80,7 +134,7 @@ class CspBridge {
               isBannerNoticeSite(site)));
 
   static bool hasBuiltinAdapter(CmsSite site) =>
-      !site.api.startsWith('csp_Local') && (isDoubanSite(site) || isMyDriveSite(site) || isBiliSite(site) ||
+      !site.api.startsWith('csp_Local') && (CspRuleEngines.supports(site) || isDoubanSite(site) || isMyDriveSite(site) || isBiliSite(site) ||
       isTuxiaobeiSite(site) || isFirstAidSite(site) || isHuyaSite(site) ||
       isDouyuSite(site) || backendsForSite(site).isNotEmpty);
 
@@ -298,7 +352,8 @@ class CspBridge {
   /// never permission to substitute another provider or reuse its video IDs.
   static List<({String name, String api})> backendsForSite(CmsSite site) {
     // Non-MacCMS HTML scrapers / Guard adapters are handled by their own adapters.
-    if (guardAdapterFor(site) != null ||
+    if ((guardAdapterFor(site) != null && site.pluginReference.trim().isNotEmpty) ||
+        CspRuleEngines.supports(site) ||
         isNetdiskSite(site) ||
         isBiliSite(site) ||
         isDoubanSite(site) ||
@@ -377,6 +432,9 @@ class CspBridge {
     CspHttpTextFetcher fetchText,
   ) async {
     if (TrailerSource.matches(site)) return ([TrailerSource.category], await TrailerSource.list(1, '', fetchText));
+    if (CspRuleEngines.supports(site)) {
+      return CspRuleEngines.fetchHome(site, fetchText);
+    }
     if (isDoubanSite(site)) {
       return _fetchDoubanHome(fetchText);
     }
@@ -407,8 +465,12 @@ class CspBridge {
     int page,
     CspHttpTextFetcher fetchText, {
     List<String> childIds = const [],
+    CmsFilter? filter,
   }) async {
     if (TrailerSource.matches(site)) return TrailerSource.list(page, '', fetchText);
+    if (CspRuleEngines.supports(site)) {
+      return CspRuleEngines.fetchCategory(site, categoryId, page, fetchText, filter: filter);
+    }
     if (isDoubanSite(site)) {
       return _fetchDoubanCategory(categoryId, page, fetchText);
     }
@@ -466,6 +528,9 @@ class CspBridge {
     CspHttpTextFetcher fetchText,
   ) async {
     if (TrailerSource.matches(site)) return TrailerSource.list(page, keyword, fetchText);
+    if (CspRuleEngines.supports(site)) {
+      return CspRuleEngines.fetchSearch(site, keyword, page, fetchText);
+    }
     if (isDoubanSite(site) || isMyDriveSite(site)) {
       return const CmsListing();
     }
@@ -488,6 +553,9 @@ class CspBridge {
     CspHttpTextFetcher fetchText,
   ) async {
     if (TrailerSource.matches(site)) return TrailerSource.detail(fallback, fetchText);
+    if (CspRuleEngines.supports(site)) {
+      return CspRuleEngines.fetchDetail(site, fallback, fetchText);
+    }
     if (isTuxiaobeiSite(site)) {
       final cleanId = fallback.id.contains(r'$')
           ? fallback.id.split(r'$').last.split('@@').first
@@ -567,9 +635,12 @@ class CspBridge {
     // A detail ID belongs to one backend. Never try the same number at another
     // service, and never merge same-title search results into these lines.
     final isAppV2 = _isAppV2Endpoint(backend.api);
+    final isAppV1Vod = _isAppV1VodEndpoint(backend.api);
     final uri = isAppV2
         ? _configuredUri(backend.api, {'id': fallback.id}, appPath: 'video_detail')
-        : _configuredUri(backend.api, {'ac': 'detail', 'ids': fallback.id});
+        : isAppV1Vod
+            ? _configuredUri(backend.api, {'vod_id': fallback.id}, appPath: 'detail')
+            : _configuredUri(backend.api, {'ac': 'detail', 'ids': fallback.id});
     final raw = await fetchText(uri.toString(), headers: site.headers);
     final listing = CmsParser.parseListing(raw);
     if (listing.videos.isEmpty) return _withoutLines(fallback);
@@ -584,6 +655,8 @@ class CspBridge {
       actor: v.actor.isEmpty ? fallback.actor : v.actor,
       description: v.description.isEmpty ? fallback.description : v.description,
       tag: v.tag.isEmpty ? fallback.tag : v.tag,
+      doubanScore: v.doubanScore ?? fallback.doubanScore,
+      rtScore: v.rtScore ?? fallback.rtScore,
       lines: v.lines,
     );
   }
@@ -592,6 +665,7 @@ class CspBridge {
     id: video.id, title: video.title, poster: video.poster,
     remarks: video.remarks, year: video.year, area: video.area,
     actor: video.actor, description: video.description, tag: video.tag,
+    doubanScore: video.doubanScore, rtScore: video.rtScore,
   );
 
   /// Resolves on-demand wrapper URLs (Tuxiaobei HTML, Youlai HTML, Bilibili playurl JSON, Huya room)
@@ -602,6 +676,9 @@ class CspBridge {
     CspHttpTextFetcher fetchText,
   ) async {
     if (TrailerSource.matches(site)) return TrailerSource.resolve(episode, fetchText);
+    if (CspRuleEngines.supports(site)) {
+      return CspRuleEngines.resolveEpisodeForPlayback(site, episode, fetchText);
+    }
     final rawUrl = episode.url.trim();
 
     // 1. Tuxiaobei `/play/{id}` -> extract `video-src` MP4
@@ -875,10 +952,14 @@ class CspBridge {
       }
       poster = CmsParser.upgradePosterUrlToHd(poster);
       String ratingStr = '';
+      double? parsedDoubanScore;
       if (item['rating'] is Map && item['rating']['value'] != null) {
         final val = item['rating']['value'];
         if (val is num && val > 0) {
           ratingStr = '豆瓣 ${val.toStringAsFixed(1)}';
+          if (val >= 2.0 && val <= 10.0) {
+            parsedDoubanScore = val.toDouble();
+          }
         }
       }
       final subtitle = (item['card_subtitle'] ?? item['info'] ?? '').toString().trim();
@@ -892,6 +973,7 @@ class CspBridge {
           year: year,
           actor: subtitle,
           description: subtitle,
+          doubanScore: parsedDoubanScore,
         ),
       );
     }
@@ -1284,18 +1366,25 @@ class CspBridge {
     CspHttpTextFetcher fetchText,
   ) async {
     var categories = <CmsCategory>[];
-    if (site.ext.trim().startsWith('{')) {
+    final trimmedExt = site.ext.trim();
+    String jsonUrl = '';
+    if (trimmedExt.startsWith('{')) {
       try {
-        final extMap = jsonDecode(site.ext);
-        if (extMap is Map && extMap['json'] is String) {
-          final jsonUrl = (extMap['json'] as String).trim();
-          if (jsonUrl.startsWith('http')) {
-            final raw = await fetchText(jsonUrl);
-            categories = CmsParser.parseCategories(raw)
-                .where((c) => c.id != 'peizhi' && !c.name.contains('配置'))
-                .toList(growable: false);
-          }
+        final extMap = jsonDecode(trimmedExt);
+        if (extMap is Map) {
+          final rawJsonUrl = extMap['json'] ?? extMap['url'];
+          if (rawJsonUrl is String) jsonUrl = rawJsonUrl.trim();
         }
+      } catch (_) {}
+    } else if (trimmedExt.startsWith('http://') || trimmedExt.startsWith('https://')) {
+      jsonUrl = trimmedExt;
+    }
+    if (jsonUrl.startsWith('http://') || jsonUrl.startsWith('https://')) {
+      try {
+        final raw = await fetchText(jsonUrl, headers: site.headers);
+        categories = CmsParser.parseCategories(raw)
+            .where((c) => c.id != 'peizhi' && !c.name.contains('配置'))
+            .toList(growable: false);
       } catch (_) {}
     }
     if (categories.isEmpty) {
@@ -1358,13 +1447,7 @@ class CspBridge {
         }
       }
     } catch (_) {}
-    // Fallback to VOD pool search if Bilibili search is rate-limited
-    return _fetchConfiguredSearch(
-      const CmsSite(key: 'bili', name: 'Bili', type: 3, api: 'csp_BiliGuard'),
-      keyword,
-      pg,
-      fetchText,
-    );
+    return const CmsListing();
   }
 
   static Future<CmsVideo> _fetchBiliDetail(
@@ -1451,6 +1534,10 @@ class CspBridge {
     return lower.contains('api.php/app') || lower.contains('xgapp.php');
   }
 
+  static bool _isAppV1VodEndpoint(String api) {
+    return api.toLowerCase().contains('api.php/v1.vod');
+  }
+
   static Uri _configuredUri(String api, Map<String, String> parameters,
       {String appPath = ''}) {
     final base = Uri.parse(api);
@@ -1468,12 +1555,17 @@ class CspBridge {
     for (final backend in backends.take(4)) {
       try {
         final isAppV2 = _isAppV2Endpoint(backend.api);
+        final isAppV1Vod = _isAppV1VodEndpoint(backend.api);
         final listUri = isAppV2
             ? _configuredUri(backend.api, {}, appPath: 'nav')
-            : _configuredUri(backend.api, {'ac': 'list'});
+            : isAppV1Vod
+                ? _configuredUri(backend.api, {}, appPath: 'types')
+                : _configuredUri(backend.api, {'ac': 'list'});
         final detailUri = isAppV2
             ? _configuredUri(backend.api, {'pg': '1'}, appPath: 'video')
-            : _configuredUri(backend.api, {'ac': 'detail'});
+            : isAppV1Vod
+                ? _configuredUri(backend.api, {'limit': '20', 'page': '1'})
+                : _configuredUri(backend.api, {'ac': 'detail'});
         final results = await Future.wait([
           fetchText(listUri.toString(), headers: site.headers),
           fetchText(detailUri.toString(), headers: site.headers),
@@ -1508,6 +1600,15 @@ class CspBridge {
         final uri = _configuredUri(api,
           {'pg': pgStr, if (id.isNotEmpty) 'tid': id}, appPath: 'video',
         );
+        return CmsParser.parseListing(await fetchText(uri.toString(), headers: site.headers));
+      }
+      if (_isAppV1VodEndpoint(api)) {
+        final uri = _configuredUri(api, {
+          'page': pgStr,
+          'limit': '20',
+          if (id.isNotEmpty) 'type': id,
+          if (id.isNotEmpty) 'tid': id,
+        });
         return CmsParser.parseListing(await fetchText(uri.toString(), headers: site.headers));
       }
       final params = <String, String>{
@@ -1555,14 +1656,17 @@ class CspBridge {
       try {
         final pgStr = (page < 1 ? 1 : page).toString();
         final isAppV2 = _isAppV2Endpoint(backend.api);
+        final isAppV1Vod = _isAppV1VodEndpoint(backend.api);
         final uri = isAppV2
             ? _configuredUri(backend.api, {'text': trimmed, 'pg': pgStr}, appPath: 'search')
-            : _configuredUri(backend.api, {
-                  'ac': 'detail',
-                  'wd': trimmed,
-                  'pg': pgStr,
-                },
-              );
+            : isAppV1Vod
+                ? _configuredUri(backend.api, {'wd': trimmed, 'page': pgStr, 'limit': '20'})
+                : _configuredUri(backend.api, {
+                      'ac': 'detail',
+                      'wd': trimmed,
+                      'pg': pgStr,
+                    },
+                  );
         final raw = await fetchText(uri.toString(), headers: site.headers);
         final listing = CmsParser.parseListing(raw);
         if (listing.videos.isNotEmpty) return listing;

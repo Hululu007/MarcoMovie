@@ -5,6 +5,7 @@ const path=require('node:path');
 const http=require('node:http');
 const vm=require('node:vm');
 const crypto=require('node:crypto');
+const zlib=require('node:zlib');
 const rsaPkcs1=require('./drpy-rsa.cjs');
 const {parentPort,workerData}=require('node:worker_threads');
 const {MAX_RESULT,validateManifest,validateCall}=require('./drpy-schema.cjs');
@@ -66,12 +67,49 @@ context.__local=bridge((action,namespace,key,valueText)=>{
 context.__join=bridge((base,part)=>new URL(part,base||manifest.origin).href);
 context.__random=bridge(length=>{if(!Number.isInteger(length)||length<0||length>65536)throw Error('drpy_random_size');return [...crypto.randomBytes(length)];});
 context.__rsaPkcs1=bridge(rsaPkcs1);
+context.__rsaPubEnc=bridge((pem,dataB64)=>{
+  if(typeof pem!=='string'||pem.length>8192||typeof dataB64!=='string'||dataB64.length>8192)throw Error('drpy_crypto_invalid');
+  return crypto.publicEncrypt({key:pem,padding:crypto.constants.RSA_PKCS1_PADDING},Buffer.from(dataB64,'base64')).toString('base64');
+});
+context.__zlib=bridge((mode,inputB64)=>{
+  if(typeof inputB64!=='string'||inputB64.length>MAX_RESULT)throw Error('drpy_crypto_invalid');
+  const buf=Buffer.from(inputB64,'base64');
+  const opts={maxOutputLength:2*1024*1024};
+  if(mode==='inflate')return zlib.inflateSync(buf,opts).toString('base64');
+  if(mode==='inflateRaw')return zlib.inflateRawSync(buf,opts).toString('base64');
+  if(mode==='gunzip')return zlib.gunzipSync(buf,opts).toString('base64');
+  throw Error('drpy_crypto_invalid');
+});
+context.__cipher=bridge((op,algo,keyB64,ivB64,dataB64,tagB64)=>{
+  const allowed=['aes-128-cbc','aes-256-cbc','aes-128-ecb','aes-256-ecb','aes-256-gcm','chacha20-poly1305'];
+  if(!allowed.includes(algo)||typeof dataB64!=='string'||dataB64.length>MAX_RESULT)throw Error('drpy_crypto_invalid');
+  const key=Buffer.from(String(keyB64||''),'base64');
+  const iv=ivB64?Buffer.from(String(ivB64),'base64'):Buffer.alloc(0);
+  const data=Buffer.from(dataB64,'base64');
+  const opts=algo==='chacha20-poly1305'?{authTagLength:16}:undefined;
+  const aead=algo==='aes-256-gcm'||algo==='chacha20-poly1305';
+  if(op==='encrypt'){
+    const cipher=crypto.createCipheriv(algo,key,algo.endsWith('-ecb')?null:iv,opts);
+    const out=Buffer.concat([cipher.update(data),cipher.final()]);
+    return {data:out.toString('base64'),tag:aead?cipher.getAuthTag().toString('base64'):''};
+  }
+  if(op==='decrypt'){
+    const decipher=crypto.createDecipheriv(algo,key,algo.endsWith('-ecb')?null:iv,opts);
+    if(aead)decipher.setAuthTag(Buffer.from(String(tagB64||''),'base64'));
+    const out=Buffer.concat([decipher.update(data),decipher.final()]);
+    return {data:out.toString('base64')};
+  }
+  throw Error('drpy_crypto_invalid');
+});
 const bootstrap=`
 globalThis.window=globalThis; globalThis.self=globalThis; globalThis.navigator={appName:'Netscape'};
 globalThis.console={log(){},warn(){},error(){}}; globalThis.print=globalThis.log=function(){};
 function bridgeValue(text){const value=JSON.parse(text);if(value.error)throw new Error(value.error);return value.value;}
 globalThis.crypto={getRandomValues(array){const bytes=bridgeValue(__random(array.byteLength));new Uint8Array(array.buffer,array.byteOffset,array.byteLength).set(bytes);return array;}};
 globalThis.rsaPkcs1=(operation,key,input)=>{try{return bridgeValue(__rsaPkcs1(operation,key,input));}catch(e){unsupportedFeature('drpy_crypto_invalid');}};
+globalThis.rsaPublicEncrypt=(pem,dataB64)=>{try{return bridgeValue(__rsaPubEnc(String(pem||''),String(dataB64||'')));}catch(e){unsupportedFeature('drpy_crypto_invalid');}};
+globalThis.zlibInflate=(mode,inputB64)=>{try{return bridgeValue(__zlib(String(mode||''),String(inputB64||'')));}catch(e){unsupportedFeature('drpy_crypto_invalid');}};
+globalThis.nodeCipher=(op,algo,keyB64,ivB64,dataB64,tagB64)=>{try{return bridgeValue(__cipher(String(op||''),String(algo||''),String(keyB64||''),String(ivB64||''),String(dataB64||''),String(tagB64||'')));}catch(e){unsupportedFeature('drpy_crypto_invalid');}};
 globalThis.req=(url,options={})=>{
   // The pinned core's getHtml() drops rule_fetch_params.encoding. Carry the
   // normalized rule value separately: it is a fallback, not a call override.

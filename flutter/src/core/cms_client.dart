@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'cms_parser.dart';
 import 'csp_bridge.dart';
+import 'csp_rule_engines.dart';
 import 'live_catalog_parser.dart';
 import 'js_source_host.dart';
 import 'python_source_assets.dart';
@@ -145,13 +146,28 @@ class CmsClient {
     this.timeout = const Duration(seconds: 15),
   }) : _http = client, _quark = quark, _scriptHost = scriptHost ?? CatPawHost.instance,
        _pythonHost = pythonHost ?? PythonSourceHost.instance;
+  static http.Client? _sharedDefaultClient;
+  static http.Client? _sharedDirectClient;
   static http.Client _createDefaultClient({bool directOnly = false}) {
     final ioHttp = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 12);
+      ..connectionTimeout = const Duration(seconds: 8)
+      ..idleTimeout = const Duration(seconds: 20)
+      ..maxConnectionsPerHost = 6;
     if (directOnly) {
       ioHttp.findProxy = (_) => 'DIRECT';
     }
     return IOClient(ioHttp);
+  }
+  static ({http.Client client, bool ephemeral}) _acquireDefaultTransport({
+    required bool directOnly,
+  }) {
+    if (HttpOverrides.current != null) {
+      return (client: _createDefaultClient(directOnly: directOnly), ephemeral: true);
+    }
+    final pooled = directOnly
+        ? (_sharedDirectClient ??= _createDefaultClient(directOnly: true))
+        : (_sharedDefaultClient ??= _createDefaultClient(directOnly: false));
+    return (client: pooled, ephemeral: false);
   }
 
   /// Detects when an iOS/desktop system HTTP proxy points to a dead local tunnel
@@ -207,11 +223,19 @@ class CmsClient {
     final normalized = CmsParser.normalizeUrl(url);
     final uri = Uri.parse(normalized);
     var usedDirectFallback = LiveCatalogParser.isLoopbackHost(uri.host);
-    var transport = _http ?? _createDefaultClient(directOnly: usedDirectFallback);
+    var ephemeralTransport = false;
+    late http.Client transport;
+    if (_http != null) {
+      transport = _http;
+    } else {
+      final acquired = _acquireDefaultTransport(directOnly: usedDirectFallback);
+      transport = acquired.client;
+      ephemeralTransport = acquired.ephemeral;
+    }
     final abort = Completer<void>();
     void cancel() {
       if (!abort.isCompleted) abort.complete();
-      if (_http == null) transport.close();
+      if (ephemeralTransport) transport.close();
     }
     final sessionAbort = Zone.current[_cancelKey] as Completer<void>?;
     if (sessionAbort?.isCompleted == true) {
@@ -288,9 +312,11 @@ class CmsClient {
               !usedDirectFallback &&
               !abort.isCompleted &&
               isDeadLocalSystemProxyError(current, error)) {
-            transport.close();
+            if (ephemeralTransport) transport.close();
             usedDirectFallback = true;
-            transport = _createDefaultClient(directOnly: true);
+            final acquired = _acquireDefaultTransport(directOnly: true);
+            transport = acquired.client;
+            ephemeralTransport = acquired.ephemeral;
             response = await transport.send(buildRequest());
           } else {
             rethrow;
@@ -1156,9 +1182,13 @@ class CmsClient {
         groups[i] = groups[i].split('#').where((s) => s.trim().isNotEmpty).map((s) {
           final sep = s.indexOf(r'$');
           final label = sep < 0 ? '正片' : s.substring(0, sep);
+          final epId = sep < 0 ? s : s.substring(sep + 1);
+          if (epId.trimLeft().startsWith('mmshare://')) {
+            return '$label\$${epId.trim()}';
+          }
           final uri = Uri(scheme: scheme, host: 'play', queryParameters: {
             'flag': i < flags.length ? flags[i] : '',
-            'id': sep < 0 ? s : s.substring(sep + 1),
+            'id': epId,
           });
           return label + r'$' + uri.toString();
         }).join('#');
@@ -1301,6 +1331,7 @@ class CmsClient {
         page,
         _getText,
         childIds: childIds,
+        filter: filter,
       );
       if (filter != null && filter.hasSubFilter) {
         final filtered = CmsParser.filterVideos(listing.videos, filter);
@@ -1422,22 +1453,30 @@ class CmsClient {
         s.isEffectivelyPrivate == source.isEffectivelyPrivate && s.searchable &&
         s.canBrowse && !CspBridge.isDoubanSite(s) && !CspBridge.isMyDriveSite(s) &&
         (_usesJs(s) || !CspBridge.canHandleSite(s) || CspBridge.backendsForSite(s).isNotEmpty ||
-          CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s))).toList();
+          CspRuleEngines.supports(s) || CspBridge.isBiliSite(s) ||
+          CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s))).toList();
     int sitePriority(CmsSite s) {
+      if (WoggSource.supports(s) || CspBridge.isNetdiskSite(s)) {
+        return 3;
+      }
       if (CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s)) {
         return 2;
       }
-      if (s.isCatPaw && (CspBridge.isNetdiskSite(s) || s.name.toLowerCase().contains('4k'))) {
-        return -1;
+      if (!CspBridge.canHandleSite(s) ||
+          CspBridge.backendsForSite(s).isNotEmpty ||
+          GuardSource.supports(s)) {
+        return 0;
       }
-      return 0;
+      return 1;
     }
     final indexed = filtered.indexed.toList()
       ..sort((a, b) {
         final cmp = sitePriority(a.$2).compareTo(sitePriority(b.$2));
         return cmp != 0 ? cmp : a.$1.compareTo(b.$1);
       });
-    final pool = indexed.map((e) => e.$2);
+    final sites = indexed.map((e) => e.$2).take(12).toList();
+    if (sites.isEmpty) return (source, detail);
+
     Future<(CmsSite, CmsVideo)?> match(CmsSite site) async {
       try {
         final results = await fetchSearch(site, title);
@@ -1456,8 +1495,30 @@ class CmsClient {
           final videoTitle = video.title.trim();
           final titleMatches = videoTitle == title ||
               (normTitle.isNotEmpty && normTitleOf(videoTitle) == normTitle);
-          if (titleMatches && video.lines.any((l) => l.episodes.any((e) => e.isDirectPlayable || e.needsSourceResolution))) {
-            return (site, video);
+          final hasPlayable = video.lines.any((l) => l.episodes.any((e) =>
+              e.isDirectPlayable ||
+              e.needsSourceResolution ||
+              (CspRuleEngines.supports(site) && e.url.startsWith('http'))));
+          if (titleMatches && hasPlayable) {
+            final enriched = (video.doubanScore == null && detail.doubanScore != null) ||
+                    (video.rtScore == null && detail.rtScore != null)
+                ? CmsVideo(
+                    id: video.id,
+                    title: video.title,
+                    poster: video.poster,
+                    remarks: video.remarks,
+                    year: video.year,
+                    area: video.area,
+                    actor: video.actor,
+                    description: video.description,
+                    tag: video.tag,
+                    doubanScore: video.doubanScore ?? detail.doubanScore,
+                    rtScore: video.rtScore ?? detail.rtScore,
+                    lines: video.lines,
+                    sourceWarnings: video.sourceWarnings,
+                  )
+                : video;
+            return (site, enriched);
           }
         }
       } catch (_) {
@@ -1465,19 +1526,247 @@ class CmsClient {
       }
       return null;
     }
-    final sites = pool.take(12).toList();
-    for (int i = 0; i < sites.length; i += 2) {
-      final matches = await Future.wait(sites.skip(i).take(2).map(
-        (s) => match(s).timeout(const Duration(seconds: 12), onTimeout: () => null)));
-      for (final result in matches) {
-        if (result != null) return result;
+
+    const maxConcurrency = 4;
+    final parentAbort = Zone.current[_cancelKey] as Completer<void>?;
+    final winner = Completer<(CmsSite, CmsVideo)?>();
+    final activeAborts = <Completer<void>>{};
+    int nextIndex = 0;
+    int inFlight = 0;
+    void cancelRemaining() {
+      for (final a in activeAborts) {
+        if (!a.isCompleted) a.complete();
       }
     }
-    return (source, detail);
+    final parentSub = parentAbort?.future.asStream().listen((_) {
+      cancelRemaining();
+      if (!winner.isCompleted) winner.complete(null);
+    });
+    void pump() {
+      if (winner.isCompleted) return;
+      while (!winner.isCompleted &&
+          inFlight < maxConcurrency &&
+          nextIndex < sites.length) {
+        final candidateSite = sites[nextIndex++];
+        inFlight++;
+        final taskAbort = Completer<void>();
+        activeAborts.add(taskAbort);
+        runZoned(() => match(candidateSite), zoneValues: {_cancelKey: taskAbort})
+            .timeout(const Duration(seconds: 8), onTimeout: () {
+          if (!taskAbort.isCompleted) taskAbort.complete();
+          return null;
+        }).then((result) {
+          if (result != null && !winner.isCompleted) {
+            winner.complete(result);
+            cancelRemaining();
+          }
+        }).catchError((Object _) {}).whenComplete(() {
+          if (!taskAbort.isCompleted) taskAbort.complete();
+          activeAborts.remove(taskAbort);
+          inFlight--;
+          if (winner.isCompleted) return;
+          if (nextIndex < sites.length) {
+            pump();
+          } else if (inFlight <= 0 && !winner.isCompleted) {
+            winner.complete(null);
+          }
+        });
+      }
+    }
+    try {
+      pump();
+      final matched = await winner.future;
+      if (parentAbort?.isCompleted == true) {
+        throw StateError('片源加载已取消');
+      }
+      return matched ?? (source, detail);
+    } finally {
+      cancelRemaining();
+      if (parentSub != null) {
+        unawaited(parentSub.cancel());
+      }
+    }
+  }
+
+  static const Duration _detailCacheTtl = Duration(minutes: 5);
+  static const int _maxDetailCacheEntries = 48;
+  final Map<String, ({CmsVideo video, DateTime expiresAt})> _detailCache = {};
+  final Map<String, Future<CmsVideo>> _detailInFlight = {};
+
+  String _detailCacheKey(CmsSite site, CmsVideo fallback) => jsonEncode([
+        JsSourceHost.generation,
+        _pythonHost.generation,
+        site.subscriptionId,
+        site.sourceKey,
+        site.isEffectivelyPrivate,
+        site.api,
+        site.ext,
+        site.pluginReference,
+        fallback.id,
+      ]);
+
+  void clearDetailCache() {
+    _detailCache.clear();
+  }
+
+  Future<void> prefetchDetail(CmsSite site, CmsVideo fallback) async {
+    if (fallback.id.trim().isEmpty ||
+        CspBridge.isDoubanSite(site) ||
+        CspBridge.isMyDriveSite(site) ||
+        WoggSource.supports(site)) {
+      return;
+    }
+    try {
+      await fetchDetail(site, fallback);
+    } catch (_) {}
   }
 
   Future<CmsVideo> fetchDetail(CmsSite site, CmsVideo fallback) async {
     _requireSourceAdapter(site);
+    if (fallback.id.trim().isEmpty) {
+      return _fetchDetailUncached(site, fallback);
+    }
+    final cacheKey = _detailCacheKey(site, fallback);
+    final now = DateTime.now();
+    final cached = _detailCache[cacheKey];
+    if (cached != null) {
+      if (now.isBefore(cached.expiresAt)) {
+        // Refresh LRU position
+        _detailCache.remove(cacheKey);
+        _detailCache[cacheKey] = cached;
+        return _mergeDetail(cached.video, fallback);
+      }
+      _detailCache.remove(cacheKey);
+    }
+
+    final existingFlight = _detailInFlight[cacheKey];
+    final callerAbort = Zone.current[_cancelKey] as Completer<void>?;
+    if (existingFlight != null) {
+      try {
+        final joined = await Future.any([
+          existingFlight,
+          if (callerAbort != null)
+            callerAbort.future.then<CmsVideo>(
+              (_) => throw StateError('片源加载已取消'),
+            ),
+        ]);
+        return _mergeDetail(joined, fallback);
+      } on StateError {
+        if (callerAbort?.isCompleted == true) rethrow;
+        // Primary caller was cancelled; fall through to start a fresh fetch.
+      }
+    }
+
+    final flight = () async {
+      final fetched = await _fetchDetailUncached(site, fallback);
+      final expanded = await _expandMmShareLines(fetched);
+      if (expanded.lines.any((l) => l.episodes.isNotEmpty)) {
+        if (_detailCache.length >= _maxDetailCacheEntries) {
+          _detailCache.remove(_detailCache.keys.first);
+        }
+        _detailCache[cacheKey] = (
+          video: expanded,
+          expiresAt: DateTime.now().add(_detailCacheTtl),
+        );
+      }
+      return expanded;
+    }();
+    _detailInFlight[cacheKey] = flight;
+    try {
+      return await flight;
+    } finally {
+      if (identical(_detailInFlight[cacheKey], flight)) {
+        _detailInFlight.remove(cacheKey);
+      }
+    }
+  }
+
+  Future<CmsVideo> _expandMmShareLines(CmsVideo video) async {
+    final hasMmShare = video.lines.any(
+      (line) => line.episodes.any((ep) => ep.url.startsWith('mmshare://')),
+    );
+    if (!hasMmShare) return video;
+
+    final shareUrls = <String>[];
+    for (final line in video.lines) {
+      for (final ep in line.episodes) {
+        if (ep.url.startsWith('mmshare://')) {
+          final rawShare = ep.url.substring('mmshare://'.length).trim();
+          if (rawShare.isNotEmpty && !shareUrls.contains(rawShare)) {
+            shareUrls.add(rawShare);
+            if (shareUrls.length >= 3) break;
+          }
+        }
+      }
+      if (shareUrls.length >= 3) break;
+    }
+
+    final resolvedByShare = <String, List<CmsEpisode>>{};
+    final errorsByShare = <String, String>{};
+    await Future.wait(
+      shareUrls.map((shareUrl) async {
+        try {
+          final eps = await _listCloudShare(shareUrl)
+              .timeout(const Duration(seconds: 8));
+          resolvedByShare[shareUrl] = eps;
+        } catch (error) {
+          errorsByShare[shareUrl] = switch (error) {
+            AliShareException e => e.message,
+            QuarkDriveException e => e.message,
+            QuarkAccountException e => e.message,
+            FormatException e => e.message,
+            TimeoutException _ => '网盘分享读取超时',
+            _ => '网盘分享读取失败',
+          };
+        }
+      }),
+    );
+
+    final expandedLines = <CmsLine>[];
+    final warnings = <String>[...video.sourceWarnings];
+    for (final line in video.lines) {
+      if (!line.episodes.any((ep) => ep.url.startsWith('mmshare://'))) {
+        expandedLines.add(line);
+        continue;
+      }
+      final eps = <CmsEpisode>[];
+      for (final ep in line.episodes) {
+        if (!ep.url.startsWith('mmshare://')) {
+          eps.add(ep);
+          continue;
+        }
+        final rawShare = ep.url.substring('mmshare://'.length).trim();
+        final resolved = resolvedByShare[rawShare];
+        if (resolved != null && resolved.isNotEmpty) {
+          eps.addAll(resolved);
+        } else if (errorsByShare.containsKey(rawShare)) {
+          final msg = '${line.name}：${errorsByShare[rawShare]}';
+          if (!warnings.contains(msg)) warnings.add(msg);
+        }
+      }
+      if (eps.isNotEmpty) {
+        expandedLines.add(CmsLine(name: line.name, episodes: eps));
+      }
+    }
+
+    return CmsVideo(
+      id: video.id,
+      title: video.title,
+      poster: video.poster,
+      remarks: video.remarks,
+      year: video.year,
+      area: video.area,
+      actor: video.actor,
+      description: video.description,
+      tag: video.tag,
+      doubanScore: video.doubanScore,
+      rtScore: video.rtScore,
+      lines: expandedLines,
+      sourceWarnings: warnings,
+    );
+  }
+
+  Future<CmsVideo> _fetchDetailUncached(CmsSite site, CmsVideo fallback) async {
     if (fallback.id.startsWith('mmquark://owned?')) {
       return _mergeDetail(CmsVideo(id: fallback.id, title: fallback.title,
           lines: [CmsLine(name: '夸克网盘', episodes: [
@@ -1539,6 +1828,8 @@ class CmsClient {
     actor: detailed.actor.isEmpty ? fallback.actor : detailed.actor,
     description: detailed.description.isEmpty ? fallback.description : detailed.description,
     tag: detailed.tag.isEmpty ? fallback.tag : detailed.tag,
+    doubanScore: detailed.doubanScore ?? fallback.doubanScore,
+    rtScore: detailed.rtScore ?? fallback.rtScore,
     lines: detailed.lines,
     sourceWarnings: detailed.sourceWarnings,
   );
@@ -1571,11 +1862,19 @@ class CmsClient {
     final normalized = CmsParser.normalizeUrl(url);
     final uri = Uri.parse(normalized);
     var usedDirectFallback = LiveCatalogParser.isLoopbackHost(uri.host);
-    var transport = _http ?? _createDefaultClient(directOnly: usedDirectFallback);
+    var ephemeralTransport = false;
+    late http.Client transport;
+    if (_http != null) {
+      transport = _http;
+    } else {
+      final acquired = _acquireDefaultTransport(directOnly: usedDirectFallback);
+      transport = acquired.client;
+      ephemeralTransport = acquired.ephemeral;
+    }
     final abort = Completer<void>();
     void cancel() {
       if (!abort.isCompleted) abort.complete();
-      if (_http == null) transport.close();
+      if (ephemeralTransport) transport.close();
     }
     final sessionAbort = Zone.current[_cancelKey] as Completer<void>?;
     if (sessionAbort?.isCompleted == true) {
@@ -1633,9 +1932,11 @@ class CmsClient {
               !usedDirectFallback &&
               !abort.isCompleted &&
               isDeadLocalSystemProxyError(current, error)) {
-            transport.close();
+            if (ephemeralTransport) transport.close();
             usedDirectFallback = true;
-            transport = _createDefaultClient(directOnly: true);
+            final acquired = _acquireDefaultTransport(directOnly: true);
+            transport = acquired.client;
+            ephemeralTransport = acquired.ephemeral;
             response = await transport.send(buildRequest());
           } else {
             rethrow;
@@ -2009,7 +2310,7 @@ class CmsClient {
       }
       if (CspBridge.canHandleSite(s)) {
         final backends = CspBridge.backendsForSite(s);
-        final nativeAdapter = _usesJs(s) || CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s);
+        final nativeAdapter = _usesJs(s) || CspRuleEngines.supports(s) || CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s);
         if (!nativeAdapter && backends.isEmpty) continue;
         final String sig;
         if (_usesJs(s)) {
@@ -2017,6 +2318,8 @@ class CmsClient {
           // artifacts, extensions and credentials. They are separate sources.
           sig = jsonEncode([s.subscriptionId, s.key, s.api, s.ext,
             s.pluginReference, s.headers]);
+        } else if (CspRuleEngines.supports(s)) {
+          sig = jsonEncode(['csp_rule', s.subscriptionId, s.key, s.api, s.ext]);
         } else if (CspBridge.isBiliSite(s)) {
           sig = 'csp_bili_search';
         } else if (CspBridge.isFirstAidSite(s)) {

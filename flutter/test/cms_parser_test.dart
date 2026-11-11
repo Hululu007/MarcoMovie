@@ -541,7 +541,8 @@ https://depot.example/config.json
 {"key":"fy","name":"风云┃多线","type":3,"api":"csp_FyGuard","searchable":1,"ext":{"type":"video","name":"Fy"}},
 {"key":"auete","name":"奥特┃多线","type":3,"api":"csp_AueteGuard","searchable":1},
 {"key":"dm84","name":"巴士┃动漫","type":3,"api":"csp_Dm84Guard","searchable":1},
-{"key":"zpan","name":"盘搜┃四盘","type":3,"api":"csp_S_zpsGuard","searchable":1,"ext":{"siteUrl":"https://so.example/"}}
+{"key":"zpan","name":"盘搜┃四盘","type":3,"api":"csp_S_zpsGuard","searchable":1,"ext":{"siteUrl":"https://so.example/"}},
+{"key":"music","name":"有声┃小说","type":3,"api":"csp_MusicGuard","searchable":0}
 ],
 "rules":[{"name":"ad_filter","hosts":["cdn.example"],"regex":["#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:5.480000,[\\s\\S]*?#EXT-X-DISCONTINUITY"]}],
 "lives":[
@@ -557,7 +558,7 @@ https://depot.example/config.json
       tvboxJsonWithCommentsAndExtinfRules,
       origin: 'https://sub.example/tv',
     );
-    expect(parsedWithRules.sites.length, 7);
+    expect(parsedWithRules.sites.length, 8);
     expect(parsedWithRules.supportedSites.map((s) => s.key).toList(), [
       'doudou',
       't4_1',
@@ -565,8 +566,10 @@ https://depot.example/config.json
       'fy',
       'auete',
       'dm84',
+      'zpan',
     ]);
-    expect(parsedWithRules.sites.singleWhere((s) => s.key == 'zpan').canBrowse, isFalse);
+    expect(parsedWithRules.sites.singleWhere((s) => s.key == 'zpan').canBrowse, isTrue);
+    expect(parsedWithRules.sites.singleWhere((s) => s.key == 'music').canBrowse, isFalse);
     expect(parsedWithRules.lives.length, 1);
     expect(parsedWithRules.lives.first.name, '综合直播');
   });

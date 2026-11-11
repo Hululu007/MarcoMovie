@@ -314,6 +314,16 @@ class CmsSite {
   bool get requiresPluginRuntime => !canBrowse;
   bool get supported => canBrowse;
   String get unsupportedReason {
+    final lowerApi = api.trim().toLowerCase();
+    if (lowerApi.startsWith('csp_sixv')) {
+      return '该线路依赖 P2P / 磁力种子协议，受当前系统沙盒限制暂不支持';
+    }
+    if (lowerApi.startsWith('csp_music')) {
+      return '该线路依赖交互式人机验证，当前设备暂不支持';
+    }
+    if (lowerApi.startsWith('csp_aidj')) {
+      return '该线路使用专有加密流保护，当前设备暂不支持';
+    }
     if (isScriptOrJarApi && CspBridge.isNetdiskSite(this)) {
       return '此网盘源的原始插件尚未适配当前设备，无法读取原始网盘线路。请使用同一来源提供的兼容接口，或切换片源';
     }
@@ -556,6 +566,8 @@ class CmsVideo {
   final String actor;
   final String description;
   final String tag;
+  final double? doubanScore;
+  final int? rtScore;
   final List<CmsLine> lines;
   final List<String> sourceWarnings;
   const CmsVideo({
@@ -568,6 +580,8 @@ class CmsVideo {
     this.actor = '',
     this.description = '',
     this.tag = '',
+    this.doubanScore,
+    this.rtScore,
     this.lines = const [],
     this.sourceWarnings = const [],
   });
