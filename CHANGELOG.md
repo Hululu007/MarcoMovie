@@ -1,3 +1,10 @@
+## 2026-11-11 Windows 0.5.15、macOS 0.5.13 与 iOS / iPadOS 0.5.22 内置本地媒体代理网关与三级二次解析更新
+
+- [Windows 0.5.15](docs/releases/windows-v0.5.15.md) · [macOS 0.5.13](docs/releases/macos-v0.5.13.md) · [iOS / iPadOS 0.5.22](docs/releases/ios-v0.5.22.md)：新增内置本机 `127.0.0.1` 通用媒体流代理网关（`LocalMediaLease` / `PlayerLocalMediaSession`），在进程内统一接管防盗链 `Referer`、`Origin`、`User-Agent` 与动态 `Set-Cookie` 会话，跨域 `302` CDN 跳转保留防盗链头并剥离源站敏感凭据，支持无后缀 `#EXTM3U` 重写、未加密 TS 伪装图片头剥离与分离音轨伴随代理。
+- 新增三级二次解析与网页媒体提取器（`WebMediaResolver`），支持片源 `playUrl`、`site.playUrl` 与订阅级 `parses` 多解析器轮询（兼容自定义请求头与 JSON / HTML 解析接口）、MacCMS `player_aaaa` `encrypt` 0/1/2 与双层 `<iframe>` 直链提取，并在 iOS / macOS 接入原生非持久化静音 `WKWebView` 媒体嗅探（`HeadlessMediaWebSniffer`）兜底。
+- 修复 `CmsClient` 拉取订阅与片源接口遇到同域重定向时丢失 `Set-Cookie` 的问题；将 `CloudMediaLease` 的 `.m3u8` 重写与去 `Range` 保护扩展至夸克、UC、百度全部网盘通道，并在本地缓存与离线下载中保留 `parses` 配置。
+- 677 项 Flutter 自动化测试与多端原生构建及 `libmpv` / `Mpv.framework` 回放回归（`738f650d744161e84bf8ba32964da98df65f4bf4`，构建记录 `43023663465`）全部通过，未声明用户私人账号实机全片验收。
+
 ## 2026-11-11 iOS / iPadOS 0.5.21 电视直播修复、原生多级设置重构与 T4 / Appgz / AppTT 片源适配
 
 - [iOS / iPadOS 0.5.21](docs/releases/ios-v0.5.21.md)：修复电视直播 `proxy://` 包装地址解包、自动过滤不支持的本机 `127.0.0.1` 代理源、自动绕过失效本机系统 HTTP 代理，并支持单频道多线路自动回退起播。
