@@ -1,0 +1,17 @@
+{
+  "sites": [
+    {
+      "key": "header_site",
+      "name": "Header Site",
+      "type": 1,
+      "api": "https://api.example.com/vod",
+      "searchable": true,
+      "capabilityStatus": "ok",
+      "headers": {
+        "User-Agent": "ExtUA/2.0",
+        "Cookie": "ext_cookie=2",
+        "Referer": "https://site.example.com"
+      }
+    }
+  ]
+}

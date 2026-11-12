@@ -1,0 +1,13 @@
+// Top header comment
+{
+  /* Multi-line
+     configuration comment */
+  "sites": [
+    {
+      "key": "comment_site",
+      "name": "Comment Site", // inline
+      "type": 1,
+      "api": "https://api.example.com/vod",
+    }, // trailing array comma
+  ], // trailing object comma
+}

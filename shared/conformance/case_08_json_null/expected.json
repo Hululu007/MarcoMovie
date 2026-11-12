@@ -1,0 +1,15 @@
+{
+  "sites": [
+    {
+      "key": "null_site",
+      "name": "Null Site",
+      "type": 1,
+      "api": "https://null.example.com/vod",
+      "jar": "",
+      "playUrl": "",
+      "ext": "",
+      "searchable": true,
+      "capabilityStatus": "ok"
+    }
+  ]
+}

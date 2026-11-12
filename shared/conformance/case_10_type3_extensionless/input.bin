@@ -1,0 +1,10 @@
+{
+  "sites": [
+    {
+      "key": "type3_script",
+      "name": "Gateway Script",
+      "type": 3,
+      "api": "https://gateway.example.com/api/v1/source/live_stream"
+    }
+  ]
+}

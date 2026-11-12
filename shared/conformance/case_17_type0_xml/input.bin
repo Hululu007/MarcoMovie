@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="5.1">
+  <list page="1" pagecount="2" pagesize="20" recordcount="40">
+    <video>
+      <id>3001</id>
+      <name><![CDATA[三体 & 黑暗森林]]></name>
+      <type>科幻</type>
+      <pic>https://img.example.com/3001.jpg</pic>
+      <year>2023</year>
+      <area>中国大陆</area>
+      <note>全30集</note>
+      <des><![CDATA[<p>文化大革命期间...</p>]]></des>
+      <dl>
+        <dd flag="蓝光">第01集$https://cdn.example.com/ep01.m3u8#第02集$https://cdn.example.com/ep02.m3u8</dd>
+      </dl>
+    </video>
+  </list>
+</rss>

@@ -1,0 +1,13 @@
+{
+  "sites": [],
+  "depots": [
+    {
+      "name": "主仓库",
+      "url": "https://depot1.example.com/tvbox.json"
+    },
+    {
+      "name": "备用仓库",
+      "url": "https://hub.example.com/warehouse/sub_depot.json"
+    }
+  ]
+}

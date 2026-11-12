@@ -1,0 +1,12 @@
+{
+  "sites": [
+    {
+      "key": "comment_site",
+      "name": "Comment Site",
+      "type": 1,
+      "api": "https://api.example.com/vod",
+      "searchable": true,
+      "capabilityStatus": "ok"
+    }
+  ]
+}

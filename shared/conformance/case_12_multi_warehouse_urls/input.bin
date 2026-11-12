@@ -1,0 +1,12 @@
+{
+  "urls": [
+    {
+      "name": "主仓库",
+      "url": "https://depot1.example.com/tvbox.json"
+    },
+    {
+      "name": "备用仓库",
+      "url": "./sub_depot.json"
+    }
+  ]
+}

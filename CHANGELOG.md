@@ -1,5 +1,11 @@
 ## 未发布
 
+- [Conformance/All] 三端规范一致性测试套件与解析对齐（Lane H § H1–H4）：
+  - 建立三端（Flutter / Android Java / TV Lite Java）通用的 20 组规范一致性测试用例库（`shared/conformance/case_01` 至 `case_20`），全面覆盖 UTF-8/UTF-16 BOM、透明 GZIP、图片隐写、2423 Hex-AES 解密、Base64 混淆、尾随逗号与注释剥离、JSON null 容错、缺省类型自动推断、无扩展名脚本源、相对路径解析、多仓聚合与 StoreHouse、数据列表分页展开、高级播放列表（`vod_play_list` / `player_info`）、请求头安全继承与扩展优先级、XML 采集源、解析器回退、混合线路直链优先排序与超大扩展参数拦截；
+  - 实现 Flutter 端一致性测试运行器（`flutter/test/conformance_test.dart`），对齐 Header 白名单继承与平台能力映射；
+  - 实现 Android 端 pure-JVM 独立一致性测试运行器（`android/tests/run_conformance_checks.py` & `ConformanceChecks.java`），修复 BOM 过滤、`data.list` 嵌套解析与 `vod_play_list` 复杂线路映射；
+  - 实现 TV Lite 端一致性测试运行器（`scripts/test_lite_conformance.py` & `LiteConformanceChecks.java`），补齐纯 JVM StAX/XML Pull 与 Base64 隐写兼容，并在 CI 工作流中全自动运行三端一致性防护回归。
+
 - [Android] 性能与稳定性优化（Lane E § E1–E5）：
   - E1: 播放进度高频更新解耦为内存书签秒级刷新，磁盘持久化节流至最多每 15 秒写入一次；暂停、退出、切集与后台切出保持即刻保存；JSON 序列化与持久化移入后台单线程守护执行器（`playback-storage`）并全量采用 `.apply()`；完成全项目 22 处 `.commit()` 审计，UI 线程全面消除同步阻塞写盘，仅在致命未捕获异常退出前保留 1 处强刷；
   - E2: `SourceController` 订阅保存（`ConfigStore.write`）从主线程移至后台 worker 执行器异步落盘并声明 `synchronized` 同步写保护，消除主线程 `fsync` 导致的抽帧卡顿；

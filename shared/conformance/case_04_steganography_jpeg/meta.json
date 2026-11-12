@@ -1,0 +1,5 @@
+{
+  "origin": "https://example.com/wallpaper.jpg",
+  "type": "config",
+  "encoding": "binary/jpeg+stego"
+}

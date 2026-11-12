@@ -773,15 +773,23 @@ class CmsParser {
       } catch (_) {}
     }
     if (candidate is! Map) return const {};
+    const allowed = {
+      'user-agent': 'User-Agent',
+      'referer': 'Referer',
+      'cookie': 'Cookie',
+      'origin': 'Origin',
+      'authorization': 'Authorization',
+    };
     final result = <String, String>{};
     candidate.forEach((k, v) {
       if (k != null && v != null) {
         final keyStr = k.toString().trim();
         final valStr = v.toString().trim();
-        if (keyStr.isNotEmpty &&
+        final lower = keyStr.toLowerCase();
+        if (allowed.containsKey(lower) &&
             !valStr.contains('\r') &&
             !valStr.contains('\n')) {
-          result[keyStr] = valStr;
+          result[allowed[lower]!] = valStr;
         }
       }
     });
@@ -789,6 +797,11 @@ class CmsParser {
   }
   static Map<String, String> _extractSiteHeaders(Map item) {
     final result = <String, String>{};
+    result.addAll(_stringHeaders(item['headers'] ?? item['header']));
+    final ua = (item['ua'] ?? '').toString().trim();
+    if (ua.isNotEmpty && !ua.contains('\r') && !ua.contains('\n')) {
+      result['User-Agent'] = ua;
+    }
     dynamic extObj = item['ext'];
     if (extObj is String && extObj.trim().startsWith('{')) {
       try { extObj = jsonDecode(stripJsonComments(extObj)); } catch (_) {}
@@ -799,11 +812,6 @@ class CmsParser {
       if (extUa.isNotEmpty && !extUa.contains('\r') && !extUa.contains('\n')) {
         result['User-Agent'] = extUa;
       }
-    }
-    result.addAll(_stringHeaders(item['headers'] ?? item['header']));
-    final ua = (item['ua'] ?? '').toString().trim();
-    if (ua.isNotEmpty && !ua.contains('\r') && !ua.contains('\n')) {
-      result['User-Agent'] = ua;
     }
     return result;
   }
@@ -1230,9 +1238,13 @@ class CmsParser {
         if (item is! Map) continue;
         var key = (item['key'] ?? item['name'] ?? 'site-$i').toString().trim();
         final name = (item['name'] ?? key).toString().trim();
-        final type = _asInt(item['type'], -1);
+        var type = _asInt(item['type'], -1);
         final api = resolveUrl(origin, (item['api'] ?? '').toString());
         if (key.isEmpty || api.isEmpty) continue;
+        if (type == -1 && (api.startsWith('http://') || api.startsWith('https://'))) {
+          final path = api.split(RegExp(r'[?#]'))[0].toLowerCase();
+          type = (path.contains('xml') || path.endsWith('.xml')) ? 0 : 1;
+        }
         if (!seenKeys.add(key)) {
           key = '$key-$i';
           seenKeys.add(key);

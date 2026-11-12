@@ -1,0 +1,12 @@
+{
+  "sites": [
+    {
+      "key": "base64_site",
+      "name": "Base64 Site",
+      "type": 1,
+      "api": "https://base64.example.com/vod",
+      "searchable": true,
+      "capabilityStatus": "ok"
+    }
+  ]
+}

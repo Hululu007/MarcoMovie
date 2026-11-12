@@ -193,6 +193,7 @@ public final class LiteCatalog {
 
     public static String withoutComments(String s) {
         if (s == null) return "";
+        if (s.startsWith("\ufeff")) s = s.substring(1);
         StringBuilder out = new StringBuilder(s.length());
         boolean inStr = false, esc = false;
         for (int i = 0; i < s.length(); i++) {
@@ -218,7 +219,34 @@ public final class LiteCatalog {
                 } else out.append(c);
             }
         }
-        return out.toString();
+        String clean = out.toString();
+        StringBuilder noTrailing = new StringBuilder(clean.length());
+        inStr = false;
+        esc = false;
+        for (int i = 0; i < clean.length(); i++) {
+            char c = clean.charAt(i);
+            if (inStr) {
+                noTrailing.append(c);
+                if (esc) esc = false;
+                else if (c == '\\') esc = true;
+                else if (c == '"') inStr = false;
+                continue;
+            }
+            if (c == '"') {
+                inStr = true;
+                noTrailing.append(c);
+                continue;
+            }
+            if (c == ',') {
+                int j = i + 1;
+                while (j < clean.length() && Character.isWhitespace(clean.charAt(j))) j++;
+                if (j < clean.length() && (clean.charAt(j) == '}' || clean.charAt(j) == ']')) {
+                    continue;
+                }
+            }
+            noTrailing.append(c);
+        }
+        return noTrailing.toString();
     }
 
     public static boolean isHtml(String s) {
@@ -512,6 +540,26 @@ public final class LiteCatalog {
                 gz.close();
             }
         }
+        if (bytes.length >= 2 && (bytes[0] & 255) == 0xFF && (bytes[1] & 255) == 0xD8) {
+            int marker = -1;
+            for (int i = bytes.length - 2; i >= 2; i--) {
+                if (bytes[i] == '*' && bytes[i + 1] == '*') {
+                    marker = i + 2;
+                    break;
+                }
+            }
+            if (marker >= 0) {
+                int len = bytes.length - marker;
+                byte[] sub = new byte[len];
+                System.arraycopy(bytes, marker, sub, 0, len);
+                return new String(Base64.decode(sub, Base64.DEFAULT), "UTF-8");
+            }
+        }
+        if (bytes.length >= 3
+                && (bytes[0] & 255) == 0xEF
+                && (bytes[1] & 255) == 0xBB
+                && (bytes[2] & 255) == 0xBF)
+            return new String(bytes, 3, bytes.length - 3, "UTF-8");
         if (bytes.length >= 2 && (bytes[0] & 255) == 255 && (bytes[1] & 255) == 254)
             return new String(bytes, 2, bytes.length - 2, "UTF-16LE");
         if (bytes.length >= 2 && (bytes[0] & 255) == 254 && (bytes[1] & 255) == 255)
@@ -582,17 +630,31 @@ public final class LiteCatalog {
             cleaned = withoutComments(decrypt2423(cleaned)).trim();
         }
         int star = cleaned.indexOf("**");
-        if (!cleaned.startsWith("{") && !cleaned.startsWith("[") && star >= 0) {
-            try {
-                String decoded =
-                        new String(
-                                Base64.decode(
-                                        cleaned.substring(star + 2).replaceAll("\\s+", ""),
-                                        Base64.DEFAULT),
-                                "UTF-8");
-                if (decoded.trim().startsWith("{") || decoded.trim().startsWith("["))
-                    cleaned = withoutComments(decoded).trim();
-            } catch (Exception ignored) {
+        if (!cleaned.startsWith("{") && !cleaned.startsWith("[")) {
+            if (star >= 0) {
+                try {
+                    String decoded =
+                            new String(
+                                    Base64.decode(
+                                            cleaned.substring(star + 2).replaceAll("\\s+", ""),
+                                            Base64.DEFAULT),
+                                    "UTF-8");
+                    if (decoded.trim().startsWith("{") || decoded.trim().startsWith("["))
+                        cleaned = withoutComments(decoded).trim();
+                } catch (Exception ignored) {
+                }
+            } else if (cleaned.length() >= 16 && !cleaned.contains(" ")) {
+                try {
+                    String decoded =
+                            new String(
+                                    Base64.decode(
+                                            cleaned.replaceAll("\\s+", ""),
+                                            Base64.DEFAULT),
+                                    "UTF-8");
+                    if (decoded.trim().startsWith("{") || decoded.trim().startsWith("["))
+                        cleaned = withoutComments(decoded).trim();
+                } catch (Exception ignored) {
+                }
             }
         }
         if (cleaned.startsWith("[")) {
@@ -637,6 +699,22 @@ public final class LiteCatalog {
         if ((rows == null || rows.length() == 0) && Json.str(document, "api", "").length() > 0)
             rows = new JSONArray().put(document);
         if (rows == null || rows.length() == 0) throw new IOException("配置没有 sites 列表");
+        String defaultJsonParseUrl = "";
+        JSONArray parses = document.optJSONArray("parses");
+        if (parses != null) {
+            for (int i = 0; i < parses.length(); i++) {
+                JSONObject pj = parses.optJSONObject(i);
+                if (pj != null) {
+                    int pType = Json.integer(pj, "type", 0);
+                    String pUrl = Json.str(pj, "url", "");
+                    if ((pType == 1 || pType == 2 || pType == 3)
+                            && (pUrl.startsWith("http://") || pUrl.startsWith("https://"))) {
+                        defaultJsonParseUrl = pUrl;
+                        break;
+                    }
+                }
+            }
+        }
         List<Site> sites = new ArrayList<Site>();
         for (int i = 0; i < rows.length() && i < 500; i++) {
             JSONObject row = rows.getJSONObject(i);
@@ -646,6 +724,10 @@ public final class LiteCatalog {
             s.type = Json.integer(row, "type", -1);
             s.api = Json.str(row, "api", "");
             s.playUrl = Json.str(row, "playUrl", "");
+            if (s.playUrl.length() == 0
+                    && (Json.integer(row, "parse", 0) == 1 || Json.integer(row, "jx", 0) == 1)) {
+                s.playUrl = defaultJsonParseUrl;
+            }
             s.searchable = Json.integer(row, "searchable", 1) != 0;
             s.ext = row.opt("ext");
             s.requiresParser =
@@ -654,7 +736,39 @@ public final class LiteCatalog {
                             || Json.integer(row, "jx", 0) == 1;
             String rawJar = Json.str(row, "jar", "");
             if (rawJar.length() > 0) {
-                s.jar = rawJar;
+                if ((rawJar.startsWith("./") || rawJar.startsWith("../"))
+                        && base != null
+                        && base.length() > 0) {
+                    try {
+                        s.jar = new URL(new URL(base), rawJar).toString();
+                    } catch (Exception ignored) {
+                        s.jar = rawJar;
+                    }
+                } else {
+                    s.jar = rawJar;
+                }
+            }
+            if (base != null && base.length() > 0) {
+                if (s.ext instanceof String) {
+                    String extStr = (String) s.ext;
+                    if (extStr.startsWith("./") || extStr.startsWith("../")) {
+                        try {
+                            s.ext = new URL(new URL(base), extStr).toString();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                } else if (s.ext instanceof JSONObject) {
+                    JSONObject extObj = (JSONObject) s.ext;
+                    for (String field : new String[] {"json", "url", "rule"}) {
+                        String val = Json.str(extObj, field, null);
+                        if (val != null && (val.startsWith("./") || val.startsWith("../"))) {
+                            try {
+                                extObj.put(field, new URL(new URL(base), val).toString());
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                }
             }
             if (!s.api.startsWith("csp_")
                     && !s.api.startsWith("js_")
@@ -710,7 +824,15 @@ public final class LiteCatalog {
                     && k.indexOf('\n') < 0
                     && v.indexOf('\r') < 0
                     && v.indexOf('\n') < 0) {
-                target.put(k, v);
+                for (String allowed :
+                        new String[] {
+                            "User-Agent", "Referer", "Cookie", "Origin", "Authorization"
+                        }) {
+                    if (k.equalsIgnoreCase(allowed)) {
+                        target.put(allowed, v);
+                        break;
+                    }
+                }
             }
         }
     }
@@ -742,10 +864,19 @@ public final class LiteCatalog {
         if (raw == null) throw new IOException("空响应");
         String trimmed = raw.trim();
         if (trimmed.startsWith("\ufeff")) trimmed = trimmed.substring(1).trim();
-        if (trimmed.startsWith("<")) {
-            return parseXmlCms(trimmed);
+        JSONObject root = trimmed.startsWith("<") ? parseXmlCms(trimmed) : new JSONObject(trimmed);
+        if (!root.has("list") && root.has("data") && root.optJSONObject("data") != null) {
+            JSONObject data = root.optJSONObject("data");
+            if (data.has("list")) {
+                root.put("list", data.get("list"));
+            }
+            if (!root.has("page") && data.has("page")) root.put("page", data.get("page"));
+            if (!root.has("pagecount") && data.has("pagecount"))
+                root.put("pagecount", data.get("pagecount"));
+            if (!root.has("total") && data.has("total")) root.put("total", data.get("total"));
+            if (!root.has("limit") && data.has("limit")) root.put("limit", data.get("limit"));
         }
-        return new JSONObject(trimmed);
+        return root;
     }
 
     public static JSONObject parseXmlCms(String xml) throws Exception {

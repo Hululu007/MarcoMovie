@@ -1,0 +1,6 @@
+{
+  "origin": "https://xmlcms.example.com/api.php/provide/vod/at/xml",
+  "type": "listing",
+  "entrypoint": "listing",
+  "encoding": "utf-8"
+}
