@@ -124,6 +124,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   final ScrollController _sourcePickerGroupsScrollController = ScrollController();
   // Expandable drawer keys in Settings tab
   final Set<String> _expandedSettings = <String>{};
+  List<WatchHistoryEntry> _cachedWatchHistory = const [];
   bool get _isMacOS => !kIsWeb && Platform.isMacOS;
   CmsFilter get _currentFilter => CmsFilter(
         primaryTab: _primaryTab,
@@ -149,6 +150,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   @override
   void initState() {
     super.initState();
+    _cachedWatchHistory = widget.storage.getWatchHistory();
     if (!kIsWeb &&
         (Platform.isWindows || Platform.isMacOS || Platform.isLinux) &&
         !Platform.environment.containsKey('FLUTTER_TEST')) {
@@ -247,7 +249,20 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     unawaited(CmsClient.closeScriptSessions());
   }
   void _onWatchHistoryRevision() {
-    if (mounted) setState(() {});
+    if (mounted) {
+      setState(() {
+        _cachedWatchHistory = widget.storage.getWatchHistory();
+      });
+    }
+  }
+  @override
+  void didUpdateWidget(AdaptiveShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.storage != oldWidget.storage) {
+      oldWidget.storage.watchHistoryRevision.removeListener(_onWatchHistoryRevision);
+      widget.storage.watchHistoryRevision.addListener(_onWatchHistoryRevision);
+      _cachedWatchHistory = widget.storage.getWatchHistory();
+    }
   }
   @override
   void dispose() {
@@ -293,6 +308,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     _searching = false;
     final saved = widget.storage.loadSavedConfig();
     _config = saved;
+    _cachedWatchHistory = widget.storage.getWatchHistory();
     unawaited(CmsClient.retainScriptSessions(
       (saved?.scriptOwners ?? const <CmsSite>[]).where((site) =>
         _privateSessionUnlocked || !site.isEffectivelyPrivate),
@@ -1046,7 +1062,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
         _privateSessionUnlocked ? const <CmsDepot>[] : (_config?.depots ?? const []);
     final history = _privateSessionUnlocked
         ? const <WatchHistoryEntry>[]
-        : widget.storage.getWatchHistory();
+        : _cachedWatchHistory;
     final horizontalPad = useSidebar ? 24.0 : 16.0;
     final topSafePad = MediaQuery.paddingOf(context).top;
     final activeFilterCount = _currentFilter.activeDimensionCount;
@@ -4997,7 +5013,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
         widget.storage.getFavorites(forPrivate: _privateSessionUnlocked);
     final history = _privateSessionUnlocked
         ? const <WatchHistoryEntry>[]
-        : widget.storage.getWatchHistory();
+        : _cachedWatchHistory;
     final pad = useSidebar ? 28.0 : 16.0;
     return SafeArea(
       bottom: useSidebar,

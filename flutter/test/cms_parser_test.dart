@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/cms_parser.dart';
@@ -573,4 +574,133 @@ https://depot.example/config.json
     expect(parsedWithRules.lives.length, 1);
     expect(parsedWithRules.lives.first.name, '综合直播');
   });
+
+  test('D1: preserves all playable lines, ordering direct stream lines first and indirect lines second', () {
+    const raw = '''
+    {
+      "page": 1,
+      "pagecount": 1,
+      "list": [
+        {
+          "vod_id": "202",
+          "vod_name": "混合线路测试影片",
+          "vod_play_from": "解析线路\$\$\$普通直链\$\$\$M3U8直链",
+          "vod_play_url": "第1集\$https://v.qq.com/x/cover/test.html\$\$\$第1集\$https://media.example/stream.mp4\$\$\$第1集\$https://media.example/stream.m3u8"
+        }
+      ]
+    }
+    ''';
+    final listing = CmsParser.parseListing(raw);
+    expect(listing.videos.length, 1);
+    final video = listing.videos.first;
+    expect(video.lines.length, 3);
+    // Direct stream line with .m3u8 ordered first
+    expect(video.lines[0].name, 'M3U8直链');
+    expect(video.lines[0].episodes.first.isDirectPlayable, isTrue);
+    // Standard direct stream line ordered second
+    expect(video.lines[1].name, '普通直链');
+    expect(video.lines[1].episodes.first.isDirectPlayable, isTrue);
+    // Non-direct parse/web line preserved and ordered after direct lines
+    expect(video.lines[2].name, '解析线路');
+    expect(video.lines[2].episodes.first.isDirectPlayable, isFalse);
+    expect(video.lines[2].episodes.first.url, contains('v.qq.com/x/cover'));
+  });
+
+  test('D3: TVBox 2423 delimiter matches on even indices only, ignoring odd-index 2324 inside key', () {
+    // Construct a hex key containing '2324' at an odd offset:
+    // Bytes: [0x61, 0xa2, 0x32, 0x4f, 0x31, 0x32, 0x33, 0x34]
+    // Hex:    61    a2    32    4f    31    32    33    34
+    // Substring '2324' appears across byte boundaries (0xa2, 0x32, 0x4f -> '...2 32 4...') at index 3 in keyHex.
+    const keyHex = '61a2324f31323334';
+    expect(keyHex.indexOf('2324'), 3); // Confirms '2324' is at odd index 3 inside keyHex
+
+    const ivStr = '1234567890abc'; // 13 ASCII chars
+    final ivHex = _testBytesToHex(ascii.encode(ivStr));
+    expect(ivHex.length, 26);
+
+    final keyStr = utf8.decode(_testHexToBytes(keyHex), allowMalformed: true).trim();
+    final keyBytes = _testPadRightBytes(utf8.encode(keyStr), 16, 0x30);
+    final ivBytes = _testPadRightBytes(utf8.encode(ivStr), 16, 0x30);
+
+    const plainText = '{"sites":[{"key":"odd_tvbox","name":"TVBox Odd Align Site","type":1,"api":"https://cms.tvbox/vod"}]}';
+    final cipherBytes = CmsParser.aes128CbcEncrypt(
+      Uint8List.fromList(utf8.encode(plainText)),
+      keyBytes,
+      ivBytes,
+    );
+    final cipherHex = _testBytesToHex(cipherBytes);
+
+    // Full TVBox hex: $# (2423) + keyHex + #$ (2324) + cipherHex + ivHex
+    // In fullHex: '2324' inside keyHex appears at index 4 + 3 = 7 (odd index).
+    // The true closing '#$' delimiter appears at index 4 + 16 = 20 (even index).
+    final fullHex = '2423$keyHex' '2324' '$cipherHex$ivHex';
+
+    // Verify decryption succeeds and does not split prematurely at odd index 7
+    final decrypted = CmsParser.tryDecryptTvBoxHexAes(fullHex);
+    expect(decrypted, isNotNull);
+    expect(decrypted, contains('odd_tvbox'));
+
+    // Verify end-to-end unpacking and parsing
+    final config = CmsParser.parseConfig(fullHex);
+    expect(config.supportedSites.length, 1);
+    expect(config.supportedSites.first.key, 'odd_tvbox');
+    expect(config.supportedSites.first.name, 'TVBox Odd Align Site');
+  });
+
+  test('D3: TVBox 2423 hex payload containing whitespace and newlines parses correctly', () {
+    const keyHex = '61a2324f31323334';
+    const ivStr = '1234567890abc';
+    final ivHex = _testBytesToHex(ascii.encode(ivStr));
+    final keyStr = utf8.decode(_testHexToBytes(keyHex), allowMalformed: true).trim();
+    final keyBytes = _testPadRightBytes(utf8.encode(keyStr), 16, 0x30);
+    final ivBytes = _testPadRightBytes(utf8.encode(ivStr), 16, 0x30);
+
+    const plainText = '{"sites":[{"key":"ws_tvbox","name":"TVBox Whitespace Site","type":1,"api":"https://cms.tvbox/vod"}]}';
+    final cipherBytes = CmsParser.aes128CbcEncrypt(
+      Uint8List.fromList(utf8.encode(plainText)),
+      keyBytes,
+      ivBytes,
+    );
+    final cipherHex = _testBytesToHex(cipherBytes);
+
+    // Embed spaces, tabs, carriage returns, and newlines
+    final whitespaceHex = '''
+      2423  $keyHex
+      2324
+      $cipherHex
+      $ivHex
+    ''';
+
+    final decrypted = CmsParser.tryDecryptTvBoxHexAes(whitespaceHex);
+    expect(decrypted, isNotNull);
+    expect(decrypted, contains('ws_tvbox'));
+
+    final config = CmsParser.parseConfig(whitespaceHex);
+    expect(config.supportedSites.length, 1);
+    expect(config.supportedSites.first.key, 'ws_tvbox');
+  });
+}
+
+Uint8List _testHexToBytes(String hex) {
+  final out = Uint8List(hex.length ~/ 2);
+  for (int i = 0; i < out.length; i++) {
+    out[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+  }
+  return out;
+}
+
+String _testBytesToHex(List<int> bytes) {
+  final sb = StringBuffer();
+  for (final b in bytes) {
+    sb.write(b.toRadixString(16).padLeft(2, '0'));
+  }
+  return sb.toString();
+}
+
+Uint8List _testPadRightBytes(List<int> src, int length, int padByte) {
+  final out = Uint8List(length);
+  for (int i = 0; i < length; i++) {
+    out[i] = i < src.length ? (src[i] & 0xFF) : padByte;
+  }
+  return out;
 }
