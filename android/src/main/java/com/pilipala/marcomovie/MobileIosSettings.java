@@ -1035,6 +1035,28 @@ final class MobileIosSettings {
                                     "支持一键读取剪贴板、输入订阅链接或选择本地包",
                                     () -> MobileShell.showMobileImportDialog(a));
 
+                            if (a.config != null) {
+                                addActionCapsule(
+                                        a,
+                                        body,
+                                        ICON_LAYERS,
+                                        COLOR_INDIGO,
+                                        "已添加源 · 切换或管理多份订阅",
+                                        "查看已保存的多份订阅源配置、自由切换或删除旧源",
+                                        () -> SourcePicker.showSavedConfigs(a));
+                            }
+
+                            if (!a.privateMode) {
+                                addActionCapsule(
+                                        a,
+                                        body,
+                                        ICON_CLOUD,
+                                        COLOR_TEAL,
+                                        "多端网络同步（含订阅源配置）",
+                                        CloudSyncDialog.statusSummary(a),
+                                        () -> CloudSyncDialog.show(a, ctl::rerenderInPlace));
+                            }
+
                             addActionCapsule(
                                     a,
                                     body,
@@ -1149,6 +1171,94 @@ final class MobileIosSettings {
         top.add(subscriptionPane);
 
         // 5. 数据 (Tray, #5AC8FA)
+        PaneSpec cloudSyncSub =
+                new PaneSpec(
+                        "多端网络同步",
+                        "通过 WebDAV 或同局域网在手机、电脑、平板与电视间自动同步进度、收藏与公开订阅源",
+                        ICON_CLOUD,
+                        COLOR_BLUE,
+                        (body, ctl) -> {
+                            if (a.privateMode) {
+                                addActionCapsule(
+                                        a,
+                                        body,
+                                        ICON_LAYERS,
+                                        COLOR_PURPLE,
+                                        "隐私空间数据仅保存在本机",
+                                        "当前处于独立隐私空间，不参与任何 WebDAV 或局域网同步",
+                                        () -> a.toast("隐私空间已严格隔离，不会上传或覆盖同步数据"));
+                                return;
+                            }
+                            addActionCapsule(
+                                    a,
+                                    body,
+                                    ICON_CLOUD,
+                                    COLOR_BLUE,
+                                    "配置 WebDAV 或连接局域网设备",
+                                    CloudSyncDialog.statusSummary(a),
+                                    () -> CloudSyncDialog.show(a, ctl::rerenderInPlace));
+
+                            addActionCapsule(
+                                    a,
+                                    body,
+                                    ICON_TRAY,
+                                    COLOR_TEAL,
+                                    "立即执行 WebDAV 云同步",
+                                    CloudSyncDialog.isConfigured(a)
+                                            ? "拉取云端最新数据并合并推送本机观看记录、收藏与订阅"
+                                            : "尚未填写 WebDAV 服务器信息，点击前往配置",
+                                    () -> {
+                                        if (CloudSyncDialog.isConfigured(a)) {
+                                            CloudSyncDialog.runWebdavSync(
+                                                    a, false, ctl::rerenderInPlace);
+                                        } else {
+                                            CloudSyncDialog.show(a, ctl::rerenderInPlace);
+                                        }
+                                    });
+
+                            addActionCapsule(
+                                    a,
+                                    body,
+                                    ICON_DISPLAY,
+                                    COLOR_GREEN,
+                                    "生成本机局域网同步码 / 二维码",
+                                    "无需云服务器，供同一局域网内的电视、电脑或另一台手机扫码双向合并",
+                                    () ->
+                                            new PhoneConfigDialog(a)
+                                                    .showLanSyncReceiver(ctl::rerenderInPlace));
+
+                            a.gap(body, 6);
+                            boolean autoSync = CloudSyncDialog.isAutoEnabled(a);
+                            addChoices(
+                                    a,
+                                    body,
+                                    "观看与收藏变更后自动云同步",
+                                    new String[] {"开启自动同步", "仅手动同步"},
+                                    autoSync ? 0 : 1,
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putBoolean(Prefs.WEBDAV_AUTO, idx == 0)
+                                                .apply();
+                                        ctl.rerenderInPlace();
+                                    });
+
+                            boolean syncSubs = CloudSyncDialog.isSyncSubscriptionsEnabled(a);
+                            addChoices(
+                                    a,
+                                    body,
+                                    "同时同步我的公开订阅源配置",
+                                    new String[] {"同步订阅源", "仅同步进度与收藏"},
+                                    syncSubs ? 0 : 1,
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putBoolean(Prefs.WEBDAV_SYNC_SUBS, idx == 0)
+                                                .apply();
+                                        ctl.rerenderInPlace();
+                                    });
+                        });
+
         PaneSpec backupRestoreSub =
                 new PaneSpec(
                         "备份与恢复",
@@ -1268,7 +1378,8 @@ final class MobileIosSettings {
                         });
 
         PaneSpec dataPane =
-                new PaneSpec("数据", "跨平台备份、恢复与缓存清理", ICON_TRAY, COLOR_TEAL, null)
+                new PaneSpec("数据", "多端网络同步、跨平台备份与缓存清理", ICON_TRAY, COLOR_TEAL, null)
+                        .addChild(cloudSyncSub)
                         .addChild(backupRestoreSub)
                         .addChild(cacheDiagSub);
         top.add(dataPane);

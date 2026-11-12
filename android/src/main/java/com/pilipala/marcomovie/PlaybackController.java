@@ -1006,6 +1006,7 @@ final class PlaybackController {
                                         a.playingBookmark))
                         .commit();
                 a.lastBookmarkSave = a.playingBookmark.updated;
+                CloudSyncDialog.scheduleAutoPush(a, false);
             } catch (Exception ignored) {
             }
         }
@@ -1713,6 +1714,7 @@ final class PlaybackController {
                                     a.playingBookmark))
                     .commit();
             a.lastBookmarkSave = a.playingBookmark.updated;
+            CloudSyncDialog.scheduleAutoPush(a, false);
         } catch (Exception error) {
             AppLog.w("PlaybackController", "savePlaybackHistoryOnPrepared failed", error);
         }
@@ -1753,6 +1755,7 @@ final class PlaybackController {
                                     a.playingBookmark))
                     .commit();
             a.lastBookmarkSave = now;
+            CloudSyncDialog.scheduleAutoPush(a, false);
         } catch (Exception error) {
             AppLog.w("PlaybackController", "savePlaybackHistory failed", error);
         }

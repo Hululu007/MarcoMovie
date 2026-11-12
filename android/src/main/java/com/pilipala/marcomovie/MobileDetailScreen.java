@@ -870,6 +870,7 @@ final class MobileDetailScreen {
                                                 a.prefs.getString(Prefs.FAVORITES, "[]"),
                                                 s.key,
                                                 v.id);
+                                CloudSyncDialog.onFavoriteToggled(a, s.key, v.id, faved);
                                 favTopBtn.setText(faved ? "♥" : "♡");
                                 favTopBtn.setTextColor(faved ? 0xffff453a : Color.WHITE);
                                 a.toast(faved ? "已加入收藏片库" : "已从片库移除");

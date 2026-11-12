@@ -121,6 +121,14 @@ public final class LiteActivity extends Activity {
     long lastUserSeekAt;
     long lastUpKeyAt;
     int upKeyStreak;
+    volatile boolean syncInFlight;
+    long lastAutoPushMs;
+    final Runnable autoPushTask =
+            new Runnable() {
+                public void run() {
+                    if (!dead) runBackgroundWebdavSync(true);
+                }
+            };
 
     static final class EpisodeItem {
         final String name;
@@ -191,6 +199,9 @@ public final class LiteActivity extends Activity {
         home();
         if (crashedSite != null && crashedSite.length() > 0 && status != null) {
             status.setText("上次加载片源时异常退出，已自动重置片源选择。");
+        }
+        if (isWebdavConfigured() && getPreferences(0).getBoolean("webdav_auto", true)) {
+            runBackgroundWebdavSync(true);
         }
     }
 
@@ -422,6 +433,14 @@ public final class LiteActivity extends Activity {
                 new Runnable() {
                     public void run() {
                         favoritesPage();
+                    }
+                });
+        addNavPill(
+                navRow,
+                "同步",
+                new Runnable() {
+                    public void run() {
+                        syncPage();
                     }
                 });
         addNavPill(
@@ -702,6 +721,15 @@ public final class LiteActivity extends Activity {
                         }));
         quickBtns.add(
                 makeActionButton(
+                        "多端网络同步",
+                        sites.isEmpty(),
+                        new Runnable() {
+                            public void run() {
+                                syncPage();
+                            }
+                        }));
+        quickBtns.add(
+                makeActionButton(
                         "输入配置地址",
                         false,
                         new Runnable() {
@@ -814,7 +842,8 @@ public final class LiteActivity extends Activity {
                 card.setOnClickListener(
                         new View.OnClickListener() {
                             public void onClick(View v) {
-                                openHistoryOrFavorite(h.siteKey, h.siteApi, h.siteName, h.vodId);
+                                openHistoryOrFavorite(
+                                        h.siteKey, h.siteApi, h.siteName, h.vodId, h.vodName);
                             }
                         });
                 histCards.add(card);
@@ -870,7 +899,8 @@ public final class LiteActivity extends Activity {
         }
     }
 
-    void openHistoryOrFavorite(String siteKey, String siteApi, String siteName, String vodId) {
+    void openHistoryOrFavorite(
+            String siteKey, String siteApi, String siteName, String vodId, String vodName) {
         loadConfiguredSites();
         LiteCatalog.Site match = null;
         for (int i = 0; i < sites.size(); i++) {
@@ -891,16 +921,25 @@ public final class LiteActivity extends Activity {
         if (match != null) {
             selected = match;
             detail(vodId);
+        } else if (!sites.isEmpty() && vodName != null && vodName.trim().length() > 0) {
+            globalSearch(vodName.trim());
         } else {
-            status.setText("未找到该记录对应的片源配置，请先导入对应配置。");
+            status.setText("未找到该记录对应的片源配置，请先导入配置或通过多端网络同步拉取订阅。");
         }
     }
 
     void historyPage() {
         base("观看历史");
         final List<LiteStore.HistoryEntry> list = LiteStore.getHistory(this);
+        button(
+                "多端云同步（同步观看进度与收藏）",
+                new Runnable() {
+                    public void run() {
+                        syncPage();
+                    }
+                });
         if (list.isEmpty()) {
-            status.setText("暂无观看历史记录。");
+            status.setText("暂无观看历史记录。可点击上方“多端云同步”从其他设备拉取。");
             button(
                     "返回首页",
                     new Runnable() {
@@ -915,12 +954,14 @@ public final class LiteActivity extends Activity {
                 "清空全部观看历史",
                 new Runnable() {
                     public void run() {
+                        recordHistoryClearTombstones(list);
                         LiteStore.clearHistory(LiteActivity.this);
                         getPreferences(0)
                                 .edit()
                                 .remove("resume_address")
                                 .remove("resume_ms")
                                 .commit();
+                        scheduleAutoPush(true);
                         historyPage();
                     }
                 });
@@ -940,7 +981,11 @@ public final class LiteActivity extends Activity {
                             new Runnable() {
                                 public void run() {
                                     openHistoryOrFavorite(
-                                            h.siteKey, h.siteApi, h.siteName, h.vodId);
+                                            h.siteKey,
+                                            h.siteApi,
+                                            h.siteName,
+                                            h.vodId,
+                                            h.vodName);
                                 }
                             }));
         }
@@ -950,8 +995,15 @@ public final class LiteActivity extends Activity {
     void favoritesPage() {
         base("我的收藏");
         final List<LiteStore.FavoriteEntry> list = LiteStore.getFavorites(this);
+        button(
+                "多端云同步（同步观看进度与收藏）",
+                new Runnable() {
+                    public void run() {
+                        syncPage();
+                    }
+                });
         if (list.isEmpty()) {
-            status.setText("暂无收藏影片，可在影片详情页点击“加入收藏”。");
+            status.setText("暂无收藏影片，可在影片详情页点击“加入收藏”，或通过上方“多端云同步”拉取。");
             button(
                     "返回首页",
                     new Runnable() {
@@ -966,7 +1018,9 @@ public final class LiteActivity extends Activity {
                 "清空收藏夹",
                 new Runnable() {
                     public void run() {
+                        recordFavoritesClearTombstones(list);
                         LiteStore.clearFavorites(LiteActivity.this);
+                        scheduleAutoPush(true);
                         favoritesPage();
                     }
                 });
@@ -983,7 +1037,11 @@ public final class LiteActivity extends Activity {
                             new Runnable() {
                                 public void run() {
                                     openHistoryOrFavorite(
-                                            f.siteKey, f.siteApi, f.siteName, f.vodId);
+                                            f.siteKey,
+                                            f.siteApi,
+                                            f.siteName,
+                                            f.vodId,
+                                            f.vodName);
                                 }
                             }));
         }
@@ -1391,15 +1449,19 @@ public final class LiteActivity extends Activity {
                                                         normalized);
                                         LiteCatalog.parse(raw, normalized);
                                         synchronized (importLock) {
+                                            long ts = System.currentTimeMillis();
                                             getPreferences(0)
                                                     .edit()
                                                     .putString("address", normalized)
                                                     .putString("config", raw)
+                                                    .putLong("sub_updated_at", ts)
                                                     .commit();
+                                            clearSubTombstone(normalized, raw);
                                         }
                                         ui.post(
                                                 new Runnable() {
                                                     public void run() {
+                                                        scheduleAutoPush(true);
                                                         if (!dead) home();
                                                     }
                                                 });
@@ -1468,26 +1530,32 @@ public final class LiteActivity extends Activity {
                                                                             .getString(
                                                                                     "config", "")))
                                                                 return;
+                                                            String rootAddr =
+                                                                    LiteCatalog.decodeConfig(
+                                                                                    combined)
+                                                                            .optString(
+                                                                                    com.pilipala
+                                                                                            .source
+                                                                                            .Warehouse
+                                                                                            .ROOT,
+                                                                                    address);
                                                             if (!getPreferences(0)
                                                                     .edit()
                                                                     .putString("config", combined)
-                                                                    .putString(
-                                                                            "address",
-                                                                            LiteCatalog.decodeConfig(
-                                                                                            combined)
-                                                                                    .optString(
-                                                                                            com.pilipala
-                                                                                                    .source
-                                                                                                    .Warehouse
-                                                                                                    .ROOT,
-                                                                                            address))
+                                                                    .putString("address", rootAddr)
+                                                                    .putLong(
+                                                                            "sub_updated_at",
+                                                                            System
+                                                                                    .currentTimeMillis())
                                                                     .commit())
                                                                 throw new java.io.IOException(
                                                                         "保存失败");
+                                                            clearSubTombstone(rootAddr, combined);
                                                         }
                                                         ui.post(
                                                                 new Runnable() {
                                                                     public void run() {
+                                                                        scheduleAutoPush(true);
                                                                         if (!dead) home();
                                                                     }
                                                                 });
@@ -1510,9 +1578,9 @@ public final class LiteActivity extends Activity {
     }
 
     void configure() {
-        base("手机扫码配置");
+        base("手机扫码配置与局域网接收");
         final int session = epoch;
-        status.setText("手机与电视连接同一局域网扫码推送配置；配置只保存在本机。");
+        status.setText("同一局域网下扫码可推送配置地址，也可在手机/电脑「多端网络同步」中扫码双向合并观看进度、收藏与公开订阅源。");
         try {
             pairing =
                     new ConfigServer(
@@ -1529,17 +1597,23 @@ public final class LiteActivity extends Activity {
                                                 .edit()
                                                 .putString("address", address)
                                                 .putString("config", raw)
+                                                .putLong(
+                                                        "sub_updated_at",
+                                                        System.currentTimeMillis())
                                                 .commit()) throw new java.io.IOException();
+                                        clearSubTombstone(address, raw);
                                     }
                                     ui.post(
                                             new Runnable() {
                                                 public void run() {
+                                                    scheduleAutoPush(true);
                                                     if (pairing != null)
                                                         status.setText("配置已保存，点击“返回片库”选择片源。");
                                                 }
                                             });
                                 }
-                            });
+                            },
+                            createLanSyncHandler());
             String host = null;
             Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
             while (nets.hasMoreElements()) {
@@ -1568,6 +1642,13 @@ public final class LiteActivity extends Activity {
             status.setText("请先连接局域网，或点击下方直接输入配置地址。");
         }
         button(
+                "多端网络同步（WebDAV / 连接其他设备）",
+                new Runnable() {
+                    public void run() {
+                        syncPage();
+                    }
+                });
+        button(
                 "直接输入配置地址",
                 new Runnable() {
                     public void run() {
@@ -1579,6 +1660,574 @@ public final class LiteActivity extends Activity {
                 new Runnable() {
                     public void run() {
                         home();
+                    }
+                });
+    }
+
+    boolean isWebdavConfigured() {
+        return getPreferences(0).getString("webdav_url", "").trim().length() > 0;
+    }
+
+    String syncStatusSummary() {
+        String last = getPreferences(0).getString("sync_last_status", "").trim();
+        if (last.length() > 0) return last;
+        return isWebdavConfigured()
+                ? "已配置 WebDAV · 待同步"
+                : "支持 WebDAV 云同步与同局域网跨设备直连同步";
+    }
+
+    LiteSync.LocalSubscription readLocalSubscriptionForSync() {
+        String addr = getPreferences(0).getString("address", "").trim();
+        String raw = getPreferences(0).getString("config", "");
+        if (addr.length() == 0 && raw.trim().length() == 0) return null;
+        String sel = getPreferences(0).getString("selected_site", "");
+        long ts = getPreferences(0).getLong("sub_updated_at", 1L);
+        String name = "TV Lite 订阅";
+        try {
+            List<LiteCatalog.Site> parsed = LiteCatalog.parse(raw, addr);
+            if (!parsed.isEmpty()) {
+                name =
+                        parsed.get(0).name
+                                + (parsed.size() > 1 ? " · " + parsed.size() + " 个片源" : "");
+            }
+        } catch (Throwable ignored) {
+        }
+        return LiteSync.LocalSubscription.create(name, addr, raw, sel, ts);
+    }
+
+    void clearSubTombstone(String origin, String raw) {
+        try {
+            String key = LiteSync.subscriptionIdentity(origin, LiteSync.sanitizePublicRawConfig(raw));
+            LiteSync.Tombstones t = LiteSync.Tombstones.read(LiteStore.getTombstonesRaw(this));
+            t.stamps.remove("sub:" + key);
+            LiteStore.setTombstonesRaw(this, t.json());
+        } catch (Exception ignored) {
+        }
+    }
+
+    void recordHistoryClearTombstones(List<LiteStore.HistoryEntry> list) {
+        if (list == null || list.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        LiteSync.Tombstones t = LiteSync.Tombstones.read(LiteStore.getTombstonesRaw(this));
+        for (int i = 0; i < list.size(); i++) {
+            LiteStore.HistoryEntry e = list.get(i);
+            t.putMax("hist:" + LiteSync.itemKey(e.siteKey, e.vodId), now);
+        }
+        LiteStore.setTombstonesRaw(this, t.json());
+    }
+
+    void recordFavoritesClearTombstones(List<LiteStore.FavoriteEntry> list) {
+        if (list == null || list.isEmpty()) return;
+        long now = System.currentTimeMillis();
+        LiteSync.Tombstones t = LiteSync.Tombstones.read(LiteStore.getTombstonesRaw(this));
+        for (int i = 0; i < list.size(); i++) {
+            LiteStore.FavoriteEntry f = list.get(i);
+            String k = LiteSync.itemKey(f.siteKey, f.vodId);
+            t.putMax("fav:" + k, now);
+            t.stamps.remove("add:" + k);
+        }
+        LiteStore.setTombstonesRaw(this, t.json());
+    }
+
+    void recordFavoriteToggleTombstone(String siteKey, String vodId, boolean nowFavorited) {
+        long now = System.currentTimeMillis();
+        String k = LiteSync.itemKey(siteKey, vodId);
+        LiteSync.Tombstones t = LiteSync.Tombstones.read(LiteStore.getTombstonesRaw(this));
+        if (nowFavorited) {
+            t.stamps.put("add:" + k, Long.valueOf(now));
+            t.stamps.remove("fav:" + k);
+        } else {
+            t.stamps.put("fav:" + k, Long.valueOf(now));
+            t.stamps.remove("add:" + k);
+        }
+        LiteStore.setTombstonesRaw(this, t.json());
+    }
+
+    LiteSync.MergeResult mergeAndApplyOnAnyThread(String remotePayloadJson) throws Exception {
+        final long now = System.currentTimeMillis();
+        final String[] snap = new String[3];
+        final boolean[] syncSubsHolder = new boolean[1];
+        final LiteSync.LocalSubscription[] localSubHolder = new LiteSync.LocalSubscription[1];
+        synchronized (importLock) {
+            snap[0] = LiteStore.getHistoryRaw(this);
+            snap[1] = LiteStore.getFavoritesRaw(this);
+            snap[2] = LiteStore.getTombstonesRaw(this);
+            syncSubsHolder[0] = getPreferences(0).getBoolean("webdav_sync_subs", true);
+            localSubHolder[0] = syncSubsHolder[0] ? readLocalSubscriptionForSync() : null;
+        }
+        final boolean syncSubs = syncSubsHolder[0];
+        LiteSync.MergeResult res =
+                LiteSync.merge(
+                        snap[0],
+                        snap[1],
+                        snap[2],
+                        localSubHolder[0],
+                        syncSubs,
+                        remotePayloadJson,
+                        now);
+
+        String fetchedRaw = null;
+        String fetchedOrigin = "";
+        if (syncSubs && res.activeSubscription != null) {
+            fetchedOrigin = res.activeSubscription.url;
+            fetchedRaw = res.activeSubscription.rawContent;
+            if ((fetchedRaw == null || fetchedRaw.trim().length() == 0)
+                    && fetchedOrigin.length() > 0) {
+                try {
+                    fetchedRaw =
+                            LiteCatalog.importConfig(
+                                    LiteCatalog.fetch(fetchedOrigin, null), fetchedOrigin);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        synchronized (importLock) {
+            LiteStore.setHistoryRaw(this, res.historyJson);
+            LiteStore.setFavoritesRaw(this, res.favoritesJson);
+            LiteStore.setTombstonesRaw(this, res.tombstonesJson);
+            if (syncSubs) {
+                String currentCfg = getPreferences(0).getString("config", "");
+                if (res.clearLocalSubscription && res.activeSubscription == null) {
+                    getPreferences(0)
+                            .edit()
+                            .remove("address")
+                            .remove("config")
+                            .remove("selected_site")
+                            .commit();
+                    selected = null;
+                } else if (res.activeSubscription != null
+                        && fetchedRaw != null
+                        && fetchedRaw.trim().length() > 0) {
+                    boolean shouldApply =
+                            currentCfg.trim().length() == 0
+                                    || !fetchedRaw.equals(currentCfg);
+                    if (shouldApply) {
+                        try {
+                            List<LiteCatalog.Site> parsed =
+                                    LiteCatalog.parse(fetchedRaw, fetchedOrigin);
+                            if (!parsed.isEmpty()) {
+                                android.content.SharedPreferences.Editor ed =
+                                        getPreferences(0)
+                                                .edit()
+                                                .putString("address", fetchedOrigin)
+                                                .putString("config", fetchedRaw)
+                                                .putLong(
+                                                        "sub_updated_at",
+                                                        res.activeSubscription.updatedAt);
+                                if (res.activeSubscription.selectedSiteKey.length() > 0) {
+                                    ed.putString(
+                                            "selected_site",
+                                            res.activeSubscription.selectedSiteKey);
+                                }
+                                ed.commit();
+                                selected = null;
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            }
+        }
+        return res;
+    }
+
+    ConfigServer.SyncHandler createLanSyncHandler() {
+        return new ConfigServer.SyncHandler() {
+            public String sync(String remotePayloadJson) throws Exception {
+                long now = System.currentTimeMillis();
+                if (remotePayloadJson == null) {
+                    boolean syncSubs = getPreferences(0).getBoolean("webdav_sync_subs", true);
+                    return LiteSync.exportPayload(
+                            LiteStore.getHistoryRaw(LiteActivity.this),
+                            LiteStore.getFavoritesRaw(LiteActivity.this),
+                            LiteStore.getTombstonesRaw(LiteActivity.this),
+                            syncSubs ? readLocalSubscriptionForSync() : null,
+                            syncSubs,
+                            now);
+                }
+                final LiteSync.MergeResult merged = mergeAndApplyOnAnyThread(remotePayloadJson);
+                final boolean syncSubs = getPreferences(0).getBoolean("webdav_sync_subs", true);
+                final String summary =
+                        "局域网已合并 · 历史 "
+                                + merged.historyCount
+                                + " / 收藏 "
+                                + merged.favoriteCount
+                                + (syncSubs ? (" / 订阅 " + merged.subscriptionCount) : "");
+                getPreferences(0)
+                        .edit()
+                        .putLong("sync_last_time", now)
+                        .putString("sync_last_status", summary)
+                        .commit();
+                ui.post(
+                        new Runnable() {
+                            public void run() {
+                                if (!dead && status != null) {
+                                    status.setText(summary + "。点击“返回片库”查看最新内容。");
+                                }
+                            }
+                        });
+                return merged.payloadJson;
+            }
+        };
+    }
+
+    void scheduleAutoPush(boolean immediate) {
+        if (dead || !isWebdavConfigured() || !getPreferences(0).getBoolean("webdav_auto", true)) {
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        long delay = immediate ? 2500L : 45000L;
+        if (!immediate && now - lastAutoPushMs < 40000L) return;
+        ui.removeCallbacks(autoPushTask);
+        ui.postDelayed(autoPushTask, delay);
+    }
+
+    void runBackgroundWebdavSync(final boolean silent) {
+        if (dead || syncInFlight || !isWebdavConfigured()) return;
+        final String url = getPreferences(0).getString("webdav_url", "").trim();
+        final String user = getPreferences(0).getString("webdav_user", "").trim();
+        final String pass = getPreferences(0).getString("webdav_pass", "");
+        if (url.length() == 0) return;
+        syncInFlight = true;
+        lastAutoPushMs = SystemClock.uptimeMillis();
+        if (!silent && status != null) {
+            status.setText("正在与 WebDAV 服务器同步…");
+        }
+        io.execute(
+                new Runnable() {
+                    public void run() {
+                        try {
+                            final LiteSync.MergeResult res =
+                                    LiteSync.syncWebdav(
+                                            url,
+                                            user,
+                                            pass,
+                                            new LiteSync.MergeCallback() {
+                                                public LiteSync.MergeResult merge(String remote)
+                                                        throws Exception {
+                                                    return mergeAndApplyOnAnyThread(remote);
+                                                }
+                                            });
+                            final boolean syncSubs =
+                                    getPreferences(0).getBoolean("webdav_sync_subs", true);
+                            final String msg =
+                                    "WebDAV 同步成功 · 历史 "
+                                            + res.historyCount
+                                            + " / 收藏 "
+                                            + res.favoriteCount
+                                            + (syncSubs ? (" / 订阅 " + res.subscriptionCount) : "");
+                            getPreferences(0)
+                                    .edit()
+                                    .putLong("sync_last_time", System.currentTimeMillis())
+                                    .putString("sync_last_status", msg)
+                                    .commit();
+                            ui.post(
+                                    new Runnable() {
+                                        public void run() {
+                                            if (dead) return;
+                                            if (!silent) {
+                                                syncPage();
+                                                if (status != null) status.setText(msg);
+                                            } else if (res.changed && homeVisible && !inPlayback) {
+                                                home();
+                                                if (status != null) status.setText(msg);
+                                            }
+                                        }
+                                    });
+                        } catch (final Exception err) {
+                            final String failMsg =
+                                    "同步未完成："
+                                            + (err.getMessage() == null
+                                                    ? err.getClass().getSimpleName()
+                                                    : err.getMessage());
+                            getPreferences(0)
+                                    .edit()
+                                    .putString("sync_last_status", failMsg)
+                                    .commit();
+                            if (!silent) {
+                                ui.post(
+                                        new Runnable() {
+                                            public void run() {
+                                                if (!dead && status != null) {
+                                                    status.setText(failMsg);
+                                                }
+                                            }
+                                        });
+                            }
+                        } finally {
+                            syncInFlight = false;
+                        }
+                    }
+                });
+    }
+
+    void syncPage() {
+        base("多端网络同步");
+        status.setText(syncStatusSummary() + "（仅同步常规观看进度、收藏与公开订阅，不含网盘或 Emby 私密凭据）");
+
+        boolean autoOn = getPreferences(0).getBoolean("webdav_auto", true);
+        boolean subsOn = getPreferences(0).getBoolean("webdav_sync_subs", true);
+
+        List<View> btns = new ArrayList<View>();
+        btns.add(
+                makeActionButton(
+                        isWebdavConfigured() ? "立即执行 WebDAV 同步" : "填写 WebDAV 云同步账号",
+                        true,
+                        new Runnable() {
+                            public void run() {
+                                if (isWebdavConfigured()) runBackgroundWebdavSync(false);
+                                else webdavConfigPage();
+                            }
+                        }));
+        btns.add(
+                makeActionButton(
+                        "配置 WebDAV 服务器",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                webdavConfigPage();
+                            }
+                        }));
+        btns.add(
+                makeActionButton(
+                        "本机二维码接收局域网同步",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                configure();
+                            }
+                        }));
+        btns.add(
+                makeActionButton(
+                        "输入对方局域网地址同步",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                lanPeerSyncPage();
+                            }
+                        }));
+        btns.add(
+                makeActionButton(
+                        autoOn ? "自动云同步：已开启" : "自动云同步：已关闭",
+                        autoOn,
+                        new Runnable() {
+                            public void run() {
+                                boolean next =
+                                        !getPreferences(0).getBoolean("webdav_auto", true);
+                                getPreferences(0).edit().putBoolean("webdav_auto", next).commit();
+                                syncPage();
+                            }
+                        }));
+        btns.add(
+                makeActionButton(
+                        subsOn ? "同时同步公开订阅源：已开启" : "同时同步公开订阅源：仅进度与收藏",
+                        subsOn,
+                        new Runnable() {
+                            public void run() {
+                                boolean next =
+                                        !getPreferences(0).getBoolean("webdav_sync_subs", true);
+                                getPreferences(0)
+                                        .edit()
+                                        .putBoolean("webdav_sync_subs", next)
+                                        .commit();
+                                syncPage();
+                            }
+                        }));
+        addGridViews(page, btns, isTvOrLandscape() ? 2 : 1, 48);
+
+        button(
+                "返回首页片库",
+                new Runnable() {
+                    public void run() {
+                        home();
+                    }
+                });
+    }
+
+    void webdavConfigPage() {
+        base("配置 WebDAV 云同步");
+        status.setText("支持坚果云、Alist、群晖 NAS、Nextcloud 等标准 WebDAV 目录或 JSON 地址：");
+
+        page.addView(text("WebDAV 目录或文件地址：", 14));
+        final EditText urlInput = new EditText(this);
+        urlInput.setSingleLine();
+        urlInput.setTextColor(0xffffffff);
+        urlInput.setHint("https://dav.example/dav/MarcoMovie/");
+        urlInput.setText(getPreferences(0).getString("webdav_url", ""));
+        page.addView(urlInput);
+
+        page.addView(text("WebDAV 账号（可选）：", 14));
+        final EditText userInput = new EditText(this);
+        userInput.setSingleLine();
+        userInput.setTextColor(0xffffffff);
+        userInput.setHint("用户名或邮箱");
+        userInput.setText(getPreferences(0).getString("webdav_user", ""));
+        page.addView(userInput);
+
+        page.addView(text("WebDAV 应用密码（可选）：", 14));
+        final EditText passInput = new EditText(this);
+        passInput.setSingleLine();
+        passInput.setInputType(
+                android.text.InputType.TYPE_CLASS_TEXT
+                        | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        passInput.setTextColor(0xffffffff);
+        passInput.setHint("应用专用密码");
+        passInput.setText(getPreferences(0).getString("webdav_pass", ""));
+        page.addView(passInput);
+
+        button(
+                "保存并立即同步",
+                new Runnable() {
+                    public void run() {
+                        String u = urlInput.getText().toString().trim();
+                        if (u.length() > 0) {
+                            try {
+                                LiteSync.resolveWebdavFileUrl(u);
+                            } catch (Exception e) {
+                                status.setText(e.getMessage());
+                                return;
+                            }
+                        }
+                        getPreferences(0)
+                                .edit()
+                                .putString("webdav_url", u)
+                                .putString("webdav_user", userInput.getText().toString().trim())
+                                .putString("webdav_pass", passInput.getText().toString())
+                                .commit();
+                        if (u.length() > 0) {
+                            runBackgroundWebdavSync(false);
+                        } else {
+                            syncPage();
+                        }
+                    }
+                });
+        button(
+                "返回同步页",
+                new Runnable() {
+                    public void run() {
+                        syncPage();
+                    }
+                });
+    }
+
+    void lanPeerSyncPage() {
+        base("连接局域网设备双向同步");
+        status.setText("在另一台手机、电脑或电视打开 Marco Movie「局域网同步接收码」，输入下方地址即可一次性双向合并记录与公开订阅：");
+
+        final EditText peerInput = new EditText(this);
+        peerInput.setSingleLine();
+        peerInput.setTextColor(0xffffffff);
+        peerInput.setHint("http://…:端口/configure/…");
+        page.addView(peerInput);
+
+        button(
+                "立即双向合并同步",
+                new Runnable() {
+                    public void run() {
+                        final String peer = peerInput.getText().toString().trim();
+                        if (peer.length() == 0) {
+                            status.setText("请输入对方设备显示的局域网同步地址");
+                            return;
+                        }
+                        if (syncInFlight) return;
+                        syncInFlight = true;
+                        status.setText("正在连接局域网设备合并数据…");
+                        io.execute(
+                                new Runnable() {
+                                    public void run() {
+                                        try {
+                                            final LiteSync.MergeResult res =
+                                                    LiteSync.syncLanPeer(
+                                                            peer,
+                                                            new LiteSync.LanPeerCallback() {
+                                                                public String exportLocalPayload() {
+                                                                    boolean syncSubs =
+                                                                            getPreferences(0)
+                                                                                    .getBoolean(
+                                                                                            "webdav_sync_subs",
+                                                                                            true);
+                                                                    return LiteSync.exportPayload(
+                                                                            LiteStore.getHistoryRaw(
+                                                                                    LiteActivity
+                                                                                            .this),
+                                                                            LiteStore
+                                                                                    .getFavoritesRaw(
+                                                                                            LiteActivity
+                                                                                                    .this),
+                                                                            LiteStore
+                                                                                    .getTombstonesRaw(
+                                                                                            LiteActivity
+                                                                                                    .this),
+                                                                            syncSubs
+                                                                                    ? readLocalSubscriptionForSync()
+                                                                                    : null,
+                                                                            syncSubs,
+                                                                            System
+                                                                                    .currentTimeMillis());
+                                                                }
+
+                                                                public LiteSync.MergeResult
+                                                                        applyMergedPayload(
+                                                                                String
+                                                                                        remoteMergedPayloadJson)
+                                                                                throws Exception {
+                                                                    return mergeAndApplyOnAnyThread(
+                                                                            remoteMergedPayloadJson);
+                                                                }
+                                                            });
+                                            final boolean syncSubs =
+                                                    getPreferences(0)
+                                                            .getBoolean("webdav_sync_subs", true);
+                                            final String msg =
+                                                    "局域网同步完成 · 历史 "
+                                                            + res.historyCount
+                                                            + " / 收藏 "
+                                                            + res.favoriteCount
+                                                            + (syncSubs
+                                                                    ? (" / 订阅 "
+                                                                            + res.subscriptionCount)
+                                                                    : "");
+                                            getPreferences(0)
+                                                    .edit()
+                                                    .putLong(
+                                                            "sync_last_time",
+                                                            System.currentTimeMillis())
+                                                    .putString("sync_last_status", msg)
+                                                    .commit();
+                                            ui.post(
+                                                    new Runnable() {
+                                                        public void run() {
+                                                            if (!dead) {
+                                                                syncPage();
+                                                                if (status != null)
+                                                                    status.setText(msg);
+                                                            }
+                                                        }
+                                                    });
+                                        } catch (final Exception err) {
+                                            ui.post(
+                                                    new Runnable() {
+                                                        public void run() {
+                                                            if (!dead && status != null) {
+                                                                status.setText(
+                                                                        "局域网同步失败："
+                                                                                + err.getMessage());
+                                                            }
+                                                        }
+                                                    });
+                                        } finally {
+                                            syncInFlight = false;
+                                        }
+                                    }
+                                });
+                    }
+                });
+        button(
+                "返回同步页",
+                new Runnable() {
+                    public void run() {
+                        syncPage();
                     }
                 });
     }
@@ -2391,7 +3040,10 @@ public final class LiteActivity extends Activity {
                                 entry.vodName = vodName;
                                 entry.vodPic = vodPic;
                                 entry.vodRemarks = vodRemarks;
-                                LiteStore.toggleFavorite(LiteActivity.this, entry);
+                                boolean nowFav =
+                                        LiteStore.toggleFavorite(LiteActivity.this, entry);
+                                recordFavoriteToggleTombstone(siteKey, vodId, nowFav);
+                                scheduleAutoPush(true);
                                 showDetail(video);
                             }
                         }));
@@ -3414,6 +4066,7 @@ public final class LiteActivity extends Activity {
                 entry.durationMs = Math.max(0, dur);
                 entry.updatedAt = System.currentTimeMillis();
                 LiteStore.saveHistory(this, entry);
+                scheduleAutoPush(false);
             }
         } catch (Exception ignored) {
         }
@@ -3510,6 +4163,7 @@ public final class LiteActivity extends Activity {
     protected void onDestroy() {
         dead = true;
         epoch++;
+        ui.removeCallbacks(autoPushTask);
         cancelWork();
         closePairing();
         release();

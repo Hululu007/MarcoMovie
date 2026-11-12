@@ -204,6 +204,20 @@ final class CatalogScreen {
         Cms.Site site = null;
         if (a.config != null) for (Cms.Site s : a.config.sites) if (s.key.equals(e.site)) site = s;
         if (site == null || !a.available(site)) {
+            if (a.config != null && e.title != null && !e.title.trim().isEmpty()) {
+                if (!a.isTvDevice()) {
+                    a.toast("原片源不在当前订阅中，已自动全网搜索该影片");
+                    a.openSearch(e.title);
+                } else {
+                    new AppDialog.Builder(a)
+                            .setTitle("原片源不在当前订阅中")
+                            .setMessage("这条观看记录来自其他设备或旧订阅源，是否在当前片库中全网搜索「" + e.title + "」？")
+                            .setPositiveButton("全网搜索", (d, w) -> a.openSearch(e.title))
+                            .setNegativeButton("保留记录", null)
+                            .show();
+                }
+                return;
+            }
             a.notice("这条记录的来源已不可用，记录仍保留在本机。");
             return;
         }
@@ -274,7 +288,9 @@ final class CatalogScreen {
                 .setPositiveButton(
                         "清空",
                         (d, n) -> {
+                            List<WatchHistory.Entry> prev = a.watchHistory();
                             a.prefs.edit().remove(Prefs.WATCH_HISTORY).apply();
+                            CloudSyncDialog.onHistoryCleared(a, prev);
                             a.refresh();
                         })
                 .show();
@@ -297,6 +313,7 @@ final class CatalogScreen {
                                                                 Prefs.WATCH_HISTORY, "[]"),
                                                         e.key()))
                                         .apply();
+                                CloudSyncDialog.onHistoryDeleted(a, e.key());
                                 a.refresh();
                             }
                         })
@@ -309,6 +326,14 @@ final class CatalogScreen {
         List<WatchHistory.Entry> entries = a.watchHistory();
         if (entries.isEmpty()) {
             a.paragraph("播放后会在这里记录集数和进度。");
+            if (!a.privateMode) {
+                a.addButton(
+                        a.body,
+                        a.navButton(
+                                "多端云同步",
+                                "history-cloud-sync",
+                                () -> CloudSyncDialog.show(a, a::refresh)));
+            }
             return;
         }
         if (a.isTvDevice()) {
@@ -319,6 +344,16 @@ final class CatalogScreen {
             TextView summary =
                     a.text(entries.size() + " 部观看记录 · 确认继续观看，长按确认或按菜单键管理", 13, MainActivity.MUTED);
             topBar.addView(summary, new LinearLayout.LayoutParams(0, -2, 1));
+            if (!a.privateMode) {
+                Button syncBtn =
+                        a.navButton(
+                                "多端云同步",
+                                "history-cloud-sync",
+                                () -> CloudSyncDialog.show(a, a::refresh));
+                LinearLayout.LayoutParams syncLp = new LinearLayout.LayoutParams(-2, a.dp(36));
+                syncLp.rightMargin = a.dp(8);
+                topBar.addView(syncBtn, syncLp);
+            }
             Button clearBtn = a.navButton("清空观看历史", "history-clear", () -> confirmClearHistory(a));
             topBar.addView(clearBtn, new LinearLayout.LayoutParams(-2, a.dp(36)));
             a.body.addView(topBar, new LinearLayout.LayoutParams(-1, -2));
@@ -489,7 +524,18 @@ final class CatalogScreen {
                 }
             return;
         }
-        a.addButton(a.body, a.navButton("清空观看历史", "history-clear", () -> confirmClearHistory(a)));
+        LinearLayout topActions = a.row();
+        if (!a.privateMode) {
+            a.addButton(
+                    topActions,
+                    a.navButton(
+                            "多端云同步",
+                            "history-cloud-sync",
+                            () -> CloudSyncDialog.show(a, a::refresh)));
+        }
+        a.addButton(
+                topActions, a.navButton("清空观看历史", "history-clear", () -> confirmClearHistory(a)));
+        a.body.addView(topActions);
         for (WatchHistory.Entry e : entries) {
             LinearLayout line = a.row();
             line.setClipChildren(false);
@@ -518,6 +564,7 @@ final class CatalogScreen {
                                                                 Prefs.WATCH_HISTORY, "[]"),
                                                         e.key()))
                                         .apply();
+                                CloudSyncDialog.onHistoryDeleted(a, e.key());
                                 a.refresh();
                             }));
             a.body.addView(line);

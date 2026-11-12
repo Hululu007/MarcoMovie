@@ -16,6 +16,7 @@ public final class LiteStore {
     private static final String KEY_HISTORY = "watch_history_v1";
     private static final String KEY_FAVORITES = "favorites_v1";
     private static final String KEY_SEARCH_HISTORY = "search_history_v1";
+    private static final String KEY_SYNC_TOMBSTONES = "sync_tombstones_v1";
     public static final int MAX_HISTORY = 40;
     public static final int MAX_FAVORITES = 100;
     public static final int MAX_SEARCH_HISTORY = 16;
@@ -291,6 +292,30 @@ public final class LiteStore {
 
     public static void clearSearchHistory(Context context) {
         prefs(context).edit().putString(KEY_SEARCH_HISTORY, "[]").commit();
+    }
+
+    public static String getHistoryRaw(Context context) {
+        return prefs(context).getString(KEY_HISTORY, "[]");
+    }
+
+    public static void setHistoryRaw(Context context, String raw) {
+        prefs(context).edit().putString(KEY_HISTORY, raw == null ? "[]" : raw).commit();
+    }
+
+    public static String getFavoritesRaw(Context context) {
+        return prefs(context).getString(KEY_FAVORITES, "[]");
+    }
+
+    public static void setFavoritesRaw(Context context, String raw) {
+        prefs(context).edit().putString(KEY_FAVORITES, raw == null ? "[]" : raw).commit();
+    }
+
+    public static String getTombstonesRaw(Context context) {
+        return prefs(context).getString(KEY_SYNC_TOMBSTONES, "");
+    }
+
+    public static void setTombstonesRaw(Context context, String raw) {
+        prefs(context).edit().putString(KEY_SYNC_TOMBSTONES, raw == null ? "" : raw).commit();
     }
 
     private static boolean sameVideo(String siteA, String vodA, String siteB, String vodB) {

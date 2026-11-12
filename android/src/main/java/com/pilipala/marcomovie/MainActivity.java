@@ -714,6 +714,9 @@ public final class MainActivity extends Activity {
                                     }
                                     open(new Screen(() -> home()), false);
                                     layoutReady = true;
+                                    if (!privateMode) {
+                                        CloudSyncDialog.pullOnStartup(MainActivity.this);
+                                    }
                                     if (recoveredFromCrash) {
                                         toast("上次加载该片源时异常退出，已自动重置片源选择");
                                     } else if (layoutIntro && isTvDevice()) {
@@ -1433,6 +1436,14 @@ public final class MainActivity extends Activity {
         addButton(
                 hero,
                 navButton("观看历史", "history-open", () -> open(new Screen(this::historyPage), true)));
+        if (!privateMode) {
+            addButton(
+                    hero,
+                    navButton(
+                            "多端同步",
+                            "cloud-sync-open",
+                            () -> CloudSyncDialog.show(this, this::refresh)));
+        }
         body.addView(hero);
         gap(body, 30);
         if (config == null) {

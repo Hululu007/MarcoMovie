@@ -1,6 +1,6 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-import json, os, subprocess, threading, hashlib, urllib.request
+import json, os, subprocess, sys, threading, hashlib, urllib.request
 ROOT=Path(__file__).resolve().parents[2]
 JDK=Path(os.environ.get('MARCOMOVIE_JDK',os.environ.get('JAVA_HOME', 'missing-jdk')))
 class Handler(BaseHTTPRequestHandler):
@@ -24,3 +24,4 @@ try:
     r=subprocess.run([str(JDK/'bin'/('java.exe' if os.name=='nt' else 'java')),'-cp',str(classes)+os.pathsep+str(jar),'CmsChecks','unused',f'http://127.0.0.1:{server.server_port}/'],check=True,text=True,encoding='utf8',capture_output=True)
     print(r.stdout);(test/'results.txt').write_text(r.stdout,encoding='utf8')
 finally:server.shutdown()
+subprocess.run([sys.executable, str(test/'run_cloud_sync_checks.py')], check=True)

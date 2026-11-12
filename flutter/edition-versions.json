@@ -1,14 +1,14 @@
 {
   "windows": {
-    "versionName": "0.5.16",
-    "buildNumber": 66
+    "versionName": "0.5.17",
+    "buildNumber": 67
   },
   "macos": {
-    "versionName": "0.5.13",
-    "buildNumber": 63
+    "versionName": "0.5.14",
+    "buildNumber": 64
   },
   "ios": {
-    "versionName": "0.5.23",
-    "buildNumber": 73
+    "versionName": "0.5.24",
+    "buildNumber": 74
   }
 }

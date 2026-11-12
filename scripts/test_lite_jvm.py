@@ -156,8 +156,13 @@ public final class Xml {
 
 
 def main():
-    if not (BUILD / 'classes.jar').exists():
-        subprocess.run(['python', '-X', 'utf8', str(ROOT / 'scripts/build_lite.py')], check=True)
+    classes_jar = BUILD / 'classes.jar'
+    latest_src_mtime = max(
+        (p.stat().st_mtime for p in (ROOT / 'lite/src').rglob('*.java')),
+        default=0.0,
+    )
+    if not classes_jar.exists() or classes_jar.stat().st_mtime < latest_src_mtime:
+        subprocess.run([os.sys.executable, '-X', 'utf8', str(ROOT / 'scripts/build_lite.py')], check=True)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
@@ -219,7 +224,7 @@ def main():
         run_cp = sep.join([str(jvm_classes), str(BUILD / 'classes.jar'), str(json_jar), str(API14)])
         out = run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteJvmChecks', capture=True)
         print(out.strip())
-        assert 'PASS 59 TV Lite JVM checks' in out
+        assert 'PASS 67 TV Lite JVM checks' in out
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteCredentialProbe', capture=True).strip())
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteTlsChecks', capture=True).strip())
 

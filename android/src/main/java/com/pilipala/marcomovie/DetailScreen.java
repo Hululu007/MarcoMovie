@@ -402,6 +402,7 @@ final class DetailScreen {
                     boolean nowFav =
                             Favorites.contains(
                                     a.prefs.getString(Prefs.FAVORITES, "[]"), s.key, v.id);
+                    CloudSyncDialog.onFavoriteToggled(a, s.key, v.id, nowFav);
                     favorite.setText(nowFav ? "♥ 已收藏" : "♡ 加入收藏");
                     styleGlassButton(a, favorite, favorite.hasFocus(), nowFav);
                 });

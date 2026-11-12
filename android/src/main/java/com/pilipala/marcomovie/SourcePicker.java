@@ -346,17 +346,15 @@ final class SourcePicker {
             }
         a.gap(panel, 8);
         LinearLayout footer = a.row();
-        if (tv) {
-            a.addButton(
-                    footer,
-                    a.navButton(
-                            "已添加源",
-                            "source-library",
-                            () -> {
-                                dialog.dismiss();
-                                showSavedConfigs(a);
-                            }));
-        }
+        a.addButton(
+                footer,
+                a.navButton(
+                        "已添加源",
+                        "source-library",
+                        () -> {
+                            dialog.dismiss();
+                            showSavedConfigs(a);
+                        }));
         a.addButton(
                 footer,
                 a.navButton(
@@ -457,62 +455,121 @@ final class SourcePicker {
                         a.ui.post(
                                 () -> {
                                     if (a.isFinishing() || a.config != previous) return;
-                                    new AppDialog.Builder(a)
-                                            .wrapChoices()
-                                            .setTitle("已添加源 · " + entries.size() + " 个订阅")
-                                            .setSingleChoiceItems(
-                                                    names,
-                                                    checked,
-                                                    (dialog, index) -> {
-                                                        dialog.dismiss();
-                                                        ConfigLibrary.Entry entry =
-                                                                entries.get(index);
-                                                        if (entry.id.equals(active)) {
-                                                            show(a);
-                                                            return;
-                                                        }
-                                                        a.worker.execute(
-                                                                () -> {
-                                                                    try {
-                                                                        Cms.Config saved =
-                                                                                Cms.parseConfig(
-                                                                                        library.raw(
-                                                                                                entry),
-                                                                                        entry.origin);
-                                                                        a.ui.post(
-                                                                                () -> {
-                                                                                    if (a
-                                                                                                    .isFinishing()
-                                                                                            || a.config
-                                                                                                    != previous)
-                                                                                        return;
-                                                                                    try {
-                                                                                        saveSelectedConfig(
-                                                                                                a,
-                                                                                                saved,
-                                                                                                entry.origin);
-                                                                                    } catch (
-                                                                                            Exception
-                                                                                                    error) {
-                                                                                        a.notice(
-                                                                                                "订阅切换失败，已保留当前片源");
-                                                                                    }
-                                                                                });
-                                                                    } catch (Exception error) {
-                                                                        a.ui.post(
-                                                                                () ->
-                                                                                        a.notice(
-                                                                                                "无法读取这份订阅，已保留当前片源"));
-                                                                    }
-                                                                });
-                                                    })
-                                            .setNegativeButton("关闭", null)
-                                            .show();
+                                    AppDialog.Builder builder =
+                                            new AppDialog.Builder(a)
+                                                    .wrapChoices()
+                                                    .setTitle("已添加源 · " + entries.size() + " 个订阅")
+                                                    .setSingleChoiceItems(
+                                                            names,
+                                                            checked,
+                                                            (dialog, index) -> {
+                                                                dialog.dismiss();
+                                                                ConfigLibrary.Entry entry =
+                                                                        entries.get(index);
+                                                                if (entry.id.equals(active)) {
+                                                                    show(a);
+                                                                    return;
+                                                                }
+                                                                a.worker.execute(
+                                                                        () -> {
+                                                                            try {
+                                                                                Cms.Config saved =
+                                                                                        Cms
+                                                                                                .parseConfig(
+                                                                                                        library
+                                                                                                                .raw(
+                                                                                                                        entry),
+                                                                                                        entry.origin);
+                                                                                a.ui.post(
+                                                                                        () -> {
+                                                                                            if (a
+                                                                                                            .isFinishing()
+                                                                                                    || a.config
+                                                                                                            != previous)
+                                                                                                return;
+                                                                                            try {
+                                                                                                saveSelectedConfig(
+                                                                                                        a,
+                                                                                                        saved,
+                                                                                                        entry.origin);
+                                                                                            } catch (
+                                                                                                    Exception
+                                                                                                            error) {
+                                                                                                a
+                                                                                                        .notice(
+                                                                                                                "订阅切换失败，已保留当前片源");
+                                                                                            }
+                                                                                        });
+                                                                            } catch (
+                                                                                    Exception
+                                                                                            error) {
+                                                                                a.ui.post(
+                                                                                        () ->
+                                                                                                a
+                                                                                                        .notice(
+                                                                                                                "无法读取这份订阅，已保留当前片源"));
+                                                                            }
+                                                                        });
+                                                            })
+                                                    .setNegativeButton("关闭", null);
+                                    if (entries.size() > 1) {
+                                        builder.setNeutralButton(
+                                                "删除订阅",
+                                                (dialog, which) ->
+                                                        showDeleteSavedConfigDialog(
+                                                                a, library, entries, active));
+                                    }
+                                    builder.show();
                                 });
                     } catch (Exception error) {
                         a.ui.post(() -> a.notice("无法读取已添加源，原订阅文件已保留"));
                     }
                 });
+    }
+
+    private static void showDeleteSavedConfigDialog(
+            final MainActivity a,
+            final ConfigLibrary library,
+            final java.util.List<ConfigLibrary.Entry> entries,
+            final String activeId) {
+        final java.util.List<ConfigLibrary.Entry> deletable = new java.util.ArrayList<>();
+        for (ConfigLibrary.Entry e : entries) {
+            if (!e.id.equals(activeId)) {
+                deletable.add(e);
+            }
+        }
+        if (deletable.isEmpty()) {
+            a.notice("请先切换到其他订阅源，再删除当前订阅。");
+            return;
+        }
+        String[] labels = new String[deletable.size()];
+        for (int i = 0; i < deletable.size(); i++) {
+            labels[i] = "删除 · " + deletable.get(i).name;
+        }
+        new AppDialog.Builder(a)
+                .wrapChoices()
+                .setTitle("选择要移除的订阅源")
+                .setItems(
+                        labels,
+                        (d, idx) -> {
+                            final ConfigLibrary.Entry target = deletable.get(idx);
+                            a.worker.execute(
+                                    () -> {
+                                        try {
+                                            library.remove(target.id);
+                                            CloudSyncDialog.onSubscriptionDeleted(a, target.id);
+                                            a.ui.post(
+                                                    () -> {
+                                                        a.toast("已移除订阅：" + target.name);
+                                                        showSavedConfigs(a);
+                                                    });
+                                        } catch (Exception err) {
+                                            a.ui.post(() -> a.notice("删除订阅失败：" + err.getMessage()));
+                                        }
+                                    });
+                        })
+                .setNegativeButton("返回", (d, w) -> showSavedConfigs(a))
+                .show();
     }
 
     private static void saveSelectedConfig(MainActivity a, Cms.Config saved, String origin)

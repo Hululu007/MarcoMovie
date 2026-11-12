@@ -2006,6 +2006,15 @@ final class MobileShell {
                 0xff1e2724,
                 MainActivity.WHITE,
                 () -> SourceController.showLiveImportDialog(a));
+        if (!a.privateMode) {
+            a.gap(card, 10);
+            addMobileActionBtn(
+                    card,
+                    "从多端同步拉取配置与记录 (WebDAV / 局域网)",
+                    0xff1e2724,
+                    0xff5ac8fa,
+                    () -> CloudSyncDialog.show(a, () -> MobileShell.show(a)));
+        }
 
         a.gap(wrap, 18);
         TextView legal = a.text("本产品仅为播放工具，不内置、不提供、不托管任何影视资源或配置地址。", 11.5f, 0xff6b7280);
@@ -3219,10 +3228,24 @@ final class MobileShell {
         page.setPadding(a.dp(16), statusBarHeight() + a.dp(10), a.dp(16), 0);
         contentContainer.addView(page, new FrameLayout.LayoutParams(-1, -1));
 
+        LinearLayout titleRow = a.row();
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        titleRow.setPadding(0, 0, 0, a.dp(10));
         TextView pageTitle = a.text("片库", 22, Color.WHITE);
         pageTitle.setTypeface(null, Typeface.BOLD);
-        pageTitle.setPadding(0, 0, 0, a.dp(10));
-        page.addView(pageTitle);
+        titleRow.addView(pageTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        if (!a.privateMode) {
+            TextView syncPill = a.text("多端同步", 12, 0xff5ac8fa);
+            syncPill.setTypeface(null, Typeface.BOLD);
+            syncPill.setTag("library-cloud-sync");
+            syncPill.setPadding(a.dp(12), a.dp(6), a.dp(12), a.dp(6));
+            syncPill.setBackground(
+                    glassBg(0x400a84ff, 0x220a84ff, a.dp(999), a.dp(0.8f), 0x555ac8fa));
+            MobileDetailScreen.bindTouchFeedback(syncPill);
+            syncPill.setOnClickListener(v -> CloudSyncDialog.show(a, () -> MobileShell.show(a)));
+            titleRow.addView(syncPill);
+        }
+        page.addView(titleRow, new LinearLayout.LayoutParams(-1, -2));
 
         final boolean[] showFavorites = {mySubTab == 1};
         final boolean[] showDownloads = {mySubTab == 2};
@@ -3335,6 +3358,7 @@ final class MobileShell {
                                                                             "[]"),
                                                                     e.key()))
                                                     .apply();
+                                            CloudSyncDialog.onHistoryDeleted(a, e.key());
                                             run();
                                         });
                                 row.addView(del);
@@ -3402,6 +3426,8 @@ final class MobileShell {
                                                                     f.site,
                                                                     f.video()))
                                                     .apply();
+                                            CloudSyncDialog.onFavoriteToggled(
+                                                    a, f.site, f.id, false);
                                             run();
                                         });
                                 row.addView(unfav);
@@ -3468,7 +3494,9 @@ final class MobileShell {
                             .setPositiveButton(
                                     "清空",
                                     (d, w) -> {
+                                        List<WatchHistory.Entry> prev = a.watchHistory();
                                         a.prefs.edit().putString(Prefs.WATCH_HISTORY, "[]").apply();
+                                        CloudSyncDialog.onHistoryCleared(a, prev);
                                         renderSubTab.run();
                                     })
                             .show();
@@ -4197,6 +4225,7 @@ final class MobileShell {
             if (k.contains("settings-playback")) return ICON_PLAYBACK;
             if (k.contains("settings-data")) return ICON_SOURCES;
             if (k.contains("settings-updates")) return ICON_UPDATE_CLOUD;
+            if (k.contains("settings-cloud-sync") || t.contains("同步")) return ICON_NETDISK;
             if (k.contains("settings-accounts") || t.contains("网盘")) return ICON_NETDISK;
             if (k.contains("settings-live-import") || t.contains("直播")) return ICON_LIVE_TV;
             if (k.contains("settings-import") || t.contains("配置源")) return ICON_LINK_CODE;

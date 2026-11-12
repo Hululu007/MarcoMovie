@@ -1163,7 +1163,11 @@ class CmsParser {
           extStr = resolveUrl(origin, extStr);
         }
         final itemGroup = (item['group'] ?? '').toString().trim();
-        final itemPrivate = _asBool(item['isPrivate'] ?? item['hidden'], isPrivate);
+        final itemPrivate = _asBool(
+              item['isPrivate'] ?? item['private'] ?? item['hidden'],
+              isPrivate,
+            ) ||
+            (item['space'] ?? '').toString().trim().toLowerCase() == 'private';
         sites.add(
           CmsSite(
             key: key,
@@ -1196,7 +1200,11 @@ class CmsParser {
       final name = (item['name'] ?? '直播源 ${index + 1}').toString().trim();
       final itemGroup = (item['group'] ?? '').toString().trim();
       final group = itemGroup.isEmpty ? groupLabel : itemGroup;
-      final hidden = _asBool(item['isPrivate'] ?? item['hidden'], isPrivate);
+      final hidden = _asBool(
+            item['isPrivate'] ?? item['private'] ?? item['hidden'],
+            isPrivate,
+          ) ||
+          (item['space'] ?? '').toString().trim().toLowerCase() == 'private';
       final headers = LiveCatalogParser.headers(item);
       final rawUrl = (item['url'] ?? '').toString().trim();
       final api = (item['api'] ?? '').toString().trim();

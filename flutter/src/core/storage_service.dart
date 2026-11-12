@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'catpaw_host.dart';
 import 'cms_parser.dart';
@@ -10,6 +11,11 @@ import 'quark_account.dart';
 import 'netdisk_session.dart';
 /// Persistent preferences and backup serializer compatible with Android `Prefs.java`.
 class StorageService {
+  static const String syncSchema = 'marco-movie-sync';
+  static const int syncVersion = 2;
+  static const String defaultSyncFileName = 'marco-movie-sync.json';
+  static const int maxSyncTombstones = 300;
+  static const int maxSyncPayloadBytes = 8 * 1024 * 1024;
   static const String keyOrigin = 'origin';
   static const String keyRawConfig = 'config_raw_json';
   static const String keySelectedSite = 'selected_site';
@@ -47,7 +53,18 @@ class StorageService {
   static const String keyPreferredQuality = 'preferred_quality';
   static const String keyDefaultAspectMode = 'default_aspect_mode';
   static const String keyPlayerKernel = 'player_kernel';
+  static const String keyWebdavUrl = 'webdav_url';
+  static const String keyWebdavUser = 'webdav_user';
+  static const String keyWebdavPass = 'webdav_pass';
+  static const String keyWebdavAuto = 'webdav_auto';
+  static const String keyWebdavSyncSubs = 'webdav_sync_subs';
+  static const String keySyncTombstones = 'sync_tombstones';
+  static const String keySyncLastTime = 'sync_last_time';
+  static const String keySyncLastStatus = 'sync_last_status';
   final SharedPreferences _prefs;
+  Timer? _autoSyncTimer;
+  bool _syncInFlight = false;
+  int _lastHistoryAutoPushMs = 0;
   static final Expando<QuarkAccountProvider> _quarkProviders = Expando();
   QuarkAccountProvider get quarkAccounts => _quarkProviders[_prefs] ??=
       QuarkAccountProvider(
@@ -288,6 +305,31 @@ class StorageService {
     }
     await saveSubscriptions(current);
 
+    final nowSync = DateTime.now().millisecondsSinceEpoch;
+    final tombs = _readSyncTombstones();
+    var tombsChanged = false;
+    for (final s in incoming) {
+      if (!s.isEffectivelyPrivate && s.rawContent.isNotEmpty) {
+        final pubRaw = _publicRawConfig(s.rawContent, s.url);
+        if (pubRaw.isNotEmpty) {
+          final syncKey = canonicalSubscriptionSyncKey(
+            s.url,
+            pubRaw,
+            warehouseUrl: s.warehouseUrl,
+          );
+          if (tombs.remove('sub:$syncKey') != null) {
+            tombsChanged = true;
+          }
+        }
+      }
+    }
+    if (tombsChanged) {
+      await _writeSyncTombstones(tombs);
+    }
+    if (webdavSyncSubs && incoming.any((s) => !s.isEffectivelyPrivate)) {
+      scheduleAutoWebdavSync(immediate: true, nowMs: nowSync);
+    }
+
     final primary = incoming.first;
     if (primary.rawContent.isNotEmpty && !primary.isEffectivelyPrivate) {
       await _prefs.setString(keyRawConfig, primary.rawContent);
@@ -341,6 +383,27 @@ class StorageService {
     _ownLegacyDepots(next);
     // The persisted registry, including [], is authoritative before legacy cleanup.
     await saveSubscriptions(next);
+    final nowSync = DateTime.now().millisecondsSinceEpoch;
+    final tombs = _readSyncTombstones();
+    var hadPublicRemoval = false;
+    for (final old in removed) {
+      if (!old.isEffectivelyPrivate) {
+        final pubRaw = _publicRawConfig(old.rawContent, old.url);
+        final syncKey = canonicalSubscriptionSyncKey(
+          old.url,
+          pubRaw.isNotEmpty ? pubRaw : old.rawContent,
+          warehouseUrl: old.warehouseUrl,
+        );
+        tombs['sub:$syncKey'] = nowSync;
+        hadPublicRemoval = true;
+      }
+    }
+    if (hadPublicRemoval) {
+      await _writeSyncTombstones(tombs);
+      if (webdavSyncSubs) {
+        scheduleAutoWebdavSync(immediate: true, nowMs: nowSync);
+      }
+    }
     final public = next.where((s) => !s.isEffectivelyPrivate).toList();
     await _prefs.setString(keyRawConfig, public.isEmpty ? '' : public.first.rawContent);
     await _prefs.setString(keyOrigin, public.isEmpty ? '' : public.first.url);
@@ -374,30 +437,106 @@ class StorageService {
     String id,
     bool isPrivate,
   ) => _editSubscriptions(() async {
-    final next = [
-      for (final s in getSubscriptions())
-        if (s.id == id) s.copyWith(isPrivate: isPrivate) else s,
-    ];
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final current = getSubscriptions();
+    final next = <SubscriptionEntry>[];
+    final tombs = _readSyncTombstones();
+    var tombsChanged = false;
+    var shouldSchedule = false;
+    for (final s in current) {
+      if (s.id == id) {
+        final wasPrivate = s.isEffectivelyPrivate;
+        final updated = s.copyWith(isPrivate: isPrivate, updatedAt: now);
+        final nowPrivate = updated.isEffectivelyPrivate;
+        if (wasPrivate != nowPrivate && s.rawContent.isNotEmpty) {
+          final pubRaw = _publicRawConfig(s.rawContent, s.url);
+          final syncKey = canonicalSubscriptionSyncKey(
+            s.url,
+            pubRaw.isNotEmpty ? pubRaw : s.rawContent,
+            warehouseUrl: s.warehouseUrl,
+          );
+          if (nowPrivate) {
+            tombs['sub:$syncKey'] = now;
+          } else {
+            tombs.remove('sub:$syncKey');
+          }
+          tombsChanged = true;
+          shouldSchedule = true;
+        }
+        next.add(updated);
+      } else {
+        next.add(s);
+      }
+    }
     await saveSubscriptions(next);
+    if (tombsChanged) {
+      await _writeSyncTombstones(tombs);
+    }
+    if (shouldSchedule && webdavSyncSubs) {
+      scheduleAutoWebdavSync(immediate: true, nowMs: now);
+    }
     return loadSavedConfig();
   });
 
   Future<CmsConfig?> toggleSubscriptionEnabled(String id, bool enabled) => _editSubscriptions(() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var touchedPublic = false;
     final next = [
       for (final s in getSubscriptions())
-        if (s.id == id) s.copyWith(enabled: enabled) else s,
+        if (s.id == id)
+          (() {
+            if (!s.isEffectivelyPrivate) touchedPublic = true;
+            return s.copyWith(enabled: enabled, updatedAt: now);
+          })()
+        else
+          s,
     ];
     await saveSubscriptions(next);
+    if (touchedPublic && webdavSyncSubs) {
+      scheduleAutoWebdavSync(immediate: true, nowMs: now);
+    }
     return loadSavedConfig();
   });
 
   Future<CmsConfig?> updateSubscriptionGroup(String id, String group) => _editSubscriptions(() async {
     final cleanGroup = group.trim().isEmpty ? '默认分组' : group.trim();
-    final next = [
-      for (final s in getSubscriptions())
-        if (s.id == id) s.copyWith(group: cleanGroup) else s,
-    ];
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final tombs = _readSyncTombstones();
+    var tombsChanged = false;
+    var shouldSchedule = false;
+    final next = <SubscriptionEntry>[];
+    for (final s in getSubscriptions()) {
+      if (s.id == id) {
+        final wasPrivate = s.isEffectivelyPrivate;
+        final updated = s.copyWith(group: cleanGroup, updatedAt: now);
+        final nowPrivate = updated.isEffectivelyPrivate;
+        if (wasPrivate != nowPrivate && s.rawContent.isNotEmpty) {
+          final pubRaw = _publicRawConfig(s.rawContent, s.url);
+          final syncKey = canonicalSubscriptionSyncKey(
+            s.url,
+            pubRaw.isNotEmpty ? pubRaw : s.rawContent,
+            warehouseUrl: s.warehouseUrl,
+          );
+          if (nowPrivate) {
+            tombs['sub:$syncKey'] = now;
+            tombsChanged = true;
+          } else {
+            if (tombs.remove('sub:$syncKey') != null) tombsChanged = true;
+          }
+        }
+        if (!wasPrivate || !nowPrivate) shouldSchedule = true;
+        next.add(updated);
+      } else {
+        next.add(s);
+      }
+    }
     await saveSubscriptions(next);
+    if (tombsChanged) {
+      await _writeSyncTombstones(tombs);
+    }
+    if (shouldSchedule && webdavSyncSubs) {
+      scheduleAutoWebdavSync(immediate: true, nowMs: now);
+    }
     return loadSavedConfig();
   });
 
@@ -850,6 +989,7 @@ class StorageService {
       keyWatchHistory,
       jsonEncode(updated.map((e) => e.toJson()).toList()),
     );
+    scheduleAutoWebdavSync();
   }
   Future<void> removeWatchHistoryItem(String siteKey, String videoId) async {
     final targetKey = '$siteKey\n$videoId';
@@ -859,9 +999,24 @@ class StorageService {
       keyWatchHistory,
       jsonEncode(updated.map((e) => e.toJson()).toList()),
     );
+    await _recordSyncTombstone(
+      'hist:$targetKey',
+      DateTime.now().millisecondsSinceEpoch,
+    );
+    scheduleAutoWebdavSync(immediate: true);
   }
   Future<void> clearWatchHistory() async {
+    final existing = getWatchHistory();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (existing.isNotEmpty) {
+      final tombs = _readSyncTombstones();
+      for (final e in existing) {
+        tombs['hist:${e.key}'] = now;
+      }
+      await _writeSyncTombstones(tombs);
+    }
     await _prefs.setString(keyWatchHistory, '[]');
+    scheduleAutoWebdavSync(immediate: true);
   }
   List<FavoriteEntry> getFavorites({bool forPrivate = false}) {
     final storageKey = forPrivate ? keyPrivateFavorites : keyFavorites;
@@ -896,6 +1051,7 @@ class StorageService {
     final current = getFavorites(forPrivate: forPrivate).toList();
     final targetKey = '${site.key}\n${video.id}';
     final existingIdx = current.indexWhere((f) => f.key == targetKey);
+    final now = DateTime.now().millisecondsSinceEpoch;
     bool nowFav;
     if (existingIdx >= 0) {
       current.removeAt(existingIdx);
@@ -909,7 +1065,7 @@ class StorageService {
           title: video.title,
           poster: video.poster,
           remarks: video.remarks,
-          updated: DateTime.now().millisecondsSinceEpoch,
+          updated: now,
         ),
       );
       if (current.length > CmsParser.maxFavoriteEntries) {
@@ -921,6 +1077,18 @@ class StorageService {
       storageKey,
       jsonEncode(current.map((e) => e.toJson()).toList()),
     );
+    if (!forPrivate) {
+      final tombs = _readSyncTombstones();
+      if (nowFav) {
+        tombs['add:$targetKey'] = now;
+        tombs.remove('fav:$targetKey');
+      } else {
+        tombs['fav:$targetKey'] = now;
+        tombs.remove('add:$targetKey');
+      }
+      await _writeSyncTombstones(tombs);
+      scheduleAutoWebdavSync(immediate: true, nowMs: now);
+    }
     return nowFav;
   }
   List<String> getSearchHistory({bool forPrivate = false}) {
@@ -964,9 +1132,16 @@ class StorageService {
     if (!parsed.sites.any((s) => s.isEffectivelyPrivate) && !parsed.lives.any((s) => s.isEffectivelyPrivate)) return raw;
     bool privateItem(dynamic item) {
       if (item is! Map) return false;
-      final flag = item['isPrivate'] ?? item['hidden'];
+      final flag = item['isPrivate'] ?? item['private'] ?? item['hidden'];
+      final space = (item['space'] ?? '').toString().trim().toLowerCase();
       final group = (item['group'] ?? '').toString();
-      return flag == true || flag == 1 || flag == 'true' || flag == '1' || group.contains('隐私') || group.contains('私密');
+      return flag == true ||
+          flag == 1 ||
+          flag == 'true' ||
+          flag == '1' ||
+          space == 'private' ||
+          group.contains('隐私') ||
+          group.contains('私密');
     }
     try {
       final value = jsonDecode(CmsParser.stripJsonComments(CmsParser.unpackConfigText(raw)));
@@ -1229,5 +1404,958 @@ class StorageService {
       await setAutoNext(settings[keyAutoNext] as bool);
     }
     return loadSavedConfig();
+  }
+
+  // ===========================================================================
+  // Multi-Device Cloud Sync v2 (WebDAV & LAN Peer-to-Peer)
+  // ===========================================================================
+
+  String get webdavUrl => (_prefs.getString(keyWebdavUrl) ?? '').trim();
+  String get webdavUser => (_prefs.getString(keyWebdavUser) ?? '').trim();
+  String get webdavPass => _prefs.getString(keyWebdavPass) ?? '';
+  bool get webdavAuto => _prefs.getBool(keyWebdavAuto) ?? true;
+  bool get webdavSyncSubs => _prefs.getBool(keyWebdavSyncSubs) ?? true;
+  int get syncLastTime => _prefs.getInt(keySyncLastTime) ?? 0;
+  String get syncLastStatus => _prefs.getString(keySyncLastStatus) ?? '';
+  bool get isWebdavConfigured => webdavUrl.isNotEmpty;
+
+  String get syncStatusSummary {
+    if (!isWebdavConfigured) {
+      if (syncLastTime > 0 && syncLastStatus.isNotEmpty) {
+        return '局域网同步 · $syncLastStatus';
+      }
+      return '支持 WebDAV（坚果云 / NAS / Alist）与局域网多端进度及订阅同步';
+    }
+    final mode = webdavAuto ? '自动同步已开启' : '手动同步';
+    if (syncLastStatus.isNotEmpty) {
+      return '$mode · $syncLastStatus';
+    }
+    return '$mode · $webdavUrl';
+  }
+
+  void cancelPendingAutoSync() {
+    _autoSyncTimer?.cancel();
+    _autoSyncTimer = null;
+  }
+
+  Future<void> saveWebdavConfig({
+    required String url,
+    required String user,
+    required String pass,
+    required bool auto,
+    bool? syncSubs,
+  }) async {
+    await _prefs.setString(keyWebdavUrl, url.trim());
+    await _prefs.setString(keyWebdavUser, user.trim());
+    await _prefs.setString(keyWebdavPass, pass);
+    await _prefs.setBool(keyWebdavAuto, auto);
+    if (syncSubs != null) {
+      await _prefs.setBool(keyWebdavSyncSubs, syncSubs);
+    }
+    if (!auto || url.trim().isEmpty) {
+      cancelPendingAutoSync();
+    }
+  }
+
+  Future<void> setWebdavSyncSubs(bool enabled) async {
+    await _prefs.setBool(keyWebdavSyncSubs, enabled);
+  }
+
+  static bool _isHttpOriginUrl(String raw) {
+    final lower = raw.trim().toLowerCase();
+    return lower.startsWith('http://') || lower.startsWith('https://');
+  }
+
+  /// Canonical cross-platform subscription sync identity matching Android `ConfigLibrary.identity`:
+  /// lowercase SHA-256 hex of `"url:<httpOrigin>"` when an HTTP(S) warehouse/origin URL exists,
+  /// otherwise `"local:<rawContent>"`.
+  static String canonicalSubscriptionSyncKey(
+    String url,
+    String rawContent, {
+    String warehouseUrl = '',
+  }) {
+    final effectiveHttp = _isHttpOriginUrl(warehouseUrl)
+        ? warehouseUrl.trim()
+        : (_isHttpOriginUrl(url) ? url.trim() : '');
+    final input = effectiveHttp.isNotEmpty
+        ? 'url:$effectiveHttp'
+        : 'local:$rawContent';
+    return sha256.convert(utf8.encode(input)).toString();
+  }
+
+  static bool _isLocalFileSubscription(String url, String rawContent) {
+    final trimmedUrl = url.trim().toLowerCase();
+    if (trimmedUrl.startsWith('file:')) return true;
+    return trimmedUrl.isEmpty && rawContent.contains('file:///');
+  }
+
+  List<SubscriptionEntry> _collectPublicSyncSubscriptions() {
+    final result = <SubscriptionEntry>[];
+    final seenSyncKeys = <String>{};
+    if (_prefs.containsKey(keySubscriptions)) {
+      for (final s in getSubscriptions()) {
+        if (s.isEffectivelyPrivate) continue;
+        if (_isLocalFileSubscription(s.url, s.rawContent)) continue;
+        final pubRaw = _publicRawConfig(s.rawContent, s.url);
+        if (pubRaw.trim().isEmpty) continue;
+        final syncKey = canonicalSubscriptionSyncKey(
+          s.url,
+          pubRaw,
+          warehouseUrl: s.warehouseUrl,
+        );
+        if (!seenSyncKeys.add(syncKey)) continue;
+        result.add(
+          s.copyWith(
+            isPrivate: false,
+            rawContent: pubRaw,
+            updatedAt: s.updatedAt > 0 ? s.updatedAt : 1,
+          ),
+        );
+      }
+      return result;
+    }
+    if (rawConfig.trim().isNotEmpty && !_isLocalFileSubscription(configOrigin, rawConfig)) {
+      final pubRaw = _publicRawConfig(rawConfig, configOrigin);
+      if (pubRaw.trim().isNotEmpty) {
+        try {
+          final parsed = CmsParser.parseConfig(pubRaw, origin: configOrigin);
+          final fmt = CmsParser.detectSubscriptionFormat(pubRaw, origin: configOrigin);
+          result.add(
+            SubscriptionEntry(
+              id: 'legacy_primary',
+              name: activeDepotName.isNotEmpty
+                  ? activeDepotName
+                  : (configOrigin.isNotEmpty
+                      ? (Uri.tryParse(configOrigin)?.host ?? '默认订阅')
+                      : '默认订阅'),
+              url: configOrigin,
+              group: '默认分组',
+              format: parsed.depots.isNotEmpty ? '多仓' : fmt,
+              isPrivate: false,
+              enabled: true,
+              rawContent: pubRaw,
+              siteCount: parsed.supportedSites.length,
+              liveCount: parsed.lives.length,
+              updatedAt: 1,
+            ),
+          );
+        } catch (_) {}
+      }
+    }
+    return result;
+  }
+
+  Map<String, int> _readSyncTombstones() {
+    final raw = _prefs.getString(keySyncTombstones) ?? '{}';
+    final out = <String, int>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        for (final entry in decoded.entries) {
+          final k = entry.key.toString();
+          final v = (entry.value as num?)?.toInt() ?? 0;
+          if (k.isNotEmpty && v > 0) {
+            out[k] = v;
+          }
+        }
+      }
+    } catch (_) {}
+    return _boundSyncTombstones(out);
+  }
+
+  Map<String, int> _boundSyncTombstones(Map<String, int> input) {
+    if (input.length <= maxSyncTombstones) return input;
+    final entries = input.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return <String, int>{
+      for (final e in entries.take(maxSyncTombstones)) e.key: e.value,
+    };
+  }
+
+  Future<void> _writeSyncTombstones(Map<String, int> tombs) async {
+    final bounded = _boundSyncTombstones(tombs);
+    await _prefs.setString(keySyncTombstones, jsonEncode(bounded));
+  }
+
+  Future<void> _recordSyncTombstone(String key, int timestampMs) async {
+    if (key.isEmpty || timestampMs <= 0) return;
+    final tombs = _readSyncTombstones();
+    tombs[key] = timestampMs;
+    await _writeSyncTombstones(tombs);
+  }
+
+  static String resolveWebdavFileUrl(String rawUrl) {
+    final trimmed = rawUrl.trim();
+    if (trimmed.isEmpty) {
+      throw const FormatException('请填写 WebDAV 服务器地址');
+    }
+    final lower = trimmed.toLowerCase();
+    if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+      throw const FormatException('WebDAV 地址需以 https:// 或 http:// 开头');
+    }
+    final pathOnly = trimmed.split('?').first.toLowerCase();
+    if (pathOnly.endsWith('.json')) {
+      return trimmed;
+    }
+    return trimmed.endsWith('/')
+        ? '$trimmed$defaultSyncFileName'
+        : '$trimmed/$defaultSyncFileName';
+  }
+
+  static String resolveLanSyncEndpoint(String rawUrl) {
+    var trimmed = rawUrl.trim();
+    if (trimmed.isEmpty) {
+      throw const FormatException('请填写对方设备的局域网同步地址');
+    }
+    final lower = trimmed.toLowerCase();
+    if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+      const httpPrefix = 'http://';
+      trimmed = '$httpPrefix$trimmed';
+    }
+    while (trimmed.endsWith('/')) {
+      trimmed = trimmed.substring(0, trimmed.length - 1);
+    }
+    final uri = Uri.tryParse(trimmed);
+    if (uri == null || uri.host.isEmpty) {
+      throw const FormatException('请输入有效的局域网同步地址');
+    }
+    return trimmed.endsWith('/sync') ? trimmed : '$trimmed/sync';
+  }
+
+  String exportSyncPayload({
+    int? nowMs,
+    List<dynamic>? preservedRemoteSubscriptions,
+  }) {
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final hist = getWatchHistory().map((e) => e.toJson()).toList();
+    final localFavEntries = getFavorites(forPrivate: false);
+    final favs = localFavEntries.map((f) => f.toJson()).toList();
+    final tombs = _readSyncTombstones();
+    for (final f in localFavEntries) {
+      if (f.updated > 0) {
+        final addKey = 'add:${f.key}';
+        final prev = tombs[addKey] ?? 0;
+        if (f.updated > prev) tombs[addKey] = f.updated;
+      }
+    }
+    List<dynamic>? subsPayload;
+    if (webdavSyncSubs) {
+      final pubSubs = _collectPublicSyncSubscriptions();
+      subsPayload = [
+        for (final s in pubSubs)
+          {
+            'syncKey': canonicalSubscriptionSyncKey(
+              s.url,
+              s.rawContent,
+              warehouseUrl: s.warehouseUrl,
+            ),
+            ...s.toJson(),
+            'isPrivate': false,
+          },
+      ];
+    } else if (preservedRemoteSubscriptions != null) {
+      subsPayload = preservedRemoteSubscriptions;
+    }
+    return jsonEncode({
+      'schema': syncSchema,
+      'version': syncVersion,
+      'updated': now,
+      'watch_history': hist,
+      'favorites': favs,
+      if (subsPayload != null) 'subscriptions': subsPayload,
+      'tombstones': _boundSyncTombstones(tombs),
+    });
+  }
+
+  static String _subscriptionSnapshotDigest(List<SubscriptionEntry> subs) {
+    return jsonEncode([
+      for (final s in subs)
+        [
+          canonicalSubscriptionSyncKey(
+            s.url,
+            s.rawContent,
+            warehouseUrl: s.warehouseUrl,
+          ),
+          s.name,
+          s.url,
+          s.group,
+          s.format,
+          s.enabled,
+          s.rawContent,
+          s.warehouseUrl,
+          s.activeDepotName,
+          s.depots.map((d) => d.toJson()).toList(),
+        ],
+    ]);
+  }
+
+  Future<
+    ({
+      int historyCount,
+      int favoriteCount,
+      int subscriptionCount,
+      bool changed,
+      bool subscriptionsChanged,
+      String payloadJson,
+    })
+  >
+  mergeSyncPayload(String? remotePayloadRaw, {int? nowMs}) async {
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final localHist = getWatchHistory();
+    final localFavs = getFavorites(forPrivate: false);
+    final localTombs = _readSyncTombstones();
+    for (final f in localFavs) {
+      if (f.updated > 0) {
+        final addKey = 'add:${f.key}';
+        final prev = localTombs[addKey] ?? 0;
+        if (f.updated > prev) localTombs[addKey] = f.updated;
+      }
+    }
+
+    final beforeHistJson = jsonEncode(localHist.map((e) => e.toJson()).toList());
+    final beforeFavsJson = jsonEncode(localFavs.map((f) => f.toJson()).toList());
+    final localPublicSubs = _collectPublicSyncSubscriptions();
+
+    if (remotePayloadRaw == null || remotePayloadRaw.trim().isEmpty) {
+      final payload = exportSyncPayload(nowMs: now);
+      return (
+        historyCount: localHist.length,
+        favoriteCount: localFavs.length,
+        subscriptionCount: webdavSyncSubs ? localPublicSubs.length : 0,
+        changed: false,
+        subscriptionsChanged: false,
+        payloadJson: payload,
+      );
+    }
+
+    if (utf8.encode(remotePayloadRaw).length > maxSyncPayloadBytes) {
+      throw const FormatException('远端同步文件超过 8 MB 大小限制');
+    }
+
+    final dynamic decoded;
+    try {
+      decoded = jsonDecode(remotePayloadRaw);
+    } catch (_) {
+      throw const FormatException('远端同步数据不是有效的 JSON 格式');
+    }
+    if (decoded is! Map) {
+      throw const FormatException('远端同步数据格式无效');
+    }
+
+    final schema = (decoded['schema'] ?? '').toString();
+    final format = (decoded['format'] ?? '').toString();
+    final remoteHist = <WatchHistoryEntry>[];
+    final remoteFavs = <FavoriteEntry>[];
+    final remoteTombs = <String, int>{};
+    final remoteSubsRaw = <Map<String, dynamic>>[];
+    List<dynamic>? preservedRemoteSubs;
+
+    if (schema == syncSchema) {
+      final rh =
+          decoded['watch_history'] ??
+          decoded['history'] ??
+          decoded['watchHistory'];
+      if (rh is List) {
+        for (final item in rh.whereType<Map>()) {
+          final e = WatchHistoryEntry.fromJson(Map<String, dynamic>.from(item));
+          if (e.site.isNotEmpty && e.id.isNotEmpty) remoteHist.add(e);
+        }
+      }
+      final rf = decoded['favorites'];
+      if (rf is List) {
+        for (final item in rf.whereType<Map>()) {
+          final map = Map<String, dynamic>.from(item);
+          map['updated'] ??= map['addedAt'];
+          final f = FavoriteEntry.fromJson(map);
+          if (f.site.isNotEmpty && f.id.isNotEmpty) {
+            remoteFavs.add(f);
+            if (f.updated > 0) {
+              final addKey = 'add:${f.key}';
+              final prev = remoteTombs[addKey] ?? 0;
+              if (f.updated > prev) remoteTombs[addKey] = f.updated;
+            }
+          }
+        }
+      }
+      final rs = decoded['subscriptions'];
+      if (rs is List) {
+        preservedRemoteSubs = rs;
+        for (final item in rs.whereType<Map>()) {
+          remoteSubsRaw.add(Map<String, dynamic>.from(item));
+        }
+      }
+      final rt = decoded['tombstones'];
+      if (rt is Map) {
+        for (final entry in rt.entries) {
+          final k = entry.key.toString();
+          final v = (entry.value as num?)?.toInt() ?? 0;
+          if (k.isNotEmpty && v > 0) remoteTombs[k] = v;
+        }
+      }
+    } else if (format == 'MarcoMovie-1' || schema == 'marco-movie-backup') {
+      final settings = decoded['settings'];
+      if (settings is Map) {
+        final rhRaw = settings[keyWatchHistory];
+        final rhList = rhRaw is String ? jsonDecode(rhRaw) : rhRaw;
+        if (rhList is List) {
+          for (final item in rhList.whereType<Map>()) {
+            final e = WatchHistoryEntry.fromJson(Map<String, dynamic>.from(item));
+            if (e.site.isNotEmpty && e.id.isNotEmpty) remoteHist.add(e);
+          }
+        }
+        final rfRaw = settings[keyFavorites];
+        final rfList = rfRaw is String ? jsonDecode(rfRaw) : rfRaw;
+        if (rfList is List) {
+          for (final item in rfList.whereType<Map>()) {
+            final f = FavoriteEntry.fromJson(Map<String, dynamic>.from(item));
+            if (f.site.isNotEmpty && f.id.isNotEmpty) remoteFavs.add(f);
+          }
+        }
+        final rsRaw = settings[keySubscriptions];
+        if (rsRaw is List) {
+          preservedRemoteSubs = rsRaw;
+          for (final item in rsRaw.whereType<Map>()) {
+            remoteSubsRaw.add(Map<String, dynamic>.from(item));
+          }
+        }
+      }
+      if (remoteSubsRaw.isEmpty) {
+        final rawCfg = (decoded['rawConfig'] ?? decoded['config'] ?? '').toString();
+        final orig = (decoded['origin'] ?? '').toString();
+        if (rawCfg.trim().isNotEmpty) {
+          remoteSubsRaw.add({
+            'id': 'backup_primary',
+            'name': orig.isNotEmpty ? (Uri.tryParse(orig)?.host ?? '备份订阅') : '备份订阅',
+            'url': orig,
+            'rawContent': rawCfg,
+            'enabled': true,
+            'updatedAt': (decoded['exportedAt'] as num?)?.toInt() ?? 1,
+          });
+        }
+      }
+    } else {
+      throw const FormatException('远端同步文件格式不受支持');
+    }
+
+    // 1. Merge tombstones
+    final mergedTombs = <String, int>{...localTombs};
+    for (final entry in remoteTombs.entries) {
+      final prev = mergedTombs[entry.key] ?? 0;
+      if (entry.value > prev) {
+        mergedTombs[entry.key] = entry.value;
+      }
+    }
+    for (final k in mergedTombs.keys.toList()) {
+      if (k.startsWith('fav:')) {
+        final rawKey = k.substring(4);
+        final delTs = mergedTombs[k];
+        final addTs = mergedTombs['add:$rawKey'];
+        if (delTs != null && addTs != null) {
+          if (addTs > delTs) {
+            mergedTombs.remove(k);
+          } else {
+            mergedTombs.remove('add:$rawKey');
+          }
+        }
+      }
+    }
+
+    // 2. Optionally merge public subscriptions BEFORE filtering history/favorites so private keys stay isolated
+    var subscriptionsChanged = false;
+    var finalSubCount = 0;
+    if (webdavSyncSubs) {
+      await _editSubscriptions(() async {
+        final currentAll = getSubscriptions();
+        final localPrivateSubs =
+            currentAll.where((s) => s.isEffectivelyPrivate).toList();
+        final localFileSubs = currentAll
+            .where(
+              (s) =>
+                  !s.isEffectivelyPrivate &&
+                  _isLocalFileSubscription(s.url, s.rawContent),
+            )
+            .toList();
+        final privateSyncKeys = <String>{
+          for (final p in localPrivateSubs)
+            if (p.rawContent.isNotEmpty)
+              canonicalSubscriptionSyncKey(
+                p.url,
+                p.rawContent,
+                warehouseUrl: p.warehouseUrl,
+              ),
+        };
+        final reservedIds = <String>{
+          for (final p in localPrivateSubs) p.id,
+          for (final f in localFileSubs) f.id,
+        };
+
+        final currentPublic = _collectPublicSyncSubscriptions();
+        final beforeSubsDigest = _subscriptionSnapshotDigest(currentPublic);
+        final hadRegistry = _prefs.containsKey(keySubscriptions);
+
+        final subByKey = <String, SubscriptionEntry>{};
+        for (final s in currentPublic) {
+          final syncKey = canonicalSubscriptionSyncKey(
+            s.url,
+            s.rawContent,
+            warehouseUrl: s.warehouseUrl,
+          );
+          final delTs = mergedTombs['sub:$syncKey'] ?? 0;
+          if (delTs > 0) {
+            if (s.updatedAt > delTs) {
+              mergedTombs.remove('sub:$syncKey');
+            } else {
+              continue;
+            }
+          }
+          subByKey[syncKey] = s;
+          reservedIds.add(s.id);
+        }
+
+        for (final rawMap in remoteSubsRaw) {
+          final candidate = SubscriptionEntry.fromJson(rawMap);
+          if (candidate.isEffectivelyPrivate) continue;
+          if (_isLocalFileSubscription(candidate.url, candidate.rawContent)) {
+            continue;
+          }
+          if (candidate.rawContent.trim().isEmpty) continue;
+          final String pubRaw;
+          final CmsConfig parsed;
+          try {
+            pubRaw = _publicRawConfig(candidate.rawContent, candidate.url);
+            if (pubRaw.trim().isEmpty) continue;
+            parsed = CmsParser.parseConfig(pubRaw, origin: candidate.url);
+          } catch (_) {
+            continue;
+          }
+          final syncKey = canonicalSubscriptionSyncKey(
+            candidate.url,
+            pubRaw,
+            warehouseUrl: candidate.warehouseUrl,
+          );
+          if (privateSyncKeys.contains(syncKey)) continue;
+          final delTs = mergedTombs['sub:$syncKey'] ?? 0;
+          final incomingTs = candidate.updatedAt > 0 ? candidate.updatedAt : 1;
+          if (delTs > 0) {
+            if (incomingTs > delTs) {
+              mergedTombs.remove('sub:$syncKey');
+            } else {
+              continue;
+            }
+          }
+          final fmt = candidate.format.trim().isNotEmpty
+              ? candidate.format.trim()
+              : (parsed.depots.isNotEmpty
+                  ? '多仓'
+                  : CmsParser.detectSubscriptionFormat(
+                      pubRaw,
+                      origin: candidate.url,
+                    ));
+          final cleanName = candidate.name.trim().isNotEmpty
+              ? candidate.name.trim()
+              : (candidate.url.isNotEmpty
+                  ? (Uri.tryParse(candidate.url)?.host ?? '云端订阅')
+                  : '云端订阅');
+          final existing = subByKey[syncKey];
+          if (existing == null) {
+            var assignedId = candidate.id.trim();
+            if (assignedId.isEmpty || reservedIds.contains(assignedId)) {
+              assignedId = 'sub_${syncKey.substring(0, 12)}';
+              var suffix = 1;
+              while (reservedIds.contains(assignedId)) {
+                assignedId = 'sub_${syncKey.substring(0, 10)}_$suffix';
+                suffix++;
+              }
+            }
+            reservedIds.add(assignedId);
+            subByKey[syncKey] = SubscriptionEntry(
+              id: assignedId,
+              name: cleanName,
+              url: candidate.url.trim(),
+              group: candidate.group.trim().isEmpty ? '默认分组' : candidate.group.trim(),
+              format: fmt,
+              isPrivate: false,
+              enabled: candidate.enabled,
+              rawContent: pubRaw,
+              siteCount: parsed.supportedSites.length,
+              liveCount: parsed.lives.length,
+              updatedAt: incomingTs,
+              warehouseUrl: candidate.warehouseUrl,
+              activeDepotName: candidate.activeDepotName,
+              depots: candidate.depots.isNotEmpty ? candidate.depots : parsed.depots,
+            );
+          } else if (incomingTs > existing.updatedAt) {
+            subByKey[syncKey] = existing.copyWith(
+              name: cleanName,
+              url: candidate.url.trim(),
+              group: candidate.group.trim().isEmpty ? '默认分组' : candidate.group.trim(),
+              format: fmt,
+              isPrivate: false,
+              enabled: candidate.enabled,
+              rawContent: pubRaw,
+              siteCount: parsed.supportedSites.length,
+              liveCount: parsed.lives.length,
+              updatedAt: incomingTs,
+              warehouseUrl: candidate.warehouseUrl,
+              activeDepotName: candidate.activeDepotName,
+              depots: candidate.depots.isNotEmpty ? candidate.depots : existing.depots,
+            );
+          }
+        }
+
+        final mergedPublic = subByKey.values.toList();
+        finalSubCount = mergedPublic.length;
+        final afterSubsDigest = _subscriptionSnapshotDigest(mergedPublic);
+        if (afterSubsDigest != beforeSubsDigest ||
+            (!hadRegistry && mergedPublic.isNotEmpty)) {
+          subscriptionsChanged = true;
+          await saveSubscriptions([
+            ...mergedPublic,
+            ...localFileSubs,
+            ...localPrivateSubs,
+          ]);
+          final primary = mergedPublic.isNotEmpty
+              ? mergedPublic.first
+              : (localFileSubs.isNotEmpty ? localFileSubs.first : null);
+          await _prefs.setString(keyRawConfig, primary?.rawContent ?? '');
+          await _prefs.setString(keyOrigin, primary?.url ?? '');
+          await _prefs.setString(keyDepots, '[]');
+          await _prefs.setString(
+            keyActiveDepotName,
+            primary?.activeDepotName ?? '',
+          );
+          final reloaded = loadSavedConfig();
+          final pubSites = reloaded?.publicSupportedSites ?? const <CmsSite>[];
+          if (pubSites.isNotEmpty &&
+              !pubSites.any((s) => s.key == selectedSiteKey)) {
+            final preferredDefault = pubSites.firstWhere(
+              (s) => !CspBridge.isBannerNoticeSite(s),
+              orElse: () => pubSites.first,
+            );
+            await _prefs.setString(keySelectedSite, preferredDefault.key);
+          } else if (pubSites.isEmpty && selectedSiteKey.isNotEmpty) {
+            final allSites = reloaded?.supportedSites ?? const <CmsSite>[];
+            if (!allSites.any((s) => s.key == selectedSiteKey)) {
+              await _prefs.setString(keySelectedSite, '');
+            }
+          }
+        }
+      });
+    }
+
+    // 3. Merge watch history (LWW per key + deletion tombstones)
+    final privKeys = _privateSiteKeySet();
+    final histByKey = <String, WatchHistoryEntry>{};
+    for (final e in [...localHist, ...remoteHist]) {
+      if (privKeys.contains(e.site)) continue;
+      final delTs = mergedTombs['hist:${e.key}'] ?? 0;
+      if (delTs > 0) {
+        if (e.updated > delTs) {
+          mergedTombs.remove('hist:${e.key}');
+        } else {
+          continue;
+        }
+      }
+      final existing = histByKey[e.key];
+      if (existing == null ||
+          e.updated > existing.updated ||
+          (e.updated == existing.updated && e.position > existing.position)) {
+        histByKey[e.key] = e;
+      }
+    }
+    final mergedHist = histByKey.values.toList()
+      ..sort((a, b) => b.updated.compareTo(a.updated));
+    if (mergedHist.length > CmsParser.maxHistoryEntries) {
+      mergedHist.removeRange(
+        CmsParser.maxHistoryEntries,
+        mergedHist.length,
+      );
+    }
+
+    // 4. Merge favorites
+    final favByKey = <String, FavoriteEntry>{};
+    for (final f in [...localFavs, ...remoteFavs]) {
+      if (privKeys.contains(f.site)) continue;
+      final delTs = mergedTombs['fav:${f.key}'] ?? 0;
+      final addTs = mergedTombs['add:${f.key}'] ?? f.updated;
+      if (delTs > 0 && delTs >= addTs) {
+        continue;
+      }
+      final existing = favByKey[f.key];
+      if (existing == null || f.updated > existing.updated) {
+        favByKey[f.key] = addTs > f.updated
+            ? FavoriteEntry(
+                site: f.site,
+                id: f.id,
+                title: f.title,
+                poster: f.poster,
+                remarks: f.remarks,
+                updated: addTs,
+              )
+            : f;
+      }
+    }
+    final mergedFavs = favByKey.values.toList()
+      ..sort((a, b) {
+        final ta = mergedTombs['add:${a.key}'] ?? a.updated;
+        final tb = mergedTombs['add:${b.key}'] ?? b.updated;
+        return tb.compareTo(ta);
+      });
+    if (mergedFavs.length > CmsParser.maxFavoriteEntries) {
+      mergedFavs.removeRange(CmsParser.maxFavoriteEntries, mergedFavs.length);
+    }
+
+    final nextHistJson = jsonEncode(mergedHist.map((e) => e.toJson()).toList());
+    final nextFavsJson = jsonEncode(mergedFavs.map((f) => f.toJson()).toList());
+    await _prefs.setString(keyWatchHistory, nextHistJson);
+    await _prefs.setString(keyFavorites, nextFavsJson);
+    await _writeSyncTombstones(mergedTombs);
+
+    final changed =
+        subscriptionsChanged ||
+        nextHistJson != beforeHistJson ||
+        nextFavsJson != beforeFavsJson;
+    final payloadJson = exportSyncPayload(
+      nowMs: now,
+      preservedRemoteSubscriptions: preservedRemoteSubs,
+    );
+    return (
+      historyCount: mergedHist.length,
+      favoriteCount: mergedFavs.length,
+      subscriptionCount: finalSubCount,
+      changed: changed,
+      subscriptionsChanged: subscriptionsChanged,
+      payloadJson: payloadJson,
+    );
+  }
+
+  void scheduleAutoWebdavSync({bool immediate = false, int? nowMs}) {
+    if (!webdavAuto || !isWebdavConfigured) return;
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    final int delayMs;
+    if (immediate) {
+      delayMs = 2500;
+      _autoSyncTimer?.cancel();
+    } else {
+      final elapsed = _lastHistoryAutoPushMs > 0
+          ? now - _lastHistoryAutoPushMs
+          : 45000;
+      if (elapsed < 45000) {
+        if (_autoSyncTimer?.isActive == true) return;
+        delayMs = (45000 - elapsed).clamp(3000, 45000);
+      } else {
+        delayMs = 3000;
+        _autoSyncTimer?.cancel();
+      }
+    }
+    _autoSyncTimer = Timer(Duration(milliseconds: delayMs), () {
+      _lastHistoryAutoPushMs = DateTime.now().millisecondsSinceEpoch;
+      syncWithWebdav().ignore();
+    });
+  }
+
+  Map<String, String> _webdavHeaders({bool jsonContent = false}) {
+    final headers = <String, String>{
+      'Accept': 'application/json',
+      'Cache-Control': 'no-store',
+      if (jsonContent) 'Content-Type': 'application/json; charset=utf-8',
+    };
+    if (webdavUser.isNotEmpty || webdavPass.isNotEmpty) {
+      final token = base64Encode(utf8.encode('$webdavUser:$webdavPass'));
+      headers['Authorization'] = 'Basic $token';
+    }
+    return headers;
+  }
+
+  String _formatSyncSuccessSummary(
+    String prefix,
+    int nowMs, {
+    required int historyCount,
+    required int favoriteCount,
+    required int subscriptionCount,
+  }) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(nowMs);
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    final subSegment = webdavSyncSubs ? ' · 订阅 $subscriptionCount' : '';
+    return '$prefix $hh:$mm（历史 $historyCount · 收藏 $favoriteCount$subSegment）';
+  }
+
+  Future<
+    ({
+      int historyCount,
+      int favoriteCount,
+      int subscriptionCount,
+      bool changed,
+      bool subscriptionsChanged,
+    })
+  >
+  syncWithWebdav({http.Client? client}) async {
+    if (_syncInFlight) {
+      throw StateError('正在同步中，请稍候');
+    }
+    final targetUrl = resolveWebdavFileUrl(webdavUrl);
+    _syncInFlight = true;
+    final httpClient = client ?? http.Client();
+    final ownsClient = client == null;
+    try {
+      final uri = Uri.parse(targetUrl);
+      String? remoteBody;
+      final getResp = await httpClient
+          .get(uri, headers: _webdavHeaders())
+          .timeout(const Duration(seconds: 15));
+      if (getResp.statusCode >= 200 && getResp.statusCode < 300) {
+        if (getResp.bodyBytes.length > maxSyncPayloadBytes) {
+          throw const FormatException('远端同步文件超过 8 MB 大小限制');
+        }
+        remoteBody = utf8.decode(getResp.bodyBytes);
+      } else if (getResp.statusCode == 404) {
+        remoteBody = null;
+      } else if (getResp.statusCode == 401 || getResp.statusCode == 403) {
+        throw FormatException(
+          'WebDAV 认证失败 (HTTP ${getResp.statusCode})，请检查账号与应用密码',
+        );
+      } else {
+        throw FormatException('WebDAV 读取失败 (HTTP ${getResp.statusCode})');
+      }
+
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final merged = await mergeSyncPayload(remoteBody, nowMs: now);
+      final encodedPayload = utf8.encode(merged.payloadJson);
+      if (encodedPayload.length > maxSyncPayloadBytes) {
+        throw const FormatException('本地待同步数据超过 8 MB 大小限制');
+      }
+
+      var putResp = await httpClient
+          .put(
+            uri,
+            headers: _webdavHeaders(jsonContent: true),
+            body: encodedPayload,
+          )
+          .timeout(const Duration(seconds: 15));
+
+      if (putResp.statusCode == 404 || putResp.statusCode == 409) {
+        final slash = targetUrl.lastIndexOf('/');
+        if (slash > 'https://'.length) {
+          final parentUri = Uri.parse(targetUrl.substring(0, slash + 1));
+          final mkcolReq = http.Request('MKCOL', parentUri)
+            ..headers.addAll(_webdavHeaders());
+          await httpClient
+              .send(mkcolReq)
+              .timeout(const Duration(seconds: 10))
+              .catchError(
+                (_) => http.StreamedResponse(const Stream.empty(), 500),
+              );
+          putResp = await httpClient
+              .put(
+                uri,
+                headers: _webdavHeaders(jsonContent: true),
+                body: encodedPayload,
+              )
+              .timeout(const Duration(seconds: 15));
+        }
+      }
+
+      if (putResp.statusCode == 401 || putResp.statusCode == 403) {
+        throw FormatException('WebDAV 写入被拒绝 (HTTP ${putResp.statusCode})');
+      }
+      if (putResp.statusCode < 200 || putResp.statusCode >= 300) {
+        throw FormatException('WebDAV 写入失败 (HTTP ${putResp.statusCode})');
+      }
+
+      _lastHistoryAutoPushMs = now;
+      await _prefs.setInt(keySyncLastTime, now);
+      await _prefs.setString(
+        keySyncLastStatus,
+        _formatSyncSuccessSummary(
+          '同步成功',
+          now,
+          historyCount: merged.historyCount,
+          favoriteCount: merged.favoriteCount,
+          subscriptionCount: merged.subscriptionCount,
+        ),
+      );
+      return (
+        historyCount: merged.historyCount,
+        favoriteCount: merged.favoriteCount,
+        subscriptionCount: merged.subscriptionCount,
+        changed: merged.changed,
+        subscriptionsChanged: merged.subscriptionsChanged,
+      );
+    } catch (e) {
+      await _prefs.setString(keySyncLastStatus, '上次失败：$e');
+      rethrow;
+    } finally {
+      _syncInFlight = false;
+      if (ownsClient) httpClient.close();
+    }
+  }
+
+  Future<
+    ({
+      int historyCount,
+      int favoriteCount,
+      int subscriptionCount,
+      bool changed,
+      bool subscriptionsChanged,
+    })
+  >
+  syncWithLanPeer(String rawLanUrl, {http.Client? client}) async {
+    if (_syncInFlight) {
+      throw StateError('正在同步中，请稍候');
+    }
+    final endpoint = resolveLanSyncEndpoint(rawLanUrl);
+    _syncInFlight = true;
+    final httpClient = client ?? http.Client();
+    final ownsClient = client == null;
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final localPayload = exportSyncPayload(nowMs: now);
+      final encodedLocal = utf8.encode(localPayload);
+      if (encodedLocal.length > maxSyncPayloadBytes) {
+        throw const FormatException('本地待同步数据超过 8 MB 大小限制');
+      }
+      final resp = await httpClient
+          .post(
+            Uri.parse(endpoint),
+            headers: const {'Content-Type': 'application/json; charset=utf-8'},
+            body: encodedLocal,
+          )
+          .timeout(const Duration(seconds: 12));
+      if (resp.statusCode == 410) {
+        throw const FormatException('对方设备的局域网同步会话已过期，请重新打开');
+      }
+      if (resp.statusCode < 200 || resp.statusCode >= 300) {
+        throw FormatException('局域网同步未成功 (HTTP ${resp.statusCode})');
+      }
+      if (resp.bodyBytes.length > maxSyncPayloadBytes) {
+        throw const FormatException('远端同步文件超过 8 MB 大小限制');
+      }
+      final merged = await mergeSyncPayload(
+        utf8.decode(resp.bodyBytes),
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      await _prefs.setInt(keySyncLastTime, now);
+      await _prefs.setString(
+        keySyncLastStatus,
+        _formatSyncSuccessSummary(
+          '局域网同步',
+          now,
+          historyCount: merged.historyCount,
+          favoriteCount: merged.favoriteCount,
+          subscriptionCount: merged.subscriptionCount,
+        ),
+      );
+      return (
+        historyCount: merged.historyCount,
+        favoriteCount: merged.favoriteCount,
+        subscriptionCount: merged.subscriptionCount,
+        changed: merged.changed,
+        subscriptionsChanged: merged.subscriptionsChanged,
+      );
+    } finally {
+      _syncInFlight = false;
+      if (ownsClient) httpClient.close();
+    }
   }
 }

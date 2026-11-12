@@ -788,6 +788,13 @@ final class SettingsScreen {
                 "网盘扫码登录、凭据与网盘顺序（由配置提供）",
                 "settings-accounts",
                 () -> AccountPanel.show(a, null));
+        if (!a.privateMode) {
+            link(
+                    "多端网络同步",
+                    CloudSyncDialog.statusSummary(a),
+                    "settings-cloud-sync",
+                    () -> CloudSyncDialog.show(a, a::refresh));
+        }
         link(
                 "备份配置与偏好",
                 "导出配置与偏好，请妥善保管；不含插件单独保存的登录状态",

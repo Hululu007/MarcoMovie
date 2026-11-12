@@ -12,6 +12,7 @@ final class ConfigLibrary {
 
     static final class Entry {
         final String id, origin, name, selected, digest;
+        final long updated;
 
         Entry(JSONObject value) throws Exception {
             id = value.getString("id");
@@ -19,6 +20,7 @@ final class ConfigLibrary {
             name = value.getString("name");
             selected = value.optString("selected");
             digest = value.getString("digest");
+            updated = Math.max(1L, value.optLong("updated", 1L));
             if (!id.matches("[0-9a-f]{64}") || !digest.matches("[0-9a-f]{64}"))
                 throw new IOException("保存的订阅索引损坏，原文件已保留");
         }
@@ -63,9 +65,15 @@ final class ConfigLibrary {
     }
 
     Entry remember(String raw, String origin, String name, String selected) throws Exception {
+        return remember(raw, origin, name, selected, System.currentTimeMillis());
+    }
+
+    Entry remember(String raw, String origin, String name, String selected, long updatedAt)
+            throws Exception {
         synchronized (LOCK) {
             String source = origin == null ? "" : origin.trim();
             String id = identity(source, raw), digest = hash(raw);
+            long stamp = Math.max(1L, updatedAt);
             JSONArray items = index();
             JSONObject value =
                     new JSONObject()
@@ -73,7 +81,8 @@ final class ConfigLibrary {
                             .put("origin", source)
                             .put("name", name)
                             .put("selected", selected == null ? "" : selected)
-                            .put("digest", digest);
+                            .put("digest", digest)
+                            .put("updated", stamp);
             Entry saved = new Entry(value);
             // Content files are immutable: a failed index write cannot damage an older
             // subscription.
@@ -89,6 +98,32 @@ final class ConfigLibrary {
             items.put(position, value);
             write(new File(directory, "index.json"), items.toString());
             return saved;
+        }
+    }
+
+    boolean remove(String id) throws Exception {
+        if (id == null || id.isEmpty()) return false;
+        synchronized (LOCK) {
+            JSONArray items = index();
+            JSONArray kept = new JSONArray();
+            List<Entry> removed = new ArrayList<>();
+            Set<String> activeFiles = new HashSet<>();
+            for (int i = 0; i < items.length(); i++) {
+                Entry entry = new Entry(items.getJSONObject(i));
+                if (id.equals(entry.id)) {
+                    removed.add(entry);
+                } else {
+                    kept.put(items.getJSONObject(i));
+                    activeFiles.add(content(entry).getName());
+                }
+            }
+            if (removed.isEmpty()) return false;
+            write(new File(directory, "index.json"), kept.toString());
+            for (Entry r : removed) {
+                File f = content(r);
+                if (!activeFiles.contains(f.getName())) f.delete();
+            }
+            return true;
         }
     }
 

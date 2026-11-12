@@ -23,6 +23,7 @@ import '../core/netdisk_service.dart';
 import '../core/storage_service.dart';
 import '../core/search_source_notice.dart';
 import 'apple_theme.dart';
+import 'cloud_sync_panel.dart';
 import 'detail_screen.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
@@ -146,14 +147,93 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             widget.storage.glassBlurStrength <= 0.02;
     GlassworkBackdrop.intensity.value = widget.storage.glassBlurStrength;
     _reloadSavedConfig();
+    if (!Platform.environment.containsKey('FLUTTER_TEST')) {
+      unawaited(_runStartupWebdavSync());
+    }
+  }
+  Future<void> _runStartupWebdavSync() async {
+    if (!widget.storage.isWebdavConfigured || !widget.storage.webdavAuto) {
+      return;
+    }
+    try {
+      final res = await widget.storage.syncWithWebdav();
+      if (!mounted) return;
+      if (res.subscriptionsChanged) {
+        _reloadSavedConfig();
+      } else if (res.changed) {
+        setState(() {});
+      }
+    } catch (_) {}
+  }
+  Future<void> _openCloudSyncCenter({String iosBackLabel = '返回'}) async {
+    if (_privateSessionUnlocked) {
+      _showAppleNotice('隐私空间已隔离', '隐私空间不参与网络同步，请先退出隐私模式再使用多端同步。');
+      return;
+    }
+    await showCloudSyncSheet(
+      context,
+      widget.storage,
+      iosBackLabel: iosBackLabel,
+      onSynced: ({required subscriptionsChanged}) {
+        if (!mounted) return;
+        if (subscriptionsChanged) {
+          _reloadSavedConfig();
+        } else {
+          setState(() {});
+        }
+      },
+    );
+    if (mounted) setState(() {});
+  }
+  void _openSyncedMediaEntry({
+    required String siteKey,
+    required String videoId,
+    required String title,
+    String poster = '',
+    String remarks = '',
+  }) {
+    final pool = _visibleSupportedSites;
+    CmsSite? matched;
+    for (final s in pool) {
+      if (s.key == siteKey) {
+        matched = s;
+        break;
+      }
+    }
+    if (matched != null) {
+      _openVideoDetail(
+        matched,
+        CmsVideo(
+          id: videoId,
+          title: title,
+          poster: poster,
+          remarks: remarks,
+        ),
+      );
+      return;
+    }
+    if (pool.isEmpty) {
+      _showAppleNotice(
+        '尚未导入对应片源',
+        '本机暂无可用片源，可在「设置 → 多端网络同步」开启订阅源同步或导入订阅后继续观看「$title」。',
+      );
+      return;
+    }
+    final kw = title.trim();
+    if (kw.isEmpty) return;
+    _searchController.text = kw;
+    _runGlobalSearch(kw);
+    _showGlobalSearchSheet();
   }
   @override
   void onWindowClose() {
+    widget.storage.cancelPendingAutoSync();
     unawaited(CatPawHost.instance.close());
     unawaited(CmsClient.closeScriptSessions());
   }
   @override
   void dispose() {
+    widget.storage.cancelPendingAutoSync();
     if (_windowListenerAttached) {
       windowManager.removeListener(this);
     }
@@ -2270,21 +2350,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       key: ValueKey('cw_${entry.site}_${entry.id}'),
       pressedScale: 0.955,
       pressedOpacity: 0.90,
-      onTap: () {
-        if (_config == null) return;
-        final site = _config!.supportedSites.firstWhere(
-          (s) => s.key == entry.site,
-          orElse: () => _activeSite!,
-        );
-        _openVideoDetail(
-          site,
-          CmsVideo(
-            id: entry.id,
-            title: entry.title,
-            poster: resolvedPoster,
-          ),
-        );
-      },
+      onTap: () => _openSyncedMediaEntry(
+        siteKey: entry.site,
+        videoId: entry.id,
+        title: entry.title,
+        poster: resolvedPoster,
+      ),
       child: AppleGlassSurface(
         borderRadius: BorderRadius.circular(22),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
@@ -4826,6 +4897,36 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                   ),
                 ),
                 const Spacer(),
+                if (!_privateSessionUnlocked && _librarySegment != 2)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 12),
+                    child: CupertinoButton(
+                      key: const ValueKey('library-open-cloud-sync'),
+                      padding: EdgeInsets.zero,
+                      minSize: 28,
+                      onPressed: () =>
+                          _openCloudSyncCenter(iosBackLabel: '片库'),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            CupertinoIcons.cloud,
+                            color: AppleColors.systemBlue,
+                            size: 16,
+                          ),
+                          SizedBox(width: 4),
+                          Text(
+                            '多端同步',
+                            style: TextStyle(
+                              color: AppleColors.systemBlue,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 if (_librarySegment == 2 &&
                     DownloadService.instance.canOpenFolder &&
                     DownloadService.instance.rootPath.isNotEmpty)
@@ -4941,22 +5042,32 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                           itemBuilder: (ctx, i) {
                             final fav = favorites[i];
                             final sitePool = _visibleSupportedSites;
-                            final site = sitePool.firstWhere(
-                              (s) => s.key == fav.site,
-                              orElse: () =>
-                                  _activeSite ??
-                                  CmsSite(
-                                    key: fav.site,
-                                    name: fav.site,
-                                    type: 1,
-                                    api: '',
-                                    isPrivate: _privateSessionUnlocked,
-                                  ),
-                            );
+                            CmsSite? matched;
+                            for (final s in sitePool) {
+                              if (s.key == fav.site) {
+                                matched = s;
+                                break;
+                              }
+                            }
+                            final displaySite = matched ??
+                                CmsSite(
+                                  key: fav.site,
+                                  name: fav.site,
+                                  type: 1,
+                                  api: '',
+                                  isPrivate: _privateSessionUnlocked,
+                                );
                             return _buildVideoCard(
-                              site,
+                              displaySite,
                               CmsVideo(
                                 id: fav.id,
+                                title: fav.title,
+                                poster: fav.poster,
+                                remarks: fav.remarks,
+                              ),
+                              onTap: () => _openSyncedMediaEntry(
+                                siteKey: fav.site,
+                                videoId: fav.id,
                                 title: fav.title,
                                 poster: fav.poster,
                                 remarks: fav.remarks,
@@ -5033,22 +5144,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                                   key: ValueKey('lib_hist_${h.site}_${h.id}'),
                                   entry: h,
                                   posterUrl: resolvedPoster,
-                                  onTap: () {
-                                    if (_config == null) return;
-                                    final site =
-                                        _config!.publicSupportedSites.firstWhere(
-                                      (s) => s.key == h.site,
-                                      orElse: () => _activeSite!,
-                                    );
-                                    _openVideoDetail(
-                                      site,
-                                      CmsVideo(
-                                        id: h.id,
-                                        title: h.title,
-                                        poster: resolvedPoster,
-                                      ),
-                                    );
-                                  },
+                                  onTap: () => _openSyncedMediaEntry(
+                                    siteKey: h.site,
+                                    videoId: h.id,
+                                    title: h.title,
+                                    poster: resolvedPoster,
+                                  ),
                                   onDelete: () async {
                                     await widget.storage.removeWatchHistoryItem(
                                       h.site,
@@ -5662,6 +5763,15 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                   _buildLiquidGlassSliderRow(() {
                     if (mounted) setState(() {});
                   }),
+                  _buildSettingsQuickActionRow(
+                    icon: CupertinoIcons.cloud_fill,
+                    iconBgColor: AppleColors.systemBlue,
+                    title: '多端网络同步 (WebDAV / 局域网)',
+                    subtitle: widget.storage.syncStatusSummary,
+                    trailingText:
+                        widget.storage.isWebdavConfigured ? '已配置' : '去设置',
+                    onTap: () => _openCloudSyncCenter(),
+                  ),
                   _buildSettingsQuickActionRow(
                     icon: CupertinoIcons.cloud_upload_fill,
                     iconBgColor: AppleColors.systemTeal,
@@ -6447,6 +6557,18 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                   refresh();
                 },
               ),
+              IosSettingsRow(
+                key: const ValueKey('ios-open-cloud-sync-shortcut'),
+                icon: CupertinoIcons.cloud_fill,
+                iconColor: AppleColors.systemTeal,
+                title: '多端网络同步（含订阅源同步）',
+                trailingText: storage.isWebdavConfigured ? '已配置' : '设置',
+                showChevron: true,
+                onTap: () async {
+                  await _openCloudSyncCenter(iosBackLabel: '订阅与账号');
+                  refresh();
+                },
+              ),
             ],
           ),
           const SizedBox(height: 20),
@@ -6488,7 +6610,27 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
         CupertinoIcons.tray_fill,
         AppleColors.systemTeal,
         sectionGroup: 'account',
+        trailingText: storage.isWebdavConfigured ? '云同步已开启' : null,
         children: [
+          SettingsPane(
+            'sync',
+            '多端网络同步',
+            storage.syncStatusSummary,
+            CupertinoIcons.cloud_fill,
+            AppleColors.systemBlue,
+            trailingText: storage.isWebdavConfigured ? '已配置' : '设置',
+            content: CloudSyncSettingsPanel(
+              storage: storage,
+              embeddedInList: true,
+              onSynced: ({required subscriptionsChanged}) {
+                if (subscriptionsChanged) {
+                  _reloadSavedConfig();
+                }
+                refresh();
+              },
+              onNotice: _showAppleNotice,
+            ),
+          ),
           SettingsPane(
             'backup',
             '备份与恢复',
@@ -6903,6 +7045,17 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
               trailingText: '${publicSubs.length} 订阅',
               onTap: () async {
                 await _showSubscriptionManagerSheet();
+                if (context.mounted) refreshBoth();
+              },
+            ),
+            AppleGroupedTile(
+              icon: CupertinoIcons.cloud_fill,
+              iconBgColor: AppleColors.systemBlue,
+              title: '多端网络同步 (WebDAV / 局域网)',
+              subtitle: widget.storage.syncStatusSummary,
+              trailingText: widget.storage.isWebdavConfigured ? '已配置' : '去配置',
+              onTap: () async {
+                await _openCloudSyncCenter();
                 if (context.mounted) refreshBoth();
               },
             ),

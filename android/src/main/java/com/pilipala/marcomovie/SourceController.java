@@ -1261,18 +1261,26 @@ final class SourceController {
         else if (!c.origin.isEmpty()) origin = c.origin;
         ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
         String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");
-        if (a.isTvDevice()) {
-            rememberConfig(a, library);
-            String id = ConfigLibrary.identity(origin, c.raw);
-            String previousId =
-                    a.config == null ? "" : ConfigLibrary.identity(a.configOrigin, a.config.raw);
-            if (!id.equals(previousId)) {
-                selected = "";
-                for (ConfigLibrary.Entry entry : library.entries()) {
-                    if (id.equals(entry.id)) selected = entry.selected;
+        boolean isLocalFile =
+                origin != null && origin.toLowerCase(java.util.Locale.ROOT).startsWith("file:");
+        if (a.isTvDevice() || !isLocalFile) {
+            try {
+                rememberConfig(a, library);
+                String id = ConfigLibrary.identity(origin, c.raw);
+                String previousId =
+                        a.config == null
+                                ? ""
+                                : ConfigLibrary.identity(a.configOrigin, a.config.raw);
+                if (!id.equals(previousId)) {
+                    selected = "";
+                    for (ConfigLibrary.Entry entry : library.entries()) {
+                        if (id.equals(entry.id)) selected = entry.selected;
+                    }
                 }
+                library.remember(c.raw, origin, configName(c), selected);
+            } catch (Exception e) {
+                if (a.isTvDevice()) throw e;
             }
-            library.remember(c.raw, origin, configName(c), selected);
         }
         a.configStore.write(c.raw);
         SourcePicker.applyEdits(a, c, origin);
@@ -1295,6 +1303,9 @@ final class SourceController {
         } else if (hasSelected) editor.putString(Prefs.SELECTED_SITE, currentKey);
         else editor.remove(Prefs.SELECTED_SITE);
         editor.apply();
+        if (!isLocalFile) {
+            CloudSyncDialog.onSubscriptionSaved(a, origin, c.raw);
+        }
         a.back.clear();
         a.current = new MainActivity.Screen(a::home);
         a.current.render.run();

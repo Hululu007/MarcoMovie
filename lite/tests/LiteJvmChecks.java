@@ -101,6 +101,7 @@ public final class LiteJvmChecks {
         testStoreJsonPersistence();
         testEpisodeGroupingAndPlayerHelpers();
         testMediaProxyLoopback();
+        testLiteSyncV2AndLanServer();
         System.out.println("PASS " + checks + " TV Lite JVM checks");
     }
 
@@ -429,6 +430,260 @@ public final class LiteJvmChecks {
         } finally {
             LiteMediaProxy.get().close();
             upstream.stop(0);
+        }
+    }
+
+    private static void testLiteSyncV2AndLanServer() throws Exception {
+        // 1. Multi-subscription preservation + private stripping + history/fav tombstones
+        String mixedRaw =
+                "{\"sites\":["
+                        + "{\"key\":\"open_cms\",\"name\":\"公开影视\",\"type\":1,\"api\":\"http://127.0.0.1:9/open\"},"
+                        + "{\"key\":\"priv_cms\",\"name\":\"隐私影视\",\"type\":1,\"api\":\"http://127.0.0.1:9/priv\",\"isPrivate\":true}"
+                        + "]}";
+        String secondRaw =
+                "{\"sites\":[{\"key\":\"backup_cms\",\"name\":\"备用影视\",\"type\":1,\"api\":\"http://127.0.0.1:9/backup\"}]}";
+
+        JSONObject remoteFromDesktop =
+                new JSONObject()
+                        .put("schema", LiteSync.SCHEMA)
+                        .put("version", 2)
+                        .put("updated", 5000L)
+                        .put(
+                                "watch_history",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", "open_cms")
+                                                        .put("id", "v100")
+                                                        .put("title", "流浪地球")
+                                                        .put("episode", "正片")
+                                                        .put("position", 360000)
+                                                        .put("duration", 7200000)
+                                                        .put("updated", 4500L))
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", "open_cms")
+                                                        .put("id", "v_del")
+                                                        .put("title", "已删影片")
+                                                        .put("position", 10000)
+                                                        .put("duration", 60000)
+                                                        .put("updated", 1200L)))
+                        .put(
+                                "favorites",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", "open_cms")
+                                                        .put("id", "f200")
+                                                        .put("title", "大闹天宫")
+                                                        .put("updated", 4200L)))
+                        .put(
+                                "subscriptions",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put("name", "桌面端订阅一")
+                                                        .put("url", "https://one.example/sub.json")
+                                                        .put("rawContent", mixedRaw)
+                                                        .put("enabled", true)
+                                                        .put("updatedAt", 4000L))
+                                        .put(
+                                                new JSONObject()
+                                                        .put("name", "桌面端订阅二")
+                                                        .put("url", "https://two.example/sub.json")
+                                                        .put("rawContent", secondRaw)
+                                                        .put("enabled", true)
+                                                        .put("updatedAt", 4100L)));
+
+        LiteSync.Tombstones localTombs = LiteSync.Tombstones.read("");
+        localTombs.putMax("hist:open_cms\nv_del", 3000L);
+
+        LiteSync.MergeResult mergedOnFreshLite =
+                LiteSync.merge(
+                        "[]",
+                        "[]",
+                        localTombs.json(),
+                        null,
+                        true,
+                        remoteFromDesktop.toString(),
+                        5500L);
+
+        check(mergedOnFreshLite.historyCount == 1, "LiteSync filters tombstoned history");
+        check(mergedOnFreshLite.favoriteCount == 1, "LiteSync imports remote favorite");
+        check(
+                mergedOnFreshLite.activeSubscription != null
+                        && "桌面端订阅一".equals(mergedOnFreshLite.activeSubscription.name)
+                        && !mergedOnFreshLite.activeSubscription.rawContent.contains("priv_cms"),
+                "LiteSync adopts first public subscription on fresh box and strips private sites");
+        JSONObject outPayload = new JSONObject(mergedOnFreshLite.payloadJson);
+        check(
+                outPayload.getJSONArray("subscriptions").length() == 2,
+                "LiteSync preserves all secondary remote subscriptions without dropping them");
+
+        // 2. Opt-out of subscription sync preserves remote subscriptions without adopting locally
+        LiteSync.MergeResult optOutRes =
+                LiteSync.merge("[]", "[]", "", null, false, remoteFromDesktop.toString(), 5600L);
+        check(
+                optOutRes.activeSubscription == null
+                        && new JSONObject(optOutRes.payloadJson)
+                                        .getJSONArray("subscriptions")
+                                        .length()
+                                == 2,
+                "LiteSync syncSubs=false preserves remote subscriptions without mutating local");
+
+        // 3. ConfigServer LAN /<token>/sync bidirectional sync
+        final String[] boxHist = new String[] {mergedOnFreshLite.historyJson};
+        final String[] boxFav = new String[] {mergedOnFreshLite.favoritesJson};
+        final String[] boxTomb = new String[] {mergedOnFreshLite.tombstonesJson};
+        final LiteSync.LocalSubscription boxSub = mergedOnFreshLite.activeSubscription;
+
+        ConfigServer syncServer =
+                new ConfigServer(
+                        new ConfigServer.Importer() {
+                            @Override
+                            public void apply(String address) {}
+                        },
+                        new ConfigServer.SyncHandler() {
+                            @Override
+                            public String sync(String remoteJson) {
+                                if (remoteJson == null) {
+                                    return LiteSync.exportPayload(
+                                            boxHist[0], boxFav[0], boxTomb[0], boxSub, true, 6000L);
+                                }
+                                LiteSync.MergeResult m =
+                                        LiteSync.merge(
+                                                boxHist[0],
+                                                boxFav[0],
+                                                boxTomb[0],
+                                                boxSub,
+                                                true,
+                                                remoteJson,
+                                                6000L);
+                                boxHist[0] = m.historyJson;
+                                boxFav[0] = m.favoritesJson;
+                                boxTomb[0] = m.tombstonesJson;
+                                return m.payloadJson;
+                            }
+                        });
+        try {
+            String lanUrl = "http://127.0.0.1:" + syncServer.port() + "/" + syncServer.token;
+            LiteStore.FavoriteEntry clientNewFav = new LiteStore.FavoriteEntry();
+            clientNewFav.siteKey = "open_cms";
+            clientNewFav.vodId = "f999";
+            clientNewFav.vodName = "手机新收藏";
+            clientNewFav.addedAt = 5900L;
+            final String clientFavRaw = LiteStore.toggleFavoriteJson("[]", clientNewFav);
+
+            LiteSync.MergeResult lanClientRes =
+                    LiteSync.syncLanPeer(
+                            lanUrl,
+                            new LiteSync.LanPeerCallback() {
+                                @Override
+                                public String exportLocalPayload() {
+                                    return LiteSync.exportPayload(
+                                            "[]", clientFavRaw, "", null, true, 5950L);
+                                }
+
+                                @Override
+                                public LiteSync.MergeResult applyMergedPayload(
+                                        String remoteMergedPayloadJson) {
+                                    return LiteSync.merge(
+                                            "[]",
+                                            clientFavRaw,
+                                            "",
+                                            null,
+                                            true,
+                                            remoteMergedPayloadJson,
+                                            6100L);
+                                }
+                            });
+            check(
+                    lanClientRes.historyCount == 1
+                            && lanClientRes.favoriteCount == 2
+                            && lanClientRes.subscriptionCount == 1,
+                    "LiteSync LAN peer receives box history + subscription and merges favorites");
+            check(
+                    LiteStore.parseFavoritesJson(boxFav[0]).size() == 2,
+                    "ConfigServer receiver simultaneously receives peer's new favorite");
+        } finally {
+            syncServer.close();
+        }
+
+        // 4. WebDAV MKCOL + PUT + GET roundtrip
+        final java.util.Set<String> dirs =
+                java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+        final byte[][] davData = new byte[1][];
+        HttpServer dav = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        dav.createContext(
+                "/",
+                new HttpHandler() {
+                    @Override
+                    public void handle(HttpExchange ex) throws java.io.IOException {
+                        try {
+                            String m = ex.getRequestMethod();
+                            String p = ex.getRequestURI().getPath();
+                            if ("MKCOL".equalsIgnoreCase(m)) {
+                                dirs.add(p.endsWith("/") ? p : (p + "/"));
+                                ex.sendResponseHeaders(201, -1);
+                                return;
+                            }
+                            if ("GET".equalsIgnoreCase(m)) {
+                                if (davData[0] == null) {
+                                    ex.sendResponseHeaders(404, -1);
+                                } else {
+                                    ex.sendResponseHeaders(200, davData[0].length);
+                                    OutputStream os = ex.getResponseBody();
+                                    os.write(davData[0]);
+                                    os.close();
+                                }
+                                return;
+                            }
+                            if ("PUT".equalsIgnoreCase(m)) {
+                                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                                InputStream is = ex.getRequestBody();
+                                byte[] buf = new byte[2048];
+                                int n;
+                                while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+                                if (!dirs.contains("/dav/") || !dirs.contains("/dav/lite/")) {
+                                    ex.sendResponseHeaders(409, -1);
+                                    return;
+                                }
+                                davData[0] = bos.toByteArray();
+                                ex.sendResponseHeaders(201, -1);
+                                return;
+                            }
+                            ex.sendResponseHeaders(405, -1);
+                        } finally {
+                            ex.close();
+                        }
+                    }
+                });
+        dav.start();
+        try {
+            String davUrl = "http://127.0.0.1:" + dav.getAddress().getPort() + "/dav/lite/";
+            LiteSync.MergeResult pushed =
+                    LiteSync.syncWebdav(
+                            davUrl,
+                            "liteuser",
+                            "litepass",
+                            new LiteSync.MergeCallback() {
+                                @Override
+                                public LiteSync.MergeResult merge(String remote) {
+                                    return LiteSync.merge(
+                                            boxHist[0],
+                                            boxFav[0],
+                                            boxTomb[0],
+                                            boxSub,
+                                            true,
+                                            remote,
+                                            7000L);
+                                }
+                            });
+            check(
+                    pushed.historyCount == 1 && pushed.favoriteCount == 2 && davData[0] != null,
+                    "LiteSync WebDAV MKCOL creates nested collections and uploads v2 JSON");
+        } finally {
+            dav.stop(0);
         }
     }
 }

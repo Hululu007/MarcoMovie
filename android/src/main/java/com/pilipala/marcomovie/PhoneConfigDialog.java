@@ -90,7 +90,8 @@ final class PhoneConfigDialog {
                                 if (!applied.await(20, TimeUnit.SECONDS))
                                     throw new java.io.IOException("Apply timeout");
                                 if (failure.get() != null) throw failure.get();
-                            });
+                            },
+                            CloudSyncDialog.lanSyncHandler(a));
             String address = server.address(ip);
             LinearLayout panel = a.vertical();
             panel.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
@@ -150,6 +151,107 @@ final class PhoneConfigDialog {
             close();
             a.toast("未能打开局域网配置，可先使用遥控输入或本地文件");
             a.addressImportDialog();
+        }
+    }
+
+    void showLanSyncReceiver(final Runnable onUpdated) {
+        if (a.privateMode) {
+            a.toast("隐私空间内容严格本机隔离，不参与网络同步");
+            return;
+        }
+        try {
+            String ip = lanAddress();
+            server =
+                    new ConfigTransferServer(
+                            null,
+                            remoteJson -> {
+                                String merged = CloudSyncDialog.lanSyncHandler(a).sync(remoteJson);
+                                if (remoteJson != null && onUpdated != null) {
+                                    a.ui.post(
+                                            () -> {
+                                                if (!a.isFinishing()) onUpdated.run();
+                                            });
+                                }
+                                return merged;
+                            });
+            final String address = server.address(ip);
+            LinearLayout panel = a.vertical();
+            panel.setGravity(android.view.Gravity.CENTER_HORIZONTAL);
+            TextView note =
+                    a.text(
+                            "保持此窗口打开（5 分钟内有效）。在同局域网的另一台设备打开「多端网络同步 → 连接局域网其他设备」，输入下方地址或扫码获取地址即可双向合并：",
+                            13.5f,
+                            MainActivity.MUTED);
+            note.setLineSpacing(a.dp(3), 1f);
+            panel.addView(note);
+            a.gap(panel, 12);
+            int qrSize = a.dp(186);
+            BitMatrix matrix =
+                    new QRCodeWriter().encode(address, BarcodeFormat.QR_CODE, qrSize, qrSize);
+            int[] pixels = new int[qrSize * qrSize];
+            for (int y = 0; y < qrSize; y++)
+                for (int x = 0; x < qrSize; x++)
+                    pixels[y * qrSize + x] = matrix.get(x, y) ? Color.BLACK : Color.WHITE;
+            ImageView qr = new ImageView(a);
+            qr.setTag("lan-sync-qr");
+            qr.setContentDescription("本机局域网同步接收二维码");
+            qr.setImageBitmap(Bitmap.createBitmap(pixels, qrSize, qrSize, Bitmap.Config.ARGB_8888));
+            panel.addView(qr, new LinearLayout.LayoutParams(qrSize, qrSize));
+            TextView url = a.text(address, 12.5f, 0xff5ac8fa);
+            url.setTag("lan-sync-address");
+            url.setGravity(android.view.Gravity.CENTER);
+            url.setPadding(0, a.dp(10), 0, a.dp(4));
+            panel.addView(url);
+            if (!a.isTvDevice()) {
+                android.widget.Button copyBtn =
+                        a.navButton(
+                                "复制同步地址",
+                                "lan-sync-copy",
+                                () -> {
+                                    android.content.ClipboardManager cm =
+                                            (android.content.ClipboardManager)
+                                                    a.getSystemService(
+                                                            android.content.Context
+                                                                    .CLIPBOARD_SERVICE);
+                                    if (cm != null) {
+                                        cm.setPrimaryClip(
+                                                android.content.ClipData.newPlainText(
+                                                        "Marco Movie 局域网同步", address));
+                                        a.toast("已复制局域网同步地址");
+                                    }
+                                });
+                LinearLayout.LayoutParams cpLp = new LinearLayout.LayoutParams(-2, a.dp(36));
+                cpLp.topMargin = a.dp(6);
+                panel.addView(copyBtn, cpLp);
+            }
+            a.gap(panel, 6);
+            panel.addView(a.text("接收码有效 5 分钟 · 关闭窗口即停止监听", 12, MainActivity.MUTED));
+            dialog =
+                    new AppDialog.Builder(a)
+                            .setTitle("本机局域网接收码")
+                            .setView(panel)
+                            .setPositiveButton(
+                                    "刷新接收码",
+                                    (d, n) -> {
+                                        if (a.phoneConfig != null) a.phoneConfig.close();
+                                        a.phoneConfig = new PhoneConfigDialog(a);
+                                        a.phoneConfig.showLanSyncReceiver(onUpdated);
+                                    })
+                            .setNegativeButton("完成并关闭", null)
+                            .create();
+            dialog.setOnDismissListener(
+                    d -> {
+                        a.ui.removeCallbacks(expiry);
+                        close();
+                    });
+            dialog.show();
+            if (a.isTvDevice() && dialog.getButton(-2) != null) {
+                dialog.getButton(-2).requestFocus();
+            }
+            a.ui.postDelayed(expiry, TimeUnit.MINUTES.toMillis(5));
+        } catch (Exception error) {
+            close();
+            a.toast("无法获取本机局域网地址，请确认已连接 Wi-Fi 或有线局域网");
         }
     }
 

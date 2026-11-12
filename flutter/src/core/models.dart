@@ -122,6 +122,9 @@ class SubscriptionEntry {
       format: f.isEmpty ? 'JSON' : f,
       isPrivate:
           json['isPrivate'] == true ||
+          json['private'] == true ||
+          json['hidden'] == true ||
+          (json['space'] ?? '').toString().trim().toLowerCase() == 'private' ||
           cleanGroup.contains('隐私') ||
           cleanGroup.contains('私密'),
       enabled: json['enabled'] != false,

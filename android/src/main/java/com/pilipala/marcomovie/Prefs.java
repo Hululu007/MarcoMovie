@@ -72,6 +72,16 @@ final class Prefs {
     static final String GLOBAL_SEARCH_HISTORY = "global_search_history";
     static final String PHONETIC_TITLES = "phonetic_titles";
 
+    // Multi-device cloud (WebDAV) & LAN sync keys (kept outside KEYS so UI reset preserves sync).
+    static final String WEBDAV_URL = "webdav_url";
+    static final String WEBDAV_USER = "webdav_user";
+    static final String WEBDAV_PASS = "webdav_pass";
+    static final String WEBDAV_AUTO = "webdav_auto";
+    static final String WEBDAV_SYNC_SUBS = "webdav_sync_subs";
+    static final String SYNC_TOMBSTONES = "sync_tombstones";
+    static final String SYNC_LAST_TIME = "sync_last_time";
+    static final String SYNC_LAST_STATUS = "sync_last_status";
+
     // Mobile iOS-aligned shell preferences (kept outside KEYS to preserve cross-device backup
     // schema table invariants).
     static final String MOBILE_GLASS_INTENSITY = "mobile_glass_intensity";

@@ -2,7 +2,7 @@
   <img src="docs/images/tv-banner-960x540.png" width="480" alt="Marco Movie — 银色场记板与播放标志" />
   <h1>Marco Movie</h1>
   <p>支持 Android 电视、手机、平板及 Windows / macOS / iOS 多端自适应的播放器。</p>
-  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.5.20 · Android 电视：0.5.20 · Android Lite：0.5.3 · Windows：0.5.16 · macOS：0.5.13 · iOS：0.5.23 · 各端独立更新</p>
+  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.5.21 · Android 电视：0.5.21 · Android Lite：0.5.4 · Windows：0.5.17 · macOS：0.5.14 · iOS：0.5.24 · 各端独立更新</p>
   <p><a href="https://marcotv.wlj9919.top/movie/">镜像下载与产品展示</a> · <a href="https://github.com/Pilipala9919/MarcoMovie/releases">GitHub 下载</a> · <a href="docs/USER_GUIDE.md">使用指南</a> · <a href="docs/BUILD.md">构建说明</a> · <a href="docs/PRIVACY.md">隐私说明</a></p>
 </div>
 
@@ -30,6 +30,7 @@ Marco Movie 希望让大屏电视、随身手机、平板电脑与桌面端上�
 | 直播列表 | 读取用户提供的兼容列表与分组；电视端工具条隐藏时上下键换台、支持数字键选台；手机端提供左分组、右频道双栏触控列表，点选即播 |
 | 配置导入管理 | 电视端提供同一局域网手机扫码推送、遥控器输入与本地文件；**手机/平板端直接提供原生输入框、剪贴板一键粘贴导入与本地 JSON 文件选择，无需扫码**；支持配置备份与还原 |
 | 跨平台客户端 | `flutter/` 跨平台工程支持 Windows（x64 `.exe`）、macOS（`.app`）与 iOS / iPadOS（`.ipa`），支持与 Android 端互通 `marco-movie-backup` 备份文件 |
+| 多端网络同步 | 全平台（Android 电视 / 手机平板 / Lite、iOS / iPadOS、Windows、macOS）互通 `marco-movie-sync` v2 协议：支持用户自配 WebDAV（坚果云 / NAS / Alist / Nextcloud 等）自动云同步与同一局域网点对点双向免云盘直连同步，合并观看历史进度、我的收藏及可选的公开订阅源配置；严格隔离隐私空间与网盘 / Emby 登录凭据 |
 | 软件更新 | 设置内检查、下载与确认安装；镜像优先、GitHub 备用，支持断点续传，安装前核对文件与签名 |
 | 个性化与账号 | 海报配色柔光、自定义壁纸、背景压暗、减少动态效果、100%/110%/120% 界面缩放、音效和色彩档位；扩展支持时提供网盘登录与配置入口，不内置账号 |
 

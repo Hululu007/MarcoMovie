@@ -7,16 +7,23 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Short-lived, token-scoped LAN configuration receiver; separate from playback proxy. */
+/** Short-lived, token-scoped LAN configuration and sync receiver; separate from playback proxy. */
 final class ConfigTransferServer implements Closeable {
+    static final int MAX_SYNC_BYTES = 8 * 1024 * 1024;
+
     interface Importer {
         void apply(String address) throws Exception;
+    }
+
+    interface SyncHandler {
+        String sync(String remotePayloadJson) throws Exception;
     }
 
     final ServerSocket socket;
     final String path;
     final long expires;
     final Importer importer;
+    final SyncHandler syncHandler;
     volatile boolean closed;
     final AtomicBoolean importing = new AtomicBoolean(), applied = new AtomicBoolean();
     final ThreadPoolExecutor requests =
@@ -33,11 +40,21 @@ final class ConfigTransferServer implements Closeable {
                     });
 
     ConfigTransferServer(Importer handler) throws IOException {
-        this(handler, TimeUnit.MINUTES.toMillis(5), new InetSocketAddress("0.0.0.0", 0));
+        this(handler, null, TimeUnit.MINUTES.toMillis(5), new InetSocketAddress("0.0.0.0", 0));
+    }
+
+    ConfigTransferServer(Importer handler, SyncHandler sync) throws IOException {
+        this(handler, sync, TimeUnit.MINUTES.toMillis(5), new InetSocketAddress("0.0.0.0", 0));
     }
 
     ConfigTransferServer(Importer handler, long ttl, InetSocketAddress bind) throws IOException {
+        this(handler, null, ttl, bind);
+    }
+
+    ConfigTransferServer(Importer handler, SyncHandler sync, long ttl, InetSocketAddress bind)
+            throws IOException {
         importer = handler;
+        syncHandler = sync;
         expires = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(ttl);
         byte[] bytes = new byte[16];
         new SecureRandom().nextBytes(bytes);
@@ -74,13 +91,25 @@ final class ConfigTransferServer implements Closeable {
         return closed || System.nanoTime() >= expires;
     }
 
+    static boolean isAllowedLanPeer(InetAddress peer) {
+        if (peer == null) return false;
+        if (peer.isSiteLocalAddress() || peer.isLoopbackAddress() || peer.isLinkLocalAddress())
+            return true;
+        byte[] raw = peer.getAddress();
+        if (raw != null && raw.length == 4) {
+            int b0 = raw[0] & 0xff, b1 = raw[1] & 0xff;
+            if (b0 == 100 && b1 >= 64 && b1 <= 127) return true;
+        }
+        return false;
+    }
+
     void serve(Socket client) {
         try (Socket s = client) {
-            s.setSoTimeout(15000);
+            s.setSoTimeout(20000);
             InputStream in = s.getInputStream();
             OutputStream out = s.getOutputStream();
             InetAddress peer = s.getInetAddress();
-            if (!peer.isSiteLocalAddress() && !peer.isLoopbackAddress()) {
+            if (!isAllowedLanPeer(peer)) {
                 reply(out, 403, "text/plain", "仅允许局域网连接");
                 return;
             }
@@ -99,22 +128,34 @@ final class ConfigTransferServer implements Closeable {
                             row.substring(0, colon).trim().toLowerCase(Locale.ROOT),
                             row.substring(colon + 1).trim());
             }
-            if (!first[1].equals(path)) {
+            String reqPath = first[1];
+            int qIdx = reqPath.indexOf('?');
+            if (qIdx >= 0) reqPath = reqPath.substring(0, qIdx);
+            boolean isSyncRequest = syncHandler != null && reqPath.equals(path + "/sync");
+            if (!reqPath.equals(path) && !isSyncRequest) {
                 reply(out, 404, "text/plain", "页面不存在");
                 return;
             }
             if (expired()) {
-                reply(out, 410, "text/plain", "二维码已过期，请在电视上重新打开");
+                reply(out, 410, "text/plain", "二维码已过期，请在设备上重新打开");
                 return;
             }
             String host = headers.containsKey("host") ? headers.get("host") : "";
             String expected = s.getLocalAddress().getHostAddress() + ":" + socket.getLocalPort();
             if (!host.equals(expected)) {
-                reply(out, 403, "text/plain", "请使用电视上的二维码地址");
+                reply(out, 403, "text/plain", "请使用设备上的二维码地址");
+                return;
+            }
+            if (isSyncRequest) {
+                serveSync(first[0], headers, host, in, out);
                 return;
             }
             if (first[0].equals("GET")) {
-                reply(out, 200, "text/html", page(""));
+                reply(out, 200, "text/html", importer == null ? syncOnlyPage() : page(""));
+                return;
+            }
+            if (importer == null) {
+                reply(out, 405, "text/plain", "此接收码仅用于局域网多端同步");
                 return;
             }
             if (!first[0].equals("POST")) {
@@ -193,6 +234,86 @@ final class ConfigTransferServer implements Closeable {
             }
         } catch (Exception ignored) {
         }
+    }
+
+    private void serveSync(
+            String method,
+            Map<String, String> headers,
+            String host,
+            InputStream in,
+            OutputStream out)
+            throws IOException {
+        String origin = headers.get("origin");
+        if (origin != null && !origin.equals("http://" + host)) {
+            reply(out, 403, "text/plain", "来源不匹配");
+            return;
+        }
+        if ("GET".equals(method)) {
+            if (!importing.compareAndSet(false, true)) {
+                reply(out, 409, "text/plain", "正在同步中，请稍候");
+                return;
+            }
+            try {
+                if (expired()) throw new IOException("Session expired");
+                String payload = syncHandler.sync(null);
+                reply(out, 200, "application/json", payload == null ? "{}" : payload);
+            } catch (Exception error) {
+                reply(out, 500, "text/plain", "读取本机同步数据失败");
+            } finally {
+                importing.set(false);
+            }
+            return;
+        }
+        if (!"POST".equals(method)) {
+            reply(out, 405, "text/plain", "请求方式不支持");
+            return;
+        }
+        String contentType =
+                headers.containsKey("content-type")
+                        ? headers.get("content-type").toLowerCase(Locale.ROOT)
+                        : "";
+        if (!contentType.startsWith("application/json")
+                || headers.containsKey("transfer-encoding")) {
+            reply(out, 415, "text/plain", "仅接受 JSON 同步数据");
+            return;
+        }
+        int length;
+        try {
+            length =
+                    Integer.parseInt(
+                            headers.containsKey("content-length")
+                                    ? headers.get("content-length")
+                                    : "-1");
+        } catch (NumberFormatException e) {
+            length = -1;
+        }
+        if (length < 0 || length > MAX_SYNC_BYTES) {
+            reply(out, 413, "text/plain", "同步数据超出大小限制");
+            return;
+        }
+        byte[] body = new byte[length];
+        for (int n = 0; n < length; ) {
+            int got = in.read(body, n, length - n);
+            if (got < 0) throw new EOFException();
+            n += got;
+        }
+        if (!importing.compareAndSet(false, true)) {
+            reply(out, 409, "text/plain", "正在同步中，请稍候");
+            return;
+        }
+        try {
+            if (expired()) throw new IOException("Session expired");
+            String merged = syncHandler.sync(new String(body, "UTF-8"));
+            reply(out, 200, "application/json", merged == null ? "{}" : merged);
+        } catch (Exception error) {
+            reply(out, 400, "text/plain", "同步合并失败");
+        } finally {
+            importing.set(false);
+        }
+    }
+
+    static String syncOnlyPage() {
+        return "<!doctype html><html lang=zh-CN><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Marco Movie 局域网同步</title><style>body{margin:0;background:#101013;color:#f5f5f7;font:17px system-ui;padding:28px}main{max-width:520px;margin:8vh auto}h1{font-size:28px}p{line-height:1.7;color:#bfbfc7}code{display:block;background:#22232a;padding:14px;border-radius:12px;color:#5ac8fa;word-break:break-all}</style><main><h1>Marco Movie 局域网同步已就绪</h1><p>请复制当前浏览器地址栏链接，在另一台设备的 Marco Movie「设置 → 多端网络同步 → 连接局域网其他设备」中粘贴并点击同步。</p></main></html>";
     }
 
     static String line(InputStream in, int max) throws IOException {

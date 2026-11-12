@@ -16,9 +16,45 @@ final class FavoritesScreen {
         List<Favorites.Entry> entries = Favorites.read(a.prefs.getString(Prefs.FAVORITES, "[]"));
         if (entries.isEmpty()) {
             a.paragraph("把喜欢的内容留在这里。打开影片详情，选择“加入收藏”。");
+            if (!a.privateMode) {
+                a.addButton(
+                        a.body,
+                        a.navButton(
+                                "多端云同步",
+                                "favorites-cloud-sync",
+                                () -> CloudSyncDialog.show(a, a::refresh)));
+            }
             return;
         }
-        a.paragraph(entries.size() + " 部收藏 · 确认打开详情，长按确认或按菜单键管理");
+        if (a.isTvDevice()) {
+            LinearLayout topBar = a.row();
+            topBar.setClipChildren(false);
+            topBar.setClipToPadding(false);
+            topBar.setGravity(Gravity.CENTER_VERTICAL);
+            TextView summary =
+                    a.text(entries.size() + " 部收藏 · 确认打开详情，长按确认或按菜单键管理", 13, MainActivity.MUTED);
+            topBar.addView(summary, new LinearLayout.LayoutParams(0, -2, 1));
+            if (!a.privateMode) {
+                Button syncBtn =
+                        a.navButton(
+                                "多端云同步",
+                                "favorites-cloud-sync",
+                                () -> CloudSyncDialog.show(a, a::refresh));
+                topBar.addView(syncBtn, new LinearLayout.LayoutParams(-2, a.dp(36)));
+            }
+            a.body.addView(topBar, new LinearLayout.LayoutParams(-1, -2));
+            a.gap(a.body, 10);
+        } else {
+            a.paragraph(entries.size() + " 部收藏 · 确认打开详情，长按确认或按菜单键管理");
+            if (!a.privateMode) {
+                a.addButton(
+                        a.body,
+                        a.navButton(
+                                "多端云同步",
+                                "favorites-cloud-sync",
+                                () -> CloudSyncDialog.show(a, a::refresh)));
+            }
+        }
         float screen = a.windowWidth() / a.getResources().getDisplayMetrics().density;
         int columns = Math.max(4, Math.min(6, a.prefs.getInt(Prefs.HOME_COLUMNS, 6)));
         int width = (int) ((screen - 92) / columns) - 20;
@@ -94,6 +130,20 @@ final class FavoritesScreen {
         Cms.Site found = null;
         if (a.config != null) for (Cms.Site s : a.config.sites) if (s.key.equals(e.site)) found = s;
         if (found == null || !a.available(found)) {
+            if (a.config != null && e.title != null && !e.title.trim().isEmpty()) {
+                if (!a.isTvDevice()) {
+                    a.toast("原片源不在当前订阅中，已自动全网搜索该影片");
+                    a.openSearch(e.title);
+                } else {
+                    new AppDialog.Builder(a)
+                            .setTitle("原片源不在当前订阅中")
+                            .setMessage("这条收藏来自其他设备或旧订阅源，是否在当前片库中全网搜索「" + e.title + "」？")
+                            .setPositiveButton("全网搜索", (d, w) -> a.openSearch(e.title))
+                            .setNegativeButton("保留收藏", null)
+                            .show();
+                }
+                return;
+            }
             a.notice("这个收藏的来源暂不可用，收藏仍保留。请检查配置。");
             return;
         }
@@ -118,6 +168,7 @@ final class FavoritesScreen {
                                                         e.site,
                                                         e.video()))
                                         .apply();
+                                CloudSyncDialog.onFavoriteToggled(a, e.site, e.id, false);
                                 a.refresh();
                             }
                         })
