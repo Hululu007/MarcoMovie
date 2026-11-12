@@ -198,10 +198,76 @@ public final class LiteJvmChecks {
             + toHex(iv13.getBytes(StandardCharsets.UTF_8));
         check(LiteCatalog.parse(hexPayload, "http://127.0.0.1:9/config.2423").size() == 2, "2423 Hex-AES config decoded");
 
+        // 4b. '2423' Hex-AES with odd-offset "2324" within key (e.g. "22@" hex has "2324" at odd offset 1)
+        String oddKeyStr = "22@key1234567890"; // 16 chars, hex starts with "323240..." where index 1-4 is "2324"
+        Cipher oddCipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+        oddCipher.init(
+            Cipher.ENCRYPT_MODE,
+            new SecretKeySpec(oddKeyStr.getBytes(StandardCharsets.UTF_8), "AES"),
+            new IvParameterSpec(iv16.getBytes(StandardCharsets.UTF_8))
+        );
+        byte[] oddEncrypted = oddCipher.doFinal(rawJson.getBytes(StandardCharsets.UTF_8));
+        String oddHexPayload = "2423"
+            + toHex(oddKeyStr.getBytes(StandardCharsets.UTF_8))
+            + "2324"
+            + toHex(oddEncrypted)
+            + toHex(iv13.getBytes(StandardCharsets.UTF_8));
+        check(LiteCatalog.parse(oddHexPayload, "http://127.0.0.1:9/config.2423").size() == 2, "2423 Hex-AES config with odd-index 2324 inside key decoded");
+
+        // 4c. '2423' Hex-AES with embedded whitespace
+        String hexWithWhitespace = "  2423 \r\n"
+            + toHex(keyStr.getBytes(StandardCharsets.UTF_8))
+            + " \n 2324 \t"
+            + toHex(encrypted)
+            + "\r\n "
+            + toHex(iv13.getBytes(StandardCharsets.UTF_8))
+            + " \n ";
+        check(LiteCatalog.parse(hexWithWhitespace, "http://127.0.0.1:9/config.2423").size() == 2, "2423 Hex-AES config with whitespace decoded");
+
         // 5. Live sources extracted from config
         List<LiteCatalog.LiveSource> liveSources = LiteCatalog.parseLives(rawJson, "http://127.0.0.1:9/config.json");
         check(liveSources.size() == 1 && "http://127.0.0.1:9/live.txt".equals(liveSources.get(0).url), "live source parsed");
         check("LiveUA/2.0".equals(liveSources.get(0).headers.get("User-Agent")), "live source UA parsed");
+
+        // 6. JSON null fields handling in Lite
+        JSONObject nullLiteCfg = new JSONObject();
+        JSONArray nullLiteSites = new JSONArray();
+        JSONObject nullLiteSite = new JSONObject();
+        nullLiteSite.put("key", "null-lite");
+        nullLiteSite.put("name", "Null Lite");
+        nullLiteSite.put("type", 1);
+        nullLiteSite.put("api", "http://127.0.0.1:9/api.php/provide/vod/");
+        nullLiteSite.put("playUrl", JSONObject.NULL);
+        nullLiteSite.put("ua", JSONObject.NULL);
+        JSONObject nullExt = new JSONObject();
+        nullExt.put("ua", JSONObject.NULL);
+        nullLiteSite.put("ext", nullExt);
+        nullLiteSites.put(nullLiteSite);
+        nullLiteCfg.put("sites", nullLiteSites);
+        List<LiteCatalog.Site> parsedNullLite = LiteCatalog.parse(nullLiteCfg.toString(), "http://127.0.0.1:9/config.json");
+        check(parsedNullLite.size() == 1, "Lite null config parses site");
+        check("".equals(parsedNullLite.get(0).playUrl), "Lite playUrl with null degrades to empty string");
+        check(parsedNullLite.get(0).headers.get("User-Agent") == null, "Lite User-Agent with null is not set to literal null");
+
+        JSONObject nullLiveCfg = new JSONObject();
+        JSONArray nullLiveArr = new JSONArray();
+        JSONObject nullLiveItem = new JSONObject();
+        nullLiveItem.put("name", "Live Null");
+        nullLiveItem.put("url", "http://127.0.0.1:9/live.txt");
+        nullLiveItem.put("ua", JSONObject.NULL);
+        nullLiveArr.put(nullLiveItem);
+        nullLiveCfg.put("lives", nullLiveArr);
+        List<LiteCatalog.LiveSource> parsedNullLives = LiteCatalog.parseLives(nullLiveCfg.toString(), "http://127.0.0.1:9/config.json");
+        check(parsedNullLives.size() == 1 && parsedNullLives.get(0).headers.get("User-Agent") == null, "Lite live UA with null is not set to literal null");
+
+        // 7. Missing type HTTP CMS sites default to type 1 or 0 and marked supported
+        String missingTypeJsonLite = "{\"sites\":[{\"key\":\"no_type_json\",\"name\":\"NoTypeJson\",\"api\":\"http://127.0.0.1:9/api.php/provide/vod/\"}]}";
+        List<LiteCatalog.Site> parsedMissingJson = LiteCatalog.parse(missingTypeJsonLite, "http://127.0.0.1:9/config.json");
+        check(parsedMissingJson.size() == 1 && parsedMissingJson.get(0).type == 1 && parsedMissingJson.get(0).supported, "Lite missing type JSON site defaults to type 1 and is supported");
+
+        String missingTypeXmlLite = "{\"sites\":[{\"key\":\"no_type_xml\",\"name\":\"NoTypeXml\",\"api\":\"http://127.0.0.1:9/vod.xml\"}]}";
+        List<LiteCatalog.Site> parsedMissingXml = LiteCatalog.parse(missingTypeXmlLite, "http://127.0.0.1:9/config.json");
+        check(parsedMissingXml.size() == 1 && parsedMissingXml.get(0).type == 0 && parsedMissingXml.get(0).supported, "Lite missing type XML site defaults to type 0 and is supported");
     }
 
     private static void testXmlAndJsonCmsParsing() throws Exception {

@@ -22,6 +22,7 @@ with tempfile.TemporaryDirectory(prefix='python-package-native-') as temporary:
     shim.parent.mkdir(parents=True)
     shim.write_text('package android.util; public final class Base64 { public static final int DEFAULT=0; public static byte[] decode(String value,int flags){return java.util.Base64.getMimeDecoder().decode(value);} }', encoding='utf-8')
     subprocess.run([jdk / 'javac', '-encoding', 'UTF-8', '-source', '8', '-target', '8', '-Xlint:-options', '-cp', parser, '-d', classes,
+                    root / 'shared/java/com/pilipala/source/Json.java',
                     root / 'shared/java/com/pilipala/source/Warehouse.java', src / 'Cms.java', src / 'LocalSourcePackage.java', src / 'RequestScope.java', src / 'LiveCatalog.java', src / 'ProxyAddress.java',
                     root / 'android/tests/PythonPackageChecks.java', shim], check=True)
     extracted = work / 'extracted.json'

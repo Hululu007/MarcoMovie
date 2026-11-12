@@ -1,6 +1,7 @@
 package com.pilipala.marcomovie;
 
 import org.json.*;
+import com.pilipala.source.Json;
 import com.pilipala.source.Warehouse;
 import java.io.*;
 import java.net.*;
@@ -419,7 +420,7 @@ public final class Cms {
             Iterator<String> it = o.keys();
             while (it.hasNext()) {
                 String k = it.next();
-                String v = o.optString(k, "");
+                String v = Json.str(o, k, "");
                 if (k == null || v == null || v.isEmpty() || v.contains("\r") || v.contains("\n"))
                     continue;
                 for (String allowed :
@@ -584,13 +585,13 @@ public final class Cms {
             root = new JSONObject(json);
         }
         if (isDirectCmsResponse(root)) {
-            root = directCmsConfig(root, root.optString(Warehouse.ORIGIN, origin));
+            root = directCmsConfig(root, Json.str(root, Warehouse.ORIGIN, origin));
             text = root.toString();
         }
         JSONArray sites = root.optJSONArray("sites");
         if ((sites == null || sites.length() == 0)
                 && root.has("api")
-                && !root.optString("api").isEmpty()) {
+                && !Json.str(root, "api", "").isEmpty()) {
             sites = new JSONArray().put(root);
         }
         if (Warehouse.isCatalog(root)) {
@@ -614,17 +615,17 @@ public final class Cms {
                             .put("type", 3)
                             .put("api", "csp_LivePlaceholder"));
         }
-        origin = root.optString(Warehouse.ORIGIN, origin);
+        origin = Json.str(root, Warehouse.ORIGIN, origin);
         if (sites == null || sites.length() == 0) throw new IOException("配置中没有 sites 来源列表");
         if (sites.length() > 500) throw new IOException("来源超过 500 个限制");
         Config out = new Config();
         out.raw = text;
         out.origin = origin == null ? "" : origin;
-        out.warehouse = root.optString(Warehouse.ROOT, "");
+        out.warehouse = Json.str(root, Warehouse.ROOT, "");
         JSONArray directory = root.optJSONArray(Warehouse.DEPOTS);
         if (directory != null) out.depots = directory;
-        String rawSpider = root.optString("spider", "");
-        if (rawSpider.isEmpty()) rawSpider = root.optString("jar", "");
+        String rawSpider = Json.str(root, "spider", "");
+        if (rawSpider.isEmpty()) rawSpider = Json.str(root, "jar", "");
         if (!rawSpider.isEmpty()) {
             String[] spParts = rawSpider.split(";md5;", 2);
             out.spider =
@@ -637,12 +638,12 @@ public final class Cms {
             for (int i = 0; i < Math.min(100, parses.length()); i++) {
                 JSONObject pj = parses.optJSONObject(i);
                 if (pj == null) continue;
-                String pUrl = pj.optString("url", "").trim();
+                String pUrl = Json.str(pj, "url", "");
                 if (!isHttp(pUrl)) continue;
                 Parse p = new Parse();
-                p.name = pj.optString("name", "解析 " + (i + 1));
+                p.name = Json.str(pj, "name", "解析 " + (i + 1));
                 p.url = pUrl;
-                p.type = pj.optInt("type", 0);
+                p.type = Json.integer(pj, "type", 0);
                 p.headers.put("User-Agent", USER_AGENT);
                 copySafeHeaders(p.headers, pj.opt("header"));
                 copySafeHeaders(p.headers, pj.opt("headers"));
@@ -659,33 +660,52 @@ public final class Cms {
             JSONObject j = sites.optJSONObject(i);
             if (j == null) continue;
             Site s = new Site();
-            s.key = j.optString("key", "site-" + i);
-            s.name = j.optString("name", s.key);
+            s.key = Json.str(j, "key", "site-" + i);
+            s.name = Json.str(j, "name", s.key);
             if (!keys.add(s.key)) s.key = s.key + "-" + i;
-            s.type = j.optInt("type", -1);
-            s.api = resolve(origin, j.optString("api", ""));
-            String rawJar = j.optString("jar", "");
+            s.type = Json.integer(j, "type", -1);
+            s.api = resolve(origin, Json.str(j, "api", ""));
+            if (s.type == -1 && isHttp(s.api)) {
+                String path = s.api.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
+                s.type = (path.contains("xml") || path.endsWith(".xml")) ? 0 : 1;
+            }
+            String rawJar = Json.str(j, "jar", "");
             if (!rawJar.isEmpty()) {
                 String[] jarParts = rawJar.split(";md5;", 2);
                 s.jar =
                         resolve(origin, jarParts[0])
                                 + (jarParts.length == 2 ? ";md5;" + jarParts[1] : "");
             }
-            s.playUrl = j.optString("playUrl", "");
-            s.searchable = j.optInt("searchable", 1) != 0;
+            s.playUrl = Json.str(j, "playUrl", "");
+            s.searchable = Json.integer(j, "searchable", 1) != 0;
             s.ext = j.opt("ext");
-            if (origin != null && origin.startsWith("file://") && s.ext instanceof String) {
-                String ext = (String) s.ext;
-                if (ext.startsWith("./") || ext.startsWith("../")) s.ext = resolve(origin, ext);
+            if (origin != null && !origin.isEmpty()) {
+                if (s.ext instanceof String) {
+                    String ext = (String) s.ext;
+                    if (ext.startsWith("./") || ext.startsWith("../")) s.ext = resolve(origin, ext);
+                } else if (s.ext instanceof JSONObject) {
+                    JSONObject extObj = (JSONObject) s.ext;
+                    for (String field : new String[] {"json", "url", "rule"}) {
+                        String val = Json.str(extObj, field, null);
+                        if (val != null && (val.startsWith("./") || val.startsWith("../"))) {
+                            try {
+                                extObj.put(field, resolve(origin, val));
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                }
             }
             s.requiresParser =
-                    !s.playUrl.isEmpty() || j.optInt("parse", 0) == 1 || j.optInt("jx", 0) == 1;
+                    !s.playUrl.isEmpty()
+                            || Json.integer(j, "parse", 0) == 1
+                            || Json.integer(j, "jx", 0) == 1;
             s.headers.put("User-Agent", USER_AGENT);
             Object h = j.opt("headers");
             if (h == null) h = j.opt("header");
             copySafeHeaders(s.headers, j.opt("header"));
             copySafeHeaders(s.headers, j.opt("headers"));
-            String ua = j.optString("ua", "");
+            String ua = Json.str(j, "ua", "");
             if (!ua.isEmpty() && !ua.contains("\r") && !ua.contains("\n")) {
                 s.headers.put("User-Agent", ua);
             }
@@ -694,25 +714,26 @@ public final class Cms {
                 Iterator<String> it = o.keys();
                 while (it.hasNext()) {
                     String k = it.next();
+                    String val = Json.str(o, k, "");
                     if (k.equalsIgnoreCase("User-Agent")
                             || k.equalsIgnoreCase("Referer")
                             || (s.type == 4
                                     && k.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-                                    && !o.optString(k).contains("\r")
-                                    && !o.optString(k).contains("\n")
+                                    && !val.contains("\r")
+                                    && !val.contains("\n")
                                     && !Arrays.asList(
                                                     "content-length",
                                                     "transfer-encoding",
                                                     "connection")
                                             .contains(k.toLowerCase(Locale.ROOT))))
-                        s.headers.put(k, o.optString(k));
+                        s.headers.put(k, val);
                 }
             }
             if (s.ext instanceof JSONObject) {
                 JSONObject extObj = (JSONObject) s.ext;
                 copySafeHeaders(s.headers, extObj.opt("header"));
                 copySafeHeaders(s.headers, extObj.opt("headers"));
-                String extUa = extObj.optString("ua", "");
+                String extUa = Json.str(extObj, "ua", "");
                 if (!extUa.isEmpty() && !extUa.contains("\r") && !extUa.contains("\n")) {
                     s.headers.put("User-Agent", extUa);
                 }

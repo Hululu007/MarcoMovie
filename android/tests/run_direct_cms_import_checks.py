@@ -20,7 +20,10 @@ def main():
     source = ROOT / 'android/src/main/java/com/pilipala/marcomovie'
     files = [source / name for name in (
         'Cms.java', 'RequestScope.java', 'SourceEngine.java', 'JsonCmsEngine.java', 'VideoFilters.java')]
-    files += [ROOT / 'shared/java/com/pilipala/source/Warehouse.java', tests / 'DirectCmsImportChecks.java']
+    files += [
+        ROOT / 'shared/java/com/pilipala/source/Json.java',
+        ROOT / 'shared/java/com/pilipala/source/Warehouse.java',
+        tests / 'DirectCmsImportChecks.java']
     suffix = '.exe' if os.name == 'nt' else ''
     subprocess.run([str(JDK / 'bin' / ('javac' + suffix)), '-encoding', 'UTF-8',
                     '-source', '8', '-target', '8', '-Xlint:-options', '-cp', str(jar),

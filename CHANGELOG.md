@@ -1,6 +1,7 @@
 ## 未发布
 
 - [Android/Flutter/Lite] 修复坚果云 WebDAV 同步 404 错误：根目录自动追加 MarcoMovie/ 子目录，补齐递归父目录 MKCOL 创建，优化 404/409 诊断提示。
+- [Android/Lite] 订阅解析与跨端对齐：支持 JSON null 字段规范降级（避免 optString 产生 "null" 伪值）；缺失 type 的 HTTP 站点按 CMS 自动识别；支持无扩展名的动态 type 3 脚本源；支持 HTTP 来源下的 ext 相对路径解析；修正 TVBox 2423 密文偶数位对齐。
 
 ## 2026-11-12 全平台观影交互、片源网盘兼容与桌面沉浸式升级（Android TV 0.5.22 · Android 手机/平板 0.5.22 · iOS / iPadOS 0.5.25 · Windows 0.5.18 · macOS 0.5.15）
 

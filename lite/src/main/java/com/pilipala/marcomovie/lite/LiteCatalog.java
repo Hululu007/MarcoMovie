@@ -3,6 +3,7 @@ package com.pilipala.marcomovie.lite;
 
 import android.util.Base64;
 import android.util.Xml;
+import com.pilipala.source.Json;
 import java.io.*;
 import java.net.*;
 import java.util.*;
@@ -187,10 +188,13 @@ public final class LiteCatalog {
 
     public static String decrypt2423(String raw) {
         if (raw == null) return "";
-        String s = raw.trim();
+        String s = raw.replaceAll("\\s+", "");
         if (!s.startsWith("2423")) return raw;
         try {
             int keyEnd = s.indexOf("2324");
+            while (keyEnd >= 0 && (keyEnd % 2 != 0)) {
+                keyEnd = s.indexOf("2324", keyEnd + 1);
+            }
             if (keyEnd < 4) return raw;
             String keyHex = s.substring(4, keyEnd);
             String body = s.substring(keyEnd + 4);
@@ -289,21 +293,21 @@ public final class LiteCatalog {
 
     public static List<Site> parse(String raw, String base) throws Exception {
         JSONObject document = decodeConfig(raw);
-        base = document.optString(com.pilipala.source.Warehouse.ORIGIN, base);
+        base = Json.str(document, com.pilipala.source.Warehouse.ORIGIN, base);
         JSONArray rows = document.optJSONArray("sites");
-        if ((rows == null || rows.length() == 0) && document.optString("api").length() > 0)
+        if ((rows == null || rows.length() == 0) && Json.str(document, "api", "").length() > 0)
             rows = new JSONArray().put(document);
         if (rows == null || rows.length() == 0) throw new IOException("配置没有 sites 列表");
         List<Site> sites = new ArrayList<Site>();
         for (int i = 0; i < rows.length() && i < 500; i++) {
             JSONObject row = rows.getJSONObject(i);
             Site s = new Site();
-            s.name = row.optString("name", "未命名");
-            s.key = row.optString("key", s.name + "_" + i);
-            s.type = row.optInt("type", -1);
-            s.api = row.optString("api");
-            s.playUrl = row.optString("playUrl", "").trim();
-            s.searchable = row.optInt("searchable", 1) != 0;
+            s.name = Json.str(row, "name", "未命名");
+            s.key = Json.str(row, "key", s.name + "_" + i);
+            s.type = Json.integer(row, "type", -1);
+            s.api = Json.str(row, "api", "");
+            s.playUrl = Json.str(row, "playUrl", "");
+            s.searchable = Json.integer(row, "searchable", 1) != 0;
             if (!s.api.startsWith("csp_")
                     && !s.api.startsWith("js_")
                     && base != null
@@ -312,6 +316,10 @@ public final class LiteCatalog {
                     s.api = new URL(new URL(base), s.api).toString();
                 } catch (Exception ignored) {
                 }
+            }
+            if (s.type == -1 && (s.api.startsWith("http://") || s.api.startsWith("https://"))) {
+                String path = s.api.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
+                s.type = (path.contains("xml") || path.endsWith(".xml")) ? 0 : 1;
             }
             boolean directPlayUrl =
                     s.playUrl.length() == 0
@@ -324,7 +332,7 @@ public final class LiteCatalog {
                 s.supported = false;
             }
             if (s.api.startsWith("emby://account/")) s.supported = true;
-            String ua = row.optString("ua", "").trim();
+            String ua = Json.str(row, "ua", "");
             if (ua.length() > 0 && ua.indexOf('\r') < 0 && ua.indexOf('\n') < 0) {
                 s.headers.put("User-Agent", ua);
             }
@@ -332,7 +340,7 @@ public final class LiteCatalog {
             putSafeHeaders(s.headers, row.optJSONObject("headers"));
             JSONObject extObj = row.optJSONObject("ext");
             if (extObj != null) {
-                String extUa = extObj.optString("ua", "").trim();
+                String extUa = Json.str(extObj, "ua", "");
                 if (extUa.length() > 0 && extUa.indexOf('\r') < 0 && extUa.indexOf('\n') < 0) {
                     s.headers.put("User-Agent", extUa);
                 }
@@ -348,7 +356,7 @@ public final class LiteCatalog {
         if (hs == null) return;
         Iterator<String> keys = hs.keys();
         while (keys.hasNext()) {
-            String k = keys.next(), v = hs.optString(k);
+            String k = keys.next(), v = Json.str(hs, k, "");
             if (k.indexOf('\r') < 0
                     && k.indexOf('\n') < 0
                     && v.indexOf('\r') < 0
@@ -520,7 +528,7 @@ public final class LiteCatalog {
         if (rawConfig == null || rawConfig.trim().length() == 0) return out;
         try {
             JSONObject doc = decodeConfig(rawConfig);
-            base = doc.optString(com.pilipala.source.Warehouse.ORIGIN, base);
+            base = Json.str(doc, com.pilipala.source.Warehouse.ORIGIN, base);
             JSONArray lives = doc.optJSONArray("lives");
             if (lives == null) return out;
             for (int i = 0; i < lives.length() && out.size() < 32; i++) {
@@ -597,7 +605,7 @@ public final class LiteCatalog {
         LiveSource src = new LiveSource();
         src.name = name == null || name.trim().length() == 0 ? "直播源" : name.trim();
         src.url = u;
-        String ua = meta.optString("ua", "").trim();
+        String ua = Json.str(meta, "ua", "");
         if (ua.length() > 0 && ua.indexOf('\r') < 0 && ua.indexOf('\n') < 0) {
             src.headers.put("User-Agent", ua);
         }
