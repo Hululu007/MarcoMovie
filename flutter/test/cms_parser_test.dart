@@ -560,7 +560,8 @@ https://depot.example/config.json
       origin: 'https://sub.example/tv',
     );
     expect(parsedWithRules.sites.length, 8);
-    expect(parsedWithRules.supportedSites.map((s) => s.key).toList(), [
+    expect(parsedWithRules.supportedSites.length, 8);
+    expect(parsedWithRules.availableSites.map((s) => s.key).toList(), [
       'doudou',
       't4_1',
       'bttwoo',

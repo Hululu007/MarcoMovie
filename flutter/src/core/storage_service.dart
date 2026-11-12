@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'catpaw_host.dart';
 import 'cms_parser.dart';
@@ -68,6 +70,10 @@ class StorageService {
   static const String keyPlayerAlwaysShowClock = 'player_always_show_clock';
   static const int maxVideoSkipRecords = 500;
   final SharedPreferences _prefs;
+  final Directory _dataDirectory;
+  @visibleForTesting
+  static Directory? debugOverrideDataDirectory;
+
   final ValueNotifier<int> watchHistoryRevision = ValueNotifier<int>(0);
   final ValueNotifier<bool> historyCorruptionNotifier = ValueNotifier<bool>(false);
   bool _historyCorrupted = false;
@@ -90,20 +96,174 @@ class StorageService {
   Set<String>? _cachedPrivateKeys;
   int _configRevision = 0;
   List<WatchHistoryEntry>? _historyCache;
+  List<WatchHistoryEntry>? _allHistoryCache;
+  List<SubscriptionEntry>? _subscriptionsCache;
+
+  int _lastHistoryDiskWriteMs = 0;
+  bool _historyDirty = false;
+  Timer? _historyFlushTimer;
 
   int get configRevision => _configRevision;
+  Directory get dataDirectory => _dataDirectory;
+  File get _subscriptionsFile => File('${_dataDirectory.path}/subscriptions.json');
+  File get _watchHistoryFile => File('${_dataDirectory.path}/watch_history.json');
 
   void _invalidateConfigCache() {
     _cachedConfig = null;
     _cachedPrivateKeys = null;
     _historyCache = null;
+    _subscriptionsCache = null;
     _configRevision++;
   }
 
-  StorageService(this._prefs) {
+  static const String _keyTestDataDir = '_test_storage_data_dir';
+
+  static Directory _resolveFallbackDataDir(SharedPreferences prefs) {
+    final saved = prefs.getString(_keyTestDataDir);
+    if (saved != null && saved.isNotEmpty) {
+      final d = Directory(saved);
+      if (!d.existsSync()) {
+        try {
+          d.createSync(recursive: true);
+        } catch (_) {}
+      }
+      return d;
+    }
+    final d = Directory.systemTemp.createTempSync('marco_movie_data_');
+    unawaited(prefs.setString(_keyTestDataDir, d.path));
+    return d;
+  }
+
+  StorageService(this._prefs, {Directory? dataDirectory})
+      : _dataDirectory = dataDirectory ??
+            debugOverrideDataDirectory ??
+            _resolveFallbackDataDir(_prefs) {
     _historyCorrupted = _prefs.getBool(keyHistoryCorrupted) ?? false;
     if (_historyCorrupted) {
       historyCorruptionNotifier.value = true;
+    }
+  }
+
+  Future<void> _atomicWriteFile(File destinationFile, String content) async {
+    final parentDir = destinationFile.parent;
+    if (!await parentDir.exists()) {
+      await parentDir.create(recursive: true);
+    }
+    final tmpFile = File(
+      '${destinationFile.path}.${DateTime.now().microsecondsSinceEpoch}.tmp',
+    );
+    RandomAccessFile? raf;
+    try {
+      raf = await tmpFile.open(mode: FileMode.write);
+      await raf.writeString(content);
+      await raf.flush();
+      await raf.close();
+      raf = null;
+      try {
+        await tmpFile.rename(destinationFile.path);
+      } on FileSystemException {
+        if (await destinationFile.exists()) {
+          try {
+            await destinationFile.delete();
+          } catch (_) {}
+        }
+        await tmpFile.rename(destinationFile.path);
+      }
+    } catch (error) {
+      if (raf != null) {
+        try {
+          await raf.close();
+        } catch (_) {}
+      }
+      if (await tmpFile.exists()) {
+        try {
+          await tmpFile.delete();
+        } catch (_) {}
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _initializeStorage() async {
+    if (!await _dataDirectory.exists()) {
+      try {
+        await _dataDirectory.create(recursive: true);
+      } catch (_) {}
+    }
+    await _migrateFromPrefsIfNeeded();
+    getSubscriptions();
+  }
+
+  bool get _hasAuthoritativeSubscriptions =>
+      getSubscriptions().isNotEmpty ||
+      _subscriptionsFile.existsSync() ||
+      _prefs.containsKey(keySubscriptions);
+
+  Future<void> _migrateFromPrefsIfNeeded() async {
+    // 1. Subscriptions migration
+    if (_prefs.containsKey(keySubscriptions)) {
+      final raw = _prefs.getString(keySubscriptions);
+      if (raw != null && raw.trim().isNotEmpty) {
+        try {
+          final decoded = jsonDecode(raw);
+          if (decoded is List) {
+            await _atomicWriteFile(_subscriptionsFile, raw);
+            await _prefs.remove(keySubscriptions);
+          }
+        } catch (_) {}
+      }
+    } else if (!await _subscriptionsFile.exists() && _prefs.containsKey(keyRawConfig)) {
+      final raw = _prefs.getString(keyRawConfig);
+      if (raw != null && raw.trim().isNotEmpty) {
+        try {
+          final legacyParsed = CmsParser.parseConfig(
+            raw,
+            origin: configOrigin,
+          );
+          final fmt = CmsParser.detectSubscriptionFormat(
+            raw,
+            origin: configOrigin,
+          );
+          final entry = SubscriptionEntry(
+            id: 'legacy_primary',
+            name: activeDepotName.isNotEmpty
+                ? activeDepotName
+                : (configOrigin.isNotEmpty
+                    ? (Uri.tryParse(configOrigin)?.host ?? '默认仓库')
+                    : '默认配置'),
+            url: configOrigin,
+            group: '默认分组',
+            format: legacyParsed.depots.isNotEmpty ? '多仓' : fmt,
+            isPrivate: false,
+            enabled: true,
+            rawContent: raw,
+            siteCount: legacyParsed.supportedSites.length,
+            liveCount: legacyParsed.lives.length,
+            updatedAt: DateTime.now().millisecondsSinceEpoch - 1000,
+          );
+          await _atomicWriteFile(
+            _subscriptionsFile,
+            jsonEncode([entry.toJson()]),
+          );
+          await _prefs.remove(keyRawConfig);
+        } catch (_) {}
+      }
+    }
+
+    // 2. Watch history migration
+    if (_prefs.containsKey(keyWatchHistory)) {
+      final raw = _prefs.getString(keyWatchHistory);
+      if (raw != null && raw.trim().isNotEmpty) {
+        try {
+          final decoded = jsonDecode(raw);
+          if (decoded is List) {
+            await _atomicWriteFile(_watchHistoryFile, raw);
+            await _prefs.remove(keyWatchHistory);
+          }
+        } catch (_) {
+          // Leave corrupt prefs unmigrated so getWatchHistory() detects and backs it up.
+        }
+      }
     }
   }
 
@@ -123,9 +283,36 @@ class StorageService {
       return res;
     });
   }
-  static Future<StorageService> init() async {
+
+  static Future<Directory> resolveDataDirectory({
+    Directory? overrideDir,
+    SharedPreferences? prefs,
+  }) async {
+    if (overrideDir != null) return overrideDir;
+    if (debugOverrideDataDirectory != null) return debugOverrideDataDirectory!;
+    if (Platform.environment.containsKey('FLUTTER_TEST')) {
+      if (prefs != null) {
+        return _resolveFallbackDataDir(prefs);
+      }
+      return Directory('${Directory.systemTemp.path}/marco_movie_data');
+    }
+    try {
+      final support = await getApplicationSupportDirectory();
+      return Directory('${support.path}/data');
+    } catch (_) {
+      if (prefs != null) {
+        return _resolveFallbackDataDir(prefs);
+      }
+      return Directory('${Directory.systemTemp.path}/marco_movie_data');
+    }
+  }
+
+  static Future<StorageService> init({Directory? dataDirectory}) async {
     final prefs = await SharedPreferences.getInstance();
-    return StorageService(prefs);
+    final dir = await resolveDataDirectory(overrideDir: dataDirectory, prefs: prefs);
+    final service = StorageService(prefs, dataDirectory: dir);
+    await service._initializeStorage();
+    return service;
   }
   String get configOrigin => _prefs.getString(keyOrigin) ?? '';
   String get rawConfig => _prefs.getString(keyRawConfig) ?? '';
@@ -243,16 +430,41 @@ class StorageService {
   }
 
   List<SubscriptionEntry> getSubscriptions() {
+    if (_subscriptionsCache != null) return _subscriptionsCache!;
+    if (_subscriptionsFile.existsSync()) {
+      try {
+        final bytes = _subscriptionsFile.readAsBytesSync();
+        if (bytes.isNotEmpty) {
+          final content = utf8.decode(bytes, allowMalformed: true);
+          final list = jsonDecode(content);
+          if (list is List) {
+            final entries = list
+                .whereType<Map>()
+                .map((m) => SubscriptionEntry.fromJson(Map<String, dynamic>.from(m)))
+                .where((s) => s.id.isNotEmpty)
+                .toList(growable: false);
+            _subscriptionsCache = entries;
+            return entries;
+          }
+        }
+      } catch (_) {}
+    }
     final raw = _prefs.getString(keySubscriptions) ?? '[]';
     try {
       final list = jsonDecode(raw);
-      if (list is! List) return const [];
-      return list
+      if (list is! List) {
+        _subscriptionsCache = const [];
+        return const [];
+      }
+      final entries = list
           .whereType<Map>()
           .map((m) => SubscriptionEntry.fromJson(Map<String, dynamic>.from(m)))
           .where((s) => s.id.isNotEmpty)
           .toList(growable: false);
+      _subscriptionsCache = entries;
+      return entries;
     } catch (_) {
+      _subscriptionsCache = const [];
       return const [];
     }
   }
@@ -271,15 +483,19 @@ class StorageService {
 
   Future<void> saveSubscriptions(List<SubscriptionEntry> subs) async {
     _invalidateConfigCache();
+    final ok = await _prefs.setString(keySubscriptions, '');
+    if (!ok) {
+      _invalidateConfigCache();
+      await _prefs.reload();
+      throw StateError('Failed to save subscriptions');
+    }
+    await _prefs.remove(keySubscriptions);
+
+    _subscriptionsCache = List.unmodifiable(subs);
+    final jsonStr = jsonEncode(subs.map((s) => s.toJson()).toList());
     try {
-      final saved = await _prefs.setString(
-        keySubscriptions,
-        jsonEncode(subs.map((s) => s.toJson()).toList()),
-      );
-      if (!saved) throw StateError('订阅变更未能保存，请重试');
+      await _atomicWriteFile(_subscriptionsFile, jsonStr);
     } catch (_) {
-      // The plugin updates its cache before the platform write completes.
-      // Re-read disk so a failed write does not look like a successful deletion.
       _invalidateConfigCache();
       await _prefs.reload();
       rethrow;
@@ -302,7 +518,7 @@ class StorageService {
     _invalidateConfigCache();
     final current = getSubscriptions().toList();
     // Migrate legacy single config into subscriptions list if not yet present
-    if (!_prefs.containsKey(keySubscriptions) && rawConfig.trim().isNotEmpty) {
+    if (getSubscriptions().isEmpty && !_hasAuthoritativeSubscriptions && rawConfig.trim().isNotEmpty) {
       try {
         final legacyParsed = CmsParser.parseConfig(
           rawConfig,
@@ -395,8 +611,11 @@ class StorageService {
         merged.publicSupportedSites.isNotEmpty &&
         !merged.supportedSites.any((s) => s.key == selectedSiteKey)) {
       final preferredDefault = merged.publicSupportedSites.firstWhere(
-        (s) => !CspBridge.isBannerNoticeSite(s),
-        orElse: () => merged.publicSupportedSites.first,
+        (s) => !CspBridge.isBannerNoticeSite(s) && s.supported,
+        orElse: () => merged.publicSupportedSites.firstWhere(
+          (s) => s.supported,
+          orElse: () => merged.publicSupportedSites.first,
+        ),
       );
       await _prefs.setString(
         keySelectedSite,
@@ -465,7 +684,13 @@ class StorageService {
     final config = loadSavedConfig();
     final sites = config?.publicSupportedSites ?? const <CmsSite>[];
     if (!sites.any((s) => s.key == selectedSiteKey)) {
-      await _prefs.setString(keySelectedSite, sites.isEmpty ? '' : sites.first.key);
+      final fallbackSite = sites.isEmpty
+          ? null
+          : sites.firstWhere(
+              (s) => s.supported,
+              orElse: () => sites.first,
+            );
+      await _prefs.setString(keySelectedSite, fallbackSite?.key ?? '');
     }
     if (!sites.any((s) => s.key == (_prefs.getString(keyPreferredSite) ?? ''))) {
       await _prefs.remove(keyPreferredSite);
@@ -680,7 +905,7 @@ class StorageService {
     final subs = getSubscriptions().where((s) => s.enabled).toList();
     final savedDepots = getSavedDepots();
     final aliases = _savedAliases();
-    if (_prefs.containsKey(keySubscriptions)) {
+    if (_hasAuthoritativeSubscriptions) {
       if (getSubscriptions().isEmpty) return null;
       final mergedSites = <CmsSite>[];
       final mergedLives = <LiveSource>[];
@@ -840,9 +1065,17 @@ class StorageService {
         isPrivate ? merged.supportedSites : merged.publicSupportedSites;
     if (visibleSites.isNotEmpty &&
         !visibleSites.any((s) => s.key == selectedSiteKey)) {
-      await _prefs.setString(keySelectedSite, visibleSites.first.key);
+      final fallbackSite = visibleSites.firstWhere(
+        (s) => s.supported,
+        orElse: () => visibleSites.first,
+      );
+      await _prefs.setString(keySelectedSite, fallbackSite.key);
     } else if (merged.supportedSites.isEmpty && merged.sites.isNotEmpty) {
-      await _prefs.setString(keySelectedSite, merged.sites.first.key);
+      final fallbackSite = merged.sites.firstWhere(
+        (s) => s.supported,
+        orElse: () => merged.sites.first,
+      );
+      await _prefs.setString(keySelectedSite, fallbackSite.key);
     }
     return merged;
   }
@@ -1242,18 +1475,85 @@ class StorageService {
     _cachedPrivateKeys = keys;
     return keys;
   }
-  void _handleHistoryCorruption(String rawCorruptString) {
-    if (_historyCorrupted) return;
+  void _handleHistoryCorruption(String? rawCorruptString, {List<int>? rawBytes}) {
+    final alreadyCorrupted = _historyCorrupted;
     _historyCorrupted = true;
     historyCorruptionNotifier.value = true;
-    final ts = DateTime.now().millisecondsSinceEpoch;
-    unawaited(_prefs.setString('watch_history_corrupt_$ts', rawCorruptString));
     unawaited(_prefs.setBool(keyHistoryCorrupted, true));
+    if (alreadyCorrupted) return;
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    if (rawCorruptString != null && rawCorruptString.isNotEmpty) {
+      unawaited(_prefs.setString('watch_history_corrupt_$ts', rawCorruptString));
+    }
+    try {
+      if (!_dataDirectory.existsSync()) {
+        try {
+          _dataDirectory.createSync(recursive: true);
+        } catch (_) {}
+      }
+      final corruptFile = File('${_dataDirectory.path}/watch_history_corrupt_$ts.json');
+      List<int>? bytesToQuarantine = rawBytes;
+      if (bytesToQuarantine == null && _watchHistoryFile.existsSync()) {
+        try {
+          bytesToQuarantine = _watchHistoryFile.readAsBytesSync();
+        } catch (_) {}
+      }
+      if (bytesToQuarantine != null && bytesToQuarantine.isNotEmpty) {
+        corruptFile.writeAsBytesSync(bytesToQuarantine, flush: true);
+      } else if (rawCorruptString != null && rawCorruptString.isNotEmpty) {
+        corruptFile.writeAsStringSync(rawCorruptString, flush: true);
+      }
+    } catch (_) {}
   }
 
   List<WatchHistoryEntry> _readRawWatchHistory() {
+    if (_allHistoryCache != null) return _allHistoryCache!;
+    if (_historyCorrupted) {
+      _allHistoryCache = const [];
+      return const [];
+    }
+    if (_watchHistoryFile.existsSync()) {
+      List<int>? rawBytes;
+      try {
+        rawBytes = _watchHistoryFile.readAsBytesSync();
+        if (rawBytes.isEmpty) {
+          _allHistoryCache = const [];
+          return const [];
+        }
+        final content = utf8.decode(rawBytes, allowMalformed: true);
+        if (content.trim().isEmpty || content.trim() == '[]') {
+          _allHistoryCache = const [];
+          return const [];
+        }
+        final decoded = jsonDecode(content);
+        if (decoded is! List) {
+          throw const FormatException('watch_history is not a JSON array');
+        }
+        final entries = decoded
+            .whereType<Map>()
+            .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
+            .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
+            .toList();
+        _allHistoryCache = entries;
+        return entries;
+      } catch (_) {
+        String? rawString;
+        try {
+          rawBytes ??= _watchHistoryFile.existsSync()
+              ? _watchHistoryFile.readAsBytesSync()
+              : null;
+          if (rawBytes != null && rawBytes.isNotEmpty) {
+            rawString = utf8.decode(rawBytes, allowMalformed: true);
+          }
+        } catch (_) {}
+        _handleHistoryCorruption(rawString, rawBytes: rawBytes);
+        _allHistoryCache = const [];
+        return const [];
+      }
+    }
     final raw = _prefs.getString(keyWatchHistory);
     if (raw == null || raw.trim().isEmpty || raw.trim() == '[]') {
+      _allHistoryCache = const [];
       return const [];
     }
     try {
@@ -1261,13 +1561,16 @@ class StorageService {
       if (decoded is! List) {
         throw const FormatException('watch_history is not a JSON array');
       }
-      return decoded
+      final entries = decoded
           .whereType<Map>()
           .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
           .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
           .toList();
+      _allHistoryCache = entries;
+      return entries;
     } catch (_) {
       _handleHistoryCorruption(raw);
+      _allHistoryCache = const [];
       return const [];
     }
   }
@@ -1285,13 +1588,84 @@ class StorageService {
     return result;
   }
 
-  Future<void> upsertWatchHistory(WatchHistoryEntry entry) {
+  Future<void> _flushHistoryToDisk() async {
+    if (_historyCorrupted) return;
+    final list = _allHistoryCache ?? _readRawWatchHistory();
+    final jsonStr = jsonEncode(list.map((e) => e.toJson()).toList());
+    await _atomicWriteFile(_watchHistoryFile, jsonStr);
+    if (_prefs.containsKey(keyWatchHistory)) {
+      await _prefs.remove(keyWatchHistory);
+    }
+  }
+
+  Future<void> _handleHistoryPersistence({
+    required bool immediate,
+    required bool isPrivate,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (immediate) {
+      _historyFlushTimer?.cancel();
+      _historyFlushTimer = null;
+      await _flushHistoryToDisk();
+      _lastHistoryDiskWriteMs = now;
+      _historyDirty = false;
+      if (!isPrivate) {
+        scheduleAutoWebdavSync(immediate: true);
+      }
+      return;
+    }
+
+    if (now - _lastHistoryDiskWriteMs >= 30000) {
+      _historyFlushTimer?.cancel();
+      _historyFlushTimer = null;
+      await _flushHistoryToDisk();
+      _lastHistoryDiskWriteMs = now;
+      _historyDirty = false;
+      if (!isPrivate) {
+        scheduleAutoWebdavSync();
+      }
+    } else {
+      _historyDirty = true;
+      if (_historyFlushTimer == null || !_historyFlushTimer!.isActive) {
+        final remainingMs = 30000 - (now - _lastHistoryDiskWriteMs);
+        _historyFlushTimer = Timer(Duration(milliseconds: remainingMs), () {
+          _runSequentialMutation(() async {
+            if (_historyDirty) {
+              await _flushHistoryToDisk();
+              _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
+              _historyDirty = false;
+              if (!isPrivate) {
+                scheduleAutoWebdavSync();
+              }
+            }
+          });
+        });
+      }
+    }
+  }
+
+  Future<void> flushPendingHistory() {
+    return _runSequentialMutation(() async {
+      _historyFlushTimer?.cancel();
+      _historyFlushTimer = null;
+      if (_historyDirty) {
+        await _flushHistoryToDisk();
+        _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
+        _historyDirty = false;
+      }
+    });
+  }
+
+  Future<void> upsertWatchHistory(
+    WatchHistoryEntry entry, {
+    bool immediate = false,
+  }) {
     return _runSequentialMutation(() async {
       if (_historyCorrupted) {
         return;
       }
       final privKeys = _privateSiteKeySet();
-      final allRaw = _readRawWatchHistory();
+      final allRaw = _allHistoryCache ?? _readRawWatchHistory();
       final localPrivate =
           allRaw.where((e) => privKeys.contains(e.site)).toList();
       final localPublic =
@@ -1305,11 +1679,9 @@ class StorageService {
         if (combined.length > CmsParser.maxHistoryEntries) {
           combined.removeRange(CmsParser.maxHistoryEntries, combined.length);
         }
-        await _prefs.setString(
-          keyWatchHistory,
-          jsonEncode(combined.map((e) => e.toJson()).toList()),
-        );
+        _allHistoryCache = combined;
         watchHistoryRevision.value++;
+        await _handleHistoryPersistence(immediate: immediate, isPrivate: true);
         return;
       }
 
@@ -1319,13 +1691,10 @@ class StorageService {
       if (combined.length > CmsParser.maxHistoryEntries) {
         combined.removeRange(CmsParser.maxHistoryEntries, combined.length);
       }
+      _allHistoryCache = combined;
       _historyCache = List.unmodifiable(updatedPublic);
-      await _prefs.setString(
-        keyWatchHistory,
-        jsonEncode(combined.map((e) => e.toJson()).toList()),
-      );
       watchHistoryRevision.value++;
-      scheduleAutoWebdavSync();
+      await _handleHistoryPersistence(immediate: immediate, isPrivate: false);
     });
   }
 
@@ -1333,14 +1702,16 @@ class StorageService {
     return _runSequentialMutation(() async {
       if (_historyCorrupted) return;
       final targetKey = '$siteKey\n$videoId';
-      final allRaw = _readRawWatchHistory();
+      final allRaw = _allHistoryCache ?? _readRawWatchHistory();
       final updated =
           allRaw.where((e) => e.key != targetKey).toList(growable: false);
       _historyCache = null;
-      await _prefs.setString(
-        keyWatchHistory,
-        jsonEncode(updated.map((e) => e.toJson()).toList()),
-      );
+      _allHistoryCache = updated;
+      _historyFlushTimer?.cancel();
+      _historyFlushTimer = null;
+      _historyDirty = false;
+      await _flushHistoryToDisk();
+      _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
       watchHistoryRevision.value++;
       await _recordSyncTombstone(
         'hist:$targetKey',
@@ -1354,7 +1725,7 @@ class StorageService {
 
   Future<void> clearWatchHistory() {
     return _runSequentialMutation(() async {
-      final existing = _readRawWatchHistory();
+      final existing = _allHistoryCache ?? _readRawWatchHistory();
       final now = DateTime.now().millisecondsSinceEpoch;
       if (existing.isNotEmpty) {
         final tombs = _readSyncTombstones();
@@ -1363,11 +1734,16 @@ class StorageService {
         }
         await _writeSyncTombstones(tombs);
       }
+      _historyFlushTimer?.cancel();
+      _historyFlushTimer = null;
+      _historyDirty = false;
       _historyCache = const [];
+      _allHistoryCache = const [];
       _historyCorrupted = false;
       historyCorruptionNotifier.value = false;
       await _prefs.setBool(keyHistoryCorrupted, false);
-      await _prefs.setString(keyWatchHistory, '[]');
+      await _flushHistoryToDisk();
+      _lastHistoryDiskWriteMs = now;
       watchHistoryRevision.value++;
       scheduleAutoWebdavSync(immediate: true);
     });
@@ -1568,11 +1944,12 @@ class StorageService {
       parts[0] = 'restored_primary';
       return jsonEncode(parts);
     }
+    final hasSubs = _hasAuthoritativeSubscriptions;
     return CmsParser.encodeBackupPayload(
-      origin: !_prefs.containsKey(keySubscriptions) ? configOrigin : primary?.url ?? '',
-      rawConfig: !_prefs.containsKey(keySubscriptions) ? _publicRawConfig(rawConfig, configOrigin) : primary?.rawContent ?? '',
+      origin: !hasSubs ? configOrigin : primary?.url ?? '',
+      rawConfig: !hasSubs ? _publicRawConfig(rawConfig, configOrigin) : primary?.rawContent ?? '',
       settings: <String, dynamic>{
-        if (_prefs.containsKey(keySubscriptions)) keySubscriptions: public.map((s) => s.toJson()).toList(),
+        if (hasSubs) keySubscriptions: public.map((s) => s.toJson()).toList(),
         for (final key in [_siteOrder, _removedSites]) key: (_prefs.getStringList(key) ?? []).map((id) => identityAliases[id] ?? id).where(publicIds.contains).map(exportedIdentity).toList(),
         _siteAliases: aliases,
         keyPreferredSite: preferredSiteKey,
@@ -1582,7 +1959,7 @@ class StorageService {
         keySkipOutroSec: skipOutroSec,
         keyRepeatMode: repeatMode,
         keySelectedSite: publicSupportedKey(),
-        keyWatchHistory: _prefs.getString(keyWatchHistory) ?? '[]',
+        keyWatchHistory: jsonEncode(getWatchHistory().map((e) => e.toJson()).toList()),
         keyFavorites: _prefs.getString(keyFavorites) ?? '[]',
         keySearchHistory: _prefs.getString(keySearchHistory) ?? '[]',
         keyEpisodesDescending: episodesDescending,
@@ -1727,9 +2104,13 @@ class StorageService {
       if (parsedConfig != null &&
           parsedConfig.supportedSites.isNotEmpty &&
           !parsedConfig.supportedSites.any((s) => s.key == selectedSiteKey)) {
+        final fallbackSite = parsedConfig.supportedSites.firstWhere(
+          (s) => s.supported,
+          orElse: () => parsedConfig.supportedSites.first,
+        );
         await _prefs.setString(
           keySelectedSite,
-          parsedConfig.supportedSites.first.key,
+          fallbackSite.key,
         );
       }
     }
@@ -1744,7 +2125,20 @@ class StorageService {
     }
     if (nextHistory != null) {
       _historyCache = null;
-      await _prefs.setString(keyWatchHistory, nextHistory);
+      try {
+        final decodedHist = jsonDecode(nextHistory);
+        if (decodedHist is List) {
+          final entries = decodedHist
+              .whereType<Map>()
+              .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
+              .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
+              .toList();
+          _allHistoryCache = entries;
+          await _flushHistoryToDisk();
+        }
+      } catch (_) {
+        await _prefs.setString(keyWatchHistory, nextHistory);
+      }
       watchHistoryRevision.value++;
     }
     if (nextFavorites != null) {
@@ -1854,7 +2248,7 @@ class StorageService {
   List<SubscriptionEntry> _collectPublicSyncSubscriptions() {
     final result = <SubscriptionEntry>[];
     final seenSyncKeys = <String>{};
-    if (_prefs.containsKey(keySubscriptions)) {
+    if (_hasAuthoritativeSubscriptions) {
       for (final s in getSubscriptions()) {
         if (s.isEffectivelyPrivate) continue;
         if (_isLocalFileSubscription(s.url, s.rawContent)) continue;
@@ -2268,7 +2662,7 @@ class StorageService {
 
         final currentPublic = _collectPublicSyncSubscriptions();
         final beforeSubsDigest = _subscriptionSnapshotDigest(currentPublic);
-        final hadRegistry = _prefs.containsKey(keySubscriptions);
+        final hadRegistry = _hasAuthoritativeSubscriptions;
 
         final subByKey = <String, SubscriptionEntry>{};
         for (final s in currentPublic) {
@@ -2525,7 +2919,8 @@ class StorageService {
       final nextFavsJson =
           jsonEncode(mergedFavs.map((f) => f.toJson()).toList());
       _historyCache = null;
-      await _prefs.setString(keyWatchHistory, nextHistJson);
+      _allHistoryCache = combinedAllHist;
+      await _flushHistoryToDisk();
       await _prefs.setString(keyFavorites, nextFavsJson);
       await _writeSyncTombstones(mergedTombs);
       if (nextHistJson != beforeHistJson) {
