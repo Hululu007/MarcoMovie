@@ -426,6 +426,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         PlaybackWakelock.setEnabled(playing);
         if (!playing) {
           _saveProgress();
+          widget.storage.scheduleAutoWebdavSync(immediate: true);
         } else if (!_loading && !_buffering) {
           _scheduleHide();
         }
@@ -507,6 +508,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.hidden) {
       _saveProgress();
+      widget.storage.scheduleAutoWebdavSync(immediate: true);
     }
   }
 
@@ -1504,6 +1506,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _historyTimer?.cancel();
     _clockTimer?.cancel();
     _saveProgress();
+    widget.storage.scheduleAutoWebdavSync(immediate: true);
     _embySession?.stop(_position.inMilliseconds);
     _embySession = null;
     _mobileChrome.close().catchError((Object error) {

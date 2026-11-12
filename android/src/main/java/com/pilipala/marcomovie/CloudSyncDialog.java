@@ -24,6 +24,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.lang.ref.WeakReference;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -48,6 +49,26 @@ final class CloudSyncDialog {
     private static final AtomicBoolean IN_FLIGHT = new AtomicBoolean(false);
     private static volatile long lastAutoPushMs = 0L;
     private static Runnable pendingAutoPush;
+    private static WeakReference<MainActivity> pendingActivityRef;
+    private static WeakReference<AppDialog> activeDialogRef;
+
+    static void cancel() {
+        if (pendingAutoPush != null) {
+            MAIN.removeCallbacks(pendingAutoPush);
+            pendingAutoPush = null;
+        }
+        pendingActivityRef = null;
+        if (activeDialogRef != null) {
+            AppDialog d = activeDialogRef.get();
+            if (d != null) {
+                try {
+                    d.dismiss();
+                } catch (Exception ignored) {
+                }
+            }
+            activeDialogRef = null;
+        }
+    }
 
     private CloudSyncDialog() {}
 
@@ -168,16 +189,18 @@ final class CloudSyncDialog {
 
     /** Schedules a background WebDAV sync when automatic cloud sync is enabled. */
     static void scheduleAutoPush(final MainActivity a, boolean immediate) {
-        if (a == null || a.privateMode || a.prefs == null) return;
+        if (a == null || a.isDestroyed() || a.isFinishing() || a.privateMode || a.prefs == null)
+            return;
         if (!isConfigured(a) || !a.prefs.getBoolean(Prefs.WEBDAV_AUTO, true)) return;
         long now = System.currentTimeMillis();
         long delayMs;
         if (immediate) {
             delayMs = 2500L;
         } else {
+            long minInterval = 300000L; // 5 minutes
             long elapsed = now - lastAutoPushMs;
-            if (elapsed < 45000L) {
-                delayMs = 45000L - elapsed;
+            if (elapsed < minInterval) {
+                delayMs = minInterval - elapsed;
             } else {
                 delayMs = 3000L;
             }
@@ -185,27 +208,44 @@ final class CloudSyncDialog {
         if (pendingAutoPush != null) {
             MAIN.removeCallbacks(pendingAutoPush);
         }
+        final WeakReference<MainActivity> weakAct = new WeakReference<>(a);
+        pendingActivityRef = weakAct;
         pendingAutoPush =
                 () -> {
                     pendingAutoPush = null;
-                    runWebdavSync(a, true, null);
+                    pendingActivityRef = null;
+                    MainActivity act = weakAct.get();
+                    if (act != null
+                            && !act.isFinishing()
+                            && !act.isDestroyed()
+                            && !act.privateMode) {
+                        runWebdavSync(act, true, null);
+                    }
                 };
         MAIN.postDelayed(pendingAutoPush, delayMs);
     }
 
     /** Silently pulls and merges cloud state shortly after app launch. */
     static void pullOnStartup(final MainActivity a) {
-        if (a == null || a.privateMode || a.prefs == null) return;
+        if (a == null || a.isDestroyed() || a.isFinishing() || a.privateMode || a.prefs == null)
+            return;
         if (!isConfigured(a) || !a.prefs.getBoolean(Prefs.WEBDAV_AUTO, true)) return;
+        final WeakReference<MainActivity> weakAct = new WeakReference<>(a);
         MAIN.postDelayed(
                 () -> {
-                    if (!a.isFinishing() && !a.isDestroyed() && !a.privateMode) {
+                    MainActivity act = weakAct.get();
+                    if (act != null
+                            && !act.isFinishing()
+                            && !act.isDestroyed()
+                            && !act.privateMode) {
                         runWebdavSync(
-                                a,
+                                act,
                                 true,
                                 () -> {
-                                    if (a.current != null && a.current.home && a.player == null) {
-                                        a.refresh();
+                                    if (act.current != null
+                                            && act.current.home
+                                            && act.player == null) {
+                                        act.refresh();
                                     }
                                 });
                     }
@@ -365,6 +405,7 @@ final class CloudSyncDialog {
         final String finalSelected = targetSelected == null ? "" : targetSelected;
         final boolean finalRemovedActive = removedActive;
         CountDownLatch uiLatch = new CountDownLatch(1);
+        final AtomicReference<Throwable> uiError = new AtomicReference<>();
         a.ui.post(
                 () -> {
                     try {
@@ -397,14 +438,25 @@ final class CloudSyncDialog {
                             a.configOrigin = "";
                             a.prefs.edit().remove(Prefs.ORIGIN).remove(Prefs.SELECTED_SITE).apply();
                         }
-                    } catch (Exception ignored) {
+                    } catch (Throwable t) {
+                        uiError.set(t);
                     } finally {
                         uiLatch.countDown();
                     }
                 });
+        boolean completed = false;
         try {
-            uiLatch.await(10, TimeUnit.SECONDS);
-        } catch (InterruptedException ignored) {
+            completed = uiLatch.await(15, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new java.io.IOException("UI 主线程应用合并配置中断", e);
+        }
+        if (!completed) {
+            throw new java.io.IOException("UI 主线程应用合并配置超时 (15s)");
+        }
+        if (uiError.get() != null) {
+            throw new java.io.IOException(
+                    "UI 主线程应用配置失败: " + uiError.get().getMessage(), uiError.get());
         }
         return true;
     }
@@ -415,21 +467,28 @@ final class CloudSyncDialog {
             return;
         }
         CountDownLatch latch = new CountDownLatch(1);
+        final AtomicReference<Throwable> mainError = new AtomicReference<>();
         a.ui.post(
                 () -> {
                     try {
                         task.run();
+                    } catch (Throwable t) {
+                        mainError.set(t);
                     } finally {
                         latch.countDown();
                     }
                 });
         try {
-            if (!latch.await(10, TimeUnit.SECONDS)) {
-                throw new java.io.IOException("主线程同步超时");
+            if (!latch.await(15, TimeUnit.SECONDS)) {
+                throw new java.io.IOException("主线程同步超时 (15s)");
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new java.io.IOException("主线程同步中断", e);
+        }
+        if (mainError.get() != null) {
+            throw new java.io.IOException(
+                    "主线程执行失败: " + mainError.get().getMessage(), mainError.get());
         }
     }
 
@@ -452,15 +511,19 @@ final class CloudSyncDialog {
         CloudSync.MergeResult res =
                 CloudSync.merge(snap[0], snap[1], snap[2], localSubs, syncSubs, remoteJson, now);
 
+        final boolean isHistCorrupt =
+                WatchHistory.isCorrupted() || a.prefs.getBoolean("watch_history_corrupted", false);
         runOnMainSync(
                 a,
-                () ->
-                        a.prefs
-                                .edit()
-                                .putString(Prefs.WATCH_HISTORY, res.historyJson)
-                                .putString(Prefs.FAVORITES, res.favoritesJson)
-                                .putString(Prefs.SYNC_TOMBSTONES, res.tombstonesJson)
-                                .commit());
+                () -> {
+                    SharedPreferences.Editor ed = a.prefs.edit();
+                    if (!isHistCorrupt) {
+                        ed.putString(Prefs.WATCH_HISTORY, res.historyJson);
+                    }
+                    ed.putString(Prefs.FAVORITES, res.favoritesJson)
+                            .putString(Prefs.SYNC_TOMBSTONES, res.tombstonesJson)
+                            .commit();
+                });
 
         if (syncSubs && res.subscriptions != null) {
             applyMergedSubscriptions(a, res.subscriptions, res.tombstonesJson);
@@ -523,8 +586,10 @@ final class CloudSyncDialog {
 
     static void runWebdavSync(
             final MainActivity a, final boolean silent, final Runnable onComplete) {
-        if (a == null || a.privateMode || a.prefs == null) {
-            if (!silent && a != null && a.privateMode) a.toast("隐私空间数据不参与网络同步");
+        if (a == null || a.isDestroyed() || a.isFinishing() || a.privateMode || a.prefs == null) {
+            if (!silent && a != null && !a.isDestroyed() && !a.isFinishing() && a.privateMode) {
+                a.toast("隐私空间数据不参与网络同步");
+            }
             return;
         }
         final String url = a.prefs.getString(Prefs.WEBDAV_URL, "").trim();
@@ -541,8 +606,14 @@ final class CloudSyncDialog {
         }
         if (!silent) a.toast("正在与 WebDAV 云端双向同步…");
 
+        final WeakReference<MainActivity> weakAct = new WeakReference<>(a);
         SYNC_EXEC.execute(
                 () -> {
+                    MainActivity act = weakAct.get();
+                    if (act == null || act.isDestroyed() || act.isFinishing()) {
+                        IN_FLIGHT.set(false);
+                        return;
+                    }
                     try {
                         final long now = System.currentTimeMillis();
                         final AtomicReference<CloudSync.MergeResult> resultRef =
@@ -552,44 +623,66 @@ final class CloudSyncDialog {
                                 user,
                                 pass,
                                 remoteJson -> {
+                                    MainActivity cur = weakAct.get();
+                                    if (cur == null || cur.isDestroyed() || cur.isFinishing()) {
+                                        throw new java.io.IOException("页面已销毁，终止同步");
+                                    }
                                     CloudSync.MergeResult res =
-                                            mergeAndPersistLocal(a, remoteJson, now);
+                                            mergeAndPersistLocal(cur, remoteJson, now);
                                     resultRef.set(res);
                                     return res;
                                 });
                         lastAutoPushMs = System.currentTimeMillis();
                         final CloudSync.MergeResult r = resultRef.get();
                         final String okSummary = formatCounts("同步成功", r, syncSubs);
-                        a.ui.post(
-                                () -> {
-                                    a.prefs
-                                            .edit()
-                                            .putLong(Prefs.SYNC_LAST_TIME, lastAutoPushMs)
-                                            .putString(Prefs.SYNC_LAST_STATUS, okSummary)
-                                            .apply();
-                                    if (!silent && !a.isFinishing()) {
-                                        a.toast("云同步完成（" + okSummary + "）");
-                                    }
-                                    if (onComplete != null && (r.changed || !silent)) {
-                                        onComplete.run();
-                                    }
-                                });
+                        MainActivity currentAct = weakAct.get();
+                        if (currentAct != null
+                                && !currentAct.isDestroyed()
+                                && !currentAct.isFinishing()) {
+                            currentAct.ui.post(
+                                    () -> {
+                                        if (currentAct.isDestroyed() || currentAct.isFinishing()) {
+                                            return;
+                                        }
+                                        currentAct
+                                                .prefs
+                                                .edit()
+                                                .putLong(Prefs.SYNC_LAST_TIME, lastAutoPushMs)
+                                                .putString(Prefs.SYNC_LAST_STATUS, okSummary)
+                                                .apply();
+                                        if (!silent && !currentAct.isFinishing()) {
+                                            currentAct.toast("云同步完成（" + okSummary + "）");
+                                        }
+                                        if (onComplete != null && (r.changed || !silent)) {
+                                            onComplete.run();
+                                        }
+                                    });
+                        }
                     } catch (Exception e) {
                         AppLog.w("CloudSync", "WebDAV sync failed", e);
                         final String errMsg =
                                 e.getMessage() == null
                                         ? e.getClass().getSimpleName()
                                         : e.getMessage();
-                        a.ui.post(
-                                () -> {
-                                    a.prefs
-                                            .edit()
-                                            .putString(Prefs.SYNC_LAST_STATUS, "失败: " + errMsg)
-                                            .apply();
-                                    if (!silent && !a.isFinishing()) {
-                                        a.notice("云同步未完成：" + errMsg);
-                                    }
-                                });
+                        MainActivity currentAct = weakAct.get();
+                        if (currentAct != null
+                                && !currentAct.isDestroyed()
+                                && !currentAct.isFinishing()) {
+                            currentAct.ui.post(
+                                    () -> {
+                                        if (currentAct.isDestroyed() || currentAct.isFinishing()) {
+                                            return;
+                                        }
+                                        currentAct
+                                                .prefs
+                                                .edit()
+                                                .putString(Prefs.SYNC_LAST_STATUS, "失败: " + errMsg)
+                                                .apply();
+                                        if (!silent && !currentAct.isFinishing()) {
+                                            currentAct.notice("云同步未完成：" + errMsg);
+                                        }
+                                    });
+                        }
                     } finally {
                         IN_FLIGHT.set(false);
                     }
@@ -862,6 +955,7 @@ final class CloudSyncDialog {
                         .setNegativeButton("关闭", null)
                         .create();
         holder[0] = dialog;
+        activeDialogRef = new WeakReference<>(dialog);
         dialog.show();
         if (a.isTvDevice()) {
             a.ui.post(syncNowBtn::requestFocus);
@@ -911,27 +1005,30 @@ final class CloudSyncDialog {
             panel.addView(pasteBtn, new LinearLayout.LayoutParams(-1, -2));
         }
 
-        new AppDialog.Builder(a)
-                .setTitle("连接局域网其他设备")
-                .setView(panel)
-                .setNegativeButton("取消", null)
-                .setPositiveButton(
-                        "立即双向同步",
-                        (d, w) -> {
-                            String raw = peerInput.getText().toString().trim();
-                            if (raw.isEmpty()) {
-                                a.toast("请输入对方设备的局域网同步地址");
-                                return;
-                            }
-                            runLanPeerSync(
-                                    a,
-                                    raw,
-                                    () -> {
-                                        if (onUpdated != null) onUpdated.run();
-                                        else a.refresh();
-                                    });
-                        })
-                .show();
+        AppDialog lanDialog =
+                new AppDialog.Builder(a)
+                        .setTitle("连接局域网其他设备")
+                        .setView(panel)
+                        .setNegativeButton("取消", null)
+                        .setPositiveButton(
+                                "立即双向同步",
+                                (d, w) -> {
+                                    String raw = peerInput.getText().toString().trim();
+                                    if (raw.isEmpty()) {
+                                        a.toast("请输入对方设备的局域网同步地址");
+                                        return;
+                                    }
+                                    runLanPeerSync(
+                                            a,
+                                            raw,
+                                            () -> {
+                                                if (onUpdated != null) onUpdated.run();
+                                                else a.refresh();
+                                            });
+                                })
+                        .create();
+        activeDialogRef = new WeakReference<>(lanDialog);
+        lanDialog.show();
     }
 
     private static void saveToggleOnly(MainActivity a, CheckBox autoCheck, CheckBox subsCheck) {

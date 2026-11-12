@@ -20,6 +20,27 @@ public final class LiteStore {
     public static final int MAX_HISTORY = 40;
     public static final int MAX_FAVORITES = 100;
     public static final int MAX_SEARCH_HISTORY = 16;
+    public static volatile boolean historyCorrupted = false;
+
+    public static boolean isHistoryCorrupted() {
+        return historyCorrupted;
+    }
+
+    public static void setHistoryCorrupted(boolean corrupted) {
+        historyCorrupted = corrupted;
+    }
+
+    public static boolean isMalformedHistory(String raw) {
+        if (raw == null) return false;
+        String t = raw.trim();
+        if (t.length() == 0 || "[]".equals(t)) return false;
+        try {
+            new JSONArray(t);
+            return false;
+        } catch (Exception e) {
+            return true;
+        }
+    }
 
     public static final class HistoryEntry {
         public String siteKey = "";
@@ -118,26 +139,53 @@ public final class LiteStore {
     }
 
     public static List<HistoryEntry> getHistory(Context context) {
-        return parseHistoryJson(prefs(context).getString(KEY_HISTORY, "[]"));
+        return parseHistoryJson(context, prefs(context).getString(KEY_HISTORY, "[]"));
     }
 
     public static List<HistoryEntry> parseHistoryJson(String raw) {
+        return parseHistoryJson(null, raw);
+    }
+
+    public static List<HistoryEntry> parseHistoryJson(Context context, String raw) {
         List<HistoryEntry> out = new ArrayList<HistoryEntry>();
-        if (raw == null || raw.length() == 0) return out;
+        if (raw == null) return out;
+        String t = raw.trim();
+        if (t.length() == 0 || "[]".equals(t)) return out;
         try {
-            JSONArray arr = new JSONArray(raw);
+            JSONArray arr = new JSONArray(t);
             for (int i = 0; i < arr.length() && out.size() < MAX_HISTORY; i++) {
                 HistoryEntry e = HistoryEntry.fromJson(arr.optJSONObject(i));
                 if (e != null && e.vodId.length() > 0 && e.vodName.length() > 0) {
                     out.add(e);
                 }
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            historyCorrupted = true;
+            if (context != null) {
+                long ts = System.currentTimeMillis();
+                prefs(context)
+                        .edit()
+                        .putString("watch_history_corrupt_" + ts, raw)
+                        .putBoolean("watch_history_corrupted", true)
+                        .commit();
+            }
+            try {
+                android.util.Log.w("LiteStore", "History JSON corrupted, parse failed: " + e.getMessage());
+            } catch (Throwable ignored) {
+            }
         }
         return out;
     }
 
     public static String recordHistoryJson(String existingRaw, HistoryEntry entry) {
+        if (historyCorrupted || isMalformedHistory(existingRaw)) {
+            historyCorrupted = true;
+            try {
+                android.util.Log.w("LiteStore", "Skipping history record because history is corrupted");
+            } catch (Throwable ignored) {
+            }
+            return existingRaw == null ? "[]" : existingRaw;
+        }
         if (entry == null || entry.vodId == null || entry.vodId.length() == 0) {
             return existingRaw == null ? "[]" : existingRaw;
         }
@@ -158,6 +206,11 @@ public final class LiteStore {
 
     public static void saveHistory(Context context, HistoryEntry entry) {
         if (context == null || entry == null) return;
+        if (historyCorrupted
+                || (context != null
+                        && prefs(context).getBoolean("watch_history_corrupted", false))) {
+            return;
+        }
         SharedPreferences sp = prefs(context);
         String updated = recordHistoryJson(sp.getString(KEY_HISTORY, "[]"), entry);
         sp.edit().putString(KEY_HISTORY, updated).commit();

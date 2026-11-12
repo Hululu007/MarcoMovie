@@ -1762,7 +1762,7 @@ final class PlaybackController {
                                     a.playingBookmark))
                     .commit();
             a.lastBookmarkSave = now;
-            CloudSyncDialog.scheduleAutoPush(a, false);
+            CloudSyncDialog.scheduleAutoPush(a, force);
         } catch (Exception error) {
             AppLog.w("PlaybackController", "savePlaybackHistory failed", error);
         }

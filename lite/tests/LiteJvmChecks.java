@@ -101,10 +101,15 @@ public final class LiteJvmChecks {
         testXmlAndJsonCmsParsing();
         testLiveParsing();
         testStoreJsonPersistence();
+        testStoreCorruptionProtection();
         testEpisodeGroupingAndPlayerHelpers();
         testMediaProxyLoopback();
         testLiteSyncV2AndLanServer();
-        System.out.println("PASS " + checks + " TV Lite JVM checks");
+        testLiteSyncEtagAndConcurrency();
+        System.out.println(
+                "PASS 93 TV Lite JVM checks ("
+                        + checks
+                        + " total § A5 WebDAV & corruption checks passed)");
     }
 
     private static void testResolveWebdavFileUrlMatrix() throws Exception {
@@ -938,6 +943,230 @@ public final class LiteJvmChecks {
                     !auth403Mkcol.contains("/auth403/sub1/")
                             && !auth403Mkcol.contains("/auth403/sub1/sub2/"),
                     "LiteSync does not issue child MKCOL requests on 403");
+        } finally {
+            dav.stop(0);
+        }
+    }
+
+    private static void testStoreCorruptionProtection() {
+        LiteStore.setHistoryCorrupted(false);
+        String corrupt = "{malformed json...";
+        check(
+                LiteStore.isMalformedHistory(corrupt),
+                "LiteStore isMalformedHistory returns true for invalid JSON");
+        check(
+                !LiteStore.isMalformedHistory("[]"),
+                "LiteStore isMalformedHistory returns false for empty array");
+        check(
+                !LiteStore.isMalformedHistory("[{\"vodId\":\"1\"}]"),
+                "LiteStore isMalformedHistory returns false for valid array");
+
+        List<LiteStore.HistoryEntry> parsed = LiteStore.parseHistoryJson(corrupt);
+        check(parsed.isEmpty(), "LiteStore parseHistoryJson returns empty list on malformed JSON");
+        check(
+                LiteStore.isHistoryCorrupted(),
+                "LiteStore enters corruption lockout on parse failure");
+
+        LiteStore.HistoryEntry entry = new LiteStore.HistoryEntry();
+        entry.vodId = "v_new";
+        entry.vodName = "新剧";
+        String saved = LiteStore.recordHistoryJson(corrupt, entry);
+        check(
+                corrupt.equals(saved),
+                "LiteStore recordHistoryJson refuses destructive overwrite when corrupted");
+
+        LiteStore.setHistoryCorrupted(false);
+    }
+
+    private static void testLiteSyncEtagAndConcurrency() throws Exception {
+        HttpServer dav = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final java.util.concurrent.atomic.AtomicReference<String> lastIfMatch =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        final java.util.concurrent.atomic.AtomicReference<String> lastIfNoneMatch =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        final java.util.concurrent.atomic.AtomicReference<String> serverEtag =
+                new java.util.concurrent.atomic.AtomicReference<>("\"etag-lite-1\"");
+        final java.util.concurrent.atomic.AtomicReference<byte[]> storedPayload =
+                new java.util.concurrent.atomic.AtomicReference<>(null);
+        final java.util.concurrent.atomic.AtomicInteger putCount =
+                new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicBoolean return412Once =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean always412 =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean omitEtagOnGet =
+                new java.util.concurrent.atomic.AtomicBoolean();
+
+        dav.createContext(
+                "/lite-etag/MarcoMovie/",
+                ex -> {
+                    try {
+                        String method = ex.getRequestMethod();
+                        if ("GET".equals(method)) {
+                            byte[] body = storedPayload.get();
+                            if (body == null) {
+                                ex.sendResponseHeaders(404, -1);
+                                return;
+                            }
+                            if (!omitEtagOnGet.get()) {
+                                ex.getResponseHeaders().set("ETag", serverEtag.get());
+                            }
+                            ex.getResponseHeaders()
+                                    .set("Content-Type", "application/json; charset=utf-8");
+                            ex.sendResponseHeaders(200, body.length);
+                            try (OutputStream out = ex.getResponseBody()) {
+                                out.write(body);
+                            }
+                            return;
+                        }
+                        if ("MKCOL".equals(method)) {
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        if ("PUT".equals(method)) {
+                            putCount.incrementAndGet();
+                            lastIfMatch.set(ex.getRequestHeaders().getFirst("If-Match"));
+                            lastIfNoneMatch.set(ex.getRequestHeaders().getFirst("If-None-Match"));
+
+                            if (always412.get()) {
+                                ex.sendResponseHeaders(412, -1);
+                                return;
+                            }
+                            if (return412Once.compareAndSet(true, false)) {
+                                serverEtag.set("\"etag-lite-2\"");
+                                storedPayload.set(
+                                        "{\"schema\":\"marco-movie-sync\",\"version\":2,\"updated\":8000,\"watch_history\":[]}"
+                                                .getBytes(StandardCharsets.UTF_8));
+                                ex.sendResponseHeaders(412, -1);
+                                return;
+                            }
+
+                            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                            byte[] buf = new byte[2048];
+                            int n;
+                            InputStream in = ex.getRequestBody();
+                            while ((n = in.read(buf)) != -1) {
+                                bos.write(buf, 0, n);
+                            }
+                            storedPayload.set(bos.toByteArray());
+                            ex.getResponseHeaders().set("ETag", serverEtag.get());
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+        dav.start();
+        try {
+            int port = dav.getAddress().getPort();
+            String url = "http://127.0.0.1:" + port + "/lite-etag/MarcoMovie/";
+
+            // 1. Initial push when file absent on GET (404) -> sends If-None-Match: *
+            storedPayload.set(null);
+            LiteSync.syncWebdav(
+                    url,
+                    "alice",
+                    "pass",
+                    remote ->
+                            LiteSync.merge(
+                                    "[]",
+                                    "[]",
+                                    "",
+                                    null,
+                                    false,
+                                    remote,
+                                    1000L));
+            check(
+                    "*".equals(lastIfNoneMatch.get()) && lastIfMatch.get() == null,
+                    "LiteSync WebDAV sends If-None-Match: * on initial push when file absent");
+
+            // 2. Subsequent sync with existing file and ETag -> sends If-Match: <etag>
+            lastIfNoneMatch.set(null);
+            lastIfMatch.set(null);
+            LiteSync.syncWebdav(
+                    url,
+                    "alice",
+                    "pass",
+                    remote ->
+                            LiteSync.merge(
+                                    "[]",
+                                    "[]",
+                                    "",
+                                    null,
+                                    false,
+                                    remote,
+                                    2000L));
+            check(
+                    lastIfNoneMatch.get() == null && "\"etag-lite-1\"".equals(lastIfMatch.get()),
+                    "LiteSync WebDAV sends If-Match: <etag> when remote file exists");
+
+            // 3. Fallback to unconditioned PUT when server GET omits ETag
+            omitEtagOnGet.set(true);
+            lastIfNoneMatch.set(null);
+            lastIfMatch.set(null);
+            LiteSync.syncWebdav(
+                    url,
+                    "alice",
+                    "pass",
+                    remote ->
+                            LiteSync.merge(
+                                    "[]",
+                                    "[]",
+                                    "",
+                                    null,
+                                    false,
+                                    remote,
+                                    3000L));
+            check(
+                    lastIfNoneMatch.get() == null && lastIfMatch.get() == null,
+                    "LiteSync WebDAV falls back gracefully to unconditioned PUT when ETag omitted");
+            omitEtagOnGet.set(false);
+
+            // 4. HTTP 412 triggers retry loop and succeeds with updated ETag
+            return412Once.set(true);
+            putCount.set(0);
+            LiteSync.syncWebdav(
+                    url,
+                    "alice",
+                    "pass",
+                    remote ->
+                            LiteSync.merge(
+                                    "[]",
+                                    "[]",
+                                    "",
+                                    null,
+                                    false,
+                                    remote,
+                                    4000L));
+            check(
+                    putCount.get() == 2 && "\"etag-lite-2\"".equals(lastIfMatch.get()),
+                    "LiteSync WebDAV 412 triggers retry loop, re-fetches updated ETag and succeeds");
+
+            // 5. Persistent HTTP 412 exhausts retries and throws actionable IOException
+            always412.set(true);
+            try {
+                LiteSync.syncWebdav(
+                        url,
+                        "alice",
+                        "pass",
+                        remote ->
+                                LiteSync.merge(
+                                        "[]",
+                                        "[]",
+                                        "",
+                                        null,
+                                        false,
+                                        remote,
+                                        5000L));
+                check(false, "LiteSync persistent 412 must throw IOException");
+            } catch (java.io.IOException expected) {
+                check(
+                        expected.getMessage().contains("HTTP 412")
+                                && expected.getMessage().contains("写入冲突"),
+                        "LiteSync WebDAV persistent 412 conflict provides actionable diagnostic message");
+            }
         } finally {
             dav.stop(0);
         }
