@@ -19,6 +19,7 @@ import '../core/wogg_source.dart';
 import 'player_interaction_layers.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
+import 'desktop_horizontal_scroller.dart';
 import 'desktop_player_window.dart';
 import 'mobile_player_chrome.dart';
 import 'netdisk_sheet.dart';
@@ -121,6 +122,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _controlsVisible = true;
   bool _speedBoosting = false;
   String _hudText = '';
+  late final FocusNode _playerFocusNode = FocusNode();
+  double _previousVolume = 100.0;
+  final ScrollController _portraitToolsScrollController = ScrollController();
   String _playbackError = '';
   Object? _playbackErrorCause;
   bool _allowEvents = false;
@@ -1126,6 +1130,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _toggleControls() {
+    if (!_playerFocusNode.hasFocus) {
+      _playerFocusNode.requestFocus();
+    }
     setState(() => _controlsVisible = !_controlsVisible);
     if (_controlsVisible) _scheduleHide();
   }
@@ -1486,6 +1493,8 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    _playerFocusNode.dispose();
+    _portraitToolsScrollController.dispose();
     _startup.cancel();
     _midPlaybackStallTimer?.cancel();
     PlaybackWakelock.setEnabled(false);
@@ -1538,10 +1547,21 @@ class _PlayerScreenState extends State<PlayerScreen>
       child: Scaffold(
       backgroundColor: Colors.black,
       body: Focus(
+        focusNode: _playerFocusNode,
         autofocus: true,
         onKeyEvent: (node, event) {
           if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
             return KeyEventResult.ignored;
+          }
+          final isCtrlOrCmd = HardwareKeyboard.instance.isControlPressed ||
+              HardwareKeyboard.instance.isMetaPressed;
+          if (isCtrlOrCmd && event.logicalKey == LogicalKeyboardKey.keyW) {
+            unawaited(
+              _saveProgress().whenComplete(() {
+                if (context.mounted) Navigator.of(context).maybePop();
+              }),
+            );
+            return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
             _seekRelative(15);
@@ -1563,7 +1583,45 @@ class _PlayerScreenState extends State<PlayerScreen>
             _showHud('音量 ${volume.round()}%');
             return KeyEventResult.handled;
           }
+          if (event.logicalKey == LogicalKeyboardKey.bracketLeft ||
+              event.logicalKey == LogicalKeyboardKey.bracketRight) {
+            final delta = event.logicalKey == LogicalKeyboardKey.bracketRight
+                ? 0.25
+                : -0.25;
+            final newSpeed = double.parse(
+              ((_normalSpeed + delta).clamp(0.5, 3.0)).toStringAsFixed(2),
+            );
+            setState(() => _normalSpeed = newSpeed);
+            _player.setRate(newSpeed);
+            widget.storage.setPlaySpeed(newSpeed);
+            final speedLabel =
+                newSpeed.toString().replaceAll(RegExp(r'\.0$'), '');
+            _showHud('倍速 ${speedLabel}x');
+            return KeyEventResult.handled;
+          }
           if (event is! KeyDownEvent) return KeyEventResult.ignored;
+          if (event.logicalKey == LogicalKeyboardKey.keyM) {
+            if (_player.state.volume > 0) {
+              _previousVolume = _player.state.volume;
+              _player.setVolume(0);
+              _showHud('静音');
+            } else {
+              final restore = _previousVolume > 0 ? _previousVolume : 100.0;
+              _player.setVolume(restore);
+              _showHud('音量 ${restore.round()}%');
+            }
+            return KeyEventResult.handled;
+          }
+          if (event.logicalKey == LogicalKeyboardKey.keyN ||
+              event.logicalKey == LogicalKeyboardKey.pageDown) {
+            _stepEpisode(1);
+            return KeyEventResult.handled;
+          }
+          if (event.logicalKey == LogicalKeyboardKey.keyP ||
+              event.logicalKey == LogicalKeyboardKey.pageUp) {
+            _stepEpisode(-1);
+            return KeyEventResult.handled;
+          }
           if (event.logicalKey == LogicalKeyboardKey.space ||
               event.logicalKey == LogicalKeyboardKey.enter ||
               event.logicalKey == LogicalKeyboardKey.select) {
@@ -2587,21 +2645,26 @@ class _PlayerScreenState extends State<PlayerScreen>
         blur: 18,
         child: AppleEdgeFade(
           fadeWidth: 14 * scale,
-          child: SingleChildScrollView(
-            physics: const BouncingScrollPhysics(),
-            scrollDirection: Axis.horizontal,
-            padding: EdgeInsets.symmetric(
-              horizontal: 10 * scale,
-              vertical: 7 * scale,
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (int i = 0; i < actions.length; i++) ...[
-                  if (i > 0) SizedBox(width: 7 * scale),
-                  _buildToolTile(actions[i], scale),
+          child: DesktopHorizontalScroller(
+            controller: _portraitToolsScrollController,
+            showArrows: false,
+            child: SingleChildScrollView(
+              controller: _portraitToolsScrollController,
+              physics: const BouncingScrollPhysics(),
+              scrollDirection: Axis.horizontal,
+              padding: EdgeInsets.symmetric(
+                horizontal: 10 * scale,
+                vertical: 7 * scale,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (int i = 0; i < actions.length; i++) ...[
+                    if (i > 0) SizedBox(width: 7 * scale),
+                    _buildToolTile(actions[i], scale),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),
@@ -3441,6 +3504,15 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
   late int _previewLineIndex;
   late int _groupIndex;
   bool _descending = false;
+  final ScrollController _linesScrollController = ScrollController();
+  final ScrollController _groupScrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _linesScrollController.dispose();
+    _groupScrollController.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -3485,10 +3557,14 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
           Row(
             children: [
               Expanded(
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  physics: const BouncingScrollPhysics(),
-                  child: Row(
+                child: DesktopHorizontalScroller(
+                  controller: _linesScrollController,
+                  showArrows: false,
+                  child: SingleChildScrollView(
+                    controller: _linesScrollController,
+                    scrollDirection: Axis.horizontal,
+                    physics: const BouncingScrollPhysics(),
+                    child: Row(
                     children: List.generate(widget.lines.length, (i) {
                       final line = widget.lines[i];
                       final selected = i == _previewLineIndex;
@@ -3575,7 +3651,8 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
+            ),
+            const SizedBox(width: 8),
               GestureDetector(
                 onTap: () => setState(() => _descending = !_descending),
                 child: Container(
@@ -3619,10 +3696,14 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
           // 分段区间快速切换（超过 40 集自动显示分段胶囊）
           if (groupCount > 1) ...[
             const SizedBox(height: 10),
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              physics: const BouncingScrollPhysics(),
-              child: Row(
+            DesktopHorizontalScroller(
+              controller: _groupScrollController,
+              showArrows: false,
+              child: SingleChildScrollView(
+                controller: _groupScrollController,
+                scrollDirection: Axis.horizontal,
+                physics: const BouncingScrollPhysics(),
+                child: Row(
                 children: List.generate(groupCount, (g) {
                   final gStart = g * _groupSize + 1;
                   final gEnd = math.min((g + 1) * _groupSize, total);
@@ -3667,7 +3748,8 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                 }),
               ),
             ),
-          ],
+          ),
+        ],
           const SizedBox(height: 10),
           // 剧集网格卡片
           Flexible(

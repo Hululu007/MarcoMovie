@@ -13,6 +13,7 @@ import '../core/models.dart';
 import '../core/storage_service.dart';
 import '../core/wogg_source.dart';
 import 'apple_theme.dart';
+import 'desktop_horizontal_scroller.dart';
 import 'netdisk_sheet.dart';
 import 'player_screen.dart';
 import 'poster_image.dart';
@@ -113,6 +114,10 @@ class _DetailScreenState extends State<DetailScreen> {
   late bool _descending;
   late bool _isFavorite;
   final ValueNotifier<double> _scrollOffset = ValueNotifier<double>(0.0);
+  final ScrollController _seasonsScrollController = ScrollController();
+  final ScrollController _quickEpisodesScrollController = ScrollController();
+  final ScrollController _previewCardsScrollController = ScrollController();
+  final ScrollController _pageRangeScrollController = ScrollController();
   Color? _posterAmbientColor;
   String _externalSynopsis = '';
   double? _resolvedDoubanScore;
@@ -208,6 +213,10 @@ class _DetailScreenState extends State<DetailScreen> {
     PosterLoader.metadataRevision.removeListener(_onExternalMetadataRevision);
     widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryChanged);
     _scrollOffset.dispose();
+    _seasonsScrollController.dispose();
+    _quickEpisodesScrollController.dispose();
+    _previewCardsScrollController.dispose();
+    _pageRangeScrollController.dispose();
     super.dispose();
   }
 
@@ -2551,12 +2560,15 @@ class _DetailScreenState extends State<DetailScreen> {
           const SizedBox(height: 11),
           SizedBox(
             height: 32,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              physics: const BouncingScrollPhysics(),
-              itemCount: totalSeasons,
-              separatorBuilder: (_, __) => const SizedBox(width: 8),
-              itemBuilder: (ctx, sIdx) {
+            child: DesktopHorizontalScroller(
+              controller: _seasonsScrollController,
+              child: ListView.separated(
+                controller: _seasonsScrollController,
+                scrollDirection: Axis.horizontal,
+                physics: const BouncingScrollPhysics(),
+                itemCount: totalSeasons,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (ctx, sIdx) {
                 if (hasInLineSeasons) {
                   final s = inLineSeasons[sIdx];
                   final isSelected = s.seasonNumber == activeInLineSeasonNum;
@@ -2642,17 +2654,21 @@ class _DetailScreenState extends State<DetailScreen> {
               },
             ),
           ),
-        ],
+        ),
+      ],
         const SizedBox(height: 12),
 
         // 2. Quick Episode Number Strip (12 13 14 [15] 16 17 ...)
         SizedBox(
           height: 30,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            itemCount: end - start,
-            separatorBuilder: (_, __) => const SizedBox(width: 7),
-            itemBuilder: (ctx, idx) {
+          child: DesktopHorizontalScroller(
+            controller: _quickEpisodesScrollController,
+            child: ListView.separated(
+              controller: _quickEpisodesScrollController,
+              scrollDirection: Axis.horizontal,
+              itemCount: end - start,
+              separatorBuilder: (_, __) => const SizedBox(width: 7),
+              itemBuilder: (ctx, idx) {
               final visualIdx = start + idx;
               final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
               final originalIdx = activeIndices[posIdx];
@@ -2692,18 +2708,22 @@ class _DetailScreenState extends State<DetailScreen> {
             },
           ),
         ),
-        const SizedBox(height: 14),
+      ),
+      const SizedBox(height: 14),
 
         // 3. Horizontal 16:9 Landscape Episode Preview Cards with Authentic Scene Stills
         //    and Authentic Per-Episode Plot Synopsis
         SizedBox(
           height: anyHasSummary ? 222 : 186,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
-            itemCount: end - start,
-            separatorBuilder: (_, __) => const SizedBox(width: 14),
-            itemBuilder: (ctx, idx) {
+          child: DesktopHorizontalScroller(
+            controller: _previewCardsScrollController,
+            child: ListView.separated(
+              controller: _previewCardsScrollController,
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              itemCount: end - start,
+              separatorBuilder: (_, __) => const SizedBox(width: 14),
+              itemBuilder: (ctx, idx) {
               final visualIdx = start + idx;
               final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
               final originalIdx = activeIndices[posIdx];
@@ -2922,17 +2942,21 @@ class _DetailScreenState extends State<DetailScreen> {
             },
           ),
         ),
+      ),
 
         // 4. Range Capsules (1 · 50, 51 · 100 ...)
         if (pageCount > 1) ...[
           const SizedBox(height: 12),
           SizedBox(
             height: 34,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: pageCount,
-              separatorBuilder: (_, __) => const SizedBox(width: 8),
-              itemBuilder: (ctx, p) {
+            child: DesktopHorizontalScroller(
+              controller: _pageRangeScrollController,
+              child: ListView.separated(
+                controller: _pageRangeScrollController,
+                scrollDirection: Axis.horizontal,
+                itemCount: pageCount,
+                separatorBuilder: (_, __) => const SizedBox(width: 8),
+                itemBuilder: (ctx, p) {
                 final pStart = p * CmsParser.episodePageSize + 1;
                 final pEnd =
                     ((p + 1) * CmsParser.episodePageSize).clamp(1, total);
@@ -2964,7 +2988,8 @@ class _DetailScreenState extends State<DetailScreen> {
               },
             ),
           ),
-        ],
+        ),
+      ],
       ],
     );
   }

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' show PointerDeviceKind;
 import 'package:window_manager/window_manager.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
@@ -15,6 +16,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     await windowManager.ensureInitialized();
+    await windowManager.setMinimumSize(const Size(720, 520));
     if (Platform.isWindows) {
       await windowManager.setTitleBarStyle(
         TitleBarStyle.hidden,
@@ -49,6 +51,19 @@ Future<void> main() async {
   }
   runApp(MarcoMovieApp(storage: storage, client: client));
 }
+class AppScrollBehavior extends MaterialScrollBehavior {
+  const AppScrollBehavior();
+
+  @override
+  Set<PointerDeviceKind> get dragDevices => const {
+        PointerDeviceKind.touch,
+        PointerDeviceKind.mouse,
+        PointerDeviceKind.trackpad,
+        PointerDeviceKind.stylus,
+        PointerDeviceKind.invertedStylus,
+      };
+}
+
 class MarcoMovieApp extends StatelessWidget {
   final StorageService storage;
   final CmsClient client;
@@ -69,6 +84,7 @@ class MarcoMovieApp extends StatelessWidget {
     final isWin = defaultTargetPlatform == TargetPlatform.windows;
     final primaryFont = isWin ? 'Microsoft YaHei UI' : null;
     return MaterialApp(
+      scrollBehavior: const AppScrollBehavior(),
       title: 'Marco Movie',
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.dark,

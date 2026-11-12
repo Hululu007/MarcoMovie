@@ -1,5 +1,6 @@
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:window_manager/window_manager.dart';
+import 'desktop_horizontal_scroller.dart';
 import 'source_choice_sliver.dart';
 import 'dart:async';
 import 'dart:io';
@@ -111,6 +112,16 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   int _liveEpoch = 0;
   // Favorites / History segmented index
   int _librarySegment = 0;
+  // Desktop horizontal scroll controllers
+  final ScrollController _continueWatchingScrollController = ScrollController();
+  final ScrollController _categoryPillsScrollController = ScrollController();
+  final ScrollController _filterCategoryScrollController = ScrollController();
+  final ScrollController _filterAreaScrollController = ScrollController();
+  final ScrollController _filterYearScrollController = ScrollController();
+  final ScrollController _searchHistoryScrollController = ScrollController();
+  final ScrollController _liveSourcesScrollController = ScrollController();
+  final ScrollController _liveGroupsScrollController = ScrollController();
+  final ScrollController _sourcePickerGroupsScrollController = ScrollController();
   // Expandable drawer keys in Settings tab
   final Set<String> _expandedSettings = <String>{};
   bool get _isMacOS => !kIsWeb && Platform.isMacOS;
@@ -253,6 +264,15 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     unawaited(CmsClient.closeScriptSessions());
     _searchController.dispose();
     _liveSearchController.dispose();
+    _continueWatchingScrollController.dispose();
+    _categoryPillsScrollController.dispose();
+    _filterCategoryScrollController.dispose();
+    _filterAreaScrollController.dispose();
+    _filterYearScrollController.dispose();
+    _searchHistoryScrollController.dispose();
+    _liveSourcesScrollController.dispose();
+    _liveGroupsScrollController.dispose();
+    _sourcePickerGroupsScrollController.dispose();
     super.dispose();
   }
   void _reloadSavedConfig() {
@@ -850,10 +870,18 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       _showImportConfigDialog(initialInput: text, initialError: '剪贴板内容未能直接导入：$e');
     }
   }
+  bool get _isDesktop {
+    if (kIsWeb) return false;
+    return defaultTargetPlatform == TargetPlatform.windows ||
+        defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.linux;
+  }
+
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
-    final isLandscape = size.width > size.height;
+    final useSidebar =
+        _isDesktop ? (size.width >= 700) : (size.width > size.height);
     const dockItems = <(IconData, IconData, String)>[
       (CupertinoIcons.play_rectangle, CupertinoIcons.play_rectangle_fill, '主页'),
       (
@@ -870,10 +898,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     ];
     final safeTabIndex = _tabIndex.clamp(0, dockItems.length - 1);
     final Widget activePage = switch (safeTabIndex) {
-      1 => _buildLiveTab(context, useSidebar: isLandscape),
-      2 => _buildFavoritesHistoryTab(context, useSidebar: isLandscape),
-      3 => _buildSettingsTab(context, useSidebar: isLandscape),
-      _ => _buildHomeTab(context, useSidebar: isLandscape),
+      1 => _buildLiveTab(context, useSidebar: useSidebar),
+      2 => _buildFavoritesHistoryTab(context, useSidebar: useSidebar),
+      3 => _buildSettingsTab(context, useSidebar: useSidebar),
+      _ => _buildHomeTab(context, useSidebar: useSidebar),
     };
     final ambientPoster = safeTabIndex == 0 && _homeVideos.isNotEmpty
         ? _homeVideos.first.poster
@@ -925,7 +953,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
         child: Scaffold(
       backgroundColor: AppleColors.background,
       extendBody: true,
-      bottomNavigationBar: isLandscape ? null : IgnorePointer(
+      bottomNavigationBar: useSidebar ? null : IgnorePointer(
         ignoring: _privacyPortalAnimating,
         child: Opacity(opacity: _privacyPortalAnimating ? 0 : 1, child: Center(
         heightFactor: 1,
@@ -970,7 +998,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           // Active page content (with right clearance in landscape for the right-side Dock)
           Padding(
             padding: EdgeInsets.only(
-              right: isLandscape
+              right: useSidebar
                   ? AppleLiquidGlassDock.landscapeFootprint(context)
                   : 0,
             ),
@@ -979,7 +1007,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           // iPhone / iPad style Dock:
           // - Portrait: bottom floating rounded-rectangle dock
           // - Landscape: right-side vertical dock
-          if (isLandscape)
+          if (useSidebar)
             Positioned(
               top: 0,
               bottom: 0,
@@ -1306,19 +1334,23 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                         fadeWidth: 18,
                         child: SizedBox(
                           height: 96,
-                          child: ListView.separated(
-                            scrollDirection: Axis.horizontal,
-                            clipBehavior: Clip.none,
-                            physics: const BouncingScrollPhysics(),
-                            padding: EdgeInsets.symmetric(
-                              horizontal: horizontalPad,
-                              vertical: 3,
+                          child: DesktopHorizontalScroller(
+                            controller: _continueWatchingScrollController,
+                            child: ListView.separated(
+                              controller: _continueWatchingScrollController,
+                              scrollDirection: Axis.horizontal,
+                              clipBehavior: Clip.none,
+                              physics: const BouncingScrollPhysics(),
+                              padding: EdgeInsets.symmetric(
+                                horizontal: horizontalPad,
+                                vertical: 3,
+                              ),
+                              itemCount: history.length.clamp(0, 8),
+                              separatorBuilder: (_, __) =>
+                                  const SizedBox(width: 12),
+                              itemBuilder: (ctx, i) =>
+                                  _buildContinueWatchingCard(history[i]),
                             ),
-                            itemCount: history.length.clamp(0, 8),
-                            separatorBuilder: (_, __) =>
-                                const SizedBox(width: 12),
-                            itemBuilder: (ctx, i) =>
-                                _buildContinueWatchingCard(history[i]),
                           ),
                         ),
                       ),
@@ -1359,21 +1391,25 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                           Expanded(
                             child: SizedBox(
                               height: 36,
-                              child: ListView.separated(
-                                scrollDirection: Axis.horizontal,
-                                physics: const BouncingScrollPhysics(),
-                                itemCount: CmsParser.primaryHomeTabs.length,
-                                separatorBuilder: (_, __) =>
-                                    const SizedBox(width: 8),
-                                itemBuilder: (ctx, idx) {
-                                  final (tabKey, tabLabel) =
-                                      CmsParser.primaryHomeTabs[idx];
-                                  return _buildCategoryPill(
-                                    label: tabLabel,
-                                    selected: _primaryTab == tabKey,
-                                    onTap: () => _selectPrimaryTab(tabKey),
-                                  );
-                                },
+                              child: DesktopHorizontalScroller(
+                                controller: _categoryPillsScrollController,
+                                child: ListView.separated(
+                                  controller: _categoryPillsScrollController,
+                                  scrollDirection: Axis.horizontal,
+                                  physics: const BouncingScrollPhysics(),
+                                  itemCount: CmsParser.primaryHomeTabs.length,
+                                  separatorBuilder: (_, __) =>
+                                      const SizedBox(width: 8),
+                                  itemBuilder: (ctx, idx) {
+                                    final (tabKey, tabLabel) =
+                                        CmsParser.primaryHomeTabs[idx];
+                                    return _buildCategoryPill(
+                                      label: tabLabel,
+                                      selected: _primaryTab == tabKey,
+                                      onTap: () => _selectPrimaryTab(tabKey),
+                                    );
+                                  },
+                                ),
                               ),
                             ),
                           ),
@@ -2228,6 +2264,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           // 1. 类别 (Sub-categories from site + Genre tags)
           _buildFilterDimensionRow(
             title: '类别',
+            controller: _filterCategoryScrollController,
             children: [
               _buildMiniFilterChip(
                 label: '全部',
@@ -2271,6 +2308,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           // 2. 地区 (Area / Country)
           _buildFilterDimensionRow(
             title: '地区',
+            controller: _filterAreaScrollController,
             children: [
               for (final area in CmsParser.filterAreas)
                 _buildMiniFilterChip(
@@ -2290,6 +2328,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           // 3. 年份 (Year)
           _buildFilterDimensionRow(
             title: '年份',
+            controller: _filterYearScrollController,
             children: [
               for (final yr in CmsParser.filterYears)
                 _buildMiniFilterChip(
@@ -2312,6 +2351,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   Widget _buildFilterDimensionRow({
     required String title,
     required List<Widget> children,
+    required ScrollController controller,
   }) {
     return Row(
       children: [
@@ -2327,16 +2367,20 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           ),
         ),
         Expanded(
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            physics: const BouncingScrollPhysics(),
-            child: Row(
-              children: [
-                for (int i = 0; i < children.length; i++) ...[
-                  if (i > 0) const SizedBox(width: 7),
-                  children[i],
+          child: DesktopHorizontalScroller(
+            controller: controller,
+            child: SingleChildScrollView(
+              controller: controller,
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              child: Row(
+                children: [
+                  for (int i = 0; i < children.length; i++) ...[
+                    if (i > 0) const SizedBox(width: 7),
+                    children[i],
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),
@@ -2996,12 +3040,15 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                       const SizedBox(height: 10),
                       SizedBox(
                         height: 30,
-                        child: ListView.separated(
-                          scrollDirection: Axis.horizontal,
-                          physics: const BouncingScrollPhysics(),
-                          itemCount: history.length,
-                          separatorBuilder: (_, __) => const SizedBox(width: 8),
-                          itemBuilder: (ctx, i) {
+                        child: DesktopHorizontalScroller(
+                          controller: _searchHistoryScrollController,
+                          child: ListView.separated(
+                            controller: _searchHistoryScrollController,
+                            scrollDirection: Axis.horizontal,
+                            physics: const BouncingScrollPhysics(),
+                            itemCount: history.length,
+                            separatorBuilder: (_, __) => const SizedBox(width: 8),
+                            itemBuilder: (ctx, i) {
                             final kw = history[i];
                             return ApplePressableScale(
                               pressedScale: 0.92,
@@ -3038,7 +3085,8 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                           },
                         ),
                       ),
-                    ],
+                    ),
+                  ],
                     const SizedBox(height: 12),
                     Expanded(
                       child: Row(
@@ -4253,14 +4301,18 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             // Row 1: Live Subscription Source Pills
             SizedBox(
               height: 34,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: lives.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 8),
-                itemBuilder: (ctx, i) => _buildCategoryPill(
-                  label: lives[i].name,
-                  selected: i == _selectedLiveSource,
-                  onTap: () => _loadLivePlaylist(i),
+              child: DesktopHorizontalScroller(
+                controller: _liveSourcesScrollController,
+                child: ListView.separated(
+                  controller: _liveSourcesScrollController,
+                  scrollDirection: Axis.horizontal,
+                  itemCount: lives.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 8),
+                  itemBuilder: (ctx, i) => _buildCategoryPill(
+                    label: lives[i].name,
+                    selected: i == _selectedLiveSource,
+                    onTap: () => _loadLivePlaylist(i),
+                  ),
                 ),
               ),
             ),
@@ -4270,11 +4322,14 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
               const SizedBox(height: 9),
               SizedBox(
                 height: 32,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: _liveGroups.length + 1,
-                  separatorBuilder: (_, __) => const SizedBox(width: 7),
-                  itemBuilder: (ctx, idx) {
+                child: DesktopHorizontalScroller(
+                  controller: _liveGroupsScrollController,
+                  child: ListView.separated(
+                    controller: _liveGroupsScrollController,
+                    scrollDirection: Axis.horizontal,
+                    itemCount: _liveGroups.length + 1,
+                    separatorBuilder: (_, __) => const SizedBox(width: 7),
+                    itemBuilder: (ctx, idx) {
                     if (idx == 0) {
                       final isAllSelected =
                           queryLower.isEmpty && safeGroupIdx == -1;
@@ -4308,7 +4363,8 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                   },
                 ),
               ),
-            ],
+            ),
+          ],
             const SizedBox(height: 12),
 
             // Main Multi-Column Channel Card Grid
@@ -8649,23 +8705,28 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       builder: (ctx) => StatefulBuilder(builder: (ctx, update) {
         final safeBottom = MediaQuery.paddingOf(ctx).bottom;
         final content = Column(children: [
-          Expanded(child: ReorderableListView.builder(
-            buildDefaultDragHandles: false,
-            padding: isIos
-                ? const EdgeInsets.symmetric(horizontal: 8, vertical: 8)
-                : null,
-            itemCount: ordered.length,
-            onReorder: (from, to) => update(() {
-              if (to > from) to--;
-              ordered.insert(to, ordered.removeAt(from));
-            }),
-            itemBuilder: (_, i) {
-              final site = ordered[i];
-              return ListTile(key: ValueKey(site.key), title: Text(site.name),
-                leading: ReorderableDragStartListener(index: i, child: const Icon(Icons.drag_handle)),
-                trailing: IconButton(tooltip: '删除这条线路', icon: const Icon(Icons.remove_circle_outline),
-                  onPressed: saving ? null : () => update(() => removed.add(ordered.removeAt(i)))));
-            },
+          Expanded(child: ScrollConfiguration(
+            behavior: ScrollConfiguration.of(ctx).copyWith(
+              dragDevices: const {PointerDeviceKind.touch, PointerDeviceKind.trackpad},
+            ),
+            child: ReorderableListView.builder(
+              buildDefaultDragHandles: false,
+              padding: isIos
+                  ? const EdgeInsets.symmetric(horizontal: 8, vertical: 8)
+                  : null,
+              itemCount: ordered.length,
+              onReorder: (from, to) => update(() {
+                if (to > from) to--;
+                ordered.insert(to, ordered.removeAt(from));
+              }),
+              itemBuilder: (_, i) {
+                final site = ordered[i];
+                return ListTile(key: ValueKey(site.key), title: Text(site.name),
+                  leading: ReorderableDragStartListener(index: i, child: const Icon(Icons.drag_handle)),
+                  trailing: IconButton(tooltip: '删除这条线路', icon: const Icon(Icons.remove_circle_outline),
+                    onPressed: saving ? null : () => update(() => removed.add(ordered.removeAt(i)))));
+              },
+            ),
           )),
           Padding(
             padding: isIos
@@ -8892,12 +8953,15 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
               // Centered Group Pills Row
               SizedBox(
                 height: MediaQuery.textScalerOf(ctx).scale(16) + 20,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  physics: const BouncingScrollPhysics(),
-                  itemCount: groups.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 8),
-                  itemBuilder: (ctx, idx) {
+                child: DesktopHorizontalScroller(
+                  controller: _sourcePickerGroupsScrollController,
+                  child: ListView.separated(
+                    controller: _sourcePickerGroupsScrollController,
+                    scrollDirection: Axis.horizontal,
+                    physics: const BouncingScrollPhysics(),
+                    itemCount: groups.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 8),
+                    itemBuilder: (ctx, idx) {
                     final g = groups[idx];
                     final count = groupCounts[g] ?? 0;
                     final isSelected = selectedGroup == g;
@@ -8979,7 +9043,8 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                   },
                 ),
               ),
-              const SizedBox(height: 12),
+            ),
+            const SizedBox(height: 12),
                 ],
               )),
               if (filteredSites.isEmpty && filteredPlugins.isEmpty)
