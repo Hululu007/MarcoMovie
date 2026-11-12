@@ -221,6 +221,59 @@ class PackageTests(unittest.TestCase):
         self.assertIn('<details class="package-check"><summary>校验</summary><code>SHA-256：'+'b'*64, result)
         self.assertIn('<style>existing CSS</style>', result)
 
+    def test_verbose_release_notes_are_automatically_summarized_and_categorized_on_page(self):
+        self.release['body'] = (
+            '# Marco Movie iOS / iPadOS 0.5.25\n\n'
+            '发布日期：2026-11-12。应用版本：`0.5.25`（构建号 `75`）。本次更新带来片头片尾独立记忆与网盘解析增强。\n\n'
+            '## 核心修复与优化\n\n'
+            '- **片头片尾独立记忆**：每部剧集单独保存跳过时长（`StorageService`），不再全局覆盖。\n'
+            '- **首页自动加载与筛选收起**：下滑自动加载下一页海报，筛选分类默认收起点击展开。\n'
+            '- **修复返回首页历史未即时刷新**：退出播放页后立即同步最新观看记录。\n'
+            '- **片头片尾独立记忆**：每部剧集单独保存跳过时长，不再全局覆盖。\n\n'
+            '## 包信息与构建记录\n\n'
+            '- **未签名 IPA**：`MarcoMovie-0.5.25-ios-unsigned.ipa`，SHA-256：`' + 'a' * 64 + '`。\n'
+            '- **构建提交**：`0123456789abcdef`。\n\n'
+            '## 验证范围与已知限制\n\n'
+            '- 通过公共内容守卫检查与全部自动化测试。\n'
+            '- 已知限制：需使用巨魔或自签工具安装。\n'
+        )
+        self.sync()
+        archived = (self.out / 'updates/history/ios-v0.5.1.md').read_text(encoding='utf-8')
+        self.assertEqual(archived, self.release['body'] + '\n')
+        page = (self.out / 'index.html').read_text(encoding='utf-8')
+        self.assertIn('<h4>片源与播放</h4>', page)
+        self.assertIn('<h4>界面与交互</h4>', page)
+        self.assertIn('<h4>问题修复与优化</h4>', page)
+        self.assertIn('<h4>注意事项</h4>', page)
+        self.assertNotIn('a' * 64, page.split('id="changelog"', 1)[1])
+        self.assertNotIn('公共内容守卫', page)
+
+    def test_windows_chinese_installer_filters_isl_and_guards_duplicate_desktop_shortcut(self):
+        import platform_package_names as ppn
+        default_isl = (
+            '[LangOptions]\nLanguageName=English\n\n'
+            '[Messages]\nSetupWindowTitle=Setup - %1\nWelcomeLabel1=Welcome to [name]\n'
+        )
+        cn_isl = (
+            '[LangOptions]\nLanguageName=<7B80><4F53><4E2D><6587>\n\n'
+            '[Messages]\nSetupWindowTitle=安装 - %1\nWelcomeLabel1=欢迎使用 [name] 安装向导\n'
+            'ObsoleteRemovedKey=已废弃\nBadPlaceholder=%1 %2\n'
+        )
+        filtered = ppn.filter_isl_messages(cn_isl, default_isl)
+        self.assertIn('SetupWindowTitle=安装 - %1', filtered)
+        self.assertIn('WelcomeLabel1=欢迎使用 [name] 安装向导', filtered)
+        self.assertNotIn('ObsoleteRemovedKey', filtered)
+        self.assertNotIn('BadPlaceholder', filtered)
+
+        iss = ppn.windows_installer_script('0.5.18', 'MarcoMovie-0.5.18-windows-setup')
+        self.assertIn('AppId={{8E9A5D2B-4F31-4C19-9A62-7B8D1E3F4A50}', iss)
+        self.assertIn('UsePreviousAppDir=yes', iss)
+        self.assertIn('UsePreviousTasks=no', iss)
+        self.assertIn('ShowLanguageDialog=no', iss)
+        self.assertIn('创建桌面快捷方式(&D)', iss)
+        self.assertIn('Check: ShouldOfferDesktopIcon', iss)
+        self.assertIn('CurStepChanged(CurStep: TSetupStep)', iss)
+
 
 if __name__ == '__main__':
     unittest.main()

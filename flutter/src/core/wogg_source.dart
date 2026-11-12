@@ -8,6 +8,7 @@ import 'package:html/dom.dart';
 import 'package:html/parser.dart' as html;
 
 import 'models.dart';
+import 'resilient_http_client.dart';
 
 /// Data-only catalogue adapter for the original WoGG website. Android plugin
 /// bytes supply reviewed configuration; they are never loaded or executed.
@@ -27,7 +28,7 @@ class WoggSource {
     required this.readBytes,
     required this.listShare,
     this.listShareWithCancellation,
-    this.shareTimeout = const Duration(seconds: 8),
+    this.shareTimeout = const Duration(seconds: 18),
   });
 
   static bool supports(CmsSite site) {
@@ -649,8 +650,23 @@ class WoggSource {
     final lines = results.whereType<Map<String, dynamic>>().toList();
     final errors = failures.whereType<Map<String, String>>().toList();
     if (lines.isEmpty) {
-      throw FormatException(
-          index == 0 ? '玩偶原站尚未提供此片分享' : '玩偶原网盘分享暂不可用，请检查网盘登录或分享状态');
+      final remarksText = '${video['vod_remarks'] ?? ''} ${_text(doc.querySelector('.video-info-header'))}';
+      final isUpcoming = RegExp(r'敬请期待|即将上映|未上映|未开播').hasMatch(remarksText);
+      final allDeadOrEmpty = errors.isNotEmpty &&
+          errors.every((e) {
+            final msg = e['message'] ?? '';
+            return msg.contains('目录为空') || msg.contains('已取消或已失效');
+          });
+      if (isUpcoming && (index == 0 || allDeadOrEmpty)) {
+        throw const FormatException('该影片暂未上线（敬请期待），原站暂无可用正片分享');
+      }
+      if (index == 0) {
+        throw const FormatException('玩偶原站尚未提供此片分享');
+      }
+      if (allDeadOrEmpty) {
+        throw const FormatException('原站网盘分享链接已失效或目录为空，请尝试搜索其他片源');
+      }
+      throw const FormatException('玩偶原网盘分享暂不可用，请检查网盘登录或分享状态');
     }
     // Native CMS parsing accepts structured lines, preserving episode headers
     // and opaque provider references without delimiter-based re-encoding.
@@ -673,42 +689,14 @@ class WoggSource {
   }
 
   static String _normalizeClipboardShare(String raw) {
-    if (raw.length > 16 * 1024) throw const FormatException('分享信息过长');
-    final marker = raw.indexOf('提取码');
-    if (marker < 0) return raw;
-    // The reviewed Cloud_baidu wrapper explicitly reads the 提取码 field.
-    // Treat full-width punctuation as the same field, without inventing keys
-    // or moving the share to a different host/provider.
-    if (!raw.contains('pan.baidu.com')) return raw;
-    if (RegExp(r'https?://', caseSensitive: false).allMatches(raw).length !=
-        1) {
-      throw const FormatException('分享链接不明确');
-    }
-    final link = RegExp(r'https?://[^\s<>"\x27]+', caseSensitive: false)
-        .firstMatch(raw.substring(0, marker))
-        ?.group(0);
-    final passcodes = RegExp(r'提取码\s*[:：]\s*([A-Za-z0-9]{4})(?![A-Za-z0-9])')
-        .allMatches(raw)
-        .toList();
-    final uri = Uri.tryParse(link ?? '');
-    if (uri == null ||
-        uri.host != 'pan.baidu.com' ||
-        uri.userInfo.isNotEmpty ||
-        !const ['http', 'https'].contains(uri.scheme) ||
-        !RegExp(r'^/s/[A-Za-z0-9_-]+$').hasMatch(uri.path) ||
-        passcodes.length != 1 ||
-        (uri.queryParametersAll['pwd']?.length ?? 0) > 1) {
+    final normalized = ResilientHttpClient.normalizeCloudShareUrl(
+      raw,
+      strictClipboard: true,
+    );
+    if (normalized == null || normalized.isEmpty) {
       throw const FormatException('分享地址或提取码不明确');
     }
-    final password = passcodes.single.group(1)!;
-    final existing = uri.queryParameters['pwd'];
-    if (existing != null && existing.isNotEmpty && existing != password) {
-      throw const FormatException('分享提取码不一致');
-    }
-    return uri.replace(queryParameters: {
-      ...uri.queryParametersAll,
-      'pwd': [password],
-    }).toString();
+    return normalized;
   }
 
   static String _tabLabel(Element tab) =>

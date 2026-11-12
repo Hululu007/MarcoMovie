@@ -887,6 +887,23 @@ final class MobileIosSettings {
                                         ctl.rerenderInPlace();
                                     });
 
+                            boolean alwaysClock =
+                                    a.prefs.getBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false);
+                            addChoices(
+                                    a,
+                                    body,
+                                    "播放页常显时间",
+                                    new String[] {"开启", "关闭"},
+                                    alwaysClock ? 0 : 1,
+                                    idx -> {
+                                        a.prefs
+                                                .edit()
+                                                .putBoolean(
+                                                        Prefs.PLAYER_ALWAYS_SHOW_CLOCK, idx == 0)
+                                                .apply();
+                                        ctl.rerenderInPlace();
+                                    });
+
                             int subStyle =
                                     Prefs.clampSubtitleStyle(
                                             a.prefs.getInt(Prefs.SUBTITLE_STYLE, 0));
@@ -922,58 +939,23 @@ final class MobileIosSettings {
         PaneSpec introOutroSub =
                 new PaneSpec(
                         "片头与片尾",
-                        "设定起播自动跳过片头与临近片尾自动切集秒数",
+                        "每部影片在播放页面独立保存片头片尾时间，不全局同步",
                         ICON_SKIP,
                         COLOR_CORAL,
                         (body, ctl) -> {
-                            final int[] skipPresets = {0, 30, 60, 90, 120};
-                            int curIntro =
-                                    Prefs.clampSkipSeconds(a.prefs.getInt(Prefs.SKIP_INTRO, 0));
-                            int introIdx = matchPresetOrCustom(skipPresets, curIntro);
-                            String customIntro =
-                                    introIdx == 5 ? "精准调校 (" + curIntro + "s)…" : "精准调校…";
-                            addChoices(
+                            int skipCount = PlaybackControls.countVideoSkipRecords(a);
+                            addActionCapsule(
                                     a,
                                     body,
-                                    "自动跳过片头",
-                                    new String[] {"关闭", "30s", "60s", "90s", "120s", customIntro},
-                                    introIdx,
-                                    idx -> {
-                                        if (idx < skipPresets.length) {
-                                            a.prefs
-                                                    .edit()
-                                                    .putInt(Prefs.SKIP_INTRO, skipPresets[idx])
-                                                    .apply();
-                                            ctl.rerenderInPlace();
-                                        } else {
-                                            PlaybackControls.showSkipAdjuster(
-                                                    a, true, 0, 0, ctl::rerenderInPlace);
-                                        }
-                                    });
-
-                            int curOutro =
-                                    Prefs.clampSkipSeconds(a.prefs.getInt(Prefs.SKIP_OUTRO, 0));
-                            int outroIdx = matchPresetOrCustom(skipPresets, curOutro);
-                            String customOutro =
-                                    outroIdx == 5 ? "精准调校 (" + curOutro + "s)…" : "精准调校…";
-                            addChoices(
-                                    a,
-                                    body,
-                                    "自动跳过片尾",
-                                    new String[] {"关闭", "30s", "60s", "90s", "120s", customOutro},
-                                    outroIdx,
-                                    idx -> {
-                                        if (idx < skipPresets.length) {
-                                            a.prefs
-                                                    .edit()
-                                                    .putInt(Prefs.SKIP_OUTRO, skipPresets[idx])
-                                                    .apply();
-                                            ctl.rerenderInPlace();
-                                        } else {
-                                            PlaybackControls.showSkipAdjuster(
-                                                    a, false, 0, 0, ctl::rerenderInPlace);
-                                        }
-                                    });
+                                    ICON_SKIP,
+                                    COLOR_CORAL,
+                                    "片头片尾按影片独立记录",
+                                    skipCount <= 0
+                                            ? "在播放页面点击「片头 / 片尾」会优先默认设为当前播放时间，仅对当前影片生效"
+                                            : "已独立记录 " + skipCount + " 部影片 · 点击查看说明或清空全部记录",
+                                    () ->
+                                            PlaybackControls.showVideoSkipRecordsDialog(
+                                                    a, ctl::rerenderInPlace));
                         });
 
         PaneSpec playbackPane =

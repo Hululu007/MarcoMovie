@@ -18,7 +18,13 @@ final class PlayerChrome {
     final LinearLayout topActions;
     final Button backBtn;
     final TextView rewindBtn, forwardBtn;
-    final TextView loadingText, episodeLabel, titleView, seekHint, wallClock, cardTitleView;
+    final TextView loadingText,
+            episodeLabel,
+            titleView,
+            seekHint,
+            wallClock,
+            persistentClock,
+            cardTitleView;
     final Button fsBtn;
     final StateGlyph state;
     final TextView resolution;
@@ -520,6 +526,56 @@ final class PlayerChrome {
         loadingPill.addView(loadingText);
         a.playbackLayer.addView(loadingPill, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
 
+        String initialPersistentTime = formatWallTime();
+        persistentClock = a.text("", a.isTvDevice() ? 14.5f : 12.5f, 0xeef3f6fc);
+        persistentClock.setTag("player-persistent-clock");
+        persistentClock.setFocusable(false);
+        persistentClock.setClickable(false);
+        persistentClock.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        persistentClock.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        persistentClock.setFontFeatureSettings("tnum");
+        if (android.os.Build.VERSION.SDK_INT >= 21) {
+            persistentClock.setLetterSpacing(0.05f);
+        }
+        persistentClock.setIncludeFontPadding(false);
+        persistentClock.setSingleLine();
+        int padH = a.isTvDevice() ? vp(a, 10) : a.dp(10);
+        int padV = a.isTvDevice() ? vp(a, 5) : a.dp(4);
+        persistentClock.setPadding(padH, padV, padH, padV);
+        persistentClock.setBackground(chromeSurface(0x7a10141a, 999, 0x24ffffff));
+        persistentClock.setText(styledWallTime(initialPersistentTime));
+        boolean showAlwaysClock =
+                !a.miniMode && a.prefs.getBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false);
+        persistentClock.setVisibility(showAlwaysClock ? View.VISIBLE : View.GONE);
+        FrameLayout.LayoutParams pClockLp =
+                new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+        pClockLp.topMargin = a.isTvDevice() ? vp(a, 22) : a.dp(14);
+        pClockLp.rightMargin = a.isTvDevice() ? vp(a, 32) : a.dp(18);
+        a.playbackLayer.addView(persistentClock, pClockLp);
+        final Runnable persistentClockTicker =
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!persistentClock.isAttachedToWindow()
+                                || a.playerChrome != PlayerChrome.this) return;
+                        syncClockViews();
+                        persistentClock.postDelayed(this, 15000);
+                    }
+                };
+        persistentClock.addOnAttachStateChangeListener(
+                new View.OnAttachStateChangeListener() {
+                    @Override
+                    public void onViewAttachedToWindow(View v) {
+                        v.removeCallbacks(persistentClockTicker);
+                        v.postDelayed(persistentClockTicker, 15000);
+                    }
+
+                    @Override
+                    public void onViewDetachedFromWindow(View v) {
+                        v.removeCallbacks(persistentClockTicker);
+                    }
+                });
+
         a.playerOverlay = overlay;
         a.controlsVisible = true;
         dock.addOnLayoutChangeListener(
@@ -629,6 +685,21 @@ final class PlayerChrome {
         safe.bottom = Math.max(safe.top, Math.min(measuredHeight, safe.bottom));
         overlay.setPadding(
                 safe.left, safe.top, measuredWidth - safe.right, measuredHeight - safe.bottom);
+        if (persistentClock != null
+                && persistentClock.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+            FrameLayout.LayoutParams pLp =
+                    (FrameLayout.LayoutParams) persistentClock.getLayoutParams();
+            int nextTop = a.isTvDevice() ? vp(a, 22) : Math.max(a.dp(12), safe.top + a.dp(10));
+            int nextRight =
+                    a.isTvDevice()
+                            ? vp(a, 32)
+                            : Math.max(a.dp(16), (measuredWidth - safe.right) + a.dp(14));
+            if (pLp.topMargin != nextTop || pLp.rightMargin != nextRight) {
+                pLp.topMargin = nextTop;
+                pLp.rightMargin = nextRight;
+                persistentClock.setLayoutParams(pLp);
+            }
+        }
         int width = safe.width(), height = safe.height();
         boolean mobileLandscape = !a.isTvDevice() && !portrait;
         boolean compact = !a.isTvDevice() && (mobileLandscape || height < a.dp(440));
@@ -854,15 +925,31 @@ final class PlayerChrome {
         }
     }
 
-    void update() {
-        if (a.prepared) loading = false;
+    void syncClockViews() {
+        String now = formatWallTime();
+        boolean timeChanged = !now.equals(lastWallClock);
+        if (timeChanged) {
+            lastWallClock = now;
+        }
+        boolean alwaysShow =
+                !a.miniMode && a.prefs.getBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false);
+        if (persistentClock != null) {
+            if (timeChanged || persistentClock.getText().length() == 0) {
+                persistentClock.setText(styledWallTime(now));
+            }
+            persistentClock.setVisibility(alwaysShow ? View.VISIBLE : View.GONE);
+        }
         if (wallClock != null) {
-            String now = formatWallTime();
-            if (!now.equals(lastWallClock)) {
-                lastWallClock = now;
+            if (timeChanged) {
                 wallClock.setText(styledWallTime(now));
             }
+            wallClock.setVisibility(alwaysShow ? View.GONE : View.VISIBLE);
         }
+    }
+
+    void update() {
+        if (a.prepared) loading = false;
+        syncClockViews();
         if (a.player != null && a.prepared) {
             resolution.setText(a.player.videoResolution());
             if (modernTv) {

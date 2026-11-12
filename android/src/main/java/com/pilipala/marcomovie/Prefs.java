@@ -88,6 +88,8 @@ final class Prefs {
     static final String MOBILE_POSTER_DENSITY = "mobile_poster_density";
     static final String MOBILE_CARD_SUBTITLE = "mobile_card_subtitle";
     static final String MOBILE_SHOW_HISTORY = "mobile_show_history";
+    static final String VIDEO_SKIP_RECORDS = "video_skip_records";
+    static final String PLAYER_ALWAYS_SHOW_CLOCK = "player_always_show_clock";
 
     static final String[] KEYS = {
         UI_SCALE_PERCENT,

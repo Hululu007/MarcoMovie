@@ -79,6 +79,162 @@ def release_history(output, releases):
     return records, files
 
 
+NOTE_CATEGORIES = (
+    ('问题修复与优化', ('修复', '报错', '异常', '崩溃', '闪退', '观看历史', '观影记录', '桌面快捷方式', '桌面图标')),
+    ('片源与播放', ('片源', '线路', '网盘', '玩偶', '夸克', '百度', '阿里', 'UC', '播放', '片头', '片尾', '常显时间', '解码', '直播', '弹幕', '字幕', '插件', '嗅探')),
+    ('界面与交互', ('界面', '海报', '首页', '筛选', '分类', '窗口', '标题栏', '沉浸式', '中文', '安装程序', '安装向导', '闪烁', '加载更多', '导航', '遥控', '设置页')),
+    ('功能与同步', ('同步', 'WebDAV', '局域网', '收藏', '新增', '支持', '引入', '升级')),
+)
+TECH_PAREN_RE = re.compile(r'[（(][^）)]*(?:`[^`]+`|[A-Za-z_][A-Za-z0-9_./:-]{3,}|SHA-256|MKCOL)[^）)]*[）)]')
+META_SENTENCE_RE = re.compile(r'^(?:发布日期|应用版本|版本代码|构建号|最低系统要求)[：:][^。\n]*[。.]?\s*')
+
+
+def _clean_note_line(raw):
+    text = TECH_PAREN_RE.sub('', raw)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def _condense_note_item(text, limit=92):
+    s = text.strip()
+    if not s:
+        return ''
+    if len(s) <= limit:
+        return s.rstrip('。；;，, ')
+    for sep in ('；', '。'):
+        idx = s.find(sep)
+        if 14 <= idx <= limit + 8:
+            s = s[:idx]
+            break
+    if len(s) > limit:
+        comma = s.rfind('，', 0, limit)
+        s = s[:comma] if comma >= limit // 2 else (s[:limit - 1] + '…')
+    return s.rstrip('。；;，, ')
+
+
+def summarize_notes(notes):
+    """Automatically condense, deduplicate, and group verbose release notes."""
+    raw = (notes or '').strip()
+    if not raw:
+        return ''
+    overview = ''
+    skip_section = False
+    in_verification = False
+    pending_topic = ''
+    buckets = {title: [] for title, _ in NOTE_CATEGORIES}
+    buckets['注意事项'] = []
+    seen = set()
+
+    def add_unique(cat, item):
+        plain = re.sub(r'\[([^\]\n]+)\]\(([^)\s]+)\)', r'\1', item).replace('**', '').replace('`', '')
+        norm = re.sub(r'[\s·•:：,，.。!！?？;；()（）\[\]【】「」]', '', plain.lower())
+        if norm and norm not in seen:
+            seen.add(norm)
+            buckets[cat].append(item)
+
+    def classify(item):
+        plain = item.replace('**', '').replace('`', '')
+        if plain.startswith(('已知限制：', '已知限制:', '注意事项：')):
+            return '注意事项'
+        for cat, keywords in NOTE_CATEGORIES:
+            if cat == '问题修复与优化':
+                if plain.startswith('修复') or any(k in plain for k in keywords[1:]):
+                    return cat
+            elif any(k in plain for k in keywords):
+                return cat
+        return '问题修复与优化'
+
+    for raw_line in notes.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        heading = re.match(r'^#{1,6}\s+(.+)$', line)
+        if heading:
+            h = heading[1].replace('**', '').replace('`', '').strip()
+            h_low = h.lower()
+            pending_topic = ''
+            if h_low.startswith('marco movie') or re.match(r'^v?\d+\.\d+\.\d+', h_low) or h in ('更新内容', '核心修复与优化') or h_low == 'changes':
+                skip_section = False
+                in_verification = False
+                continue
+            if any(k in h for k in ('包信息', '构建记录', '文件校验', '安装包校验')) or 'checksum' in h_low or 'artifact' in h_low:
+                skip_section = True
+                in_verification = False
+                continue
+            if any(k in h for k in ('验证范围', '测试记录', '自动化验证')):
+                skip_section = True
+                in_verification = True
+                continue
+            skip_section = False
+            in_verification = False
+            continue
+        numbered_bold = re.match(r'^\d+[.)、]\s*\*\*(.+?)\*\*\s*$', line)
+        if numbered_bold:
+            if not skip_section:
+                pending_topic = numbered_bold[1].replace('`', '').strip()
+            continue
+        bullet = re.match(r'^(?:[-*•]|\d+[.)])\s+(.+)$', line)
+        content = bullet[1].strip() if bullet else line
+        plain_check = content.replace('**', '').replace('`', '')
+        if plain_check.startswith(('已知限制：', '已知限制:', '注意事项：')):
+            add_unique('注意事项', _condense_note_item(_clean_note_line(content), 96))
+            continue
+        if skip_section:
+            if in_verification and '已知限制' in plain_check:
+                add_unique('注意事项', _condense_note_item(_clean_note_line(content), 96))
+            continue
+        low_check = plain_check.lower()
+        if (plain_check.startswith(('发布日期：', '发布日期:'))
+                or low_check.startswith(('platform:', '- platform:', 'commit:', '- commit:'))
+                or 'sha-256' in low_check or 'sha256:' in low_check
+                or '构建提交' in plain_check or '对应源码包' in plain_check
+                or plain_check.startswith('通过公共内容守卫检查')
+                or (plain_check.startswith('自动化与') and '实机验收' in plain_check)
+                or (plain_check.startswith('未签名 IPA 支持巨魔') and '长期可用性承诺' in plain_check)):
+            rest = content
+            while True:
+                m_meta = META_SENTENCE_RE.match(rest)
+                if not m_meta:
+                    break
+                rest = rest[m_meta.end():].strip()
+            if rest and not overview:
+                overview = _condense_note_item(_clean_note_line(rest), 96)
+            continue
+        if not bullet and not overview and sum(len(v) for v in buckets.values()) == 0 and plain_check.startswith('本次更新'):
+            overview = _condense_note_item(_clean_note_line(content), 96)
+            continue
+        cleaned = _clean_note_line(content)
+        if not cleaned:
+            continue
+        if pending_topic and not cleaned.replace('**', '').startswith(pending_topic):
+            if '：' not in cleaned and ':' not in cleaned:
+                cleaned = f'**{pending_topic}**：{cleaned}'
+            pending_topic = ''
+        condensed = _condense_note_item(cleaned, 92)
+        if condensed:
+            add_unique(classify(condensed), condensed)
+
+    ordered_titles = ['片源与播放', '界面与交互', '功能与同步', '问题修复与优化', '注意事项']
+    non_empty = [(t, buckets[t]) for t in ordered_titles if buckets[t]]
+    total = sum(len(items) for _, items in non_empty)
+    if not non_empty:
+        return overview or raw
+    if total == 1 and not overview:
+        return non_empty[0][1][0]
+    out = []
+    if overview:
+        out.append(overview)
+        out.append('')
+    show_headers = len(non_empty) > 1 or total >= 3
+    for title, items in non_empty:
+        if show_headers:
+            out.append(f'### {title}')
+        for item in items:
+            out.append(f'- {item}')
+        out.append('')
+    return '\n'.join(out).strip()
+
+
 def render_notes(notes):
     """A small escaped Markdown subset, with no raw HTML or executable URLs."""
     def inline(text):
@@ -152,7 +308,7 @@ def patch_notes(page, records):
         if item['prerelease']:
             label += ' · 预览版'
         escaped = html.escape
-        note = item['notes'] if item['notes'].strip() else '该历史版本未提供更新说明。'
+        note = summarize_notes(item['notes']) if item['notes'].strip() else '该历史版本未提供更新说明。'
         entry = (
             '<details class="release-entry" data-platforms="' + ' '.join(platforms) + '"'
             + (' open' if latest and not current else '') + '><summary><span>' + escaped(label) + '</span>'

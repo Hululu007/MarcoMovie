@@ -179,6 +179,7 @@ class _DetailScreenState extends State<DetailScreen> {
     );
     _seedCachedExternalFields();
     PosterLoader.metadataRevision.addListener(_onExternalMetadataRevision);
+    widget.storage.watchHistoryRevision.addListener(_onWatchHistoryChanged);
     final immediateBytes = PosterLoader.peekMemory(
       _video.poster,
       title: _publicLookupTitle,
@@ -205,8 +206,13 @@ class _DetailScreenState extends State<DetailScreen> {
   void dispose() {
     _cancelDetailWork();
     PosterLoader.metadataRevision.removeListener(_onExternalMetadataRevision);
+    widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryChanged);
     _scrollOffset.dispose();
     super.dispose();
+  }
+
+  void _onWatchHistoryChanged() {
+    if (mounted) setState(() {});
   }
 
   void _cancelDetailWork() {
@@ -392,7 +398,7 @@ class _DetailScreenState extends State<DetailScreen> {
       setState(() {
         _loading = false;
         if (!showImmediately || _video.lines.isEmpty) {
-          _error = '读取详情失败：$e';
+          _error = '读取详情失败：${CmsClient.cleanErrorMessage(e)}';
           _errorCause = e;
         }
       });

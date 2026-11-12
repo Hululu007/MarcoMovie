@@ -4,6 +4,8 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/models.dart';
+import 'package:marco_movie/core/resilient_http_client.dart';
+import 'package:marco_movie/core/source_playback.dart';
 import 'package:marco_movie/core/wogg_source.dart';
 
 const catalogue = '''<html><title>玩偶共享站</title><body>
@@ -778,5 +780,63 @@ void main() {
         source.invoke(site(origin: 'https://user:password@catalogue.invalid/'),
             'home', []),
         throwsFormatException);
+  });
+
+  test('Quark, UC, Ali and Baidu share clipboard passcodes normalize cleanly',
+      () async {
+    final seen = <String>[];
+    final source = adapter(
+        (_, __) async => shareDetail([
+              '链接：https://pan.quark.cn/s/qShare1 提取码：q1W2',
+              '链接：https://drive.uc.cn/s/uShare2?public=1 提取码: u3R4',
+              'https://www.alipan.com/s/aShare3 提取码=a5B6',
+              'https://pan.baidu.com/share/init?surl=bShare4&pwd=c7D8',
+            ]), listShare: (url) async {
+      seen.add(url);
+      return const [CmsEpisode(name: 'ep1.mkv', url: 'mmwogg://quark?fid=1')];
+    });
+    final result =
+        jsonDecode(await source.invoke(site(), 'detail', ['42']))['list'][0];
+    expect(seen, [
+      'https://pan.quark.cn/s/qShare1?pwd=q1W2',
+      'https://drive.uc.cn/s/uShare2?public=1&pwd=u3R4',
+      'https://www.alipan.com/s/aShare3?pwd=a5B6',
+      'https://pan.baidu.com/s/1bShare4?pwd=c7D8',
+    ]);
+    expect(result['lines'].length, 4);
+    expect(
+      ResilientHttpClient.normalizeCloudShareUrl(
+          'push://https%3A%2F%2Fpan.quark.cn%2Fs%2FqShare1%3Fpwd%3Dq1W2'),
+      'https://pan.quark.cn/s/qShare1?pwd=q1W2',
+    );
+  });
+
+  test('upcoming title without valid share reports upcoming message clearly',
+      () async {
+    const upcomingHtml = '''<html><title>玩偶共享站</title>
+    <div class="video-info"></div>
+    <div class="video-info-items"><span class="video-info-itemtitle">备注：</span><div class="video-info-item">敬请期待</div></div>
+    </html>''';
+    final source = adapter((_, __) async => upcomingHtml);
+    await expectLater(
+      source.invoke(site(), 'detail', ['42']),
+      throwsA(isA<FormatException>()
+          .having((e) => e.message, 'message', contains('敬请期待'))),
+    );
+  });
+
+  test('SourcePlayback.decode accepts boolean false and empty parse flags',
+      () async {
+    final ep = await SourcePlayback.decode(
+      {
+        'parse': false,
+        'jx': '',
+        'url': ['原画', 'https://catalogue.invalid/a.m3u8', '高清', 'https://catalogue.invalid/b.m3u8'],
+      },
+      const CmsEpisode(name: '第1集', url: 'mmjs://play?id=1'),
+      localUrl: (u) async => Uri.parse(u),
+    );
+    expect(ep.url, 'https://catalogue.invalid/a.m3u8');
+    expect(ep.variants.map((v) => v.name), ['原画', '高清']);
   });
 }

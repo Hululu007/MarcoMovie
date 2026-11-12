@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../core/app_update.dart';
 import 'apple_theme.dart';
 import 'ios_settings.dart';
+import 'release_notes_view.dart';
 
 typedef IosUpdateCheck = Future<AppUpdate> Function(
     UpdateCancellation cancellation, void Function(String) onStage);
@@ -400,7 +401,7 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
                     if (release != null && release.notes.isNotEmpty) ...[
                       const SizedBox(height: 14),
                       const Text(
-                        '更新内容',
+                        '更新摘要',
                         style: TextStyle(
                           color: AppleColors.labelPrimary,
                           fontSize: 13.5,
@@ -408,14 +409,7 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
                         ),
                       ),
                       const SizedBox(height: 6),
-                      Text(
-                        release.notes,
-                        style: const TextStyle(
-                          color: AppleColors.labelSecondary,
-                          fontSize: 13,
-                          height: 1.55,
-                        ),
-                      ),
+                      ReleaseNotesSummaryView(rawNotes: release.notes),
                     ],
                   ],
                 ),
@@ -536,16 +530,12 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
         ]),
         if (release != null && release.notes.isNotEmpty) ...[
           const SizedBox(height: 24),
-          const Text('更新内容',
+          const Text('更新摘要',
               style: TextStyle(
                   color: AppleColors.labelPrimary,
                   fontWeight: FontWeight.w600)),
           const SizedBox(height: 8),
-          Text(release.notes,
-              style: const TextStyle(
-                  color: AppleColors.labelSecondary,
-                  fontSize: 13,
-                  height: 1.6)),
+          ReleaseNotesSummaryView(rawNotes: release.notes),
         ],
       ]),
     );

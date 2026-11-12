@@ -408,4 +408,398 @@ class AppUpdate {
       throw const FormatException('更新包校验失败，请重新下载');
     }
   }
+
+  ReleaseNotesSummary get notesSummary => ReleaseNotesSummary.parse(notes);
+}
+
+class ReleaseNotesSection {
+  final String title;
+  final List<String> items;
+  const ReleaseNotesSection(this.title, this.items);
+}
+
+/// Automatically condenses, deduplicates, and categorizes verbose Markdown
+/// release notes into concise user-facing sections across desktop and iOS.
+class ReleaseNotesSummary {
+  final String overview;
+  final List<ReleaseNotesSection> sections;
+  final int totalItems;
+
+  const ReleaseNotesSummary({
+    required this.overview,
+    required this.sections,
+    required this.totalItems,
+  });
+
+  bool get isEmpty => overview.isEmpty && sections.isEmpty;
+
+  static const _catPlayback = '片源与播放';
+  static const _catUi = '界面与交互';
+  static const _catFeature = '功能与同步';
+  static const _catFix = '问题修复与优化';
+  static const _catNote = '注意事项';
+
+  static final _headingRe = RegExp(r'^#{1,6}\s+(.+)$');
+  static final _numberedBoldRe = RegExp(r'^\d+[.)、]\s*\*\*(.+?)\*\*\s*$');
+  static final _bulletRe = RegExp(r'^(?:[-*•]|\d+[.)、])\s+(.+)$');
+  static final _mdLinkRe = RegExp(r'\[([^\]\n]+)\]\(([^)\s]+)\)');
+  static final _techParenRe = RegExp(
+    r'[（(][^）)]*(?:`[^`]+`|[A-Za-z_][A-Za-z0-9_./:-]{3,}|SHA-256|MKCOL)[^）)]*[）)]',
+  );
+  static final _metaSentenceRe = RegExp(
+    r'^(?:发布日期|应用版本|版本代码|构建号|最低系统要求)[：:][^。\n]*[。.]?\s*',
+  );
+
+  static ReleaseNotesSummary parse(String rawNotes) {
+    final trimmedAll = rawNotes.trim();
+    if (trimmedAll.isEmpty) {
+      return const ReleaseNotesSummary(
+        overview: '',
+        sections: [],
+        totalItems: 0,
+      );
+    }
+    final lines = rawNotes.split(RegExp(r'\r?\n'));
+    var overview = '';
+    var skipSection = false;
+    var inVerificationSection = false;
+    var pendingTopic = '';
+
+    final buckets = <String, List<String>>{
+      _catPlayback: <String>[],
+      _catUi: <String>[],
+      _catFeature: <String>[],
+      _catFix: <String>[],
+      _catNote: <String>[],
+    };
+    final seen = <String>{};
+
+    int currentCount() =>
+        buckets.values.fold<int>(0, (acc, list) => acc + list.length);
+
+    void addUnique(String category, String item) {
+      final norm = item
+          .toLowerCase()
+          .replaceAll(
+            RegExp(r'[\s·•:：,，.。!！?？;；()（）\[\]【】「」]'),
+            '',
+          );
+      if (norm.isEmpty || !seen.add(norm)) return;
+      buckets[category]!.add(item);
+    }
+
+    for (final rawLine in lines) {
+      final trimmed = rawLine.trim();
+      if (trimmed.isEmpty) continue;
+
+      final hm = _headingRe.firstMatch(trimmed);
+      if (hm != null) {
+        final h = _cleanInline(hm.group(1)!);
+        pendingTopic = '';
+        if (_isTopVersionHeading(h)) {
+          skipSection = false;
+          inVerificationSection = false;
+          continue;
+        }
+        if (_isBuildArtifactHeading(h)) {
+          skipSection = true;
+          inVerificationSection = false;
+          continue;
+        }
+        if (_isVerificationHeading(h)) {
+          skipSection = true;
+          inVerificationSection = true;
+          continue;
+        }
+        skipSection = false;
+        inVerificationSection = false;
+        continue;
+      }
+
+      final nbm = _numberedBoldRe.firstMatch(trimmed);
+      if (nbm != null) {
+        if (!skipSection) {
+          pendingTopic = _cleanInline(nbm.group(1)!);
+        }
+        continue;
+      }
+
+      final bm = _bulletRe.firstMatch(trimmed);
+      final content = bm != null ? bm.group(1)!.trim() : trimmed;
+
+      if (_isKnownLimitationLine(content)) {
+        addUnique(_catNote, _condenseItem(_cleanInline(content), 88));
+        continue;
+      }
+
+      if (skipSection) {
+        if (inVerificationSection && content.contains('已知限制')) {
+          addUnique(_catNote, _condenseItem(_cleanInline(content), 88));
+        }
+        continue;
+      }
+
+      if (_isNoiseMetadataLine(content)) {
+        final extracted = _extractOverviewFromMetaLine(content);
+        if (extracted.isNotEmpty && overview.isEmpty) {
+          overview = extracted;
+        }
+        continue;
+      }
+
+      if (bm == null &&
+          overview.isEmpty &&
+          currentCount() == 0 &&
+          content.startsWith('本次更新')) {
+        overview = _condenseItem(_cleanInline(content), 86);
+        continue;
+      }
+
+      var cleaned = _cleanInline(content);
+      if (cleaned.isEmpty || _isNoiseMetadataLine(cleaned)) continue;
+
+      if (pendingTopic.isNotEmpty && !cleaned.startsWith(pendingTopic)) {
+        if (!cleaned.contains('：') && !cleaned.contains(':')) {
+          cleaned = '$pendingTopic：$cleaned';
+        }
+        pendingTopic = '';
+      }
+
+      final condensed = _condenseItem(cleaned, 84);
+      if (condensed.isEmpty) continue;
+      addUnique(_classify(condensed), condensed);
+    }
+
+    final sections = <ReleaseNotesSection>[];
+    var total = 0;
+    for (final entry in buckets.entries) {
+      if (entry.value.isNotEmpty) {
+        sections.add(
+          ReleaseNotesSection(entry.key, List.unmodifiable(entry.value)),
+        );
+        total += entry.value.length;
+      }
+    }
+    return ReleaseNotesSummary(
+      overview: overview,
+      sections: List.unmodifiable(sections),
+      totalItems: total,
+    );
+  }
+
+  String toPlainText() {
+    if (sections.isEmpty) return overview;
+    if (totalItems == 1 && overview.isEmpty) {
+      return '• ${sections.first.items.first}';
+    }
+    final buf = StringBuffer();
+    if (overview.isNotEmpty) {
+      buf.writeln(overview);
+      buf.writeln();
+    } else if (totalItems >= 2) {
+      buf.writeln('共整理 $totalItems 项重点升级改进：');
+      buf.writeln();
+    }
+    final showHeaders = sections.length > 1 || totalItems >= 3;
+    for (var i = 0; i < sections.length; i++) {
+      final sec = sections[i];
+      if (showHeaders) {
+        buf.writeln('【${sec.title}】');
+      }
+      for (final item in sec.items) {
+        buf.writeln('• $item');
+      }
+      if (i + 1 < sections.length) buf.writeln();
+    }
+    return buf.toString().trimRight();
+  }
+
+  static String formatPlainText(String rawNotes) {
+    final parsed = parse(rawNotes);
+    if (parsed.isEmpty) return rawNotes.trim();
+    return parsed.toPlainText();
+  }
+
+  static bool _isTopVersionHeading(String h) {
+    final lower = h.toLowerCase();
+    return lower.startsWith('marco movie') ||
+        RegExp(r'^v?\d+\.\d+\.\d+').hasMatch(lower) ||
+        h == '更新内容' ||
+        h == '核心修复与优化' ||
+        lower == 'changes';
+  }
+
+  static bool _isBuildArtifactHeading(String h) {
+    final lower = h.toLowerCase();
+    return h.contains('包信息') ||
+        h.contains('构建记录') ||
+        h.contains('文件校验') ||
+        h.contains('安装包校验') ||
+        lower.contains('checksum') ||
+        lower.contains('artifact');
+  }
+
+  static bool _isVerificationHeading(String h) =>
+      h.contains('验证范围') || h.contains('测试记录') || h.contains('自动化验证');
+
+  static bool _isKnownLimitationLine(String line) =>
+      line.startsWith('已知限制：') ||
+      line.startsWith('已知限制:') ||
+      line.startsWith('注意事项：');
+
+  static bool _isNoiseMetadataLine(String line) {
+    final lower = line.toLowerCase();
+    if (line.startsWith('发布日期：') || line.startsWith('发布日期:')) return true;
+    if (lower.startsWith('platform:') || lower.startsWith('- platform:')) {
+      return true;
+    }
+    if (lower.startsWith('commit:') || lower.startsWith('- commit:')) {
+      return true;
+    }
+    if (lower.contains('sha-256') || lower.contains('sha256:')) return true;
+    if (line.contains('构建提交') || line.contains('对应源码包')) return true;
+    if (line.startsWith('通过公共内容守卫检查')) return true;
+    if (line.startsWith('自动化与') && line.contains('实机验收')) return true;
+    if (line.startsWith('未签名 IPA 支持巨魔') && line.contains('长期可用性承诺')) {
+      return true;
+    }
+    return false;
+  }
+
+  static String _extractOverviewFromMetaLine(String line) {
+    var rest = line;
+    while (true) {
+      final m = _metaSentenceRe.firstMatch(rest);
+      if (m != null) {
+        rest = rest.substring(m.end).trim();
+      } else {
+        break;
+      }
+    }
+    if (rest.isEmpty) return '';
+    return _condenseItem(_cleanInline(rest), 86);
+  }
+
+  static String _cleanInline(String raw) {
+    var s = raw.replaceAll(_techParenRe, '');
+    s = s.replaceAllMapped(_mdLinkRe, (m) => m.group(1) ?? '');
+    s = s.replaceAll('**', '').replaceAll('__', '').replaceAll('`', '');
+    s = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return s;
+  }
+
+  static String _condenseItem(String cleaned, int maxLen) {
+    var s = cleaned.trim();
+    if (s.isEmpty) return '';
+    if (s.length <= maxLen) return _stripTrailingPunct(s);
+    final semi = s.indexOf('；');
+    if (semi >= 14 && semi <= maxLen + 8) {
+      s = s.substring(0, semi);
+    }
+    final period = s.indexOf('。');
+    if (period >= 14 && period <= maxLen + 8) {
+      s = s.substring(0, period);
+    }
+    if (s.length > maxLen) {
+      final comma = s.lastIndexOf('，', maxLen);
+      if (comma >= maxLen ~/ 2) {
+        s = s.substring(0, comma);
+      } else {
+        s = '${s.substring(0, maxLen - 1)}…';
+      }
+    }
+    return _stripTrailingPunct(s);
+  }
+
+  static String _stripTrailingPunct(String s) {
+    var end = s.length;
+    while (end > 0) {
+      final ch = s[end - 1];
+      if (ch == '。' || ch == '；' || ch == ';' || ch == '，' || ch == ',') {
+        end--;
+      } else {
+        break;
+      }
+    }
+    return s.substring(0, end).trim();
+  }
+
+  static String _classify(String item) {
+    if (_isKnownLimitationLine(item)) return _catNote;
+    if (item.startsWith('修复') ||
+        _containsAny(item, const [
+          '报错',
+          '异常',
+          '崩溃',
+          '闪退',
+          '观看历史',
+          '观影记录',
+          '桌面快捷方式',
+          '桌面图标',
+        ])) {
+      return _catFix;
+    }
+    if (_containsAny(item, const [
+      '片源',
+      '线路',
+      '网盘',
+      '玩偶',
+      '夸克',
+      '百度',
+      '阿里',
+      'UC',
+      '播放',
+      '片头',
+      '片尾',
+      '常显时间',
+      '解码',
+      '直播',
+      '弹幕',
+      '字幕',
+      '插件',
+      '嗅探',
+    ])) {
+      return _catPlayback;
+    }
+    if (_containsAny(item, const [
+      '界面',
+      '海报',
+      '首页',
+      '筛选',
+      '分类',
+      '窗口',
+      '标题栏',
+      '沉浸式',
+      '中文',
+      '安装程序',
+      '安装向导',
+      '闪烁',
+      '加载更多',
+      '导航',
+      '遥控',
+      '设置页',
+    ])) {
+      return _catUi;
+    }
+    if (_containsAny(item, const [
+      '同步',
+      'WebDAV',
+      '局域网',
+      '收藏',
+      '新增',
+      '支持',
+      '引入',
+      '升级',
+    ])) {
+      return _catFeature;
+    }
+    return _catFix;
+  }
+
+  static bool _containsAny(String text, List<String> keywords) {
+    for (final kw in keywords) {
+      if (text.contains(kw)) return true;
+    }
+    return false;
+  }
 }

@@ -8,7 +8,11 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
 import android.text.TextUtils;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.StyleSpan;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.*;
@@ -474,8 +478,8 @@ final class UpdateScreen {
 
         if (notesHeading != null && notesBody != null) {
             if (rel != null && rel.notes != null && !rel.notes.trim().isEmpty()) {
-                notesHeading.setText("版本 " + rel.version + " 更新内容");
-                notesBody.setText(rel.notes.trim());
+                notesHeading.setText("版本 " + rel.version + " 更新摘要");
+                notesBody.setText(buildStyledNotes(rel.notes));
             } else {
                 notesHeading.setText("版本特性与安全保障");
                 notesBody.setText(
@@ -506,6 +510,81 @@ final class UpdateScreen {
         if (modeValueView != null) {
             modeValueView.setText(modeName(updates.mode()) + "  ›");
         }
+    }
+
+    static CharSequence buildStyledNotes(String rawNotes) {
+        ReleaseNotesFormatter.Summary summary = ReleaseNotesFormatter.summarize(rawNotes);
+        if (summary.sections.isEmpty()) {
+            return summary.overview.isEmpty() ? rawNotes.trim() : summary.overview;
+        }
+        SpannableStringBuilder sb = new SpannableStringBuilder();
+        if (!summary.overview.isEmpty()) {
+            int start = sb.length();
+            sb.append(summary.overview);
+            sb.setSpan(
+                    new ForegroundColorSpan(0xffe5e7eb),
+                    start,
+                    sb.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            sb.append("\n\n");
+        } else if (summary.totalItems >= 2) {
+            int start = sb.length();
+            sb.append("共整理 ").append(String.valueOf(summary.totalItems)).append(" 项重点升级改进");
+            sb.setSpan(
+                    new ForegroundColorSpan(0xff9ca3af),
+                    start,
+                    sb.length(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            sb.append("\n\n");
+        }
+        boolean showHeaders = summary.sections.size() > 1 || summary.totalItems >= 3;
+        for (int i = 0; i < summary.sections.size(); i++) {
+            ReleaseNotesFormatter.Section sec = summary.sections.get(i);
+            if (showHeaders) {
+                int hStart = sb.length();
+                sb.append("▎ ").append(sec.title);
+                sb.setSpan(
+                        new StyleSpan(Typeface.BOLD),
+                        hStart,
+                        sb.length(),
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                sb.setSpan(
+                        new ForegroundColorSpan(0xff5ac8fa),
+                        hStart,
+                        sb.length(),
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                sb.append("\n");
+            }
+            for (String item : sec.items) {
+                sb.append("• ");
+                int colon = item.indexOf('：');
+                if (colon > 0 && colon <= 24) {
+                    int bStart = sb.length();
+                    sb.append(item.substring(0, colon + 1));
+                    sb.setSpan(
+                            new StyleSpan(Typeface.BOLD),
+                            bStart,
+                            sb.length(),
+                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    sb.setSpan(
+                            new ForegroundColorSpan(MainActivity.WHITE),
+                            bStart,
+                            sb.length(),
+                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    sb.append(item.substring(colon + 1));
+                } else {
+                    sb.append(item);
+                }
+                sb.append("\n");
+            }
+            if (i + 1 < summary.sections.size()) {
+                sb.append("\n");
+            }
+        }
+        while (sb.length() > 0 && sb.charAt(sb.length() - 1) == '\n') {
+            sb.delete(sb.length() - 1, sb.length());
+        }
+        return sb;
     }
 
     static String modeName(String mode) {

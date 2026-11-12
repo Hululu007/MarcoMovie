@@ -155,11 +155,11 @@ final class MobileShell {
                 || retainedHeight != a.windowHeight()
                 || renderedPortrait != a.isPortrait()) return false;
         a.cancelPageRequests();
-        a.cancelArtwork();
         a.releasePlayer();
         a.generation++;
         ++homeRequest;
         if (resumeHome != null) resumeHome.run();
+        resumeMissingPosters(retainedRoot);
         refreshHeaderNetdiskCapsule();
         a.root = retainedRoot;
         a.setContentView(retainedRoot);
@@ -188,6 +188,20 @@ final class MobileShell {
                         });
         parent.removeViewAt(idx);
         parent.addView(replacement, idx, lp);
+    }
+
+    private void resumeMissingPosters(View view) {
+        if (view instanceof ImageView
+                && ((ImageView) view).getDrawable() == null
+                && view.getTag() instanceof String) {
+            a.poster((String) view.getTag(), (ImageView) view);
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                resumeMissingPosters(group.getChildAt(i));
+            }
+        }
     }
 
     MobileShell(MainActivity activity) {
@@ -1120,89 +1134,99 @@ final class MobileShell {
         body.addView(buildHomeTopHeaderRow(), new LinearLayout.LayoutParams(-1, -2));
 
         // 2. History shelf; the newest entry remains first and resumes on tap.
-        List<WatchHistory.Entry> history = a.watchHistory();
-        if (!history.isEmpty() && a.prefs.getBoolean(Prefs.MOBILE_SHOW_HISTORY, true)) {
-            LinearLayout histHeader = a.row();
-            histHeader.setGravity(Gravity.CENTER_VERTICAL);
-            histHeader.setPadding(a.dp(16), a.dp(14), a.dp(16), a.dp(8));
-            TextView hTitle = a.text("历史记录", 18, MainActivity.WHITE);
-            hTitle.setTypeface(null, Typeface.BOLD);
-            histHeader.addView(hTitle, new LinearLayout.LayoutParams(0, -2, 1));
-            TextView moreHist = a.text("查看全部", 13, 0xff0a84ff);
-            moreHist.setTypeface(null, Typeface.BOLD);
-            MobileDetailScreen.bindTouchFeedback(moreHist);
-            moreHist.setOnClickListener(
-                    v -> {
-                        mySubTab = 0;
-                        switchTab(3);
-                    });
-            histHeader.addView(moreHist);
-            body.addView(histHeader, new LinearLayout.LayoutParams(-1, -2));
+        final LinearLayout historyHost = a.vertical();
+        body.addView(historyHost, new LinearLayout.LayoutParams(-1, -2));
+        final Runnable refreshHistoryShelf =
+                () -> {
+                    historyHost.removeAllViews();
+                    List<WatchHistory.Entry> history = a.watchHistory();
+                    if (history.isEmpty() || !a.prefs.getBoolean(Prefs.MOBILE_SHOW_HISTORY, true)) {
+                        return;
+                    }
+                    LinearLayout histHeader = a.row();
+                    histHeader.setGravity(Gravity.CENTER_VERTICAL);
+                    histHeader.setPadding(a.dp(16), a.dp(14), a.dp(16), a.dp(8));
+                    TextView hTitle = a.text("历史记录", 18, MainActivity.WHITE);
+                    hTitle.setTypeface(null, Typeface.BOLD);
+                    histHeader.addView(hTitle, new LinearLayout.LayoutParams(0, -2, 1));
+                    TextView moreHist = a.text("查看全部", 13, 0xff0a84ff);
+                    moreHist.setTypeface(null, Typeface.BOLD);
+                    MobileDetailScreen.bindTouchFeedback(moreHist);
+                    moreHist.setOnClickListener(
+                            v -> {
+                                mySubTab = 0;
+                                switchTab(3);
+                            });
+                    histHeader.addView(moreHist);
+                    historyHost.addView(histHeader, new LinearLayout.LayoutParams(-1, -2));
 
-            HorizontalScrollView histScroll = new HorizontalScrollView(a);
-            histScroll.setHorizontalScrollBarEnabled(false);
-            histScroll.setClipToPadding(false);
-            histScroll.setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(2));
-            LinearLayout histRow = a.row();
-            histScroll.addView(histRow);
-            for (int i = 0; i < Math.min(8, history.size()); i++) {
-                final WatchHistory.Entry e = history.get(i);
-                LinearLayout card = a.row();
-                card.setTag("home-history:" + i);
-                card.setGravity(Gravity.CENTER_VERTICAL);
-                card.setPadding(a.dp(10), a.dp(10), a.dp(12), a.dp(10));
-                card.setBackground(
-                        glassBg(0xb81e2724, 0xb8151b19, a.dp(18), a.dp(0.8f), 0x2effffff));
-                MobileDetailScreen.bindTouchFeedback(card);
-                card.setOnClickListener(v -> a.resumeHistory(e));
+                    HorizontalScrollView histScroll = new HorizontalScrollView(a);
+                    histScroll.setHorizontalScrollBarEnabled(false);
+                    histScroll.setClipToPadding(false);
+                    histScroll.setPadding(a.dp(16), a.dp(2), a.dp(16), a.dp(2));
+                    LinearLayout histRow = a.row();
+                    histScroll.addView(histRow);
+                    for (int i = 0; i < Math.min(8, history.size()); i++) {
+                        final WatchHistory.Entry e = history.get(i);
+                        LinearLayout card = a.row();
+                        card.setTag("home-history:" + i);
+                        card.setGravity(Gravity.CENTER_VERTICAL);
+                        card.setPadding(a.dp(10), a.dp(10), a.dp(12), a.dp(10));
+                        card.setBackground(
+                                glassBg(0xb81e2724, 0xb8151b19, a.dp(18), a.dp(0.8f), 0x2effffff));
+                        MobileDetailScreen.bindTouchFeedback(card);
+                        card.setOnClickListener(v -> a.resumeHistory(e));
 
-                ImageView thumb = new ImageView(a);
-                thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                thumb.setBackground(a.bg(0xff232b28, 10));
-                thumb.setClipToOutline(true);
-                LinearLayout.LayoutParams thumbLp =
-                        new LinearLayout.LayoutParams(a.dp(46), a.dp(64));
-                thumbLp.rightMargin = a.dp(10);
-                card.addView(thumb, thumbLp);
-                if (e.poster != null && !e.poster.isEmpty()) a.poster(e.poster, thumb);
+                        ImageView thumb = new ImageView(a);
+                        thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                        thumb.setBackground(a.bg(0xff232b28, 10));
+                        thumb.setClipToOutline(true);
+                        LinearLayout.LayoutParams thumbLp =
+                                new LinearLayout.LayoutParams(a.dp(46), a.dp(64));
+                        thumbLp.rightMargin = a.dp(10);
+                        card.addView(thumb, thumbLp);
+                        if (e.poster != null && !e.poster.isEmpty()) a.poster(e.poster, thumb);
 
-                LinearLayout meta = a.vertical();
-                TextView t = a.text(e.title, 13.5f, MainActivity.WHITE);
-                t.setTypeface(null, Typeface.BOLD);
-                t.setSingleLine(true);
-                t.setEllipsize(TextUtils.TruncateAt.END);
-                meta.addView(t);
+                        LinearLayout meta = a.vertical();
+                        TextView t = a.text(e.title, 13.5f, MainActivity.WHITE);
+                        t.setTypeface(null, Typeface.BOLD);
+                        t.setSingleLine(true);
+                        t.setEllipsize(TextUtils.TruncateAt.END);
+                        meta.addView(t);
 
-                TextView sub = a.text(a.historyLabel(e), 11.5f, 0xff9ca3af);
-                sub.setSingleLine(true);
-                sub.setEllipsize(TextUtils.TruncateAt.END);
-                sub.setPadding(0, a.dp(3), 0, a.dp(7));
-                meta.addView(sub);
+                        TextView sub = a.text(a.historyLabel(e), 11.5f, 0xff9ca3af);
+                        sub.setSingleLine(true);
+                        sub.setEllipsize(TextUtils.TruncateAt.END);
+                        sub.setPadding(0, a.dp(3), 0, a.dp(7));
+                        meta.addView(sub);
 
-                // Progress bar matching iPhone Continue Watching card
-                FrameLayout progTrack = new FrameLayout(a);
-                progTrack.setBackground(a.bg(0x33ffffff, 2));
-                float frac =
-                        e.duration > 0
-                                ? Math.max(0.12f, Math.min(1f, (float) e.position / e.duration))
-                                : 0.2f;
-                View progFill = new View(a);
-                progFill.setBackground(a.bg(0xff0a84ff, 2));
-                progTrack.addView(
-                        progFill,
-                        new FrameLayout.LayoutParams(
-                                a.dp(Math.round(126 * frac)), a.dp(3), Gravity.START));
-                meta.addView(progTrack, new LinearLayout.LayoutParams(a.dp(126), a.dp(3)));
+                        // Progress bar matching iPhone Continue Watching card
+                        FrameLayout progTrack = new FrameLayout(a);
+                        progTrack.setBackground(a.bg(0x33ffffff, 2));
+                        float frac =
+                                e.duration > 0
+                                        ? Math.max(
+                                                0.12f,
+                                                Math.min(1f, (float) e.position / e.duration))
+                                        : 0.2f;
+                        View progFill = new View(a);
+                        progFill.setBackground(a.bg(0xff0a84ff, 2));
+                        progTrack.addView(
+                                progFill,
+                                new FrameLayout.LayoutParams(
+                                        a.dp(Math.round(126 * frac)), a.dp(3), Gravity.START));
+                        meta.addView(progTrack, new LinearLayout.LayoutParams(a.dp(126), a.dp(3)));
 
-                card.addView(meta, new LinearLayout.LayoutParams(0, -2, 1));
+                        card.addView(meta, new LinearLayout.LayoutParams(0, -2, 1));
 
-                LinearLayout.LayoutParams cardLp =
-                        new LinearLayout.LayoutParams(a.dp(212), a.dp(84));
-                cardLp.rightMargin = a.dp(12);
-                histRow.addView(card, cardLp);
-            }
-            body.addView(histScroll, new LinearLayout.LayoutParams(-1, -2));
-        }
+                        LinearLayout.LayoutParams cardLp =
+                                new LinearLayout.LayoutParams(a.dp(212), a.dp(84));
+                        cardLp.rightMargin = a.dp(12);
+                        histRow.addView(card, cardLp);
+                    }
+                    historyHost.addView(histScroll, new LinearLayout.LayoutParams(-1, -2));
+                };
+        refreshHistoryShelf.run();
 
         // 3. Featured Hero Showcase Card Container ("今日首推")
         final FrameLayout heroContainer = new FrameLayout(a);
@@ -1283,6 +1307,7 @@ final class MobileShell {
         final int[] completedPage = {0};
         resumeHome =
                 () -> {
+                    refreshHistoryShelf.run();
                     boolean showHero =
                             !SourceController.isConfigOrNetdiskSite(currentSite)
                                     && a.prefs.getBoolean(Prefs.SHOW_HERO_BANNER, true)
@@ -1302,8 +1327,7 @@ final class MobileShell {
                     loadingPage[0] = false;
                     pageFailed[0] = false;
                     currentPage = Math.max(1, completedPage[0]);
-                    loadMoreBtn.setVisibility(currentPage < totalPages ? View.VISIBLE : View.GONE);
-                    loadMoreBtn.setText("加载更多影片 (" + currentPage + "/" + totalPages + ")");
+                    loadMoreBtn.setVisibility(View.GONE);
                 };
         final Runnable[] fetchCategoryPage = new Runnable[1];
         reloadCategory =
@@ -1389,11 +1413,8 @@ final class MobileShell {
                         }
                         statusText.setVisibility(View.VISIBLE);
                         statusText.setText("正在加载…");
-                        loadMoreBtn.setVisibility(View.GONE);
-                    } else {
-                        loadMoreBtn.setVisibility(View.VISIBLE);
-                        loadMoreBtn.setText("正在加载更多…");
                     }
+                    loadMoreBtn.setVisibility(View.GONE);
                     final Cms.Site siteSnapshot = currentSite;
                     final String catSnapshot = selectedCategoryId;
                     final int pageSnapshot = currentPage;
@@ -1513,15 +1534,43 @@ final class MobileShell {
                                                 boolean configOrNetdisk =
                                                         SourceController.isConfigOrNetdiskSite(
                                                                 siteSnapshot);
+                                                final int prevVideoCount =
+                                                        pageSnapshot == 1
+                                                                ? 0
+                                                                : currentVideos.size();
                                                 if (pageSnapshot == 1) currentVideos.clear();
-                                                for (Cms.Video v : filtered) {
-                                                    if (configOrNetdisk
-                                                            || v.action == null
-                                                            || v.action.isEmpty()) {
-                                                        currentVideos.add(v);
+                                                java.util.Set<String> seenIds =
+                                                        new java.util.HashSet<>();
+                                                for (Cms.Video existing : currentVideos) {
+                                                    if (existing != null && existing.id != null) {
+                                                        seenIds.add(existing.id);
                                                     }
                                                 }
-                                                totalPages = Math.max(1, finalList.pageCount);
+                                                int addedCount = 0;
+                                                for (Cms.Video v : filtered) {
+                                                    if (v == null
+                                                            || v.id == null
+                                                            || v.id.trim().isEmpty()) {
+                                                        continue;
+                                                    }
+                                                    if ((configOrNetdisk
+                                                                    || v.action == null
+                                                                    || v.action.isEmpty())
+                                                            && seenIds.add(v.id)) {
+                                                        currentVideos.add(v);
+                                                        addedCount++;
+                                                    }
+                                                }
+                                                int resolvedPages =
+                                                        Math.max(1, finalList.pageCount);
+                                                if (pageSnapshot > 1
+                                                        && (finalList.videos.isEmpty()
+                                                                || (addedCount == 0
+                                                                        && filterSnapshot
+                                                                                .isEmpty()))) {
+                                                    resolvedPages = pageSnapshot;
+                                                }
+                                                totalPages = resolvedPages;
                                                 statusText.setVisibility(
                                                         currentVideos.isEmpty()
                                                                 ? View.VISIBLE
@@ -1530,45 +1579,39 @@ final class MobileShell {
                                                     statusText.setText(
                                                             selectedFilters.isEmpty()
                                                                     ? "当前分类暂无影片"
-                                                                    : "当前筛选暂无匹配，可继续加载更多影片");
+                                                                    : "当前筛选暂无匹配，可下滑继续筛选后续影片");
                                                 }
-                                                // Render Featured Hero Showcase on Recommend tab
-                                                if (!configOrNetdisk
-                                                        && a.prefs.getBoolean(
-                                                                Prefs.SHOW_HERO_BANNER, true)
-                                                        && catSnapshot.isEmpty()
-                                                        && !currentVideos.isEmpty()) {
-                                                    heroContainer.removeAllViews();
-                                                    heroContainer.addView(
-                                                            buildHeroShowcaseCard(
-                                                                    siteSnapshot,
-                                                                    currentVideos.get(0)));
-                                                    heroContainer.setVisibility(View.VISIBLE);
-                                                } else {
-                                                    heroContainer.removeAllViews();
-                                                    heroContainer.setVisibility(View.GONE);
+                                                if (pageSnapshot == 1) {
+                                                    // Render Featured Hero Showcase on Recommend
+                                                    // tab
+                                                    if (!configOrNetdisk
+                                                            && a.prefs.getBoolean(
+                                                                    Prefs.SHOW_HERO_BANNER, true)
+                                                            && catSnapshot.isEmpty()
+                                                            && !currentVideos.isEmpty()) {
+                                                        heroContainer.removeAllViews();
+                                                        heroContainer.addView(
+                                                                buildHeroShowcaseCard(
+                                                                        siteSnapshot,
+                                                                        currentVideos.get(0)));
+                                                        heroContainer.setVisibility(View.VISIBLE);
+                                                    } else {
+                                                        heroContainer.removeAllViews();
+                                                        heroContainer.setVisibility(View.GONE);
+                                                    }
+                                                    renderVideoGrid(
+                                                            gridContainer,
+                                                            siteSnapshot,
+                                                            currentVideos,
+                                                            0);
+                                                } else if (addedCount > 0) {
+                                                    renderVideoGrid(
+                                                            gridContainer,
+                                                            siteSnapshot,
+                                                            currentVideos,
+                                                            prevVideoCount);
                                                 }
-                                                final int savedScrollY = scrollView.getScrollY();
-                                                renderVideoGrid(
-                                                        gridContainer, siteSnapshot, currentVideos);
-                                                if (pageSnapshot > 1 && savedScrollY > 0) {
-                                                    scrollView.scrollTo(0, savedScrollY);
-                                                    scrollView.post(
-                                                            () ->
-                                                                    scrollView.scrollTo(
-                                                                            0, savedScrollY));
-                                                }
-                                                if (currentPage < totalPages) {
-                                                    loadMoreBtn.setVisibility(View.VISIBLE);
-                                                    loadMoreBtn.setText(
-                                                            "加载更多影片 ("
-                                                                    + currentPage
-                                                                    + "/"
-                                                                    + totalPages
-                                                                    + ")");
-                                                } else {
-                                                    loadMoreBtn.setVisibility(View.GONE);
-                                                }
+                                                loadMoreBtn.setVisibility(View.GONE);
                                             });
                                 } catch (Throwable e) {
                                     AppLog.w("MobileShell", "fetchCategoryPage failed", e);
@@ -1792,8 +1835,13 @@ final class MobileShell {
      * `12dp` rounded `2:3` poster with a smooth bottom gradient scrim and right-aligned `remarks`
      * inside the poster bottom edge, plus two-line left-aligned `title` + `year · area` below.
      */
-    private void renderVideoGrid(LinearLayout container, Cms.Site site, List<Cms.Video> videos) {
-        container.removeAllViews();
+    private void renderVideoGrid(
+            LinearLayout container, Cms.Site site, List<Cms.Video> videos, int startIndex) {
+        int safeStart = Math.max(0, startIndex);
+        if (safeStart == 0 || container.getChildCount() == 0) {
+            container.removeAllViews();
+            safeStart = 0;
+        }
         float widthDp = a.windowWidth() / a.getResources().getDisplayMetrics().density;
         int baseCols = widthDp >= 720 ? 5 : (widthDp >= 520 ? 4 : 3);
         int densityPref = a.prefs.getInt(Prefs.MOBILE_POSTER_DENSITY, 1);
@@ -1808,8 +1856,19 @@ final class MobileShell {
         int posterHeightDp = Math.round(cardWidthDp * 1.48f);
 
         LinearLayout currentRow = null;
-        for (int i = 0; i < videos.size(); i++) {
-            if (i % cols == 0) {
+        if (safeStart > 0 && safeStart % cols != 0 && container.getChildCount() > 0) {
+            View lastChild = container.getChildAt(container.getChildCount() - 1);
+            if (lastChild instanceof LinearLayout) {
+                currentRow = (LinearLayout) lastChild;
+                for (int c = currentRow.getChildCount() - 1; c >= 0; c--) {
+                    if ("grid-spacer".equals(currentRow.getChildAt(c).getTag())) {
+                        currentRow.removeViewAt(c);
+                    }
+                }
+            }
+        }
+        for (int i = safeStart; i < videos.size(); i++) {
+            if (i % cols == 0 || currentRow == null) {
                 currentRow = a.row();
                 currentRow.setGravity(Gravity.TOP);
                 container.addView(currentRow, new LinearLayout.LayoutParams(-1, -2));
@@ -1879,10 +1938,12 @@ final class MobileShell {
             int rem = videos.size() % cols;
             if (rem > 0) {
                 for (int i = rem; i < cols; i++) {
+                    View spacer = new View(a);
+                    spacer.setTag("grid-spacer");
                     LinearLayout.LayoutParams blankLp = new LinearLayout.LayoutParams(0, 1, 1);
                     blankLp.leftMargin = a.dp(5);
                     blankLp.rightMargin = i == cols - 1 ? 0 : a.dp(5);
-                    currentRow.addView(new View(a), blankLp);
+                    currentRow.addView(spacer, blankLp);
                 }
             }
         }
@@ -3715,27 +3776,32 @@ final class MobileShell {
                         "已关闭 · 单集播放完毕后停止",
                         autoNext,
                         next -> a.prefs.edit().putBoolean(Prefs.AUTO_NEXT, next).apply());
+                final boolean alwaysClock =
+                        a.prefs.getBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false);
+                addSettingToggleCard(
+                        body,
+                        SettingIconView.ICON_SPEED_GAUGE,
+                        "播放页常显时间",
+                        "已开启 · 播放页面右上角持续显示系统时间",
+                        "已关闭 · 仅在唤起控制栏时显示时间",
+                        alwaysClock,
+                        next ->
+                                a.prefs
+                                        .edit()
+                                        .putBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, next)
+                                        .apply());
 
                 a.gap(body, 18);
                 addSectionHeader(body, "片头片尾与字幕样式");
-                int introSec = a.prefs.getInt(Prefs.SKIP_INTRO_SECONDS, 0);
-                int outroSec = a.prefs.getInt(Prefs.SKIP_OUTRO_SECONDS, 0);
-                String skipDesc =
-                        (introSec > 0
-                                        ? "片头 " + PlaybackController.formatTime(introSec * 1000)
-                                        : "片头关闭")
-                                + " · "
-                                + (outroSec > 0
-                                        ? "片尾 " + PlaybackController.formatTime(outroSec * 1000)
-                                        : "片尾关闭");
+                int skipCount = PlaybackControls.countVideoSkipRecords(a);
                 addSettingCard(
                         body,
                         SettingIconView.ICON_SKIP_TIMELINE,
-                        "片头片尾跳过时间节点",
-                        skipDesc + "（支持手动拖动滑块精准设定）",
-                        () ->
-                                PlaybackControls.showSkipAdjuster(
-                                        a, true, introSec, 0, refreshInPlace));
+                        "片头片尾独立记录",
+                        skipCount <= 0
+                                ? "每部影片在播放页面独立保存片头片尾，不全局同步"
+                                : "已独立记录 " + skipCount + " 部影片 · 点击查看或清空",
+                        () -> PlaybackControls.showVideoSkipRecordsDialog(a, refreshInPlace));
 
                 int subSize = Prefs.clampSubtitleSize(a.prefs.getInt(Prefs.SUBTITLE_SIZE_SP, 45));
                 int subWeight =

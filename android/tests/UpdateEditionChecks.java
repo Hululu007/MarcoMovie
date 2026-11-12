@@ -125,6 +125,34 @@ public final class UpdateEditionChecks {
         check(
                 UpdatePolicy.mobileEdition("mobile") && !UpdatePolicy.mobileEdition("tv"),
                 "explicit installed edition");
+        String noisyNotes =
+                "# Marco Movie Android 电视 / 盒子 0.5.22\n\n"
+                        + "发布日期：2026-11-12。版本代码：`81`。本次更新带来独立片头片尾记忆与首页自动加载体验。\n\n"
+                        + "## 核心修复与优化\n\n"
+                        + "- **独立片头片尾跳过记录**：每部影片单独保存片头片尾时间（`VideoSkipStore`），不再全局覆盖其他剧集。\n"
+                        + "- **首页海报自动翻页与防闪烁**：滑动至底部自动加载下一页海报，移除多余按钮并消除刷新闪烁。\n"
+                        + "- **返回首页即时刷新观看历史**：看完影片返回首页立即展示最新观影记录。\n"
+                        + "- **独立片头片尾跳过记录**：每部影片单独保存片头片尾时间，不再全局覆盖其他剧集。\n\n"
+                        + "## 包信息与构建记录\n\n"
+                        + "- **SHA-256**：`aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`\n"
+                        + "- **构建提交**：`0123456789abcdef`\n\n"
+                        + "## 验证范围与已知限制\n\n"
+                        + "- 通过公共内容守卫检查与离线回归测试。\n"
+                        + "- 已知限制：部分外部源仍受限于上游网络环境。\n";
+        ReleaseNotesFormatter.Summary summary = ReleaseNotesFormatter.summarize(noisyNotes);
+        check(
+                summary.overview.contains("本次更新带来独立片头片尾记忆") && !summary.overview.contains("发布日期"),
+                "overview strips metadata prefix");
+        check(summary.totalItems == 4, "deduplicates bullets and strips checksums/CI logs");
+        String plain = ReleaseNotesFormatter.formatPlainText(noisyNotes);
+        check(
+                plain.contains("【片源与播放】")
+                        && plain.contains("【界面与交互】")
+                        && plain.contains("【问题修复与优化】")
+                        && plain.contains("【注意事项】")
+                        && !plain.contains("SHA-256")
+                        && !plain.contains("公共内容守卫"),
+                "grouped plain text omits build clutter");
         System.out.println("OK " + count + " update edition checks");
     }
 }

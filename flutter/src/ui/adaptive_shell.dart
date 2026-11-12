@@ -30,6 +30,7 @@ import 'ios_update_sheet.dart';
 import 'netdisk_sheet.dart';
 import 'player_screen.dart';
 import 'poster_image.dart';
+import 'release_notes_view.dart';
 import 'source_verification_dialog.dart';
 /// Apple HIG adaptive shell:
 /// - macOS / iPadOS / Desktop (`width >= 700`): Translucent sidebar with traffic-light inset & source card
@@ -65,10 +66,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   bool _homeLoading = false;
   bool _loadingMore = false;
   String? _homeError;
+  String? _loadMoreError;
   Object? _homeErrorCause;
   Future<void> Function()? _retryHomeError;
   int _homeEpoch = 0;
   int _categoryEpoch = 0;
+  bool _autoPagingScheduled = false;
   Completer<void>? _homeAbort;
   Completer<void>? _categoryAbort;
   Completer<void>? _liveAbort;
@@ -146,6 +149,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
         widget.storage.glassBlurLevel == 'solid' ||
             widget.storage.glassBlurStrength <= 0.02;
     GlassworkBackdrop.intensity.value = widget.storage.glassBlurStrength;
+    widget.storage.watchHistoryRevision.addListener(_onWatchHistoryRevision);
     _reloadSavedConfig();
     if (!Platform.environment.containsKey('FLUTTER_TEST')) {
       unawaited(_runStartupWebdavSync());
@@ -231,8 +235,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     unawaited(CatPawHost.instance.close());
     unawaited(CmsClient.closeScriptSessions());
   }
+  void _onWatchHistoryRevision() {
+    if (mounted) setState(() {});
+  }
   @override
   void dispose() {
+    widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryRevision);
     widget.storage.cancelPendingAutoSync();
     if (_windowListenerAttached) {
       windowManager.removeListener(this);
@@ -324,7 +332,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       _homeLoading = true;
       _loadingMore = false;
       _homeError = null;
+      _loadMoreError = null;
       _primaryTab = 'recommend';
+      _filterExpanded = false;
       _selectedCategoryId = '';
       _filterSubCategoryId = '';
       _filterGenreLabel = '';
@@ -357,7 +367,8 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       setState(() {
         _homeLoading = false;
         _loadingMore = false;
-        _homeError = '读取片源「${site.name}」失败：$e';
+        _homeError =
+            '读取片源「${site.name}」失败：${CmsClient.cleanErrorMessage(e)}';
         _homeErrorCause = e;
         _retryHomeError = _loadSiteHome;
       });
@@ -377,17 +388,29 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   }
   Future<void> _selectPrimaryTab(String tabKey) async {
     if (tabKey == 'recommend') {
+      if (_primaryTab == 'recommend' &&
+          _filterSubCategoryId.isEmpty &&
+          _filterGenreLabel.isEmpty) {
+        if (_filterExpanded) setState(() => _filterExpanded = false);
+        return;
+      }
       setState(() {
         _primaryTab = 'recommend';
+        _filterExpanded = false;
         _filterSubCategoryId = '';
         _filterGenreLabel = '';
       });
       await _reloadFilteredListing(page: 1);
       return;
     }
+    if (_primaryTab == tabKey) {
+      setState(() => _filterExpanded = !_filterExpanded);
+      return;
+    }
     final resolved = CmsParser.resolvePrimaryTabCategory(_categories, tabKey);
     setState(() {
       _primaryTab = tabKey;
+      _filterExpanded = false;
       _filterSubCategoryId = '';
       _filterGenreLabel = '';
       _selectedCategoryId = resolved.categoryId;
@@ -426,6 +449,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
         _loadingMore = true;
       }
       _homeError = null;
+      _loadMoreError = null;
       _selectedCategoryId = targetCategoryId;
     });
     try {
@@ -536,8 +560,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
         _currentPage = page;
         if (page == 1) {
           _pageCount = listing.pageCount;
-        } else if (addedCount == 0 && listing.videos.isEmpty) {
-          // Reached the end of available pages
+        } else if (listing.videos.isEmpty ||
+            (addedCount == 0 && !filter.hasSubFilter)) {
+          // Reached the end of available pages (or source repeats duplicate pages)
           _pageCount = page;
         } else {
           _pageCount = math.max(_pageCount, listing.pageCount);
@@ -553,9 +578,11 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
         _homeLoading = false;
         _loadingMore = false;
         if (page == 1 || CmsClient.needsSourceVerification(site, e)) {
-          _homeError = '加载分类失败：$e';
+          _homeError = '加载分类失败：${CmsClient.cleanErrorMessage(e)}';
           _homeErrorCause = e;
           _retryHomeError = () => _reloadFilteredListing(page: page);
+        } else {
+          _loadMoreError = CmsClient.cleanErrorMessage(e);
         }
       });
     }
@@ -1496,6 +1523,18 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                       return _buildVideoCard(_activeSite!, video);
                     },
                     childCount: _homeVideos.length,
+                    findChildIndexCallback: (Key key) {
+                      if (key is! ValueKey<String>) return null;
+                      final siteKey = _activeSite?.key ?? '';
+                      final target = key.value;
+                      for (int i = 0; i < _homeVideos.length; i++) {
+                        final v = _homeVideos[i];
+                        final expected =
+                            'vcard_${siteKey}_${v.id.isNotEmpty ? v.id : v.title}_';
+                        if (expected == target) return i;
+                      }
+                      return null;
+                    },
                   ),
                 ),
               ),
@@ -1519,11 +1558,11 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                                 ),
                               ),
                             )
-                      : (_homeError == null && _currentPage < _pageCount
+                      : (_loadMoreError != null && _currentPage < _pageCount
                           ? AppleCapsuleButton(
-                              key: const ValueKey('home-load-more-button'),
-                              label: '加载更多影片',
-                              icon: CupertinoIcons.arrow_down_circle,
+                              label: '重试加载更多',
+                              icon: CupertinoIcons.refresh,
+                              compact: true,
                               onPressed: () => _reloadFilteredListing(
                                 page: _currentPage + 1,
                               ),
@@ -1535,8 +1574,38 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
           ],
         ],
       );
+          final autoPagingScrollView = NotificationListener<ScrollNotification>(
+            onNotification: (notification) {
+              if (notification.metrics.axis == Axis.vertical &&
+                  (notification.metrics.maxScrollExtent > 0 ||
+                      notification.metrics.pixels > 16) &&
+                  notification.metrics.extentAfter < 420 &&
+                  !_homeLoading &&
+                  !_loadingMore &&
+                  !_autoPagingScheduled &&
+                  _homeError == null &&
+                  _loadMoreError == null &&
+                  _currentPage < _pageCount) {
+                _autoPagingScheduled = true;
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  _autoPagingScheduled = false;
+                  if (!mounted ||
+                      _homeLoading ||
+                      _loadingMore ||
+                      _homeError != null ||
+                      _loadMoreError != null ||
+                      _currentPage >= _pageCount) {
+                    return;
+                  }
+                  _reloadFilteredListing(page: _currentPage + 1);
+                });
+              }
+              return false;
+            },
+            child: homeScrollView,
+          );
           if (isWindowsDesktopUi) {
-            return homeScrollView;
+            return autoPagingScrollView;
           }
           return ShaderMask(
             blendMode: BlendMode.dstIn,
@@ -1553,7 +1622,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
               ],
               stops: [0.0, s1, s2, s3, 0.968, 1.0],
             ).createShader(rect),
-            child: homeScrollView,
+            child: autoPagingScrollView,
           );
         },
       ),
@@ -3337,6 +3406,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
 
   void _exitPrivacySpace() {
     HapticFeedback.lightImpact();
+    widget.storage.clearPrivateVideoSkipRecords();
     _searchSubscription?.cancel();
     _searchResults.clear();
     _searchController.clear();
@@ -5495,11 +5565,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
       };
 
   String get _skipIntroOutroSummary {
-    final skipIntro = widget.storage.skipIntroSec;
-    final skipOutro = widget.storage.skipOutroSec;
-    return (skipIntro == 0 && skipOutro == 0)
-        ? '未开启'
-        : '片头 ${skipIntro}s · 片尾 ${skipOutro}s';
+    final count = widget.storage.countVideoSkipRecords(
+      forPrivate: _privateSessionUnlocked,
+    );
+    return count <= 0 ? '按影片独立记录' : '已记录 $count 部';
   }
 
   Widget _buildSettingsQuickActionRow({
@@ -6488,7 +6557,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                 storage.setEpisodesDescending,
               ),
               IosSettingsGroup(
-                header: '连续播放',
+                header: '连续播放与时钟',
                 children: [
                   toggleRow(
                     '自动播放下一集',
@@ -6496,6 +6565,13 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                     AppleColors.systemGreen,
                     storage.autoNext,
                     storage.setAutoNext,
+                  ),
+                  toggleRow(
+                    '播放页常显时间',
+                    CupertinoIcons.clock_fill,
+                    AppleColors.systemTeal,
+                    storage.playerAlwaysShowClock,
+                    storage.setPlayerAlwaysShowClock,
                   ),
                 ],
               ),
@@ -6941,8 +7017,8 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
               settingKey: 'skip_intro_outro',
               icon: CupertinoIcons.forward_fill,
               iconBgColor: AppleColors.systemIndigo,
-              title: '片头 / 片尾自动跳过',
-              subtitle: '设置剧集统一的片头起播与片尾跳过秒数',
+              title: '片头 / 片尾独立记录',
+              subtitle: '每部影片独立记录片头片尾跳过时间，不全局同步',
               trailingText: _skipIntroOutroSummary,
               onStateChanged: refreshBoth,
               drawerChild:
@@ -6977,6 +7053,20 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                 activeTrackColor: AppleColors.systemGreen,
                 onChanged: (v) async {
                   await widget.storage.setAutoNext(v);
+                  refreshBoth();
+                },
+              ),
+            ),
+            AppleGroupedTile(
+              icon: CupertinoIcons.clock_fill,
+              iconBgColor: AppleColors.systemTeal,
+              title: '播放页常显时间',
+              subtitle: '在播放页面右上角独立常显当前系统时间',
+              trailing: CupertinoSwitch(
+                value: widget.storage.playerAlwaysShowClock,
+                activeTrackColor: AppleColors.systemGreen,
+                onChanged: (v) async {
+                  await widget.storage.setPlayerAlwaysShowClock(v);
                   refreshBoth();
                 },
               ),
@@ -7551,34 +7641,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   }
 
   Widget _buildSkipIntroOutroDrawerBody({VoidCallback? onStateChanged}) {
-    const presets = <int>[0, 15, 30, 60, 90, 120, 180];
-    final curIntro = widget.storage.skipIntroSec;
-    final curOutro = widget.storage.skipOutroSec;
-    String fmtSec(int s) {
-      if (s <= 0) return '00:00 (关闭)';
-      final m = s ~/ 60;
-      final r = s % 60;
-      return '${m.toString().padLeft(2, '0')}:${r.toString().padLeft(2, '0')} (${s}s)';
-    }
-
-    Future<void> updateIntro(int sec) async {
-      await widget.storage.setSkipIntroSec(sec.clamp(0, 300));
-      if (onStateChanged != null) {
-        onStateChanged();
-      } else {
-        setState(() {});
-      }
-    }
-
-    Future<void> updateOutro(int sec) async {
-      await widget.storage.setSkipOutroSec(sec.clamp(0, 300));
-      if (onStateChanged != null) {
-        onStateChanged();
-      } else {
-        setState(() {});
-      }
-    }
-
+    final recordedCount = widget.storage.countVideoSkipRecords(
+      forPrivate: _privateSessionUnlocked,
+    );
     return Padding(
       padding: const EdgeInsets.all(14),
       child: Column(
@@ -7586,187 +7651,65 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
         children: [
           Row(
             children: [
-              const Expanded(
+              const Icon(
+                CupertinoIcons.film_fill,
+                size: 16,
+                color: AppleColors.systemBlue,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
                 child: Text(
-                  '跳过片头时长',
-                  style: TextStyle(
-                    color: AppleColors.labelSecondary,
-                    fontSize: 12.5,
+                  recordedCount > 0
+                      ? '当前空间已独立记录 $recordedCount 部影片'
+                      : '当前空间暂无片头 / 片尾独立记录',
+                  style: const TextStyle(
+                    color: AppleColors.labelPrimary,
+                    fontSize: 13.5,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
               ),
-              Text(
-                fmtSec(curIntro),
-                style: const TextStyle(
-                  color: AppleColors.systemBlue,
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
             ],
           ),
-          SizedBox(
-            width: double.infinity,
-            child: CupertinoSlider(
-              value: curIntro.clamp(0, 300).toDouble(),
-              min: 0,
-              max: 300,
-              divisions: 300,
-              activeColor: AppleColors.systemBlue,
-              onChanged: (v) => updateIntro(v.round()),
+          const SizedBox(height: 8),
+          const Text(
+            '每部影片独立记录片头与片尾跳过节点，仅保存在本机、不跨片共用也不参与全局同步。在播放页点击「跳片头 / 跳片尾」会优先默认设为当前播放时间，并支持按秒微调。',
+            style: TextStyle(
+              color: AppleColors.labelSecondary,
+              fontSize: 12.5,
+              height: 1.45,
             ),
           ),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final delta in const [-5, -1, 1, 5])
-                GestureDetector(
-                  onTap: () => updateIntro(curIntro + delta),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0x18FFFFFF),
-                      borderRadius: BorderRadius.circular(999),
-                      border: Border.all(
-                        color: const Color(0x2EFFFFFF),
-                        width: 0.5,
-                      ),
-                    ),
-                    child: Text(
-                      delta > 0 ? '+${delta}s' : '${delta}s',
-                      style: const TextStyle(
-                        color: AppleColors.labelSecondary,
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-              for (final sec in presets)
-                GestureDetector(
-                  onTap: () => updateIntro(sec),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 13,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: curIntro == sec
-                          ? AppleColors.systemBlue
-                          : const Color(0x22FFFFFF),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Text(
-                      sec == 0 ? '关闭' : '${sec}s',
-                      style: TextStyle(
-                        color: curIntro == sec
-                            ? Colors.white
-                            : AppleColors.labelPrimary,
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  '跳过片尾时长',
+          if (recordedCount > 0) ...[
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: CupertinoButton(
+                padding: const EdgeInsets.symmetric(vertical: 9),
+                minSize: 36,
+                color: const Color(0x28FF453A),
+                borderRadius: BorderRadius.circular(12),
+                onPressed: () async {
+                  await widget.storage.clearVideoSkipRecords(
+                    forPrivate: _privateSessionUnlocked,
+                  );
+                  if (onStateChanged != null) {
+                    onStateChanged();
+                  } else if (mounted) {
+                    setState(() {});
+                  }
+                },
+                child: const Text(
+                  '清空全部片头片尾独立记录',
                   style: TextStyle(
-                    color: AppleColors.labelSecondary,
-                    fontSize: 12.5,
+                    color: AppleColors.systemRed,
+                    fontSize: 13,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
               ),
-              Text(
-                fmtSec(curOutro),
-                style: const TextStyle(
-                  color: AppleColors.systemBlue,
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-          ),
-          SizedBox(
-            width: double.infinity,
-            child: CupertinoSlider(
-              value: curOutro.clamp(0, 300).toDouble(),
-              min: 0,
-              max: 300,
-              divisions: 300,
-              activeColor: AppleColors.systemBlue,
-              onChanged: (v) => updateOutro(v.round()),
             ),
-          ),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final delta in const [-5, -1, 1, 5])
-                GestureDetector(
-                  onTap: () => updateOutro(curOutro + delta),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 5,
-                    ),
-                    decoration: BoxDecoration(
-                      color: const Color(0x18FFFFFF),
-                      borderRadius: BorderRadius.circular(999),
-                      border: Border.all(
-                        color: const Color(0x2EFFFFFF),
-                        width: 0.5,
-                      ),
-                    ),
-                    child: Text(
-                      delta > 0 ? '+${delta}s' : '${delta}s',
-                      style: const TextStyle(
-                        color: AppleColors.labelSecondary,
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-              for (final sec in presets)
-                GestureDetector(
-                  onTap: () => updateOutro(sec),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 13,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: curOutro == sec
-                          ? AppleColors.systemBlue
-                          : const Color(0x22FFFFFF),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Text(
-                      sec == 0 ? '关闭' : '${sec}s',
-                      style: TextStyle(
-                        color: curOutro == sec
-                            ? Colors.white
-                            : AppleColors.labelPrimary,
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
+          ],
         ],
       ),
     );
@@ -7789,32 +7732,8 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     }
   }
 
-  static String _formatCleanReleaseNotes(String raw) {
-    final lines = raw.split(RegExp(r'\r?\n'));
-    final out = <String>[];
-    for (var line in lines) {
-      var trimmed = line.trim();
-      if (trimmed.isEmpty) continue;
-      trimmed = trimmed
-          .replaceFirst(RegExp(r'^#{1,6}\s*'), '')
-          .replaceAll('**', '')
-          .replaceAll('`', '')
-          .trim();
-      if (trimmed.startsWith('- Platform:') ||
-          trimmed.startsWith('Platform:') ||
-          trimmed.startsWith('- Commit:') ||
-          trimmed.startsWith('Commit:')) {
-        continue;
-      }
-      if (trimmed.toLowerCase() == 'changes') {
-        trimmed = '本次更新内容：';
-      } else if (trimmed.startsWith('- ')) {
-        trimmed = '• ${trimmed.substring(2).trim()}';
-      }
-      out.add(trimmed);
-    }
-    return out.join('\n');
-  }
+  static String _formatCleanReleaseNotes(String raw) =>
+      ReleaseNotesSummary.formatPlainText(raw);
 
   static bool _isRemoteVersionNewer(String remote, String current) {
     List<int> parseParts(String v) => v
@@ -7976,7 +7895,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                   }
                   await Process.start(
                     filePath,
-                    const [],
+                    [
+                      '/MERGETASKS=!desktopicon',
+                      '/DIR=${File(Platform.resolvedExecutable).parent.path}',
+                    ],
                     mode: ProcessStartMode.detached,
                   );
                   if (ctx.mounted) setSheetState(() {
@@ -8061,7 +7983,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                     const SizedBox(height: 14),
                     Container(
                       width: double.infinity,
-                      constraints: const BoxConstraints(maxHeight: 200),
+                      constraints: const BoxConstraints(maxHeight: 240),
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: AppleColors.groupedSecondary,
@@ -8072,13 +7994,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
                         ),
                       ),
                       child: SingleChildScrollView(
-                        child: Text(
-                          releaseNotes,
-                          style: const TextStyle(
-                            color: AppleColors.labelSecondary,
-                            fontSize: 12.5,
-                            height: 1.45,
-                          ),
+                        child: ReleaseNotesSummaryView(
+                          rawNotes: release?.notes ?? releaseNotes,
+                          fontSize: 12.5,
                         ),
                       ),
                     ),

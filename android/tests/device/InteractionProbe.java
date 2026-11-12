@@ -759,12 +759,12 @@ public final class InteractionProbe extends Instrumentation {
                                                     .getDecorView()
                                                     .getHeight()
                                             < a.root.getHeight() * .7f));
-            for (int i = 0; i < 12; i++) key(KeyEvent.KEYCODE_DPAD_DOWN);
+            for (int i = 0; i < 13; i++) key(KeyEvent.KEYCODE_DPAD_DOWN);
             check(
                     "bubble_last_option_reachable",
                     ui(
                             () ->
-                                    "player-option:12"
+                                    "player-option:13"
                                             .equals(
                                                     a.playbackControls
                                                             .activeDialog

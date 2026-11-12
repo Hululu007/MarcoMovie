@@ -3057,14 +3057,26 @@ class _PosterImageState extends State<PosterImage>
   @override
   void didUpdateWidget(covariant PosterImage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.url.trim() != widget.url.trim() ||
-        oldWidget.title.trim() != widget.title.trim() ||
-        oldWidget.year.trim() != widget.year.trim() ||
-        oldWidget.highRes != widget.highRes) {
+    final sameIdentity = oldWidget.url.trim() == widget.url.trim() &&
+        oldWidget.title.trim() == widget.title.trim() &&
+        oldWidget.year.trim() == widget.year.trim();
+    if (!sameIdentity) {
       _retryTimer?.cancel();
       _retryCount = 0;
       _resubscribeKeys();
       _initLoad();
+      return;
+    }
+    if (oldWidget.highRes != widget.highRes) {
+      _resubscribeKeys();
+      if (widget.highRes &&
+          _bytes != null &&
+          !widget.forBackdrop &&
+          widget.title.trim().isNotEmpty) {
+        unawaited(_verifyAndUpgradeIfLowRes(_bytes!, widget.title.trim()));
+      } else if (_bytes == null) {
+        _initLoad();
+      }
     }
   }
 

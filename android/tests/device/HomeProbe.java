@@ -475,13 +475,17 @@ public final class HomeProbe extends Instrumentation {
                                     a.current.homeState.category.equals("c1")
                                             && tag("source-switcher").hasFocus()));
             check(
-                    "concrete_category_auto_shows_inline_filters_without_rail_buttons",
+                    "concrete_category_collapses_inline_filters_by_default",
                     ui(
                             () ->
                                     tag("home-filters") == null
                                             && tag("home-category-more") == null
                                             && tag("home-tab:7") != null
-                                            && tag("home-inline-filters").isShown()));
+                                            && !tag("home-inline-filters").isShown()));
+            click("home-tab:1");
+            check(
+                    "clicking_selected_category_expands_inline_filters",
+                    ui(() -> tag("home-inline-filters").isShown()));
             runOnMainSync(() -> tag("home-filter:class:0").requestFocus());
             SystemClock.sleep(250);
             check(
@@ -778,7 +782,10 @@ public final class HomeProbe extends Instrumentation {
                     "late_category_cannot_overwrite",
                     ui(() -> a.current.homeState.videos.get(0).id.startsWith("c2")));
             View beforeAppend = tag("home-video:0");
-            click("home-load-more");
+            check(
+                    "load_more_button_not_shown_before_auto_page",
+                    ui(() -> !tag("home-load-more").isShown()));
+            runOnMainSync(() -> tag("home-video:10").requestFocus());
             await(() -> tag("home-video:14") != null);
             check("pagination_keeps_existing_cards", ui(() -> tag("home-video:0") == beforeAppend));
             check(
@@ -868,7 +875,45 @@ public final class HomeProbe extends Instrumentation {
             check(
                     "detail_return_sends_no_catalogue_requests",
                     homeRequests.get() == homeCount && categoryRequests.get() == categoryCount);
+            click("home-video:11");
+            await(() -> tag("detail-favorite") != null);
+            runOnMainSync(
+                    () -> {
+                        WatchHistory.Entry watched = new WatchHistory.Entry();
+                        watched.site = "home-fixture";
+                        watched.id = "c2-1-11";
+                        watched.title = "刚看完的新片";
+                        watched.poster = "https://fixture.test/poster.png";
+                        watched.line = "样本";
+                        watched.episode = "第 1 集";
+                        watched.position = 120000;
+                        watched.duration = 120000;
+                        watched.updated = System.currentTimeMillis();
+                        a.prefs
+                                .edit()
+                                .putString(
+                                        Prefs.WATCH_HISTORY,
+                                        WatchHistory.upsert(
+                                                a.prefs.getString(Prefs.WATCH_HISTORY, "[]"),
+                                                watched))
+                                .commit();
+                    });
+            key(KeyEvent.KEYCODE_BACK);
+            await(() -> tag("home-history:0") != null);
+            check(
+                    "resume_refreshes_watch_history_immediately",
+                    ui(
+                            () ->
+                                    a.root == retainedHome
+                                            && tag("home-history:0")
+                                                    .getContentDescription()
+                                                    .toString()
+                                                    .startsWith("刚看完的新片")));
             runOnMainSync(() -> tag("home-tab:2").requestFocus());
+            check(
+                    "focus_category_keeps_filters_collapsed",
+                    ui(() -> !tag("home-inline-filters").isShown()));
+            click("home-tab:2");
             await(
                     () ->
                             tag("home-inline-filters").isShown()

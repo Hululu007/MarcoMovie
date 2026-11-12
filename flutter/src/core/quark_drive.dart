@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'models.dart';
 import 'cloud_media_proxy.dart';
 import 'quark_account.dart';
+import 'resilient_http_client.dart';
 import 'source_playback.dart';
 
 /// Account-scoped drive access and original public share resolution.
@@ -17,7 +18,7 @@ class QuarkDriveClient {
     http.Client Function()? mediaClientFactory,
     this.isCancelled,
   })  : _accounts = accounts,
-        _http = httpClient ?? http.Client(),
+        _http = httpClient ?? ResilientHttpClient(),
         _ownsHttp = httpClient == null,
         _mediaClientFactory =
             mediaClientFactory ?? CloudMediaLease.createDefaultMediaClient;
@@ -263,18 +264,20 @@ class QuarkDriveClient {
     http.Client? httpClient,
     bool Function()? isCancelled,
   }) async {
+    final cleaned =
+        ResilientHttpClient.normalizeCloudShareUrl(shareUrl) ?? shareUrl.trim();
     final match = RegExp(
       r'^https?://pan\.quark\.cn/s/([A-Za-z0-9_-]{1,128})(?:[/?#\s]|$)',
       caseSensitive: false,
-    ).firstMatch(shareUrl.trim());
+    ).firstMatch(cleaned);
     if (match == null) return const [];
     final pwdId = match.group(1)!;
     final passcode = RegExp(
-          r'(?:pwd|passcode|code|提取码)[=:：\s]*([A-Za-z0-9]{4})',
+          r'(?:pwd|passcode|password|code|提取码)[=:：\s]*([A-Za-z0-9]{4})',
           caseSensitive: false,
-        ).firstMatch(shareUrl)?.group(1) ??
+        ).firstMatch(cleaned)?.group(1) ??
         '';
-    final client = httpClient ?? http.Client();
+    final client = httpClient ?? ResilientHttpClient();
     try {
       final token =
           await _shareToken(client, pwdId, passcode, isCancelled: isCancelled);

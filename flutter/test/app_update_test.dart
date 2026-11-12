@@ -96,4 +96,38 @@ void main() {
     expect(() => AppUpdate.parse({'platform': 'ios', 'versionName': '0.5.1'}),
         throwsFormatException);
   });
+
+  test('ReleaseNotesSummary condenses, deduplicates, categorizes and strips checksum clutter', () {
+    const raw = '''
+# Marco Movie Windows 0.5.18
+
+发布日期：2026-11-12。应用版本：`0.5.18`（构建号 `68`）。本次更新升级沉浸式窗口与多线路兼容能力。
+
+## 核心修复与优化
+
+- **片源与网盘解析增强**：适配 32 款 WEX 插件并优化玩偶网盘分享解析（`ResilientHttpClient`）。
+- **沉浸式窗口与中文安装向导**：Windows 标题栏升级沉浸式融合，安装程序全面切换简体中文。
+- **修复更新后桌面重复图标**：覆盖升级不再重复创建桌面快捷方式。
+- **片源与网盘解析增强**：适配 32 款 WEX 插件并优化玩偶网盘分享解析。
+
+## 包信息与构建记录
+
+- **安装版**：`MarcoMovie-0.5.18-windows-x64-setup.exe`，SHA-256：`aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`。
+- **构建提交**：`0123456789abcdef`。
+
+## 验证范围与已知限制
+
+- 通过公共内容守卫检查与全部自动化测试。
+- 已知限制：第三方上游站点受自身网络波动影响。
+''';
+    final summary = ReleaseNotesSummary.parse(raw);
+    expect(summary.overview, contains('本次更新升级沉浸式窗口'));
+    expect(summary.overview, isNot(contains('发布日期')));
+    expect(summary.totalItems, 4);
+    final titles = summary.sections.map((s) => s.title).toList();
+    expect(titles, containsAll(['片源与播放', '界面与交互', '问题修复与优化', '注意事项']));
+    final plain = summary.toPlainText();
+    expect(plain, isNot(contains('SHA-256')));
+    expect(plain, isNot(contains('公共内容守卫')));
+  });
 }

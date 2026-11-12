@@ -27,6 +27,7 @@ import 'source_verification.dart';
 import 'models.dart';
 import 'quark_drive.dart';
 import 'quark_account.dart';
+import 'resilient_http_client.dart';
 import 'storage_service.dart';
 import 'web_media_resolver.dart';
 /// HTTP CMS client with TVBox `okhttp/3.15` User-Agent parity, system certificate validation for third-party
@@ -102,6 +103,25 @@ class CmsClient {
     return () => abort?.isCompleted == true || lifetime?.call() == true;
   }
 
+  static String cleanErrorMessage(Object error) {
+    final raw = switch (error) {
+      AliShareException e => e.message,
+      QuarkDriveException e => e.message,
+      QuarkAccountException e => e.message,
+      FormatException e => e.message,
+      _ => error.toString(),
+    };
+    final cleaned = raw
+        .replaceFirst(
+          RegExp(
+            r'^(?:FormatException|Exception|StateError|HttpException|SocketException|HandshakeException):\s*',
+          ),
+          '',
+        )
+        .trim();
+    return cleaned.isEmpty ? error.toString().trim() : cleaned;
+  }
+
   static String cloudPlaybackError(CmsEpisode episode, Object? error) {
     if (episode.cloudProvider == null) return '';
     final message = switch (error) {
@@ -119,7 +139,9 @@ class CmsClient {
   Future<String> _cloudCredential(String provider) async =>
       (await StorageService.init()).netdiskCredential(provider);
 
-  Future<List<CmsEpisode>> _listCloudShare(String url) async {
+  Future<List<CmsEpisode>> _listCloudShare(String rawUrl) async {
+    final url =
+        ResilientHttpClient.normalizeCloudShareUrl(rawUrl) ?? rawUrl.trim();
     if (CloudShareClient.supportsShare(url)) {
       final cloud = CloudShareClient(client: _http, credentialReader: _cloudCredential, isCancelled: _sourceCancelled);
       try { return await cloud.listShare(url); } finally { cloud.close(); }
@@ -1183,8 +1205,19 @@ class CmsClient {
           final sep = s.indexOf(r'$');
           final label = sep < 0 ? '正片' : s.substring(0, sep);
           final epId = sep < 0 ? s : s.substring(sep + 1);
-          if (epId.trimLeft().startsWith('mmshare://')) {
-            return '$label\$${epId.trim()}';
+          final trimmedEpId = epId.trim();
+          if (trimmedEpId.startsWith('mmshare://')) {
+            final norm = ResilientHttpClient.normalizeCloudShareUrl(trimmedEpId);
+            return '$label\$mmshare://${norm ?? trimmedEpId.substring('mmshare://'.length).trim()}';
+          }
+          if (trimmedEpId.toLowerCase().startsWith('push://') ||
+              trimmedEpId.toLowerCase().startsWith('http://') ||
+              trimmedEpId.toLowerCase().startsWith('https://')) {
+            final normShare =
+                ResilientHttpClient.normalizeCloudShareUrl(trimmedEpId);
+            if (normShare != null) {
+              return '$label\$mmshare://$normShare';
+            }
           }
           final uri = Uri(scheme: scheme, host: 'play', queryParameters: {
             'flag': i < flags.length ? flags[i] : '',
@@ -1687,27 +1720,80 @@ class CmsClient {
     );
     if (!hasMmShare) return video;
 
-    final shareUrls = <String>[];
+    String canonicalShareOf(String epUrl) {
+      final raw = epUrl.substring('mmshare://'.length).trim();
+      return ResilientHttpClient.normalizeCloudShareUrl(raw) ?? raw;
+    }
+
+    final allUniqueShares = <String>[];
     for (final line in video.lines) {
       for (final ep in line.episodes) {
         if (ep.url.startsWith('mmshare://')) {
-          final rawShare = ep.url.substring('mmshare://'.length).trim();
-          if (rawShare.isNotEmpty && !shareUrls.contains(rawShare)) {
-            shareUrls.add(rawShare);
-            if (shareUrls.length >= 3) break;
+          final norm = canonicalShareOf(ep.url);
+          if (norm.isNotEmpty && !allUniqueShares.contains(norm)) {
+            allUniqueShares.add(norm);
           }
         }
       }
-      if (shareUrls.length >= 3) break;
     }
+    if (allUniqueShares.isEmpty) return video;
+
+    var preferredOrder = const ['quark', 'uc', 'baidu', 'ali'];
+    final loggedInProviders = <String>{};
+    try {
+      final storage = await StorageService.init();
+      preferredOrder = storage.driveOrder;
+      if (storage.quarkCookie.trim().isNotEmpty) loggedInProviders.add('quark');
+      if (storage.ucCookie.trim().isNotEmpty) loggedInProviders.add('uc');
+      if (storage.baiduCookie.trim().isNotEmpty) loggedInProviders.add('baidu');
+      if (storage.aliToken.trim().isNotEmpty) loggedInProviders.add('ali');
+    } catch (_) {
+      // Unit tests without initialized platform storage keep original order.
+    }
+
+    int sharePriority(String shareUrl) {
+      final provider = ResilientHttpClient.cloudProviderForShare(shareUrl);
+      if (provider == null) return 100;
+      final orderIdx = preferredOrder.indexOf(provider);
+      final rank = orderIdx < 0 ? 50 : orderIdx;
+      return loggedInProviders.contains(provider) ? rank : 10 + rank;
+    }
+
+    final indexedShares = allUniqueShares.indexed.toList()
+      ..sort((a, b) {
+        if (loggedInProviders.isNotEmpty) {
+          final cmp = sharePriority(a.$2).compareTo(sharePriority(b.$2));
+          if (cmp != 0) return cmp;
+        }
+        return a.$1.compareTo(b.$1);
+      });
+    final shareUrls =
+        indexedShares.take(10).map((entry) => entry.$2).toList(growable: false);
 
     final resolvedByShare = <String, List<CmsEpisode>>{};
     final errorsByShare = <String, String>{};
-    await Future.wait(
-      shareUrls.map((shareUrl) async {
+    final parentAbort = Zone.current[_cancelKey] as Completer<void>?;
+    final activeTokens = <Completer<void>>{};
+    final parentSub = parentAbort?.future.asStream().listen((_) {
+      for (final token in activeTokens.toList()) {
+        if (!token.isCompleted) token.complete();
+      }
+    });
+    var nextShareIdx = 0;
+    Future<void> shareWorker() async {
+      while (nextShareIdx < shareUrls.length) {
+        if (_sourceCancelled()) break;
+        final shareUrl = shareUrls[nextShareIdx++];
+        final token = Completer<void>();
+        activeTokens.add(token);
         try {
-          final eps = await _listCloudShare(shareUrl)
-              .timeout(const Duration(seconds: 8));
+          final eps = await runSourceOperation(
+            () => _listCloudShare(shareUrl),
+            cancellation: token,
+          ).timeout(const Duration(seconds: 18), onTimeout: () {
+            if (!token.isCompleted) token.complete();
+            throw TimeoutException('网盘分享读取超时');
+          });
           resolvedByShare[shareUrl] = eps;
         } catch (error) {
           errorsByShare[shareUrl] = switch (error) {
@@ -1718,9 +1804,23 @@ class CmsClient {
             TimeoutException _ => '网盘分享读取超时',
             _ => '网盘分享读取失败',
           };
+        } finally {
+          if (!token.isCompleted) token.complete();
+          activeTokens.remove(token);
         }
-      }),
-    );
+      }
+    }
+
+    try {
+      await Future.wait([
+        for (var i = 0; i < 3 && i < shareUrls.length; i++) shareWorker(),
+      ]);
+    } finally {
+      await parentSub?.cancel();
+      for (final token in activeTokens.toList()) {
+        if (!token.isCompleted) token.complete();
+      }
+    }
 
     final expandedLines = <CmsLine>[];
     final warnings = <String>[...video.sourceWarnings];
@@ -1735,7 +1835,7 @@ class CmsClient {
           eps.add(ep);
           continue;
         }
-        final rawShare = ep.url.substring('mmshare://'.length).trim();
+        final rawShare = canonicalShareOf(ep.url);
         final resolved = resolvedByShare[rawShare];
         if (resolved != null && resolved.isNotEmpty) {
           eps.addAll(resolved);
@@ -2078,13 +2178,16 @@ class CmsClient {
     List<CmsParse> parses = const [],
   }) async {
     final payload = Map<String, dynamic>.from(rawPayload);
-    final rawUrl = (payload['url'] ?? '').toString().trim();
-    if (_isDirectStreamUrl(rawUrl)) {
+    final rawUrlObj = payload['url'];
+    final rawUrl = rawUrlObj is String ? rawUrlObj.trim() : '';
+    if (rawUrl.isNotEmpty && _isDirectStreamUrl(rawUrl)) {
       payload['parse'] = 0;
       payload['jx'] = 0;
       return payload;
     }
-    if ('${payload['parse'] ?? 0}' != '0' || '${payload['jx'] ?? 0}' != '0') {
+    if (SourcePlayback.needsParse(payload['parse']) ||
+        SourcePlayback.needsParse(payload['jx'])) {
+      if (rawUrl.isEmpty) return payload;
       final spiderHeaders =
           _extractPayloadHeaders(payload['header'] ?? payload['headers']);
       final parsed = await _resolveSecondaryPlayback(
@@ -2113,11 +2216,46 @@ class CmsClient {
     return payload;
   }
 
+  Future<CmsEpisode?> _tryResolveCloudShareTarget(
+    CmsSite site,
+    CmsEpisode episode,
+    String candidateUrl, {
+    List<CmsParse> parses = const [],
+  }) async {
+    final trimmed = candidateUrl.trim();
+    if (!trimmed.startsWith('mmshare://') &&
+        !trimmed.toLowerCase().startsWith('push://') &&
+        ResilientHttpClient.cloudProviderForShare(trimmed) == null) {
+      return null;
+    }
+    final shareUrl = ResilientHttpClient.normalizeCloudShareUrl(trimmed);
+    if (shareUrl == null) return null;
+    final items = await _listCloudShare(shareUrl);
+    if (items.isEmpty) {
+      throw const FormatException('该网盘分享目录为空或已失效');
+    }
+    final picked = items.firstWhere(
+      (item) => item.name.trim() == episode.name.trim(),
+      orElse: () => items.first,
+    );
+    return resolveEpisodeForPlayback(site, picked, parses: parses);
+  }
+
   Future<CmsEpisode> resolveEpisodeForPlayback(
     CmsSite site,
     CmsEpisode episode, {
     List<CmsParse> parses = const [],
   }) async {
+    if (episode.url.startsWith('mmshare://') ||
+        episode.url.toLowerCase().startsWith('push://')) {
+      final shareResolved = await _tryResolveCloudShareTarget(
+        site,
+        episode,
+        episode.url,
+        parses: parses,
+      );
+      if (shareResolved != null) return shareResolved;
+    }
     if (CloudShareClient.supportsEpisode(episode.url)) {
       final cloud = CloudShareClient(client: _http, credentialReader: _cloudCredential, isCancelled: _sourceCancelled);
       try { return await cloud.resolve(episode); } finally { cloud.close(); }
@@ -2154,6 +2292,12 @@ class CmsClient {
       final raw = jsonDecode(await _callT4(site,
         {'play': parameters['id'] ?? '', 'flag': parameters['flag'] ?? ''}));
       if (raw is! Map) throw const FormatException('T4 没有返回播放结果');
+      final payloadUrl = raw['url'];
+      if (payloadUrl is String) {
+        final shareResolved = await _tryResolveCloudShareTarget(
+            site, episode, payloadUrl, parses: parses);
+        if (shareResolved != null) return shareResolved;
+      }
       final payload = await _maybeUnwrapSpiderPayload(site, raw, parses: parses);
       return SourcePlayback.decode(payload, episode, localUrl: _scriptHost.resolve,
         sourceHeaders: site.headers, sourceOrigin: _sourceCredentialOrigin(site));
@@ -2163,6 +2307,12 @@ class CmsClient {
       final raw = jsonDecode(await _getText(_appendQuery(site.api,
         {'play':parameters['id'] ?? '', 'flag':parameters['flag'] ?? ''}).toString()));
       if (raw is! Map) throw const FormatException('CatPaw 没有返回播放结果');
+      final payloadUrl = raw['url'];
+      if (payloadUrl is String) {
+        final shareResolved = await _tryResolveCloudShareTarget(
+            site, episode, payloadUrl, parses: parses);
+        if (shareResolved != null) return shareResolved;
+      }
       final payload = await _maybeUnwrapSpiderPayload(site, raw, parses: parses);
       return SourcePlayback.decode(payload,episode,localUrl:CatPawHost.instance.resolve,sourceHeaders:site.headers,sourceOrigin:_sourceCredentialOrigin(site));
     }
@@ -2173,6 +2323,12 @@ class CmsClient {
       final params = Uri.parse(episode.url).queryParameters;
       final raw = jsonDecode(await _callJs(site, 'play', [params['flag'], params['id'], []]));
       if (raw is! Map) throw const FormatException('脚本没有返回播放地址');
+      final payloadUrl = raw['url'];
+      if (payloadUrl is String) {
+        final shareResolved = await _tryResolveCloudShareTarget(
+            site, episode, payloadUrl, parses: parses);
+        if (shareResolved != null) return shareResolved;
+      }
       final payload = await _maybeUnwrapSpiderPayload(site, raw, parses: parses);
       final resolved = await SourcePlayback.decode(payload, episode,
           localUrl: _scriptHost.resolve,

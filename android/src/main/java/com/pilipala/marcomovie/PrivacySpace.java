@@ -195,6 +195,7 @@ final class PrivacySpace {
         a.cancelPageRequests();
         a.closeEngines();
         active = privateMode;
+        if (!privateMode) VideoSkipStore.clearPrivateRecords();
         a.switchingPrivacy = true;
         MobileShell.activeTab = 0;
         MobileShell.clearSearchSession();

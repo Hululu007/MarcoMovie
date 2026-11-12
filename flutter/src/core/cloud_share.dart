@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 
 import 'models.dart';
 import 'cloud_media_proxy.dart';
+import 'resilient_http_client.dart';
 
 /// Native UC/Baidu share readers. Protocols are scoped to the original provider;
 /// a failed share is never replaced by a search result from another source.
@@ -18,7 +19,7 @@ class CloudShareClient {
     DateTime Function()? clock,
     bool Function()? isCancelled,
     http.Client Function()? mediaClientFactory,
-  })  : _http = client ?? http.Client(),
+  })  : _http = client ?? ResilientHttpClient(),
         _ownsClient = client == null,
         _clock = clock ?? DateTime.now,
         _isCancelled = isCancelled ?? (() => false),
@@ -904,7 +905,9 @@ class _Share {
   String get shortId => id.startsWith('1') ? id.substring(1) : id;
 
   static _Share? parse(String raw) {
-    final uri = Uri.tryParse(raw.trim());
+    final cleaned =
+        ResilientHttpClient.normalizeCloudShareUrl(raw) ?? raw.trim();
+    final uri = Uri.tryParse(cleaned);
     if (uri == null ||
         !const ['http', 'https'].contains(uri.scheme) ||
         uri.userInfo.isNotEmpty ||
@@ -918,8 +921,10 @@ class _Share {
             : '';
     final match = RegExp(r'^/s/([A-Za-z0-9_-]{4,80})/?$').firstMatch(uri.path);
     if (provider.isEmpty || match == null) return null;
-    final passcode =
-        uri.queryParameters['pwd'] ?? uri.queryParameters['passcode'] ?? '';
+    final passcode = uri.queryParameters['pwd'] ??
+        uri.queryParameters['passcode'] ??
+        uri.queryParameters['password'] ??
+        '';
     return _Share(provider, match.group(1)!, passcode, uri.toString());
   }
 }

@@ -583,4 +583,80 @@ void main() {
       expect(host.bootstraps, 6);
     },
   );
+
+  test(
+    'WEX VOD and Pan Guard adapters map cleanly with optional extensions and netdisk classification',
+    () async {
+      final host = PortHost();
+      final guard = GuardSource(
+        host: host,
+        drpy: DrpySource(host: host, read: (_, __) async => ''),
+        read: (_, __) async => bytes,
+      );
+      final base = site('https://import.invalid/plugin.jar;md5;$digest');
+      const vodApis = [
+        'csp_WexAppV7Guard',
+        'csp_WexAiGuaziGuard',
+        'csp_WexAiDuBoKuGuard',
+        'csp_WexAiWenCaiGuard',
+        'csp_WexFengYe4KGuard',
+        'csp_WexAiFengYeGuard',
+        'csp_WexAiJianPianGuard',
+        'csp_WexAiJuXiaFanGuard',
+        'csp_WexAiReBoGuard',
+        'csp_WexAiBoBoGuard',
+        'csp_WexAiIkanBotGuard',
+        'csp_AiNewIkanbotGuard',
+        'csp_WexAiYiYsGuard',
+        'csp_AiNewYiYsGuard',
+        'csp_WexAiHanXiaoQuanGuard',
+      ];
+      for (final api in vodApis) {
+        final s = base.copyWith(api: api, name: '线路', ext: 'AppV7Dsx');
+        expect(GuardSource.supports(s), isTrue, reason: api);
+        expect(s.canBrowse, isTrue, reason: api);
+        await guard.invoke(s, 'home', [false]);
+      }
+      expect(host.extensions.every((e) => e == 'AppV7Dsx'), isTrue);
+
+      const panApis = [
+        'csp_AiNewDuoduoGuard',
+        'csp_AiNewHubanGuard',
+        'csp_AiNewKuaiYingGuard',
+        'csp_AiNewLabiGuard',
+        'csp_AiNewMuouGuard',
+        'csp_AiNewShanDianGuard',
+        'csp_AiNewXiaoPanGuard',
+        'csp_AiNewZhiZhenGuard',
+        'csp_AiNewWoggGuard',
+        'csp_AiNewHuajuanGuard',
+        'csp_AiNewJuTouGuard',
+        'csp_AiNewZhiNan4KGuard',
+        'csp_AiNewWoNiu4KGuard',
+        'csp_AiNewPianKuGuard',
+        'csp_AiQwMkvGuard',
+        'csp_AiNewYiDong4KGuard',
+        'csp_SoAiAiPanSoGuard',
+        'csp_SoAiHaiYinGuard',
+        'csp_SoAiQuanPanGuard',
+        'csp_SoKakaGuard',
+      ];
+      for (final api in panApis) {
+        final s = base.copyWith(api: api, name: '4K线路');
+        expect(GuardSource.supports(s), isTrue, reason: api);
+        expect(s.canBrowse, isTrue, reason: api);
+      }
+
+      // Challenge/PoW/comment-gated spiders remain unadapted by policy.
+      for (final gated in [
+        'csp_AiNewGuanYingGuard',
+        'csp_WexAiYueYueGuard',
+        'csp_AiNewLibvioGuard',
+        'csp_SoAiPanSooGuard',
+        'csp_AiPan1MeGuard',
+      ]) {
+        expect(GuardSource.supports(base.copyWith(api: gated)), isFalse, reason: gated);
+      }
+    },
+  );
 }

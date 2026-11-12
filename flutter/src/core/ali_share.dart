@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+import 'resilient_http_client.dart';
 
 /// Native Dart implementation of the imported Ali share protocol. No Android
 /// bridge or third-party token service is used. Listing is read-only; playback
@@ -15,7 +16,7 @@ class AliShareClient {
     required Future<String> Function(String provider) credentialReader,
     Future<void> Function(String provider, String value)? credentialWriter,
     bool Function()? isCancelled,
-  })  : _http = client ?? http.Client(),
+  })  : _http = client ?? ResilientHttpClient(),
         _ownsClient = client == null,
         _readCredential = credentialReader,
         _writeCredential = credentialWriter,
@@ -527,7 +528,9 @@ class AliShareClient {
   }
 
   static _AliShare? _share(String value) {
-    final uri = Uri.tryParse(value.trim());
+    final cleaned =
+        ResilientHttpClient.normalizeCloudShareUrl(value) ?? value.trim();
+    final uri = Uri.tryParse(cleaned);
     if (uri == null ||
         !['https', 'http'].contains(uri.scheme) ||
         uri.userInfo.isNotEmpty ||
@@ -551,8 +554,10 @@ class AliShareClient {
       }
       folder = parts[3];
     }
-    final password =
-        uri.queryParameters['pwd'] ?? uri.queryParameters['password'] ?? '';
+    final password = uri.queryParameters['pwd'] ??
+        uri.queryParameters['passcode'] ??
+        uri.queryParameters['password'] ??
+        '';
     if (password.length > 64) return null;
     return _AliShare(parts[1], folder, password);
   }

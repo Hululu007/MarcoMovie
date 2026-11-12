@@ -8,5 +8,5 @@ sources=[root/'android/src/main/java/com/pilipala/marcomovie'/name for name in [
 subprocess.run([str(jdk/('bin/javac'+suffix)),'-encoding','UTF-8','-d',str(out),*map(str,sources),str(root/'android/tests/UpdateLayoutChecks.java')],check=True)
 subprocess.run([str(jdk/('bin/java'+suffix)),'-cp',str(out),'com.pilipala.marcomovie.UpdateLayoutChecks'],check=True)
 jar=root/'android/tests/lib/json-20240303.jar'
-subprocess.run([str(jdk/('bin/javac'+suffix)),'-encoding','UTF-8','-source','8','-target','8','-Xlint:-options','-cp',str(out)+os.pathsep+str(jar),'-d',str(out),str(root/'android/src/main/java/com/pilipala/marcomovie/UpdateRelease.java'),str(root/'android/tests/UpdateEditionChecks.java')],check=True)
+subprocess.run([str(jdk/('bin/javac'+suffix)),'-encoding','UTF-8','-source','8','-target','8','-Xlint:-options','-cp',str(out)+os.pathsep+str(jar),'-d',str(out),str(root/'android/src/main/java/com/pilipala/marcomovie/UpdateRelease.java'),str(root/'android/src/main/java/com/pilipala/marcomovie/ReleaseNotesFormatter.java'),str(root/'android/tests/UpdateEditionChecks.java')],check=True)
 subprocess.run([str(jdk/('bin/java'+suffix)),'-cp',str(out)+os.pathsep+str(jar),'com.pilipala.marcomovie.UpdateEditionChecks'],check=True)

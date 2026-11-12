@@ -117,6 +117,76 @@ class CspBridge {
     'csp_kkss': 'kkss-v1',
     'csp_uussguard': 'uuss-v1',
     'csp_uuss': 'uuss-v1',
+    'csp_wexappv7guard': 'wexappv7-v1',
+    'csp_wexappv7': 'wexappv7-v1',
+    'csp_wexaiguaziguard': 'wexguazi-v1',
+    'csp_wexaiguazi': 'wexguazi-v1',
+    'csp_wexaidubokuguard': 'wexduboku-v1',
+    'csp_wexaiduboku': 'wexduboku-v1',
+    'csp_wexaiwencaiguard': 'wexwencai-v1',
+    'csp_wexaiwencai': 'wexwencai-v1',
+    'csp_wexfengye4kguard': 'wexfengye-v1',
+    'csp_wexfengye4k': 'wexfengye-v1',
+    'csp_wexaifengyeguard': 'wexfengye-v1',
+    'csp_wexaifengye': 'wexfengye-v1',
+    'csp_wexaijianpianguard': 'wexjianpian-v1',
+    'csp_wexaijianpian': 'wexjianpian-v1',
+    'csp_wexaijuxiafanguard': 'wexjuxiafan-v1',
+    'csp_wexaijuxiafan': 'wexjuxiafan-v1',
+    'csp_wexaireboguard': 'wexrebo-v1',
+    'csp_wexairebo': 'wexrebo-v1',
+    'csp_wexaiboboguard': 'wexbobo-v1',
+    'csp_wexaibobo': 'wexbobo-v1',
+    'csp_wexaiikanbotguard': 'wexikanbot-v1',
+    'csp_wexaiikanbot': 'wexikanbot-v1',
+    'csp_ainewikanbotguard': 'wexikanbot-v1',
+    'csp_ainewikanbot': 'wexikanbot-v1',
+    'csp_wexaiyiysguard': 'wexyiys-v1',
+    'csp_wexaiyiys': 'wexyiys-v1',
+    'csp_ainewyiysguard': 'wexyiys-v1',
+    'csp_ainewyiys': 'wexyiys-v1',
+    'csp_wexaihanxiaoquanguard': 'wexhanxiaoquan-v1',
+    'csp_wexaihanxiaoquan': 'wexhanxiaoquan-v1',
+    'csp_ainewduoduoguard': 'wexduoduo-v1',
+    'csp_ainewduoduo': 'wexduoduo-v1',
+    'csp_ainewhubanguard': 'wexhuban-v1',
+    'csp_ainewhuban': 'wexhuban-v1',
+    'csp_ainewkuaiyingguard': 'wexkuaiying-v1',
+    'csp_ainewkuaiying': 'wexkuaiying-v1',
+    'csp_ainewlabiguard': 'wexlabi-v1',
+    'csp_ainewlabi': 'wexlabi-v1',
+    'csp_ainewmuouguard': 'wexmuou-v1',
+    'csp_ainewmuou': 'wexmuou-v1',
+    'csp_ainewshandianguard': 'wexshandian-v1',
+    'csp_ainewshandian': 'wexshandian-v1',
+    'csp_ainewxiaopanguard': 'wexxiaopan-v1',
+    'csp_ainewxiaopan': 'wexxiaopan-v1',
+    'csp_ainewzhizhenguard': 'wexzhizhen-v1',
+    'csp_ainewzhizhen': 'wexzhizhen-v1',
+    'csp_ainewwoggguard': 'wexwogg-v1',
+    'csp_ainewwogg': 'wexwogg-v1',
+    'csp_ainewhuajuanguard': 'wexhuajuan-v1',
+    'csp_ainewhuajuan': 'wexhuajuan-v1',
+    'csp_ainewjutouguard': 'wexjutou-v1',
+    'csp_ainewjutou': 'wexjutou-v1',
+    'csp_ainewzhinan4kguard': 'wexzhinan-v1',
+    'csp_ainewzhinan4k': 'wexzhinan-v1',
+    'csp_ainewwoniu4kguard': 'wexwoniu-v1',
+    'csp_ainewwoniu4k': 'wexwoniu-v1',
+    'csp_ainewpiankuguard': 'wexpianku-v1',
+    'csp_ainewpianku': 'wexpianku-v1',
+    'csp_aiqwmkvguard': 'wexqiwei-v1',
+    'csp_aiqwmkv': 'wexqiwei-v1',
+    'csp_ainewyidong4kguard': 'wexyidong-v1',
+    'csp_ainewyidong4k': 'wexyidong-v1',
+    'csp_soaiaipansoguard': 'wexaipanso-v1',
+    'csp_soaiaipanso': 'wexaipanso-v1',
+    'csp_soaihaiyinguard': 'wexhaiyin-v1',
+    'csp_soaihaiyin': 'wexhaiyin-v1',
+    'csp_soaiquanpanguard': 'wexquanpan-v1',
+    'csp_soaiquanpan': 'wexquanpan-v1',
+    'csp_sokakaguard': 'wexkaka-v1',
+    'csp_sokaka': 'wexkaka-v1',
   }[site.api.toLowerCase()];
 
   static bool hasAdapter(CmsSite site) => WoggSource.supports(site) || (guardAdapterFor(site) != null && site.pluginReference.trim().isNotEmpty) || site.isDrpySource || site.isRemoteScriptSource || site.isJavaScriptSource || site.isPythonSource || TrailerSource.matches(site) || hasBuiltinAdapter(site);
@@ -155,6 +225,8 @@ class CspBridge {
     final lowerKey = site.key.toLowerCase();
     return lowerApi.contains('mydrive') ||
         lowerApi.contains('panwebshare') ||
+        lowerApi.contains('panconfig') ||
+        lowerApi.contains('mypan') ||
         lowerApi == 'csp_config' ||
         lowerApi == 'csp_configcenter' ||
         lowerApi.startsWith('csp_push') ||
@@ -173,7 +245,17 @@ class CspBridge {
     final lowerApi = site.api.toLowerCase();
     final lowerName = site.name.toLowerCase();
     final lowerKey = site.key.toLowerCase();
+    if (lowerName.contains('秒播') ||
+        lowerApi.startsWith('csp_wex') ||
+        lowerApi.contains('ikanbot') ||
+        lowerApi.contains('yiys')) {
+      return false;
+    }
     return lowerApi.contains('wogg') ||
+        lowerApi.contains('ainew') ||
+        lowerApi.contains('qwmkv') ||
+        lowerApi.contains('soai') ||
+        lowerApi.contains('sokaka') ||
         lowerApi.contains('seedhub') ||
         lowerApi.contains('pansou') ||
         lowerApi.contains('s_zps') ||
@@ -338,10 +420,12 @@ class CspBridge {
   }
 
   static bool isDouyuSite(CmsSite site) {
+    final lowerApi = site.api.toLowerCase();
     final lowerKey = site.key.toLowerCase();
     final lowerName = site.name.toLowerCase();
     final lowerExt = site.ext.toLowerCase();
-    return lowerKey.contains('斗鱼') ||
+    return lowerApi.contains('douyu') ||
+        lowerKey.contains('斗鱼') ||
         lowerKey.contains('douyu') ||
         lowerName.contains('斗鱼') ||
         lowerExt.contains('douyu') ||

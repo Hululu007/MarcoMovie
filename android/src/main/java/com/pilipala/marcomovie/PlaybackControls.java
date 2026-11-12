@@ -26,6 +26,8 @@ final class PlaybackControls {
     static final int ICON_LINES = 5;
     static final int ICON_SPEED = 6;
     static final int ICON_MORE = 7;
+    static final int ICON_SKIP_INTRO = 8;
+    static final int ICON_SKIP_OUTRO = 9;
 
     final MainActivity a;
     final boolean modernTv;
@@ -232,11 +234,11 @@ final class PlaybackControls {
                         else chooseLine();
                     });
             addModernIcon(row, "倍速", "speed", ICON_SPEED, this::speed);
+            addModernIcon(row, "片头", "skip-intro-tool", ICON_SKIP_INTRO, () -> skip(true));
+            addModernIcon(row, "片尾", "skip-outro-tool", ICON_SKIP_OUTRO, () -> skip(false));
             addModernIcon(row, "更多", "more", ICON_MORE, this::more);
             registerHiddenAction("decoder", this::decoderMenu);
             registerHiddenAction("aspect", this::aspect);
-            registerHiddenAction("skip-intro-tool", () -> skip(true));
-            registerHiddenAction("skip-outro-tool", () -> skip(false));
         } else if (a.isTvDevice()) {
             add(
                     row,
@@ -462,15 +464,22 @@ final class PlaybackControls {
 
     void syncModernActionVisibility() {
         if (!modernTv) return;
+        boolean live = "live".equals(site.key);
         boolean multiOrLive =
-                "live".equals(site.key)
+                live
                         || (a.activeLine != null
                                 && a.activeLine.episodes != null
                                 && a.activeLine.episodes.size() > 1);
         Button nextBtn = buttons.get("next-episode");
         Button epBtn = buttons.get("episodes");
+        Button introBtn = buttons.get("skip-intro-tool");
+        Button outroBtn = buttons.get("skip-outro-tool");
+        Button speedBtn = buttons.get("speed");
         if (nextBtn != null) nextBtn.setVisibility(multiOrLive ? View.VISIBLE : View.GONE);
         if (epBtn != null) epBtn.setVisibility(multiOrLive ? View.VISIBLE : View.GONE);
+        if (introBtn != null) introBtn.setVisibility(live ? View.GONE : View.VISIBLE);
+        if (outroBtn != null) outroBtn.setVisibility(live ? View.GONE : View.VISIBLE);
+        if (speedBtn != null) speedBtn.setVisibility(live ? View.GONE : View.VISIBLE);
 
         final List<Button> vis = new ArrayList<>();
         for (Button b : buttons.values()) {
@@ -479,7 +488,6 @@ final class PlaybackControls {
             }
         }
         if (vis.isEmpty()) return;
-        boolean live = "live".equals(site.key);
         for (int i = 0; i < vis.size(); i++) {
             final Button cur = vis.get(i);
             final Button prev = vis.get((i - 1 + vis.size()) % vis.size());
@@ -836,6 +844,46 @@ final class PlaybackControls {
                         c.drawLine(cx, cy + r * .06f, cx + r * .20f, cy - r * .15f, p);
                         p.setStyle(Paint.Style.FILL);
                         c.drawCircle(cx, cy + r * .06f, r * .08f, p);
+                        break;
+                    }
+                case ICON_SKIP_INTRO:
+                    {
+                        p.setStyle(Paint.Style.FILL);
+                        box.set(cx - r * .30f, cy - r * .26f, cx - r * .19f, cy + r * .26f);
+                        c.drawRoundRect(box, r * .05f, r * .05f, p);
+                        p.setStyle(Paint.Style.FILL_AND_STROKE);
+                        p.setStrokeWidth(Math.max(1.3f, r * .06f));
+                        path.reset();
+                        path.moveTo(cx - r * .09f, cy - r * .24f);
+                        path.lineTo(cx + r * .27f, cy);
+                        path.lineTo(cx - r * .09f, cy + r * .24f);
+                        path.close();
+                        c.drawPath(path, p);
+                        if (getVideoIntro(a, site, video) > 0) {
+                            p.setStyle(Paint.Style.FILL);
+                            p.setColor(0xff2ad47a);
+                            c.drawCircle(cx + r * .36f, cy - r * .34f, Math.max(2f, r * .10f), p);
+                        }
+                        break;
+                    }
+                case ICON_SKIP_OUTRO:
+                    {
+                        p.setStyle(Paint.Style.FILL_AND_STROKE);
+                        p.setStrokeWidth(Math.max(1.3f, r * .06f));
+                        path.reset();
+                        path.moveTo(cx - r * .27f, cy - r * .24f);
+                        path.lineTo(cx + r * .09f, cy);
+                        path.lineTo(cx - r * .27f, cy + r * .24f);
+                        path.close();
+                        c.drawPath(path, p);
+                        p.setStyle(Paint.Style.FILL);
+                        box.set(cx + r * .19f, cy - r * .26f, cx + r * .30f, cy + r * .26f);
+                        c.drawRoundRect(box, r * .05f, r * .05f, p);
+                        if (getVideoOutro(a, site, video) > 0) {
+                            p.setStyle(Paint.Style.FILL);
+                            p.setColor(0xff2ad47a);
+                            c.drawCircle(cx + r * .36f, cy - r * .34f, Math.max(2f, r * .10f), p);
+                        }
                         break;
                     }
                 case ICON_MORE:
@@ -2227,6 +2275,8 @@ final class PlaybackControls {
                             + subtitleStyleLabel()
                             + "）");
             labels.add("字幕样式 · " + subtitleStyleLabel());
+            boolean alwaysClock = a.prefs.getBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false);
+            labels.add("播放页常显时间 · " + (alwaysClock ? "开启" : "关闭"));
             labels.add("关闭字幕");
             labels.addAll(tracks);
             labels.add("导入字幕文件…");
@@ -2249,10 +2299,16 @@ final class PlaybackControls {
                                         a.prefs.edit().putInt(Prefs.SUBTITLE_STYLE, sIdx).apply();
                                         applySubtitleStyle();
                                     });
+                        } else if (i == 2) {
+                            a.prefs
+                                    .edit()
+                                    .putBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, !alwaysClock)
+                                    .apply();
+                            if (a.playerChrome != null) a.playerChrome.syncClockViews();
                         } else if (i == labels.size() - 1) {
                             a.pickSubtitle();
                         } else if (a.player != null && a.prepared) {
-                            a.player.selectTrack(3, i == 2 ? -2 : i - 3);
+                            a.player.selectTrack(3, i == 3 ? -2 : i - 4);
                         }
                     });
             return;
@@ -2293,10 +2349,73 @@ final class PlaybackControls {
                 });
     }
 
+    static int getVideoIntro(MainActivity a, Cms.Site site, Cms.Video video) {
+        if (a == null) return 0;
+        String siteKey = site == null ? "" : site.key;
+        String videoId = VideoSkipStore.videoKeyFrom(video, a.activeEpisode);
+        if (a.privateMode) {
+            return VideoSkipStore.getPrivateSkip(siteKey, videoId, true);
+        }
+        if (a.prefs == null) return 0;
+        return VideoSkipStore.readIntro(
+                a.prefs.getString(Prefs.VIDEO_SKIP_RECORDS, "[]"), siteKey, videoId);
+    }
+
+    static int getVideoOutro(MainActivity a, Cms.Site site, Cms.Video video) {
+        if (a == null) return 0;
+        String siteKey = site == null ? "" : site.key;
+        String videoId = VideoSkipStore.videoKeyFrom(video, a.activeEpisode);
+        if (a.privateMode) {
+            return VideoSkipStore.getPrivateSkip(siteKey, videoId, false);
+        }
+        if (a.prefs == null) return 0;
+        return VideoSkipStore.readOutro(
+                a.prefs.getString(Prefs.VIDEO_SKIP_RECORDS, "[]"), siteKey, videoId);
+    }
+
+    static void setVideoSkip(
+            MainActivity a, Cms.Site site, Cms.Video video, boolean intro, int seconds) {
+        if (a == null) return;
+        String siteKey = site == null ? "" : site.key;
+        String videoId = VideoSkipStore.videoKeyFrom(video, a.activeEpisode);
+        if (a.privateMode) {
+            VideoSkipStore.setPrivateSkip(siteKey, videoId, intro, seconds);
+            return;
+        }
+        if (a.prefs == null) return;
+        String updated =
+                VideoSkipStore.writeSkip(
+                        a.prefs.getString(Prefs.VIDEO_SKIP_RECORDS, "[]"),
+                        siteKey,
+                        videoId,
+                        intro,
+                        seconds,
+                        System.currentTimeMillis());
+        a.prefs.edit().putString(Prefs.VIDEO_SKIP_RECORDS, updated).apply();
+    }
+
+    static int countVideoSkipRecords(MainActivity a) {
+        if (a == null) return 0;
+        if (a.privateMode) return VideoSkipStore.countPrivateRecords();
+        if (a.prefs == null) return 0;
+        return VideoSkipStore.countRecords(a.prefs.getString(Prefs.VIDEO_SKIP_RECORDS, "[]"));
+    }
+
+    static void clearVideoSkipRecords(MainActivity a) {
+        if (a == null) return;
+        if (a.privateMode) {
+            VideoSkipStore.clearPrivateRecords();
+            return;
+        }
+        if (a.prefs != null) {
+            a.prefs.edit().remove(Prefs.VIDEO_SKIP_RECORDS).apply();
+        }
+    }
+
     void skip(boolean intro) {
         int curPos = a.player != null && a.prepared ? a.player.getCurrentPosition() : 0;
         int curDur = a.player != null && a.prepared ? a.player.getDuration() : 0;
-        showSkipAdjuster(a, intro, curPos, curDur, this::updateLabels);
+        showSkipAdjuster(a, site, video, intro, curPos, curDur, this::updateLabels);
     }
 
     static void showSkipAdjuster(
@@ -2305,7 +2424,53 @@ final class PlaybackControls {
             int currentPlayerPosMs,
             int currentPlayerDurMs,
             Runnable onChanged) {
-        final String key = intro ? Prefs.SKIP_INTRO : Prefs.SKIP_OUTRO;
+        showVideoSkipRecordsDialog(a, onChanged);
+    }
+
+    static void showVideoSkipRecordsDialog(MainActivity a, Runnable onChanged) {
+        if (a == null) return;
+        int count = countVideoSkipRecords(a);
+        AppDialog.Builder b =
+                new AppDialog.Builder(a)
+                        .setTitle("片头片尾独立记录")
+                        .setMessage(
+                                "每部影片在播放页面点击「片头」或「片尾」按钮时，会优先默认记录当前播放时间，并支持按秒微调。\n\n"
+                                        + "记录仅对当前影片独立生效，不会全局同步影响其他影视。\n"
+                                        + "当前本机已保存："
+                                        + count
+                                        + " 部影片记录。")
+                        .setNegativeButton("关闭", null);
+        if (count > 0) {
+            b.setPositiveButton(
+                    "清空全部记录",
+                    (d, w) -> {
+                        clearVideoSkipRecords(a);
+                        a.toast("已清空全部影片的片头片尾记录");
+                        if (onChanged != null) onChanged.run();
+                    });
+        }
+        b.show();
+    }
+
+    static void showSkipAdjuster(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            boolean intro,
+            int currentPlayerPosMs,
+            int currentPlayerDurMs,
+            Runnable onChanged) {
+        if (site == null || video == null) {
+            showVideoSkipRecordsDialog(a, onChanged);
+            return;
+        }
+        final int savedSec = intro ? getVideoIntro(a, site, video) : getVideoOutro(a, site, video);
+        final boolean hasPlaybackTime = currentPlayerPosMs > 0;
+        final int captureSec =
+                VideoSkipStore.defaultSecondsFromPlayback(
+                        intro, savedSec, currentPlayerPosMs, currentPlayerDurMs);
+        final int initialSec = hasPlaybackTime ? captureSec : savedSec;
+
         final Dialog dlg = new Dialog(a);
         dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
         if (dlg.getWindow() != null) {
@@ -2320,15 +2485,23 @@ final class PlaybackControls {
         bg.setStroke(a.dp(1), 0x38ffffff);
         card.setBackground(bg);
 
-        TextView title = a.text(intro ? "手动精准设置跳过片头" : "手动精准设置跳过片尾", 17, MainActivity.WHITE);
+        String rawTitle = video.title != null ? video.title.trim() : "";
+        String movieLabel = rawTitle.isEmpty() ? "当前影片" : "《" + rawTitle + "》";
+        TextView title =
+                a.text((intro ? "设置本片跳过片头" : "设置本片跳过片尾") + " · 独立记录", 17, MainActivity.WHITE);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         card.addView(title);
         a.gap(card, 6);
 
         TextView sub =
-                a.text("拖动滑块或使用左右方向键精准定位到秒（00:00 - 03:00），也可一键抓取当前播放进度", 12, MainActivity.MUTED);
+                a.text(
+                        hasPlaybackTime
+                                ? ("仅对" + movieLabel + "独立生效，不全局同步。已默认填入当前时间，可直接确认或使用下方微调。")
+                                : ("仅对" + movieLabel + "独立生效，不全局同步。可使用下方按钮或滑块微调秒数。"),
+                        12,
+                        MainActivity.MUTED);
         card.addView(sub);
-        a.gap(card, 14);
+        a.gap(card, 12);
 
         final TextView valueLabel = a.text("", 18, 0xff2ad47a);
         valueLabel.setTypeface(null, android.graphics.Typeface.BOLD);
@@ -2336,23 +2509,26 @@ final class PlaybackControls {
         a.gap(card, 10);
 
         final SeekBar bar = new SeekBar(a);
-        bar.setMax(180);
+        bar.setMax(VideoSkipStore.MAX_SKIP_SECONDS);
         bar.setKeyProgressIncrement(1);
         UiCompat.tintSeekBar(bar, 0xff2ad47a, Color.WHITE);
-        int initialSec = Prefs.clampSkipSeconds(a.prefs.getInt(key, 0));
         bar.setProgress(initialSec);
-        card.addView(bar, new LinearLayout.LayoutParams(-1, a.dp(36)));
-        a.gap(card, 12);
 
+        final int[] currentSecRef = {initialSec};
         final PlayerBubble.IntAction applySec =
                 sec -> {
-                    int clamped = Prefs.clampSkipSeconds(sec);
-                    a.prefs.edit().putInt(key, clamped).apply();
+                    int clamped = VideoSkipStore.clampSkipSeconds(sec);
+                    currentSecRef[0] = clamped;
+                    setVideoSkip(a, site, video, intro, clamped);
+                    if (!intro && a.player != null && !"live".equals(site.key)) {
+                        a.player.setRepeatOne(
+                                a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1 && clamped == 0);
+                    }
                     if (bar.getProgress() != clamped) bar.setProgress(clamped);
                     valueLabel.setText(
                             clamped <= 0
-                                    ? "当前：已关闭（00:00）"
-                                    : "当前："
+                                    ? "当前本片：未设置（00:00）"
+                                    : "当前本片："
                                             + PlaybackController.formatTime(clamped * 1000)
                                             + "（"
                                             + clamped
@@ -2364,60 +2540,102 @@ final class PlaybackControls {
                     if (onChanged != null) onChanged.run();
                 });
 
-        bar.setOnSeekBarChangeListener(
-                new SeekBar.OnSeekBarChangeListener() {
-                    public void onStartTrackingTouch(SeekBar s) {}
-
-                    public void onStopTrackingTouch(SeekBar s) {}
-
-                    public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
-                        if (fromUser) applySec.accept(progress);
-                    }
-                });
-
-        if (currentPlayerPosMs > 0) {
-            int candidateSec =
-                    intro
-                            ? (currentPlayerPosMs / 1000)
-                            : (currentPlayerDurMs > currentPlayerPosMs
-                                    ? (currentPlayerDurMs - currentPlayerPosMs) / 1000
-                                    : (currentPlayerPosMs / 1000));
-            final int captureSec = Prefs.clampSkipSeconds(Math.max(1, candidateSec));
+        TextView primaryCaptureBtn = null;
+        if (hasPlaybackTime) {
             String captureText =
-                    (intro ? "设为当前播放进度 · " : "设为当前剩余时长 · ")
+                    "✓ 默认设为当前时间 · "
                             + PlaybackController.formatTime(captureSec * 1000)
                             + " ("
                             + captureSec
-                            + "秒)";
-            TextView captureBtn = a.text(captureText, 13, MainActivity.WHITE);
+                            + "秒 · 确认)";
+            final TextView captureBtn = a.text(captureText, 13, MainActivity.WHITE);
+            captureBtn.setTag("skip-confirm-current");
             captureBtn.setGravity(Gravity.CENTER);
-            captureBtn.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
+            captureBtn.setPadding(a.dp(14), a.dp(11), a.dp(14), a.dp(11));
             captureBtn.setBackground(a.bg(0xff1e5d41, 14));
             captureBtn.setFocusable(true);
-            captureBtn.setOnClickListener(v -> applySec.accept(captureSec));
+            captureBtn.setOnFocusChangeListener(
+                    (v, f) ->
+                            FocusMotion.style(
+                                    a,
+                                    captureBtn,
+                                    f,
+                                    0xff1e5d41,
+                                    0xff2ad47a,
+                                    14,
+                                    MainActivity.WHITE,
+                                    0xff0d1612,
+                                    true,
+                                    1.02f));
+            captureBtn.setOnClickListener(
+                    v -> {
+                        applySec.accept(captureSec);
+                        dlg.dismiss();
+                    });
             card.addView(captureBtn, new LinearLayout.LayoutParams(-1, -2));
             a.gap(card, 10);
+            primaryCaptureBtn = captureBtn;
         }
 
         LinearLayout stepRow = a.row();
         stepRow.setGravity(Gravity.CENTER);
-        String[] stepTitles = {"关闭", "-10秒", "-5秒", "-1秒", "+1秒", "+5秒", "+10秒", "完成"};
-        int[] deltas = {0, -10, -5, -1, 1, 5, 10, 999};
-        for (int i = 0; i < stepTitles.length; i++) {
-            final int d = deltas[i];
-            TextView b = a.text(stepTitles[i], 12, MainActivity.WHITE);
+        List<String> stepTitles = new ArrayList<>();
+        List<Integer> stepActions = new ArrayList<>();
+        stepTitles.add("-15秒");
+        stepActions.add(-15);
+        stepTitles.add("-5秒");
+        stepActions.add(-5);
+        stepTitles.add("-1秒");
+        stepActions.add(-1);
+        stepTitles.add("+1秒");
+        stepActions.add(1);
+        stepTitles.add("+5秒");
+        stepActions.add(5);
+        stepTitles.add("+15秒");
+        stepActions.add(15);
+        stepTitles.add("清除本片");
+        stepActions.add(0);
+        if (hasPlaybackTime && savedSec != captureSec) {
+            stepTitles.add(
+                    savedSec <= 0
+                            ? "恢复未设"
+                            : "恢复 " + PlaybackController.formatTime(savedSec * 1000));
+            stepActions.add(1000);
+        }
+        stepTitles.add("完成");
+        stepActions.add(999);
+
+        for (int i = 0; i < stepTitles.size(); i++) {
+            final int d = stepActions.get(i);
+            final TextView b = a.text(stepTitles.get(i), 12, MainActivity.WHITE);
             b.setGravity(Gravity.CENTER);
             b.setPadding(a.dp(10), a.dp(8), a.dp(10), a.dp(8));
             b.setFocusable(true);
-            b.setBackground(a.bg(d == 999 ? 0xff1f6f4a : 0x24ffffff, 12));
+            final int idleBg = d == 999 ? 0xff1f6f4a : 0x24ffffff;
+            b.setBackground(a.bg(idleBg, 12));
+            b.setOnFocusChangeListener(
+                    (v, f) ->
+                            FocusMotion.style(
+                                    a,
+                                    b,
+                                    f,
+                                    idleBg,
+                                    MainActivity.WHITE,
+                                    12,
+                                    MainActivity.WHITE,
+                                    0xff101614,
+                                    true,
+                                    1.04f));
             b.setOnClickListener(
                     v -> {
                         if (d == 999) {
                             dlg.dismiss();
                         } else if (d == 0) {
                             applySec.accept(0);
+                        } else if (d == 1000) {
+                            applySec.accept(savedSec);
                         } else {
-                            applySec.accept(a.prefs.getInt(key, 0) + d);
+                            applySec.accept(currentSecRef[0] + d);
                         }
                     });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
@@ -2428,15 +2646,32 @@ final class PlaybackControls {
         scroll.setHorizontalScrollBarEnabled(false);
         scroll.addView(stepRow);
         card.addView(scroll, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(card, 10);
+
+        bar.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    public void onStartTrackingTouch(SeekBar s) {}
+
+                    public void onStopTrackingTouch(SeekBar s) {}
+
+                    public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+                        if (fromUser) applySec.accept(progress);
+                    }
+                });
+        card.addView(bar, new LinearLayout.LayoutParams(-1, a.dp(36)));
 
         FrameLayout wrapper = new FrameLayout(a);
         FrameLayout.LayoutParams wlp =
                 new FrameLayout.LayoutParams(
-                        Math.min(a.windowWidth() - a.dp(32), a.dp(540)), -2, Gravity.CENTER);
+                        Math.min(a.windowWidth() - a.dp(32), a.dp(560)), -2, Gravity.CENTER);
         wrapper.addView(card, wlp);
         dlg.setContentView(wrapper);
         dlg.show();
-        bar.requestFocus();
+        if (primaryCaptureBtn != null) {
+            primaryCaptureBtn.requestFocus();
+        } else {
+            bar.requestFocus();
+        }
     }
 
     void repeat() {
@@ -2447,14 +2682,24 @@ final class PlaybackControls {
                 i -> {
                     a.prefs.edit().putInt(Prefs.REPEAT_MODE, i).apply();
                     if (a.player != null)
-                        a.player.setRepeatOne(i == 1 && a.prefs.getInt(Prefs.SKIP_OUTRO, 0) == 0);
+                        a.player.setRepeatOne(i == 1 && getVideoOutro(a, site, video) == 0);
                     updateLabels();
                 });
     }
 
     void more() {
         if ("live".equals(site.key)) {
-            String[] live = {"上一频道", "选择频道", "播放线路", "播放器与解码", "画面色彩", "播放信息", "返回频道列表"};
+            boolean alwaysClock = a.prefs.getBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false);
+            String[] live = {
+                "上一频道",
+                "选择频道",
+                "播放线路",
+                "播放器与解码",
+                "画面色彩",
+                "播放页常显时间：" + (alwaysClock ? "开启" : "关闭"),
+                "播放信息",
+                "返回频道列表"
+            };
             choose(
                     "直播设置",
                     live,
@@ -2485,6 +2730,13 @@ final class PlaybackControls {
                                 pictureEffect();
                                 break;
                             case 5:
+                                a.prefs
+                                        .edit()
+                                        .putBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, !alwaysClock)
+                                        .apply();
+                                if (a.playerChrome != null) a.playerChrome.syncClockViews();
+                                break;
+                            case 6:
                                 message(
                                         a.player == null
                                                 ? "播放器尚未准备好。"
@@ -2492,25 +2744,27 @@ final class PlaybackControls {
                                                         + "\n"
                                                         + surface.outputName());
                                 break;
-                            case 6:
+                            case 7:
                                 a.leavePlayback();
                                 break;
                         }
                     });
             return;
         }
+        boolean alwaysClock = a.prefs.getBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false);
         String[] labels = {
             "画面比例",
             "字幕与显示",
             "刷新播放",
             "从头重播",
             "上一集",
-            "跳过片头 / 片尾",
+            "跳过片头 / 片尾（本片独立）",
             "弹幕",
             modernTv ? "播放器与解码" : "音效",
             "画面色彩",
             "循环播放",
             "自动播放下集：" + (a.prefs.getBoolean(Prefs.AUTO_NEXT, true) ? "开启" : "关闭"),
+            "播放页常显时间：" + (alwaysClock ? "开启" : "关闭"),
             "播放信息",
             "返回详情"
         };
@@ -2547,10 +2801,10 @@ final class PlaybackControls {
                             break;
                         case 5:
                             choose(
-                                    "自动跳过",
+                                    "本片自动跳过（独立记录）",
                                     new String[] {
-                                        "片头 · " + skipLabel(a.prefs.getInt(Prefs.SKIP_INTRO, 0)),
-                                        "片尾 · " + skipLabel(a.prefs.getInt(Prefs.SKIP_OUTRO, 0))
+                                        "本片片头 · " + skipLabel(getVideoIntro(a, site, video)),
+                                        "本片片尾 · " + skipLabel(getVideoOutro(a, site, video))
                                     },
                                     -1,
                                     n -> skip(n == 0));
@@ -2577,6 +2831,13 @@ final class PlaybackControls {
                                     .apply();
                             break;
                         case 11:
+                            a.prefs
+                                    .edit()
+                                    .putBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, !alwaysClock)
+                                    .apply();
+                            if (a.playerChrome != null) a.playerChrome.syncClockViews();
+                            break;
+                        case 12:
                             message(
                                     a.player == null
                                             ? "播放器尚未准备好。"
@@ -2584,7 +2845,7 @@ final class PlaybackControls {
                                                     + "\n"
                                                     + surface.outputName());
                             break;
-                        case 12:
+                        case 13:
                             a.leavePlayback();
                             break;
                     }
@@ -2606,13 +2867,23 @@ final class PlaybackControls {
         }
         Button introBtn = buttons.get("skip-intro-tool");
         if (introBtn != null) {
-            int s = a.prefs.getInt(Prefs.SKIP_INTRO, 0);
-            introBtn.setText(s > 0 ? (a.isTvDevice() ? "片头" + s + "s" : s + "s") : "片头");
+            int s = getVideoIntro(a, site, video);
+            if (introBtn instanceof ModernIconButton) {
+                introBtn.setContentDescription(s > 0 ? "片头 " + s + "s" : "片头");
+                introBtn.invalidate();
+            } else {
+                introBtn.setText(s > 0 ? (a.isTvDevice() ? "片头" + s + "s" : s + "s") : "片头");
+            }
         }
         Button outroBtn = buttons.get("skip-outro-tool");
         if (outroBtn != null) {
-            int s = a.prefs.getInt(Prefs.SKIP_OUTRO, 0);
-            outroBtn.setText(s > 0 ? (a.isTvDevice() ? "片尾" + s + "s" : s + "s") : "片尾");
+            int s = getVideoOutro(a, site, video);
+            if (outroBtn instanceof ModernIconButton) {
+                outroBtn.setContentDescription(s > 0 ? "片尾 " + s + "s" : "片尾");
+                outroBtn.invalidate();
+            } else {
+                outroBtn.setText(s > 0 ? (a.isTvDevice() ? "片尾" + s + "s" : s + "s") : "片尾");
+            }
         }
         Button decBtn = buttons.get("decoder");
         if (decBtn != null) {
@@ -2702,7 +2973,7 @@ final class PlaybackControls {
         int seek =
                 ("live".equals(site.key) || explicitRestart)
                         ? 0
-                        : historyResume ? a.resumeAt : a.prefs.getInt(Prefs.SKIP_INTRO, 0) * 1000;
+                        : historyResume ? a.resumeAt : getVideoIntro(a, site, video) * 1000;
         a.resumeAt = 0;
         if (seek > 0) {
             if (duration > 0) {
@@ -2725,7 +2996,7 @@ final class PlaybackControls {
             a.player.setSpeed(a.prefs.getFloat(Prefs.PLAY_SPEED, 1));
             a.player.setRepeatOne(
                     a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1
-                            && a.prefs.getInt(Prefs.SKIP_OUTRO, 0) == 0);
+                            && getVideoOutro(a, site, video) == 0);
         }
         syncModernActionVisibility();
         refreshPlayPauseGlyph();
@@ -2757,7 +3028,7 @@ final class PlaybackControls {
             timeline.setMax(100);
             timeline.setProgress(0);
         }
-        int tail = a.prefs.getInt(Prefs.SKIP_OUTRO, 0) * 1000;
+        int tail = getVideoOutro(a, site, video) * 1000;
         if (!transitioning
                 && a.playing
                 && duration > 0
@@ -2765,7 +3036,7 @@ final class PlaybackControls {
                 && tail < duration
                 && position >= duration - tail) {
             if (a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1)
-                a.player.seekTo(a.prefs.getInt(Prefs.SKIP_INTRO, 0) * 1000);
+                a.player.seekTo(getVideoIntro(a, site, video) * 1000);
             else if (!step(1)) {
                 transitioning = true;
                 a.player.pause();

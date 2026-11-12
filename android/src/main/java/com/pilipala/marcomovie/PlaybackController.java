@@ -901,6 +901,7 @@ final class PlaybackController {
         if (a.playbackControls == null || a.miniMode) return;
         a.miniMode = true;
         showControls(a, false);
+        if (a.playerChrome != null) a.playerChrome.syncClockViews();
         a.playbackControls.subtitle.setVisibility(View.GONE);
         a.playbackControls.danmaku.setVisibility(View.GONE);
         a.miniDetails = new MiniDetails(a);
@@ -917,6 +918,7 @@ final class PlaybackController {
         a.playbackLayer.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
         a.playbackControls.subtitle.setVisibility(View.VISIBLE);
         a.playbackControls.danmaku.setVisibility(View.VISIBLE);
+        if (a.playerChrome != null) a.playerChrome.syncClockViews();
         a.playbackLayer.post(
                 () -> {
                     if (a.playbackControls != null) {
@@ -1230,6 +1232,11 @@ final class PlaybackController {
                                                                                     a.playingBookmark
                                                                                             .position,
                                                                                     dur);
+                                                                } else if (a.playingBookmark
+                                                                                .position
+                                                                        <= 0) {
+                                                                    a.playingBookmark.position =
+                                                                            1000;
                                                                 }
                                                             }
                                                             savePlaybackHistory(a, true);

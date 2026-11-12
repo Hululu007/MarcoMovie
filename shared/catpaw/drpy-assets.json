@@ -59,8 +59,8 @@
     },
     {
       "name": "drpy-bootstrap-worker.cjs",
-      "bytes": 2948,
-      "sha256": "a776ceede3e7c21a70701642d414ad8d1301269205a9d6c042fc73142cd06c28"
+      "bytes": 3310,
+      "sha256": "5cf4d183b2a1fe5b9376e381defe2abc4f207e53f896f747785b2db8da301a25"
     },
     {
       "name": "drpy-auete-adapter.cjs",
@@ -131,6 +131,21 @@
       "name": "drpy-fty-pan-adapter.cjs",
       "bytes": 30214,
       "sha256": "b0c1e31136085ef948611052a12b8c6a8ef3622ae8d1a2a6c80fbc53c5bbe139"
+    },
+    {
+      "name": "drpy-wex-extractor.cjs",
+      "bytes": 106714,
+      "sha256": "4389e5f161f65bafae9c018f24c62b0134053a4eba3b864f89f7b011b70bf15f"
+    },
+    {
+      "name": "drpy-wex-vod-adapter.cjs",
+      "bytes": 107530,
+      "sha256": "f15e5bff3d77533fb7ea57c9beed3010be1d649afd7f39115866c2892bf10751"
+    },
+    {
+      "name": "drpy-wex-pan-adapter.cjs",
+      "bytes": 51094,
+      "sha256": "4ab044f86dad92cbb4c5d0129141b5c79f68f884424c538d3a0a4f21fe2486a2"
     }
   ]
 }

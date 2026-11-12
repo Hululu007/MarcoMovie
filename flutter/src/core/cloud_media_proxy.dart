@@ -4,8 +4,8 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:http/http.dart' as http;
-import 'package:http/io_client.dart';
 import 'quark_account.dart';
+import 'resilient_http_client.dart';
 
 enum CloudMediaProvider { uc, quark, baidu }
 
@@ -32,14 +32,12 @@ class CloudMediaLease {
   static const int _maxConcurrentRequests = 24;
   static const int _flushThresholdBytes = 4 * 1024 * 1024;
 
-  static http.Client createDefaultMediaClient() {
-    final io = HttpClient()
-      ..autoUncompress = false
-      ..maxConnectionsPerHost = 12
-      ..connectionTimeout = const Duration(seconds: 20)
-      ..idleTimeout = const Duration(seconds: 30);
-    return IOClient(io);
-  }
+  static http.Client createDefaultMediaClient() => ResilientHttpClient(
+        autoUncompress: false,
+        maxConnectionsPerHost: 12,
+        connectionTimeout: const Duration(seconds: 20),
+        idleTimeout: const Duration(seconds: 30),
+      );
 
   final HttpServer _server;
   final http.Client _client;

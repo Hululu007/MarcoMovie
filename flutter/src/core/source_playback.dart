@@ -37,10 +37,19 @@ class SourcePlayback {
           sourceHeaders: sourceHeaders, sourceOrigin: sourceOrigin)).toList());
   }
 
+  static bool needsParse(Object? value) {
+    if (value == null || value == false || value == 0) return false;
+    final text = value.toString().trim().toLowerCase();
+    return text.isNotEmpty &&
+        text != '0' &&
+        text != 'false' &&
+        text != 'null';
+  }
+
   static Future<CmsEpisode> decode(Map raw, CmsEpisode episode,
       {required Future<Uri> Function(String) localUrl,
       Map<String,String> sourceHeaders = const {}, Uri? sourceOrigin}) async {
-    if ('${raw['parse'] ?? 0}' != '0') {
+    if (needsParse(raw['parse']) || needsParse(raw['jx'])) {
       throw const FormatException('此线路还需要网页解析，请选择其他播放线路');
     }
     Map<String,String> headers(dynamic value) {

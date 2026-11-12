@@ -35,6 +35,39 @@ public final class FavoritesChecks {
         }
         check(Favorites.read(data).size() == 300, "Bounded collection");
         check(Favorites.read(data).get(0).id.equals("id304"), "Newest favorite first");
-        System.out.println("PASS " + checks + " favorite persistence checks");
+
+        String skips = VideoSkipStore.writeSkip("[]", "siteA", "vod-1", true, 88, 1000L);
+        skips = VideoSkipStore.writeSkip(skips, "siteA", "vod-1", false, 95, 1001L);
+        skips = VideoSkipStore.writeSkip(skips, "siteA", "vod-2", true, 42, 1002L);
+        check(
+                VideoSkipStore.readIntro(skips, "siteA", "vod-1") == 88
+                        && VideoSkipStore.readOutro(skips, "siteA", "vod-1") == 95
+                        && VideoSkipStore.readIntro(skips, "siteA", "vod-2") == 42
+                        && VideoSkipStore.readOutro(skips, "siteA", "vod-2") == 0
+                        && VideoSkipStore.readIntro(skips, "siteB", "vod-1") == 0
+                        && VideoSkipStore.countRecords(skips) == 2,
+                "Per-video intro/outro skip records stay isolated per site and video");
+        skips = VideoSkipStore.writeSkip(skips, "siteA", "vod-2", true, 0, 1003L);
+        check(
+                VideoSkipStore.readIntro(skips, "siteA", "vod-2") == 0
+                        && VideoSkipStore.countRecords(skips) == 1,
+                "Clearing both intro and outro removes empty video skip record");
+        check(
+                VideoSkipStore.defaultSecondsFromPlayback(true, 0, 86400, 2700000) == 86
+                        && VideoSkipStore.defaultSecondsFromPlayback(false, 0, 2595000, 2700000)
+                                == 105
+                        && VideoSkipStore.defaultSecondsFromPlayback(false, 0, 92000, 2700000)
+                                == 92,
+                "Clicking intro/outro in player defaults to current playback time first");
+        VideoSkipStore.clearPrivateRecords();
+        VideoSkipStore.setPrivateSkip("privSite", "vod-p", true, 75);
+        check(
+                VideoSkipStore.getPrivateSkip("privSite", "vod-p", true) == 75
+                        && VideoSkipStore.countPrivateRecords() == 1,
+                "Private session skip records stay in memory");
+        VideoSkipStore.clearPrivateRecords();
+        check(VideoSkipStore.countPrivateRecords() == 0, "Private skip records clear on exit");
+
+        System.out.println("PASS " + checks + " favorite and per-video skip persistence checks");
     }
 }

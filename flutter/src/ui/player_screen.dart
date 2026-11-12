@@ -104,9 +104,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   late double _normalSpeed;
   late int _skipIntroSec;
   late int _skipOutroSec;
+  late bool _alwaysShowClock;
   late bool _autoNext;
   late String _repeatMode;
   late String _playerKernel;
+  Timer? _clockTimer;
+  String _clockText = '';
+  bool _initialHistoryRecorded = false;
   double _playerBrightness = 1.0;
   bool _isVerticalDragging = false;
   bool _isDraggingLeftBrightness = false;
@@ -203,8 +207,25 @@ class _PlayerScreenState extends State<PlayerScreen>
       _currentLine.episodes.length - 1,
     );
     _normalSpeed = _isLiveStream ? 1.0 : widget.storage.playSpeed;
-    _skipIntroSec = widget.storage.skipIntroSec;
-    _skipOutroSec = widget.storage.skipOutroSec;
+    _skipIntroSec = widget.storage.getVideoSkipIntroSec(
+      widget.site.key,
+      widget.video.id,
+      isPrivate: widget.site.isEffectivelyPrivate,
+    );
+    _skipOutroSec = widget.storage.getVideoSkipOutroSec(
+      widget.site.key,
+      widget.video.id,
+      isPrivate: widget.site.isEffectivelyPrivate,
+    );
+    _alwaysShowClock = widget.storage.playerAlwaysShowClock;
+    _clockText = _formatClockNow();
+    _clockTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!mounted || !_alwaysShowClock) return;
+      final next = _formatClockNow();
+      if (next != _clockText) {
+        setState(() => _clockText = next);
+      }
+    });
     _autoNext = widget.storage.autoNext;
     _repeatMode = widget.storage.repeatMode;
     _playerKernel = widget.storage.playerKernel;
@@ -285,6 +306,10 @@ class _PlayerScreenState extends State<PlayerScreen>
           : _position;
       if (pos.inMilliseconds >= 1000) {
         _lastKnownPositionMs = pos.inMilliseconds;
+        if (!_initialHistoryRecorded) {
+          _initialHistoryRecorded = true;
+          unawaited(_saveProgress());
+        }
       }
       final shouldClearLoading = pos > Duration.zero && _loading;
       final nowMs = DateTime.now().millisecondsSinceEpoch;
@@ -316,6 +341,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           pos.inSeconds > 10 &&
           (effectiveDur - pos).inSeconds <= _skipOutroSec) {
         _outroSkippedForSession = true;
+        unawaited(_saveProgress());
         _showHud('已自动跳过片尾 ${_skipOutroSec}s');
         _handleEpisodeEnd();
       }
@@ -447,6 +473,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           !_outroSkippedForSession) {
         _embySession?.stop(_position.inMilliseconds);
         _embySession = null;
+        unawaited(_saveProgress(completed: true));
         _handleEpisodeEnd();
       }
     });
@@ -821,6 +848,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!_isLiveStream) _lookupSavedResumeForCurrentEpisode();
     _introSkippedForSession = _pendingResumeMs > 0;
     _outroSkippedForSession = false;
+    _initialHistoryRecorded = false;
 
     final canOpenDirectly = _isLiveStream
         ? (_currentEpisode.isLocalFile ||
@@ -1028,7 +1056,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
-  Future<void> _saveProgress() async {
+  static String _formatClockNow() {
+    final now = DateTime.now();
+    return '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+  }
+
+  Future<void> _saveProgress({bool completed = false}) async {
     if (!_allowHistory ||
         _isLiveStream ||
         widget.site.key == 'live' ||
@@ -1036,12 +1069,17 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
     final livePosMs = _position.inMilliseconds;
-    final effectivePosMs = _pendingResumeMs > 0
-        ? _pendingResumeMs
-        : (livePosMs >= 1000 ? livePosMs : _lastKnownPositionMs);
     final effectiveDurMs = _duration.inMilliseconds > 0
         ? _duration.inMilliseconds
         : _lastKnownDurationMs;
+    final rawPosMs = _pendingResumeMs > 0
+        ? _pendingResumeMs
+        : (livePosMs >= 1000
+              ? livePosMs
+              : (_lastKnownPositionMs > 0 ? _lastKnownPositionMs : livePosMs));
+    final effectivePosMs = completed
+        ? (effectiveDurMs > 0 ? effectiveDurMs : math.max(1000, rawPosMs))
+        : rawPosMs;
     if (effectiveDurMs <= 0 && effectivePosMs <= 0) {
       return;
     }
@@ -1123,7 +1161,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _desktopEscape() async {
     try {
       final exited = await _desktopWindow!.exitFullscreen();
-      if (mounted && !exited) Navigator.of(context).maybePop();
+      if (!exited) {
+        await _saveProgress();
+        if (mounted) Navigator.of(context).maybePop();
+      }
     } catch (error) {
       _windowError(error);
     }
@@ -1452,6 +1493,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _historyTimer?.cancel();
+    _clockTimer?.cancel();
     _saveProgress();
     _embySession?.stop(_position.inMilliseconds);
     _embySession = null;
@@ -1487,7 +1529,13 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) {
+          unawaited(_saveProgress());
+        }
+      },
+      child: Scaffold(
       backgroundColor: Colors.black,
       body: Focus(
         autofocus: true,
@@ -1533,7 +1581,11 @@ class _PlayerScreenState extends State<PlayerScreen>
             if (_desktop) {
               _desktopEscape();
             } else {
-              Navigator.of(context).maybePop();
+              unawaited(
+                _saveProgress().whenComplete(() {
+                  if (context.mounted) Navigator.of(context).maybePop();
+                }),
+              );
             }
             return KeyEventResult.handled;
           }
@@ -1550,6 +1602,59 @@ class _PlayerScreenState extends State<PlayerScreen>
               controls: Stack(
                 fit: StackFit.expand,
                 children: [
+                  if (_alwaysShowClock)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: SafeArea(
+                          child: Align(
+                            alignment: Alignment.topRight,
+                            child: AnimatedPadding(
+                              duration: const Duration(milliseconds: 200),
+                              curve: Curves.easeOutCubic,
+                              padding: EdgeInsets.only(
+                                top: Platform.isMacOS &&
+                                        !(_desktopWindow?.fullscreen ?? false)
+                                    ? 38
+                                    : 12,
+                                right: (_controlsVisible &&
+                                        MediaQuery.sizeOf(context).width >
+                                            MediaQuery.sizeOf(context).height)
+                                    ? 76
+                                    : 16,
+                              ),
+                              child: Container(
+                                key: const Key('player-persistent-clock'),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4.5,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0x88101218),
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(
+                                    color: const Color(0x2EFFFFFF),
+                                    width: 0.6,
+                                  ),
+                                ),
+                                child: Text(
+                                  _clockText.isEmpty
+                                      ? _formatClockNow()
+                                      : _clockText,
+                                  style: const TextStyle(
+                                    color: Color(0xEBFFFFFF),
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w600,
+                                    fontFeatures: [
+                                      FontFeature.tabularFigures(),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                   if (_controlsVisible) _buildAppleChromeOverlay(context),
                   if (_playbackError.isNotEmpty)
                     Center(
@@ -1864,6 +1969,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           ),
         ),
       ),
+      ),
     );
   }
 
@@ -1941,7 +2047,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         CupertinoButton(
           padding: EdgeInsets.zero,
           minSize: 36 * scale,
-          onPressed: () => Navigator.of(context).maybePop(),
+          onPressed: () async {
+            await _saveProgress();
+            if (context.mounted) {
+              Navigator.of(context).maybePop();
+            }
+          },
           child: AppleGlassSurface(
             padding: EdgeInsets.symmetric(
               horizontal: 13 * scale,
@@ -2405,6 +2516,13 @@ class _PlayerScreenState extends State<PlayerScreen>
           active: _repeatMode == 'one' || _repeatMode == 'all',
         ),
       ],
+      _PlayerAction(
+        CupertinoIcons.clock_fill,
+        '时间·${_alwaysShowClock ? "显" : "隐"}',
+        _toggleAlwaysShowClock,
+        shortLabel: '时间',
+        active: _alwaysShowClock,
+      ),
       if (_qualityChoices.length > 1)
         _PlayerAction(CupertinoIcons.slider_horizontal_3, '画质', _showQualityChoices),
       _PlayerAction(CupertinoIcons.speaker_2_fill, '音轨', _showAudioTracksSheet),
@@ -2610,6 +2728,16 @@ class _PlayerScreenState extends State<PlayerScreen>
     _showHud('循环模式：$_repeatLabel');
   }
 
+  void _toggleAlwaysShowClock() {
+    final next = !_alwaysShowClock;
+    setState(() {
+      _alwaysShowClock = next;
+      if (next) _clockText = _formatClockNow();
+    });
+    widget.storage.setPlayerAlwaysShowClock(next);
+    _showHud('播放页常显时间：${next ? "已开启" : "已关闭"}');
+  }
+
   void _showSkipIntroSheet() {
     _showPrecisionSkipSheet(isIntro: true);
   }
@@ -2619,12 +2747,23 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _showPrecisionSkipSheet({required bool isIntro}) {
-    const presets = [0, 15, 30, 45, 60, 90, 120, 150, 180];
-    int tempSec = (isIntro ? _skipIntroSec : _skipOutroSec).clamp(0, 300);
+    const presets = [0, 15, 30, 45, 60, 90, 120, 150, 180, 240];
+    final previousSec = (isIntro ? _skipIntroSec : _skipOutroSec).clamp(0, 600);
+    final effectiveDur = _duration.inMilliseconds > 0
+        ? _duration
+        : Duration(milliseconds: _lastKnownDurationMs);
+    final defaultSec = StorageService.defaultSkipSecondsFromPlayback(
+      isIntro: isIntro,
+      savedSec: previousSec,
+      position: _position,
+      duration: effectiveDur,
+    );
+    int tempSec = defaultSec.clamp(0, 600);
+    final bool autoAppliedCurrentTime =
+        defaultSec > 0 && defaultSec != previousSec;
 
-    void applySec(int sec, void Function(void Function()) setSheetState) {
-      final clamped = sec.clamp(0, 300);
-      setSheetState(() => tempSec = clamped);
+    void persistSec(int sec) {
+      final clamped = sec.clamp(0, 600);
       setState(() {
         if (isIntro) {
           _skipIntroSec = clamped;
@@ -2633,29 +2772,121 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
       });
       if (isIntro) {
-        widget.storage.setSkipIntroSec(clamped);
+        widget.storage.setVideoSkipIntroSec(
+          widget.site.key,
+          widget.video.id,
+          clamped,
+          isPrivate: widget.site.isEffectivelyPrivate,
+        );
       } else {
-        widget.storage.setSkipOutroSec(clamped);
+        widget.storage.setVideoSkipOutroSec(
+          widget.site.key,
+          widget.video.id,
+          clamped,
+          isPrivate: widget.site.isEffectivelyPrivate,
+        );
       }
+    }
+
+    if (autoAppliedCurrentTime) {
+      persistSec(tempSec);
+      _showHud(
+        '本片${isIntro ? "片头" : "片尾"}已默认设为当前时间 ${_formatDuration(Duration(seconds: tempSec))}',
+      );
+    }
+
+    void applySec(int sec, void Function(void Function()) setSheetState) {
+      final clamped = sec.clamp(0, 600);
+      setSheetState(() => tempSec = clamped);
+      persistSec(clamped);
     }
 
     showAppleModalSheet<void>(
       context: context,
-      title: isIntro ? '跳过片头时间节点' : '跳过片尾时间节点',
+      title: isIntro ? '本片跳过片头节点' : '本片跳过片尾节点',
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheetState) {
           final formatted = _formatDuration(Duration(seconds: tempSec));
-          final currentPlaySec = isIntro
-              ? _position.inSeconds.clamp(0, 300)
-              : ((_duration.inMilliseconds > 0
-                        ? (_duration - _position).inSeconds
-                        : _position.inSeconds)
-                    .clamp(0, 300));
+          final liveDur = _duration.inMilliseconds > 0
+              ? _duration
+              : Duration(milliseconds: _lastKnownDurationMs);
+          final currentPlaySec = StorageService.defaultSkipSecondsFromPlayback(
+            isIntro: isIntro,
+            savedSec: tempSec,
+            position: _position,
+            duration: liveDur,
+          );
           return SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 9,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0x260A84FF),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: const Color(0x4D0A84FF),
+                      width: 0.7,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        CupertinoIcons.film_fill,
+                        color: Color(0xFF5AC8FA),
+                        size: 15,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          autoAppliedCurrentTime && tempSec == defaultSec
+                              ? '已优先默认设为当前时间 $formatted · 仅对《${widget.video.title}》独立生效'
+                              : '独立记录 · 仅对《${widget.video.title}》生效，不影响其他影片',
+                          style: const TextStyle(
+                            color: Color(0xFFE5F1FF),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            height: 1.35,
+                          ),
+                        ),
+                      ),
+                      if (previousSec != tempSec) ...[
+                        const SizedBox(width: 8),
+                        CupertinoButton(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 4,
+                          ),
+                          minSize: 24,
+                          color: const Color(0x33FFFFFF),
+                          borderRadius: BorderRadius.circular(999),
+                          onPressed: () {
+                            applySec(previousSec, setSheetState);
+                            _showHud(
+                              previousSec == 0
+                                  ? '已恢复本片${isIntro ? "片头" : "片尾"}为不跳过'
+                                  : '已恢复原值 ${_formatDuration(Duration(seconds: previousSec))}',
+                            );
+                          },
+                          child: Text(
+                            previousSec == 0 ? '恢复关闭' : '恢复${previousSec}s',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
                 AppleGlassSurface(
                   padding: const EdgeInsets.all(14),
                   borderRadius: BorderRadius.circular(18),
@@ -2666,7 +2897,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Text(
-                            isIntro ? '手动拉取精准片头节点' : '手动拉取精准片尾节点',
+                            isIntro ? '微调本片片头节点' : '微调本片片尾节点',
                             style: const TextStyle(
                               color: AppleColors.labelSecondary,
                               fontSize: 13,
@@ -2695,17 +2926,24 @@ class _PlayerScreenState extends State<PlayerScreen>
                           thumbColor: Colors.white,
                         ),
                         child: Slider(
-                          value: tempSec.toDouble(),
+                          value: tempSec.clamp(0, 600).toDouble(),
                           min: 0,
-                          max: 300,
-                          divisions: 300,
+                          max: 600,
+                          divisions: 600,
                           onChanged: (v) => applySec(v.round(), setSheetState),
                         ),
                       ),
                       const SizedBox(height: 6),
                       Row(
                         children: [
-                          for (final step in const [-10, -5, -1, 1, 5, 10]) ...[
+                          for (final step in const [
+                            -15,
+                            -5,
+                            -1,
+                            1,
+                            5,
+                            15,
+                          ]) ...[
                             Expanded(
                               child: Padding(
                                 padding: const EdgeInsets.symmetric(
@@ -2734,7 +2972,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                           ],
                         ],
                       ),
-                      if (_position.inSeconds > 0) ...[
+                      if (_position.inSeconds > 0 && currentPlaySec > 0) ...[
                         const SizedBox(height: 10),
                         CupertinoButton(
                           padding: const EdgeInsets.symmetric(vertical: 9),
@@ -2744,7 +2982,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                           onPressed: () {
                             applySec(currentPlaySec, setSheetState);
                             _showHud(
-                              '${isIntro ? "片头" : "片尾"}已设为当前时间节点 ${_formatDuration(Duration(seconds: currentPlaySec))}',
+                              '本片${isIntro ? "片头" : "片尾"}已设为当前时间 ${_formatDuration(Duration(seconds: currentPlaySec))}',
                             );
                           },
                           child: Text(
@@ -2773,8 +3011,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                         applySec(sec, setSheetState);
                         _showHud(
                           sec == 0
-                              ? '已关闭跳过${isIntro ? "片头" : "片尾"}'
-                              : '${isIntro ? "片头" : "片尾"}跳过已设为 ${_formatDuration(Duration(seconds: sec))}',
+                              ? '已清除本片跳过${isIntro ? "片头" : "片尾"}'
+                              : '本片${isIntro ? "片头" : "片尾"}已设为 ${_formatDuration(Duration(seconds: sec))}',
                         );
                       },
                       child: Container(
@@ -2790,7 +3028,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                         ),
                         child: Text(
                           sec == 0
-                              ? '关闭'
+                              ? '清除本片'
                               : '${_formatDuration(Duration(seconds: sec))} (${sec}s)',
                           style: TextStyle(
                             color: Colors.white,

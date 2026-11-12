@@ -17,7 +17,7 @@ import org.json.JSONObject;
 
 /** Recent history above one category-based, vertically browsed library. */
 final class HomeScreen {
-    static final int MAX_RETAINED_CARDS = 120;
+    static final int MAX_RETAINED_CARDS = 360;
     final MainActivity a;
     final Cms.Site site;
     final int COLUMNS;
@@ -25,7 +25,7 @@ final class HomeScreen {
     final Map<View, String> tabIds = new HashMap<>();
     final List<View> historyCards = new ArrayList<>(), tabs = new ArrayList<>();
     final List<List<View>> rows = new ArrayList<>();
-    LinearLayout content;
+    LinearLayout historyHost, content;
     android.widget.HorizontalScrollView categoryScroll;
     CategoryFlow filters;
     InlineFilters inlineFilters;
@@ -122,6 +122,10 @@ final class HomeScreen {
         float width = a.windowWidth() / a.getResources().getDisplayMetrics().density;
         int marginDp = bottomDock ? 36 : (34 + rightPadDp);
         posterWidth = Math.max(48, (int) ((width - marginDp - (COLUMNS - 1) * 14) / COLUMNS) - 8);
+        historyHost = a.vertical();
+        historyHost.setClipChildren(false);
+        historyHost.setClipToPadding(false);
+        a.body.addView(historyHost, new LinearLayout.LayoutParams(-1, -2));
         historySection();
         LinearLayout heading = a.row();
         heading.setClipChildren(false);
@@ -200,6 +204,20 @@ final class HomeScreen {
         footer.addView(more, new LinearLayout.LayoutParams(a.dp(180), a.dp(40)));
         a.body.addView(footer);
         more.setVisibility(View.GONE);
+        a.scroll
+                .getViewTreeObserver()
+                .addOnScrollChangedListener(
+                        () -> {
+                            if (!active() || a.scroll == null || a.scroll.getScrollY() <= 0) return;
+                            View child = a.scroll.getChildAt(0);
+                            if (child == null) return;
+                            int diff =
+                                    child.getBottom()
+                                            - (a.scroll.getHeight() + a.scroll.getScrollY());
+                            if (diff <= a.dp(260)) {
+                                maybeAutoLoadMore();
+                            }
+                        });
         wireNavigation();
         retainedRoot = a.root;
         retainedBody = a.body;
@@ -359,6 +377,7 @@ final class HomeScreen {
         a.homeDock = retainedDock;
         a.homeAmbient = ambient;
         a.setContentView(retainedRoot);
+        historySection();
         int drawn = state.windowStart;
         for (List<View> row : rows) drawn += row.size();
         if (drawn < windowEnd()) appendCards(drawn, gridEpoch, true);
@@ -585,6 +604,10 @@ final class HomeScreen {
     }
 
     void historySection() {
+        if (historyHost == null) return;
+        historyHost.removeAllViews();
+        historyCards.clear();
+        allHistory = null;
         List<WatchHistory.Entry> entries = a.watchHistory();
         if (entries.isEmpty()) return;
         boolean compactStack = a.useBottomDock();
@@ -593,7 +616,7 @@ final class HomeScreen {
         section.setGravity(Gravity.TOP);
         section.setClipChildren(false);
         section.setClipToPadding(false);
-        a.body.addView(section);
+        historyHost.addView(section, new LinearLayout.LayoutParams(-1, -2));
         LinearLayout heading = a.row();
         heading.setClipChildren(false);
         heading.setClipToPadding(false);
@@ -700,7 +723,7 @@ final class HomeScreen {
             recent.addView(card, cell);
             historyCards.add(card);
         }
-        a.gap(a.body, 4);
+        a.gap(historyHost, 4);
     }
 
     void renderSnapshot() {
@@ -954,14 +977,6 @@ final class HomeScreen {
                         switchedOnFocus = true;
                         v.post(() -> switchedOnFocus = false);
                         choose(id, true);
-                    } else if (!id.isEmpty()
-                            && !SourceController.isConfigOrNetdiskSite(site)
-                            && !state.filtersExpanded
-                            && state.selectedFilters.isEmpty()) {
-                        state.filtersExpanded = true;
-                        inlineFilters.render();
-                        updateTabs();
-                        wireNavigation();
                     }
                 });
         addTabView(button);
@@ -981,8 +996,22 @@ final class HomeScreen {
     }
 
     void styleTab(TextView b) {
-        boolean selected = state.category.equals(tabIds.get(b));
+        String id = tabIds.get(b);
+        boolean selected = state.category.equals(id);
         styleCategory(b, selected);
+        if (selected
+                && a.isTvDevice()
+                && id != null
+                && !id.isEmpty()
+                && !SourceController.isConfigOrNetdiskSite(site)) {
+            b.setCompoundDrawablePadding(a.dp(5));
+            b.setCompoundDrawables(null, null, new FilterChevron(a, state.filtersExpanded), null);
+            b.setContentDescription(
+                    b.getText() + "，按确认键" + (state.filtersExpanded ? "收起筛选" : "展开筛选"));
+        } else {
+            b.setCompoundDrawables(null, null, null, null);
+            b.setContentDescription(b.getText());
+        }
     }
 
     void styleCategory(TextView b, boolean selected) {
@@ -1105,10 +1134,10 @@ final class HomeScreen {
         if (categoryChanged) state.selectedFilters.clear();
         state.category = category;
         if (a.isTvDevice()) {
-            if (category.isEmpty() || SourceController.isConfigOrNetdiskSite(site)) {
+            if (category.isEmpty()
+                    || SourceController.isConfigOrNetdiskSite(site)
+                    || categoryChanged) {
                 state.filtersExpanded = false;
-            } else if (categoryChanged || user) {
-                state.filtersExpanded = true;
             }
         }
         state.ready = false;
@@ -1165,8 +1194,7 @@ final class HomeScreen {
                 VideoFilters.remoteValues(definitions, selections, site.supported());
         status.setVisibility(first ? View.VISIBLE : View.GONE);
         status.setText("正在读取分类…");
-        more.setText("正在加载…");
-        more.setVisibility(first ? View.GONE : View.VISIBLE);
+        more.setVisibility(View.GONE);
         DetailRequest timing = new DetailRequest("MovieCategoryTiming");
         a.submitPage(
                 () -> {
@@ -1238,8 +1266,12 @@ final class HomeScreen {
                                                 (previous / windowSize()) * windowSize();
                                     }
                                     boolean changedWindow = oldWindow != state.windowStart;
+                                    int changedPageCount =
+                                            (!first && added == 0 && selections.isEmpty())
+                                                    ? finalPage
+                                                    : finalPageCount;
                                     state.page = finalPage;
-                                    state.pages = finalPageCount;
+                                    state.pages = changedPageCount;
                                     state.ready = true;
                                     if (first && selections.isEmpty() && !state.videos.isEmpty()) {
                                         Cms.Listing cached = new Cms.Listing();
@@ -1379,11 +1411,25 @@ final class HomeScreen {
                     });
     }
 
-    /** Shows or hides "加载更多" without ever hiding it while it still holds focus. */
+    /** Keeps "加载更多" hidden during normal browsing (only shown as retry on failure). */
     void updateMore() {
-        more.setText(windowEnd() < state.videos.size() ? "查看后面的影片" : "加载更多");
-        boolean hasMore = windowEnd() < state.videos.size() || state.page < state.pages;
-        if (hasMore || !more.hasFocus()) more.setVisibility(hasMore ? View.VISIBLE : View.GONE);
+        if ("重新加载".equals(String.valueOf(more.getText())) && state != null && !state.ready) {
+            return;
+        }
+        if (!more.hasFocus()) {
+            more.setVisibility(View.GONE);
+        }
+    }
+
+    void maybeAutoLoadMore() {
+        if (!active() || busy || state == null || !state.ready || snapshot == null) return;
+        if (windowEnd() < state.videos.size()) {
+            showWindow(state.windowStart + windowSize());
+            return;
+        }
+        if (state.page < state.pages) {
+            loadCategory(false);
+        }
     }
 
     void appendCards(int start, int epoch, boolean restore) {
@@ -1471,6 +1517,10 @@ final class HomeScreen {
                     if (f && ambient != null) ambient.follow(art);
                     if (f) {
                         collapseFiltersForBrowsing();
+                        int localRow = (index - state.windowStart) / Math.max(1, COLUMNS);
+                        if (localRow >= Math.max(1, rows.size() - 2)) {
+                            maybeAutoLoadMore();
+                        }
                         v.requestRectangleOnScreen(
                                 new Rect(0, -a.dp(8), v.getWidth(), v.getHeight() + a.dp(10)),
                                 false);
@@ -1748,6 +1798,12 @@ final class HomeScreen {
         View target = id == View.NO_ID ? null : a.root.findViewById(id);
         if (target == null || !target.isShown() || !target.isFocusable()) return false;
         if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
+            if (key == android.view.KeyEvent.KEYCODE_DPAD_DOWN
+                    && target == focus
+                    && a.current != null
+                    && a.current.retainedHome != null) {
+                a.current.retainedHome.maybeAutoLoadMore();
+            }
             target.requestFocus();
             String tag = String.valueOf(target.getTag());
             if (key == android.view.KeyEvent.KEYCODE_DPAD_UP
@@ -1810,6 +1866,46 @@ final class HomeScreen {
             path.moveTo(b.left + b.width() * .15f, b.top + b.height() * .35f);
             path.lineTo(b.exactCenterX(), b.top + b.height() * .65f);
             path.lineTo(b.left + b.width() * .85f, b.top + b.height() * .35f);
+            canvas.drawPath(path, paint);
+        }
+
+        public void setAlpha(int value) {
+            paint.setAlpha(value);
+        }
+
+        public void setColorFilter(android.graphics.ColorFilter value) {
+            paint.setColorFilter(value);
+        }
+
+        public int getOpacity() {
+            return android.graphics.PixelFormat.TRANSLUCENT;
+        }
+    }
+
+    static final class FilterChevron extends android.graphics.drawable.Drawable {
+        final android.graphics.Paint paint = new android.graphics.Paint(3);
+        final MainActivity a;
+        final boolean expanded;
+
+        FilterChevron(MainActivity a, boolean expanded) {
+            this.a = a;
+            this.expanded = expanded;
+            setBounds(0, 0, a.dp(9), a.dp(9));
+        }
+
+        public void draw(android.graphics.Canvas canvas) {
+            android.graphics.Rect b = getBounds();
+            paint.setColor(0xffe8eef6);
+            paint.setStyle(android.graphics.Paint.Style.STROKE);
+            paint.setStrokeWidth(a.dp(1.35f));
+            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            paint.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+            android.graphics.Path path = new android.graphics.Path();
+            float yEdge = b.top + b.height() * (expanded ? .66f : .34f);
+            float yTip = b.top + b.height() * (expanded ? .34f : .66f);
+            path.moveTo(b.left + b.width() * .15f, yEdge);
+            path.lineTo(b.exactCenterX(), yTip);
+            path.lineTo(b.left + b.width() * .85f, yEdge);
             canvas.drawPath(path, paint);
         }
 

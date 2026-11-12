@@ -1856,6 +1856,7 @@ public final class MainActivity extends Activity {
     protected void onDestroy() {
         if (privateMode && isFinishing() && !switchingPrivacy) {
             MobileShell.clearSearchSession();
+            VideoSkipStore.clearPrivateRecords();
             PrivacySpace.active = false;
         }
         if (activeActivity == this) activeActivity = null;

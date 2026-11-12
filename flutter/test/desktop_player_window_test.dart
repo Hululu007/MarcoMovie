@@ -59,9 +59,9 @@ void main() {
       calls.where((c) => c.method != 'isFullScreen').toList();
 
   test(
-    'Windows hides the title before native fullscreen and restores the frame',
+    'Windows immersive frame keeps native title bar hidden before and after fullscreen',
     () async {
-      window = DesktopPlayerWindow(macOS: false);
+      window = DesktopPlayerWindow(macOS: false, immersiveFrame: true);
       await window.initialize();
       await window.toggle();
       expect(window.fullscreen, true);
@@ -75,10 +75,26 @@ void main() {
       expect(await window.exitFullscreen(), true);
       expect(window.fullscreen, false);
       expect(writes().last.arguments, {
+        'titleBarStyle': 'hidden',
+        'windowButtonVisibility': false,
+      });
+      expect(await window.exitFullscreen(), false);
+    },
+  );
+
+  test(
+    'non-immersive desktop frame restores normal title bar after fullscreen',
+    () async {
+      window = DesktopPlayerWindow(macOS: false, immersiveFrame: false);
+      await window.initialize();
+      await window.toggle();
+      expect(window.fullscreen, true);
+      expect(await window.exitFullscreen(), true);
+      expect(window.fullscreen, false);
+      expect(writes().last.arguments, {
         'titleBarStyle': 'normal',
         'windowButtonVisibility': true,
       });
-      expect(await window.exitFullscreen(), false);
     },
   );
 
@@ -141,16 +157,16 @@ void main() {
   );
 
   test(
-    'failed entry restores visible window controls and can be retried',
+    'failed entry preserves immersive frame and can be retried',
     () async {
-      window = DesktopPlayerWindow(macOS: false);
+      window = DesktopPlayerWindow(macOS: false, immersiveFrame: true);
       await window.initialize();
       failEntry = true;
       await expectLater(window.toggle(), throwsA(isA<PlatformException>()));
       expect(window.fullscreen, false);
       expect(writes().last.arguments, {
-        'titleBarStyle': 'normal',
-        'windowButtonVisibility': true,
+        'titleBarStyle': 'hidden',
+        'windowButtonVisibility': false,
       });
       failEntry = false;
       await window.toggle();

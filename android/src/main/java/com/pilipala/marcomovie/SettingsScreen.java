@@ -690,29 +690,16 @@ final class SettingsScreen {
                             .show();
                 });
         toggle("自动播放下一集", Prefs.AUTO_NEXT, true, null);
+        toggle("播放页常显时间", Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false, null);
         ints("循环", Prefs.REPEAT_MODE, new String[] {"关闭", "单集循环", "列表循环"}, new int[] {0, 1, 2}, 0);
-        int skipIntroSec = Prefs.clampSkipSeconds(a.prefs.getInt(Prefs.SKIP_INTRO, 0));
+        int skipRecordCount = PlaybackControls.countVideoSkipRecords(a);
         link(
-                "跳过片头（精准拉取节点）",
-                skipIntroSec <= 0
-                        ? "关闭（点击可手动拉取秒数）"
-                        : PlaybackController.formatTime(skipIntroSec * 1000)
-                                + " · "
-                                + skipIntroSec
-                                + " 秒",
-                "setting-" + Prefs.SKIP_INTRO,
-                () -> PlaybackControls.showSkipAdjuster(a, true, 0, 0, a::refresh));
-        int skipOutroSec = Prefs.clampSkipSeconds(a.prefs.getInt(Prefs.SKIP_OUTRO, 0));
-        link(
-                "跳过片尾（精准拉取节点）",
-                skipOutroSec <= 0
-                        ? "关闭（点击可手动拉取秒数）"
-                        : PlaybackController.formatTime(skipOutroSec * 1000)
-                                + " · "
-                                + skipOutroSec
-                                + " 秒",
-                "setting-" + Prefs.SKIP_OUTRO,
-                () -> PlaybackControls.showSkipAdjuster(a, false, 0, 0, a::refresh));
+                "片头片尾独立记录",
+                skipRecordCount <= 0
+                        ? "每部影片在播放页独立保存片头片尾，不全局同步"
+                        : "已独立记录 " + skipRecordCount + " 部影片 · 点击查看或清空",
+                "setting-" + Prefs.VIDEO_SKIP_RECORDS,
+                () -> PlaybackControls.showVideoSkipRecordsDialog(a, a::refresh));
         int subSize = Prefs.clampSubtitleSize(a.prefs.getInt(Prefs.SUBTITLE_SIZE, 45));
         int subBottom = Prefs.clampSubtitleBottom(a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24));
         int subStyle = Prefs.clampSubtitleStyle(a.prefs.getInt(Prefs.SUBTITLE_STYLE, 0));

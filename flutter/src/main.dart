@@ -10,10 +10,18 @@ import 'core/download_service.dart';
 import 'core/storage_service.dart';
 import 'ui/adaptive_shell.dart';
 import 'ui/apple_theme.dart';
+import 'ui/windows_title_bar.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     await windowManager.ensureInitialized();
+    if (Platform.isWindows) {
+      await windowManager.setTitleBarStyle(
+        TitleBarStyle.hidden,
+        windowButtonVisibility: false,
+      );
+      await windowManager.setBackgroundColor(AppleColors.background);
+    }
   }
   try {
     MediaKit.ensureInitialized();
@@ -105,12 +113,17 @@ class MarcoMovieApp extends StatelessWidget {
       ),
       builder: (context, child) {
         if (child == null) return const SizedBox.shrink();
+        final wrapped = (!kIsWeb &&
+                Platform.isWindows &&
+                !Platform.environment.containsKey('FLUTTER_TEST'))
+            ? WindowsImmersiveFrame(child: child)
+            : child;
         return DefaultTextStyle.merge(
           style: TextStyle(
             fontFamily: primaryFont,
             fontFamilyFallback: _cjkFontFallback,
           ),
-          child: child,
+          child: wrapped,
         );
       },
       home: AdaptiveShell(storage: storage, client: client),

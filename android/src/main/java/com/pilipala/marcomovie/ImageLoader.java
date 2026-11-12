@@ -64,6 +64,16 @@ final class ImageLoader {
             return;
         }
         Bitmap preview = a.images.get(address);
+        if ((preview == null || preview.isRecycled()) && detail) {
+            String gridKey =
+                    ImageDecodePolicy.cacheKey(
+                            address,
+                            ImageDecodePolicy.targetWidth(0, false),
+                            ImageDecodePolicy.targetHeight(0, false),
+                            true,
+                            false);
+            preview = a.images.get(gridKey);
+        }
         if (preview != null && !preview.isRecycled()) {
             image.setImageBitmap(preview);
             com.pilipala.glass.GlassworkSurface.invalidateBackdrop(image);
@@ -145,12 +155,6 @@ final class ImageLoader {
                                         return;
                                     }
                                     a.images.put(key, bitmap);
-                                    Bitmap existingPreview = a.images.get(address);
-                                    if (existingPreview == null
-                                            || existingPreview.isRecycled()
-                                            || bitmap.getWidth() >= existingPreview.getWidth()) {
-                                        a.images.put(address, bitmap);
-                                    }
                                     final java.util.List<ImageView> targets;
                                     synchronized (IN_FLIGHT) {
                                         java.util.List<ImageView> removed =

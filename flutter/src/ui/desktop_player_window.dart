@@ -6,11 +6,15 @@ import 'package:window_manager/window_manager.dart';
 /// Owns native fullscreen for one player route. Native transitions are serialized
 /// so a second double click or leaving the route cannot race a macOS animation.
 class DesktopPlayerWindow extends ChangeNotifier with WindowListener {
-  DesktopPlayerWindow({bool? macOS}) : _macOS = macOS ?? Platform.isMacOS {
+  DesktopPlayerWindow({bool? macOS, bool? immersiveFrame})
+      : _macOS = macOS ?? Platform.isMacOS,
+        _immersiveFrame =
+            immersiveFrame ?? (!(macOS ?? Platform.isMacOS) && Platform.isWindows) {
     windowManager.addListener(this);
   }
 
   final bool _macOS;
+  final bool _immersiveFrame;
   Future<void>? _ready;
   Future<void> _queue = Future<void>.value();
   Future<void>? _closed;
@@ -58,10 +62,12 @@ class DesktopPlayerWindow extends ChangeNotifier with WindowListener {
   }
 
   Future<void> _titleBar(bool full) => windowManager.setTitleBarStyle(
-    // The generated Mac runner normally uses a transparent, hidden title.
-    // Restore its traffic-light buttons on exit, and the normal Windows frame.
-    full || _macOS ? TitleBarStyle.hidden : TitleBarStyle.normal,
-    windowButtonVisibility: !full,
+    // Mac uses a hidden title bar with native traffic lights in windowed mode;
+    // Windows uses a full-time hidden native frame with our Flutter immersive bar.
+    full || _macOS || _immersiveFrame
+        ? TitleBarStyle.hidden
+        : TitleBarStyle.normal,
+    windowButtonVisibility: _immersiveFrame ? false : !full,
   );
 
   Future<void> _setFullscreen(bool full) async {

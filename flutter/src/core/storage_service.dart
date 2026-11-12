@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'catpaw_host.dart';
@@ -61,7 +62,14 @@ class StorageService {
   static const String keySyncTombstones = 'sync_tombstones';
   static const String keySyncLastTime = 'sync_last_time';
   static const String keySyncLastStatus = 'sync_last_status';
+  static const String keyVideoSkipRecords = 'video_skip_records';
+  static const String keyPlayerAlwaysShowClock = 'player_always_show_clock';
+  static const int maxVideoSkipRecords = 500;
   final SharedPreferences _prefs;
+  final ValueNotifier<int> watchHistoryRevision = ValueNotifier<int>(0);
+  final Map<String, ({int intro, int outro, int updated})>
+      _privateVideoSkipRecords =
+      <String, ({int intro, int outro, int updated})>{};
   Timer? _autoSyncTimer;
   bool _syncInFlight = false;
   int _lastHistoryAutoPushMs = 0;
@@ -92,6 +100,8 @@ class StorageService {
   bool get autoNext => _prefs.getBool(keyAutoNext) ?? true;
   int get skipIntroSec => (_prefs.getInt(keySkipIntroSec) ?? 0).clamp(0, 600);
   int get skipOutroSec => (_prefs.getInt(keySkipOutroSec) ?? 0).clamp(0, 600);
+  bool get playerAlwaysShowClock =>
+      _prefs.getBool(keyPlayerAlwaysShowClock) ?? false;
   String get repeatMode => _prefs.getString(keyRepeatMode) ?? 'off';
   String get wallpaperPreset =>
       _prefs.getString(keyWallpaperPreset) ?? 'obsidian';
@@ -793,6 +803,188 @@ class StorageService {
   Future<void> setSkipOutroSec(int seconds) async {
     await _prefs.setInt(keySkipOutroSec, seconds.clamp(0, 600));
   }
+  Future<void> setPlayerAlwaysShowClock(bool value) async {
+    await _prefs.setBool(keyPlayerAlwaysShowClock, value);
+  }
+  static String _videoSkipKey(String siteKey, String videoId) {
+    final s = siteKey.trim();
+    final v = videoId.trim();
+    if (s.isEmpty || v.isEmpty) return '';
+    return '$s\n$v';
+  }
+  bool _isPrivateVideoSkip(String siteKey, bool isPrivate) =>
+      isPrivate || _privateSiteKeySet().contains(siteKey.trim());
+  Map<String, ({int intro, int outro, int updated})>
+      _readPublicVideoSkipRecords() {
+    final raw = _prefs.getString(keyVideoSkipRecords) ?? '{}';
+    final out = <String, ({int intro, int outro, int updated})>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) {
+        for (final entry in decoded.entries) {
+          final k = entry.key.toString();
+          final v = entry.value;
+          if (k.isEmpty || v is! Map) continue;
+          final intro = ((v['intro'] as num?)?.toInt() ?? 0).clamp(0, 600);
+          final outro = ((v['outro'] as num?)?.toInt() ?? 0).clamp(0, 600);
+          final updated = (v['updated'] as num?)?.toInt() ?? 0;
+          if (intro > 0 || outro > 0) {
+            out[k] = (intro: intro, outro: outro, updated: updated);
+          }
+        }
+      }
+    } catch (_) {}
+    return out;
+  }
+  Future<void> _writePublicVideoSkipRecords(
+    Map<String, ({int intro, int outro, int updated})> records,
+  ) async {
+    final entries = records.entries
+        .where((e) => e.value.intro > 0 || e.value.outro > 0)
+        .toList()
+      ..sort((a, b) => b.value.updated.compareTo(a.value.updated));
+    final bounded = entries.take(maxVideoSkipRecords);
+    final payload = <String, Map<String, int>>{
+      for (final e in bounded)
+        e.key: {
+          'intro': e.value.intro,
+          'outro': e.value.outro,
+          'updated': e.value.updated,
+        },
+    };
+    await _prefs.setString(keyVideoSkipRecords, jsonEncode(payload));
+  }
+  int getVideoSkipIntroSec(
+    String siteKey,
+    String videoId, {
+    bool isPrivate = false,
+  }) {
+    final key = _videoSkipKey(siteKey, videoId);
+    if (key.isEmpty) return 0;
+    if (_isPrivateVideoSkip(siteKey, isPrivate)) {
+      return _privateVideoSkipRecords[key]?.intro ?? 0;
+    }
+    return _readPublicVideoSkipRecords()[key]?.intro ?? 0;
+  }
+  int getVideoSkipOutroSec(
+    String siteKey,
+    String videoId, {
+    bool isPrivate = false,
+  }) {
+    final key = _videoSkipKey(siteKey, videoId);
+    if (key.isEmpty) return 0;
+    if (_isPrivateVideoSkip(siteKey, isPrivate)) {
+      return _privateVideoSkipRecords[key]?.outro ?? 0;
+    }
+    return _readPublicVideoSkipRecords()[key]?.outro ?? 0;
+  }
+  Future<void> setVideoSkipIntroSec(
+    String siteKey,
+    String videoId,
+    int seconds, {
+    bool isPrivate = false,
+  }) async {
+    final key = _videoSkipKey(siteKey, videoId);
+    if (key.isEmpty) return;
+    final clamped = seconds.clamp(0, 600);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_isPrivateVideoSkip(siteKey, isPrivate)) {
+      final prev = _privateVideoSkipRecords[key];
+      final outro = prev?.outro ?? 0;
+      if (clamped <= 0 && outro <= 0) {
+        _privateVideoSkipRecords.remove(key);
+      } else {
+        _privateVideoSkipRecords[key] =
+            (intro: clamped, outro: outro, updated: now);
+      }
+      return;
+    }
+    final records = _readPublicVideoSkipRecords();
+    final prev = records[key];
+    final outro = prev?.outro ?? 0;
+    if (clamped <= 0 && outro <= 0) {
+      records.remove(key);
+    } else {
+      records[key] = (intro: clamped, outro: outro, updated: now);
+    }
+    await _writePublicVideoSkipRecords(records);
+  }
+  Future<void> setVideoSkipOutroSec(
+    String siteKey,
+    String videoId,
+    int seconds, {
+    bool isPrivate = false,
+  }) async {
+    final key = _videoSkipKey(siteKey, videoId);
+    if (key.isEmpty) return;
+    final clamped = seconds.clamp(0, 600);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_isPrivateVideoSkip(siteKey, isPrivate)) {
+      final prev = _privateVideoSkipRecords[key];
+      final intro = prev?.intro ?? 0;
+      if (intro <= 0 && clamped <= 0) {
+        _privateVideoSkipRecords.remove(key);
+      } else {
+        _privateVideoSkipRecords[key] =
+            (intro: intro, outro: clamped, updated: now);
+      }
+      return;
+    }
+    final records = _readPublicVideoSkipRecords();
+    final prev = records[key];
+    final intro = prev?.intro ?? 0;
+    if (intro <= 0 && clamped <= 0) {
+      records.remove(key);
+    } else {
+      records[key] = (intro: intro, outro: clamped, updated: now);
+    }
+    await _writePublicVideoSkipRecords(records);
+  }
+  int countVideoSkipRecords({bool forPrivate = false}) {
+    if (forPrivate) {
+      return _privateVideoSkipRecords.values
+          .where((e) => e.intro > 0 || e.outro > 0)
+          .length;
+    }
+    final privKeys = _privateSiteKeySet();
+    return _readPublicVideoSkipRecords().entries.where((e) {
+      final site = e.key.split('\n').first;
+      return !privKeys.contains(site) &&
+          (e.value.intro > 0 || e.value.outro > 0);
+    }).length;
+  }
+  Future<void> clearVideoSkipRecords({bool forPrivate = false}) async {
+    if (forPrivate) {
+      _privateVideoSkipRecords.clear();
+      return;
+    }
+    await _prefs.remove(keyVideoSkipRecords);
+  }
+  void clearPrivateVideoSkipRecords() {
+    _privateVideoSkipRecords.clear();
+  }
+  static int defaultSkipSecondsFromPlayback({
+    required bool isIntro,
+    required int savedSec,
+    required Duration position,
+    required Duration duration,
+  }) {
+    final posSec = position.inSeconds;
+    final durSec = duration.inSeconds;
+    if (isIntro) {
+      if (posSec >= 1 && posSec <= 600) {
+        return posSec;
+      }
+      return savedSec.clamp(0, 600);
+    }
+    if (durSec > 0 && posSec > 0 && durSec > posSec) {
+      final remainSec = durSec - posSec;
+      if (remainSec >= 1 && remainSec <= 600) {
+        return remainSec;
+      }
+    }
+    return savedSec.clamp(0, 600);
+  }
   Future<void> setRepeatMode(String mode) async {
     await _prefs.setString(keyRepeatMode, mode);
   }
@@ -989,6 +1181,7 @@ class StorageService {
       keyWatchHistory,
       jsonEncode(updated.map((e) => e.toJson()).toList()),
     );
+    watchHistoryRevision.value++;
     scheduleAutoWebdavSync();
   }
   Future<void> removeWatchHistoryItem(String siteKey, String videoId) async {
@@ -999,6 +1192,7 @@ class StorageService {
       keyWatchHistory,
       jsonEncode(updated.map((e) => e.toJson()).toList()),
     );
+    watchHistoryRevision.value++;
     await _recordSyncTombstone(
       'hist:$targetKey',
       DateTime.now().millisecondsSinceEpoch,
@@ -1016,6 +1210,7 @@ class StorageService {
       await _writeSyncTombstones(tombs);
     }
     await _prefs.setString(keyWatchHistory, '[]');
+    watchHistoryRevision.value++;
     scheduleAutoWebdavSync(immediate: true);
   }
   List<FavoriteEntry> getFavorites({bool forPrivate = false}) {
@@ -1384,6 +1579,7 @@ class StorageService {
     }
     if (nextHistory != null) {
       await _prefs.setString(keyWatchHistory, nextHistory);
+      watchHistoryRevision.value++;
     }
     if (nextFavorites != null) {
       await _prefs.setString(keyFavorites, nextFavorites);
@@ -2110,6 +2306,9 @@ class StorageService {
     await _prefs.setString(keyWatchHistory, nextHistJson);
     await _prefs.setString(keyFavorites, nextFavsJson);
     await _writeSyncTombstones(mergedTombs);
+    if (nextHistJson != beforeHistJson) {
+      watchHistoryRevision.value++;
+    }
 
     final changed =
         subscriptionsChanged ||
