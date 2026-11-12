@@ -182,6 +182,15 @@ class CmsFilter {
 }
 
 class CmsSite {
+  static const String statusOk = 'ok';
+  static const String statusNeedsJar = 'needs-jar';
+  static const String statusUnsupportedType = 'unsupported-type';
+  static const String statusAdapterMissing = 'adapter-missing';
+  static const String statusExtTooLarge = 'ext-too-large';
+  static const String statusCustomSiteUrl = 'custom-site-url';
+  static const String statusParserRequired = 'parser-required';
+  static const int maxExtSize = 128 * 1024;
+
   final String key;
   final String? originalKey;
   String get sourceKey => originalKey ?? key;
@@ -191,6 +200,8 @@ class CmsSite {
   final String playUrl;
   final bool searchable;
   final String ext;
+  final bool extTooLarge;
+  final bool requiresParser;
   /// Original JSON string value for full-name JS Spider init. [ext] keeps the
   /// existing normalized URL/plugin representation; object values have no raw string.
   final String? rawExtension;
@@ -212,6 +223,8 @@ class CmsSite {
     this.playUrl = '',
     this.searchable = true,
     this.ext = '',
+    this.extTooLarge = false,
+    this.requiresParser = false,
     this.rawExtension,
     this.jar = '',
     this.spider = '',
@@ -220,6 +233,9 @@ class CmsSite {
     this.isPrivate = false,
     this.subscriptionId = '',
   });
+
+  bool get isExtTooLarge => extTooLarge || ext.length > maxExtSize;
+
   CmsSite copyWith({
     String? key,
     String? name,
@@ -228,6 +244,8 @@ class CmsSite {
     String? playUrl,
     bool? searchable,
     String? ext,
+    bool? extTooLarge,
+    bool? requiresParser,
     String? rawExtension,
     String? jar,
     String? spider,
@@ -245,6 +263,8 @@ class CmsSite {
       playUrl: playUrl ?? this.playUrl,
       searchable: searchable ?? this.searchable,
       ext: ext ?? this.ext,
+      extTooLarge: extTooLarge ?? this.extTooLarge,
+      requiresParser: requiresParser ?? this.requiresParser,
       rawExtension: rawExtension ?? (ext == null ? this.rawExtension : null),
       jar: jar ?? this.jar,
       spider: spider ?? this.spider,
@@ -315,7 +335,55 @@ class CmsSite {
   bool get isEffectivelyPrivate =>
       isPrivate || group.contains('隐私') || group.contains('私密');
   bool get requiresPluginRuntime => !canBrowse;
-  bool get supported => canBrowse;
+  String get capabilityStatus {
+    if (isExtTooLarge) {
+      return statusExtTooLarge;
+    }
+    if (CspBridge.isNetdiskSite(this) && !CspBridge.hasAdapter(this)) {
+      return statusAdapterMissing;
+    }
+    if (type == 3 ||
+        api.startsWith('csp_') ||
+        api.endsWith('.js') ||
+        jar.isNotEmpty) {
+      if (!CspBridge.hasAdapter(this)) {
+        return statusNeedsJar;
+      }
+    }
+    if (!CspBridge.hasAdapter(this)) {
+      if (type != 0 && type != 1 && type != 4 && !isEmby && !isCatPaw) {
+        return statusUnsupportedType;
+      }
+      if (!isHttpApi && !isEmby && !isCatPaw && !isM3uVodApi) {
+        return statusCustomSiteUrl;
+      }
+    }
+    if (requiresParser && playUrl.isEmpty) {
+      return statusParserRequired;
+    }
+    if (!canBrowse) {
+      return statusUnsupportedType;
+    }
+    return statusOk;
+  }
+
+  static String capabilityReason(String status) {
+    return switch (status) {
+      statusOk => '正常可用',
+      statusNeedsJar => '此来源需要 Spider / JS / JAR 运行环境，基础版尚未支持',
+      statusUnsupportedType => '暂不支持此类型来源，已保留在列表中',
+      statusAdapterMissing => '此网盘源的原始插件尚未适配当前设备，无法读取原始网盘线路',
+      statusExtTooLarge => '扩展参数超过大小上限，无法加载',
+      statusCustomSiteUrl => '此来源不是可直接请求的 HTTP(S) CMS',
+      statusParserRequired => '需要解析器，当前环境缺少可用解析配置',
+      _ => '此来源暂不可用',
+    };
+  }
+
+  String get limitation => unsupportedReason;
+
+  bool get supported => capabilityStatus == statusOk;
+
   String get unsupportedReason {
     final lowerApi = api.trim().toLowerCase();
     if (lowerApi.startsWith('csp_sixv')) {
@@ -327,11 +395,7 @@ class CmsSite {
     if (lowerApi.startsWith('csp_aidj')) {
       return '该线路使用专有加密流保护，当前设备暂不支持';
     }
-    if (isScriptOrJarApi && CspBridge.isNetdiskSite(this)) {
-      return '此网盘源的原始插件尚未适配当前设备，无法读取原始网盘线路。请使用同一来源提供的兼容接口，或切换片源';
-    }
-    if (isScriptOrJarApi) return '该插件需要相应运行环境，可在兼容设备上使用';
-    return '当前设备不支持此接口类型';
+    return capabilityReason(capabilityStatus);
   }
 }
 
@@ -433,14 +497,25 @@ class CmsConfig {
     this.parses = const [],
     this.spider = '',
   });
-  List<CmsSite> get supportedSites =>
-      sites.where((s) => s.supported).toList(growable: false);
+  List<CmsSite> get supportedSites => List<CmsSite>.unmodifiable(sites);
   List<CmsSite> get publicSupportedSites => sites
-      .where((s) => s.supported && !s.isEffectivelyPrivate)
+      .where((s) => !s.isEffectivelyPrivate)
       .toList(growable: false);
   List<CmsSite> get privateSupportedSites => sites
+      .where((s) => s.isEffectivelyPrivate)
+      .toList(growable: false);
+
+  List<CmsSite> get availableSites =>
+      sites.where((s) => s.supported).toList(growable: false);
+  List<CmsSite> get publicAvailableSites => sites
+      .where((s) => s.supported && !s.isEffectivelyPrivate)
+      .toList(growable: false);
+  List<CmsSite> get privateAvailableSites => sites
       .where((s) => s.supported && s.isEffectivelyPrivate)
       .toList(growable: false);
+
+  int get availableSiteCount => availableSites.length;
+  int get publicAvailableSiteCount => publicAvailableSites.length;
   List<LiveSource> get publicLives =>
       lives.where((l) => !l.isEffectivelyPrivate).toList(growable: false);
   List<LiveSource> get privateLives =>

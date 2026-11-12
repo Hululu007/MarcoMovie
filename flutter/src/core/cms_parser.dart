@@ -1264,17 +1264,24 @@ class CmsParser {
               isPrivate,
             ) ||
             (item['space'] ?? '').toString().trim().toLowerCase() == 'private';
+        final itemPlayUrl = (item['playUrl'] ?? '').toString().trim();
+        final itemParse = _asInt(item['parse'], 0);
+        final itemJx = _asInt(item['jx'], 0);
+        final requiresParser = itemPlayUrl.isNotEmpty || itemParse == 1 || itemJx == 1;
+        final extTooLarge = extStr.length > CmsSite.maxExtSize;
         sites.add(
           CmsSite(
             key: key,
             name: name.isEmpty ? key : name,
             type: type,
             api: api,
-            playUrl: (item['playUrl'] ?? '').toString().trim().isNotEmpty
-                ? (item['playUrl'] ?? '').toString().trim()
+            playUrl: itemPlayUrl.isNotEmpty
+                ? itemPlayUrl
                 : defaultJsonParseUrl,
             searchable: _asBool(item['searchable'], true),
             ext: extStr,
+            extTooLarge: extTooLarge,
+            requiresParser: requiresParser,
             rawExtension: item['ext'] is String ? item['ext'] as String : null,
             jar: normalizeJarDeclaration(origin, (item['jar'] ?? '').toString()),
             spider: spider,

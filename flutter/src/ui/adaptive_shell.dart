@@ -227,6 +227,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       }
     }
     if (matched != null) {
+      if (!matched.supported) {
+        _showAppleNotice(matched.name, matched.unsupportedReason);
+        return;
+      }
       _openVideoDetail(
         matched,
         CmsVideo(
@@ -279,7 +283,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.hidden) {
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.inactive) {
+      widget.storage.flushPendingHistory();
       widget.storage.scheduleAutoWebdavSync(immediate: true);
     }
   }
@@ -915,11 +921,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
       final merged = await widget.storage.upsertSubscriptions(entries);
       _reloadSavedConfig();
-      final siteCount = merged?.publicSupportedSites.length ?? 0;
+      final totalSiteCount = merged?.publicSupportedSites.length ?? 0;
+      final availSiteCount = merged?.publicAvailableSiteCount ?? 0;
       final liveCount = merged?.publicLives.length ?? 0;
       _showAppleNotice(
         '订阅导入成功',
-        '本次成功导入 ${entries.length} 个订阅源，当前共 $siteCount 个可用片源'
+        '本次成功导入 ${entries.length} 个订阅源，当前 可用 $availSiteCount / 共 $totalSiteCount 个片源'
         '${liveCount > 0 ? "、$liveCount 个直播源" : ""}。',
       );
     } catch (e) {
@@ -5891,7 +5898,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     iconBgColor: AppleColors.systemGreen,
                     title: '订阅与数据维护',
                     subtitle: '网盘扫码登录、点播直播订阅源管理与缓存清理',
-                    trailingText: '${publicSites.length} 可用',
+                    trailingText: '可用 ${publicSites.where((s) => s.supported).length} / 共 ${publicSites.length}',
                     onTap: () => _openSettingsSubPage(
                       title: '订阅与数据维护',
                       subtitle: '集中管理云盘扫码授权、点播与直播订阅源、多仓切换及跨端数据备份',
@@ -7242,8 +7249,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               iconBgColor: AppleColors.systemPurple,
               title: '订阅源与分组管理中心',
               subtitle: publicSubs.isEmpty
-                  ? '批量导入、多仓切换与自定义分组（当前 ${publicSites.length} 可用片源）'
-                  : '已导入 ${publicSubs.length} 个订阅 · ${publicSites.length} 个可用片源${depots.isNotEmpty ? " · ${depots.length} 个子仓库" : ""}',
+                  ? '批量导入、多仓切换与自定义分组（当前 可用 ${publicSites.where((s) => s.supported).length} / 共 ${publicSites.length} 片源）'
+                  : '已导入 ${publicSubs.length} 个订阅 · 可用 ${publicSites.where((s) => s.supported).length} / 共 ${publicSites.length} 个片源${depots.isNotEmpty ? " · ${depots.length} 个子仓库" : ""}',
               trailingText: '${publicSubs.length} 订阅',
               onTap: () async {
                 await _showSubscriptionManagerSheet();
@@ -8833,7 +8840,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 (inPrivacyMode ? s.isEffectivelyPrivate : !s.isEffectivelyPrivate) &&
                 !CspBridge.isPickerHiddenUtilitySite(s))
             .toList();
-    final groupCounts = <String, int>{'全部': countSource.length};
+    final totalCount = countSource.length;
+    final availableCount = countSource.where((s) => s.supported).length;
+    final groupCounts = <String, int>{'全部': totalCount};
     final groups = <String>['全部'];
     for (final s in countSource) {
       if (!inPrivacyMode && s.isEffectivelyPrivate) continue;
@@ -8844,13 +8853,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     String selectedGroup = '全部';
     String searchQuery = '';
-    bool showUnsupported = false;
     final searchCtrl = TextEditingController();
-    final plugins = (_config?.pluginOnlySites ?? const <CmsSite>[])
-        .where((s) =>
-            (inPrivacyMode ? s.isEffectivelyPrivate : !s.isEffectivelyPrivate) &&
-            !CspBridge.isPickerHiddenUtilitySite(s))
-        .toList();
     final importPrivateButton = CupertinoButton(
       padding: const EdgeInsets.symmetric(horizontal: 6),
       minimumSize: const Size(28, 28),
@@ -8868,8 +8871,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
     _openIosOrModalPage<void>(
       title: inPrivacyMode
-          ? '切换隐私片源 (${supported.length} 可用)'
-          : '切换片源 (${supported.length} 可用)',
+          ? '切换隐私片源 (可用 $availableCount / 共 $totalCount)'
+          : '切换片源 (可用 $availableCount / 共 $totalCount)',
       backLabel: '返回',
       maxWidth: 680,
       ignoreKeyboardInsets: true,
@@ -8926,7 +8929,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 s.api.toLowerCase().contains(q);
           }
           final filteredSites = supported.where(matchesFilter).toList();
-          final filteredPlugins = plugins.where(matchesFilter).toList();
 
           String siteBadgeLabel(CmsSite s) {
             final lower = '${s.name} ${s.api} ${s.key}'.toLowerCase();
@@ -9103,117 +9105,69 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             const SizedBox(height: 12),
                 ],
               )),
-              if (filteredSites.isEmpty && filteredPlugins.isEmpty)
+              if (filteredSites.isEmpty)
                 const SliverToBoxAdapter(child: Padding(
                   padding: EdgeInsets.all(24),
                   child: Text('未找到匹配的片源', style: TextStyle(
                     color: AppleColors.labelSecondary, fontSize: 14)),
                 ))
               else
-                          SourceChoiceSliver(
-                            sites: filteredSites,
-                            selectedKey: _activeSite?.key,
-                            preferredKey: widget.storage.preferredSiteKey,
-                            onPreferred: inPrivacyMode ? null : (s) async {
-                              await widget.storage.setPreferredSiteKey(
-                                widget.storage.preferredSiteKey == s.key ? '' : s.key);
-                              if (ctx.mounted) setPickerState(() {});
-                            },
-                            badgeLabel: siteBadgeLabel,
-                            badgeColor: siteBadgeColor,
-                            onSelected: (s) {
-                              Navigator.of(ctx).pop();
-                              if (s.isCatPaw && Uri.parse(s.api).path == '/api/baseset') {
-                                _showCatPawSettings(s);
-                                return;
-                              }
-                              if (inPrivacyMode) {
-                                setState(() {
-                                  _privateSessionUnlocked = true;
-                                  _selectedPrivateSiteKey = s.key;
-                                  _activeSite = s;
-                                });
-                              } else {
-                                widget.storage.setSelectedSiteKey(s.key);
-                                unawaited(CmsClient.retainScriptSessions(
-                                  (_config?.scriptOwners ?? const <CmsSite>[])
-                                      .where((site) => !site.isEffectivelyPrivate),
-                                ));
-                                setState(() {
-                                  _privateSessionUnlocked = false;
-                                  _activeSite = s;
-                                });
-                              }
-                              _loadSiteHome();
-                            },
+                SourceChoiceSliver(
+                  sites: filteredSites,
+                  selectedKey: _activeSite?.key,
+                  preferredKey: widget.storage.preferredSiteKey,
+                  onPreferred: inPrivacyMode ? null : (s) async {
+                    await widget.storage.setPreferredSiteKey(
+                      widget.storage.preferredSiteKey == s.key ? '' : s.key);
+                    if (ctx.mounted) setPickerState(() {});
+                  },
+                  badgeLabel: siteBadgeLabel,
+                  badgeColor: siteBadgeColor,
+                  onUnsupportedSelected: (s) {
+                    showCupertinoDialog<void>(
+                      context: ctx,
+                      builder: (dialogCtx) => CupertinoAlertDialog(
+                        title: Text(s.name),
+                        content: Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Text(s.unsupportedReason),
+                        ),
+                        actions: [
+                          CupertinoDialogAction(
+                            isDefaultAction: true,
+                            onPressed: () => Navigator.of(dialogCtx).pop(),
+                            child: const Text('我知道了'),
                           ),
-                          if (filteredPlugins.isNotEmpty) ...[
-                            SliverToBoxAdapter(
-                              child: Padding(
-                                padding: const EdgeInsets.only(top: 12),
-                                child: Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.stretch,
-                                  children: [
-                                    GestureDetector(
-                                      behavior: HitTestBehavior.opaque,
-                                      onTap: () => setPickerState(
-                                        () => showUnsupported =
-                                            !showUnsupported,
-                                      ),
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 6,
-                                          vertical: 6,
-                                        ),
-                                        child: Row(
-                                          children: [
-                                            Text(
-                                              '当前设备未适配 (${filteredPlugins.length})',
-                                              style: const TextStyle(
-                                                color: AppleColors
-                                                    .labelSecondary,
-                                                fontSize: 12.5,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                            const Spacer(),
-                                            Icon(
-                                              (showUnsupported ||
-                                                      searchQuery
-                                                          .trim()
-                                                          .isNotEmpty)
-                                                  ? CupertinoIcons
-                                                      .chevron_up
-                                                  : CupertinoIcons
-                                                      .chevron_down,
-                                              size: 13,
-                                              color: AppleColors
-                                                  .labelSecondary,
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                    if (showUnsupported ||
-                                        searchQuery.trim().isNotEmpty)
-                                      AppleGroupedSection(
-                                        children: filteredPlugins.map((s) {
-                                          return AppleGroupedTile(
-                                            icon: CupertinoIcons
-                                                .lock_shield_fill,
-                                            iconBgColor: AppleColors
-                                                .groupedTertiary,
-                                            title: s.name,
-                                            subtitle: s.unsupportedReason,
-                                          );
-                                        }).toList(),
-                                      ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ],
+                        ],
+                      ),
+                    );
+                  },
+                  onSelected: (s) {
+                    Navigator.of(ctx).pop();
+                    if (s.isCatPaw && Uri.parse(s.api).path == '/api/baseset') {
+                      _showCatPawSettings(s);
+                      return;
+                    }
+                    if (inPrivacyMode) {
+                      setState(() {
+                        _privateSessionUnlocked = true;
+                        _selectedPrivateSiteKey = s.key;
+                        _activeSite = s;
+                      });
+                    } else {
+                      widget.storage.setSelectedSiteKey(s.key);
+                      unawaited(CmsClient.retainScriptSessions(
+                        (_config?.scriptOwners ?? const <CmsSite>[])
+                            .where((site) => !site.isEffectivelyPrivate),
+                      ));
+                      setState(() {
+                        _privateSessionUnlocked = false;
+                        _activeSite = s;
+                      });
+                    }
+                    _loadSiteHome();
+                  },
+                ),
               if (isIos)
                 SliverToBoxAdapter(
                   child: SizedBox(height: safeBottom + 28),

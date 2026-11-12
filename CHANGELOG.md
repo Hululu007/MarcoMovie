@@ -1,5 +1,16 @@
 ## 未发布
 
+- [Flutter/Storage] 存储架构升级与播放进度节流（Lane D2 § D4）：
+  - 将订阅配置（subscriptions.json）与观看历史（watch_history.json）从 SharedPreferences 迁移至独立原子 JSON 文件；
+  - 保持同步 API 内存缓存与原子替换写文件（.tmp 写入、flush 刷新、安全重命名）；
+  - 启动自动无损迁移旧版 SharedPreferences 存储并清理旧键；修复非 UTF-8 异常字节与损坏历史隔离备份（watch_history_corrupt_<ts>.json）及写保护锁，防止崩溃损坏文件被破坏性覆盖；
+  - 订阅文件（subscriptions.json）支持字节级容错读取与安全 UTF-8 解码；
+  - 连续播放进度写入节流至最多每 30 秒落盘一次，暂停、完播、切集、后台及退出时即时强制落盘；支持数据目录注入隔离测试。
+- [Flutter/UI] 未适配片源灰显展示与诊断原因（Lane D2 § D5）：
+  - 站点列表保留全部解析站点，暴露 availableSites 供仅需可用站点的调用方使用；
+  - 对齐全平台统一 7 种能力状态（ok、needs-jar、unsupported-type、adapter-missing、ext-too-large、custom-site-url、parser-required）与标准中文提示；
+  - 站点选择器未适配站点灰显展示（0.52 透明度、暗化边框、淡化未适配角标、隐藏星标），点击弹出诊断提示对话框而不切换线路；
+  - 片源总数统一显示为“可用 X / 共 Y”，默认启动片源自动优选可用站点。
 - [Android/Lite] 统一配置拉取策略与站点可见性（Lane C2 § C5, C6）：
   - 配置拉取双 UA 自动回退：默认 okhttp/3.15 请求，遇到 HTTP 错误或 HTML 网页拦截时自动回退至 Safari 桌面 UA 重试；
   - 跨重定向保留同域 Cookie（最多 5 跳），跨不同域重定向时严格剥离 Authorization 与 Cookie 敏感请求头；

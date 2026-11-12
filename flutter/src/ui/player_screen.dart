@@ -345,7 +345,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           pos.inSeconds > 10 &&
           (effectiveDur - pos).inSeconds <= _skipOutroSec) {
         _outroSkippedForSession = true;
-        unawaited(_saveProgress());
+        unawaited(_saveProgress(immediate: true));
         _showHud('已自动跳过片尾 ${_skipOutroSec}s');
         _handleEpisodeEnd();
       }
@@ -425,7 +425,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         });
         PlaybackWakelock.setEnabled(playing);
         if (!playing) {
-          _saveProgress();
+          _saveProgress(immediate: true);
           widget.storage.scheduleAutoWebdavSync(immediate: true);
         } else if (!_loading && !_buffering) {
           _scheduleHide();
@@ -478,7 +478,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           !_outroSkippedForSession) {
         _embySession?.stop(_position.inMilliseconds);
         _embySession = null;
-        unawaited(_saveProgress(completed: true));
+        unawaited(_saveProgress(completed: true, immediate: true));
         _handleEpisodeEnd();
       }
     });
@@ -498,7 +498,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _openCurrentEpisode(resumeMs: widget.initialPositionMs);
     _historyTimer = Timer.periodic(
       const Duration(seconds: 15),
-      (_) => _saveProgress(),
+      (_) => _saveProgress(immediate: false),
     );
   }
 
@@ -507,7 +507,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.hidden) {
-      _saveProgress();
+      _saveProgress(immediate: true);
+      widget.storage.flushPendingHistory();
       widget.storage.scheduleAutoWebdavSync(immediate: true);
     }
   }
@@ -551,7 +552,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (_episodeIndex < _currentLine.episodes.length - 1) {
         _stepEpisode(1);
       } else if (_repeatMode == 'all' && _currentLine.episodes.isNotEmpty) {
-        _saveProgress();
+        _saveProgress(immediate: true);
         setState(() => _episodeIndex = 0);
         _openCurrentEpisode(resumeMs: 0);
       }
@@ -1067,7 +1068,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     return '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
   }
 
-  Future<void> _saveProgress({bool completed = false}) async {
+  Future<void> _saveProgress({bool completed = false, bool immediate = false}) async {
     if (!_allowHistory ||
         _isLiveStream ||
         widget.site.key == 'live' ||
@@ -1115,6 +1116,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         duration: effectiveDurMs,
         updated: DateTime.now().millisecondsSinceEpoch,
       ),
+      immediate: immediate,
     );
   }
 
@@ -1171,7 +1173,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       final exited = await _desktopWindow!.exitFullscreen();
       if (!exited) {
-        await _saveProgress();
+        await _saveProgress(immediate: true);
         if (mounted) Navigator.of(context).maybePop();
       }
     } catch (error) {
@@ -1204,7 +1206,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _stepEpisode(int delta) {
     final next = _episodeIndex + delta;
     if (next < 0 || next >= _currentLine.episodes.length) return;
-    _saveProgress();
+    _saveProgress(immediate: true);
     _failedLinesForEpisode.clear();
     _failedLiveEpisodes.clear();
     setState(() => _episodeIndex = next);
@@ -1219,7 +1221,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
     setState(() => _position = Duration(milliseconds: targetMs));
     _player.seek(Duration(milliseconds: targetMs));
-    _saveProgress();
+    _saveProgress(immediate: true);
     _showHud(
       '${seconds >= 0 ? "快进" : "快退"} ${_formatDuration(Duration(milliseconds: targetMs))}',
     );
@@ -1505,7 +1507,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     _hideTimer?.cancel();
     _historyTimer?.cancel();
     _clockTimer?.cancel();
-    _saveProgress();
+    _saveProgress(immediate: true);
+    widget.storage.flushPendingHistory();
     widget.storage.scheduleAutoWebdavSync(immediate: true);
     _embySession?.stop(_position.inMilliseconds);
     _embySession = null;
@@ -1544,7 +1547,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     return PopScope(
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) {
-          unawaited(_saveProgress());
+          unawaited(_saveProgress(immediate: true));
         }
       },
       child: Scaffold(
@@ -1560,7 +1563,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               HardwareKeyboard.instance.isMetaPressed;
           if (isCtrlOrCmd && event.logicalKey == LogicalKeyboardKey.keyW) {
             unawaited(
-              _saveProgress().whenComplete(() {
+              _saveProgress(immediate: true).whenComplete(() {
                 if (context.mounted) Navigator.of(context).maybePop();
               }),
             );
@@ -1643,7 +1646,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               _desktopEscape();
             } else {
               unawaited(
-                _saveProgress().whenComplete(() {
+                _saveProgress(immediate: true).whenComplete(() {
                   if (context.mounted) Navigator.of(context).maybePop();
                 }),
               );
@@ -1891,7 +1894,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               _hudText = '';
             });
             _player.seek(Duration(milliseconds: targetMs));
-            _saveProgress();
+            _saveProgress(immediate: true);
             _scheduleHide();
           },
           onHorizontalDragCancel: () {
@@ -2109,7 +2112,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           padding: EdgeInsets.zero,
           minSize: 36 * scale,
           onPressed: () async {
-            await _saveProgress();
+            await _saveProgress(immediate: true);
             if (context.mounted) {
               Navigator.of(context).maybePop();
             }
@@ -3388,7 +3391,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   final keepPos = _position.inMilliseconds >= 1000
                       ? _position.inMilliseconds
                       : _lastKnownPositionMs;
-                  _saveProgress();
+                  _saveProgress(immediate: true);
                   setState(() {
                     _lineIndex = i;
                     _episodeIndex = CspBridge.matchEpisodeIndexInLine(
@@ -3429,7 +3432,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     ? _position.inMilliseconds
                     : _lastKnownPositionMs)
               : 0;
-          _saveProgress();
+          _saveProgress(immediate: true);
           setState(() {
             _lineIndex = lineIdx;
             _episodeIndex = epIdx;

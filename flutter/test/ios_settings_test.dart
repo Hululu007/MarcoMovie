@@ -320,7 +320,7 @@ void main() {
     await tester.tap(find.text('玩偶哥哥 4K 弹幕').first);
     await tester.pumpAndSettle();
     expect(find.byType(IosSettingsScaffold), findsOneWidget);
-    expect(find.text('切换片源 (1 可用)'), findsOneWidget);
+    expect(find.text('切换片源 (可用 1 / 共 1)'), findsOneWidget);
     expect(find.byKey(const ValueKey('site-picker-scroll')), findsOneWidget);
     // Tapping 管理线路 transitions cleanly to another full-screen secondary page.
     await tester.tap(find.text('管理线路'));
