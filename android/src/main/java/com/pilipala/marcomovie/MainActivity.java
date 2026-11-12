@@ -243,7 +243,7 @@ public final class MainActivity extends Activity {
                         AppLog.w("PluginGuard", "extension main-thread callback failed", error);
                         MainActivity activity = activeActivity;
                         if (activity != null && activity.prefs != null) {
-                            activity.prefs.edit().putString(Prefs.LOADING_SITE, "").commit();
+                            activity.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
                             activity.ui.post(
                                     () -> {
                                         if (!activity.isFinishing()) activity.toast("扩展操作未能完成，请重试");
@@ -692,7 +692,7 @@ public final class MainActivity extends Activity {
                                         prefs.edit()
                                                 .putString(Prefs.LOADING_SITE, "")
                                                 .putString(Prefs.SELECTED_SITE, "")
-                                                .commit();
+                                                .apply();
                                     }
                                     worker.execute(
                                             () ->

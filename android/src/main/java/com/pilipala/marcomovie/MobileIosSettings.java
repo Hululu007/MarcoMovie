@@ -503,7 +503,7 @@ final class MobileIosSettings {
                                             a.prefs
                                                     .edit()
                                                     .putInt(Prefs.UI_SCALE_PERCENT, target)
-                                                    .commit();
+                                                    .apply();
                                             a.recreate();
                                         }
                                     });
@@ -1351,7 +1351,7 @@ final class MobileIosSettings {
                                                                         .remove(
                                                                                 Prefs
                                                                                         .MOBILE_SHOW_HISTORY)
-                                                                        .commit();
+                                                                        .apply();
                                                                 a.reduced = false;
                                                                 resetToRoot();
                                                                 a.recreate();

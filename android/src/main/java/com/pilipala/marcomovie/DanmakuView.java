@@ -106,68 +106,120 @@ final class DanmakuView extends View implements AutoCloseable {
         return new String(bytes, "UTF-8");
     }
 
+    static String fetchDanmaku(String candidate, Map<String, String> headers) throws Exception {
+        String input = candidate == null ? "" : candidate.trim();
+        if (input.startsWith("[") || input.startsWith("{")) {
+            try {
+                org.json.JSONObject wrapper = new org.json.JSONObject().put("danmaku", input);
+                input = MediaOptions.extractDanmakuUrl(wrapper);
+            } catch (Exception ignored) {
+            }
+        }
+        String address = LocalProxy.rewrite(input);
+        if (!Cms.isHttp(address)) {
+            throw new IOException("来源没有提供有效弹幕地址");
+        }
+        Map<String, String> reqHeaders =
+                ProxyAddress.requestHeaders(
+                        address,
+                        headers != null ? headers : Collections.<String, String>emptyMap());
+        URL currentUrl = new URL(Cms.normalizeHttp(address));
+        HttpURLConnection connection = null;
+        Map<String, Cms.RedirectCookie> redirectCookies = new LinkedHashMap<>();
+
+        try {
+            for (int redirect = 0; redirect < 5; redirect++) {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+                boolean isLoopback = LocalProxy.loopbackHost(currentUrl.getHost());
+                connection = (HttpURLConnection) currentUrl.openConnection();
+                connection.setInstanceFollowRedirects(false);
+                connection.setConnectTimeout(12000);
+                connection.setReadTimeout(25000);
+                connection.setRequestProperty("User-Agent", Cms.USER_AGENT);
+                connection.setRequestProperty("Accept-Encoding", "gzip, deflate");
+                for (Map.Entry<String, String> h : reqHeaders.entrySet()) {
+                    String k = h.getKey();
+                    if (k == null) continue;
+                    if (isLoopback
+                            && ("Origin".equalsIgnoreCase(k) || "Host".equalsIgnoreCase(k))) {
+                        continue;
+                    }
+                    connection.setRequestProperty(k, h.getValue());
+                }
+                int status = connection.getResponseCode();
+
+                // Track Set-Cookie headers
+                List<String> setCookies = connection.getHeaderFields().get("Set-Cookie");
+                if (setCookies == null) {
+                    for (Map.Entry<String, List<String>> entry :
+                            connection.getHeaderFields().entrySet()) {
+                        if ("set-cookie".equalsIgnoreCase(entry.getKey())) {
+                            setCookies = entry.getValue();
+                            break;
+                        }
+                    }
+                }
+                List<Cms.RedirectCookie> newCookies = Cms.parseSetCookies(setCookies, currentUrl);
+                for (Cms.RedirectCookie cookie : newCookies) {
+                    redirectCookies.put(
+                            cookie.domain
+                                    + "|"
+                                    + cookie.hostOnly
+                                    + "|"
+                                    + cookie.path
+                                    + "|"
+                                    + cookie.name,
+                            cookie);
+                }
+
+                if (status == 301
+                        || status == 302
+                        || status == 303
+                        || status == 307
+                        || status == 308) {
+                    String loc = connection.getHeaderField("Location");
+                    if (loc == null || loc.trim().isEmpty()) {
+                        throw new IOException("弹幕重定向缺少地址");
+                    }
+                    URL targetUrl = new URL(currentUrl, loc.trim());
+                    if (!Cms.isHttp(targetUrl.toString())) {
+                        throw new IOException("不支持此弹幕重定向协议: " + targetUrl.getProtocol());
+                    }
+                    if (targetUrl.getUserInfo() != null) {
+                        throw new IOException("弹幕重定向不能注入登录凭据");
+                    }
+                    reqHeaders =
+                            Cms.inheritedHeaders(
+                                    currentUrl.toString(), targetUrl.toString(), reqHeaders);
+                    Cms.mergeRedirectCookies(reqHeaders, redirectCookies.values(), targetUrl);
+                    currentUrl = targetUrl;
+                    continue;
+                }
+
+                if (status < 200 || status >= 300) {
+                    throw new IOException("弹幕服务器返回 HTTP " + status);
+                }
+
+                try (InputStream in = connection.getInputStream()) {
+                    return decodeResponseStream(in, connection.getContentEncoding());
+                }
+            }
+            throw new IOException("弹幕重定向次数过多");
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
     void load(String url, Map<String, String> headers, Listener listener) {
         final int ticket = ++request;
         loader.execute(
                 () -> {
-                    HttpURLConnection connection = null;
                     try {
-                        String candidate = url == null ? "" : url.trim();
-                        if (candidate.startsWith("[") || candidate.startsWith("{")) {
-                            try {
-                                org.json.JSONObject wrapper =
-                                        new org.json.JSONObject().put("danmaku", candidate);
-                                candidate = MediaOptions.extractDanmakuUrl(wrapper);
-                            } catch (Exception ignored) {
-                            }
-                        }
-                        String address = LocalProxy.rewrite(candidate);
-                        if (!Cms.isHttp(address)) throw new IOException("来源没有提供有效弹幕地址");
-                        Map<String, String> reqHeaders =
-                                ProxyAddress.requestHeaders(
-                                        address,
-                                        headers != null
-                                                ? headers
-                                                : Collections.<String, String>emptyMap());
-                        URL currentUrl = new URL(Cms.normalizeHttp(address));
-                        for (int redirect = 0; redirect <= 5; redirect++) {
-                            if (connection != null) {
-                                connection.disconnect();
-                            }
-                            boolean isLoopback = LocalProxy.loopbackHost(currentUrl.getHost());
-                            connection = (HttpURLConnection) currentUrl.openConnection();
-                            connection.setInstanceFollowRedirects(false);
-                            connection.setConnectTimeout(12000);
-                            connection.setReadTimeout(25000);
-                            connection.setRequestProperty("User-Agent", Cms.USER_AGENT);
-                            connection.setRequestProperty("Accept-Encoding", "gzip, deflate");
-                            for (Map.Entry<String, String> h : reqHeaders.entrySet()) {
-                                String k = h.getKey();
-                                if (k == null) continue;
-                                if (isLoopback
-                                        && ("Origin".equalsIgnoreCase(k)
-                                                || "Host".equalsIgnoreCase(k))) {
-                                    continue;
-                                }
-                                connection.setRequestProperty(k, h.getValue());
-                            }
-                            int status = connection.getResponseCode();
-                            if (status == 301
-                                    || status == 302
-                                    || status == 303
-                                    || status == 307
-                                    || status == 308) {
-                                String loc = connection.getHeaderField("Location");
-                                if (loc == null || loc.trim().isEmpty()) break;
-                                currentUrl = new URL(currentUrl, loc.trim());
-                                continue;
-                            }
-                            break;
-                        }
-                        String body;
-                        try (InputStream in = connection.getInputStream()) {
-                            body = decodeResponseStream(in, connection.getContentEncoding());
-                        }
+                        String body = fetchDanmaku(url, headers);
                         List<Comment> values = DanmakuData.parse(body);
                         post(
                                 () -> {
@@ -178,13 +230,16 @@ final class DanmakuView extends View implements AutoCloseable {
                                     }
                                 });
                     } catch (Exception error) {
+                        AppLog.w(
+                                "DanmakuView",
+                                "Failed to load danmaku: " + error.getMessage(),
+                                error);
                         post(
                                 () -> {
-                                    if (!closed && ticket == request)
+                                    if (!closed && ticket == request) {
                                         listener.error("弹幕暂时不可用，可导入本地 XML / JSON 文件。");
+                                    }
                                 });
-                    } finally {
-                        if (connection != null) connection.disconnect();
                     }
                 });
     }

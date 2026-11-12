@@ -10,7 +10,7 @@ final class ConfigStore {
         directory = target;
     }
 
-    void write(String raw) throws IOException {
+    synchronized void write(String raw) throws IOException {
         if (!directory.exists() && !directory.mkdirs()) throw new IOException("配置目录不可用");
         File pending = File.createTempFile("config-", ".tmp", directory);
         try {

@@ -515,7 +515,7 @@ final class SettingsScreen {
                                     a.prefs
                                             .edit()
                                             .putInt(Prefs.UI_SCALE_PERCENT, scaleValues[n])
-                                            .commit();
+                                            .apply();
                                     a.recreate();
                                 });
                         return;
@@ -530,7 +530,7 @@ final class SettingsScreen {
                                         a.prefs
                                                 .edit()
                                                 .putInt(Prefs.UI_SCALE_PERCENT, scaleValues[n])
-                                                .commit();
+                                                .apply();
                                         a.recreate();
                                     })
                             .setNegativeButton("返回", null)
@@ -830,7 +830,7 @@ final class SettingsScreen {
                                 () -> {
                                     android.content.SharedPreferences.Editor edit = a.prefs.edit();
                                     for (String key : KEYS) edit.remove(key);
-                                    edit.commit();
+                                    edit.apply();
                                     a.reduced = false;
                                     a.recreate();
                                 }));

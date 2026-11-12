@@ -127,7 +127,7 @@ final class PrivacySpace {
                                                                                             .currentTimeMillis()
                                                                                     + 30000
                                                                             : 0)
-                                                            .commit();
+                                                            .apply();
                                                     pin.setText("");
                                                     a.toast("密码错误，请重新输入");
                                                 } else {
@@ -146,10 +146,7 @@ final class PrivacySpace {
                                                                         Base64.encodeToString(
                                                                                 hash,
                                                                                 Base64.NO_WRAP));
-                                                    if (!save.commit()) {
-                                                        a.toast("无法保存隐私密码，请重试");
-                                                        return;
-                                                    }
+                                                    save.apply();
                                                     dialog.dismiss();
                                                     switchSpace(a, true);
                                                 }

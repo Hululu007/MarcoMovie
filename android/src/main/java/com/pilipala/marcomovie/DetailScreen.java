@@ -15,6 +15,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
@@ -1022,7 +1023,7 @@ final class DetailScreen {
                 curMeta.baseTitle == null
                         ? ""
                         : curMeta.baseTitle
-                                .toLowerCase()
+                                .toLowerCase(Locale.ROOT)
                                 .replaceAll("[\\s·:：\\-—_（）()【】\\[\\]《》〈〉\"“”'’!！?？,，.。]", "")
                                 .trim();
         if (baseKey.isEmpty()) return;
@@ -1049,7 +1050,7 @@ final class DetailScreen {
                                                 MobileDetailScreen.parseSeasonMeta(cand.title);
                                         String candKey =
                                                 candMeta.baseTitle
-                                                        .toLowerCase()
+                                                        .toLowerCase(Locale.ROOT)
                                                         .replaceAll(
                                                                 "[\\s·:：\\-—_（）()【】\\[\\]《》〈〉\"“”'’!！?？,，.。]",
                                                                 "")

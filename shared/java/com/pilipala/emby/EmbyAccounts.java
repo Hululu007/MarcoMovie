@@ -137,7 +137,7 @@ public final class EmbyAccounts {
                         String existing = prefs.getString("device", "");
                         if (existing.length() == 0) {
                             existing = UUID.randomUUID().toString();
-                            prefs.edit().putString("device", existing).commit();
+                            prefs.edit().putString("device", existing).apply();
                         }
                         final String device = existing;
                         new Thread(

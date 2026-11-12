@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -378,7 +379,7 @@ final class ImageLoader {
     static void applyArtworkHeaders(
             HttpURLConnection connection, String url, Map<String, String> existing) {
         if (existing != null && existing.containsKey("Referer")) return;
-        String lower = url.toLowerCase();
+        String lower = url.toLowerCase(Locale.ROOT);
         if (lower.contains("doubanio.com") || lower.contains("douban.com")) {
             connection.setRequestProperty("Referer", "https://movie.douban.com/");
         } else if (lower.contains("hdslb.com")

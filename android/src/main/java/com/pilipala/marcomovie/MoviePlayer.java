@@ -48,6 +48,27 @@ public class MoviePlayer {
         boolean onError(MoviePlayer player, int what, int extra);
     }
 
+    private static volatile String sDefaultUserAgent = null;
+
+    static String defaultUserAgent(Context context) {
+        if (sDefaultUserAgent != null) return sDefaultUserAgent;
+        String version = null;
+        if (context != null) {
+            try {
+                version =
+                        context.getPackageManager()
+                                .getPackageInfo(context.getPackageName(), 0)
+                                .versionName;
+            } catch (Exception ignored) {
+            }
+        }
+        if (version == null || version.isEmpty() || "未知".equals(version)) {
+            version = "0.5.22";
+        }
+        sDefaultUserAgent = "MarcoMovie/" + version;
+        return sDefaultUserAgent;
+    }
+
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Context context;
     private ExoPlayer exo;
@@ -597,6 +618,7 @@ public class MoviePlayer {
                                                     scope.call(
                                                             () ->
                                                                     sniffMime(
+                                                                            context,
                                                                             address,
                                                                             requestHeaders,
                                                                             scope));
@@ -629,7 +651,7 @@ public class MoviePlayer {
         if (released || (scope != null && scope.cancelled) || ticket != preparation) return;
         try {
             String userAgent =
-                    options.optBoolean("live", false) ? Cms.USER_AGENT : "MarcoMovie/0.2.0";
+                    options.optBoolean("live", false) ? Cms.USER_AGENT : defaultUserAgent(context);
             for (Map.Entry<String, String> header : requestHeaders.entrySet())
                 if (header.getKey().equalsIgnoreCase("User-Agent")) userAgent = header.getValue();
             DefaultHttpDataSource.Factory http =
@@ -693,7 +715,7 @@ public class MoviePlayer {
     }
 
     private static String sniffMime(
-            Uri address, Map<String, String> requestHeaders, RequestScope scope) {
+            Context context, Uri address, Map<String, String> requestHeaders, RequestScope scope) {
         if (scope != null && scope.cancelled) return null;
         int type = Util.inferContentType(address);
         if (type == C.CONTENT_TYPE_HLS) return MimeTypes.APPLICATION_M3U8;
@@ -720,7 +742,7 @@ public class MoviePlayer {
             connection.setConnectTimeout(1200);
             connection.setReadTimeout(1200);
             connection.setInstanceFollowRedirects(true);
-            connection.setRequestProperty("User-Agent", "MarcoMovie/0.2.0");
+            connection.setRequestProperty("User-Agent", defaultUserAgent(context));
             connection.setRequestProperty("Range", "bytes=0-" + (PROBE_MAX_BYTES - 1));
             for (Map.Entry<String, String> header : requestHeaders.entrySet())
                 connection.setRequestProperty(header.getKey(), header.getValue());

@@ -685,7 +685,7 @@ final class UpdateScreen {
                                         updates.prefs
                                                 .edit()
                                                 .putInt("pending_code", release.code)
-                                                .commit();
+                                                .apply();
                                         a.startActivityForResult(installIntent(), INSTALL);
                                         updates.message = "请在系统安装页面确认或返回";
                                     } catch (RuntimeException error) {

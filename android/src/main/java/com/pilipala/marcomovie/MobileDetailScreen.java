@@ -1862,7 +1862,9 @@ final class MobileDetailScreen {
 
     private static String normalizeBaseKey(String s) {
         if (s == null) return "";
-        return s.toLowerCase().replaceAll("[\\s·:：\\-—_（）()【】\\[\\]《》〈〉\"“”'’!！?？,，.。]", "").trim();
+        return s.toLowerCase(Locale.ROOT)
+                .replaceAll("[\\s·:：\\-—_（）()【】\\[\\]《》〈〉\"“”'’!！?？,，.。]", "")
+                .trim();
     }
 
     static void populateRelatedSeasons(

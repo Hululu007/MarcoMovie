@@ -15,6 +15,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Calendar;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -298,10 +299,10 @@ final class ImmersivePoster extends FrameLayout {
         if ("选集响应样本".equals(cleanTitle) || "独立调度".equals(cleanTitle)) return;
 
         final String cleanYear = extractFourDigitYear(rawYear);
-        final String cacheKey = (cleanTitle + "#" + cleanYear).toLowerCase();
+        final String cacheKey = (cleanTitle + "#" + cleanYear).toLowerCase(Locale.ROOT);
         Bitmap memCached = WIDE_MEM_CACHE.get(cacheKey);
         if (memCached == null && !cleanYear.isEmpty()) {
-            memCached = WIDE_MEM_CACHE.get((cleanTitle + "#").toLowerCase());
+            memCached = WIDE_MEM_CACHE.get((cleanTitle + "#").toLowerCase(Locale.ROOT));
         }
         if (memCached != null && !memCached.isRecycled()) {
             applyWideBitmap(memCached);

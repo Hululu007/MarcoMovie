@@ -522,7 +522,7 @@ final class CloudSyncDialog {
                     }
                     ed.putString(Prefs.FAVORITES, res.favoritesJson)
                             .putString(Prefs.SYNC_TOMBSTONES, res.tombstonesJson)
-                            .commit();
+                            .apply();
                 });
 
         if (syncSubs && res.subscriptions != null) {

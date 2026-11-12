@@ -41,8 +41,58 @@ final class PlaybackController {
                         t.setDaemon(true);
                         return t;
                     });
+    static final ExecutorService STORAGE_EXECUTOR =
+            Executors.newSingleThreadExecutor(
+                    r -> {
+                        Thread t = new Thread(r, "playback-storage");
+                        t.setDaemon(true);
+                        return t;
+                    });
+    private static final long DISK_SAVE_INTERVAL_MS = 15000L;
 
     private PlaybackController() {}
+
+    static WatchHistory.Entry cloneBookmark(WatchHistory.Entry src) {
+        if (src == null) return null;
+        WatchHistory.Entry e = new WatchHistory.Entry();
+        e.site = src.site;
+        e.id = src.id;
+        e.title = src.title;
+        e.poster = src.poster;
+        e.line = src.line;
+        e.episode = src.episode;
+        e.index = src.index;
+        e.position = src.position;
+        e.duration = src.duration;
+        e.updated = src.updated;
+        return e;
+    }
+
+    static void updateInMemoryBookmark(MainActivity a) {
+        if (a.player == null || !a.prepared || a.playingBookmark == null) return;
+        try {
+            int rawPos = a.player.getCurrentPosition();
+            int position =
+                    a.playbackControls != null
+                            ? a.playbackControls.displayPosition(rawPos)
+                            : rawPos;
+            if (a.playbackControls != null
+                    && a.playbackControls.pendingResumeMs > 0
+                    && position < 2000) {
+                position = a.playbackControls.pendingResumeMs;
+            }
+            if (position < 1000 && a.playingBookmark.position >= 1000) {
+                position = a.playingBookmark.position;
+            }
+            a.playingBookmark.position = Math.max(0, position);
+            int dur = a.player.getDuration();
+            if (dur > 0) {
+                a.playingBookmark.duration = dur;
+            }
+            a.playingBookmark.updated = System.currentTimeMillis();
+        } catch (Exception ignored) {
+        }
+    }
 
     static String formatTime(int ms) {
         int sec = Math.max(0, ms / 1000);
@@ -998,19 +1048,20 @@ final class PlaybackController {
             a.playingBookmark.position = Math.max(0, initialResume);
             a.playingBookmark.duration = saved != null ? Math.max(0, saved.duration) : 0;
             a.playingBookmark.updated = System.currentTimeMillis();
-            try {
-                a.prefs
-                        .edit()
-                        .putString(
-                                Prefs.WATCH_HISTORY,
-                                WatchHistory.upsert(
-                                        a.prefs.getString(Prefs.WATCH_HISTORY, "[]"),
-                                        a.playingBookmark))
-                        .commit();
-                a.lastBookmarkSave = a.playingBookmark.updated;
-                CloudSyncDialog.scheduleAutoPush(a, false);
-            } catch (Exception ignored) {
-            }
+            a.lastBookmarkSave = a.playingBookmark.updated;
+            final WatchHistory.Entry snapshot = cloneBookmark(a.playingBookmark);
+            final android.content.SharedPreferences prefs = a.prefs;
+            STORAGE_EXECUTOR.execute(
+                    () -> {
+                        try {
+                            if (prefs == null || snapshot == null) return;
+                            String current = prefs.getString(Prefs.WATCH_HISTORY, "[]");
+                            String updated = WatchHistory.upsert(current, snapshot);
+                            prefs.edit().putString(Prefs.WATCH_HISTORY, updated).apply();
+                        } catch (Exception ignored) {
+                        }
+                    });
+            CloudSyncDialog.scheduleAutoPush(a, false);
         }
         a.generation++;
         final int ticket = a.generation;
@@ -1564,6 +1615,7 @@ final class PlaybackController {
 
     static void clock(MainActivity a, int ticket) {
         if (ticket != a.generation || a.player == null || !a.prepared) return;
+        updateInMemoryBookmark(a);
         savePlaybackHistory(a, false);
         try {
             if (a.embyReporter != null)
@@ -1693,79 +1745,49 @@ final class PlaybackController {
     static void savePlaybackHistoryOnPrepared(MainActivity a) {
         if (a.privateMode) return;
         if (a.player == null || !a.prepared || a.playingBookmark == null) return;
-        try {
-            int rawPos = a.player.getCurrentPosition();
-            int displayPos =
-                    a.playbackControls != null
-                            ? a.playbackControls.displayPosition(rawPos)
-                            : rawPos;
-            if (a.playbackControls != null
-                    && a.playbackControls.pendingResumeMs > 0
-                    && displayPos < 2000) {
-                displayPos = a.playbackControls.pendingResumeMs;
-            }
-            if (displayPos >= 1000 || a.playingBookmark.position <= 0) {
-                a.playingBookmark.position = Math.max(0, displayPos);
-            }
-            int dur = a.player.getDuration();
-            if (dur > 0) {
-                a.playingBookmark.duration = dur;
-            }
-            a.playingBookmark.updated = System.currentTimeMillis();
-            a.prefs
-                    .edit()
-                    .putString(
-                            Prefs.WATCH_HISTORY,
-                            WatchHistory.upsert(
-                                    a.prefs.getString(Prefs.WATCH_HISTORY, "[]"),
-                                    a.playingBookmark))
-                    .commit();
-            a.lastBookmarkSave = a.playingBookmark.updated;
-            CloudSyncDialog.scheduleAutoPush(a, false);
-        } catch (Exception error) {
-            AppLog.w("PlaybackController", "savePlaybackHistoryOnPrepared failed", error);
-        }
+        updateInMemoryBookmark(a);
+        a.lastBookmarkSave = a.playingBookmark.updated;
+        final WatchHistory.Entry snapshot = cloneBookmark(a.playingBookmark);
+        final android.content.SharedPreferences prefs = a.prefs;
+        STORAGE_EXECUTOR.execute(
+                () -> {
+                    try {
+                        if (prefs == null || snapshot == null) return;
+                        String current = prefs.getString(Prefs.WATCH_HISTORY, "[]");
+                        String updated = WatchHistory.upsert(current, snapshot);
+                        prefs.edit().putString(Prefs.WATCH_HISTORY, updated).apply();
+                    } catch (Exception error) {
+                        AppLog.w(
+                                "PlaybackController",
+                                "savePlaybackHistoryOnPrepared failed",
+                                error);
+                    }
+                });
+        CloudSyncDialog.scheduleAutoPush(a, false);
     }
 
     static void savePlaybackHistory(MainActivity a, boolean force) {
         if (a.privateMode) return;
         if (a.player == null || !a.prepared || a.playingBookmark == null) return;
+        updateInMemoryBookmark(a);
+        if (a.playingBookmark.position < 1000 && a.playingBookmark.position == 0) return;
         long now = System.currentTimeMillis();
-        if (!force && now - a.lastBookmarkSave < 2000) return;
-        try {
-            int rawPos = a.player.getCurrentPosition();
-            int position =
-                    a.playbackControls != null
-                            ? a.playbackControls.displayPosition(rawPos)
-                            : rawPos;
-            if (a.playbackControls != null
-                    && a.playbackControls.pendingResumeMs > 0
-                    && position < 2000) {
-                position = a.playbackControls.pendingResumeMs;
-            }
-            if (position < 1000 && a.playingBookmark.position == 0) return;
-            if (position < 1000 && a.playingBookmark.position >= 1000) {
-                position = a.playingBookmark.position;
-            }
-            a.playingBookmark.position = Math.max(0, position);
-            int dur = a.player.getDuration();
-            if (dur > 0) {
-                a.playingBookmark.duration = dur;
-            }
-            a.playingBookmark.updated = now;
-            a.prefs
-                    .edit()
-                    .putString(
-                            Prefs.WATCH_HISTORY,
-                            WatchHistory.upsert(
-                                    a.prefs.getString(Prefs.WATCH_HISTORY, "[]"),
-                                    a.playingBookmark))
-                    .commit();
-            a.lastBookmarkSave = now;
-            CloudSyncDialog.scheduleAutoPush(a, force);
-        } catch (Exception error) {
-            AppLog.w("PlaybackController", "savePlaybackHistory failed", error);
-        }
+        if (!force && now - a.lastBookmarkSave < DISK_SAVE_INTERVAL_MS) return;
+        a.lastBookmarkSave = now;
+        final WatchHistory.Entry snapshot = cloneBookmark(a.playingBookmark);
+        final android.content.SharedPreferences prefs = a.prefs;
+        STORAGE_EXECUTOR.execute(
+                () -> {
+                    try {
+                        if (prefs == null || snapshot == null) return;
+                        String current = prefs.getString(Prefs.WATCH_HISTORY, "[]");
+                        String updated = WatchHistory.upsert(current, snapshot);
+                        prefs.edit().putString(Prefs.WATCH_HISTORY, updated).apply();
+                    } catch (Exception error) {
+                        AppLog.w("PlaybackController", "async savePlaybackHistory failed", error);
+                    }
+                });
+        CloudSyncDialog.scheduleAutoPush(a, force);
     }
 
     static void stopEmbySession(MainActivity a) {

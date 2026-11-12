@@ -30,11 +30,18 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.Future;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -512,6 +519,102 @@ final class MobileShell {
         importTextOrUrl(a, text);
     }
 
+    static byte[] fetchZipBytes(String address) throws Exception {
+        if (!Cms.isHttp(address)) {
+            throw new IOException("只支持 HTTP(S) 地址");
+        }
+        URL current = new URL(Cms.normalizeHttp(address));
+        Map<String, String> forwardedHeaders = new LinkedHashMap<>();
+        forwardedHeaders.put("User-Agent", Cms.USER_AGENT);
+        forwardedHeaders.put("Accept", "*/*");
+        Map<String, Cms.RedirectCookie> redirectCookies = new LinkedHashMap<>();
+
+        for (int hop = 0; hop < 5; hop++) {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new java.io.InterruptedIOException();
+            }
+            HttpURLConnection conn = (HttpURLConnection) current.openConnection();
+            conn.setInstanceFollowRedirects(false);
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(25000);
+            for (Map.Entry<String, String> entry : forwardedHeaders.entrySet()) {
+                conn.setRequestProperty(entry.getKey(), entry.getValue());
+            }
+
+            try {
+                int status = conn.getResponseCode();
+
+                // Track Set-Cookie headers across hops
+                List<String> setCookies = conn.getHeaderFields().get("Set-Cookie");
+                if (setCookies == null) {
+                    for (Map.Entry<String, List<String>> entry :
+                            conn.getHeaderFields().entrySet()) {
+                        if ("set-cookie".equalsIgnoreCase(entry.getKey())) {
+                            setCookies = entry.getValue();
+                            break;
+                        }
+                    }
+                }
+                List<Cms.RedirectCookie> newCookies = Cms.parseSetCookies(setCookies, current);
+                for (Cms.RedirectCookie cookie : newCookies) {
+                    redirectCookies.put(
+                            cookie.domain
+                                    + "|"
+                                    + cookie.hostOnly
+                                    + "|"
+                                    + cookie.path
+                                    + "|"
+                                    + cookie.name,
+                            cookie);
+                }
+
+                if (status == 301
+                        || status == 302
+                        || status == 303
+                        || status == 307
+                        || status == 308) {
+                    String loc = conn.getHeaderField("Location");
+                    if (loc == null || loc.trim().isEmpty()) {
+                        throw new IOException("重定向缺少地址");
+                    }
+                    URL target = new URL(current, loc.trim());
+                    if (!Cms.isHttp(target.toString())) {
+                        throw new IOException("不支持此重定向协议: " + target.getProtocol());
+                    }
+                    if (target.getUserInfo() != null) {
+                        throw new IOException("来源重定向不能注入登录凭据");
+                    }
+                    forwardedHeaders =
+                            Cms.inheritedHeaders(
+                                    current.toString(), target.toString(), forwardedHeaders);
+                    Cms.mergeRedirectCookies(forwardedHeaders, redirectCookies.values(), target);
+                    current = target;
+                    continue;
+                }
+
+                if (status < 200 || status >= 300) {
+                    throw new IOException("远程服务器返回 HTTP " + status);
+                }
+
+                try (InputStream in = conn.getInputStream();
+                        ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        if (bos.size() + n > 28 * 1024 * 1024) {
+                            throw new IOException("远程包超过 28 MB 限制");
+                        }
+                        bos.write(buf, 0, n);
+                    }
+                    return bos.toByteArray();
+                }
+            } finally {
+                conn.disconnect();
+            }
+        }
+        throw new IOException("来源重定向次数过多");
+    }
+
     static void importTextOrUrl(MainActivity a, String rawInput) {
         final String pasted = rawInput == null ? "" : rawInput.trim();
         if (pasted.isEmpty()) {
@@ -526,29 +629,9 @@ final class MobileShell {
                         String rawJson = pasted;
                         if (Cms.isHttp(pasted)) {
                             origin = Cms.normalizeHttp(pasted);
-                            String lowerOrigin = origin.toLowerCase();
+                            String lowerOrigin = origin.toLowerCase(Locale.ROOT);
                             if (lowerOrigin.endsWith(".zip") || lowerOrigin.contains(".zip?")) {
-                                java.net.HttpURLConnection conn =
-                                        (java.net.HttpURLConnection)
-                                                new java.net.URL(origin).openConnection();
-                                conn.setConnectTimeout(15000);
-                                conn.setReadTimeout(25000);
-                                conn.setRequestProperty("User-Agent", Cms.USER_AGENT);
-                                byte[] bytes;
-                                try (java.io.InputStream in = conn.getInputStream();
-                                        java.io.ByteArrayOutputStream bos =
-                                                new java.io.ByteArrayOutputStream()) {
-                                    byte[] buf = new byte[8192];
-                                    int n;
-                                    while ((n = in.read(buf)) != -1) {
-                                        if (bos.size() + n > 28 * 1024 * 1024)
-                                            throw new IOException("远程包超过 28 MB 限制");
-                                        bos.write(buf, 0, n);
-                                    }
-                                    bytes = bos.toByteArray();
-                                } finally {
-                                    conn.disconnect();
-                                }
+                                byte[] bytes = fetchZipBytes(origin);
                                 LocalSourcePackage pkg =
                                         LocalSourcePackage.open(a.getFilesDir(), bytes);
                                 a.ui.post(
@@ -1425,7 +1508,7 @@ final class MobileShell {
                     final HomeScreen.Snapshot cached =
                             siteSnapshot == null ? null : a.homeData.get(siteSnapshot.key);
                     if (catSnapshot.isEmpty() && pageSnapshot == 1 && siteSnapshot != null) {
-                        a.prefs.edit().putString(Prefs.LOADING_SITE, siteSnapshot.key).commit();
+                        a.prefs.edit().putString(Prefs.LOADING_SITE, siteSnapshot.key).apply();
                     }
                     a.submitPage(
                             () -> {
@@ -1642,7 +1725,7 @@ final class MobileShell {
                                     if (siteSnapshot != null
                                             && siteSnapshot.key.equals(
                                                     a.prefs.getString(Prefs.LOADING_SITE, ""))) {
-                                        a.prefs.edit().putString(Prefs.LOADING_SITE, "").commit();
+                                        a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
                                     }
                                 }
                             });
@@ -3003,7 +3086,7 @@ final class MobileShell {
         if (catalog.groups.isEmpty()) return;
 
         final int selectedGroupIdx = selectedGroupHolder[0];
-        final String qLower = searchQuery == null ? "" : searchQuery.toLowerCase();
+        final String qLower = searchQuery == null ? "" : searchQuery.toLowerCase(Locale.ROOT);
 
         // Pill 0: All Channels
         boolean allActive = qLower.isEmpty() && selectedGroupIdx == -1;
@@ -3085,8 +3168,8 @@ final class MobileShell {
         if (!qLower.isEmpty()) {
             for (LiveCatalog.Group g : catalog.groups) {
                 for (LiveCatalog.Channel ch : g.channels) {
-                    if (ch.name.toLowerCase().contains(qLower)
-                            || g.name.toLowerCase().contains(qLower)) {
+                    if (ch.name.toLowerCase(Locale.ROOT).contains(qLower)
+                            || g.name.toLowerCase(Locale.ROOT).contains(qLower)) {
                         displayList.add(ch);
                         displayGroups.add(g.name);
                     }
@@ -3249,7 +3332,7 @@ final class MobileShell {
 
     static TextView buildSmartChannelBadgeView(MainActivity a, String rawName) {
         String name = rawName == null ? "TV" : rawName.trim();
-        String upper = name.toUpperCase();
+        String upper = name.toUpperCase(Locale.ROOT);
         int bgColor = 0xff2563eb;
         String label;
         if (upper.startsWith("CCTV")) {
