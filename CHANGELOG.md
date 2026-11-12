@@ -2,7 +2,8 @@
 
 - [Android/Flutter/Lite] 修复坚果云 WebDAV 同步 404 错误：根目录自动追加 MarcoMovie/ 子目录，补齐递归父目录 MKCOL 创建，优化 404/409 诊断提示。
 - [Windows/macOS] 桌面端交互体验优化：支持鼠标拖拽滚动；横向列表支持滚轮横向滚动与悬停翻页箭头；半屏贴靠（宽度≥700）保持侧边栏导航；设置最小窗口尺寸（720x520）；播放器新增快捷键（M 静音、N/P 切集、[] 调速、Ctrl/Cmd+W 退出）。
-- [Android/Lite] 订阅解析与跨端对齐：支持 JSON null 字段规范降级（避免 optString 产生 "null" 伪值）；缺失 type 的 HTTP 站点按 CMS 自动识别；支持无扩展名的动态 type 3 脚本源；支持 HTTP 来源下的 ext 相对路径解析；修正 TVBox 2423 密文偶数位对齐。
+- [Android/Lite] 订阅解析与格式容错：增强 JSON null 容错（新建 Json.java，使用 JSONObject.NULL 覆盖测试）；缺少 type 的 HTTP 站点默认按 CMS 0/1 解析；支持无扩展名 type 3 脚本源（严格排除 .jar 与 /csp_ 路径）；完善 ext 相对路径解析（支持 http/https/file 来源）；TVBox 2423 结束标记强制偶数对齐并过滤空白。
+- [Flutter] 订阅解析与性能优化：播放线路保留全部解析线路并优先排序直链；观看历史与订阅配置增加内存缓存，避免主界面重复全量解析卡顿；TVBox 2423 密文结束符强制偶数位对齐。
 
 ## 2026-11-12 全平台观影交互、片源网盘兼容与桌面沉浸式升级（Android TV 0.5.22 · Android 手机/平板 0.5.22 · iOS / iPadOS 0.5.25 · Windows 0.5.18 · macOS 0.5.15）
 

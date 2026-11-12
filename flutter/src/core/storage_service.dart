@@ -80,9 +80,28 @@ class StorageService {
         writeCredential: (value) async { await _prefs.setString(keyQuarkCookie, value); },
       );
   Future<void> _subscriptionQueue = Future<void>.value();
+  CmsConfig? _cachedConfig;
+  Set<String>? _cachedPrivateKeys;
+  int _configRevision = 0;
+  List<WatchHistoryEntry>? _historyCache;
+
+  int get configRevision => _configRevision;
+
+  void _invalidateConfigCache() {
+    _cachedConfig = null;
+    _cachedPrivateKeys = null;
+    _historyCache = null;
+    _configRevision++;
+  }
+
   StorageService(this._prefs);
   Future<T> _editSubscriptions<T>(Future<T> Function() edit) {
-    final next = _subscriptionQueue.then((_) => edit());
+    final next = _subscriptionQueue.then((_) async {
+      _invalidateConfigCache();
+      final res = await edit();
+      _invalidateConfigCache();
+      return res;
+    });
     _subscriptionQueue = next.then<void>((_) {}, onError: (Object _, StackTrace __) {});
     return next;
   }
@@ -233,6 +252,7 @@ class StorageService {
   }
 
   Future<void> saveSubscriptions(List<SubscriptionEntry> subs) async {
+    _invalidateConfigCache();
     try {
       final saved = await _prefs.setString(
         keySubscriptions,
@@ -242,6 +262,7 @@ class StorageService {
     } catch (_) {
       // The plugin updates its cache before the platform write completes.
       // Re-read disk so a failed write does not look like a successful deletion.
+      _invalidateConfigCache();
       await _prefs.reload();
       rethrow;
     }
@@ -260,6 +281,7 @@ class StorageService {
     String? activeDepotName,
   }) async {
     if (incoming.isEmpty) return loadSavedConfig();
+    _invalidateConfigCache();
     final current = getSubscriptions().toList();
     // Migrate legacy single config into subscriptions list if not yet present
     if (!_prefs.containsKey(keySubscriptions) && rawConfig.trim().isNotEmpty) {
@@ -369,6 +391,8 @@ class StorageService {
   Future<CmsConfig?> removeSubscription(String id) =>
       _editSubscriptions(() => _removeSubscription(id));
 
+  Future<CmsConfig?> deleteSubscription(String id) => removeSubscription(id);
+
   Future<CmsConfig?> _removeSubscription(String id) async {
     final current = getSubscriptions();
     final removed = current.where((s) => s.id == id).toList();
@@ -419,6 +443,7 @@ class StorageService {
     await _prefs.setString(keyOrigin, public.isEmpty ? '' : public.first.url);
     await _prefs.setString(keyDepots, '[]');
     await _prefs.setString(keyActiveDepotName, public.isEmpty ? '' : public.first.activeDepotName);
+    _invalidateConfigCache();
     final config = loadSavedConfig();
     final sites = config?.publicSupportedSites ?? const <CmsSite>[];
     if (!sites.any((s) => s.key == selectedSiteKey)) {
@@ -569,6 +594,7 @@ class StorageService {
   }
 
   Future<void> savePickerEdits(List<CmsSite> ordered, List<CmsSite> removed) => _editSubscriptions(() async {
+    _invalidateConfigCache();
     final oldOrder = _prefs.getStringList(_siteOrder) ?? [];
     final ids = ordered.map(_siteIdentity).toList();
     final hidden = {...?_prefs.getStringList(_removedSites), ...removed.map(_siteIdentity)};
@@ -577,13 +603,40 @@ class StorageService {
       if (!orderSaved) throw StateError('线路顺序未能保存，请重试');
       final removalSaved = await _prefs.setStringList(_removedSites, hidden.toList());
       if (!removalSaved) throw StateError('线路删除未能保存，请重试');
+      _invalidateConfigCache();
     } catch (_) {
+      _invalidateConfigCache();
       await _prefs.reload();
       rethrow;
     }
   });
 
+  Future<void> reorderSites(List<String> order) => _editSubscriptions(() async {
+    _invalidateConfigCache();
+    await _prefs.setStringList(_siteOrder, order);
+  });
+
+  Future<void> hideSite(String siteIdentity) => _editSubscriptions(() async {
+    _invalidateConfigCache();
+    final hidden = {...?_prefs.getStringList(_removedSites), siteIdentity};
+    await _prefs.setStringList(_removedSites, hidden.toList());
+  });
+
+  Future<void> removeSite(String siteIdentity) => hideSite(siteIdentity);
+
+  Future<void> restoreSite(String siteIdentity) => _editSubscriptions(() async {
+    _invalidateConfigCache();
+    final hidden = (_prefs.getStringList(_removedSites) ?? []).where((id) => id != siteIdentity).toList();
+    await _prefs.setStringList(_removedSites, hidden);
+  });
+
+  Future<void> resetRemovedSites() => _editSubscriptions(() async {
+    _invalidateConfigCache();
+    await _prefs.remove(_removedSites);
+  });
+
   CmsConfig? loadSavedConfig() {
+    if (_cachedConfig != null) return _cachedConfig;
     final config = _loadImportedConfig();
     if (config == null) return null;
     final identities = _pickerIdentities(config.sites);
@@ -594,8 +647,15 @@ class StorageService {
       final site = byId.remove(identities[id] ?? id);
       if (site != null) sites.add(site);
     }
-    return CmsConfig(sites: [...sites, ...byId.values], lives: config.lives,
-        depots: config.depots, parses: config.parses, spider: config.spider);
+    final result = CmsConfig(
+      sites: [...sites, ...byId.values],
+      lives: config.lives,
+      depots: config.depots,
+      parses: config.parses,
+      spider: config.spider,
+    );
+    _cachedConfig = result;
+    return result;
   }
 
   CmsConfig? _loadImportedConfig() {
@@ -711,6 +771,7 @@ class StorageService {
     bool isPrivate = false,
     String customName = '',
   }) async {
+    _invalidateConfigCache();
     final parsed = CmsParser.parseConfig(
       rawJson,
       origin: origin,
@@ -1150,25 +1211,38 @@ class StorageService {
     await _prefs.setStringList(keyDriveOrder, order);
   }
   Set<String> _privateSiteKeySet() {
+    if (_cachedPrivateKeys != null) return _cachedPrivateKeys!;
     final cfg = loadSavedConfig();
-    if (cfg == null) return const <String>{};
-    return <String>{
+    if (cfg == null) {
+      _cachedPrivateKeys = const <String>{};
+      return _cachedPrivateKeys!;
+    }
+    final keys = <String>{
       for (final s in cfg.sites)
         if (s.isEffectivelyPrivate) s.key,
     };
+    _cachedPrivateKeys = keys;
+    return keys;
   }
   List<WatchHistoryEntry> getWatchHistory() {
+    if (_historyCache != null) return _historyCache!;
     final raw = _prefs.getString(keyWatchHistory) ?? '[]';
     try {
       final list = jsonDecode(raw);
-      if (list is! List) return const [];
+      if (list is! List) {
+        _historyCache = const [];
+        return const [];
+      }
       final privKeys = _privateSiteKeySet();
-      return list
+      final result = list
           .whereType<Map>()
           .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
           .where((e) => !privKeys.contains(e.site))
           .toList(growable: false);
+      _historyCache = result;
+      return result;
     } catch (_) {
+      _historyCache = const [];
       return const [];
     }
   }
@@ -1177,6 +1251,7 @@ class StorageService {
       return;
     }
     final updated = CmsParser.upsertHistory(getWatchHistory(), entry);
+    _historyCache = List.unmodifiable(updated);
     await _prefs.setString(
       keyWatchHistory,
       jsonEncode(updated.map((e) => e.toJson()).toList()),
@@ -1187,7 +1262,8 @@ class StorageService {
   Future<void> removeWatchHistoryItem(String siteKey, String videoId) async {
     final targetKey = '$siteKey\n$videoId';
     final updated =
-        getWatchHistory().where((e) => e.key != targetKey).toList();
+        getWatchHistory().where((e) => e.key != targetKey).toList(growable: false);
+    _historyCache = List.unmodifiable(updated);
     await _prefs.setString(
       keyWatchHistory,
       jsonEncode(updated.map((e) => e.toJson()).toList()),
@@ -1209,6 +1285,7 @@ class StorageService {
       }
       await _writeSyncTombstones(tombs);
     }
+    _historyCache = const [];
     await _prefs.setString(keyWatchHistory, '[]');
     watchHistoryRevision.value++;
     scheduleAutoWebdavSync(immediate: true);
@@ -1569,6 +1646,7 @@ class StorageService {
         );
       }
     }
+    _invalidateConfigCache();
     if (settings[keyPreferredSite] is String) {
       final key = settings[keyPreferredSite] as String;
       final exists = (loadSavedConfig()?.publicSupportedSites ?? const <CmsSite>[]).any((s) => s.key == key);
@@ -1578,6 +1656,7 @@ class StorageService {
       await setSelectedSiteKey(settings[keySelectedSite] as String);
     }
     if (nextHistory != null) {
+      _historyCache = null;
       await _prefs.setString(keyWatchHistory, nextHistory);
       watchHistoryRevision.value++;
     }
@@ -2232,6 +2311,7 @@ class StorageService {
             keyActiveDepotName,
             primary?.activeDepotName ?? '',
           );
+          _invalidateConfigCache();
           final reloaded = loadSavedConfig();
           final pubSites = reloaded?.publicSupportedSites ?? const <CmsSite>[];
           if (pubSites.isNotEmpty &&
@@ -2315,6 +2395,7 @@ class StorageService {
 
     final nextHistJson = jsonEncode(mergedHist.map((e) => e.toJson()).toList());
     final nextFavsJson = jsonEncode(mergedFavs.map((f) => f.toJson()).toList());
+    _historyCache = null;
     await _prefs.setString(keyWatchHistory, nextHistJson);
     await _prefs.setString(keyFavorites, nextFavsJson);
     await _writeSyncTombstones(mergedTombs);

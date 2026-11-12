@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:archive/archive.dart';
+import 'package:meta/meta.dart';
 import 'js_source_syntax.dart';
 import 'models.dart';
 import 'live_catalog_parser.dart';
@@ -8,6 +9,11 @@ import 'live_catalog_parser.dart';
 /// obfuscated/encrypted config payloads (**Base64, Base64, $#...#$ AES-128-CBC),
 /// Punycode IDN URLs, M3U/TXT live playlists, and cross-platform backups.
 class CmsParser {
+  @visibleForTesting
+  static int parseConfigCallCount = 0;
+  @visibleForTesting
+  static void resetParseConfigCallCount() => parseConfigCallCount = 0;
+
   static const int maxHistoryEntries = 60;
   static const int maxFavoriteEntries = 120;
   static const int episodePageSize = 50;
@@ -227,8 +233,9 @@ class CmsParser {
       if (decoded != null) return decoded;
     }
     // 2. Check for hex-encoded `$#...#$` (`2423...`) AES-128-CBC TVBox payload
-    if (_looksLikeHex(s) && s.toLowerCase().startsWith('2423')) {
-      final decrypted = _tryDecryptTvBoxHexAes(s);
+    final compact = s.replaceAll(RegExp(r'\s+'), '');
+    if (_looksLikeHex(compact) && compact.toLowerCase().startsWith('2423')) {
+      final decrypted = _tryDecryptTvBoxHexAes(compact);
       if (decrypted != null) return unpackConfigText(decrypted);
     }
     // 3. Check for literal `$#...#$` prefix
@@ -283,8 +290,9 @@ class CmsParser {
     return null;
   }
   static bool _looksLikeHex(String s) {
-    if (s.length < 32 || s.length.isOdd) return false;
-    return RegExp(r'^[0-9a-fA-F]+$').hasMatch(s);
+    final clean = s.replaceAll(RegExp(r'\s+'), '');
+    if (clean.length < 32 || clean.length.isOdd) return false;
+    return RegExp(r'^[0-9a-fA-F]+$').hasMatch(clean);
   }
   static String _bytesToHex(List<int> bytes) {
     final sb = StringBuffer();
@@ -303,9 +311,13 @@ class CmsParser {
   /// Decrypts TVBox `2423...` (`$#<key>#$<cipher><13-byte-iv-hex>`) AES-128-CBC PKCS7 payload.
   static String? _tryDecryptTvBoxHexAes(String hexInput) {
     try {
-      final lower = hexInput.trim().toLowerCase();
-      final keyEndIdx = lower.indexOf('2324'); // `#$`
-      if (!lower.startsWith('2423') || keyEndIdx < 4 || lower.length <= keyEndIdx + 4 + 26) {
+      final lower = hexInput.replaceAll(RegExp(r'\s+'), '').toLowerCase();
+      if (!lower.startsWith('2423')) return null;
+      int keyEndIdx = lower.indexOf('2324'); // `#$`
+      while (keyEndIdx >= 0 && keyEndIdx % 2 != 0) {
+        keyEndIdx = lower.indexOf('2324', keyEndIdx + 1);
+      }
+      if (keyEndIdx < 4 || lower.length <= keyEndIdx + 4 + 26) {
         return null;
       }
       final keyHex = lower.substring(4, keyEndIdx);
@@ -330,6 +342,9 @@ class CmsParser {
       return null;
     }
   }
+
+  @visibleForTesting
+  static String? tryDecryptTvBoxHexAes(String hexInput) => _tryDecryptTvBoxHexAes(hexInput);
   static Uint8List _padRightBytes(List<int> src, int length, int padByte) {
     final out = Uint8List(length);
     for (int i = 0; i < length; i++) {
@@ -522,6 +537,86 @@ class CmsParser {
     invSubBytes();
     addRoundKey(0);
     return state;
+  }
+  static Uint8List _aesEncryptBlock(Uint8List input, Uint8List w) {
+    final state = Uint8List.fromList(input);
+    void addRoundKey(int round) {
+      final base = round * 16;
+      for (int i = 0; i < 16; i++) {
+        state[i] ^= w[base + i];
+      }
+    }
+    void subBytes() {
+      for (int i = 0; i < 16; i++) {
+        state[i] = _sBox[state[i]];
+      }
+    }
+    void shiftRows() {
+      var t = state[1];
+      state[1] = state[5];
+      state[5] = state[9];
+      state[9] = state[13];
+      state[13] = t;
+
+      t = state[2];
+      state[2] = state[10];
+      state[10] = t;
+      t = state[6];
+      state[6] = state[14];
+      state[14] = t;
+
+      t = state[15];
+      state[15] = state[11];
+      state[11] = state[7];
+      state[7] = state[3];
+      state[3] = t;
+    }
+    void mixColumns() {
+      for (int c = 0; c < 4; c++) {
+        final i = c * 4;
+        final s0 = state[i];
+        final s1 = state[i + 1];
+        final s2 = state[i + 2];
+        final s3 = state[i + 3];
+        state[i] = _gfMul(s0, 0x02) ^ _gfMul(s1, 0x03) ^ s2 ^ s3;
+        state[i + 1] = s0 ^ _gfMul(s1, 0x02) ^ _gfMul(s2, 0x03) ^ s3;
+        state[i + 2] = s0 ^ s1 ^ _gfMul(s2, 0x02) ^ _gfMul(s3, 0x03);
+        state[i + 3] = _gfMul(s0, 0x03) ^ s1 ^ s2 ^ _gfMul(s3, 0x02);
+      }
+    }
+    addRoundKey(0);
+    for (int round = 1; round <= 9; round++) {
+      subBytes();
+      shiftRows();
+      mixColumns();
+      addRoundKey(round);
+    }
+    subBytes();
+    shiftRows();
+    addRoundKey(10);
+    return state;
+  }
+  @visibleForTesting
+  static Uint8List aes128CbcEncrypt(Uint8List plain, Uint8List key, Uint8List iv) {
+    final padLen = 16 - (plain.length % 16);
+    final padded = Uint8List(plain.length + padLen);
+    padded.setRange(0, plain.length, plain);
+    for (int i = plain.length; i < padded.length; i++) {
+      padded[i] = padLen;
+    }
+    final roundKeys = _aesKeyExpansion(key);
+    final out = Uint8List(padded.length);
+    var prevBlock = iv;
+    for (int offset = 0; offset < padded.length; offset += 16) {
+      final block = Uint8List(16);
+      for (int i = 0; i < 16; i++) {
+        block[i] = padded[offset + i] ^ prevBlock[i];
+      }
+      final encrypted = _aesEncryptBlock(block, roundKeys);
+      out.setRange(offset, offset + 16, encrypted);
+      prevBlock = encrypted;
+    }
+    return out;
   }
   /// Strips UTF-8 BOM, `//` and `/* */` comments, and trailing commas before `}` or `]`.
   static String stripJsonComments(String input) {
@@ -924,6 +1019,7 @@ class CmsParser {
     String subscriptionId = '',
     String defaultName = '',
   }) {
+    parseConfigCallCount++;
     final groupLabel =
         defaultGroup.trim().isEmpty ? '默认分组' : defaultGroup.trim();
     final unpacked = unpackConfigText(rawJson);
@@ -2197,9 +2293,15 @@ class CmsParser {
       }
     }
     if (lines.length > 1) {
-      final directLines = lines
-          .where((l) => l.episodes.any((e) => e.isDirectPlayable))
-          .toList(growable: false);
+      final directLines = <CmsLine>[];
+      final indirectLines = <CmsLine>[];
+      for (final l in lines) {
+        if (l.episodes.any((e) => e.isDirectPlayable)) {
+          directLines.add(l);
+        } else {
+          indirectLines.add(l);
+        }
+      }
       if (directLines.isNotEmpty) {
         directLines.sort((a, b) {
           final aM3u8 = a.name.toLowerCase().contains('m3u8') ||
@@ -2209,7 +2311,7 @@ class CmsParser {
           if (aM3u8 != bM3u8) return aM3u8 ? -1 : 1;
           return 0;
         });
-        return directLines;
+        return [...directLines, ...indirectLines];
       }
     }
     return lines;
