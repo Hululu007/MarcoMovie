@@ -90,17 +90,34 @@ public final class JsEngine implements SourceEngine {
     }
 
     public static boolean eligible(Cms.Site s) {
+        if (s == null) return false;
         if (s.type == 3 && "csp_LocalPython".equals(s.api) && s.ext instanceof String) return true;
         boolean checkedScript =
                 s.ext instanceof JSONObject
                         && ((JSONObject) s.ext).opt("_mm_entrySource") instanceof String
                         && !((JSONObject) s.ext).optString("_mm_entrySource").isEmpty();
-        return s.type == 3
-                && (Cms.isHttp(s.api) || (s.api != null && s.api.startsWith("file://")))
-                && (checkedScript
-                        || s.api.split("[?#]", 2)[0]
-                                .toLowerCase(Locale.ROOT)
-                                .matches(".*\\.(m?js|py)"));
+        if (s.type != 3) return false;
+        if (checkedScript) return true;
+        if (s.api == null) return false;
+        if (s.api.startsWith("file://")) {
+            return s.api.split("[?#]", 2)[0].toLowerCase(Locale.ROOT).matches(".*\\.(m?js|py)");
+        }
+        if (Cms.isHttp(s.api)) {
+            String clean = s.api.split("[?#]", 2)[0];
+            String path = clean;
+            try {
+                path = new URL(clean).getPath();
+            } catch (Exception ignored) {
+            }
+            String lowerClean = clean.toLowerCase(Locale.ROOT);
+            String lowerPath = path.toLowerCase(Locale.ROOT);
+            if (lowerClean.endsWith(".jar") || lowerPath.endsWith(".jar")) return false;
+            if (clean.startsWith("csp_")
+                    || lowerPath.contains("/csp_")
+                    || lowerPath.startsWith("csp_")) return false;
+            return true;
+        }
+        return false;
     }
 
     public JsEngine(Application application, Cms.Config config, Cms.Site selected)
@@ -333,7 +350,11 @@ public final class JsEngine implements SourceEngine {
                                 site.ext instanceof String ? site.ext : JSONObject.NULL)
                         .toString();
         LocalSourcePackage.PythonPackage pythonPackage =
-                !inlinePython && site.api.toLowerCase(Locale.ROOT).endsWith(".py")
+                !inlinePython
+                                && site.api
+                                        .split("[?#]", 2)[0]
+                                        .toLowerCase(Locale.ROOT)
+                                        .endsWith(".py")
                         ? LocalSourcePackage.pythonPackage(app.getFilesDir(), site.api)
                         : null;
         String source =

@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix='script-proxy-check-') as temporary:
     sources = [src / name for name in ('Cms.java','RequestScope.java','SourceEngine.java','JsEngine.java','QuickJsDeadline.java',
                                       'LocalSourcePackage.java','LiveCatalog.java','ProxyAddress.java','LocalProxy.java')]
     subprocess.run([jdk / 'javac','-encoding','UTF-8','-source','8','-target','8','-Xlint:-options','-cp',classpath,'-d',classes,
-                    *shim_files,root / 'shared/java/com/pilipala/source/Warehouse.java',*sources,
+                    *shim_files,root / 'shared/java/com/pilipala/source/Json.java',root / 'shared/java/com/pilipala/source/Warehouse.java',*sources,
                     root / 'android/tests/ScriptProxyChecks.java'],check=True)
     subprocess.run([jdk / 'java','-Dfile.encoding=UTF-8','-cp',str(classes)+os.pathsep+classpath,
                     'com.pilipala.marcomovie.ScriptProxyChecks',node,root / 'android/tests/script_proxy_fixture.cjs'],check=True,timeout=90)

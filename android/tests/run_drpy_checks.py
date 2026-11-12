@@ -47,6 +47,7 @@ public final class NodeRuntime { public static void start(android.content.Contex
     classes.mkdir()
     subprocess.run([JDK / 'bin/javac', '-encoding', 'UTF-8', '-source', '8', '-target', '8', '-Xlint:-options',
                     '-cp', PARSER, '-d', classes, *sources,
+                    ROOT / 'shared/java/com/pilipala/source/Json.java',
                     ROOT / 'shared/java/com/pilipala/source/Warehouse.java',
                     ROOT / 'shared/java/com/pilipala/catpaw/CatPawHost.java',
                     *(SRC / name for name in ('Cms.java', 'RequestScope.java', 'SourceEngine.java',

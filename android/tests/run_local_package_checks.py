@@ -18,6 +18,7 @@ with tempfile.TemporaryDirectory() as output, tempfile.TemporaryDirectory() as i
     xpp_shim.parent.mkdir(parents=True)
     xpp_shim.write_text('package org.xmlpull.v1; public interface XmlPullParser { int END_DOCUMENT=1; int START_TAG=2; int END_TAG=3; void setInput(java.io.Reader in) throws Exception; int getEventType() throws Exception; String getName(); String getAttributeValue(String ns, String name); String nextText() throws Exception; int next() throws Exception; }', encoding='utf-8')
     subprocess.run([jdk / "javac", "-encoding", "UTF-8", "-cp", parser, "-d", output,
+                    root / "shared/java/com/pilipala/source/Json.java",
                     root / "shared/java/com/pilipala/source/Warehouse.java", src / "Cms.java", src / "LocalSourcePackage.java", src / "RequestScope.java", src / "LiveCatalog.java", src / "ProxyAddress.java",
                     root / "android/tests/LocalPackageChecks.java", shim, xml_shim, xpp_shim,
                     root / 'lite/src/main/java/com/pilipala/marcomovie/lite/LiteCatalog.java',

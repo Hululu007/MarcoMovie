@@ -1,8 +1,10 @@
 import com.pilipala.marcomovie.*;
-import java.nio.file.*;
-import java.nio.charset.StandardCharsets;
-import java.util.*;
+import com.pilipala.source.Json;
 import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.*;
+import org.json.*;
 
 public final class CmsChecks {
     static int count;
@@ -65,6 +67,140 @@ public final class CmsChecks {
                         && picture.headers.get("Referer").equals("https://catalog.test/")
                         && picture.headers.get("User-Agent").equals("Mozilla/5.0"),
                 "actual poster header suffix separated from image URL");
+        testLaneCAdditions();
         System.out.println("OK " + count + " checks");
+    }
+
+    private static void testLaneCAdditions() throws Exception {
+        // C1: Direct Json class behavior
+        JSONObject testObj = new JSONObject();
+        testObj.put("nullKey", JSONObject.NULL);
+        testObj.put("strKey", "  hello  ");
+        testObj.put("intKey", 42);
+        testObj.put("boolKey", true);
+        check(Json.str(testObj, "nullKey", "fb").equals("fb"), "Json.str nullKey returns fallback");
+        check(
+                Json.str(testObj, "missingKey", "fb").equals("fb"),
+                "Json.str missingKey returns fallback");
+        check(Json.str(testObj, "strKey", "fb").equals("hello"), "Json.str trims non-null string");
+        check(
+                Json.str(testObj, "strKey").equals("hello"),
+                "Json.str two-arg overload trims non-null string");
+        check(
+                Json.str(testObj, "nullKey").equals(""),
+                "Json.str two-arg overload returns empty string on null");
+        check(Json.integer(testObj, "nullKey", 99) == 99, "Json.integer nullKey returns fallback");
+        check(Json.integer(testObj, "intKey", 99) == 42, "Json.integer intKey returns value");
+        check(!Json.bool(testObj, "nullKey", false), "Json.bool nullKey returns fallback");
+        check(Json.bool(testObj, "boolKey", false), "Json.bool boolKey returns value");
+
+        // C1: Config parsing with explicit JSONObject.NULL
+        JSONObject nullCfg = new JSONObject();
+        nullCfg.put("spider", JSONObject.NULL);
+        nullCfg.put("jar", JSONObject.NULL);
+        nullCfg.put(com.pilipala.source.Warehouse.ROOT, JSONObject.NULL);
+        JSONArray siteArr = new JSONArray();
+        JSONObject siteObj = new JSONObject();
+        siteObj.put("key", "null-site");
+        siteObj.put("name", "Null Site");
+        siteObj.put("api", "http://127.0.0.1/api.php?ac=videolist");
+        siteObj.put("playUrl", JSONObject.NULL);
+        siteObj.put("ua", JSONObject.NULL);
+        siteObj.put("jar", JSONObject.NULL);
+        siteObj.put("ext", JSONObject.NULL);
+        siteArr.put(siteObj);
+        nullCfg.put("sites", siteArr);
+        Cms.Config parsedNullCfg =
+                Cms.parseConfig(nullCfg.toString(), "http://127.0.0.1/config.json");
+        check(parsedNullCfg.spider.isEmpty(), "spider with null degrades to empty string");
+        check(parsedNullCfg.warehouse.isEmpty(), "warehouse with null degrades to empty string");
+        Cms.Site sNull = parsedNullCfg.sites.get(0);
+        check(sNull.playUrl.isEmpty(), "playUrl with null degrades to empty string");
+        check(!sNull.requiresParser, "playUrl null does not falsely trigger requiresParser");
+        check(
+                Cms.USER_AGENT.equals(sNull.headers.get("User-Agent")),
+                "User-Agent null does not overwrite default with literal null");
+        check(
+                sNull.jar == null || sNull.jar.isEmpty(),
+                "jar null does not produce literal null string");
+
+        // C2: Missing type HTTP CMS defaults
+        String missingTypeXml =
+                "{\"sites\":[{\"key\":\"xml1\",\"name\":\"Xml1\",\"api\":\"http://127.0.0.1/vod.xml\"}]}";
+        Cms.Config cXml = Cms.parseConfig(missingTypeXml, "http://127.0.0.1/config.json");
+        check(
+                cXml.sites.get(0).type == 0 && cXml.sites.get(0).supported(),
+                "missing type vod.xml defaults to type 0 XML and is supported");
+
+        String missingTypeXmlPath =
+                "{\"sites\":[{\"key\":\"xml2\",\"name\":\"Xml2\",\"api\":\"http://127.0.0.1/api.php/provide/vod/at/xml\"}]}";
+        Cms.Config cXmlPath = Cms.parseConfig(missingTypeXmlPath, "http://127.0.0.1/config.json");
+        check(
+                cXmlPath.sites.get(0).type == 0 && cXmlPath.sites.get(0).supported(),
+                "missing type with xml in path defaults to type 0 XML and is supported");
+
+        String missingTypeJson =
+                "{\"sites\":[{\"key\":\"json1\",\"name\":\"Json1\",\"api\":\"http://127.0.0.1/api.php?ac=videolist\"}]}";
+        Cms.Config cJson = Cms.parseConfig(missingTypeJson, "http://127.0.0.1/config.json");
+        check(
+                cJson.sites.get(0).type == 1 && cJson.sites.get(0).supported(),
+                "missing type non-xml defaults to type 1 JSON and is supported");
+
+        // C4: Relative ext resolution with HTTP and file origins
+        String httpOrigin = "https://example.com/sub/config.json";
+        String httpRelCfg =
+                "{\"sites\":[{\"key\":\"rel1\",\"name\":\"Rel1\",\"type\":1,\"api\":\"https://example.com/api\",\"ext\":\"./rules/custom.json\"}]}";
+        Cms.Config cRelHttp = Cms.parseConfig(httpRelCfg, httpOrigin);
+        check(
+                "https://example.com/sub/rules/custom.json".equals(cRelHttp.sites.get(0).ext),
+                "HTTP origin resolves relative string ext ./");
+
+        String httpDotDotCfg =
+                "{\"sites\":[{\"key\":\"rel2\",\"name\":\"Rel2\",\"type\":1,\"api\":\"https://example.com/api\",\"ext\":\"../top_rule.js\"}]}";
+        Cms.Config cDotDotHttp = Cms.parseConfig(httpDotDotCfg, httpOrigin);
+        check(
+                "https://example.com/top_rule.js".equals(cDotDotHttp.sites.get(0).ext),
+                "HTTP origin resolves relative string ext ../");
+
+        JSONObject objExtCfg = new JSONObject();
+        JSONArray objExtSites = new JSONArray();
+        JSONObject siteObjExt = new JSONObject();
+        siteObjExt.put("key", "relObj");
+        siteObjExt.put("name", "RelObj");
+        siteObjExt.put("type", 1);
+        siteObjExt.put("api", "https://example.com/api");
+        JSONObject innerExt = new JSONObject();
+        innerExt.put("json", "./data/data.json");
+        innerExt.put("url", "../remote/feed.json");
+        innerExt.put("rule", "./script.js");
+        innerExt.put("normal", "keepMe");
+        siteObjExt.put("ext", innerExt);
+        objExtSites.put(siteObjExt);
+        objExtCfg.put("sites", objExtSites);
+        Cms.Config cObjExt = Cms.parseConfig(objExtCfg.toString(), httpOrigin);
+        JSONObject resolvedExtObj = (JSONObject) cObjExt.sites.get(0).ext;
+        check(
+                "https://example.com/sub/data/data.json".equals(resolvedExtObj.optString("json")),
+                "HTTP origin resolves object ext.json ./");
+        check(
+                "https://example.com/remote/feed.json".equals(resolvedExtObj.optString("url")),
+                "HTTP origin resolves object ext.url ../");
+        check(
+                "https://example.com/sub/script.js".equals(resolvedExtObj.optString("rule")),
+                "HTTP origin resolves object ext.rule ./");
+        check(
+                "keepMe".equals(resolvedExtObj.optString("normal")),
+                "HTTP origin leaves non-path object ext fields untouched");
+
+        String fileOrigin = "file:///sdcard/Download/tvbox.json";
+        String fileRelCfg =
+                "{\"sites\":[{\"key\":\"fileRel\",\"name\":\"FileRel\",\"type\":1,\"api\":\"http://example.com/api\",\"ext\":\"./local_rules.json\"}]}";
+        Cms.Config cRelFile = Cms.parseConfig(fileRelCfg, fileOrigin);
+        String resolvedFileExt = (String) cRelFile.sites.get(0).ext;
+        check(
+                resolvedFileExt != null
+                        && resolvedFileExt.startsWith("file://")
+                        && resolvedFileExt.endsWith("/sdcard/Download/local_rules.json"),
+                "File origin resolves relative string ext ./");
     }
 }

@@ -44,6 +44,7 @@ public static void start(android.content.Context c,String a,String b,String d)th
     dependencies = os.pathsep.join(map(str, (PARSER, ANDROID, PRODUCTION)))
     subprocess.run([JDK / 'bin/javac', '-encoding', 'UTF-8', '-source', '8', '-target', '8', '-Xlint:-options',
                     '-cp', dependencies, '-d', classes, *sources,
+                    ROOT / 'shared/java/com/pilipala/source/Json.java',
                     ROOT / 'shared/java/com/pilipala/source/Warehouse.java',
                     ROOT / 'shared/java/com/pilipala/catpaw/CatPawHost.java',
                     *(SRC / name for name in ('Cms.java', 'RequestScope.java', 'SourceEngine.java', 'CspEngine.java',

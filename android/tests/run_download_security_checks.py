@@ -15,7 +15,7 @@ for name,content in stubs.items():
 jdk=Path(os.environ.get('MARCOMOVIE_JDK', os.environ.get('JAVA_HOME', 'missing-jdk')))
 jar=root/'android/tests/lib/json-20240303.jar'
 sources=[root/'android/src/main/java/com/pilipala/marcomovie'/name for name in ['DownloadManager.java','Cms.java','RequestScope.java','SourceEngine.java','MediaOptions.java','ProxyAddress.java','AppLog.java']]
-sources += [root/'shared/java/com/pilipala/source/MediaRequestHeaders.java', root/'shared/java/com/pilipala/source/Warehouse.java',root/'android/tests/NativeDownloadProbe.java',*(build/'stubs').rglob('*.java')]
+sources += [root/'shared/java/com/pilipala/source/Json.java', root/'shared/java/com/pilipala/source/MediaRequestHeaders.java', root/'shared/java/com/pilipala/source/Warehouse.java',root/'android/tests/NativeDownloadProbe.java',*(build/'stubs').rglob('*.java')]
 classes=build/'classes';classes.mkdir(parents=True,exist_ok=True)
 suffix = '.exe' if os.name == 'nt' else ''
 subprocess.run([str(jdk/'bin'/('javac'+suffix)),'-encoding','UTF-8','-cp',str(jar),'-d',str(classes),*map(str,sources)],check=True)

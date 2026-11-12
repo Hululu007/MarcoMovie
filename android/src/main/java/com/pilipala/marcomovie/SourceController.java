@@ -1195,12 +1195,27 @@ final class SourceController {
                                     });
                             return;
                         }
+                        String fileOrigin = null;
+                        if (uri != null) {
+                            if ("file".equalsIgnoreCase(uri.getScheme())) {
+                                fileOrigin = uri.toString();
+                            } else if (uri.getPath() != null) {
+                                String path = uri.getPath();
+                                fileOrigin =
+                                        path.startsWith("/")
+                                                ? ("file://" + path)
+                                                : ("file:///" + path);
+                            } else {
+                                fileOrigin = uri.toString();
+                            }
+                        }
                         try {
-                            Cms.Config parsed = Cms.parseConfig(text, null);
+                            Cms.Config parsed = Cms.parseConfig(text, fileOrigin);
+                            final String finalOrigin = fileOrigin != null ? fileOrigin : "";
                             a.ui.post(
                                     () -> {
                                         try {
-                                            saveConfig(a, parsed, "");
+                                            saveConfig(a, parsed, finalOrigin);
                                         } catch (Exception ex) {
                                             a.toast("保存配置失败：" + a.message(ex));
                                         }

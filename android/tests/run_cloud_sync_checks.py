@@ -14,6 +14,7 @@ CLASSPATH = os.pathsep.join([str(JSON_JAR), str(OKHTTP_JAR), str(OKIO_JAR)])
 SUFFIX = ".exe" if os.name == "nt" else ""
 
 SOURCES = [
+    ROOT / "shared/java/com/pilipala/source/Json.java",
     ROOT / "shared/java/com/pilipala/source/Warehouse.java",
     ROOT / "android/src/main/java/com/pilipala/marcomovie/AppLog.java",
     ROOT / "android/src/main/java/com/pilipala/marcomovie/Cms.java",
