@@ -1,3 +1,10 @@
+## 2026-11-12 全平台多端网络同步 v2 上线（Android TV 0.5.21 · Android 手机/平板 0.5.21 · Android Lite 0.5.4 · iOS / iPadOS 0.5.24 · Windows 0.5.17 · macOS 0.5.14）
+
+- [iOS / iPadOS 0.5.24](docs/releases/ios-v0.5.24.md) · [Windows 0.5.17](docs/releases/windows-v0.5.17.md) · [macOS 0.5.14](docs/releases/macos-v0.5.14.md) · [Android 电视 / 盒子 0.5.21](docs/releases/android-tv-v0.5.21.md) · [Android 手机 / 平板 0.5.21](docs/releases/android-mobile-v0.5.21.md) · [Android Lite 0.5.4](docs/releases/android-lite-v0.5.4.md)：全平台打通统一的 `marco-movie-sync` v2 多端网络同步协议（向下兼容 v1 与 `marco-movie-backup`），同时支持用户自配 WebDAV（坚果云 / Nextcloud / Alist / 群晖 NAS 等，支持多级目录 `MKCOL` 自动创建、启动静默拉取与进度/收藏/订阅变更自动防抖推送）与同一局域网 5 分钟随机令牌点对点双向免云盘直连同步（`/configure/<token>/sync`）。
+- 新增默认开启的「同时同步我的订阅源配置」独立开关：新安装的手机、平板、电脑或电视只需连接 WebDAV 或扫码局域网同步一次，即可一步拉取公开订阅仓库、观看历史进度与收藏列表并自动激活可用片源；关闭开关时仅同步观看进度与收藏且完整保留云端已有订阅（Android Lite 写回时亦无损保留标准版/桌面端的多份订阅）；同时为 Android 手机/平板开放「已添加源」（`ConfigLibrary`）多订阅切换与删除同步，并在跨端打开缺失源站的历史/收藏条目时自动回退至聚合搜索。
+- 严格执行隐私与凭据本机隔离：隐私空间（私密订阅、私密站点及其历史与收藏，含混合订阅中带 `isPrivate` / `private` / `hidden` / `space:"private"` 或「隐私 / 私密」分组的条目）、本机 `file://` 文件配置、四大网盘账号 Cookie / Token 及 Emby 凭据均严格保留在本机，绝不写入 WebDAV 或局域网同步载荷，也不会被远端同步覆盖。
+- 691 项 Flutter 自动化测试、16 项 Android `CloudSync` v2 离线协议检查、67 项 Android Lite API 14 单 DEX / JVM 检查、API 23 模拟器回归及多端原生构建（`b851a910ff321820f5ac3354c39387e028de7bdd`，多平台构建 `43147174023`、片源回归 `43147174099`、API 23 回归 `43147174165`、公共内容守卫 `43147173948`）全部通过，未声明特定第三方外部 WebDAV 服务及全部实体机型的穷举验收。
+
 ## 2026-11-12 iOS / iPadOS 0.5.23 多订阅插件规则适配、选集页秒开提速与豆瓣 / 烂番茄真实评分恢复
 
 - [iOS / iPadOS 0.5.23](docs/releases/ios-v0.5.23.md)：在不执行外部 DEX / JAR / `.so` 的前提下，新增 21 套 `Guard` 纯数据提取与协议适配器（补齐多版本插件包 `AppTT` 映射与 `mmshare://` 网盘分享自动展开）及纯 Dart `CspRuleEngines`（`csp_XBPQ` / `csp_XYQ` / `csp_XPath*`）、`api.php/v1.vod` 与相对路径 JSON 配置支持；「切换片源」自动过滤纯提示/推送伪站点并默认收起未适配折叠组。
