@@ -986,21 +986,24 @@ public final class LiteSync {
                 String p = parts[i];
                 if (p == null || p.length() == 0) continue;
                 current.append(p).append('/');
-                sendRawMkcol(uri, current.toString(), auth);
+                int code = sendRawMkcol(uri, current.toString(), auth);
+                if (code == 401 || code == 403) {
+                    break;
+                }
             }
         } catch (Exception e) {
             logW("LiteSync", "递归创建 WebDAV 父目录失败: " + e.getMessage());
         }
     }
 
-    private static void sendRawMkcol(URI baseUri, String rawCollectionPath, String auth) {
+    private static int sendRawMkcol(URI baseUri, String rawCollectionPath, String auth) {
         String scheme =
                 baseUri.getScheme() == null
                         ? "http"
                         : baseUri.getScheme().toLowerCase(Locale.ROOT);
         boolean https = "https".equals(scheme);
         String host = baseUri.getHost();
-        if (host == null || host.length() == 0) return;
+        if (host == null || host.length() == 0) return -1;
         int port = baseUri.getPort();
         int connectPort = port > 0 ? port : (https ? 443 : 80);
         String hostHeader =
@@ -1018,7 +1021,7 @@ public final class LiteSync {
                 if (!HttpsURLConnection.getDefaultHostnameVerifier()
                         .verify(host, ssl.getSession())) {
                     ssl.close();
-                    return;
+                    return -1;
                 }
                 sock = ssl;
             } else {
@@ -1057,8 +1060,10 @@ public final class LiteSync {
             } else {
                 logW("LiteSync", "MKCOL 请求未成功 (HTTP " + statusCode + ") for " + rawCollectionPath);
             }
+            return statusCode;
         } catch (Exception e) {
             logW("LiteSync", "MKCOL 异常 for " + rawCollectionPath + ": " + e.getMessage());
+            return -1;
         } finally {
             if (sock != null) {
                 try {

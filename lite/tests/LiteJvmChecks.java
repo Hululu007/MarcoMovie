@@ -663,6 +663,10 @@ public final class LiteJvmChecks {
                 java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
         final java.util.List<String> mkcolSeq =
                 java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+        final java.util.List<String> auth401Mkcol =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+        final java.util.List<String> auth403Mkcol =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
         final byte[][] davData = new byte[1][];
         HttpServer dav = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         dav.createContext(
@@ -673,6 +677,30 @@ public final class LiteJvmChecks {
                         try {
                             String m = ex.getRequestMethod();
                             String p = ex.getRequestURI().getPath();
+                            if (p.startsWith("/auth401/")) {
+                                if ("MKCOL".equalsIgnoreCase(m)) {
+                                    String norm = p.endsWith("/") ? p : (p + "/");
+                                    auth401Mkcol.add(norm);
+                                    ex.sendResponseHeaders(401, -1);
+                                    return;
+                                }
+                                if ("PUT".equalsIgnoreCase(m)) {
+                                    ex.sendResponseHeaders(404, -1);
+                                    return;
+                                }
+                            }
+                            if (p.startsWith("/auth403/")) {
+                                if ("MKCOL".equalsIgnoreCase(m)) {
+                                    String norm = p.endsWith("/") ? p : (p + "/");
+                                    auth403Mkcol.add(norm);
+                                    ex.sendResponseHeaders(403, -1);
+                                    return;
+                                }
+                                if ("PUT".equalsIgnoreCase(m)) {
+                                    ex.sendResponseHeaders(404, -1);
+                                    return;
+                                }
+                            }
                             if (p.startsWith("/forbidden")) {
                                 if ("MKCOL".equalsIgnoreCase(m)) {
                                     ex.sendResponseHeaders(403, -1);
@@ -782,6 +810,68 @@ public final class LiteJvmChecks {
                         expected.getMessage().contains("目标文件夹不存在或不可写。坚果云请在地址后加一个文件夹名"),
                         "LiteSync WebDAV 404/409 write failure provides actionable diagnostic message");
             }
+
+            // 5. MKCOL halts recursion immediately on HTTP 401
+            try {
+                LiteSync.syncWebdav(
+                        "http://127.0.0.1:" + port + "/auth401/sub1/sub2/",
+                        "liteuser",
+                        "litepass",
+                        new LiteSync.MergeCallback() {
+                            @Override
+                            public LiteSync.MergeResult merge(String remote) {
+                                return LiteSync.merge(
+                                        boxHist[0],
+                                        boxFav[0],
+                                        boxTomb[0],
+                                        boxSub,
+                                        true,
+                                        remote,
+                                        7000L);
+                            }
+                        });
+                check(false, "LiteSync MKCOL 401 failure must throw IOException on PUT");
+            } catch (java.io.IOException expected) {
+                // Expected PUT failure
+            }
+            check(
+                    auth401Mkcol.size() == 1 && "/auth401/".equals(auth401Mkcol.get(0)),
+                    "LiteSync MKCOL halts recursion immediately on HTTP 401 without requesting child directories");
+            check(
+                    !auth401Mkcol.contains("/auth401/sub1/")
+                            && !auth401Mkcol.contains("/auth401/sub1/sub2/"),
+                    "LiteSync does not issue child MKCOL requests on 401");
+
+            // 6. MKCOL halts recursion immediately on HTTP 403
+            try {
+                LiteSync.syncWebdav(
+                        "http://127.0.0.1:" + port + "/auth403/sub1/sub2/",
+                        "liteuser",
+                        "litepass",
+                        new LiteSync.MergeCallback() {
+                            @Override
+                            public LiteSync.MergeResult merge(String remote) {
+                                return LiteSync.merge(
+                                        boxHist[0],
+                                        boxFav[0],
+                                        boxTomb[0],
+                                        boxSub,
+                                        true,
+                                        remote,
+                                        7000L);
+                            }
+                        });
+                check(false, "LiteSync MKCOL 403 failure must throw IOException on PUT");
+            } catch (java.io.IOException expected) {
+                // Expected PUT failure
+            }
+            check(
+                    auth403Mkcol.size() == 1 && "/auth403/".equals(auth403Mkcol.get(0)),
+                    "LiteSync MKCOL halts recursion immediately on HTTP 403 without requesting child directories");
+            check(
+                    !auth403Mkcol.contains("/auth403/sub1/")
+                            && !auth403Mkcol.contains("/auth403/sub1/sub2/"),
+                    "LiteSync does not issue child MKCOL requests on 403");
         } finally {
             dav.stop(0);
         }
