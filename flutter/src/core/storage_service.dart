@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -23,6 +24,7 @@ class StorageService {
   static const String keyPreferredSite = 'preferred_site';
   static const String keyPreferredLine = 'preferred_line';
   static const String keyWatchHistory = 'watch_history';
+  static const String keyHistoryCorrupted = 'watch_history_corrupted';
   static const String keyFavorites = 'favorites';
   static const String keyPrivateFavorites = 'private_favorites';
   static const String keySearchHistory = 'global_search_history';
@@ -67,11 +69,15 @@ class StorageService {
   static const int maxVideoSkipRecords = 500;
   final SharedPreferences _prefs;
   final ValueNotifier<int> watchHistoryRevision = ValueNotifier<int>(0);
+  final ValueNotifier<bool> historyCorruptionNotifier = ValueNotifier<bool>(false);
+  bool _historyCorrupted = false;
+  bool get isHistoryCorrupted => _historyCorrupted;
   final Map<String, ({int intro, int outro, int updated})>
       _privateVideoSkipRecords =
       <String, ({int intro, int outro, int updated})>{};
   Timer? _autoSyncTimer;
   bool _syncInFlight = false;
+  bool _resyncRequested = false;
   int _lastHistoryAutoPushMs = 0;
   static final Expando<QuarkAccountProvider> _quarkProviders = Expando();
   QuarkAccountProvider get quarkAccounts => _quarkProviders[_prefs] ??=
@@ -79,7 +85,7 @@ class StorageService {
         readCredential: () => getNetdiskCred('quark'),
         writeCredential: (value) async { await _prefs.setString(keyQuarkCookie, value); },
       );
-  Future<void> _subscriptionQueue = Future<void>.value();
+  Future<void> _mutationQueue = Future<void>.value();
   CmsConfig? _cachedConfig;
   Set<String>? _cachedPrivateKeys;
   int _configRevision = 0;
@@ -94,16 +100,28 @@ class StorageService {
     _configRevision++;
   }
 
-  StorageService(this._prefs);
+  StorageService(this._prefs) {
+    _historyCorrupted = _prefs.getBool(keyHistoryCorrupted) ?? false;
+    if (_historyCorrupted) {
+      historyCorruptionNotifier.value = true;
+    }
+  }
+
+  Future<T> _runSequentialMutation<T>(Future<T> Function() mutation) {
+    final next = _mutationQueue.then((_) async {
+      return await mutation();
+    });
+    _mutationQueue = next.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    return next;
+  }
+
   Future<T> _editSubscriptions<T>(Future<T> Function() edit) {
-    final next = _subscriptionQueue.then((_) async {
+    return _runSequentialMutation(() async {
       _invalidateConfigCache();
       final res = await edit();
       _invalidateConfigCache();
       return res;
     });
-    _subscriptionQueue = next.then<void>((_) {}, onError: (Object _, StackTrace __) {});
-    return next;
   }
   static Future<StorageService> init() async {
     final prefs = await SharedPreferences.getInstance();
@@ -1224,72 +1242,137 @@ class StorageService {
     _cachedPrivateKeys = keys;
     return keys;
   }
-  List<WatchHistoryEntry> getWatchHistory() {
-    if (_historyCache != null) return _historyCache!;
-    final raw = _prefs.getString(keyWatchHistory) ?? '[]';
+  void _handleHistoryCorruption(String rawCorruptString) {
+    if (_historyCorrupted) return;
+    _historyCorrupted = true;
+    historyCorruptionNotifier.value = true;
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    unawaited(_prefs.setString('watch_history_corrupt_$ts', rawCorruptString));
+    unawaited(_prefs.setBool(keyHistoryCorrupted, true));
+  }
+
+  List<WatchHistoryEntry> _readRawWatchHistory() {
+    final raw = _prefs.getString(keyWatchHistory);
+    if (raw == null || raw.trim().isEmpty || raw.trim() == '[]') {
+      return const [];
+    }
     try {
-      final list = jsonDecode(raw);
-      if (list is! List) {
-        _historyCache = const [];
-        return const [];
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) {
+        throw const FormatException('watch_history is not a JSON array');
       }
-      final privKeys = _privateSiteKeySet();
-      final result = list
+      return decoded
           .whereType<Map>()
           .map((m) => WatchHistoryEntry.fromJson(Map<String, dynamic>.from(m)))
-          .where((e) => !privKeys.contains(e.site))
-          .toList(growable: false);
-      _historyCache = result;
-      return result;
+          .where((e) => e.site.isNotEmpty && e.id.isNotEmpty)
+          .toList();
     } catch (_) {
-      _historyCache = const [];
+      _handleHistoryCorruption(raw);
       return const [];
     }
   }
-  Future<void> upsertWatchHistory(WatchHistoryEntry entry) async {
-    if (_privateSiteKeySet().contains(entry.site)) {
-      return;
+
+  List<WatchHistoryEntry> getWatchHistory({bool forPrivate = false}) {
+    if (!forPrivate && _historyCache != null) return _historyCache!;
+    final rawList = _readRawWatchHistory();
+    final privKeys = _privateSiteKeySet();
+    final result = rawList
+        .where((e) => forPrivate ? true : !privKeys.contains(e.site))
+        .toList(growable: false);
+    if (!forPrivate) {
+      _historyCache = result;
     }
-    final updated = CmsParser.upsertHistory(getWatchHistory(), entry);
-    _historyCache = List.unmodifiable(updated);
-    await _prefs.setString(
-      keyWatchHistory,
-      jsonEncode(updated.map((e) => e.toJson()).toList()),
-    );
-    watchHistoryRevision.value++;
-    scheduleAutoWebdavSync();
+    return result;
   }
-  Future<void> removeWatchHistoryItem(String siteKey, String videoId) async {
-    final targetKey = '$siteKey\n$videoId';
-    final updated =
-        getWatchHistory().where((e) => e.key != targetKey).toList(growable: false);
-    _historyCache = List.unmodifiable(updated);
-    await _prefs.setString(
-      keyWatchHistory,
-      jsonEncode(updated.map((e) => e.toJson()).toList()),
-    );
-    watchHistoryRevision.value++;
-    await _recordSyncTombstone(
-      'hist:$targetKey',
-      DateTime.now().millisecondsSinceEpoch,
-    );
-    scheduleAutoWebdavSync(immediate: true);
-  }
-  Future<void> clearWatchHistory() async {
-    final existing = getWatchHistory();
-    final now = DateTime.now().millisecondsSinceEpoch;
-    if (existing.isNotEmpty) {
-      final tombs = _readSyncTombstones();
-      for (final e in existing) {
-        tombs['hist:${e.key}'] = now;
+
+  Future<void> upsertWatchHistory(WatchHistoryEntry entry) {
+    return _runSequentialMutation(() async {
+      if (_historyCorrupted) {
+        return;
       }
-      await _writeSyncTombstones(tombs);
-    }
-    _historyCache = const [];
-    await _prefs.setString(keyWatchHistory, '[]');
-    watchHistoryRevision.value++;
-    scheduleAutoWebdavSync(immediate: true);
+      final privKeys = _privateSiteKeySet();
+      final allRaw = _readRawWatchHistory();
+      final localPrivate =
+          allRaw.where((e) => privKeys.contains(e.site)).toList();
+      final localPublic =
+          allRaw.where((e) => !privKeys.contains(e.site)).toList();
+
+      final bool isPrivateEntry = privKeys.contains(entry.site);
+      if (isPrivateEntry) {
+        final updatedPrivate = CmsParser.upsertHistory(localPrivate, entry);
+        final combined = [...localPublic, ...updatedPrivate]
+          ..sort((a, b) => b.updated.compareTo(a.updated));
+        if (combined.length > CmsParser.maxHistoryEntries) {
+          combined.removeRange(CmsParser.maxHistoryEntries, combined.length);
+        }
+        await _prefs.setString(
+          keyWatchHistory,
+          jsonEncode(combined.map((e) => e.toJson()).toList()),
+        );
+        watchHistoryRevision.value++;
+        return;
+      }
+
+      final updatedPublic = CmsParser.upsertHistory(localPublic, entry);
+      final combined = [...updatedPublic, ...localPrivate]
+        ..sort((a, b) => b.updated.compareTo(a.updated));
+      if (combined.length > CmsParser.maxHistoryEntries) {
+        combined.removeRange(CmsParser.maxHistoryEntries, combined.length);
+      }
+      _historyCache = List.unmodifiable(updatedPublic);
+      await _prefs.setString(
+        keyWatchHistory,
+        jsonEncode(combined.map((e) => e.toJson()).toList()),
+      );
+      watchHistoryRevision.value++;
+      scheduleAutoWebdavSync();
+    });
   }
+
+  Future<void> removeWatchHistoryItem(String siteKey, String videoId) {
+    return _runSequentialMutation(() async {
+      if (_historyCorrupted) return;
+      final targetKey = '$siteKey\n$videoId';
+      final allRaw = _readRawWatchHistory();
+      final updated =
+          allRaw.where((e) => e.key != targetKey).toList(growable: false);
+      _historyCache = null;
+      await _prefs.setString(
+        keyWatchHistory,
+        jsonEncode(updated.map((e) => e.toJson()).toList()),
+      );
+      watchHistoryRevision.value++;
+      await _recordSyncTombstone(
+        'hist:$targetKey',
+        DateTime.now().millisecondsSinceEpoch,
+      );
+      if (!_privateSiteKeySet().contains(siteKey)) {
+        scheduleAutoWebdavSync(immediate: true);
+      }
+    });
+  }
+
+  Future<void> clearWatchHistory() {
+    return _runSequentialMutation(() async {
+      final existing = _readRawWatchHistory();
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (existing.isNotEmpty) {
+        final tombs = _readSyncTombstones();
+        for (final e in existing) {
+          tombs['hist:${e.key}'] = now;
+        }
+        await _writeSyncTombstones(tombs);
+      }
+      _historyCache = const [];
+      _historyCorrupted = false;
+      historyCorruptionNotifier.value = false;
+      await _prefs.setBool(keyHistoryCorrupted, false);
+      await _prefs.setString(keyWatchHistory, '[]');
+      watchHistoryRevision.value++;
+      scheduleAutoWebdavSync(immediate: true);
+    });
+  }
+
   List<FavoriteEntry> getFavorites({bool forPrivate = false}) {
     final storageKey = forPrivate ? keyPrivateFavorites : keyFavorites;
     final raw = _prefs.getString(storageKey) ?? '[]';
@@ -1306,6 +1389,7 @@ class StorageService {
       return const [];
     }
   }
+
   bool isFavorite(
     String siteKey,
     String videoId, {
@@ -1316,52 +1400,55 @@ class StorageService {
     return getFavorites(forPrivate: effectivePrivate)
         .any((f) => f.key == target);
   }
-  Future<bool> toggleFavorite(CmsSite site, CmsVideo video) async {
-    final forPrivate =
-        site.isEffectivelyPrivate || _privateSiteKeySet().contains(site.key);
-    final storageKey = forPrivate ? keyPrivateFavorites : keyFavorites;
-    final current = getFavorites(forPrivate: forPrivate).toList();
-    final targetKey = '${site.key}\n${video.id}';
-    final existingIdx = current.indexWhere((f) => f.key == targetKey);
-    final now = DateTime.now().millisecondsSinceEpoch;
-    bool nowFav;
-    if (existingIdx >= 0) {
-      current.removeAt(existingIdx);
-      nowFav = false;
-    } else {
-      current.insert(
-        0,
-        FavoriteEntry(
-          site: site.key,
-          id: video.id,
-          title: video.title,
-          poster: video.poster,
-          remarks: video.remarks,
-          updated: now,
-        ),
-      );
-      if (current.length > CmsParser.maxFavoriteEntries) {
-        current.removeRange(CmsParser.maxFavoriteEntries, current.length);
-      }
-      nowFav = true;
-    }
-    await _prefs.setString(
-      storageKey,
-      jsonEncode(current.map((e) => e.toJson()).toList()),
-    );
-    if (!forPrivate) {
-      final tombs = _readSyncTombstones();
-      if (nowFav) {
-        tombs['add:$targetKey'] = now;
-        tombs.remove('fav:$targetKey');
+
+  Future<bool> toggleFavorite(CmsSite site, CmsVideo video) {
+    return _runSequentialMutation(() async {
+      final forPrivate =
+          site.isEffectivelyPrivate || _privateSiteKeySet().contains(site.key);
+      final storageKey = forPrivate ? keyPrivateFavorites : keyFavorites;
+      final current = getFavorites(forPrivate: forPrivate).toList();
+      final targetKey = '${site.key}\n${video.id}';
+      final existingIdx = current.indexWhere((f) => f.key == targetKey);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      bool nowFav;
+      if (existingIdx >= 0) {
+        current.removeAt(existingIdx);
+        nowFav = false;
       } else {
-        tombs['fav:$targetKey'] = now;
-        tombs.remove('add:$targetKey');
+        current.insert(
+          0,
+          FavoriteEntry(
+            site: site.key,
+            id: video.id,
+            title: video.title,
+            poster: video.poster,
+            remarks: video.remarks,
+            updated: now,
+          ),
+        );
+        if (current.length > CmsParser.maxFavoriteEntries) {
+          current.removeRange(CmsParser.maxFavoriteEntries, current.length);
+        }
+        nowFav = true;
       }
-      await _writeSyncTombstones(tombs);
-      scheduleAutoWebdavSync(immediate: true, nowMs: now);
-    }
-    return nowFav;
+      await _prefs.setString(
+        storageKey,
+        jsonEncode(current.map((e) => e.toJson()).toList()),
+      );
+      if (!forPrivate) {
+        final tombs = _readSyncTombstones();
+        if (nowFav) {
+          tombs['add:$targetKey'] = now;
+          tombs.remove('fav:$targetKey');
+        } else {
+          tombs['fav:$targetKey'] = now;
+          tombs.remove('add:$targetKey');
+        }
+        await _writeSyncTombstones(tombs);
+        scheduleAutoWebdavSync(immediate: true, nowMs: now);
+      }
+      return nowFav;
+    });
   }
   List<String> getSearchHistory({bool forPrivate = false}) {
     final storageKey = forPrivate ? keyPrivateSearchHistory : keySearchHistory;
@@ -1987,6 +2074,9 @@ class StorageService {
     })
   >
   mergeSyncPayload(String? remotePayloadRaw, {int? nowMs}) async {
+    if (_historyCorrupted) {
+      throw StateError('本地观看历史数据损坏，已停止同步覆盖（已备份至 watch_history_corrupt_*）');
+    }
     final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
     final localHist = getWatchHistory();
     final localFavs = getFavorites(forPrivate: false);
@@ -2331,110 +2421,155 @@ class StorageService {
       });
     }
 
-    // 3. Merge watch history (LWW per key + deletion tombstones)
-    final privKeys = _privateSiteKeySet();
-    final histByKey = <String, WatchHistoryEntry>{};
-    for (final e in [...localHist, ...remoteHist]) {
-      if (privKeys.contains(e.site)) continue;
-      final delTs = mergedTombs['hist:${e.key}'] ?? 0;
-      if (delTs > 0) {
-        if (e.updated > delTs) {
-          mergedTombs.remove('hist:${e.key}');
-        } else {
-          continue;
+    return _runSequentialMutation(() async {
+      if (_historyCorrupted) {
+        throw StateError('本地观看历史数据损坏，已停止同步覆盖（已备份至 watch_history_corrupt_*）');
+      }
+
+      // 3. Re-read fresh local watch history (including private entries) and favorites
+      final allLocalHist = _readRawWatchHistory();
+      final privKeys = _privateSiteKeySet();
+      final localPrivateHist =
+          allLocalHist.where((e) => privKeys.contains(e.site)).toList();
+      final localPublicHist =
+          allLocalHist.where((e) => !privKeys.contains(e.site)).toList();
+      final currentLocalFavs = getFavorites(forPrivate: false);
+
+      final currentLocalTombs = _readSyncTombstones();
+      for (final f in currentLocalFavs) {
+        if (f.updated > 0) {
+          final addKey = 'add:${f.key}';
+          final prev = currentLocalTombs[addKey] ?? 0;
+          if (f.updated > prev) currentLocalTombs[addKey] = f.updated;
         }
       }
-      final existing = histByKey[e.key];
-      if (existing == null ||
-          e.updated > existing.updated ||
-          (e.updated == existing.updated && e.position > existing.position)) {
-        histByKey[e.key] = e;
+      for (final entry in remoteTombs.entries) {
+        final cur = currentLocalTombs[entry.key] ?? 0;
+        if (entry.value > cur) currentLocalTombs[entry.key] = entry.value;
       }
-    }
-    final mergedHist = histByKey.values.toList()
-      ..sort((a, b) => b.updated.compareTo(a.updated));
-    if (mergedHist.length > CmsParser.maxHistoryEntries) {
-      mergedHist.removeRange(
-        CmsParser.maxHistoryEntries,
-        mergedHist.length,
+      final mergedTombs = currentLocalTombs;
+
+      // Merge watch history (LWW per key + deletion tombstones)
+      final histByKey = <String, WatchHistoryEntry>{};
+      for (final e in [...localPublicHist, ...remoteHist]) {
+        if (privKeys.contains(e.site)) continue;
+        final delTs = mergedTombs['hist:${e.key}'] ?? 0;
+        if (delTs > 0) {
+          if (e.updated > delTs) {
+            mergedTombs.remove('hist:${e.key}');
+          } else {
+            continue;
+          }
+        }
+        final existing = histByKey[e.key];
+        if (existing == null ||
+            e.updated > existing.updated ||
+            (e.updated == existing.updated && e.position > existing.position)) {
+          histByKey[e.key] = e;
+        }
+      }
+      final mergedPublicHist = histByKey.values.toList()
+        ..sort((a, b) => b.updated.compareTo(a.updated));
+      if (mergedPublicHist.length > CmsParser.maxHistoryEntries) {
+        mergedPublicHist.removeRange(
+          CmsParser.maxHistoryEntries,
+          mergedPublicHist.length,
+        );
+      }
+
+      // Recombine with preserved local private history entries
+      final combinedAllHist = [...mergedPublicHist, ...localPrivateHist]
+        ..sort((a, b) => b.updated.compareTo(a.updated));
+      if (combinedAllHist.length > CmsParser.maxHistoryEntries) {
+        combinedAllHist.removeRange(
+          CmsParser.maxHistoryEntries,
+          combinedAllHist.length,
+        );
+      }
+
+      // 4. Merge favorites
+      final favByKey = <String, FavoriteEntry>{};
+      for (final f in [...currentLocalFavs, ...remoteFavs]) {
+        if (privKeys.contains(f.site)) continue;
+        final delTs = mergedTombs['fav:${f.key}'] ?? 0;
+        final addTs = mergedTombs['add:${f.key}'] ?? f.updated;
+        if (delTs > 0 && delTs >= addTs) {
+          continue;
+        }
+        final existing = favByKey[f.key];
+        if (existing == null || f.updated > existing.updated) {
+          favByKey[f.key] = addTs > f.updated
+              ? FavoriteEntry(
+                  site: f.site,
+                  id: f.id,
+                  title: f.title,
+                  poster: f.poster,
+                  remarks: f.remarks,
+                  updated: addTs,
+                )
+              : f;
+        }
+      }
+      final mergedFavs = favByKey.values.toList()
+        ..sort((a, b) {
+          final ta = mergedTombs['add:${a.key}'] ?? a.updated;
+          final tb = mergedTombs['add:${b.key}'] ?? b.updated;
+          return tb.compareTo(ta);
+        });
+      if (mergedFavs.length > CmsParser.maxFavoriteEntries) {
+        mergedFavs.removeRange(CmsParser.maxFavoriteEntries, mergedFavs.length);
+      }
+
+      final nextHistJson =
+          jsonEncode(combinedAllHist.map((e) => e.toJson()).toList());
+      final nextFavsJson =
+          jsonEncode(mergedFavs.map((f) => f.toJson()).toList());
+      _historyCache = null;
+      await _prefs.setString(keyWatchHistory, nextHistJson);
+      await _prefs.setString(keyFavorites, nextFavsJson);
+      await _writeSyncTombstones(mergedTombs);
+      if (nextHistJson != beforeHistJson) {
+        watchHistoryRevision.value++;
+      }
+
+      final changed =
+          subscriptionsChanged ||
+          nextHistJson != beforeHistJson ||
+          nextFavsJson != beforeFavsJson;
+      final payloadJson = exportSyncPayload(
+        nowMs: now,
+        preservedRemoteSubscriptions: preservedRemoteSubs,
       );
-    }
-
-    // 4. Merge favorites
-    final favByKey = <String, FavoriteEntry>{};
-    for (final f in [...localFavs, ...remoteFavs]) {
-      if (privKeys.contains(f.site)) continue;
-      final delTs = mergedTombs['fav:${f.key}'] ?? 0;
-      final addTs = mergedTombs['add:${f.key}'] ?? f.updated;
-      if (delTs > 0 && delTs >= addTs) {
-        continue;
-      }
-      final existing = favByKey[f.key];
-      if (existing == null || f.updated > existing.updated) {
-        favByKey[f.key] = addTs > f.updated
-            ? FavoriteEntry(
-                site: f.site,
-                id: f.id,
-                title: f.title,
-                poster: f.poster,
-                remarks: f.remarks,
-                updated: addTs,
-              )
-            : f;
-      }
-    }
-    final mergedFavs = favByKey.values.toList()
-      ..sort((a, b) {
-        final ta = mergedTombs['add:${a.key}'] ?? a.updated;
-        final tb = mergedTombs['add:${b.key}'] ?? b.updated;
-        return tb.compareTo(ta);
-      });
-    if (mergedFavs.length > CmsParser.maxFavoriteEntries) {
-      mergedFavs.removeRange(CmsParser.maxFavoriteEntries, mergedFavs.length);
-    }
-
-    final nextHistJson = jsonEncode(mergedHist.map((e) => e.toJson()).toList());
-    final nextFavsJson = jsonEncode(mergedFavs.map((f) => f.toJson()).toList());
-    _historyCache = null;
-    await _prefs.setString(keyWatchHistory, nextHistJson);
-    await _prefs.setString(keyFavorites, nextFavsJson);
-    await _writeSyncTombstones(mergedTombs);
-    if (nextHistJson != beforeHistJson) {
-      watchHistoryRevision.value++;
-    }
-
-    final changed =
-        subscriptionsChanged ||
-        nextHistJson != beforeHistJson ||
-        nextFavsJson != beforeFavsJson;
-    final payloadJson = exportSyncPayload(
-      nowMs: now,
-      preservedRemoteSubscriptions: preservedRemoteSubs,
-    );
-    return (
-      historyCount: mergedHist.length,
-      favoriteCount: mergedFavs.length,
-      subscriptionCount: finalSubCount,
-      changed: changed,
-      subscriptionsChanged: subscriptionsChanged,
-      payloadJson: payloadJson,
-    );
+      return (
+        historyCount: mergedPublicHist.length,
+        favoriteCount: mergedFavs.length,
+        subscriptionCount: finalSubCount,
+        changed: changed,
+        subscriptionsChanged: subscriptionsChanged,
+        payloadJson: payloadJson,
+      );
+    });
   }
 
   void scheduleAutoWebdavSync({bool immediate = false, int? nowMs}) {
     if (!webdavAuto || !isWebdavConfigured) return;
+    if (_syncInFlight) {
+      _resyncRequested = true;
+      return;
+    }
     final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
     final int delayMs;
     if (immediate) {
       delayMs = 2500;
       _autoSyncTimer?.cancel();
     } else {
+      const minInterval = 300000; // 5 minutes
       final elapsed = _lastHistoryAutoPushMs > 0
           ? now - _lastHistoryAutoPushMs
-          : 45000;
-      if (elapsed < 45000) {
+          : minInterval;
+      if (elapsed < minInterval) {
         if (_autoSyncTimer?.isActive == true) return;
-        delayMs = (45000 - elapsed).clamp(3000, 45000);
+        delayMs = (minInterval - elapsed).clamp(3000, minInterval);
       } else {
         delayMs = 3000;
         _autoSyncTimer?.cancel();
@@ -2442,15 +2577,45 @@ class StorageService {
     }
     _autoSyncTimer = Timer(Duration(milliseconds: delayMs), () {
       _lastHistoryAutoPushMs = DateTime.now().millisecondsSinceEpoch;
+      if (_syncInFlight) {
+        _resyncRequested = true;
+        return;
+      }
       syncWithWebdav().ignore();
     });
   }
 
-  Map<String, String> _webdavHeaders({bool jsonContent = false}) {
+  Future<void> flushPendingSync({
+    Duration timeout = const Duration(seconds: 3),
+  }) async {
+    cancelPendingAutoSync();
+    if (!isWebdavConfigured || !webdavAuto) return;
+    if (_syncInFlight) {
+      final deadline = DateTime.now().add(timeout);
+      while (_syncInFlight && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      return;
+    }
+    try {
+      await syncWithWebdav().timeout(timeout);
+    } catch (_) {
+      // Best-effort push on exit
+    }
+  }
+
+  Map<String, String> _webdavHeaders({
+    bool jsonContent = false,
+    String? ifMatch,
+    String? ifNoneMatch,
+  }) {
     final headers = <String, String>{
       'Accept': 'application/json',
       'Cache-Control': 'no-store',
       if (jsonContent) 'Content-Type': 'application/json; charset=utf-8',
+      if (ifMatch != null && ifMatch.isNotEmpty) 'If-Match': ifMatch,
+      if (ifNoneMatch != null && ifNoneMatch.isNotEmpty)
+        'If-None-Match': ifNoneMatch,
     };
     if (webdavUser.isNotEmpty || webdavPass.isNotEmpty) {
       final token = base64Encode(utf8.encode('$webdavUser:$webdavPass'));
@@ -2460,6 +2625,9 @@ class StorageService {
   }
 
   static String _formatWebdavWriteError(int code) {
+    if (code == 412) {
+      return 'WebDAV 写入冲突 (HTTP 412)：文件已被其他设备修改，重试后仍冲突';
+    }
     if (code == 404 || code == 409) {
       return 'WebDAV 写入失败 (HTTP $code)：目标文件夹不存在或不可写。坚果云请在地址后加一个文件夹名，例如 https://dav.jianguoyun.com/dav/MarcoMovie/';
     }
@@ -2530,83 +2698,124 @@ class StorageService {
     final ownsClient = client == null;
     try {
       final uri = Uri.parse(targetUrl);
-      String? remoteBody;
-      final getResp = await httpClient
-          .get(uri, headers: _webdavHeaders())
-          .timeout(const Duration(seconds: 15));
-      if (getResp.statusCode >= 200 && getResp.statusCode < 300) {
-        if (getResp.bodyBytes.length > maxSyncPayloadBytes) {
-          throw const FormatException('远端同步文件超过 8 MB 大小限制');
+      const maxRetries = 2;
+      var attempt = 0;
+      final rand = Random();
+
+      while (true) {
+        String? remoteBody;
+        String? remoteEtag;
+        var fileAbsent = false;
+
+        final getResp = await httpClient
+            .get(uri, headers: _webdavHeaders())
+            .timeout(const Duration(seconds: 15));
+        if (getResp.statusCode >= 200 && getResp.statusCode < 300) {
+          if (getResp.bodyBytes.length > maxSyncPayloadBytes) {
+            throw const FormatException('远端同步文件超过 8 MB 大小限制');
+          }
+          remoteBody = utf8.decode(getResp.bodyBytes);
+          final h = getResp.headers['etag']?.trim();
+          if (h != null && h.isNotEmpty) {
+            remoteEtag = h;
+          }
+        } else if (getResp.statusCode == 404) {
+          remoteBody = null;
+          fileAbsent = true;
+        } else if (getResp.statusCode == 401 || getResp.statusCode == 403) {
+          throw FormatException(
+            'WebDAV 认证失败 (HTTP ${getResp.statusCode})，请检查账号与应用密码',
+          );
+        } else {
+          throw FormatException('WebDAV 读取失败 (HTTP ${getResp.statusCode})');
         }
-        remoteBody = utf8.decode(getResp.bodyBytes);
-      } else if (getResp.statusCode == 404) {
-        remoteBody = null;
-      } else if (getResp.statusCode == 401 || getResp.statusCode == 403) {
-        throw FormatException(
-          'WebDAV 认证失败 (HTTP ${getResp.statusCode})，请检查账号与应用密码',
-        );
-      } else {
-        throw FormatException('WebDAV 读取失败 (HTTP ${getResp.statusCode})');
-      }
 
-      final now = DateTime.now().millisecondsSinceEpoch;
-      final merged = await mergeSyncPayload(remoteBody, nowMs: now);
-      final encodedPayload = utf8.encode(merged.payloadJson);
-      if (encodedPayload.length > maxSyncPayloadBytes) {
-        throw const FormatException('本地待同步数据超过 8 MB 大小限制');
-      }
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final merged = await mergeSyncPayload(remoteBody, nowMs: now);
+        final encodedPayload = utf8.encode(merged.payloadJson);
+        if (encodedPayload.length > maxSyncPayloadBytes) {
+          throw const FormatException('本地待同步数据超过 8 MB 大小限制');
+        }
 
-      var putResp = await httpClient
-          .put(
-            uri,
-            headers: _webdavHeaders(jsonContent: true),
-            body: encodedPayload,
-          )
-          .timeout(const Duration(seconds: 15));
+        String? ifMatch;
+        String? ifNoneMatch;
+        if (fileAbsent) {
+          ifNoneMatch = '*';
+        } else if (remoteEtag != null && remoteEtag.isNotEmpty) {
+          ifMatch = remoteEtag;
+        }
 
-      if (putResp.statusCode == 404 || putResp.statusCode == 409) {
-        await _ensureWebdavCollections(httpClient, uri);
-        putResp = await httpClient
+        var putResp = await httpClient
             .put(
               uri,
-              headers: _webdavHeaders(jsonContent: true),
+              headers: _webdavHeaders(
+                jsonContent: true,
+                ifMatch: ifMatch,
+                ifNoneMatch: ifNoneMatch,
+              ),
               body: encodedPayload,
             )
             .timeout(const Duration(seconds: 15));
-      }
 
-      if (putResp.statusCode == 401 || putResp.statusCode == 403) {
-        throw FormatException('WebDAV 写入被拒绝 (HTTP ${putResp.statusCode})');
-      }
-      if (putResp.statusCode < 200 || putResp.statusCode >= 300) {
-        throw FormatException(_formatWebdavWriteError(putResp.statusCode));
-      }
+        if (putResp.statusCode == 404 || putResp.statusCode == 409) {
+          await _ensureWebdavCollections(httpClient, uri);
+          putResp = await httpClient
+              .put(
+                uri,
+                headers: _webdavHeaders(
+                  jsonContent: true,
+                  ifMatch: ifMatch,
+                  ifNoneMatch: ifNoneMatch,
+                ),
+                body: encodedPayload,
+              )
+              .timeout(const Duration(seconds: 15));
+        }
 
-      _lastHistoryAutoPushMs = now;
-      await _prefs.setInt(keySyncLastTime, now);
-      await _prefs.setString(
-        keySyncLastStatus,
-        _formatSyncSuccessSummary(
-          '同步成功',
-          now,
+        if (putResp.statusCode == 412 && attempt < maxRetries) {
+          attempt++;
+          final jitterMs = 50 + rand.nextInt(100);
+          await Future<void>.delayed(Duration(milliseconds: jitterMs));
+          continue;
+        }
+
+        if (putResp.statusCode == 401 || putResp.statusCode == 403) {
+          throw FormatException('WebDAV 写入被拒绝 (HTTP ${putResp.statusCode})');
+        }
+        if (putResp.statusCode < 200 || putResp.statusCode >= 300) {
+          throw FormatException(_formatWebdavWriteError(putResp.statusCode));
+        }
+
+        _lastHistoryAutoPushMs = now;
+        await _prefs.setInt(keySyncLastTime, now);
+        await _prefs.setString(
+          keySyncLastStatus,
+          _formatSyncSuccessSummary(
+            '同步成功',
+            now,
+            historyCount: merged.historyCount,
+            favoriteCount: merged.favoriteCount,
+            subscriptionCount: merged.subscriptionCount,
+          ),
+        );
+        return (
           historyCount: merged.historyCount,
           favoriteCount: merged.favoriteCount,
           subscriptionCount: merged.subscriptionCount,
-        ),
-      );
-      return (
-        historyCount: merged.historyCount,
-        favoriteCount: merged.favoriteCount,
-        subscriptionCount: merged.subscriptionCount,
-        changed: merged.changed,
-        subscriptionsChanged: merged.subscriptionsChanged,
-      );
+          changed: merged.changed,
+          subscriptionsChanged: merged.subscriptionsChanged,
+        );
+      }
     } catch (e) {
       await _prefs.setString(keySyncLastStatus, '上次失败：$e');
       rethrow;
     } finally {
       _syncInFlight = false;
       if (ownsClient) httpClient.close();
+      if (_resyncRequested) {
+        _resyncRequested = false;
+        scheduleAutoWebdavSync(immediate: true);
+      }
     }
   }
 

@@ -579,4 +579,293 @@ void main() {
       );
     },
   );
+
+  test(
+    'WebDAV ETag concurrency: If-None-Match for absent file, If-Match for existing, graceful fallback, and 412 retry',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final storage = await StorageService.init();
+      await storage.saveWebdavConfig(
+        url: 'https://dav.example/dav/MarcoMovie/',
+        user: 'alice',
+        pass: 'secret',
+        auto: false,
+        syncSubs: false,
+      );
+
+      // 1. Initial push when remote file is absent (404) -> must send 'If-None-Match: *'
+      String? sentIfNoneMatch;
+      String? sentIfMatch;
+      String? storedBlob;
+      const currentEtag = '"etag-100"';
+
+      final mockAbsent = MockClient((req) async {
+        if (req.method == 'GET') {
+          return http.Response('', 404);
+        }
+        if (req.method == 'PUT') {
+          sentIfNoneMatch = req.headers['if-none-match'];
+          sentIfMatch = req.headers['if-match'];
+          storedBlob = utf8.decode(req.bodyBytes);
+          return http.Response('', 201, headers: {'etag': currentEtag});
+        }
+        return http.Response('', 405);
+      });
+
+      await storage.syncWithWebdav(client: mockAbsent);
+      expect(sentIfNoneMatch, equals('*'));
+      expect(sentIfMatch, isNull);
+
+      // 2. Subsequent sync with existing file returning ETag -> must send 'If-Match: "etag-100"'
+      sentIfNoneMatch = null;
+      sentIfMatch = null;
+      final mockExistingWithEtag = MockClient((req) async {
+        if (req.method == 'GET') {
+          return http.Response(
+            storedBlob ?? '',
+            200,
+            headers: {'etag': currentEtag},
+          );
+        }
+        if (req.method == 'PUT') {
+          sentIfNoneMatch = req.headers['if-none-match'];
+          sentIfMatch = req.headers['if-match'];
+          storedBlob = utf8.decode(req.bodyBytes);
+          return http.Response('', 204, headers: {'etag': '"etag-101"'});
+        }
+        return http.Response('', 405);
+      });
+
+      await storage.syncWithWebdav(client: mockExistingWithEtag);
+      expect(sentIfNoneMatch, isNull);
+      expect(sentIfMatch, equals(currentEtag));
+
+      // 3. Server does not provide ETag -> graceful fallback to unconditional PUT
+      sentIfNoneMatch = null;
+      sentIfMatch = null;
+      final mockNoEtag = MockClient((req) async {
+        if (req.method == 'GET') {
+          return http.Response(storedBlob ?? '', 200);
+        }
+        if (req.method == 'PUT') {
+          sentIfNoneMatch = req.headers['if-none-match'];
+          sentIfMatch = req.headers['if-match'];
+          storedBlob = utf8.decode(req.bodyBytes);
+          return http.Response('', 204);
+        }
+        return http.Response('', 405);
+      });
+
+      await storage.syncWithWebdav(client: mockNoEtag);
+      expect(sentIfNoneMatch, isNull);
+      expect(sentIfMatch, isNull);
+
+      // 4. HTTP 412 Precondition Failed triggers retry loop (GET -> merge -> PUT)
+      var attempts = 0;
+      var getCount = 0;
+      final mock412Retry = MockClient((req) async {
+        if (req.method == 'GET') {
+          getCount++;
+          return http.Response(
+            storedBlob ?? '',
+            200,
+            headers: {'etag': getCount == 1 ? '"etag-old"' : '"etag-new"'},
+          );
+        }
+        if (req.method == 'PUT') {
+          attempts++;
+          if (attempts == 1) {
+            expect(req.headers['if-match'], equals('"etag-old"'));
+            return http.Response('', 412);
+          }
+          expect(req.headers['if-match'], equals('"etag-new"'));
+          storedBlob = utf8.decode(req.bodyBytes);
+          return http.Response('', 204);
+        }
+        return http.Response('', 405);
+      });
+
+      await storage.syncWithWebdav(client: mock412Retry);
+      expect(attempts, 2);
+      expect(getCount, 2);
+
+      // 5. HTTP 412 persists beyond maxRetries (2) -> throws FormatException with diagnosis
+      final mock412Persistent = MockClient((req) async {
+        if (req.method == 'GET') {
+          return http.Response(
+            storedBlob ?? '',
+            200,
+            headers: {'etag': '"etag-stale"'},
+          );
+        }
+        if (req.method == 'PUT') {
+          return http.Response('', 412);
+        }
+        return http.Response('', 405);
+      });
+
+      await expectLater(
+        storage.syncWithWebdav(client: mock412Persistent),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('WebDAV 写入冲突 (HTTP 412)'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'preserves private site watch history locally and re-reads fresh local state before merge writeback',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final storage = await StorageService.init();
+
+      await storage.saveConfig(
+        publicSubJsonA,
+        origin: 'https://a.example/sub.json',
+      );
+      await storage.saveConfig(
+        privateSubJson,
+        origin: 'https://secret.example/sub.json',
+        isPrivate: true,
+      );
+
+      await storage.upsertWatchHistory(
+        const WatchHistoryEntry(
+          site: 'siteA',
+          id: 'v_pub',
+          title: '公开剧集',
+          position: 10000,
+          duration: 60000,
+          updated: 1000,
+        ),
+      );
+      await storage.upsertWatchHistory(
+        const WatchHistoryEntry(
+          site: 'secretSite',
+          id: 'v_priv',
+          title: '私密剧集',
+          position: 25000,
+          duration: 90000,
+          updated: 2000,
+        ),
+      );
+
+      final pubHist = storage.getWatchHistory();
+      expect(pubHist.map((e) => e.site).toList(), equals(['siteA']));
+
+      final allHist = storage.getWatchHistory(forPrivate: true);
+      expect(allHist.map((e) => e.site).toSet(), containsAll(['siteA', 'secretSite']));
+
+      final exportedJson = storage.exportSyncPayload();
+      expect(exportedJson.contains('secretSite'), isFalse);
+      expect(exportedJson.contains('privInline'), isFalse);
+
+      final remotePayload = jsonEncode({
+        'schema': 'marco-movie-sync',
+        'version': 2,
+        'updated': 3000,
+        'watch_history': [
+          {
+            'site': 'siteA',
+            'id': 'v_pub_remote',
+            'title': '远端公开剧集',
+            'position': 50000,
+            'duration': 60000,
+            'updated': 3000,
+          },
+        ],
+        'favorites': <dynamic>[],
+        'tombstones': <String, int>{},
+      });
+
+      final mergeRes = await storage.mergeSyncPayload(remotePayload);
+      expect(mergeRes.historyCount, 2);
+
+      final allHistAfter = storage.getWatchHistory(forPrivate: true);
+      expect(allHistAfter.any((e) => e.site == 'secretSite'), isTrue);
+      expect(allHistAfter.any((e) => e.id == 'v_pub_remote'), isTrue);
+      expect(allHistAfter.any((e) => e.id == 'v_pub'), isTrue);
+    },
+  );
+
+  test(
+    'protects against watch history JSON corruption, backs up raw string, and locks out destructive overwrites',
+    () async {
+      const corruptRaw = '{"corrupted": true, [malformed JSON...';
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        'watch_history': corruptRaw,
+      });
+      final storage = await StorageService.init();
+
+      expect(storage.isHistoryCorrupted, isFalse);
+      expect(storage.historyCorruptionNotifier.value, isFalse);
+
+      final hist = storage.getWatchHistory();
+      expect(hist, isEmpty);
+      expect(storage.isHistoryCorrupted, isTrue);
+      expect(storage.historyCorruptionNotifier.value, isTrue);
+
+      final prefs = await SharedPreferences.getInstance();
+      final backupKeys =
+          prefs.getKeys().where((k) => k.startsWith('watch_history_corrupt_')).toList();
+      expect(backupKeys, isNotEmpty);
+      expect(prefs.getString(backupKeys.first), equals(corruptRaw));
+      expect(prefs.getBool('watch_history_corrupted'), isTrue);
+
+      await storage.upsertWatchHistory(
+        const WatchHistoryEntry(
+          site: 'siteA',
+          id: 'v_new',
+          title: '试图覆盖的条目',
+        ),
+      );
+      expect(prefs.getString('watch_history'), equals(corruptRaw));
+
+      await expectLater(
+        storage.mergeSyncPayload(
+          jsonEncode({
+            'schema': 'marco-movie-sync',
+            'version': 2,
+            'updated': 5000,
+            'watch_history': <dynamic>[],
+            'favorites': <dynamic>[],
+          }),
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            contains('本地观看历史数据损坏'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'scheduleAutoWebdavSync handles concurrent calls via _resyncRequested without throwing StateError',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final storage = await StorageService.init();
+      await storage.saveWebdavConfig(
+        url: 'https://dav.example/dav/MarcoMovie/',
+        user: 'alice',
+        pass: 'secret',
+        auto: true,
+        syncSubs: false,
+      );
+
+      expect(() {
+        storage.scheduleAutoWebdavSync();
+        storage.scheduleAutoWebdavSync(immediate: true);
+        storage.scheduleAutoWebdavSync(immediate: true);
+      }, returnsNormally);
+
+      storage.cancelPendingAutoSync();
+    },
+  );
 }

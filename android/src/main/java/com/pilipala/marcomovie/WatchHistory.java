@@ -1,11 +1,36 @@
 package com.pilipala.marcomovie;
 
-import org.json.*;
 import java.util.*;
+import org.json.*;
 
 /** Device-local bookmarks. Resolve fresh media URLs; never persist signed playback URLs. */
 final class WatchHistory {
     static final int LIMIT = 60;
+    static volatile boolean historyCorrupted = false;
+
+    interface CorruptionRecorder {
+        void recordCorruption(String key, String rawCorrupted);
+    }
+
+    static boolean isCorrupted() {
+        return historyCorrupted;
+    }
+
+    static void setCorrupted(boolean corrupted) {
+        historyCorrupted = corrupted;
+    }
+
+    static boolean isMalformed(String text) {
+        if (text == null) return false;
+        String t = text.trim();
+        if (t.isEmpty() || "[]".equals(t)) return false;
+        try {
+            new JSONArray(t);
+            return false;
+        } catch (Exception e) {
+            return true;
+        }
+    }
 
     static final class Entry {
         String site, id, title, poster, line, episode;
@@ -40,10 +65,17 @@ final class WatchHistory {
     }
 
     static List<Entry> read(String text) {
+        return read(text, null);
+    }
+
+    static List<Entry> read(String text, CorruptionRecorder recorder) {
         List<Entry> out = new ArrayList<>();
         Set<String> keys = new HashSet<>();
+        if (text == null) return out;
+        String trimmed = text.trim();
+        if (trimmed.isEmpty() || "[]".equals(trimmed)) return out;
         try {
-            JSONArray a = new JSONArray(text);
+            JSONArray a = new JSONArray(trimmed);
             for (int i = 0; i < a.length() && out.size() < LIMIT; i++) {
                 JSONObject o = a.optJSONObject(i);
                 if (o == null) continue;
@@ -60,12 +92,23 @@ final class WatchHistory {
                 e.updated = o.optLong("updated");
                 if (!e.site.isEmpty() && !e.id.isEmpty() && keys.add(e.key())) out.add(e);
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            historyCorrupted = true;
+            if (recorder != null) {
+                long ts = System.currentTimeMillis();
+                recorder.recordCorruption("watch_history_corrupt_" + ts, text);
+            }
+            AppLog.w("WatchHistory", "History JSON corrupted, parse failed", e);
         }
         return out;
     }
 
     static String upsert(String text, Entry entry) {
+        if (historyCorrupted || isMalformed(text)) {
+            historyCorrupted = true;
+            AppLog.w("WatchHistory", "Skipping upsert because watch history is corrupted", null);
+            return text;
+        }
         List<Entry> entries = read(text);
         for (Iterator<Entry> it = entries.iterator(); it.hasNext(); ) {
             if (it.next().key().equals(entry.key())) it.remove();
@@ -81,6 +124,10 @@ final class WatchHistory {
     }
 
     static String remove(String text, String key) {
+        if (historyCorrupted || isMalformed(text)) {
+            historyCorrupted = true;
+            return text;
+        }
         JSONArray a = new JSONArray();
         for (Entry e : read(text))
             if (!e.key().equals(key))

@@ -47,7 +47,8 @@ class AdaptiveShell extends StatefulWidget {
   @override
   State<AdaptiveShell> createState() => _AdaptiveShellState();
 }
-class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
+class _AdaptiveShellState extends State<AdaptiveShell>
+    with WindowListener, WidgetsBindingObserver {
   bool _windowListenerAttached = false;
   int _tabIndex = 0;
   CmsConfig? _config;
@@ -150,12 +151,14 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _cachedWatchHistory = widget.storage.getWatchHistory();
     if (!kIsWeb &&
         (Platform.isWindows || Platform.isMacOS || Platform.isLinux) &&
         !Platform.environment.containsKey('FLUTTER_TEST')) {
       windowManager.addListener(this);
       _windowListenerAttached = true;
+      unawaited(windowManager.setPreventClose(true));
     }
     unawaited(_loadInstalledVersion());
     GlassworkBackdrop.reduceTransparency.value =
@@ -163,6 +166,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
             widget.storage.glassBlurStrength <= 0.02;
     GlassworkBackdrop.intensity.value = widget.storage.glassBlurStrength;
     widget.storage.watchHistoryRevision.addListener(_onWatchHistoryRevision);
+    widget.storage.historyCorruptionNotifier.addListener(_onHistoryCorruption);
+    if (widget.storage.isHistoryCorrupted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _onHistoryCorruption();
+      });
+    }
     _reloadSavedConfig();
     if (!Platform.environment.containsKey('FLUTTER_TEST')) {
       unawaited(_runStartupWebdavSync());
@@ -243,11 +252,38 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     _showGlobalSearchSheet();
   }
   @override
-  void onWindowClose() {
-    widget.storage.cancelPendingAutoSync();
-    unawaited(CatPawHost.instance.close());
-    unawaited(CmsClient.closeScriptSessions());
+  Future<void> onWindowClose() async {
+    try {
+      await windowManager.setPreventClose(true);
+    } catch (_) {}
+    try {
+      await widget.storage.flushPendingSync(timeout: const Duration(seconds: 3));
+    } catch (_) {}
+    try {
+      await CatPawHost.instance.close();
+      await CmsClient.closeScriptSessions();
+    } catch (_) {}
+    try {
+      await windowManager.destroy();
+    } catch (_) {}
   }
+
+  void _onHistoryCorruption() {
+    if (!mounted || !widget.storage.isHistoryCorrupted) return;
+    _showAppleNotice(
+      '观看历史数据异常',
+      '检测到本地历史记录文件损坏，已自动为您备份并暂停同步以防止数据覆盖。可在设置中查看备份或重新同步。',
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      widget.storage.scheduleAutoWebdavSync(immediate: true);
+    }
+  }
+
   void _onWatchHistoryRevision() {
     if (mounted) {
       setState(() {
@@ -260,12 +296,16 @@ class _AdaptiveShellState extends State<AdaptiveShell> with WindowListener {
     super.didUpdateWidget(oldWidget);
     if (widget.storage != oldWidget.storage) {
       oldWidget.storage.watchHistoryRevision.removeListener(_onWatchHistoryRevision);
+      oldWidget.storage.historyCorruptionNotifier.removeListener(_onHistoryCorruption);
       widget.storage.watchHistoryRevision.addListener(_onWatchHistoryRevision);
+      widget.storage.historyCorruptionNotifier.addListener(_onHistoryCorruption);
       _cachedWatchHistory = widget.storage.getWatchHistory();
     }
   }
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    widget.storage.historyCorruptionNotifier.removeListener(_onHistoryCorruption);
     widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryRevision);
     widget.storage.cancelPendingAutoSync();
     if (_windowListenerAttached) {

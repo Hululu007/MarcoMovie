@@ -848,42 +848,77 @@ public final class LiteSync {
             throws Exception {
         String fileUrl = resolveWebdavFileUrl(rawWebdavUrl);
         String auth = basicAuthHeader(username, password);
-        HttpURLConnection getConn = openConnection(fileUrl, "GET", auth, 12000);
-        String remoteJson = null;
-        try {
-            int code = getConn.getResponseCode();
-            if (code >= 200 && code < 300) {
-                remoteJson = readBody(getConn.getInputStream(), MAX_SYNC_BYTES);
-            } else if (code == 401 || code == 403) {
-                throw new IOException("WebDAV 认证失败 (HTTP " + code + ")");
-            } else if (code != 404) {
-                throw new IOException("WebDAV 读取失败 (HTTP " + code + ")");
+
+        int maxRetries = 2;
+        int attempt = 0;
+        java.util.Random rand = new java.util.Random();
+
+        while (true) {
+            HttpURLConnection getConn = openConnection(fileUrl, "GET", auth, 12000);
+            String remoteJson = null;
+            String etag = null;
+            boolean fileAbsent = false;
+            try {
+                int code = getConn.getResponseCode();
+                if (code >= 200 && code < 300) {
+                    remoteJson = readBody(getConn.getInputStream(), MAX_SYNC_BYTES);
+                    String h = getConn.getHeaderField("ETag");
+                    if (h != null && !h.trim().isEmpty()) {
+                        etag = h.trim();
+                    }
+                } else if (code == 401 || code == 403) {
+                    throw new IOException("WebDAV 认证失败 (HTTP " + code + ")");
+                } else if (code == 404) {
+                    fileAbsent = true;
+                } else {
+                    throw new IOException("WebDAV 读取失败 (HTTP " + code + ")");
+                }
+            } finally {
+                getConn.disconnect();
             }
-        } finally {
-            getConn.disconnect();
-        }
 
-        MergeResult merged = merger.merge(remoteJson);
-        byte[] payloadBytes = merged.payloadJson.getBytes("UTF-8");
-        if (payloadBytes.length > MAX_SYNC_BYTES) {
-            throw new IOException("同步数据超出 8 MB 限制");
-        }
+            MergeResult merged = merger.merge(remoteJson);
+            byte[] payloadBytes = merged.payloadJson.getBytes("UTF-8");
+            if (payloadBytes.length > MAX_SYNC_BYTES) {
+                throw new IOException("同步数据超出 8 MB 限制");
+            }
 
-        int putCode = putBytes(fileUrl, auth, payloadBytes);
-        if (putCode == 404 || putCode == 409) {
-            ensureParentCollections(fileUrl, auth);
-            putCode = putBytes(fileUrl, auth, payloadBytes);
+            int putCode = putBytes(fileUrl, auth, payloadBytes, etag, fileAbsent);
+            if (putCode == 404 || putCode == 409) {
+                ensureParentCollections(fileUrl, auth);
+                putCode = putBytes(fileUrl, auth, payloadBytes, etag, fileAbsent);
+            }
+            if (putCode == 412 && attempt < maxRetries) {
+                attempt++;
+                logW(
+                        "LiteSync",
+                        "WebDAV 412 Precondition Failed, retrying merge ("
+                                + attempt
+                                + "/"
+                                + maxRetries
+                                + ")");
+                int jitterMs = 50 + rand.nextInt(100);
+                try {
+                    Thread.sleep(jitterMs);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+                continue;
+            }
+            if (putCode == 401 || putCode == 403) {
+                throw new IOException("WebDAV 写入被拒绝 (HTTP " + putCode + ")");
+            }
+            if (putCode < 200 || putCode >= 300) {
+                throw new IOException(formatWebdavWriteError(putCode));
+            }
+            return merged;
         }
-        if (putCode == 401 || putCode == 403) {
-            throw new IOException("WebDAV 写入被拒绝 (HTTP " + putCode + ")");
-        }
-        if (putCode < 200 || putCode >= 300) {
-            throw new IOException(formatWebdavWriteError(putCode));
-        }
-        return merged;
     }
 
     static String formatWebdavWriteError(int code) {
+        if (code == 412) {
+            return "WebDAV 写入冲突 (HTTP 412)：文件已被其他设备修改，重试后仍冲突";
+        }
         if (code == 404 || code == 409) {
             return "WebDAV 写入失败 (HTTP "
                     + code
@@ -935,11 +970,26 @@ public final class LiteSync {
     }
 
     private static int putBytes(String fileUrl, String auth, byte[] body) throws IOException {
+        return putBytes(fileUrl, auth, body, null, false);
+    }
+
+    private static int putBytes(
+            String fileUrl,
+            String auth,
+            byte[] body,
+            String ifMatch,
+            boolean ifNoneMatchStar)
+            throws IOException {
         HttpURLConnection conn = openConnection(fileUrl, "PUT", auth, 15000);
         try {
             conn.setDoOutput(true);
             conn.setFixedLengthStreamingMode(body.length);
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            if (ifNoneMatchStar) {
+                conn.setRequestProperty("If-None-Match", "*");
+            } else if (ifMatch != null && !ifMatch.isEmpty()) {
+                conn.setRequestProperty("If-Match", ifMatch);
+            }
             OutputStream os = conn.getOutputStream();
             try {
                 os.write(body);

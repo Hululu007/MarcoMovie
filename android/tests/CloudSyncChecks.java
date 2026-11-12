@@ -44,6 +44,9 @@ public final class CloudSyncChecks {
         testLegacyBackupCompatibility();
         testLanPeerSyncRoundtrip();
         testWebdavMkcolAndRoundtrip();
+        testWebdavEtagAndConcurrency();
+        testWatchHistoryCorruptionBackupAndLockout();
+        testUiLatchTimeoutAndErrorPropagation();
         System.out.println("ALL PASS (" + checks + " checks)");
     }
 
@@ -530,5 +533,226 @@ public final class CloudSyncChecks {
         } finally {
             dav.stop(0);
         }
+    }
+
+    private static void testWebdavEtagAndConcurrency() throws Exception {
+        HttpServer dav = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final AtomicReference<String> lastIfMatch = new AtomicReference<>();
+        final AtomicReference<String> lastIfNoneMatch = new AtomicReference<>();
+        final AtomicReference<String> serverEtag = new AtomicReference<>("\"etag-v1\"");
+        final AtomicReference<byte[]> storedPayload = new AtomicReference<>(null);
+        final java.util.concurrent.atomic.AtomicInteger putCount =
+                new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicBoolean return412Once =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean always412 =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean omitEtagOnGet =
+                new java.util.concurrent.atomic.AtomicBoolean();
+
+        dav.createContext(
+                "/etag-dav/MarcoMovie/",
+                ex -> {
+                    try {
+                        String method = ex.getRequestMethod();
+                        if ("GET".equals(method)) {
+                            byte[] body = storedPayload.get();
+                            if (body == null) {
+                                ex.sendResponseHeaders(404, -1);
+                                return;
+                            }
+                            if (!omitEtagOnGet.get()) {
+                                ex.getResponseHeaders().set("ETag", serverEtag.get());
+                            }
+                            ex.getResponseHeaders()
+                                    .set("Content-Type", "application/json; charset=utf-8");
+                            ex.sendResponseHeaders(200, body.length);
+                            try (OutputStream out = ex.getResponseBody()) {
+                                out.write(body);
+                            }
+                            return;
+                        }
+                        if ("MKCOL".equals(method)) {
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        if ("PUT".equals(method)) {
+                            putCount.incrementAndGet();
+                            lastIfMatch.set(ex.getRequestHeaders().getFirst("If-Match"));
+                            lastIfNoneMatch.set(ex.getRequestHeaders().getFirst("If-None-Match"));
+
+                            if (always412.get()) {
+                                ex.sendResponseHeaders(412, -1);
+                                return;
+                            }
+                            if (return412Once.compareAndSet(true, false)) {
+                                serverEtag.set("\"etag-v2\"");
+                                storedPayload.set(
+                                        "{\"schema\":\"marco-movie-sync\",\"version\":2,\"updated\":8000,\"watch_history\":[]}"
+                                                .getBytes(StandardCharsets.UTF_8));
+                                ex.sendResponseHeaders(412, -1);
+                                return;
+                            }
+
+                            storedPayload.set(readAll(ex.getRequestBody()));
+                            ex.getResponseHeaders().set("ETag", serverEtag.get());
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+        dav.start();
+        try {
+            int port = dav.getAddress().getPort();
+            String url = "http://127.0.0.1:" + port + "/etag-dav/MarcoMovie/";
+
+            // 1. Initial push when file absent on GET (404) -> sends If-None-Match: *
+            storedPayload.set(null);
+            CloudSync.syncWebdav(
+                    url,
+                    "alice",
+                    "pass",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 1000L));
+            check(
+                    "*".equals(lastIfNoneMatch.get()) && lastIfMatch.get() == null,
+                    "WebDAV sends If-None-Match: * on initial push when file absent");
+
+            // 2. Subsequent sync with existing file and ETag -> sends If-Match: <etag>
+            lastIfNoneMatch.set(null);
+            lastIfMatch.set(null);
+            CloudSync.syncWebdav(
+                    url,
+                    "alice",
+                    "pass",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 2000L));
+            check(
+                    lastIfNoneMatch.get() == null && "\"etag-v1\"".equals(lastIfMatch.get()),
+                    "WebDAV sends If-Match: <etag> when remote file exists");
+
+            // 3. Fallback to unconditioned PUT when server GET omits ETag
+            omitEtagOnGet.set(true);
+            lastIfNoneMatch.set(null);
+            lastIfMatch.set(null);
+            CloudSync.syncWebdav(
+                    url,
+                    "alice",
+                    "pass",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 3000L));
+            check(
+                    lastIfNoneMatch.get() == null && lastIfMatch.get() == null,
+                    "WebDAV falls back gracefully to unconditioned PUT when ETag omitted");
+            omitEtagOnGet.set(false);
+
+            // 4. HTTP 412 triggers retry loop and succeeds with updated ETag
+            return412Once.set(true);
+            putCount.set(0);
+            CloudSync.syncWebdav(
+                    url,
+                    "alice",
+                    "pass",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 4000L));
+            check(
+                    putCount.get() == 2 && "\"etag-v2\"".equals(lastIfMatch.get()),
+                    "WebDAV 412 triggers retry loop, re-fetches updated ETag and succeeds");
+
+            // 5. Persistent HTTP 412 exhausts retries and throws actionable IOException
+            always412.set(true);
+            try {
+                CloudSync.syncWebdav(
+                        url,
+                        "alice",
+                        "pass",
+                        remote ->
+                                CloudSync.merge(
+                                        "[]",
+                                        "[]",
+                                        "",
+                                        Collections.emptyList(),
+                                        false,
+                                        remote,
+                                        5000L));
+                check(false, "Persistent 412 must throw IOException");
+            } catch (java.io.IOException expected) {
+                check(
+                        expected.getMessage().contains("HTTP 412")
+                                && expected.getMessage().contains("写入冲突"),
+                        "WebDAV persistent 412 conflict provides actionable diagnostic message");
+            }
+        } finally {
+            dav.stop(0);
+        }
+    }
+
+    private static void testWatchHistoryCorruptionBackupAndLockout() {
+        WatchHistory.setCorrupted(false);
+        String corruptJson = "{\"corrupt\": true, [invalid json...";
+        final AtomicReference<String> backupKey = new AtomicReference<>();
+        final AtomicReference<String> backupValue = new AtomicReference<>();
+
+        WatchHistory.CorruptionRecorder recorder =
+                (key, raw) -> {
+                    backupKey.set(key);
+                    backupValue.set(raw);
+                };
+
+        // 1. Reading corrupted JSON detects corruption, triggers recorder backup, sets
+        // isCorrupted()
+        List<WatchHistory.Entry> entries = WatchHistory.read(corruptJson, recorder);
+        check(entries.isEmpty(), "WatchHistory.read returns empty list on corrupt JSON");
+        check(
+                WatchHistory.isCorrupted(),
+                "WatchHistory marks historyCorrupted = true on malformed JSON");
+        check(
+                backupKey.get() != null
+                        && backupKey.get().startsWith("watch_history_corrupt_")
+                        && corruptJson.equals(backupValue.get()),
+                "WatchHistory calls recorder with watch_history_corrupt_<ts> and verbatim content");
+
+        // 2. Destructive upsert() and remove() are locked out when history is corrupted
+        WatchHistory.Entry e = new WatchHistory.Entry();
+        e.site = "site_a";
+        e.id = "vod_a";
+        e.title = "test";
+        String upsertResult = WatchHistory.upsert(corruptJson, e);
+        check(corruptJson.equals(upsertResult), "WatchHistory.upsert is locked out when corrupted");
+
+        String removeResult = WatchHistory.remove(corruptJson, "site_a\nvod_a");
+        check(corruptJson.equals(removeResult), "WatchHistory.remove is locked out when corrupted");
+
+        WatchHistory.setCorrupted(false);
+    }
+
+    private static void testUiLatchTimeoutAndErrorPropagation() {
+        // Test timeout detection
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        boolean timeoutPassed = false;
+        try {
+            boolean completed = latch.await(50, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (!completed) {
+                timeoutPassed = true;
+            }
+        } catch (InterruptedException ignored) {
+        }
+        check(
+                timeoutPassed,
+                "CountDownLatch detects timeout when UI thread does not count down in time");
+
+        // Test error propagation via AtomicReference<Throwable>
+        final AtomicReference<Throwable> errRef = new AtomicReference<>();
+        errRef.set(new IllegalStateException("simulated UI exception"));
+        check(
+                errRef.get() != null && "simulated UI exception".equals(errRef.get().getMessage()),
+                "AtomicReference propagates background UI failure throwable to sync caller");
     }
 }

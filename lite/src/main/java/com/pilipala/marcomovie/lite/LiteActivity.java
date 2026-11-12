@@ -197,7 +197,10 @@ public final class LiteActivity extends Activity {
                     .commit();
         }
         home();
-        if (crashedSite != null && crashedSite.length() > 0 && status != null) {
+        LiteStore.historyCorrupted = getPreferences(0).getBoolean("watch_history_corrupted", false);
+        if (LiteStore.historyCorrupted && status != null) {
+            status.setText("观看历史数据损坏，已自动备份至本地。");
+        } else if (crashedSite != null && crashedSite.length() > 0 && status != null) {
             status.setText("上次加载片源时异常退出，已自动重置片源选择。");
         }
         if (isWebdavConfigured() && getPreferences(0).getBoolean("webdav_auto", true)) {
@@ -1877,8 +1880,18 @@ public final class LiteActivity extends Activity {
             return;
         }
         long now = SystemClock.uptimeMillis();
-        long delay = immediate ? 2500L : 45000L;
-        if (!immediate && now - lastAutoPushMs < 40000L) return;
+        long delay;
+        if (immediate) {
+            delay = 2500L;
+        } else {
+            long minInterval = 300000L; // 5 minutes
+            long elapsed = now - lastAutoPushMs;
+            if (elapsed < minInterval) {
+                delay = minInterval - elapsed;
+            } else {
+                delay = 3000L;
+            }
+        }
         ui.removeCallbacks(autoPushTask);
         ui.postDelayed(autoPushTask, delay);
     }
@@ -3730,8 +3743,11 @@ public final class LiteActivity extends Activity {
     void togglePlayPause() {
         if (player == null || !ready) return;
         try {
-            if (player.isPlaying()) player.pause();
-            else if (embyReporter == null
+            if (player.isPlaying()) {
+                player.pause();
+                saveResume();
+                scheduleAutoPush(true);
+            } else if (embyReporter == null
                     && selected != null
                     && selected.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)) {
                 play(playbackAddress, playbackTitle);
@@ -4066,7 +4082,7 @@ public final class LiteActivity extends Activity {
                 entry.durationMs = Math.max(0, dur);
                 entry.updatedAt = System.currentTimeMillis();
                 LiteStore.saveHistory(this, entry);
-                scheduleAutoPush(false);
+                scheduleAutoPush(true);
             }
         } catch (Exception ignored) {
         }

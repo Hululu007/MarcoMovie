@@ -586,6 +586,10 @@ public final class MainActivity extends Activity {
             applyMobileSystemBars(false);
         }
         prefs = getSharedPreferences(privateMode ? "movie-private" : Prefs.FILE, MODE_PRIVATE);
+        WatchHistory.historyCorrupted = prefs.getBoolean("watch_history_corrupted", false);
+        if (WatchHistory.historyCorrupted) {
+            ui.post(() -> toast("检测到观看历史数据损坏，已自动备份至本地。为保护数据，已暂停历史更新与云端覆盖。"));
+        }
         reduced = prefs.getBoolean(Prefs.REDUCED, false);
         configOrigin = prefs.getString("origin", "");
         try {
@@ -1672,7 +1676,13 @@ public final class MainActivity extends Activity {
     java.util.List<WatchHistory.Entry> watchHistory() {
         return privateMode
                 ? java.util.Collections.emptyList()
-                : WatchHistory.read(prefs.getString(Prefs.WATCH_HISTORY, "[]"));
+                : WatchHistory.read(
+                        prefs.getString(Prefs.WATCH_HISTORY, "[]"),
+                        (key, raw) ->
+                                prefs.edit()
+                                        .putString(key, raw)
+                                        .putBoolean("watch_history_corrupted", true)
+                                        .apply());
     }
 
     void savePlaybackHistory(boolean force) {
@@ -1854,6 +1864,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        CloudSyncDialog.cancel();
         if (privateMode && isFinishing() && !switchingPrivacy) {
             MobileShell.clearSearchSession();
             VideoSkipStore.clearPrivateRecords();
