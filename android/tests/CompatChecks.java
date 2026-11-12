@@ -316,6 +316,7 @@ public final class CompatChecks {
                 WatchHistory.read(WatchHistory.remove(history, e.key())).size() == 59,
                 "history item removal");
         check(WatchHistory.read("bad JSON").isEmpty(), "invalid history recovers safely");
+        WatchHistory.setCorrupted(false);
         e.duration = 120000;
         e.position = 118000;
         check(e.resume() == 0, "finished item restarts from beginning");

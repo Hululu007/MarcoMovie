@@ -1,5 +1,12 @@
 ## 未发布
 
+- [Android] 性能与稳定性优化（Lane E § E1–E5）：
+  - E1: 播放进度高频更新解耦为内存书签秒级刷新，磁盘持久化节流至最多每 15 秒写入一次；暂停、退出、切集与后台切出保持即刻保存；JSON 序列化与持久化移入后台单线程守护执行器（`playback-storage`）并全量采用 `.apply()`；完成全项目 22 处 `.commit()` 审计，UI 线程全面消除同步阻塞写盘，仅在致命未捕获异常退出前保留 1 处强刷；
+  - E2: `SourceController` 订阅保存（`ConfigStore.write`）从主线程移至后台 worker 执行器异步落盘并声明 `synchronized` 同步写保护，消除主线程 `fsync` 导致的抽帧卡顿；
+  - E3: 手机端 ZIP 扩展包导入支持手动跟随跨协议 HTTP/HTTPS 3xx 重定向（最多 5 跳），自动维护并透传重定向 Cookie，拦截非法协议与凭据注入，强制 `finally` 释放网络连接防套接字泄漏，严格校验 28 MB 上限；
+  - E4: 弹幕拉取重定向跨域时自动剥离 `Authorization`、`Proxy-Authorization`、`Cookie` 等源站敏感凭据，同域重定向安全继承并保留有效会话凭据；
+  - E5: 动态获取应用真实版本号组装播放器 User-Agent（兜底 `MarcoMovie/0.5.22`），替换硬编码的 `0.2.0`；全面消除 11 处缺失 `Locale.ROOT` 的大小写转换，杜绝土耳其语等特异 Locale 下引起的 `.ZIP` 扩展名失效、海报防盗链失效、频道搜索异常与剧集规整错位。
+
 - [Flutter/Storage] 存储架构升级与播放进度节流（Lane D2 § D4）：
   - 将订阅配置（subscriptions.json）与观看历史（watch_history.json）从 SharedPreferences 迁移至独立原子 JSON 文件；
   - 保持同步 API 内存缓存与原子替换写文件（.tmp 写入、flush 刷新、安全重命名）；

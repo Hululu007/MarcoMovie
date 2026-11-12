@@ -407,7 +407,7 @@ final class HomeScreen {
         status.setText("正在整理片单…");
         more.setVisibility(View.GONE);
         int token = ++request;
-        a.prefs.edit().putString(Prefs.LOADING_SITE, site.key).commit();
+        a.prefs.edit().putString(Prefs.LOADING_SITE, site.key).apply();
         a.submitPage(
                 () -> {
                     try {

@@ -298,7 +298,7 @@ final class UpdateManager {
         File part = new File(folder(), "release.part");
         if (!r.sha.equals(prefs.getString("partial_sha", "")) || part.length() > r.size) {
             part.delete();
-            prefs.edit().putString("partial_sha", r.sha).commit();
+            prefs.edit().putString("partial_sha", r.sha).apply();
         }
         percent = (int) (part.length() * 100 / r.size);
         boolean verified = false;

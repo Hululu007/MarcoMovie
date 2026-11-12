@@ -20,10 +20,7 @@ final class SourcePicker {
                 && !a.prefs.contains(currentProfile)
                 && a.prefs.contains(legacyProfile)) {
             String old = a.prefs.getString(legacyProfile, "{}");
-            if (!a.prefs.edit().putString(currentProfile, old).remove(legacyProfile).commit()) {
-                // Reading the old edit record still honors deletion if migration cannot persist.
-                currentProfile = legacyProfile;
-            }
+            a.prefs.edit().putString(currentProfile, old).remove(legacyProfile).apply();
         }
         try {
             org.json.JSONObject saved =
@@ -127,10 +124,7 @@ final class SourcePicker {
                         break;
                     }
             }
-            if (!editor.commit()) {
-                a.notice("线路变更未能保存，请重试");
-                return;
-            }
+            editor.apply();
             config.sites.clear();
             config.sites.addAll(sites);
             a.back.clear();
@@ -300,7 +294,7 @@ final class SourcePicker {
                                         .edit()
                                         .putString(Prefs.SELECTED_SITE, site.key)
                                         .putString(Prefs.LOADING_SITE, site.key)
-                                        .commit();
+                                        .apply();
                                 dialog.dismiss();
                                 a.back.clear();
                                 a.open(new MainActivity.Screen(a::home), false);

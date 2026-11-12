@@ -1297,7 +1297,18 @@ final class SourceController {
                 if (a.isTvDevice()) throw e;
             }
         }
-        a.configStore.write(c.raw);
+        final String rawConfig = c.raw;
+        final ConfigStore store = a.configStore;
+        if (store != null) {
+            a.worker.execute(
+                    () -> {
+                        try {
+                            store.write(rawConfig);
+                        } catch (Exception e) {
+                            AppLog.w("SourceController", "Background configStore.write failed", e);
+                        }
+                    });
+        }
         SourcePicker.applyEdits(a, c, origin);
         a.closeEngines();
         a.config = c;
