@@ -760,6 +760,13 @@ public final class Cms {
                 out.parses.add(p);
             }
         }
+        String defaultJsonParseUrl = "";
+        for (Parse p : out.parses) {
+            if (p.type == 1 || p.type == 2 || p.type == 3) {
+                defaultJsonParseUrl = p.url;
+                break;
+            }
+        }
         Set<String> keys = new HashSet<>();
         for (int i = 0; i < sites.length(); i++) {
             JSONObject j = sites.optJSONObject(i);
@@ -782,6 +789,10 @@ public final class Cms {
                                 + (jarParts.length == 2 ? ";md5;" + jarParts[1] : "");
             }
             s.playUrl = Json.str(j, "playUrl", "");
+            if (s.playUrl.isEmpty()
+                    && (Json.integer(j, "parse", 0) == 1 || Json.integer(j, "jx", 0) == 1)) {
+                s.playUrl = defaultJsonParseUrl;
+            }
             s.searchable = Json.integer(j, "searchable", 1) != 0;
             s.ext = j.opt("ext");
             if (origin != null && !origin.isEmpty()) {
@@ -860,6 +871,8 @@ public final class Cms {
     }
 
     public static String withoutComments(String source) throws IOException {
+        if (source == null) return "";
+        if (source.startsWith("\uFEFF")) source = source.substring(1);
         StringBuilder clean = new StringBuilder();
         boolean quoted = false, escaped = false;
         for (int i = 0; i < source.length(); i++) {
@@ -1021,7 +1034,11 @@ public final class Cms {
             }
         }
         String text;
-        if (bytes.length >= 2 && (bytes[0] & 255) == 255 && (bytes[1] & 255) == 254)
+        if (bytes.length >= 3
+                && (bytes[0] & 255) == 0xEF
+                && (bytes[1] & 255) == 0xBB
+                && (bytes[2] & 255) == 0xBF) text = new String(bytes, 3, bytes.length - 3, "UTF-8");
+        else if (bytes.length >= 2 && (bytes[0] & 255) == 255 && (bytes[1] & 255) == 254)
             text = new String(bytes, 2, bytes.length - 2, "UTF-16LE");
         else if (bytes.length >= 2 && (bytes[0] & 255) == 254 && (bytes[1] & 255) == 255)
             text = new String(bytes, 2, bytes.length - 2, "UTF-16BE");
@@ -1567,8 +1584,49 @@ public final class Cms {
         v.director = j.optString("vod_director");
         v.description =
                 j.optString("vod_content").replaceAll("<[^>]*>", " ").replace("&nbsp;", " ").trim();
-        String[] from = j.optString("vod_play_from").split("\\$\\$\\$", -1),
-                urls = j.optString("vod_play_url").split("\\$\\$\\$", -1);
+        String rawFrom = j.optString("vod_play_from");
+        String rawUrl = j.optString("vod_play_url");
+        if (rawUrl.isEmpty() && j.has("vod_play_list")) {
+            JSONArray playList = j.optJSONArray("vod_play_list");
+            if (playList != null) {
+                List<String> froms = new ArrayList<>();
+                List<String> urls = new ArrayList<>();
+                for (int i = 0; i < playList.length(); i++) {
+                    JSONObject p = playList.optJSONObject(i);
+                    if (p == null) continue;
+                    String u = Json.str(p, "url", "");
+                    if (u.isEmpty() && p.optJSONObject("urls") != null) {
+                        JSONObject urlsObj = p.getJSONObject("urls");
+                        List<String> segs = new ArrayList<>();
+                        Iterator<String> it = urlsObj.keys();
+                        while (it.hasNext()) {
+                            JSONObject ep = urlsObj.optJSONObject(it.next());
+                            if (ep == null) continue;
+                            String epUrl = Json.str(ep, "url", "");
+                            if (epUrl.isEmpty()) continue;
+                            String epName = Json.str(ep, "name", "正片");
+                            segs.add(epName + "$" + epUrl);
+                        }
+                        u = String.join("#", segs);
+                    }
+                    if (u.isEmpty()) continue;
+                    JSONObject pInfo = p.optJSONObject("player_info");
+                    String showName =
+                            pInfo != null
+                                    ? Json.str(pInfo, "show", Json.str(pInfo, "from", ""))
+                                    : "";
+                    if (showName.isEmpty())
+                        showName = Json.str(p, "from", Json.str(p, "name", "默认线路"));
+                    froms.add(showName);
+                    urls.add(u);
+                }
+                if (!froms.isEmpty()) {
+                    rawFrom = String.join("$$$", froms);
+                    rawUrl = String.join("$$$", urls);
+                }
+            }
+        }
+        String[] from = rawFrom.split("\\$\\$\\$", -1), urls = rawUrl.split("\\$\\$\\$", -1);
         parsePlayLines(v, from, urls);
         prioritizeDirectStreamLines(v);
         return v;
@@ -1674,6 +1732,9 @@ public final class Cms {
             return l;
         }
         JSONObject o = new JSONObject(json);
+        if (!o.has("list") && o.optJSONObject("data") != null) {
+            o = o.getJSONObject("data");
+        }
         Listing l = new Listing();
         l.page = Math.max(1, o.optInt("page", 1));
         l.pageCount = Math.max(l.page, o.optInt("pagecount", l.page));

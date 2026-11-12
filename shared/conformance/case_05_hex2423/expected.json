@@ -1,0 +1,12 @@
+{
+  "sites": [
+    {
+      "key": "hex2423_site",
+      "name": "2423 Site",
+      "type": 1,
+      "api": "https://2423.example.com/vod",
+      "searchable": true,
+      "capabilityStatus": "ok"
+    }
+  ]
+}

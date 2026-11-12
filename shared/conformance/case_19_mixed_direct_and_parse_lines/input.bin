@@ -1,0 +1,10 @@
+{
+  "list": [
+    {
+      "vod_id": "4001",
+      "vod_name": "混合线路电影",
+      "vod_play_from": "解析线路$$$官方直链$$$备用解析",
+      "vod_play_url": "第1集$https://parse.example.com/play/101$$$第1集$https://cdn.example.com/video.m3u8$$$第1集$https://other.example.com/play/202"
+    }
+  ]
+}

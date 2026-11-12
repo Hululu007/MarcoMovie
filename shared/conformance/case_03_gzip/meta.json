@@ -1,0 +1,5 @@
+{
+  "origin": "https://example.com/sub.json.gz",
+  "type": "config",
+  "encoding": "gzip"
+}

@@ -1,0 +1,20 @@
+{
+  "sites": [
+    {
+      "key": "missing_json",
+      "name": "Auto JSON Site",
+      "type": 1,
+      "api": "https://cms.example.com/api.php/provide/vod",
+      "searchable": true,
+      "capabilityStatus": "ok"
+    },
+    {
+      "key": "missing_xml",
+      "name": "Auto XML Site",
+      "type": 0,
+      "api": "https://cms.example.com/api.php/provide/vod/at/xml",
+      "searchable": true,
+      "capabilityStatus": "ok"
+    }
+  ]
+}

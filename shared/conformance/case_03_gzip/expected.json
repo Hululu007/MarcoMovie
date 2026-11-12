@@ -1,0 +1,12 @@
+{
+  "sites": [
+    {
+      "key": "gzip_site",
+      "name": "Gzip Site",
+      "type": 1,
+      "api": "https://gzip.example.com/vod",
+      "searchable": true,
+      "capabilityStatus": "ok"
+    }
+  ]
+}

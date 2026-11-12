@@ -1,0 +1,5 @@
+{
+  "origin": "https://example.com/sub_utf16.json",
+  "type": "config",
+  "encoding": "utf-16le"
+}

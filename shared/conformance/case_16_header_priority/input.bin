@@ -1,0 +1,22 @@
+{
+  "sites": [
+    {
+      "key": "header_site",
+      "name": "Header Site",
+      "type": 1,
+      "api": "https://api.example.com/vod",
+      "ua": "SiteUA/1.0",
+      "headers": {
+        "Referer": "https://site.example.com",
+        "Cookie": "site_cookie=1",
+        "X-Ignored": "evil"
+      },
+      "ext": {
+        "ua": "ExtUA/2.0",
+        "headers": {
+          "Cookie": "ext_cookie=2"
+        }
+      }
+    }
+  ]
+}

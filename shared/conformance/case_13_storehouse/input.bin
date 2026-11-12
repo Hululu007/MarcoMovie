@@ -1,0 +1,12 @@
+{
+  "storeHouse": [
+    {
+      "sourceName": "精品线路 A",
+      "sourceUrl": "https://store.example.com/a.json"
+    },
+    {
+      "sourceName": "精品线路 B",
+      "sourceUrl": "https://store.example.com/b.json"
+    }
+  ]
+}

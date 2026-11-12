@@ -342,10 +342,12 @@ class CmsSite {
     if (CspBridge.isNetdiskSite(this) && !CspBridge.hasAdapter(this)) {
       return statusAdapterMissing;
     }
+    if (jar.isNotEmpty) {
+      return statusNeedsJar;
+    }
     if (type == 3 ||
         api.startsWith('csp_') ||
-        api.endsWith('.js') ||
-        jar.isNotEmpty) {
+        api.endsWith('.js')) {
       if (!CspBridge.hasAdapter(this)) {
         return statusNeedsJar;
       }

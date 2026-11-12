@@ -1,0 +1,12 @@
+{
+  "sites": [
+    {
+      "key": "utf16_site",
+      "name": "UTF16 站点",
+      "type": 1,
+      "api": "https://utf16.example.com/vod",
+      "searchable": true,
+      "capabilityStatus": "ok"
+    }
+  ]
+}

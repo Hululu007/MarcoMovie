@@ -1,0 +1,31 @@
+{
+  "videos": [
+    {
+      "id": "2001",
+      "lines": [
+        {
+          "name": "蓝光 1080P",
+          "episodes": [
+            {
+              "name": "第01集",
+              "url": "https://cdn.example.com/ep01.m3u8"
+            },
+            {
+              "name": "第02集",
+              "url": "https://cdn.example.com/ep02.m3u8"
+            }
+          ]
+        },
+        {
+          "name": "4K 原画",
+          "episodes": [
+            {
+              "name": "正片 4K",
+              "url": "https://cdn.example.com/4k.m3u8"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

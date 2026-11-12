@@ -1,0 +1,13 @@
+{
+  "spider": "./spiders/custom.jar;md5;abc12345",
+  "sites": [
+    {
+      "key": "rel_site",
+      "name": "Relative Site",
+      "type": 1,
+      "api": "https://api.example.com/vod",
+      "jar": "../jars/site.jar",
+      "ext": "./rules/site.json"
+    }
+  ]
+}

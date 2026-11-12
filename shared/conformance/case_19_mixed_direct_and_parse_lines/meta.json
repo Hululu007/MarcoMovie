@@ -1,0 +1,6 @@
+{
+  "origin": "https://cms.example.com/api.php/provide/vod?ids=4001",
+  "type": "listing",
+  "entrypoint": "listing",
+  "encoding": "utf-8"
+}

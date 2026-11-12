@@ -1,0 +1,12 @@
+{
+  "sites": [
+    {
+      "key": "stego_site",
+      "name": "Stego Site",
+      "type": 1,
+      "api": "https://stego.example.com/vod",
+      "searchable": true,
+      "capabilityStatus": "ok"
+    }
+  ]
+}

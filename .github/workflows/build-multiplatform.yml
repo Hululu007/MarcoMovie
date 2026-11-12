@@ -47,6 +47,10 @@ jobs:
         with:
           distribution: "zulu"
           java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: "3.38.9"
       - name: Check public content guardrails
         run: python scripts/check_public_content.py
       - name: Verify runtime assets before platform builds
@@ -94,6 +98,8 @@ jobs:
           python android/tests/run_warehouse_checks.py
           python android/tests/run_video_filter_checks.py
           python android/tests/run_glasswork_checks.py
+          python android/tests/run_conformance_checks.py
+          python scripts/test_lite_conformance.py
           python -m unittest discover -s flutter -p "test_*.py"
           python scripts/test_movie_mirror.py
           python scripts/test_platform_packages.py
@@ -106,6 +112,12 @@ jobs:
           python scripts/test_t4_adapter.py
           node --jitless scripts/test_fy_adapter.cjs
           python scripts/test_fy_adapter.py
+      - name: Run Flutter tri-platform conformance tests
+        working-directory: flutter
+        run: |
+          python prepare_platform.py
+          flutter pub get
+          flutter test test/conformance_test.dart
       - name: Shared script runtime and native patch checks
         run: |
           node scripts/test_js_module_interop.cjs
@@ -148,7 +160,10 @@ jobs:
           python android/tests/run_api23_callback_checks.py
           python android/tests/run_checks.py
           python android/tests/run_guard_checks.py
+          python android/tests/run_conformance_checks.py
+          python scripts/test_lite_conformance.py
           python scripts/build_lite.py
+          python scripts/test_lite_jvm.py
       - uses: actions/upload-artifact@v4
         with:
           name: MarcoMovie-Android-APK

@@ -1,0 +1,5 @@
+{
+  "origin": "https://example.com/config.txt",
+  "type": "config",
+  "encoding": "base64"
+}
