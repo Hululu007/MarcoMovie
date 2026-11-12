@@ -1,3 +1,7 @@
+## 未发布
+
+- [Android/Flutter/Lite] 修复坚果云 WebDAV 同步 404 错误：根目录自动追加 MarcoMovie/ 子目录，补齐递归父目录 MKCOL 创建，优化 404/409 诊断提示。
+
 ## 2026-11-12 全平台观影交互、片源网盘兼容与桌面沉浸式升级（Android TV 0.5.22 · Android 手机/平板 0.5.22 · iOS / iPadOS 0.5.25 · Windows 0.5.18 · macOS 0.5.15）
 
 - [Android 电视 / 盒子 0.5.22](docs/releases/android-tv-v0.5.22.md) · [Android 手机 / 平板 0.5.22](docs/releases/android-mobile-v0.5.22.md) · [iOS / iPadOS 0.5.25](docs/releases/ios-v0.5.25.md) · [Windows 0.5.18](docs/releases/windows-v0.5.18.md) · [macOS 0.5.15](docs/releases/macos-v0.5.15.md)

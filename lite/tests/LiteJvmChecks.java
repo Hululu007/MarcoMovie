@@ -95,6 +95,8 @@ public final class LiteJvmChecks {
     }
 
     public static void main(String[] args) throws Exception {
+        testResolveWebdavFileUrlMatrix();
+        testWebdavErrorDiagnostics();
         testConfigDecodingAndSites();
         testXmlAndJsonCmsParsing();
         testLiveParsing();
@@ -103,6 +105,53 @@ public final class LiteJvmChecks {
         testMediaProxyLoopback();
         testLiteSyncV2AndLanServer();
         System.out.println("PASS " + checks + " TV Lite JVM checks");
+    }
+
+    private static void testResolveWebdavFileUrlMatrix() throws Exception {
+        check(
+                "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
+                        .equals(LiteSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/dav/")),
+                "LiteSync Jianguoyun root folder trailing slash appends MarcoMovie");
+        check(
+                "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
+                        .equals(LiteSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/dav")),
+                "LiteSync Jianguoyun root folder without trailing slash appends MarcoMovie");
+        check(
+                "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
+                        .equals(LiteSync.resolveWebdavFileUrl("dav.jianguoyun.com/dav/")),
+                "LiteSync Jianguoyun scheme-less URL auto-prepends https and appends MarcoMovie");
+        check(
+                "https://dav.jianguoyun.com/dav/我的坚果云/marco-movie-sync.json"
+                        .equals(LiteSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/dav/我的坚果云/")),
+                "LiteSync Jianguoyun custom folder preserves user subfolder");
+        check(
+                "https://dav.jianguoyun.com/dav/a/x.json"
+                        .equals(LiteSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/dav/a/x.json")),
+                "LiteSync Jianguoyun explicit json file URL left untouched");
+        check(
+                "https://nas.local:5006/marco-movie-sync.json"
+                        .equals(LiteSync.resolveWebdavFileUrl("https://nas.local:5006/")),
+                "LiteSync Non-Jianguoyun WebDAV server does not append MarcoMovie subfolder");
+    }
+
+    private static void testWebdavErrorDiagnostics() {
+        String err404 = LiteSync.formatWebdavWriteError(404);
+        check(
+                err404.contains("HTTP 404") && err404.contains("坚果云请在地址后加一个文件夹名"),
+                "LiteSync HTTP 404 provides actionable Jianguoyun diagnostic error message");
+        String err409 = LiteSync.formatWebdavWriteError(409);
+        check(
+                err409.contains("HTTP 409") && err409.contains("坚果云请在地址后加一个文件夹名"),
+                "LiteSync HTTP 409 provides actionable Jianguoyun diagnostic error message");
+        check(
+                "WebDAV 写入失败 (HTTP 405)：服务器不允许写入".equals(LiteSync.formatWebdavWriteError(405)),
+                "LiteSync HTTP 405 provides method not allowed message");
+        check(
+                "WebDAV 写入失败 (HTTP 423)：文件被锁定".equals(LiteSync.formatWebdavWriteError(423)),
+                "LiteSync HTTP 423 provides locked file message");
+        check(
+                "WebDAV 写入失败 (HTTP 507)：空间不足".equals(LiteSync.formatWebdavWriteError(507)),
+                "LiteSync HTTP 507 provides insufficient storage message");
     }
 
     private static void testConfigDecodingAndSites() throws Exception {
@@ -612,6 +661,8 @@ public final class LiteJvmChecks {
         // 4. WebDAV MKCOL + PUT + GET roundtrip
         final java.util.Set<String> dirs =
                 java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+        final java.util.List<String> mkcolSeq =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
         final byte[][] davData = new byte[1][];
         HttpServer dav = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         dav.createContext(
@@ -622,8 +673,20 @@ public final class LiteJvmChecks {
                         try {
                             String m = ex.getRequestMethod();
                             String p = ex.getRequestURI().getPath();
+                            if (p.startsWith("/forbidden")) {
+                                if ("MKCOL".equalsIgnoreCase(m)) {
+                                    ex.sendResponseHeaders(403, -1);
+                                    return;
+                                }
+                                if ("PUT".equalsIgnoreCase(m)) {
+                                    ex.sendResponseHeaders(404, -1);
+                                    return;
+                                }
+                            }
                             if ("MKCOL".equalsIgnoreCase(m)) {
-                                dirs.add(p.endsWith("/") ? p : (p + "/"));
+                                String norm = p.endsWith("/") ? p : (p + "/");
+                                dirs.add(norm);
+                                mkcolSeq.add(norm);
                                 ex.sendResponseHeaders(201, -1);
                                 return;
                             }
@@ -644,6 +707,11 @@ public final class LiteJvmChecks {
                                 byte[] buf = new byte[2048];
                                 int n;
                                 while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+                                if ("/dav/marco-movie-sync.json".equals(p)
+                                        || "/marco-movie-sync.json".equals(p)) {
+                                    ex.sendResponseHeaders(404, -1);
+                                    return;
+                                }
                                 if (!dirs.contains("/dav/") || !dirs.contains("/dav/lite/")) {
                                     ex.sendResponseHeaders(409, -1);
                                     return;
@@ -660,7 +728,8 @@ public final class LiteJvmChecks {
                 });
         dav.start();
         try {
-            String davUrl = "http://127.0.0.1:" + dav.getAddress().getPort() + "/dav/lite/";
+            int port = dav.getAddress().getPort();
+            String davUrl = "http://127.0.0.1:" + port + "/dav/lite/";
             LiteSync.MergeResult pushed =
                     LiteSync.syncWebdav(
                             davUrl,
@@ -682,6 +751,37 @@ public final class LiteJvmChecks {
             check(
                     pushed.historyCount == 1 && pushed.favoriteCount == 2 && davData[0] != null,
                     "LiteSync WebDAV MKCOL creates nested collections and uploads v2 JSON");
+            check(
+                    mkcolSeq.contains("/dav/") && mkcolSeq.contains("/dav/lite/"),
+                    "LiteSync MKCOL creates nested collections in hierarchy");
+            check(
+                    mkcolSeq.indexOf("/dav/") < mkcolSeq.indexOf("/dav/lite/"),
+                    "LiteSync MKCOL sequence creates parent before child");
+
+            try {
+                LiteSync.syncWebdav(
+                        "http://127.0.0.1:" + port + "/forbidden/",
+                        "liteuser",
+                        "litepass",
+                        new LiteSync.MergeCallback() {
+                            @Override
+                            public LiteSync.MergeResult merge(String remote) {
+                                return LiteSync.merge(
+                                        boxHist[0],
+                                        boxFav[0],
+                                        boxTomb[0],
+                                        boxSub,
+                                        true,
+                                        remote,
+                                        7000L);
+                            }
+                        });
+                check(false, "LiteSync persistent write failure must throw IOException");
+            } catch (java.io.IOException expected) {
+                check(
+                        expected.getMessage().contains("目标文件夹不存在或不可写。坚果云请在地址后加一个文件夹名"),
+                        "LiteSync WebDAV 404/409 write failure provides actionable diagnostic message");
+            }
         } finally {
             dav.stop(0);
         }

@@ -1,9 +1,11 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 package com.pilipala.marcomovie.lite;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
@@ -755,18 +757,41 @@ public final class LiteSync {
         if (rawUrl == null || rawUrl.trim().length() == 0) {
             throw new IOException("请填写 WebDAV 服务器地址");
         }
-        String u = rawUrl.trim();
-        String lower = u.toLowerCase(Locale.US);
-        if (!lower.startsWith("https://") && !lower.startsWith("http://")) {
-            throw new IOException("WebDAV 地址需以 https:// 或 http:// 开头");
+        String trimmed = rawUrl.trim();
+        if (!trimmed.regionMatches(true, 0, "http://", 0, 7)
+                && !trimmed.regionMatches(true, 0, "https://", 0, 8)) {
+            trimmed = "https://" + trimmed;
         }
-        String pathOnly = u;
-        int q = pathOnly.indexOf('?');
-        if (q >= 0) pathOnly = pathOnly.substring(0, q);
-        if (pathOnly.toLowerCase(Locale.US).endsWith(".json")) {
-            return u;
+        URI uri;
+        try {
+            uri = URI.create(trimmed);
+        } catch (IllegalArgumentException e) {
+            throw new IOException("无效的 WebDAV 地址: " + e.getMessage());
         }
-        return u.endsWith("/") ? (u + DEFAULT_FILE) : (u + "/" + DEFAULT_FILE);
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
+        if (!"http".equals(scheme) && !"https".equals(scheme)) {
+            throw new IOException("仅支持 HTTP 或 HTTPS WebDAV 地址");
+        }
+        String path =
+                uri.getPath() == null
+                        ? (uri.getRawPath() == null ? "" : uri.getRawPath())
+                        : uri.getPath();
+        if (path.toLowerCase(Locale.ROOT).endsWith(".json")) {
+            return trimmed;
+        }
+        String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.ROOT);
+        boolean isJianguoyun = "jianguoyun.com".equals(host) || host.endsWith(".jianguoyun.com");
+        boolean isRootPath =
+                path.isEmpty()
+                        || "/".equals(path)
+                        || "/dav".equals(path)
+                        || "/dav/".equals(path);
+        String folderPrefix = (isJianguoyun && isRootPath) ? "MarcoMovie/" : "";
+        if (trimmed.endsWith("/")) {
+            return trimmed + folderPrefix + DEFAULT_FILE;
+        } else {
+            return trimmed + "/" + folderPrefix + DEFAULT_FILE;
+        }
     }
 
     public static String resolveLanSyncEndpoint(String rawInput) throws IOException {
@@ -853,9 +878,27 @@ public final class LiteSync {
             throw new IOException("WebDAV 写入被拒绝 (HTTP " + putCode + ")");
         }
         if (putCode < 200 || putCode >= 300) {
-            throw new IOException("WebDAV 写入失败 (HTTP " + putCode + ")");
+            throw new IOException(formatWebdavWriteError(putCode));
         }
         return merged;
+    }
+
+    static String formatWebdavWriteError(int code) {
+        if (code == 404 || code == 409) {
+            return "WebDAV 写入失败 (HTTP "
+                    + code
+                    + ")：目标文件夹不存在或不可写。坚果云请在地址后加一个文件夹名，例如 https://dav.jianguoyun.com/dav/MarcoMovie/";
+        }
+        if (code == 405) {
+            return "WebDAV 写入失败 (HTTP 405)：服务器不允许写入";
+        }
+        if (code == 423) {
+            return "WebDAV 写入失败 (HTTP 423)：文件被锁定";
+        }
+        if (code == 507) {
+            return "WebDAV 写入失败 (HTTP 507)：空间不足";
+        }
+        return "WebDAV 写入失败 (HTTP " + code + ")";
     }
 
     public static MergeResult syncLanPeer(String peerUrl, LanPeerCallback callback)
@@ -930,7 +973,8 @@ public final class LiteSync {
 
     private static void ensureParentCollections(String fileUrl, String auth) {
         try {
-            URI uri = new URI(fileUrl);
+            URI rawUri = URI.create(fileUrl);
+            URI uri = URI.create(rawUri.toASCIIString());
             String rawPath = uri.getRawPath();
             if (rawPath == null || rawPath.length() == 0) return;
             int lastSlash = rawPath.lastIndexOf('/');
@@ -944,7 +988,8 @@ public final class LiteSync {
                 current.append(p).append('/');
                 sendRawMkcol(uri, current.toString(), auth);
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            logW("LiteSync", "递归创建 WebDAV 父目录失败: " + e.getMessage());
         }
     }
 
@@ -952,7 +997,7 @@ public final class LiteSync {
         String scheme =
                 baseUri.getScheme() == null
                         ? "http"
-                        : baseUri.getScheme().toLowerCase(Locale.US);
+                        : baseUri.getScheme().toLowerCase(Locale.ROOT);
         boolean https = "https".equals(scheme);
         String host = baseUri.getHost();
         if (host == null || host.length() == 0) return;
@@ -991,10 +1036,29 @@ public final class LiteSync {
             OutputStream os = sock.getOutputStream();
             os.write(req.toString().getBytes("UTF-8"));
             os.flush();
+
             InputStream is = sock.getInputStream();
-            byte[] buf = new byte[256];
-            is.read(buf);
-        } catch (Exception ignored) {
+            BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+            String statusLine = br.readLine();
+            int statusCode = -1;
+            if (statusLine != null) {
+                String[] tokens = statusLine.split(" ");
+                if (tokens.length >= 2) {
+                    try {
+                        statusCode = Integer.parseInt(tokens[1]);
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            if (statusCode == 201 || statusCode == 405 || statusCode == 301 || statusCode == 302) {
+                // Success, already exists, or redirect
+            } else if (statusCode == 401 || statusCode == 403) {
+                logW("LiteSync", "WebDAV 权限验证失败 (HTTP " + statusCode + ")");
+            } else {
+                logW("LiteSync", "MKCOL 请求未成功 (HTTP " + statusCode + ") for " + rawCollectionPath);
+            }
+        } catch (Exception e) {
+            logW("LiteSync", "MKCOL 异常 for " + rawCollectionPath + ": " + e.getMessage());
         } finally {
             if (sock != null) {
                 try {
@@ -1002,6 +1066,13 @@ public final class LiteSync {
                 } catch (Exception ignored) {
                 }
             }
+        }
+    }
+
+    private static void logW(String tag, String msg) {
+        try {
+            android.util.Log.w(tag, msg);
+        } catch (Throwable ignored) {
         }
     }
 

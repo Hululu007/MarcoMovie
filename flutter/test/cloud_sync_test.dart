@@ -114,6 +114,7 @@ void main() {
       String? cloudBlob = remoteFromB;
       var folderCreated = false;
       var mkcolCalled = false;
+      final mkcolSequence = <String>[];
       final mockWebdav = MockClient((req) async {
         if (req.method == 'GET') {
           if (cloudBlob == null) return http.Response('', 404);
@@ -122,9 +123,14 @@ void main() {
         if (req.method == 'MKCOL') {
           mkcolCalled = true;
           folderCreated = true;
+          mkcolSequence.add(req.url.path);
           return http.Response('', 201);
         }
         if (req.method == 'PUT') {
+          if (req.url.path == '/dav/marco-movie-sync.json' ||
+              req.url.path == '/marco-movie-sync.json') {
+            return http.Response('', 404);
+          }
           if (!folderCreated) {
             return http.Response('', 409);
           }
@@ -144,6 +150,12 @@ void main() {
 
       final resA = await deviceA.syncWithWebdav(client: mockWebdav);
       expect(mkcolCalled, isTrue);
+      expect(mkcolSequence, contains('/dav/'));
+      expect(mkcolSequence, contains('/dav/MarcoMovie/'));
+      expect(
+        mkcolSequence.indexOf('/dav/'),
+        lessThan(mkcolSequence.indexOf('/dav/MarcoMovie/')),
+      );
       expect(resA.historyCount, 2);
       expect(resA.favoriteCount, 2);
       final histA = deviceA.getWatchHistory();
@@ -448,6 +460,122 @@ void main() {
             .map((s) => s.key)
             .toSet(),
         {'siteA', 'siteB'},
+      );
+    },
+  );
+
+  test('normalizes Jianguoyun and WebDAV file URLs consistently', () {
+    expect(
+      StorageService.resolveWebdavFileUrl('https://dav.jianguoyun.com/dav/'),
+      'https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json',
+    );
+    expect(
+      StorageService.resolveWebdavFileUrl('https://dav.jianguoyun.com/dav'),
+      'https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json',
+    );
+    expect(
+      StorageService.resolveWebdavFileUrl('dav.jianguoyun.com/dav/'),
+      'https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json',
+    );
+    expect(
+      StorageService.resolveWebdavFileUrl(
+        'https://dav.jianguoyun.com/dav/我的坚果云/',
+      ),
+      'https://dav.jianguoyun.com/dav/我的坚果云/marco-movie-sync.json',
+    );
+    expect(
+      StorageService.resolveWebdavFileUrl(
+        'https://dav.jianguoyun.com/dav/a/x.json',
+      ),
+      'https://dav.jianguoyun.com/dav/a/x.json',
+    );
+    expect(
+      StorageService.resolveWebdavFileUrl('https://nas.local:5006/'),
+      'https://nas.local:5006/marco-movie-sync.json',
+    );
+  });
+
+  test(
+    'provides actionable diagnostic message on WebDAV write failure',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final storage = await StorageService.init();
+
+      final mock404 = MockClient((req) async {
+        if (req.method == 'GET') return http.Response('', 404);
+        if (req.method == 'MKCOL') return http.Response('', 201);
+        if (req.method == 'PUT') return http.Response('', 404);
+        return http.Response('', 405);
+      });
+
+      await storage.saveWebdavConfig(
+        url: 'https://dav.jianguoyun.com/dav/',
+        user: 'alice',
+        pass: 'secret',
+        auto: false,
+        syncSubs: true,
+      );
+
+      await expectLater(
+        storage.syncWithWebdav(client: mock404),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('目标文件夹不存在或不可写。坚果云请在地址后加一个文件夹名'),
+          ),
+        ),
+      );
+
+      final mock405 = MockClient((req) async {
+        if (req.method == 'GET') return http.Response('', 404);
+        if (req.method == 'PUT') return http.Response('', 405);
+        return http.Response('', 405);
+      });
+
+      await expectLater(
+        storage.syncWithWebdav(client: mock405),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('服务器不允许写入'),
+          ),
+        ),
+      );
+
+      final mock423 = MockClient((req) async {
+        if (req.method == 'GET') return http.Response('', 404);
+        if (req.method == 'PUT') return http.Response('', 423);
+        return http.Response('', 405);
+      });
+
+      await expectLater(
+        storage.syncWithWebdav(client: mock423),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('文件被锁定'),
+          ),
+        ),
+      );
+
+      final mock507 = MockClient((req) async {
+        if (req.method == 'GET') return http.Response('', 404);
+        if (req.method == 'PUT') return http.Response('', 507);
+        return http.Response('', 405);
+      });
+
+      await expectLater(
+        storage.syncWithWebdav(client: mock507),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('空间不足'),
+          ),
+        ),
       );
     },
   );

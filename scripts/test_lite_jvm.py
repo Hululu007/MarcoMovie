@@ -51,6 +51,16 @@ public final class Base64 {
 }
 """
 
+ANDROID_SHIM_LOG = """package android.util;
+public final class Log {
+    public static int w(String tag, String msg) { return 0; }
+    public static int w(String tag, String msg, Throwable tr) { return 0; }
+    public static int i(String tag, String msg) { return 0; }
+    public static int d(String tag, String msg) { return 0; }
+    public static int e(String tag, String msg) { return 0; }
+}
+"""
+
 ANDROID_SHIM_XML = """package android.util;
 import java.io.InputStream;
 import java.io.Reader;
@@ -203,6 +213,7 @@ def main():
         shim_src.mkdir(parents=True)
         (shim_src / 'Base64.java').write_text(ANDROID_SHIM_BASE64, encoding='utf-8')
         (shim_src / 'Xml.java').write_text(ANDROID_SHIM_XML, encoding='utf-8')
+        (shim_src / 'Log.java').write_text(ANDROID_SHIM_LOG, encoding='utf-8')
 
         jvm_classes = tmp_dir / 'jvm_classes'
         jvm_classes.mkdir()
@@ -217,6 +228,7 @@ def main():
             '-d', jvm_classes,
             shim_src / 'Base64.java',
             shim_src / 'Xml.java',
+            shim_src / 'Log.java',
             ROOT / 'lite/tests/LiteJvmChecks.java',
             ROOT / 'lite/tests/LiteCredentialProbe.java',
             ROOT / 'lite/tests/LiteTlsChecks.java',
@@ -224,7 +236,7 @@ def main():
         run_cp = sep.join([str(jvm_classes), str(BUILD / 'classes.jar'), str(json_jar), str(API14)])
         out = run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteJvmChecks', capture=True)
         print(out.strip())
-        assert 'PASS 67 TV Lite JVM checks' in out
+        assert 'PASS 81 TV Lite JVM checks' in out
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteCredentialProbe', capture=True).strip())
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteTlsChecks', capture=True).strip())
 

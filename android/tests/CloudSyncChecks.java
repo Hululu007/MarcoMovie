@@ -37,12 +37,65 @@ public final class CloudSyncChecks {
     }
 
     public static void main(String[] args) throws Exception {
+        testResolveWebdavFileUrlMatrix();
+        testWebdavErrorDiagnostics();
         testHistoryFavoritesAndTombstones();
         testSubscriptionSyncIsolationAndOptOut();
         testLegacyBackupCompatibility();
         testLanPeerSyncRoundtrip();
         testWebdavMkcolAndRoundtrip();
         System.out.println("ALL PASS (" + checks + " checks)");
+    }
+
+    private static void testResolveWebdavFileUrlMatrix() {
+        check(
+                "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
+                        .equals(CloudSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/dav/")),
+                "Jianguoyun root folder trailing slash appends MarcoMovie");
+        check(
+                "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
+                        .equals(CloudSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/dav")),
+                "Jianguoyun root folder without trailing slash appends MarcoMovie");
+        check(
+                "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
+                        .equals(CloudSync.resolveWebdavFileUrl("dav.jianguoyun.com/dav/")),
+                "Jianguoyun scheme-less URL auto-prepends https and appends MarcoMovie");
+        check(
+                "https://dav.jianguoyun.com/dav/我的坚果云/marco-movie-sync.json"
+                        .equals(
+                                CloudSync.resolveWebdavFileUrl(
+                                        "https://dav.jianguoyun.com/dav/我的坚果云/")),
+                "Jianguoyun custom folder preserves user subfolder");
+        check(
+                "https://dav.jianguoyun.com/dav/a/x.json"
+                        .equals(
+                                CloudSync.resolveWebdavFileUrl(
+                                        "https://dav.jianguoyun.com/dav/a/x.json")),
+                "Jianguoyun explicit json file URL left untouched");
+        check(
+                "https://nas.local:5006/marco-movie-sync.json"
+                        .equals(CloudSync.resolveWebdavFileUrl("https://nas.local:5006/")),
+                "Non-Jianguoyun WebDAV server does not append MarcoMovie subfolder");
+    }
+
+    private static void testWebdavErrorDiagnostics() {
+        String err404 = CloudSync.formatWebdavWriteError(404);
+        check(
+                err404.contains("HTTP 404") && err404.contains("坚果云请在地址后加一个文件夹名"),
+                "HTTP 404 provides actionable Jianguoyun diagnostic error message");
+        String err409 = CloudSync.formatWebdavWriteError(409);
+        check(
+                err409.contains("HTTP 409") && err409.contains("坚果云请在地址后加一个文件夹名"),
+                "HTTP 409 provides actionable Jianguoyun diagnostic error message");
+        check(
+                "WebDAV 写入失败 (HTTP 405)：服务器不允许写入".equals(CloudSync.formatWebdavWriteError(405)),
+                "HTTP 405 provides method not allowed message");
+        check(
+                "WebDAV 写入失败 (HTTP 423)：文件被锁定".equals(CloudSync.formatWebdavWriteError(423)),
+                "HTTP 423 provides locked file message");
+        check(
+                "WebDAV 写入失败 (HTTP 507)：空间不足".equals(CloudSync.formatWebdavWriteError(507)),
+                "HTTP 507 provides insufficient storage message");
     }
 
     private static void testHistoryFavoritesAndTombstones() throws Exception {
@@ -321,6 +374,7 @@ public final class CloudSyncChecks {
 
     private static void testWebdavMkcolAndRoundtrip() throws Exception {
         final Set<String> createdDirs = Collections.synchronizedSet(new HashSet<String>());
+        final List<String> mkcolSequence = Collections.synchronizedList(new ArrayList<String>());
         final AtomicReference<byte[]> storedFile = new AtomicReference<>(null);
         final AtomicReference<String> lastAuth = new AtomicReference<>("");
 
@@ -333,9 +387,20 @@ public final class CloudSyncChecks {
                         String path = ex.getRequestURI().getPath();
                         String auth = ex.getRequestHeaders().getFirst("Authorization");
                         lastAuth.set(auth == null ? "" : auth);
+                        if (path.startsWith("/forbidden")) {
+                            if ("MKCOL".equalsIgnoreCase(method)) {
+                                ex.sendResponseHeaders(403, -1);
+                                return;
+                            }
+                            if ("PUT".equalsIgnoreCase(method)) {
+                                ex.sendResponseHeaders(404, -1);
+                                return;
+                            }
+                        }
                         if ("MKCOL".equalsIgnoreCase(method)) {
                             String norm = path.endsWith("/") ? path : path + "/";
                             createdDirs.add(norm);
+                            mkcolSequence.add(norm);
                             ex.sendResponseHeaders(201, -1);
                             return;
                         }
@@ -355,6 +420,12 @@ public final class CloudSyncChecks {
                         }
                         if ("PUT".equalsIgnoreCase(method)) {
                             byte[] body = readAll(ex.getRequestBody());
+                            // Simulate Jianguoyun root collection read-only
+                            if ("/dav/marco-movie-sync.json".equals(path)
+                                    || "/marco-movie-sync.json".equals(path)) {
+                                ex.sendResponseHeaders(404, -1);
+                                return;
+                            }
                             if (!createdDirs.contains("/dav/")
                                     || !createdDirs.contains("/dav/MarcoMovie/")) {
                                 ex.sendResponseHeaders(409, -1);
@@ -411,6 +482,12 @@ public final class CloudSyncChecks {
             check(
                     lastAuth.get().startsWith("Basic "),
                     "WebDAV request sends RFC 4648 Basic Authorization header");
+            check(
+                    mkcolSequence.contains("/dav/") && mkcolSequence.contains("/dav/MarcoMovie/"),
+                    "MKCOL creates nested collections in hierarchy");
+            check(
+                    mkcolSequence.indexOf("/dav/") < mkcolSequence.indexOf("/dav/MarcoMovie/"),
+                    "MKCOL sequence creates parent collection before child collection");
 
             CloudSync.MergeResult pullRes =
                     CloudSync.syncWebdav(
@@ -429,6 +506,27 @@ public final class CloudSyncChecks {
             check(
                     pullRes.historyCount == 1 && pullRes.subscriptionCount == 1,
                     "second device pulls history and subscription from WebDAV server");
+
+            try {
+                CloudSync.syncWebdav(
+                        "http://127.0.0.1:" + port + "/forbidden/",
+                        "alice",
+                        "secret-pass",
+                        remote ->
+                                CloudSync.merge(
+                                        "[]",
+                                        "[]",
+                                        "",
+                                        Collections.<CloudSync.SubscriptionItem>emptyList(),
+                                        true,
+                                        remote,
+                                        7300L));
+                check(false, "Persistent WebDAV write failure must throw IOException");
+            } catch (java.io.IOException expected) {
+                check(
+                        expected.getMessage().contains("目标文件夹不存在或不可写。坚果云请在地址后加一个文件夹名"),
+                        "WebDAV 404/409 write failure provides actionable diagnostic message");
+            }
         } finally {
             dav.stop(0);
         }

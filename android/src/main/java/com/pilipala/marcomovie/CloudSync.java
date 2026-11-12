@@ -15,6 +15,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -827,12 +831,23 @@ final class CloudSync {
         if (!"http".equals(scheme) && !"https".equals(scheme)) {
             throw new IllegalArgumentException("仅支持 HTTP 或 HTTPS WebDAV 地址");
         }
-        String path = uri.getRawPath() == null ? "" : uri.getRawPath();
-        if (path.endsWith(".json")) {
+        String path =
+                uri.getPath() == null
+                        ? (uri.getRawPath() == null ? "" : uri.getRawPath())
+                        : uri.getPath();
+        if (path.toLowerCase(Locale.ROOT).endsWith(".json")) {
             return trimmed;
         }
-        if (!trimmed.endsWith("/")) trimmed = trimmed + "/";
-        return trimmed + DEFAULT_FILE;
+        String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.ROOT);
+        boolean isJianguoyun = "jianguoyun.com".equals(host) || host.endsWith(".jianguoyun.com");
+        boolean isRootPath =
+                path.isEmpty() || "/".equals(path) || "/dav".equals(path) || "/dav/".equals(path);
+        String folderPrefix = (isJianguoyun && isRootPath) ? "MarcoMovie/" : "";
+        if (trimmed.endsWith("/")) {
+            return trimmed + folderPrefix + DEFAULT_FILE;
+        } else {
+            return trimmed + "/" + folderPrefix + DEFAULT_FILE;
+        }
     }
 
     /** Normalizes a LAN QR pairing URL or sync URL to the {@code /sync} JSON endpoint. */
@@ -925,9 +940,27 @@ final class CloudSync {
             throw new IOException("WebDAV 写入被拒绝 (HTTP " + putCode + ")，请检查读写权限");
         }
         if (putCode < 200 || putCode >= 300) {
-            throw new IOException("WebDAV 写入失败 (HTTP " + putCode + ")");
+            throw new IOException(formatWebdavWriteError(putCode));
         }
         return merged;
+    }
+
+    static String formatWebdavWriteError(int code) {
+        if (code == 404 || code == 409) {
+            return "WebDAV 写入失败 (HTTP "
+                    + code
+                    + ")：目标文件夹不存在或不可写。坚果云请在地址后加一个文件夹名，例如 https://dav.jianguoyun.com/dav/MarcoMovie/";
+        }
+        if (code == 405) {
+            return "WebDAV 写入失败 (HTTP 405)：服务器不允许写入";
+        }
+        if (code == 423) {
+            return "WebDAV 写入失败 (HTTP 423)：文件被锁定";
+        }
+        if (code == 507) {
+            return "WebDAV 写入失败 (HTTP 507)：空间不足";
+        }
+        return "WebDAV 写入失败 (HTTP " + code + ")";
     }
 
     /**
@@ -983,12 +1016,13 @@ final class CloudSync {
     }
 
     /**
-     * Creates missing ancestor WebDAV collections via raw HTTP/1.1 {@code MKCOL}, because standard
-     * {@link HttpURLConnection#setRequestMethod(String)} rejects {@code MKCOL}.
+     * Creates missing ancestor WebDAV collections sequentially via {@code MKCOL} using OkHttp,
+     * because standard {@link HttpURLConnection#setRequestMethod(String)} rejects {@code MKCOL}.
      */
     private static void ensureParentCollections(String fileUrl, String auth) {
         try {
-            URI uri = new URI(fileUrl);
+            URI rawUri = URI.create(fileUrl);
+            URI uri = URI.create(rawUri.toASCIIString());
             String rawPath = uri.getRawPath();
             if (rawPath == null || rawPath.isEmpty()) return;
             int lastSlash = rawPath.lastIndexOf('/');
@@ -996,70 +1030,44 @@ final class CloudSync {
             String parentPath = rawPath.substring(0, lastSlash + 1);
             String[] parts = parentPath.split("/");
             StringBuilder current = new StringBuilder("/");
+            String authority = uri.getRawAuthority();
+            String scheme = uri.getScheme() == null ? "https" : uri.getScheme();
+            String base = scheme + "://" + authority;
+
+            OkHttpClient client =
+                    new OkHttpClient.Builder()
+                            .connectTimeout(10, TimeUnit.SECONDS)
+                            .readTimeout(10, TimeUnit.SECONDS)
+                            .followRedirects(false)
+                            .build();
+
             for (String part : parts) {
                 if (part == null || part.isEmpty()) continue;
                 current.append(part).append('/');
-                sendRawMkcol(uri, current.toString(), auth);
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    private static void sendRawMkcol(URI baseUri, String rawCollectionPath, String auth) {
-        String scheme =
-                baseUri.getScheme() == null ? "http" : baseUri.getScheme().toLowerCase(Locale.ROOT);
-        boolean https = "https".equals(scheme);
-        String host = baseUri.getHost();
-        if (host == null || host.isEmpty()) return;
-        int port = baseUri.getPort();
-        int connectPort = port > 0 ? port : (https ? 443 : 80);
-        String hostHeader = (port > 0 && port != (https ? 443 : 80)) ? (host + ":" + port) : host;
-
-        java.net.Socket sock = null;
-        try {
-            java.net.Socket tcp = new java.net.Socket();
-            tcp.connect(new java.net.InetSocketAddress(host, connectPort), 8000);
-            tcp.setSoTimeout(8000);
-            if (https) {
-                javax.net.ssl.SSLSocketFactory sf =
-                        (javax.net.ssl.SSLSocketFactory)
-                                javax.net.ssl.SSLSocketFactory.getDefault();
-                javax.net.ssl.SSLSocket ssl =
-                        (javax.net.ssl.SSLSocket) sf.createSocket(tcp, host, connectPort, true);
-                ssl.startHandshake();
-                if (!javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier()
-                        .verify(host, ssl.getSession())) {
-                    ssl.close();
-                    return;
+                String collUrl = base + current.toString();
+                Request.Builder reqBuilder =
+                        new Request.Builder()
+                                .url(collUrl)
+                                .method("MKCOL", null)
+                                .header("User-Agent", "MarcoMovie-Sync/2.0");
+                if (auth != null && !auth.isEmpty()) {
+                    reqBuilder.header("Authorization", auth);
                 }
-                sock = ssl;
-            } else {
-                sock = tcp;
-            }
-            StringBuilder req = new StringBuilder();
-            req.append("MKCOL ").append(rawCollectionPath).append(" HTTP/1.1\r\n");
-            req.append("Host: ").append(hostHeader).append("\r\n");
-            req.append("User-Agent: MarcoMovie-Sync/2.0\r\n");
-            if (auth != null && !auth.isEmpty()) {
-                req.append("Authorization: ").append(auth).append("\r\n");
-            }
-            req.append("Content-Length: 0\r\n");
-            req.append("Connection: close\r\n\r\n");
-            OutputStream os = sock.getOutputStream();
-            os.write(req.toString().getBytes(StandardCharsets.UTF_8));
-            os.flush();
-            InputStream is = sock.getInputStream();
-            byte[] buf = new byte[256];
-            // Read response status line to let server complete MKCOL cleanly
-            is.read(buf);
-        } catch (Exception ignored) {
-        } finally {
-            if (sock != null) {
-                try {
-                    sock.close();
-                } catch (Exception ignored) {
+                try (Response resp = client.newCall(reqBuilder.build()).execute()) {
+                    int code = resp.code();
+                    if (code == 401 || code == 403) {
+                        AppLog.w(
+                                "CloudSync",
+                                "WebDAV 权限验证失败 (HTTP " + code + ") for " + collUrl,
+                                null);
+                        break;
+                    }
+                } catch (Exception e) {
+                    AppLog.w("CloudSync", "MKCOL 请求失败 for " + collUrl, e);
                 }
             }
+        } catch (Exception e) {
+            AppLog.w("CloudSync", "递归创建 WebDAV 父目录失败: " + fileUrl, e);
         }
     }
 

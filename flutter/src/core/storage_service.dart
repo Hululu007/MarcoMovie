@@ -1781,21 +1781,33 @@ class StorageService {
   }
 
   static String resolveWebdavFileUrl(String rawUrl) {
-    final trimmed = rawUrl.trim();
+    var trimmed = rawUrl.trim();
     if (trimmed.isEmpty) {
       throw const FormatException('请填写 WebDAV 服务器地址');
     }
     final lower = trimmed.toLowerCase();
     if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
-      throw const FormatException('WebDAV 地址需以 https:// 或 http:// 开头');
+      trimmed = 'https://$trimmed';
     }
-    final pathOnly = trimmed.split('?').first.toLowerCase();
-    if (pathOnly.endsWith('.json')) {
+    final uri = Uri.tryParse(trimmed);
+    if (uri == null ||
+        !uri.hasScheme ||
+        (uri.scheme != 'http' && uri.scheme != 'https')) {
+      throw const FormatException('仅支持 HTTP 或 HTTPS WebDAV 地址');
+    }
+    final path = uri.path;
+    if (path.toLowerCase().endsWith('.json')) {
       return trimmed;
     }
+    final host = uri.host.toLowerCase();
+    final isJianguoyun =
+        host == 'jianguoyun.com' || host.endsWith('.jianguoyun.com');
+    final isRootPath =
+        path.isEmpty || path == '/' || path == '/dav' || path == '/dav/';
+    final folderPrefix = (isJianguoyun && isRootPath) ? 'MarcoMovie/' : '';
     return trimmed.endsWith('/')
-        ? '$trimmed$defaultSyncFileName'
-        : '$trimmed/$defaultSyncFileName';
+        ? '$trimmed$folderPrefix$defaultSyncFileName'
+        : '$trimmed/$folderPrefix$defaultSyncFileName';
   }
 
   static String resolveLanSyncEndpoint(String rawUrl) {
@@ -2366,6 +2378,44 @@ class StorageService {
     return headers;
   }
 
+  static String _formatWebdavWriteError(int code) {
+    if (code == 404 || code == 409) {
+      return 'WebDAV 写入失败 (HTTP $code)：目标文件夹不存在或不可写。坚果云请在地址后加一个文件夹名，例如 https://dav.jianguoyun.com/dav/MarcoMovie/';
+    }
+    if (code == 405) {
+      return 'WebDAV 写入失败 (HTTP 405)：服务器不允许写入';
+    }
+    if (code == 423) {
+      return 'WebDAV 写入失败 (HTTP 423)：文件被锁定';
+    }
+    if (code == 507) {
+      return 'WebDAV 写入失败 (HTTP 507)：空间不足';
+    }
+    return 'WebDAV 写入失败 (HTTP $code)';
+  }
+
+  Future<void> _ensureWebdavCollections(http.Client client, Uri fileUri) async {
+    final segments = fileUri.pathSegments;
+    if (segments.length <= 1) return;
+    for (var i = 0; i < segments.length - 1; i++) {
+      final subPath = '/${segments.sublist(0, i + 1).join('/')}/';
+      final collUri = fileUri.replace(path: subPath);
+      final req = http.Request('MKCOL', collUri)..headers.addAll(_webdavHeaders());
+      try {
+        final streamed =
+            await client.send(req).timeout(const Duration(seconds: 10));
+        final status = streamed.statusCode;
+        if (status == 401 || status == 403) {
+          throw FormatException('WebDAV 权限验证失败 (HTTP $status)');
+        }
+      } on FormatException {
+        rethrow;
+      } catch (e) {
+        // Continue creating intermediate directories
+      }
+    }
+  }
+
   String _formatSyncSuccessSummary(
     String prefix,
     int nowMs, {
@@ -2434,32 +2484,21 @@ class StorageService {
           .timeout(const Duration(seconds: 15));
 
       if (putResp.statusCode == 404 || putResp.statusCode == 409) {
-        final slash = targetUrl.lastIndexOf('/');
-        if (slash > 'https://'.length) {
-          final parentUri = Uri.parse(targetUrl.substring(0, slash + 1));
-          final mkcolReq = http.Request('MKCOL', parentUri)
-            ..headers.addAll(_webdavHeaders());
-          await httpClient
-              .send(mkcolReq)
-              .timeout(const Duration(seconds: 10))
-              .catchError(
-                (_) => http.StreamedResponse(const Stream.empty(), 500),
-              );
-          putResp = await httpClient
-              .put(
-                uri,
-                headers: _webdavHeaders(jsonContent: true),
-                body: encodedPayload,
-              )
-              .timeout(const Duration(seconds: 15));
-        }
+        await _ensureWebdavCollections(httpClient, uri);
+        putResp = await httpClient
+            .put(
+              uri,
+              headers: _webdavHeaders(jsonContent: true),
+              body: encodedPayload,
+            )
+            .timeout(const Duration(seconds: 15));
       }
 
       if (putResp.statusCode == 401 || putResp.statusCode == 403) {
         throw FormatException('WebDAV 写入被拒绝 (HTTP ${putResp.statusCode})');
       }
       if (putResp.statusCode < 200 || putResp.statusCode >= 300) {
-        throw FormatException('WebDAV 写入失败 (HTTP ${putResp.statusCode})');
+        throw FormatException(_formatWebdavWriteError(putResp.statusCode));
       }
 
       _lastHistoryAutoPushMs = now;
