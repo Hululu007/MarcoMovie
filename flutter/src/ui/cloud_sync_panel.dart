@@ -70,6 +70,11 @@ class CloudSyncSettingsPanel extends StatefulWidget {
     this.onNotice,
   });
 
+  static bool isCleartextHttpWithPassword(String url, String password) {
+    final trimmed = url.trim().toLowerCase();
+    return trimmed.startsWith('http://') && password.isNotEmpty;
+  }
+
   @override
   State<CloudSyncSettingsPanel> createState() => _CloudSyncSettingsPanelState();
 }
@@ -140,12 +145,45 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
     );
   }
 
+  static bool isCleartextHttpWithPassword(String url, String password) {
+    final trimmed = url.trim().toLowerCase();
+    return trimmed.startsWith('http://') && password.isNotEmpty;
+  }
+
+  Future<bool> _confirmCleartextHttpWarning() async {
+    final confirmed = await showCupertinoDialog<bool>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: const Text('明文传输风险提示'),
+        content: const Text(
+          '您配置的 WebDAV 服务使用未加密的 HTTP 协议（http://），在此模式下账号与应用密码将以明文在网络中传输，可能存在凭据泄露风险。建议使用 HTTPS 协议。\n\n是否确认继续保存？',
+        ),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          CupertinoDialogAction(
+            isDestructiveAction: true,
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('已知晓风险，继续保存'),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
+  }
+
   Future<void> _handleSaveAndWebdavSync() async {
     if (_syncingWebdav) return;
     final trimmedUrl = _urlCtrl.text.trim();
     if (trimmedUrl.isEmpty) {
       _notifyNotice('请填写地址', '请先填写 WebDAV 服务器目录或文件地址。', isError: true);
       return;
+    }
+    if (isCleartextHttpWithPassword(_urlCtrl.text, _passCtrl.text)) {
+      final ok = await _confirmCleartextHttpWarning();
+      if (!ok) return;
     }
     setState(() {
       _syncingWebdav = true;
@@ -171,6 +209,10 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
   }
 
   Future<void> _handleSaveOnly() async {
+    if (isCleartextHttpWithPassword(_urlCtrl.text, _passCtrl.text)) {
+      final ok = await _confirmCleartextHttpWarning();
+      if (!ok) return;
+    }
     await _saveWebdavFields();
     widget.onSynced?.call(subscriptionsChanged: false);
     _notifyNotice('已保存配置', 'WebDAV 同步配置与同步范围已保存。');

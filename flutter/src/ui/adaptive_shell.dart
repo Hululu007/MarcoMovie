@@ -7948,6 +7948,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 hasNewer = _isRemoteVersionNewer(latestVersion, _currentAppVersion);
                 statusText = hasNewer ? '发现新版本 v$latestVersion（当前 v$_currentAppVersion）'
                     : '当前已是最新版本（v$_currentAppVersion）';
+              } on FormatException catch (e) {
+                statusText = '检查更新失败：${e.message}';
               } catch (_) {
                 statusText = '暂时无法检查更新，请稍后重试或打开官方下载站';
               }

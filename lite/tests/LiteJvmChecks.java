@@ -548,6 +548,44 @@ public final class LiteJvmChecks {
             } finally {
                 cs.close();
             }
+            // 6. ConfigServer LAN peer validation
+            check(ConfigServer.isAllowedLanPeer(java.net.InetAddress.getByName("127.0.0.1")), "ConfigServer allows loopback 127.0.0.1");
+            check(ConfigServer.isAllowedLanPeer(java.net.InetAddress.getByName("::1")), "ConfigServer allows IPv6 loopback ::1");
+            check(ConfigServer.isAllowedLanPeer(java.net.InetAddress.getByName("192.168.1.100")), "ConfigServer allows 192.168.x.x");
+            check(ConfigServer.isAllowedLanPeer(java.net.InetAddress.getByName("10.10.10.10")), "ConfigServer allows 10.x.x.x");
+            check(ConfigServer.isAllowedLanPeer(java.net.InetAddress.getByName("172.20.0.1")), "ConfigServer allows 172.16-31.x.x");
+            check(ConfigServer.isAllowedLanPeer(java.net.InetAddress.getByName("100.64.0.5")), "ConfigServer allows CGNAT/Tailscale 100.64-127.x.x");
+            check(!ConfigServer.isAllowedLanPeer(java.net.InetAddress.getByName("8.8.8.8")), "ConfigServer blocks WAN 8.8.8.8");
+            check(!ConfigServer.isAllowedLanPeer(java.net.InetAddress.getByName("1.1.1.1")), "ConfigServer blocks WAN 1.1.1.1");
+            check(!ConfigServer.isAllowedLanPeer(java.net.InetAddress.getByName("203.0.113.1")), "ConfigServer blocks WAN 203.0.113.1");
+
+            // 7. ConfigServer session timeout & dynamic exit
+            ConfigServer expiredCs = new ConfigServer(
+                    new ConfigServer.Importer() {
+                        @Override
+                        public void apply(String address) {}
+                    },
+                    null,
+                    System.currentTimeMillis() - ConfigServer.SESSION_LIFETIME_MS - 1000L);
+            try {
+                check(expiredCs.isExpired(), "ConfigServer isExpired returns true when past lifetime");
+            } finally {
+                expiredCs.close();
+            }
+            ConfigServer expiringCs = new ConfigServer(
+                    new ConfigServer.Importer() {
+                        @Override
+                        public void apply(String address) {}
+                    },
+                    null,
+                    System.currentTimeMillis() - ConfigServer.SESSION_LIFETIME_MS + 150L);
+            try {
+                check(!expiringCs.isExpired(), "ConfigServer not expired initially");
+                Thread.sleep(250L);
+                check(expiringCs.isExpired(), "ConfigServer isExpired becomes true after lifetime");
+            } finally {
+                expiringCs.close();
+            }
         } finally {
             LiteMediaProxy.get().close();
             upstream.stop(0);

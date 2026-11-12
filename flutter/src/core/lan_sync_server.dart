@@ -20,10 +20,12 @@ class LanSyncServer {
   final StorageService storage;
   final LanSyncAppliedCallback? onSynced;
   final HttpServer _server;
+  final int port;
   final String tokenPath;
   final DateTime expiresAt;
   bool _closed = false;
   bool _busy = false;
+  Timer? _expiryTimer;
 
   LanSyncServer._({
     required this.storage,
@@ -31,7 +33,18 @@ class LanSyncServer {
     required this.tokenPath,
     required this.expiresAt,
     this.onSynced,
-  }) : _server = server {
+  })  : _server = server,
+        port = server.port {
+    final remaining = expiresAt.difference(DateTime.now());
+    if (remaining.isNegative || remaining == Duration.zero) {
+      _expiryTimer = Timer(const Duration(seconds: 10), () {
+        close(force: false);
+      });
+    } else {
+      _expiryTimer = Timer(remaining, () {
+        close(force: false);
+      });
+    }
     _server.listen(
       _handleRequest,
       onError: (_) {},
@@ -39,7 +52,6 @@ class LanSyncServer {
     );
   }
 
-  int get port => _server.port;
   bool get isClosed => _closed;
   bool get isExpired => _closed || DateTime.now().isAfter(expiresAt);
 
@@ -184,6 +196,7 @@ class LanSyncServer {
       }
       if (isExpired) {
         await _sendText(res, HttpStatus.gone, '局域网同步会话已过期，请重新打开接收码');
+        scheduleMicrotask(() => close(force: false));
         return;
       }
       final origin = req.headers.value('origin');
@@ -316,11 +329,13 @@ class LanSyncServer {
         '<p>本次接收会话有效期 5 分钟，关闭同步页面后自动失效。</p></main></html>';
   }
 
-  Future<void> close() async {
+  Future<void> close({bool force = true}) async {
     if (_closed) return;
     _closed = true;
+    _expiryTimer?.cancel();
+    _expiryTimer = null;
     try {
-      await _server.close(force: true);
+      await _server.close(force: force);
     } catch (_) {}
   }
 }

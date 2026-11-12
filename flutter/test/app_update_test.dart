@@ -88,6 +88,7 @@ void main() {
         'platform': 'ios', 'versionName': '0.5.1', 'notes': 'iPhone update',
         'package': {'url':'https://marcotv.wlj9919.top/movie/MarcoMovie-0.5.1-ios-unsigned.ipa',
           'size':100, 'sha256':'a' * 64},
+        'signature': 'XOLvasep2jH9gRy01XjgQ4+iJcM/ccEM47iqnNIjD2IrIliO3/x0FQrTdOoFmuUdukksbNYabfCpMtPRahSoCQ==',
       }), 200);
     });
     final release = await AppUpdate.check(client: client, platform: 'ios');

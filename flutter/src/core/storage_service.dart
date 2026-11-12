@@ -13,6 +13,7 @@ import 'csp_bridge.dart';
 import 'models.dart';
 import 'quark_account.dart';
 import 'netdisk_session.dart';
+import 'secure_credential_store.dart';
 /// Persistent preferences and backup serializer compatible with Android `Prefs.java`.
 class StorageService {
   static const String syncSchema = 'marco-movie-sync';
@@ -89,8 +90,16 @@ class StorageService {
   QuarkAccountProvider get quarkAccounts => _quarkProviders[_prefs] ??=
       QuarkAccountProvider(
         readCredential: () => getNetdiskCred('quark'),
-        writeCredential: (value) async { await _prefs.setString(keyQuarkCookie, value); },
+        writeCredential: (value) async {
+          _credentialCache[keyQuarkCookie] = value;
+          await _secureStore.write(keyQuarkCookie, value);
+          await _prefs.remove(keyQuarkCookie);
+        },
       );
+  final SecureCredentialStore _secureStore;
+  final Map<String, String> _credentialCache = <String, String>{};
+  @visibleForTesting
+  SecureCredentialStore get secureStoreForTesting => _secureStore;
   Future<void> _mutationQueue = Future<void>.value();
   CmsConfig? _cachedConfig;
   Set<String>? _cachedPrivateKeys;
@@ -134,10 +143,19 @@ class StorageService {
     return d;
   }
 
-  StorageService(this._prefs, {Directory? dataDirectory})
-      : _dataDirectory = dataDirectory ??
+  StorageService(
+    this._prefs, {
+    Directory? dataDirectory,
+    SecureCredentialStore? secureStore,
+  })  : _dataDirectory = dataDirectory ??
             debugOverrideDataDirectory ??
-            _resolveFallbackDataDir(_prefs) {
+            _resolveFallbackDataDir(_prefs),
+        _secureStore = secureStore ??
+            DefaultSecureCredentialStore(
+              dataDirectory: dataDirectory ??
+                  debugOverrideDataDirectory ??
+                  _resolveFallbackDataDir(_prefs),
+            ) {
     _historyCorrupted = _prefs.getBool(keyHistoryCorrupted) ?? false;
     if (_historyCorrupted) {
       historyCorruptionNotifier.value = true;
@@ -190,8 +208,33 @@ class StorageService {
         await _dataDirectory.create(recursive: true);
       } catch (_) {}
     }
+    await _migrateCredentialsIfNeeded();
     await _migrateFromPrefsIfNeeded();
     getSubscriptions();
+  }
+
+  Future<void> _migrateCredentialsIfNeeded() async {
+    for (final key in [
+      keyWebdavPass,
+      keyQuarkCookie,
+      keyUcCookie,
+      keyBaiduCookie,
+      keyAliToken,
+    ]) {
+      if (_prefs.containsKey(key)) {
+        final plain = _prefs.getString(key) ?? '';
+        _credentialCache[key] = plain;
+        if (plain.isNotEmpty) {
+          await _secureStore.write(key, plain);
+        }
+        await _prefs.remove(key);
+      } else {
+        final secVal = await _secureStore.read(key);
+        if (secVal != null && secVal.isNotEmpty) {
+          _credentialCache[key] = secVal;
+        }
+      }
+    }
   }
 
   bool get _hasAuthoritativeSubscriptions =>
@@ -307,10 +350,13 @@ class StorageService {
     }
   }
 
-  static Future<StorageService> init({Directory? dataDirectory}) async {
+  static Future<StorageService> init({
+    Directory? dataDirectory,
+    SecureCredentialStore? secureStore,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
     final dir = await resolveDataDirectory(overrideDir: dataDirectory, prefs: prefs);
-    final service = StorageService(prefs, dataDirectory: dir);
+    final service = StorageService(prefs, dataDirectory: dir, secureStore: secureStore);
     await service._initializeStorage();
     return service;
   }
@@ -356,10 +402,14 @@ class StorageService {
       _prefs.getString(keyDefaultAspectMode) ?? 'contain';
   String get playerKernel =>
       _prefs.getString(keyPlayerKernel) ?? 'exo';
-  String get quarkCookie => _prefs.getString(keyQuarkCookie) ?? '';
-  String get ucCookie => _prefs.getString(keyUcCookie) ?? '';
-  String get baiduCookie => _prefs.getString(keyBaiduCookie) ?? '';
-  String get aliToken => _prefs.getString(keyAliToken) ?? '';
+  String get quarkCookie =>
+      _credentialCache[keyQuarkCookie] ?? _prefs.getString(keyQuarkCookie) ?? '';
+  String get ucCookie =>
+      _credentialCache[keyUcCookie] ?? _prefs.getString(keyUcCookie) ?? '';
+  String get baiduCookie =>
+      _credentialCache[keyBaiduCookie] ?? _prefs.getString(keyBaiduCookie) ?? '';
+  String get aliToken =>
+      _credentialCache[keyAliToken] ?? _prefs.getString(keyAliToken) ?? '';
   List<String> get driveOrder {
     const defaults = ['quark', 'uc', 'baidu', 'ali'];
     final raw = _prefs.getStringList(keyDriveOrder);
@@ -387,16 +437,72 @@ class StorageService {
       return const [];
     }
   }
-  static final RegExp _hashedPinPattern =
-      RegExp(r'^sha256:(\d+):([0-9a-f]{64})$');
-  static String _hashPin(String pin) =>
+  static final RegExp _pbkdf2PinPattern =
+      RegExp(r'^pbkdf2:sha256:(?:(\d+):)?(\d+):([0-9a-fA-F]{32}):([0-9a-fA-F]{64})$');
+  static final RegExp _legacySha256PinPattern =
+      RegExp(r'^sha256:(\d+):([0-9a-fA-F]{64})$');
+  static String _legacyHashPin(String pin) =>
       sha256.convert(utf8.encode('mm_pin_v1:$pin')).toString();
+
+  static Uint8List pbkdf2Sha256(
+    List<int> password,
+    List<int> salt,
+    int iterations,
+    int keyLength,
+  ) {
+    final hmac = Hmac(sha256, password);
+    final s1 = Uint8List(salt.length + 4);
+    s1.setRange(0, salt.length, salt);
+    s1[salt.length] = 0;
+    s1[salt.length + 1] = 0;
+    s1[salt.length + 2] = 0;
+    s1[salt.length + 3] = 1;
+
+    var u = Uint8List.fromList(hmac.convert(s1).bytes);
+    final result = Uint8List.fromList(u);
+
+    for (var i = 1; i < iterations; i++) {
+      u = Uint8List.fromList(hmac.convert(u).bytes);
+      for (var j = 0; j < result.length; j++) {
+        result[j] ^= u[j];
+      }
+    }
+    return result.sublist(0, keyLength);
+  }
+
+  static bool _constantTimeEquals(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
+  }
+
+  static Uint8List _hexDecode(String hex) {
+    final result = Uint8List(hex.length ~/ 2);
+    for (var i = 0; i < result.length; i++) {
+      result[i] = int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16);
+    }
+    return result;
+  }
+
+  static String _hexEncode(List<int> bytes) =>
+      bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
   String get privacyPassword => _prefs.getString(keyPrivacyPassword) ?? '';
   bool get hasPrivacyPassword => privacyPassword.trim().isNotEmpty;
   int get privacyPasswordLength {
     final saved = privacyPassword.trim();
-    final match = _hashedPinPattern.firstMatch(saved);
+    final pbMatch = _pbkdf2PinPattern.firstMatch(saved);
+    if (pbMatch != null) {
+      final lenStr = pbMatch.group(1);
+      if (lenStr != null && lenStr.isNotEmpty) {
+        return (int.tryParse(lenStr) ?? 4).clamp(4, 8);
+      }
+      return 4;
+    }
+    final match = _legacySha256PinPattern.firstMatch(saved);
     if (match != null) {
       return (int.tryParse(match.group(1)!) ?? 4).clamp(4, 8);
     }
@@ -405,27 +511,71 @@ class StorageService {
   bool get hasPrivacyConfigured =>
       hasPrivacyPassword ||
       getSubscriptions().any((s) => s.isEffectivelyPrivate);
+
   bool verifyPrivacyPassword(String input) {
     final trimmed = input.trim();
     final saved = privacyPassword.trim();
     if (saved.isEmpty || trimmed.isEmpty) return false;
-    final match = _hashedPinPattern.firstMatch(saved);
+
+    final pbMatch = _pbkdf2PinPattern.firstMatch(saved);
+    if (pbMatch != null) {
+      final lenStr = pbMatch.group(1);
+      if (lenStr != null && lenStr.isNotEmpty) {
+        final expectedLen = int.tryParse(lenStr) ?? 0;
+        if (trimmed.length != expectedLen) return false;
+      }
+      final iterations = int.tryParse(pbMatch.group(2)!) ?? 100000;
+      final saltHex = pbMatch.group(3)!;
+      final expectedHashHex = pbMatch.group(4)!;
+      final derived = pbkdf2Sha256(
+        utf8.encode(trimmed),
+        _hexDecode(saltHex),
+        iterations,
+        32,
+      );
+      return _constantTimeEquals(derived, _hexDecode(expectedHashHex));
+    }
+
+    final match = _legacySha256PinPattern.firstMatch(saved);
     if (match != null) {
       final expectedLen = int.tryParse(match.group(1)!) ?? 0;
-      return trimmed.length == expectedLen &&
-          _hashPin(trimmed) == match.group(2);
+      final legacyHash = match.group(2)!;
+      if (trimmed.length == expectedLen &&
+          _constantTimeEquals(
+            utf8.encode(_legacyHashPin(trimmed)),
+            utf8.encode(legacyHash),
+          )) {
+        unawaited(setPrivacyPassword(trimmed));
+        return true;
+      }
+      return false;
     }
-    return trimmed == saved;
+
+    if (_constantTimeEquals(utf8.encode(trimmed), utf8.encode(saved))) {
+      unawaited(setPrivacyPassword(trimmed));
+      return true;
+    }
+    return false;
   }
+
   Future<void> setPrivacyPassword(String password) async {
     final trimmed = password.trim();
     if (trimmed.isEmpty) {
       await _prefs.setString(keyPrivacyPassword, '');
       return;
     }
+    final rand = Random.secure();
+    final salt = Uint8List(16);
+    for (var i = 0; i < 16; i++) {
+      salt[i] = rand.nextInt(256);
+    }
+    const iterations = 100000;
+    final derived = pbkdf2Sha256(utf8.encode(trimmed), salt, iterations, 32);
+    final saltHex = _hexEncode(salt);
+    final hashHex = _hexEncode(derived);
     await _prefs.setString(
       keyPrivacyPassword,
-      'sha256:${trimmed.length}:${_hashPin(trimmed)}',
+      'pbkdf2:sha256:${trimmed.length}:$iterations:$saltHex:$hashHex',
     );
   }
 
@@ -1444,16 +1594,24 @@ class StorageService {
     switch (driveKey) {
       case 'quark':
         quarkAccounts.invalidate();
-        await _prefs.setString(keyQuarkCookie, trimmed);
+        _credentialCache[keyQuarkCookie] = trimmed;
+        await _secureStore.write(keyQuarkCookie, trimmed);
+        await _prefs.remove(keyQuarkCookie);
         break;
       case 'uc':
-        await _prefs.setString(keyUcCookie, trimmed);
+        _credentialCache[keyUcCookie] = trimmed;
+        await _secureStore.write(keyUcCookie, trimmed);
+        await _prefs.remove(keyUcCookie);
         break;
       case 'baidu':
-        await _prefs.setString(keyBaiduCookie, trimmed);
+        _credentialCache[keyBaiduCookie] = trimmed;
+        await _secureStore.write(keyBaiduCookie, trimmed);
+        await _prefs.remove(keyBaiduCookie);
         break;
       case 'ali':
-        await _prefs.setString(keyAliToken, trimmed);
+        _credentialCache[keyAliToken] = trimmed;
+        await _secureStore.write(keyAliToken, trimmed);
+        await _prefs.remove(keyAliToken);
         break;
     }
     unawaited(CatPawHost.instance.syncNetdiskConfig());
@@ -2168,7 +2326,8 @@ class StorageService {
 
   String get webdavUrl => (_prefs.getString(keyWebdavUrl) ?? '').trim();
   String get webdavUser => (_prefs.getString(keyWebdavUser) ?? '').trim();
-  String get webdavPass => _prefs.getString(keyWebdavPass) ?? '';
+  String get webdavPass =>
+      _credentialCache[keyWebdavPass] ?? _prefs.getString(keyWebdavPass) ?? '';
   bool get webdavAuto => _prefs.getBool(keyWebdavAuto) ?? true;
   bool get webdavSyncSubs => _prefs.getBool(keyWebdavSyncSubs) ?? true;
   int get syncLastTime => _prefs.getInt(keySyncLastTime) ?? 0;
@@ -2203,7 +2362,9 @@ class StorageService {
   }) async {
     await _prefs.setString(keyWebdavUrl, url.trim());
     await _prefs.setString(keyWebdavUser, user.trim());
-    await _prefs.setString(keyWebdavPass, pass);
+    _credentialCache[keyWebdavPass] = pass;
+    await _secureStore.write(keyWebdavPass, pass);
+    await _prefs.remove(keyWebdavPass);
     await _prefs.setBool(keyWebdavAuto, auto);
     if (syncSubs != null) {
       await _prefs.setBool(keyWebdavSyncSubs, syncSubs);

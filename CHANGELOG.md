@@ -1,5 +1,27 @@
 ## 未发布
 
+- [Security/All] 全平台安全加固（Lane F § F1–F8）：
+  - F1 (平台级安全凭据存储与无损迁移)：
+    - Flutter: 新增 `SecureCredentialStore` 抽象与默认带认证加密存储（CTR + HMAC-SHA256 与平台原生密钥派生），`StorageService` 维持内存缓存同步访问，启动自动对 WebDAV 密码与四大网盘 Cookie/Token 执行写后即删无损迁移，SharedPreferences 不再驻留敏感明文凭据；
+    - Android: 新增 `SecureStorage`，采用 `AndroidKeyStore` AES-256-GCM 硬件加密存储敏感配置凭据，自动迁移旧版 `movie` SharedPreferences 明文并安全清除；
+    - TV Lite: 新增 `SecureStorage`，基于设备特征盐与随机 IV 采用 AES/CBC/PKCS5Padding 加密持久化凭据，兼顾 API 14+ 旧电视系统兼容与静态配置防窃取。
+  - F2 (基于 PBKDF2-SHA256 的加盐隐私 PIN 密码防护)：
+    - Flutter: 基于 `package:crypto` 实现 16 字节随机盐与 100,000 次迭代的 PBKDF2-HMAC-SHA256 密码哈希派生与恒定时间比较，新哈希格式为 `pbkdf2:sha256:<len>:100000:<salt>:<hash>`；支持旧版单次 SHA-256 哈希及明文 PIN 密码在首次验证通过后平滑无感升级。
+  - F3 (明文 HTTP WebDAV 敏感凭据保存二次警示)：
+    - Flutter / Android / TV Lite 三端在用户配置带有密码且使用明文 `http://` 的 WebDAV 服务时，在保存或测试连接前弹出二次确认警告对话框，提示局域网明文传输密码风险，经用户显式确认后方可提交。
+  - F4 (非受信任明文 HTTP Spider 插件预警与仅 HTTPS 插件策略开关)：
+    - Android 电视与手机设置中新增「仅允许 HTTPS 插件」（`only_allow_https_plugins`）安全策略开关（默认关闭）；开启时严格拦截所有明文 HTTP 插件下载并防止跨协议重定向；未开启时遇到缺少 MD5 校验的明文 HTTP Spider 插件自动记录安全警告并弹出 Toast 提示。
+  - F5 (Ed25519 签名更新清单校验与发布 CLI 工具)：
+    - Flutter: 引入零外部依赖纯 Dart RFC 8032 Ed25519 签名验证器与规范化 JSON（RFC 8785 键排序与紧凑格式）摘要验签，在 `AppUpdate.check()` 中内置官方 Ed25519 公钥强制校验更新清单签名，自动拦截被篡改或缺少签名的第三方镜像更新；
+    - CLI: 新增纯 Python RFC 8032 更新清单签名工具（`scripts/sign_manifest.py`），支持生成私钥/公钥与对 `release-manifest.json` 执行内联签名。
+  - F6 (现代 TLS 传输协议与根证书链兼容加固)：
+    - Android: 配置 `network_security_config.xml`，移除非受信任的全局明文流量声明，并打包内置 Let's Encrypt `ISRG Root X1` 根证书（`res/raw/isrg_root_x1.crt`）；
+    - TV Lite: `build_lite.py` 构建时无条件打包 Conscrypt 2.5.2 引擎（`classes.dex` 及 `lib/armeabi-v7a/libconscrypt_jni.so`），并在 `NetworkTls` 中装配内嵌 ISRG Root X1 的复合 `X509TrustManager`，彻底解决旧版 Android 4.0-7.0 (API 14-24) 电视机因根证书过期导致的 HTTPS SNI 与 Let's Encrypt 证书握手失败问题。
+  - F7 (TV Lite ConfigServer 局域网配对端点生命周期加固)：
+    - TV Lite `ConfigServer` 设定 5 分钟固定生命周期（`SESSION_LIFETIME_MS = 300,000`），ServerSocket 动态超时超时自动退出监听；单次请求设定 20 秒超时（`REQUEST_TIMEOUT_MS = 20,000`）；进入请求立即验证对端是否为局域网/回环地址（`isAllowedLanPeer`），非局域网请求即刻返回 403 Forbidden，过期会话返回 410 Gone 并主动关闭套接字。
+  - F8 (Flutter 局域网同步端点会话超时与套接字优雅关闭)：
+    - `LanSyncServer` 增加会话超时主动守护定时器（`_expiryTimer`），到期自动优雅释放 ServerSocket；当客户端在会话过期后访问时，响应 HTTP 410 Gone 并等待响应刷新完毕后通过微任务异步关闭套接字，防止端口长期暴露被外部扫描利用。
+
 - [Conformance/All] 三端规范一致性测试套件与解析对齐（Lane H § H1–H4）：
   - 建立三端（Flutter / Android Java / TV Lite Java）通用的 20 组规范一致性测试用例库（`shared/conformance/case_01` 至 `case_20`），全面覆盖 UTF-8/UTF-16 BOM、透明 GZIP、图片隐写、2423 Hex-AES 解密、Base64 混淆、尾随逗号与注释剥离、JSON null 容错、缺省类型自动推断、无扩展名脚本源、相对路径解析、多仓聚合与 StoreHouse、数据列表分页展开、高级播放列表（`vod_play_list` / `player_info`）、请求头安全继承与扩展优先级、XML 采集源、解析器回退、混合线路直链优先排序与超大扩展参数拦截；
   - 实现 Flutter 端一致性测试运行器（`flutter/test/conformance_test.dart`），对齐 Header 白名单继承与平台能力映射；

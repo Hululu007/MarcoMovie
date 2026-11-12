@@ -67,6 +67,7 @@ final class Prefs {
     static final String PREFERRED_LINE = "preferred_line";
     static final String LOADING_SITE = "loading_site";
     static final String EXPERIMENTAL_CSP = "experimental_csp";
+    static final String ONLY_ALLOW_HTTPS_PLUGINS = "only_allow_https_plugins";
     static final String FAVORITES = "favorites";
     static final String WATCH_HISTORY = "watch_history";
     static final String GLOBAL_SEARCH_HISTORY = "global_search_history";
@@ -129,7 +130,8 @@ final class Prefs {
         AUDIO_EFFECT,
         SEARCH_THREADS,
         SEARCH_TIMEOUT,
-        EPISODES_DESCENDING
+        EPISODES_DESCENDING,
+        ONLY_ALLOW_HTTPS_PLUGINS
     };
 
     private static final Set<String> BOOLEAN_KEYS =
@@ -147,7 +149,8 @@ final class Prefs {
                                     SOFTWARE_AUDIO,
                                     PREFER_AAC,
                                     TUNNELED_PLAYBACK,
-                                    EPISODES_DESCENDING)));
+                                    EPISODES_DESCENDING,
+                                    ONLY_ALLOW_HTTPS_PLUGINS)));
 
     private static final Map<String, int[]> INT_RANGES;
 

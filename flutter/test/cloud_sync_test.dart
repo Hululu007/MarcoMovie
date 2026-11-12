@@ -464,6 +464,59 @@ void main() {
     },
   );
 
+  test(
+    'LanSyncServer returns HTTP 410 Gone on expired session and closes socket gracefully',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final storage = await StorageService.init();
+
+      final server = await LanSyncServer.start(
+        storage,
+        ttl: const Duration(milliseconds: -100),
+        bindAddress: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(server.close);
+
+      expect(server.isExpired, isTrue);
+
+      final resp = await http.get(Uri.parse(server.addressForHost('127.0.0.1')));
+      expect(resp.statusCode, 410);
+      expect(resp.body, contains('已过期'));
+
+      await pumpEventQueue();
+      expect(server.isClosed, isTrue);
+
+      expect(
+        () => http.get(Uri.parse(server.addressForHost('127.0.0.1'))),
+        throwsA(anyOf(isA<SocketException>(), isA<http.ClientException>())),
+      );
+    },
+  );
+
+  test(
+    'LanSyncServer active expiration timer automatically closes socket after TTL',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final storage = await StorageService.init();
+
+      final server = await LanSyncServer.start(
+        storage,
+        ttl: const Duration(milliseconds: 100),
+        bindAddress: InternetAddress.loopbackIPv4,
+      );
+      addTearDown(server.close);
+
+      expect(server.isClosed, isFalse);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(server.isClosed, isTrue);
+
+      expect(
+        () => http.get(Uri.parse(server.addressForHost('127.0.0.1'))),
+        throwsA(anyOf(isA<SocketException>(), isA<http.ClientException>())),
+      );
+    },
+  );
+
   test('normalizes Jianguoyun and WebDAV file URLs consistently', () {
     expect(
       StorageService.resolveWebdavFileUrl('https://dav.jianguoyun.com/dav/'),

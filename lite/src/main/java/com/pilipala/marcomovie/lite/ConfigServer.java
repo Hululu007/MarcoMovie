@@ -10,6 +10,7 @@ import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URLDecoder;
 import java.util.Locale;
 import java.util.UUID;
@@ -21,6 +22,13 @@ import java.util.concurrent.Executors;
  */
 public final class ConfigServer {
     public static final int MAX_SYNC_BYTES = 8 * 1024 * 1024;
+    public static final long SESSION_LIFETIME_MS = 5 * 60 * 1000L;
+    public static final long REQUEST_TIMEOUT_MS = 20000L;
+    private final long createdAtMs;
+
+    public boolean isExpired() {
+        return closed || (System.currentTimeMillis() - createdAtMs >= SESSION_LIFETIME_MS);
+    }
 
     public interface Importer {
         void apply(String address) throws Exception;
@@ -43,8 +51,13 @@ public final class ConfigServer {
     }
 
     public ConfigServer(Importer sink, SyncHandler sync) throws IOException {
+        this(sink, sync, System.currentTimeMillis());
+    }
+
+    ConfigServer(Importer sink, SyncHandler sync, long createdAtMs) throws IOException {
         importer = sink;
         syncHandler = sync;
+        this.createdAtMs = createdAtMs;
         server = new ServerSocket(0, 4);
         worker.execute(
                 new Runnable() {
@@ -84,12 +97,20 @@ public final class ConfigServer {
 
     private void serve() {
         while (!closed) {
+            long remainingLifetime =
+                    (createdAtMs + SESSION_LIFETIME_MS) - System.currentTimeMillis();
+            if (remainingLifetime <= 0) {
+                close();
+                break;
+            }
             Socket s = null;
             try {
+                server.setSoTimeout((int) Math.min(remainingLifetime, 5000));
                 s = server.accept();
                 active = s;
-                s.setSoTimeout(12000);
                 handle(s);
+            } catch (SocketTimeoutException te) {
+                // Timeout on accept, recheck lifetime
             } catch (Exception ignored) {
             } finally {
                 try {
@@ -143,11 +164,25 @@ public final class ConfigServer {
     }
 
     private void handle(Socket s) throws Exception {
+        if (!isAllowedLanPeer(s.getInetAddress())) {
+            reply(s, 403, "text/plain; charset=utf-8", "Forbidden: LAN access only");
+            return;
+        }
+        if (isExpired()) {
+            reply(s, 410, "text/html; charset=utf-8", "配对已过期，请重新扫码");
+            close();
+            return;
+        }
+        final long deadline = System.currentTimeMillis() + REQUEST_TIMEOUT_MS;
+        s.setSoTimeout((int) REQUEST_TIMEOUT_MS);
+
         InputStream in = s.getInputStream();
         String[] request = line(in).split(" ");
         int length = 0;
         String transfer = "", content = "", origin = "", referer = "", host = "";
         for (int i = 0; i < 40; i++) {
+            int rem = (int) Math.max(1, deadline - System.currentTimeMillis());
+            s.setSoTimeout(rem);
             String h = line(in);
             if (h.length() == 0) break;
             int colon = h.indexOf(':');
@@ -211,6 +246,8 @@ public final class ConfigServer {
             reply(s, 400, "text/html; charset=utf-8", "提交格式不正确");
             return;
         }
+        int rem = (int) Math.max(1, deadline - System.currentTimeMillis());
+        s.setSoTimeout(rem);
         byte[] b = readExact(in, length);
         String address = null;
         for (String field : new String(b, "UTF-8").split("&")) {
@@ -220,6 +257,9 @@ public final class ConfigServer {
         }
         try {
             if (address == null || importer == null) throw new IOException();
+            if (System.currentTimeMillis() >= deadline) {
+                throw new SocketTimeoutException("Request budget exceeded");
+            }
             importer.apply(LiteCatalog.http(address));
             reply(s, 200, "text/html; charset=utf-8", "<meta charset=utf-8><h2>配置已保存到电视</h2><p>请返回电视选择片源。</p>");
         } catch (Exception failure) {
@@ -240,12 +280,17 @@ public final class ConfigServer {
             String content,
             String origin)
             throws Exception {
-        if (syncHandler == null) {
-            reply(s, 404, "application/json; charset=utf-8", "{\"error\":\"sync_unavailable\"}");
-            return;
-        }
         if (!isAllowedLanPeer(s.getInetAddress())) {
             reply(s, 403, "application/json; charset=utf-8", "{\"error\":\"lan_only\"}");
+            return;
+        }
+        if (isExpired()) {
+            reply(s, 410, "application/json; charset=utf-8", "{\"error\":\"session_expired\"}");
+            close();
+            return;
+        }
+        if (syncHandler == null) {
+            reply(s, 404, "application/json; charset=utf-8", "{\"error\":\"sync_unavailable\"}");
             return;
         }
         if (origin.length() > 0) {

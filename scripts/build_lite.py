@@ -39,8 +39,18 @@ def build():
  if not pin.exists():raise RuntimeError('Record independently reviewed dependency digest in lite/zxing.sha256')
  if digest!=pin.read_text().strip():raise RuntimeError('ZXing digest mismatch')
  dependencies=[dep];native={}
+ conscrypt_item={'name':'conscrypt-android','url':'https://repo.maven.apache.org/maven2/org/conscrypt/conscrypt-android/2.5.2/conscrypt-android-2.5.2.aar','sha256':'42d18979caf53f5ef68548c76d4c98b41adb910a32ad9448133f9c5b20bd65a3'}
+ archive=ROOT/'tools/lite-dependencies'/conscrypt_item['url'].rsplit('/',1)[1];archive.parent.mkdir(parents=True,exist_ok=True)
+ if not archive.exists():archive.write_bytes(urllib.request.urlopen(conscrypt_item['url'],timeout=40).read())
+ if hashlib.sha256(archive.read_bytes()).hexdigest()!=conscrypt_item['sha256']:raise RuntimeError('Conscrypt dependency mismatch')
+ with zipfile.ZipFile(archive) as z:
+  if 'classes.jar' in z.namelist():
+   jar=BUILD/(conscrypt_item['name']+'.jar');jar.write_bytes(z.read('classes.jar'));dependencies.append(jar)
+  for n in z.namelist():
+   if n.startswith('jni/armeabi-v7a/') and n.endswith('.so'):native['lib/'+n[4:]]=z.read(n)
  if candidate:
   for item in json.loads((ROOT/'lite/candidate-dependencies.json').read_text()):
+   if item['name'] == 'conscrypt-android': continue
    archive=ROOT/'tools/lite-dependencies'/item['url'].rsplit('/',1)[1];archive.parent.mkdir(parents=True,exist_ok=True)
    if not archive.exists():archive.write_bytes(urllib.request.urlopen(item['url'],timeout=40).read())
    if hashlib.sha256(archive.read_bytes()).hexdigest()!=item['sha256']:raise RuntimeError('Candidate dependency mismatch')
