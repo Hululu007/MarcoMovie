@@ -106,10 +106,11 @@ public final class LiteJvmChecks {
         testMediaProxyLoopback();
         testLiteSyncV2AndLanServer();
         testLiteSyncEtagAndConcurrency();
+        testConfigPullAndCapabilityStatus();
         System.out.println(
-                "PASS 93 TV Lite JVM checks ("
+                "PASS " + checks + " TV Lite JVM checks ("
                         + checks
-                        + " total § A5 WebDAV & corruption checks passed)");
+                        + " total § C5 pull & C6 capability checks passed)");
     }
 
     private static void testResolveWebdavFileUrlMatrix() throws Exception {
@@ -1169,6 +1170,261 @@ public final class LiteJvmChecks {
             }
         } finally {
             dav.stop(0);
+        }
+    }
+
+    private static void testConfigPullAndCapabilityStatus() throws Exception {
+        // 1. 7 unified capability statuses and Chinese reasons
+        LiteCatalog.Site sOk = new LiteCatalog.Site();
+        sOk.type = 1;
+        sOk.api = "http://127.0.0.1:9/api";
+        check(
+                LiteCatalog.Site.STATUS_OK.equals(sOk.capabilityStatus())
+                        && "正常可用".equals(sOk.limitation()),
+                "Lite capability status ok");
+
+        LiteCatalog.Site sJar = new LiteCatalog.Site();
+        sJar.type = 3;
+        sJar.api = "http://127.0.0.1:9/spider.jar";
+        check(
+                LiteCatalog.Site.STATUS_NEEDS_JAR.equals(sJar.capabilityStatus())
+                        && "此来源需要 Spider / JS / JAR 运行环境，基础版尚未支持".equals(sJar.limitation()),
+                "Lite capability status needs-jar");
+
+        LiteCatalog.Site sType = new LiteCatalog.Site();
+        sType.type = 99;
+        sType.api = "http://127.0.0.1:9/unknown";
+        check(
+                LiteCatalog.Site.STATUS_UNSUPPORTED_TYPE.equals(sType.capabilityStatus())
+                        && "暂不支持此类型来源，已保留在列表中".equals(sType.limitation()),
+                "Lite capability status unsupported-type");
+
+        LiteCatalog.Site sNetdisk = new LiteCatalog.Site();
+        sNetdisk.type = 3;
+        sNetdisk.api = "csp_Ali";
+        sNetdisk.name = "阿里网盘";
+        check(
+                LiteCatalog.Site.STATUS_ADAPTER_MISSING.equals(sNetdisk.capabilityStatus())
+                        && "此网盘源的原始插件尚未适配当前设备，无法读取原始网盘线路".equals(sNetdisk.limitation()),
+                "Lite capability status adapter-missing");
+
+        LiteCatalog.Site sExt = new LiteCatalog.Site();
+        sExt.type = 1;
+        sExt.api = "http://127.0.0.1:9/api";
+        sExt.extTooLarge = true;
+        check(
+                LiteCatalog.Site.STATUS_EXT_TOO_LARGE.equals(sExt.capabilityStatus())
+                        && "扩展参数超过大小上限，无法加载".equals(sExt.limitation()),
+                "Lite capability status ext-too-large");
+
+        LiteCatalog.Site sUrl = new LiteCatalog.Site();
+        sUrl.type = 1;
+        sUrl.api = "custom://invalid";
+        check(
+                LiteCatalog.Site.STATUS_CUSTOM_SITE_URL.equals(sUrl.capabilityStatus())
+                        && "此来源不是可直接请求的 HTTP(S) CMS".equals(sUrl.limitation()),
+                "Lite capability status custom-site-url");
+
+        LiteCatalog.Site sParse = new LiteCatalog.Site();
+        sParse.type = 1;
+        sParse.api = "http://127.0.0.1:9/api";
+        sParse.requiresParser = true;
+        sParse.playUrl = "";
+        check(
+                LiteCatalog.Site.STATUS_PARSER_REQUIRED.equals(sParse.capabilityStatus())
+                        && "需要解析器，当前环境缺少可用解析配置".equals(sParse.limitation()),
+                "Lite capability status parser-required");
+
+        // 2. decodeConfig HTML detection
+        boolean directHtmlCaught = false;
+        try {
+            LiteCatalog.decodeConfig("<!DOCTYPE html><html><body>Login Required</body></html>");
+        } catch (java.io.IOException e) {
+            directHtmlCaught =
+                    e.getMessage() != null
+                            && e.getMessage().contains("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+        }
+        check(directHtmlCaught, "Lite decodeConfig rejects HTML with diagnostic error");
+
+        // 3. decodeText gzip bomb protection
+        ByteArrayOutputStream bombStream = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzos = new GZIPOutputStream(bombStream)) {
+            byte[] chunk = new byte[65536];
+            for (int i = 0; i < 40; i++) {
+                gzos.write(chunk);
+            }
+        }
+        byte[] bombBytes = bombStream.toByteArray();
+        boolean bombCaught = false;
+        try {
+            LiteCatalog.decodeText(bombBytes);
+        } catch (java.io.IOException e) {
+            bombCaught = e.getMessage() != null && e.getMessage().contains("解压后内容超过大小限制");
+        }
+        check(bombCaught, "Lite decodeText rejects gzip bomb exceeding 2MB");
+
+        // 4. Cross-domain header stripping unit check
+        Map<String, String> headersToStrip = new HashMap<String, String>();
+        headersToStrip.put("Authorization", "Basic dXNlcjpwYXNz");
+        headersToStrip.put("Cookie", "session=123");
+        headersToStrip.put("Custom-Header", "kept");
+        Map<String, String> stripped =
+                LiteCatalog.inheritedHeaders(
+                        new URL("http://a.com/"), new URL("http://b.com/"), headersToStrip);
+        check(
+                !stripped.containsKey("Authorization")
+                        && !stripped.containsKey("Cookie")
+                        && "kept".equals(stripped.get("Custom-Header")),
+                "Lite inheritedHeaders strips auth and cookie across domains");
+
+        // 5. HttpServer tests
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        int port = server.getAddress().getPort();
+        String baseUrl = "http://127.0.0.1:" + port;
+
+        server.createContext(
+                "/gzip-ok",
+                exchange -> {
+                    ByteArrayOutputStream out = new ByteArrayOutputStream();
+                    try (GZIPOutputStream gz = new GZIPOutputStream(out)) {
+                        gz.write(
+                                "{\"sites\":[{\"key\":\"gz-site\",\"name\":\"GZ Site\",\"type\":1,\"api\":\"http://127.0.0.1:9/api\"}]}"
+                                        .getBytes(StandardCharsets.UTF_8));
+                    }
+                    byte[] gzipped = out.toByteArray();
+                    exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+                    exchange.sendResponseHeaders(200, gzipped.length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(gzipped);
+                    }
+                });
+
+        server.createContext(
+                "/gzip-bomb-http",
+                exchange -> {
+                    exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+                    exchange.sendResponseHeaders(200, bombBytes.length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(bombBytes);
+                    }
+                });
+
+        server.createContext(
+                "/dual-ua",
+                exchange -> {
+                    String ua = exchange.getRequestHeaders().getFirst("User-Agent");
+                    if (LiteCatalog.USER_AGENT.equals(ua)) {
+                        byte[] resp =
+                                "<html><body>403 Forbidden</body></html>"
+                                        .getBytes(StandardCharsets.UTF_8);
+                        exchange.sendResponseHeaders(403, resp.length);
+                        try (OutputStream os = exchange.getResponseBody()) {
+                            os.write(resp);
+                        }
+                    } else if (LiteCatalog.SAFARI_USER_AGENT.equals(ua)) {
+                        byte[] resp =
+                                "{\"sites\":[{\"key\":\"dual-site\",\"name\":\"Dual Site\",\"type\":1,\"api\":\"http://127.0.0.1:9/api\"}]}"
+                                        .getBytes(StandardCharsets.UTF_8);
+                        exchange.sendResponseHeaders(200, resp.length);
+                        try (OutputStream os = exchange.getResponseBody()) {
+                            os.write(resp);
+                        }
+                    }
+                });
+
+        server.createContext(
+                "/html-blocked",
+                exchange -> {
+                    byte[] resp =
+                            "<!DOCTYPE html><html><body>Captcha Required</body></html>"
+                                    .getBytes(StandardCharsets.UTF_8);
+                    exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+                    exchange.sendResponseHeaders(200, resp.length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(resp);
+                    }
+                });
+
+        server.createContext(
+                "/redirect-step1",
+                exchange -> {
+                    exchange.getResponseHeaders().set("Location", baseUrl + "/redirect-step2");
+                    exchange.getResponseHeaders()
+                            .set("Set-Cookie", "session_id=secret456; Path=/");
+                    exchange.sendResponseHeaders(302, -1);
+                });
+
+        server.createContext(
+                "/redirect-step2",
+                exchange -> {
+                    String cookie = exchange.getRequestHeaders().getFirst("Cookie");
+                    if (cookie != null && cookie.contains("session_id=secret456")) {
+                        byte[] resp =
+                                "{\"sites\":[{\"key\":\"cookie-site\",\"name\":\"Cookie Site\",\"type\":1,\"api\":\"http://127.0.0.1:9/api\"}]}"
+                                        .getBytes(StandardCharsets.UTF_8);
+                        exchange.sendResponseHeaders(200, resp.length);
+                        try (OutputStream os = exchange.getResponseBody()) {
+                            os.write(resp);
+                        }
+                    } else {
+                        byte[] err = "missing cookie".getBytes(StandardCharsets.UTF_8);
+                        exchange.sendResponseHeaders(500, err.length);
+                        try (OutputStream os = exchange.getResponseBody()) {
+                            os.write(err);
+                        }
+                    }
+                });
+
+        server.createContext(
+                "/status-201",
+                exchange -> {
+                    byte[] resp =
+                            "{\"sites\":[{\"key\":\"created-site\",\"name\":\"Created Site\",\"type\":1,\"api\":\"http://127.0.0.1:9/api\"}]}"
+                                    .getBytes(StandardCharsets.UTF_8);
+                    exchange.sendResponseHeaders(201, resp.length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(resp);
+                    }
+                });
+
+        server.start();
+        try {
+            String gzResult = LiteCatalog.fetch(baseUrl + "/gzip-ok", null);
+            check(gzResult.contains("\"key\":\"gz-site\""), "Lite fetch decompresses gzip response");
+
+            boolean httpBombCaught = false;
+            try {
+                LiteCatalog.fetch(baseUrl + "/gzip-bomb-http", null);
+            } catch (java.io.IOException e) {
+                httpBombCaught =
+                        e.getMessage() != null && e.getMessage().contains("超过大小限制");
+            }
+            check(httpBombCaught, "Lite fetch rejects gzip bomb exceeding MAX_BYTES");
+
+            String dualResult = LiteCatalog.fetch(baseUrl + "/dual-ua", null);
+            check(
+                    dualResult.contains("\"key\":\"dual-site\""),
+                    "Lite fetch retries with Safari UA on error/HTML");
+
+            boolean httpHtmlCaught = false;
+            try {
+                LiteCatalog.fetch(baseUrl + "/html-blocked", null);
+            } catch (java.io.IOException e) {
+                httpHtmlCaught =
+                        e.getMessage() != null
+                                && e.getMessage().contains("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+            }
+            check(httpHtmlCaught, "Lite fetch throws diagnostic error on persistent HTML");
+
+            String cookieFetch = LiteCatalog.fetch(baseUrl + "/redirect-step1", null);
+            check(
+                    cookieFetch.contains("\"key\":\"cookie-site\""),
+                    "Lite fetch preserves cookies across same-domain redirects");
+
+            String status201Result = LiteCatalog.fetch(baseUrl + "/status-201", null);
+            check(status201Result.contains("\"key\":\"created-site\""), "Lite fetch accepts 201 status code");
+        } finally {
+            server.stop(0);
         }
     }
 }

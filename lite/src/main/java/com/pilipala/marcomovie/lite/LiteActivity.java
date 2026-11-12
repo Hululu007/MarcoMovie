@@ -870,10 +870,20 @@ public final class LiteActivity extends Activity {
             for (int i = 0; i < sites.size(); i++) {
                 final LiteCatalog.Site s = sites.get(i);
                 boolean isPref = (s.key + "\n" + s.api).equals(preferred);
+                String limitation = s.limitation();
+                String limitationSuffix =
+                        (!s.supported
+                                        && limitation != null
+                                        && limitation.length() > 0
+                                        && !"正常可用".equals(limitation))
+                                ? "（" + limitation + "）"
+                                : "";
                 String tag =
                         s.api.startsWith("emby://")
                                 ? " [Emby]"
-                                : s.type == 0 ? " [XML]" : s.supported ? "" : " · 尚未兼容";
+                                : s.type == 0
+                                        ? " [XML]"
+                                        : s.supported ? "" : " · 尚未兼容" + limitationSuffix;
                 String title = (isPref ? "★ 默认 · " : "") + s.name + tag;
                 final TextView b =
                         makeActionButton(
@@ -891,8 +901,13 @@ public final class LiteActivity extends Activity {
                                                     .commit();
                                             catalog("", 1);
                                         } else {
+                                            String lim = s.limitation();
                                             status.setText(
-                                                    "此来源需要插件、JS 或网页解析，Android 4.0 轻量版仅支持标准 JSON/XML CMS 与 Emby 片源。");
+                                                    (lim != null
+                                                                    && lim.length() > 0
+                                                                    && !"正常可用".equals(lim))
+                                                            ? lim
+                                                            : "此来源需要插件、JS 或网页解析，Android 4.0 轻量版仅支持标准 JSON/XML CMS 与 Emby 片源。");
                                         }
                                     }
                                 });

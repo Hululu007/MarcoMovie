@@ -30,7 +30,25 @@ public final class DirectCmsImportChecks {
                                     @Override
                                     protected HttpURLConnection openConnection(URL url) {
                                         requests.add(url.toString());
+                                        String host = url.getHost();
                                         return new HttpURLConnection(url) {
+                                            private final java.util.Map<String, List<String>>
+                                                    headers = new java.util.HashMap<>();
+                                            private int responseCode = 200;
+                                            private byte[] responseBody =
+                                                    RESPONSE.getBytes(StandardCharsets.UTF_8);
+
+                                            @Override
+                                            public void setRequestProperty(
+                                                    String key, String value) {
+                                                super.setRequestProperty(key, value);
+                                                if (key != null && value != null) {
+                                                    List<String> list = new ArrayList<>();
+                                                    list.add(value);
+                                                    headers.put(key, list);
+                                                }
+                                            }
+
                                             public void connect() {}
 
                                             public void disconnect() {}
@@ -40,12 +58,109 @@ public final class DirectCmsImportChecks {
                                             }
 
                                             public int getResponseCode() {
-                                                return 200;
+                                                if ("dual-ua.test".equals(host)) {
+                                                    String ua = getRequestProperty("User-Agent");
+                                                    if (Cms.USER_AGENT.equals(ua)) {
+                                                        responseCode = 403;
+                                                        responseBody =
+                                                                "<html><body>403 Forbidden</body></html>"
+                                                                        .getBytes(
+                                                                                StandardCharsets
+                                                                                        .UTF_8);
+                                                    } else if (Cms.SAFARI_USER_AGENT.equals(ua)) {
+                                                        responseCode = 200;
+                                                        responseBody =
+                                                                "{\"sites\":[{\"key\":\"dual\",\"name\":\"Dual\",\"api\":\"http://cms.test/api\"}]}"
+                                                                        .getBytes(
+                                                                                StandardCharsets
+                                                                                        .UTF_8);
+                                                    }
+                                                } else if ("html-error.test".equals(host)) {
+                                                    responseCode = 200;
+                                                    responseBody =
+                                                            "<!DOCTYPE html><html><body>Login Required</body></html>"
+                                                                    .getBytes(
+                                                                            StandardCharsets.UTF_8);
+                                                } else if ("cookie-redirect.test".equals(host)) {
+                                                    String path = url.getPath();
+                                                    if ("/step1".equals(path)) {
+                                                        responseCode = 302;
+                                                        headers.put(
+                                                                "Location",
+                                                                Arrays.asList(
+                                                                        "http://cookie-redirect.test/step2"));
+                                                        headers.put(
+                                                                "Set-Cookie",
+                                                                Arrays.asList(
+                                                                        "session_id=abc12345; Path=/"));
+                                                        responseBody = new byte[0];
+                                                    } else if ("/step2".equals(path)) {
+                                                        String cookie =
+                                                                getRequestProperty("Cookie");
+                                                        if (cookie != null
+                                                                && cookie.contains(
+                                                                        "session_id=abc12345")) {
+                                                            responseCode = 302;
+                                                            headers.put(
+                                                                    "Location",
+                                                                    Arrays.asList(
+                                                                            "http://cross-domain.test/step3"));
+                                                            responseBody = new byte[0];
+                                                        } else {
+                                                            responseCode = 500;
+                                                            responseBody =
+                                                                    "missing cookie"
+                                                                            .getBytes(
+                                                                                    StandardCharsets
+                                                                                            .UTF_8);
+                                                        }
+                                                    }
+                                                } else if ("cross-domain.test".equals(host)) {
+                                                    String cookie = getRequestProperty("Cookie");
+                                                    if (cookie == null
+                                                            || !cookie.contains(
+                                                                    "session_id=abc12345")) {
+                                                        responseCode = 200;
+                                                        responseBody =
+                                                                "{\"sites\":[{\"key\":\"ok\",\"name\":\"OK\",\"api\":\"http://cms.test/api\"}]}"
+                                                                        .getBytes(
+                                                                                StandardCharsets
+                                                                                        .UTF_8);
+                                                    } else {
+                                                        responseCode = 500;
+                                                        responseBody =
+                                                                "leaked cookie"
+                                                                        .getBytes(
+                                                                                StandardCharsets
+                                                                                        .UTF_8);
+                                                    }
+                                                }
+                                                return responseCode;
+                                            }
+
+                                            @Override
+                                            public java.util.Map<String, List<String>>
+                                                    getHeaderFields() {
+                                                return headers;
+                                            }
+
+                                            @Override
+                                            public String getHeaderField(String name) {
+                                                for (java.util.Map.Entry<String, List<String>> e :
+                                                        headers.entrySet()) {
+                                                    if (e.getKey() != null
+                                                            && e.getKey().equalsIgnoreCase(name)) {
+                                                        List<String> list = e.getValue();
+                                                        return (list != null && !list.isEmpty())
+                                                                ? list.get(0)
+                                                                : null;
+                                                    }
+                                                }
+                                                return null;
                                             }
 
                                             public InputStream getInputStream() {
-                                                return new ByteArrayInputStream(
-                                                        RESPONSE.getBytes(StandardCharsets.UTF_8));
+                                                return new ByteArrayInputStream(responseBody);
                                             }
                                         };
                                     }
@@ -183,6 +298,117 @@ public final class DirectCmsImportChecks {
                 base,
                 "API error response rejected");
         rejects("<html><body>Login required</body></html>", base, "HTML response rejected");
+
+        // Dual-UA retry
+        String dualResult = Cms.fetchImport("http://dual-ua.test/config.json");
+        check(
+                dualResult.contains("\"key\":\"dual\""),
+                "dual-UA retries with Safari UA on HTTP error/HTML");
+
+        // HTML diagnostic error
+        boolean htmlDiagnosticCaught = false;
+        try {
+            Cms.fetchImport("http://html-error.test/page.html");
+        } catch (java.io.IOException e) {
+            htmlDiagnosticCaught =
+                    e.getMessage() != null && e.getMessage().contains("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+        }
+        check(htmlDiagnosticCaught, "HTML response throws diagnostic error message");
+
+        // Cross-redirect cookie preservation and stripping
+        String cookieResult = Cms.fetch("http://cookie-redirect.test/step1", null);
+        check(
+                cookieResult.contains("\"key\":\"ok\""),
+                "cross-redirect preserves same-domain cookies and strips cross-domain");
+
+        // Gzip bomb protection
+        java.io.ByteArrayOutputStream bombOut = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gzos = new java.util.zip.GZIPOutputStream(bombOut)) {
+            byte[] chunk = new byte[65536];
+            for (int i = 0; i < 70; i++) {
+                gzos.write(chunk);
+            }
+        }
+        byte[] bombBytes = bombOut.toByteArray();
+        boolean bombCaught = false;
+        try {
+            Cms.document(bombBytes);
+        } catch (java.io.IOException e) {
+            bombCaught = e.getMessage() != null && e.getMessage().contains("解压后内容超过大小限制");
+        }
+        check(bombCaught, "gzip bomb exceeding 4MB is rejected");
+
+        // Valid gzip payload decompression
+        java.io.ByteArrayOutputStream validGzOut = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gzos = new java.util.zip.GZIPOutputStream(validGzOut)) {
+            gzos.write(
+                    "{\"sites\":[{\"key\":\"gz\",\"name\":\"GZ\",\"api\":\"http://cms.test/api\"}]}"
+                            .getBytes(StandardCharsets.UTF_8));
+        }
+        String decompressed = Cms.document(validGzOut.toByteArray());
+        check(decompressed.contains("\"key\":\"gz\""), "valid gzip payload is decompressed");
+
+        // Capability status and limitation reasons (7 unified statuses)
+        Cms.Site sOk = new Cms.Site();
+        sOk.type = 1;
+        sOk.api = "http://cms.test/api";
+        check(
+                Cms.Site.STATUS_OK.equals(sOk.capabilityStatus())
+                        && "正常可用".equals(sOk.limitation()),
+                "capability status ok");
+
+        Cms.Site sJar = new Cms.Site();
+        sJar.type = 3;
+        sJar.api = "http://cms.test/spider.jar";
+        check(
+                Cms.Site.STATUS_NEEDS_JAR.equals(sJar.capabilityStatus())
+                        && "此来源需要 Spider / JS / JAR 运行环境，基础版尚未支持".equals(sJar.limitation()),
+                "capability status needs-jar");
+
+        Cms.Site sType = new Cms.Site();
+        sType.type = 99;
+        sType.api = "http://cms.test/unknown";
+        check(
+                Cms.Site.STATUS_UNSUPPORTED_TYPE.equals(sType.capabilityStatus())
+                        && "暂不支持此类型来源，已保留在列表中".equals(sType.limitation()),
+                "capability status unsupported-type");
+
+        Cms.Site sNetdisk = new Cms.Site();
+        sNetdisk.type = 3;
+        sNetdisk.api = "csp_Ali";
+        sNetdisk.name = "阿里网盘";
+        check(
+                Cms.Site.STATUS_ADAPTER_MISSING.equals(sNetdisk.capabilityStatus())
+                        && "此网盘源的原始插件尚未适配当前设备，无法读取原始网盘线路".equals(sNetdisk.limitation()),
+                "capability status adapter-missing");
+
+        Cms.Site sExt = new Cms.Site();
+        sExt.type = 1;
+        sExt.api = "http://cms.test/api";
+        sExt.extTooLarge = true;
+        check(
+                Cms.Site.STATUS_EXT_TOO_LARGE.equals(sExt.capabilityStatus())
+                        && "扩展参数超过大小上限，无法加载".equals(sExt.limitation()),
+                "capability status ext-too-large");
+
+        Cms.Site sUrl = new Cms.Site();
+        sUrl.type = 1;
+        sUrl.api = "custom://invalid";
+        check(
+                Cms.Site.STATUS_CUSTOM_SITE_URL.equals(sUrl.capabilityStatus())
+                        && "此来源不是可直接请求的 HTTP(S) CMS".equals(sUrl.limitation()),
+                "capability status custom-site-url");
+
+        Cms.Site sParse = new Cms.Site();
+        sParse.type = 1;
+        sParse.api = "http://cms.test/api";
+        sParse.requiresParser = true;
+        sParse.playUrl = "";
+        check(
+                Cms.Site.STATUS_PARSER_REQUIRED.equals(sParse.capabilityStatus())
+                        && "需要解析器，当前环境缺少可用解析配置".equals(sParse.limitation()),
+                "capability status parser-required");
+
         System.out.println("OK " + count + " direct CMS import checks");
     }
 }

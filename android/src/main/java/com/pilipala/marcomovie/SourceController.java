@@ -26,7 +26,7 @@ final class SourceController {
     }
 
     static String fetchImport(android.content.Context context, String address) throws Exception {
-        if (!com.pilipala.emby.CheckedScript.matches(address)) return Cms.fetch(address, null);
+        if (!com.pilipala.emby.CheckedScript.matches(address)) return Cms.fetchImport(address);
         com.pilipala.emby.CheckedScript script = com.pilipala.emby.CheckedScript.read(address);
         if (com.pilipala.catpaw.CatPawHost.isBundle(script.code))
             return new com.pilipala.catpaw.CatPawHost(context).install(script.code);

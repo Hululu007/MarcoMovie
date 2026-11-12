@@ -1,5 +1,14 @@
 ## 未发布
 
+- [Android/Lite] 统一配置拉取策略与站点可见性（Lane C2 § C5, C6）：
+  - 配置拉取双 UA 自动回退：默认 okhttp/3.15 请求，遇到 HTTP 错误或 HTML 网页拦截时自动回退至 Safari 桌面 UA 重试；
+  - 跨重定向保留同域 Cookie（最多 5 跳），跨不同域重定向时严格剥离 Authorization 与 Cookie 敏感请求头；
+  - 接受全部 2xx 响应状态码（200-299）；
+  - 网页拦截精确诊断：当配置地址返回 HTML 网页（Content-Type 为 text/html 或内容以 <!doctype / <html 开头）时，明确提示“地址返回的是网页而不是配置（可能需要登录或被拦截）”；
+  - TV Lite 解除 identity 编码限制，支持透明 gzip 解压缩；
+  - Android gunzipIfNeeded 增加解压炸弹保护，解压超过 4MB 上限时显式抛出错误，不再静默截断；
+  - 建立全平台统一的 7 种站点能力状态（ok、needs-jar、unsupported-type、adapter-missing、ext-too-large、custom-site-url、parser-required）及标准中文解释；
+  - Android 站点选择器片源计数显示为“可用 X / 共 Y”，点击不可用站点时弹出具体原因；TV Lite 站点列表不可用站点灰显并附带具体原因说明。
 - [Android/Flutter/Lite] 修复坚果云 WebDAV 同步 404 错误：根目录自动追加 MarcoMovie/ 子目录，补齐递归父目录 MKCOL 创建，优化 404/409 诊断提示。
 - [Windows/macOS] 桌面端交互体验优化：支持鼠标拖拽滚动；横向列表支持滚轮横向滚动与悬停翻页箭头；半屏贴靠（宽度≥700）保持侧边栏导航；设置最小窗口尺寸（720x520）；播放器新增快捷键（M 静音、N/P 切集、[] 调速、Ctrl/Cmd+W 退出）。
 - [Android/Lite] 订阅解析与格式容错：增强 JSON null 容错（新建 Json.java，使用 JSONObject.NULL 覆盖测试）；缺少 type 的 HTTP 站点默认按 CMS 0/1 解析；支持无扩展名 type 3 脚本源（严格排除 .jar 与 /csp_ 路径）；完善 ext 相对路径解析（支持 http/https/file 来源）；TVBox 2423 结束标记强制偶数对齐并过滤空白。
