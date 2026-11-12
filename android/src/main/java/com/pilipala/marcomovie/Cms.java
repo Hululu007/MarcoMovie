@@ -11,6 +11,8 @@ import java.util.*;
 public final class Cms {
     public static final int MAX_JSON = 4 * 1024 * 1024;
     public static final String USER_AGENT = "okhttp/3.15";
+    public static final String SAFARI_USER_AGENT =
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
 
     public static final class Parse {
         public String name = "", url = "";
@@ -28,22 +30,116 @@ public final class Cms {
     }
 
     public static final class Site {
+        public static final String STATUS_OK = "ok";
+        public static final String STATUS_NEEDS_JAR = "needs-jar";
+        public static final String STATUS_UNSUPPORTED_TYPE = "unsupported-type";
+        public static final String STATUS_ADAPTER_MISSING = "adapter-missing";
+        public static final String STATUS_EXT_TOO_LARGE = "ext-too-large";
+        public static final String STATUS_CUSTOM_SITE_URL = "custom-site-url";
+        public static final String STATUS_PARSER_REQUIRED = "parser-required";
+        public static final int MAX_EXT_SIZE = 128 * 1024;
+
         public String key, name, api, playUrl, jar = "";
         public int type;
         public final Map<String, String> headers = new LinkedHashMap<>();
         public boolean requiresParser;
         public boolean searchable = true;
         public Object ext;
+        public boolean extTooLarge;
+
+        public boolean isExtTooLarge() {
+            if (extTooLarge) return true;
+            if (ext instanceof String) {
+                return ((String) ext).length() > MAX_EXT_SIZE;
+            }
+            if (ext instanceof JSONObject || ext instanceof JSONArray) {
+                return ext.toString().length() > MAX_EXT_SIZE;
+            }
+            return false;
+        }
+
+        public boolean isNetdiskSite() {
+            String lowerApi = api == null ? "" : api.toLowerCase(Locale.ROOT);
+            String lowerName = name == null ? "" : name.toLowerCase(Locale.ROOT);
+            String lowerKey = key == null ? "" : key.toLowerCase(Locale.ROOT);
+            if (lowerName.contains("秒播")
+                    || lowerApi.startsWith("csp_wex")
+                    || lowerApi.contains("ikanbot")
+                    || lowerApi.contains("yiys")) {
+                return false;
+            }
+            return lowerApi.contains("wogg")
+                    || lowerApi.contains("ainew")
+                    || lowerApi.contains("qwmkv")
+                    || lowerApi.contains("soai")
+                    || lowerApi.contains("sokaka")
+                    || lowerApi.contains("seedhub")
+                    || lowerApi.contains("pansou")
+                    || lowerApi.contains("s_zps")
+                    || lowerApi.contains("ypanso")
+                    || lowerApi.contains("bpanso")
+                    || lowerApi.contains("yiso")
+                    || lowerApi.contains("panta")
+                    || lowerApi.contains("mypan")
+                    || lowerKey.contains("mypan")
+                    || lowerName.contains("我的云盘")
+                    || lowerName.contains("我的网盘")
+                    || lowerName.contains("我的┃网盘")
+                    || lowerName.contains("网盘")
+                    || lowerName.contains("云盘")
+                    || lowerApi.contains("alipansou")
+                    || lowerApi.contains("tudou");
+        }
 
         public boolean supported() {
-            return (type == 0 || type == 1) && isHttp(api);
+            return (type == 0 || type == 1) && isHttp(api) && !isExtTooLarge();
+        }
+
+        public String capabilityStatus() {
+            if (isExtTooLarge()) {
+                return STATUS_EXT_TOO_LARGE;
+            }
+            if (isNetdiskSite()) {
+                return STATUS_ADAPTER_MISSING;
+            }
+            if (type == 3
+                    || (api != null && (api.startsWith("csp_") || api.endsWith(".js")))
+                    || (jar != null && !jar.isEmpty())) {
+                return STATUS_NEEDS_JAR;
+            }
+            if (type != 0 && type != 1) {
+                return STATUS_UNSUPPORTED_TYPE;
+            }
+            if (!isHttp(api)) {
+                return STATUS_CUSTOM_SITE_URL;
+            }
+            if (requiresParser && (playUrl == null || playUrl.isEmpty())) {
+                return STATUS_PARSER_REQUIRED;
+            }
+            return STATUS_OK;
+        }
+
+        public static String capabilityReason(String status) {
+            if (STATUS_OK.equals(status)) {
+                return "正常可用";
+            } else if (STATUS_NEEDS_JAR.equals(status)) {
+                return "此来源需要 Spider / JS / JAR 运行环境，基础版尚未支持";
+            } else if (STATUS_UNSUPPORTED_TYPE.equals(status)) {
+                return "暂不支持此类型来源，已保留在列表中";
+            } else if (STATUS_ADAPTER_MISSING.equals(status)) {
+                return "此网盘源的原始插件尚未适配当前设备，无法读取原始网盘线路";
+            } else if (STATUS_EXT_TOO_LARGE.equals(status)) {
+                return "扩展参数超过大小上限，无法加载";
+            } else if (STATUS_CUSTOM_SITE_URL.equals(status)) {
+                return "此来源不是可直接请求的 HTTP(S) CMS";
+            } else if (STATUS_PARSER_REQUIRED.equals(status)) {
+                return "需要解析器，当前环境缺少可用解析配置";
+            }
+            return "此来源暂不可用";
         }
 
         public String limitation() {
-            if (type == 3 || api.startsWith("csp_") || api.endsWith(".js"))
-                return "此来源需要 Spider / JS / JAR 运行环境，基础版尚未支持。";
-            if (type != 0 && type != 1) return "暂不支持此类型来源，已保留在列表中。";
-            return "此来源不是可直接请求的 HTTP(S) CMS。";
+            return capabilityReason(capabilityStatus());
         }
     }
 
@@ -503,9 +599,18 @@ public final class Cms {
         return config;
     }
 
+    public static boolean isHtml(String s) {
+        if (s == null) return false;
+        String t = s.trim().toLowerCase(Locale.ROOT);
+        return t.startsWith("<!doctype") || t.startsWith("<html");
+    }
+
     public static Config parseConfig(String text, String origin) throws Exception {
         if (text == null || text.length() > MAX_JSON) throw new IOException("配置超过 4 MB 限制");
         String trimmed = text.trim().replaceFirst("^\\uFEFF", "");
+        if (isHtml(trimmed)) {
+            throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+        }
         if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
             if (origin != null
                     && isHttp(origin)
@@ -831,7 +936,7 @@ public final class Cms {
         return document(out.toByteArray());
     }
 
-    private static byte[] gunzipIfNeeded(byte[] bytes) {
+    static byte[] gunzipIfNeeded(byte[] bytes) throws IOException {
         if (bytes != null
                 && bytes.length >= 2
                 && (bytes[0] & 0xff) == 0x1f
@@ -842,11 +947,12 @@ public final class Cms {
                 byte[] buf = new byte[8192];
                 int n;
                 while ((n = gis.read(buf)) != -1) {
-                    if (bos.size() + n > MAX_JSON) break;
+                    if (bos.size() + n > MAX_JSON) {
+                        throw new IOException("解压后内容超过大小限制");
+                    }
                     bos.write(buf, 0, n);
                 }
                 return bos.toByteArray();
-            } catch (Exception ignored) {
             }
         }
         return bytes;
@@ -1012,12 +1118,166 @@ public final class Cms {
     }
 
     public static String fetch(String address, Map<String, String> headers) throws Exception {
-        return fetch(address, headers, null);
+        return fetch(address, headers, null, USER_AGENT);
+    }
+
+    public static String fetch(
+            String address, Map<String, String> headers, Map<String, String> form)
+            throws Exception {
+        return fetch(address, headers, form, USER_AGENT);
+    }
+
+    public static String fetchImport(String address) throws Exception {
+        String[] uas = new String[] {USER_AGENT, SAFARI_USER_AGENT};
+        Exception firstError = null;
+        boolean sawHtml = false;
+        for (String ua : uas) {
+            try {
+                Map<String, String> headers = new LinkedHashMap<>();
+                headers.put("User-Agent", ua);
+                String result = fetch(address, headers, null, ua);
+                if (isHtml(result)) {
+                    sawHtml = true;
+                    firstError = new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+                    continue;
+                }
+                return result;
+            } catch (Exception e) {
+                if (e.getMessage() != null && e.getMessage().contains("地址返回的是网页而不是配置")) {
+                    sawHtml = true;
+                }
+                firstError = e;
+            }
+        }
+        if (sawHtml) {
+            throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+        }
+        throw firstError != null ? firstError : new IOException("无法连接配置地址");
+    }
+
+    static final class RedirectCookie {
+        final String name;
+        final String value;
+        final String domain;
+        final boolean hostOnly;
+        final String path;
+
+        RedirectCookie(String name, String value, String domain, boolean hostOnly, String path) {
+            this.name = name;
+            this.value = value;
+            this.domain = domain;
+            this.hostOnly = hostOnly;
+            this.path = path;
+        }
+
+        boolean matches(URL target) {
+            String targetHost = target.getHost().toLowerCase(Locale.ROOT);
+            if (hostOnly) {
+                if (!targetHost.equals(domain)) return false;
+            } else {
+                if (!targetHost.equals(domain) && !targetHost.endsWith("." + domain)) return false;
+            }
+            String targetPath = target.getPath();
+            if (targetPath == null || targetPath.isEmpty()) targetPath = "/";
+            if (path.equals("/") || targetPath.equals(path)) return true;
+            if (targetPath.startsWith(path)) {
+                return path.endsWith("/") || targetPath.charAt(path.length()) == '/';
+            }
+            return false;
+        }
+    }
+
+    static List<RedirectCookie> parseSetCookies(List<String> headerValues, URL requestUrl) {
+        List<RedirectCookie> result = new ArrayList<>();
+        if (headerValues == null || headerValues.isEmpty()) return result;
+        String reqHost = requestUrl.getHost().toLowerCase(Locale.ROOT);
+        for (String raw : headerValues) {
+            if (raw == null || raw.trim().isEmpty()) continue;
+            String[] parts = raw.split(";");
+            if (parts.length == 0) continue;
+            String first = parts[0].trim();
+            int eq = first.indexOf('=');
+            if (eq <= 0) continue;
+            String name = first.substring(0, eq).trim();
+            String value = first.substring(eq + 1).trim();
+            if (name.isEmpty()) continue;
+
+            String domain = reqHost;
+            boolean hostOnly = true;
+            String path = "/";
+            boolean expired = value.isEmpty();
+
+            for (int i = 1; i < parts.length; i++) {
+                String attr = parts[i].trim();
+                if (attr.isEmpty()) continue;
+                int aEq = attr.indexOf('=');
+                String aKey =
+                        (aEq < 0 ? attr : attr.substring(0, aEq)).trim().toLowerCase(Locale.ROOT);
+                String aVal = aEq < 0 ? "" : attr.substring(aEq + 1).trim();
+                if ("domain".equals(aKey) && !aVal.isEmpty()) {
+                    String clean = aVal.replaceAll("^\\.+", "").toLowerCase(Locale.ROOT);
+                    if (clean.contains(".")
+                            && (reqHost.equals(clean) || reqHost.endsWith("." + clean))) {
+                        domain = clean;
+                        hostOnly = false;
+                    }
+                } else if ("path".equals(aKey) && aVal.startsWith("/")) {
+                    path = aVal;
+                } else if ("max-age".equals(aKey)) {
+                    try {
+                        long secs = Long.parseLong(aVal);
+                        if (secs <= 0) expired = true;
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            if (!expired) {
+                result.add(new RedirectCookie(name, value, domain, hostOnly, path));
+            }
+        }
+        return result;
+    }
+
+    static void mergeRedirectCookies(
+            Map<String, String> headers, Collection<RedirectCookie> cookies, URL target) {
+        Map<String, String> map = new LinkedHashMap<>();
+        String existing = null;
+        for (Map.Entry<String, String> entry : headers.entrySet()) {
+            if ("cookie".equalsIgnoreCase(entry.getKey())) {
+                existing = entry.getValue();
+                break;
+            }
+        }
+        if (existing != null && !existing.trim().isEmpty()) {
+            String[] pairs = existing.split(";");
+            for (String pair : pairs) {
+                int eq = pair.indexOf('=');
+                if (eq > 0) {
+                    map.put(pair.substring(0, eq).trim(), pair.substring(eq + 1).trim());
+                }
+            }
+        }
+        for (RedirectCookie rc : cookies) {
+            if (rc.matches(target)) {
+                map.put(rc.name, rc.value);
+            }
+        }
+        if (!map.isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, String> e : map.entrySet()) {
+                if (sb.length() > 0) sb.append("; ");
+                sb.append(e.getKey()).append("=").append(e.getValue());
+            }
+            for (Iterator<String> it = headers.keySet().iterator(); it.hasNext(); ) {
+                if ("cookie".equalsIgnoreCase(it.next())) it.remove();
+            }
+            headers.put("Cookie", sb.toString());
+        }
     }
 
     /** A non-null form selects POST; redirects preserve the existing credential boundary. */
     public static String fetch(
-            String address, Map<String, String> headers, Map<String, String> form)
+            String address, Map<String, String> headers, Map<String, String> form, String defaultUa)
             throws Exception {
         if (!isHttp(address)) throw new IOException("只支持 HTTP(S) 地址");
         URL next = new URL(normalizeHttp(address));
@@ -1044,13 +1304,14 @@ public final class Cms {
             }
             next = new URL(next.getProtocol(), next.getHost(), next.getPort(), next.getFile());
         }
+        Map<String, RedirectCookie> redirectCookies = new LinkedHashMap<>();
         for (int hop = 0; hop < 5; hop++) {
             if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException();
             HttpURLConnection c = (HttpURLConnection) next.openConnection();
             c.setConnectTimeout(12000);
             c.setReadTimeout(18000);
             c.setInstanceFollowRedirects(false);
-            c.setRequestProperty("User-Agent", USER_AGENT);
+            c.setRequestProperty("User-Agent", defaultUa != null ? defaultUa : USER_AGENT);
             for (Map.Entry<String, String> e : forwarded.entrySet())
                 c.setRequestProperty(e.getKey(), e.getValue());
             try {
@@ -1066,6 +1327,27 @@ public final class Cms {
                     }
                 }
                 int status = c.getResponseCode();
+                List<String> setCookies = c.getHeaderFields().get("Set-Cookie");
+                if (setCookies == null) {
+                    for (Map.Entry<String, List<String>> entry : c.getHeaderFields().entrySet()) {
+                        if ("set-cookie".equalsIgnoreCase(entry.getKey())) {
+                            setCookies = entry.getValue();
+                            break;
+                        }
+                    }
+                }
+                List<RedirectCookie> newCookies = parseSetCookies(setCookies, next);
+                for (RedirectCookie cookie : newCookies) {
+                    redirectCookies.put(
+                            cookie.domain
+                                    + "|"
+                                    + cookie.hostOnly
+                                    + "|"
+                                    + cookie.path
+                                    + "|"
+                                    + cookie.name,
+                            cookie);
+                }
                 if (status == 301
                         || status == 302
                         || status == 303
@@ -1077,18 +1359,28 @@ public final class Cms {
                     if (!isHttp(target.toString())) throw new IOException("不支持此重定向协议");
                     if (target.getUserInfo() != null) throw new IOException("来源重定向不能注入登录凭据");
                     forwarded = inheritedHeaders(next.toString(), target.toString(), forwarded);
+                    mergeRedirectCookies(forwarded, redirectCookies.values(), target);
                     if (status == 301 || status == 302 || status == 303) body = null;
                     next = target;
                     continue;
                 }
                 if (status < 200 || status >= 300) throw new IOException("来源返回 HTTP " + status);
+                String contentType = c.getContentType();
+                boolean isHtmlContentType =
+                        contentType != null
+                                && contentType.toLowerCase(Locale.ROOT).contains("text/html");
                 InputStream rawIn = c.getInputStream();
                 if ("gzip".equalsIgnoreCase(c.getContentEncoding())) {
                     rawIn = new java.util.zip.GZIPInputStream(rawIn);
                 }
+                String result;
                 try (InputStream input = rawIn) {
-                    return read(input, MAX_JSON);
+                    result = read(input, MAX_JSON);
                 }
+                if (isHtmlContentType || isHtml(result)) {
+                    throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+                }
+                return result;
             } finally {
                 RequestScope.detach(c);
                 c.disconnect();

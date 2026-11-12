@@ -170,7 +170,10 @@ final class SourcePicker {
         TextView title = a.text("选择片源", tv ? 22 : 19, MainActivity.WHITE);
         title.setTypeface(null, Typeface.BOLD);
         titleBadgeRow.addView(title);
-        TextView count = a.text(a.config.sites.size() + " 个片源", 11.5f, 0xff9ca3af);
+        int supported = 0;
+        for (Cms.Site s : a.config.sites) if (a.available(s)) supported++;
+        TextView count =
+                a.text("可用 " + supported + " / 共 " + a.config.sites.size(), 11.5f, 0xff9ca3af);
         count.setPadding(a.dp(8), a.dp(2), a.dp(8), a.dp(2));
         count.setBackground(a.bg(0x22ffffff, 999));
         LinearLayout.LayoutParams countLp = new LinearLayout.LayoutParams(-2, -2);
@@ -290,7 +293,7 @@ final class SourcePicker {
                                     return;
                                 }
                                 if (!a.available(site)) {
-                                    a.notice("这个片源需要启用来源扩展，或仍有接口待适配。可以在设置中查看。");
+                                    a.notice(site.limitation());
                                     return;
                                 }
                                 a.prefs

@@ -24,6 +24,9 @@ import org.xmlpull.v1.XmlPullParser;
 public final class LiteCatalog {
     public static final int MAX_BYTES = 2 * 1024 * 1024;
     public static final long REQUEST_BUDGET_NS = 18000000000L;
+    public static final String USER_AGENT = "okhttp/3.15";
+    public static final String SAFARI_USER_AGENT =
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
     private static final Set<HttpURLConnection> IN_FLIGHT =
             Collections.synchronizedSet(new HashSet<HttpURLConnection>());
 
@@ -42,11 +45,117 @@ public final class LiteCatalog {
     }
 
     public static final class Site {
+        public static final String STATUS_OK = "ok";
+        public static final String STATUS_NEEDS_JAR = "needs-jar";
+        public static final String STATUS_UNSUPPORTED_TYPE = "unsupported-type";
+        public static final String STATUS_ADAPTER_MISSING = "adapter-missing";
+        public static final String STATUS_EXT_TOO_LARGE = "ext-too-large";
+        public static final String STATUS_CUSTOM_SITE_URL = "custom-site-url";
+        public static final String STATUS_PARSER_REQUIRED = "parser-required";
+        public static final int MAX_EXT_SIZE = 128 * 1024;
+
         public String key, name, api, playUrl = "";
         public int type;
         public boolean supported;
         public boolean searchable = true;
         public final Map<String, String> headers = new LinkedHashMap<String, String>();
+        public String jar = "";
+        public Object ext;
+        public boolean extTooLarge;
+        public boolean requiresParser;
+
+        public boolean isExtTooLarge() {
+            if (extTooLarge) return true;
+            if (ext instanceof String) {
+                return ((String) ext).length() > MAX_EXT_SIZE;
+            }
+            if (ext instanceof JSONObject || ext instanceof JSONArray) {
+                return ext.toString().length() > MAX_EXT_SIZE;
+            }
+            return false;
+        }
+
+        public boolean isNetdiskSite() {
+            String lowerApi = api == null ? "" : api.toLowerCase(Locale.ROOT);
+            String lowerName = name == null ? "" : name.toLowerCase(Locale.ROOT);
+            String lowerKey = key == null ? "" : key.toLowerCase(Locale.ROOT);
+            if (lowerName.contains("秒播")
+                    || lowerApi.startsWith("csp_wex")
+                    || lowerApi.contains("ikanbot")
+                    || lowerApi.contains("yiys")) {
+                return false;
+            }
+            return lowerApi.contains("wogg")
+                    || lowerApi.contains("ainew")
+                    || lowerApi.contains("qwmkv")
+                    || lowerApi.contains("soai")
+                    || lowerApi.contains("sokaka")
+                    || lowerApi.contains("seedhub")
+                    || lowerApi.contains("pansou")
+                    || lowerApi.contains("s_zps")
+                    || lowerApi.contains("ypanso")
+                    || lowerApi.contains("bpanso")
+                    || lowerApi.contains("yiso")
+                    || lowerApi.contains("panta")
+                    || lowerApi.contains("mypan")
+                    || lowerKey.contains("mypan")
+                    || lowerName.contains("我的云盘")
+                    || lowerName.contains("我的网盘")
+                    || lowerName.contains("我的┃网盘")
+                    || lowerName.contains("网盘")
+                    || lowerName.contains("云盘")
+                    || lowerApi.contains("alipansou")
+                    || lowerApi.contains("tudou");
+        }
+
+        public String capabilityStatus() {
+            if (isExtTooLarge()) {
+                return STATUS_EXT_TOO_LARGE;
+            }
+            if (isNetdiskSite()) {
+                return STATUS_ADAPTER_MISSING;
+            }
+            if (type == 3
+                    || (api != null && (api.startsWith("csp_") || api.endsWith(".js")))
+                    || (jar != null && jar.length() > 0)) {
+                return STATUS_NEEDS_JAR;
+            }
+            if (type != 0 && type != 1) {
+                return STATUS_UNSUPPORTED_TYPE;
+            }
+            try {
+                http(api);
+            } catch (Exception invalid) {
+                return STATUS_CUSTOM_SITE_URL;
+            }
+            if (requiresParser && (playUrl == null || playUrl.length() == 0)) {
+                return STATUS_PARSER_REQUIRED;
+            }
+            return STATUS_OK;
+        }
+
+        public static String capabilityReason(String status) {
+            if (STATUS_OK.equals(status)) {
+                return "正常可用";
+            } else if (STATUS_NEEDS_JAR.equals(status)) {
+                return "此来源需要 Spider / JS / JAR 运行环境，基础版尚未支持";
+            } else if (STATUS_UNSUPPORTED_TYPE.equals(status)) {
+                return "暂不支持此类型来源，已保留在列表中";
+            } else if (STATUS_ADAPTER_MISSING.equals(status)) {
+                return "此网盘源的原始插件尚未适配当前设备，无法读取原始网盘线路";
+            } else if (STATUS_EXT_TOO_LARGE.equals(status)) {
+                return "扩展参数超过大小上限，无法加载";
+            } else if (STATUS_CUSTOM_SITE_URL.equals(status)) {
+                return "此来源不是可直接请求的 HTTP(S) CMS";
+            } else if (STATUS_PARSER_REQUIRED.equals(status)) {
+                return "需要解析器，当前环境缺少可用解析配置";
+            }
+            return "此来源暂不可用";
+        }
+
+        public String limitation() {
+            return capabilityReason(capabilityStatus());
+        }
     }
 
     public static final class Category {
@@ -112,10 +221,164 @@ public final class LiteCatalog {
         return out.toString();
     }
 
-    public static String fetch(String address, Map<String, String> headers) throws Exception {
+    public static boolean isHtml(String s) {
+        if (s == null) return false;
+        String t = s.trim().toLowerCase(Locale.ROOT);
+        return t.startsWith("<!doctype") || t.startsWith("<html");
+    }
+
+    static final class RedirectCookie {
+        final String name;
+        final String value;
+        final String domain;
+        final boolean hostOnly;
+        final String path;
+
+        RedirectCookie(String name, String value, String domain, boolean hostOnly, String path) {
+            this.name = name;
+            this.value = value;
+            this.domain = domain;
+            this.hostOnly = hostOnly;
+            this.path = path;
+        }
+
+        boolean matches(URL target) {
+            String targetHost = target.getHost().toLowerCase(Locale.ROOT);
+            if (hostOnly) {
+                if (!targetHost.equals(domain)) return false;
+            } else {
+                if (!targetHost.equals(domain) && !targetHost.endsWith("." + domain)) return false;
+            }
+            String targetPath = target.getPath();
+            if (targetPath == null || targetPath.length() == 0) targetPath = "/";
+            if ("/".equals(path) || targetPath.equals(path)) return true;
+            if (targetPath.startsWith(path)) {
+                return path.endsWith("/") || targetPath.charAt(path.length()) == '/';
+            }
+            return false;
+        }
+    }
+
+    static List<RedirectCookie> parseSetCookies(List<String> headerValues, URL requestUrl) {
+        List<RedirectCookie> result = new ArrayList<RedirectCookie>();
+        if (headerValues == null || headerValues.isEmpty()) return result;
+        String reqHost = requestUrl.getHost().toLowerCase(Locale.ROOT);
+        for (int j = 0; j < headerValues.size(); j++) {
+            String raw = headerValues.get(j);
+            if (raw == null || raw.trim().length() == 0) continue;
+            String[] parts = raw.split(";");
+            if (parts.length == 0) continue;
+            String first = parts[0].trim();
+            int eq = first.indexOf('=');
+            if (eq <= 0) continue;
+            String name = first.substring(0, eq).trim();
+            String value = first.substring(eq + 1).trim();
+            if (name.length() == 0) continue;
+
+            String domain = reqHost;
+            boolean hostOnly = true;
+            String path = "/";
+            boolean expired = value.length() == 0;
+
+            for (int i = 1; i < parts.length; i++) {
+                String attr = parts[i].trim();
+                if (attr.length() == 0) continue;
+                int aEq = attr.indexOf('=');
+                String aKey =
+                        (aEq < 0 ? attr : attr.substring(0, aEq)).trim().toLowerCase(Locale.ROOT);
+                String aVal = aEq < 0 ? "" : attr.substring(aEq + 1).trim();
+                if ("domain".equals(aKey) && aVal.length() > 0) {
+                    String clean = aVal.replaceAll("^\\.+", "").toLowerCase(Locale.ROOT);
+                    if (clean.indexOf('.') >= 0
+                            && (reqHost.equals(clean) || reqHost.endsWith("." + clean))) {
+                        domain = clean;
+                        hostOnly = false;
+                    }
+                } else if ("path".equals(aKey) && aVal.startsWith("/")) {
+                    path = aVal;
+                } else if ("max-age".equals(aKey)) {
+                    try {
+                        long secs = Long.parseLong(aVal);
+                        if (secs <= 0) expired = true;
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            if (!expired) {
+                result.add(new RedirectCookie(name, value, domain, hostOnly, path));
+            }
+        }
+        return result;
+    }
+
+    static void mergeRedirectCookies(
+            Map<String, String> headers, Collection<RedirectCookie> cookies, URL target) {
+        Map<String, String> map = new LinkedHashMap<String, String>();
+        String existing = null;
+        for (Map.Entry<String, String> entry : headers.entrySet()) {
+            if ("cookie".equalsIgnoreCase(entry.getKey())) {
+                existing = entry.getValue();
+                break;
+            }
+        }
+        if (existing != null && existing.trim().length() > 0) {
+            String[] pairs = existing.split(";");
+            for (int i = 0; i < pairs.length; i++) {
+                int eq = pairs[i].indexOf('=');
+                if (eq > 0) {
+                    map.put(pairs[i].substring(0, eq).trim(), pairs[i].substring(eq + 1).trim());
+                }
+            }
+        }
+        for (Iterator<RedirectCookie> it = cookies.iterator(); it.hasNext(); ) {
+            RedirectCookie rc = it.next();
+            if (rc.matches(target)) {
+                map.put(rc.name, rc.value);
+            }
+        }
+        if (!map.isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, String> e : map.entrySet()) {
+                if (sb.length() > 0) sb.append("; ");
+                sb.append(e.getKey()).append("=").append(e.getValue());
+            }
+            for (Iterator<String> it = headers.keySet().iterator(); it.hasNext(); ) {
+                if ("cookie".equalsIgnoreCase(it.next())) it.remove();
+            }
+            headers.put("Cookie", sb.toString());
+        }
+    }
+
+    static Map<String, String> inheritedHeaders(URL before, URL after, Map<String, String> input) {
+        Map<String, String> out = new LinkedHashMap<String, String>();
+        int bp = before.getPort() < 0 ? before.getDefaultPort() : before.getPort();
+        int ap = after.getPort() < 0 ? after.getDefaultPort() : after.getPort();
+        boolean sameOrigin =
+                before.getProtocol().equalsIgnoreCase(after.getProtocol())
+                        && before.getHost().equalsIgnoreCase(after.getHost())
+                        && bp == ap;
+        for (Map.Entry<String, String> entry : input.entrySet()) {
+            String key = entry.getKey();
+            if (sameOrigin
+                    || !(key.equalsIgnoreCase("Authorization")
+                            || key.equalsIgnoreCase("Proxy-Authorization")
+                            || key.equalsIgnoreCase("Cookie")
+                            || key.equalsIgnoreCase("Cookie2"))) {
+                out.put(key, entry.getValue());
+            }
+        }
+        return out;
+    }
+
+    private static String fetchOnce(
+            String address, Map<String, String> requestHeaders, String defaultUa)
+            throws Exception {
         String current = http(address);
         long deadlineNs = System.nanoTime() + REQUEST_BUDGET_NS;
-        for (int redirects = 0; redirects < 6; redirects++) {
+        Map<String, String> headers = new LinkedHashMap<String, String>();
+        if (requestHeaders != null) headers.putAll(requestHeaders);
+        Map<String, RedirectCookie> redirectCookies = new LinkedHashMap<String, RedirectCookie>();
+        for (int redirects = 0; redirects < 5; redirects++) {
             if (Thread.currentThread().isInterrupted() || System.nanoTime() > deadlineNs)
                 throw new InterruptedIOException();
             HttpURLConnection c = (HttpURLConnection) new URL(current).openConnection();
@@ -126,25 +389,58 @@ public final class LiteCatalog {
             c.setConnectTimeout(Math.min(10000, remainingMs));
             c.setReadTimeout(Math.min(12000, remainingMs));
             c.setInstanceFollowRedirects(false);
-            c.setRequestProperty("User-Agent", "MarcoMovie-Lite/0.5");
-            c.setRequestProperty("Accept-Encoding", "identity");
+            c.setRequestProperty("User-Agent", defaultUa != null ? defaultUa : USER_AGENT);
             if (headers != null)
                 for (Map.Entry<String, String> h : headers.entrySet())
                     c.setRequestProperty(h.getKey(), h.getValue());
             try {
                 int status = c.getResponseCode();
+                List<String> setCookies = c.getHeaderFields().get("Set-Cookie");
+                if (setCookies == null) {
+                    for (Map.Entry<String, List<String>> entry : c.getHeaderFields().entrySet()) {
+                        if ("set-cookie".equalsIgnoreCase(entry.getKey())) {
+                            setCookies = entry.getValue();
+                            break;
+                        }
+                    }
+                }
+                List<RedirectCookie> newCookies = parseSetCookies(setCookies, new URL(current));
+                for (int i = 0; i < newCookies.size(); i++) {
+                    RedirectCookie cookie = newCookies.get(i);
+                    redirectCookies.put(
+                            cookie.domain
+                                    + "|"
+                                    + cookie.hostOnly
+                                    + "|"
+                                    + cookie.path
+                                    + "|"
+                                    + cookie.name,
+                            cookie);
+                }
                 if (status >= 300 && status < 400) {
-                    String next =
-                            http(new URL(new URL(current), c.getHeaderField("Location")).toString());
+                    String loc = c.getHeaderField("Location");
+                    if (loc == null) throw new IOException("重定向缺少地址");
+                    String next = http(new URL(new URL(current), loc).toString());
                     URL before = new URL(current), after = new URL(next);
                     if ("https".equals(before.getProtocol()) && "http".equals(after.getProtocol()))
                         throw new IOException("不支持降级连接");
-                    if (!before.getAuthority().equals(after.getAuthority())) headers = null;
+                    if (after.getUserInfo() != null) throw new IOException("来源重定向不能注入登录凭据");
+                    if (headers != null) {
+                        headers = inheritedHeaders(before, after, headers);
+                    }
+                    mergeRedirectCookies(headers, redirectCookies.values(), after);
                     current = next;
                     continue;
                 }
-                if (status != 200) throw new IOException("服务器返回 HTTP " + status);
+                if (status < 200 || status >= 300) throw new IOException("服务器返回 HTTP " + status);
+                String contentType = c.getContentType();
+                boolean isHtmlContentType =
+                        contentType != null
+                                && contentType.toLowerCase(Locale.ROOT).contains("text/html");
                 InputStream in = c.getInputStream();
+                if ("gzip".equalsIgnoreCase(c.getContentEncoding())) {
+                    in = new java.util.zip.GZIPInputStream(in);
+                }
                 ByteArrayOutputStream out = new ByteArrayOutputStream();
                 byte[] b = new byte[8192];
                 int n;
@@ -154,13 +450,50 @@ public final class LiteCatalog {
                     if (out.size() + n > MAX_BYTES) throw new IOException("配置或列表超过大小限制");
                     out.write(b, 0, n);
                 }
-                return decodeText(out.toByteArray());
+                String result = decodeText(out.toByteArray());
+                if (isHtmlContentType || isHtml(result)) {
+                    throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+                }
+                return result;
             } finally {
                 IN_FLIGHT.remove(c);
                 c.disconnect();
             }
         }
         throw new IOException("重定向过多");
+    }
+
+    public static String fetch(String address, Map<String, String> headers) throws Exception {
+        String customUa = null;
+        if (headers != null) {
+            for (Map.Entry<String, String> entry : headers.entrySet()) {
+                if ("user-agent".equalsIgnoreCase(entry.getKey())) {
+                    customUa = entry.getValue();
+                    break;
+                }
+            }
+        }
+        if (customUa != null) {
+            return fetchOnce(address, headers, customUa);
+        }
+        Exception firstError = null;
+        boolean sawHtml = false;
+        String[] uas = new String[] {USER_AGENT, SAFARI_USER_AGENT};
+        for (int i = 0; i < uas.length; i++) {
+            String ua = uas[i];
+            try {
+                return fetchOnce(address, headers, ua);
+            } catch (Exception e) {
+                if (e.getMessage() != null && e.getMessage().contains("地址返回的是网页而不是配置")) {
+                    sawHtml = true;
+                }
+                firstError = e;
+            }
+        }
+        if (sawHtml) {
+            throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+        }
+        throw firstError != null ? firstError : new IOException("无法连接配置地址");
     }
 
     public static String decodeText(byte[] bytes) throws IOException {
@@ -237,7 +570,13 @@ public final class LiteCatalog {
     }
 
     public static JSONObject decodeConfig(String raw) throws Exception {
+        if (isHtml(raw)) {
+            throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+        }
         String cleaned = withoutComments(raw).trim();
+        if (isHtml(cleaned)) {
+            throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+        }
         if (cleaned.startsWith("\ufeff")) cleaned = cleaned.substring(1).trim();
         if (cleaned.startsWith("2423")) {
             cleaned = withoutComments(decrypt2423(cleaned)).trim();
@@ -308,6 +647,15 @@ public final class LiteCatalog {
             s.api = Json.str(row, "api", "");
             s.playUrl = Json.str(row, "playUrl", "");
             s.searchable = Json.integer(row, "searchable", 1) != 0;
+            s.ext = row.opt("ext");
+            s.requiresParser =
+                    s.playUrl.length() > 0
+                            || Json.integer(row, "parse", 0) == 1
+                            || Json.integer(row, "jx", 0) == 1;
+            String rawJar = Json.str(row, "jar", "");
+            if (rawJar.length() > 0) {
+                s.jar = rawJar;
+            }
             if (!s.api.startsWith("csp_")
                     && !s.api.startsWith("js_")
                     && base != null
@@ -332,6 +680,7 @@ public final class LiteCatalog {
                 s.supported = false;
             }
             if (s.api.startsWith("emby://account/")) s.supported = true;
+            if (s.isExtTooLarge()) s.supported = false;
             String ua = Json.str(row, "ua", "");
             if (ua.length() > 0 && ua.indexOf('\r') < 0 && ua.indexOf('\n') < 0) {
                 s.headers.put("User-Agent", ua);
