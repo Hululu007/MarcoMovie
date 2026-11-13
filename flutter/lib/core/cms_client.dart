@@ -2339,12 +2339,26 @@ class CmsClient {
       return _localScriptPlaybackHeaders(site, resolved);
     }
     var resolved = await CspBridge.resolveEpisodeForPlayback(site, episode, _getText);
+    if (resolved.url != episode.url &&
+        (resolved.url.startsWith('mmshare://') ||
+            resolved.url.toLowerCase().startsWith('push://') ||
+            ResilientHttpClient.cloudProviderForShare(resolved.url) != null)) {
+      final shareResolved = await _tryResolveCloudShareTarget(
+        site,
+        resolved,
+        resolved.url,
+        parses: parses,
+      );
+      if (shareResolved != null) return shareResolved;
+    }
+    final unsupportedPushOrShare = _unsupportedPushOrShareReason(resolved.url);
     final resolvedUri = Uri.tryParse(resolved.url);
     final ownedLocalProxy = resolvedUri != null &&
         (JsSourceHost.ownsProxyUrl(_scriptSessionKey(site), resolvedUri) ||
             _pythonHost.ownsProxyUrl(_scriptSessionKey(site), resolvedUri) ||
             CatPawHost.matches(resolved.url));
-    if (!_isDirectStreamUrl(resolved.url) &&
+    if (unsupportedPushOrShare == null &&
+        !_isDirectStreamUrl(resolved.url) &&
         !ownedLocalProxy &&
         (site.playUrl.isNotEmpty ||
             parses.isNotEmpty ||
@@ -2367,15 +2381,59 @@ class CmsClient {
         throw const FormatException('未能从网页或解析接口提取可播放视频流，请切换其他线路');
       }
     } else if (!resolved.isDirectPlayable && !ownedLocalProxy) {
-      final blockReason = WebMediaResolver.episodeUnavailableReason(
-        resolved,
-        site: site,
-        parses: parses,
-      );
+      final blockReason = unsupportedPushOrShare ??
+          WebMediaResolver.episodeUnavailableReason(
+            resolved,
+            site: site,
+            parses: parses,
+          );
       throw FormatException(blockReason ?? '当前剧集缺少可用解析配置，请切换其他线路');
     }
     return SourcePlayback.inheritSourceHeaders(resolved,
         sourceHeaders: site.headers, sourceOrigin: _sourceCredentialOrigin(site));
+  }
+
+  static String? _unsupportedPushOrShareReason(String rawUrl) {
+    final trimmed = rawUrl.trim();
+    final lower = trimmed.toLowerCase();
+    if (lower.startsWith('mmshare://')) {
+      var inner = trimmed.substring('mmshare://'.length).trim();
+      if (inner.contains('%')) {
+        try {
+          inner = Uri.decodeFull(inner);
+        } on ArgumentError {
+          // Keep raw string when percent-encoding is malformed.
+        }
+      }
+      final innerLower = inner.toLowerCase();
+      if (innerLower.startsWith('magnet:') ||
+          innerLower.startsWith('ed2k://') ||
+          innerLower.startsWith('thunder://')) {
+        return '当前剧集为磁力 / P2P 下载链接，暂不支持直接播放';
+      }
+      return '当前剧集返回了不受支持的网盘分享链接，仅支持夸克、UC、百度与阿里云盘';
+    }
+    if (lower.startsWith('push://')) {
+      var inner = trimmed.substring('push://'.length).trim();
+      if (inner.contains('%')) {
+        try {
+          inner = Uri.decodeFull(inner);
+        } on ArgumentError {
+          // Keep raw string when percent-encoding is malformed.
+        }
+      }
+      final innerLower = inner.toLowerCase();
+      if (innerLower.isEmpty) {
+        return '当前剧集返回的推送链接（push://）为空，请切换其他线路';
+      }
+      if (innerLower.startsWith('magnet:') ||
+          innerLower.startsWith('ed2k://') ||
+          innerLower.startsWith('thunder://')) {
+        return '当前剧集为磁力 / P2P 推送链接（push://），暂不支持直接播放';
+      }
+      return '当前剧集为外部推送链接（push://），目标网盘或协议暂不支持直接播放';
+    }
+    return null;
   }
 
   CmsEpisode _localScriptPlaybackHeaders(CmsSite site, CmsEpisode episode) {

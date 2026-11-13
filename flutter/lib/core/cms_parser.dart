@@ -1242,7 +1242,7 @@ class CmsParser {
         final api = resolveUrl(origin, (item['api'] ?? '').toString());
         if (key.isEmpty || api.isEmpty) continue;
         if (type == -1 && (api.startsWith('http://') || api.startsWith('https://'))) {
-          final path = api.split(RegExp(r'[?#]'))[0].toLowerCase();
+          final path = (Uri.tryParse(api)?.path ?? '').toLowerCase();
           type = (path.contains('xml') || path.endsWith('.xml')) ? 0 : 1;
         }
         if (!seenKeys.add(key)) {

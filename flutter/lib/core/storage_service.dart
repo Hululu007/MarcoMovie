@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
@@ -18,6 +19,13 @@ import 'storage_file_store.dart';
 
 export 'storage_file_store.dart';
 
+typedef Pbkdf2ComputeRunner = Future<T> Function<T>(
+  FutureOr<T> Function() computation,
+);
+
+Future<T> _defaultIsolatePbkdf2Runner<T>(FutureOr<T> Function() computation) =>
+    Isolate.run<T>(computation);
+
 /// Persistent preferences and backup serializer compatible with Android `Prefs.java`.
 class StorageService {
   static const String syncSchema = 'marco-movie-sync';
@@ -25,6 +33,8 @@ class StorageService {
   static const String defaultSyncFileName = 'marco-movie-sync.json';
   static const int maxSyncTombstones = 300;
   static const int maxSyncPayloadBytes = 8 * 1024 * 1024;
+  static const double minPlaySpeed = 0.5;
+  static const double maxPlaySpeed = 3.0;
   static const String keyOrigin = 'origin';
   static const String keyRawConfig = 'config_raw_json';
   static const String keySelectedSite = 'selected_site';
@@ -103,11 +113,16 @@ class StorageService {
   final ValueNotifier<bool> historyCorruptionNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<bool> subscriptionsCorruptionNotifier =
       ValueNotifier<bool>(false);
+  final ValueNotifier<bool> credentialMigrationFailureNotifier =
+      ValueNotifier<bool>(false);
   bool _historyCorrupted = false;
   bool get isHistoryCorrupted => _historyCorrupted;
   bool _subscriptionsCorrupted = false;
   bool _subscriptionsCorruptionNoticeConsumed = false;
   bool get isSubscriptionsCorrupted => _subscriptionsCorrupted;
+  bool _credentialMigrationNoticeConsumed = false;
+  String? _credentialMigrationBackupPath;
+  String? get credentialMigrationBackupPath => _credentialMigrationBackupPath;
   @visibleForTesting
   bool get hasCachedSubscriptions => _subscriptionsCache != null;
 
@@ -120,12 +135,52 @@ class StorageService {
     return true;
   }
 
+  /// Consumes the pending one-time UI notice when legacy credential decryption failed.
+  bool consumeCredentialMigrationFailureNotice() {
+    if (!credentialMigrationFailureNotifier.value ||
+        _credentialMigrationNoticeConsumed) {
+      return false;
+    }
+    _credentialMigrationNoticeConsumed = true;
+    credentialMigrationFailureNotifier.value = false;
+    final store = _secureStore;
+    if (store is DefaultSecureCredentialStore) {
+      store.acknowledgeLegacyMigrationFailure();
+    }
+    return true;
+  }
+
   /// Explicitly clears subscription write-protection when resetting corrupted state.
   void resetSubscriptionsWriteProtection() {
     _subscriptionsCorrupted = false;
     _subscriptionsCorruptionNoticeConsumed = false;
     subscriptionsCorruptionNotifier.value = false;
   }
+
+  /// Clears subscription write-protection and re-reads `subscriptions.json` from disk.
+  /// Returns `true` if subscriptions loaded cleanly, or `false` if still corrupted.
+  Future<bool> reloadSubscriptionsFromDisk() =>
+      _runSequentialMutation(() async {
+        resetSubscriptionsWriteProtection();
+        _invalidateConfigCache();
+        try {
+          await _fileStore.ensureInitialized();
+        } on Object catch (e) {
+          debugPrint('StorageService: reloadSubscriptionsFromDisk init warning: $e');
+        }
+        final subs = getSubscriptions();
+        if (_subscriptionsCorrupted) {
+          return false;
+        }
+        final public = subs.where((s) => !s.isEffectivelyPrivate).toList();
+        if (public.isNotEmpty) {
+          await _prefs.setString(keyRawConfig, public.first.rawContent);
+          await _prefs.setString(keyOrigin, public.first.url);
+          await _prefs.setString(keyActiveDepotName, public.first.activeDepotName);
+        }
+        _invalidateConfigCache();
+        return true;
+      });
 
   final Map<String, ({int intro, int outro, int updated})>
       _privateVideoSkipRecords =
@@ -139,15 +194,37 @@ class StorageService {
   QuarkAccountProvider get quarkAccounts => _quarkProviders[_prefs] ??=
       QuarkAccountProvider(
         readCredential: () => getNetdiskCred('quark'),
-        writeCredential: (value) async {
-          _credentialCache[keyQuarkCookie] = value;
-          await _secureStore.write(keyQuarkCookie, value);
-          await _prefs.remove(keyQuarkCookie);
-        },
+        writeCredential: (value) => _writeSecret(keyQuarkCookie, value),
       );
   final SecureCredentialStore _secureStore;
+  final Pbkdf2ComputeRunner _pbkdf2Runner;
   Map<String, String> get _credentialCache =>
       _credentialCaches[_prefs] ??= <String, String>{};
+
+  Future<void> _writeSecret(String key, String value) async {
+    final hadPrevious = _credentialCache.containsKey(key);
+    final previousValue = _credentialCache[key];
+    if (value.isEmpty) {
+      _credentialCache.remove(key);
+    } else {
+      _credentialCache[key] = value;
+    }
+    try {
+      if (value.isEmpty) {
+        await _secureStore.delete(key);
+      } else {
+        await _secureStore.write(key, value);
+      }
+      await _prefs.remove(key);
+    } on Object {
+      if (hadPrevious && previousValue != null) {
+        _credentialCache[key] = previousValue;
+      } else {
+        _credentialCache.remove(key);
+      }
+      rethrow;
+    }
+  }
   @visibleForTesting
   SecureCredentialStore get secureStoreForTesting => _secureStore;
   @visibleForTesting
@@ -299,9 +376,11 @@ class StorageService {
     required Directory? explicitDataDirectory,
     required StorageFileStore fileStore,
     required SecureCredentialStore secureStore,
+    Pbkdf2ComputeRunner? pbkdf2Runner,
   })  : _explicitDataDirectory = explicitDataDirectory,
         _fileStore = fileStore,
-        _secureStore = secureStore {
+        _secureStore = secureStore,
+        _pbkdf2Runner = pbkdf2Runner ?? _defaultIsolatePbkdf2Runner {
     _historyCorrupted = _prefs.getBool(keyHistoryCorrupted) ?? false;
     if (_historyCorrupted) {
       historyCorruptionNotifier.value = true;
@@ -313,6 +392,7 @@ class StorageService {
     Directory? dataDirectory,
     SecureCredentialStore? secureStore,
     StorageFileStore? fileStore,
+    Pbkdf2ComputeRunner? pbkdf2Runner,
   }) {
     final resolved = _resolveBackingStores(
       prefs,
@@ -325,6 +405,7 @@ class StorageService {
       explicitDataDirectory: resolved.dir,
       fileStore: resolved.fileStore,
       secureStore: resolved.secureStore,
+      pbkdf2Runner: pbkdf2Runner,
     );
   }
 
@@ -357,12 +438,37 @@ class StorageService {
     } on Object catch (e) {
       debugPrint('StorageService: ensureInitialized warning: $e');
     }
+    await _cleanupLeftoverTempFiles();
     await _migrateCredentialsIfNeeded();
     await _migrateFromPrefsIfNeeded();
     getSubscriptions();
   }
 
+  Future<void> _cleanupLeftoverTempFiles() async {
+    try {
+      final names = _fileStore.listFileNamesSync();
+      for (final name in names) {
+        if (!name.endsWith('.tmp')) continue;
+        if (name.startsWith('$_subscriptionsFileName.') ||
+            name.startsWith('$_watchHistoryFileName.') ||
+            name.startsWith('${DefaultSecureCredentialStore.legacyFileName}.')) {
+          try {
+            await _fileStore.deleteFile(name);
+          } on Object catch (e) {
+            debugPrint('StorageService: cleanup temp file $name failed: $e');
+          }
+        }
+      }
+    } on Object catch (e) {
+      debugPrint('StorageService: scan leftover temp files failed: $e');
+    }
+  }
+
   Future<void> _migrateCredentialsIfNeeded() async {
+    final store = _secureStore;
+    if (store is DefaultSecureCredentialStore) {
+      await store.ensureInitialized();
+    }
     for (final key in [
       keyWebdavPass,
       keyQuarkCookie,
@@ -373,16 +479,29 @@ class StorageService {
       if (_prefs.containsKey(key)) {
         final plain = _prefs.getString(key) ?? '';
         _credentialCache[key] = plain;
-        if (plain.isNotEmpty) {
-          await _secureStore.write(key, plain);
+        try {
+          if (plain.isNotEmpty) {
+            await _secureStore.write(key, plain);
+          }
+          await _prefs.remove(key);
+        } on Object catch (e) {
+          debugPrint('StorageService: migrate pref $key to secure store failed: $e');
         }
-        await _prefs.remove(key);
       } else {
-        final secVal = await _secureStore.read(key);
-        if (secVal != null && secVal.isNotEmpty) {
-          _credentialCache[key] = secVal;
+        try {
+          final secVal = await _secureStore.read(key);
+          if (secVal != null && secVal.isNotEmpty) {
+            _credentialCache[key] = secVal;
+          }
+        } on Object catch (e) {
+          debugPrint('StorageService: read $key from secure store failed: $e');
         }
       }
+    }
+    if (store is DefaultSecureCredentialStore && store.didLegacyMigrationFail) {
+      _credentialMigrationBackupPath = store.legacyBackupPath;
+      _credentialMigrationNoticeConsumed = false;
+      credentialMigrationFailureNotifier.value = true;
     }
   }
 
@@ -475,6 +594,7 @@ class StorageService {
     Directory? dataDirectory,
     SecureCredentialStore? secureStore,
     StorageFileStore? fileStore,
+    Pbkdf2ComputeRunner? pbkdf2Runner,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final explicitDir = dataDirectory ?? debugOverrideDataDirectory;
@@ -494,6 +614,7 @@ class StorageService {
               ns,
               InMemorySecureCredentialStore.new,
             ),
+        pbkdf2Runner: pbkdf2Runner,
       );
       await service._initializeStorage();
       return service;
@@ -507,6 +628,7 @@ class StorageService {
       dataDirectory: dir,
       secureStore: secureStore,
       fileStore: fileStore,
+      pbkdf2Runner: pbkdf2Runner,
     );
     await service._initializeStorage();
     return service;
@@ -517,7 +639,7 @@ class StorageService {
   String get activeDepotName => _prefs.getString(keyActiveDepotName) ?? '';
   bool get episodesDescending => _prefs.getBool(keyEpisodesDescending) ?? false;
   double get playSpeed =>
-      (_prefs.getDouble(keyPlaySpeed) ?? 1.0).clamp(0.5, 2.0);
+      (_prefs.getDouble(keyPlaySpeed) ?? 1.0).clamp(minPlaySpeed, maxPlaySpeed);
   bool get autoNext => _prefs.getBool(keyAutoNext) ?? true;
   int get skipIntroSec => (_prefs.getInt(keySkipIntroSec) ?? 0).clamp(0, 600);
   int get skipOutroSec => (_prefs.getInt(keySkipOutroSec) ?? 0).clamp(0, 600);
@@ -664,10 +786,41 @@ class StorageService {
       hasPrivacyPassword ||
       getSubscriptions().any((s) => s.isEffectivelyPrivate);
 
-  bool verifyPrivacyPassword(String input) {
+  static bool _verifyPbkdf2InIsolate(
+    Uint8List passwordBytes,
+    Uint8List saltBytes,
+    int iterations,
+    Uint8List expectedHash,
+  ) {
+    final derived = pbkdf2Sha256(passwordBytes, saltBytes, iterations, 32);
+    return _constantTimeEquals(derived, expectedHash);
+  }
+
+  static String _deriveFormattedPinInIsolate(
+    String trimmedPin,
+    Uint8List salt,
+  ) {
+    const iterations = 100000;
+    final derived = pbkdf2Sha256(utf8.encode(trimmedPin), salt, iterations, 32);
+    final saltHex = _hexEncode(salt);
+    final hashHex = _hexEncode(derived);
+    return 'pbkdf2:sha256:${trimmedPin.length}:$iterations:$saltHex:$hashHex';
+  }
+
+  static Uint8List _generatePinSalt() {
+    final rand = Random.secure();
+    final salt = Uint8List(16);
+    for (var i = 0; i < 16; i++) {
+      salt[i] = rand.nextInt(256);
+    }
+    return salt;
+  }
+
+  Future<bool> verifyPrivacyPassword(String input) async {
     final trimmed = input.trim();
     final saved = privacyPassword.trim();
     if (saved.isEmpty || trimmed.isEmpty) return false;
+    final runner = _pbkdf2Runner;
 
     final pbMatch = _pbkdf2PinPattern.firstMatch(saved);
     if (pbMatch != null) {
@@ -680,15 +833,17 @@ class StorageService {
       if (iterations < 100000 || iterations > 1000000) {
         return false;
       }
-      final saltHex = pbMatch.group(3)!;
-      final expectedHashHex = pbMatch.group(4)!;
-      final derived = pbkdf2Sha256(
-        utf8.encode(trimmed),
-        _hexDecode(saltHex),
-        iterations,
-        32,
+      final pwdBytes = Uint8List.fromList(utf8.encode(trimmed));
+      final saltBytes = _hexDecode(pbMatch.group(3)!);
+      final expectedBytes = _hexDecode(pbMatch.group(4)!);
+      return runner(
+        () => _verifyPbkdf2InIsolate(
+          pwdBytes,
+          saltBytes,
+          iterations,
+          expectedBytes,
+        ),
       );
-      return _constantTimeEquals(derived, _hexDecode(expectedHashHex));
     }
 
     final match = _legacySha256PinPattern.firstMatch(saved);
@@ -700,7 +855,11 @@ class StorageService {
             utf8.encode(_legacyHashPin(trimmed)),
             utf8.encode(legacyHash),
           )) {
-        unawaited(setPrivacyPassword(trimmed));
+        final salt = _generatePinSalt();
+        final upgraded = await runner(
+          () => _deriveFormattedPinInIsolate(trimmed, salt),
+        );
+        await _prefs.setString(keyPrivacyPassword, upgraded);
         return true;
       }
       return false;
@@ -713,7 +872,11 @@ class StorageService {
     }
 
     if (_constantTimeEquals(utf8.encode(trimmed), utf8.encode(saved))) {
-      unawaited(setPrivacyPassword(trimmed));
+      final salt = _generatePinSalt();
+      final upgraded = await runner(
+        () => _deriveFormattedPinInIsolate(trimmed, salt),
+      );
+      await _prefs.setString(keyPrivacyPassword, upgraded);
       return true;
     }
     return false;
@@ -725,19 +888,12 @@ class StorageService {
       await _prefs.setString(keyPrivacyPassword, '');
       return;
     }
-    final rand = Random.secure();
-    final salt = Uint8List(16);
-    for (var i = 0; i < 16; i++) {
-      salt[i] = rand.nextInt(256);
-    }
-    const iterations = 100000;
-    final derived = pbkdf2Sha256(utf8.encode(trimmed), salt, iterations, 32);
-    final saltHex = _hexEncode(salt);
-    final hashHex = _hexEncode(derived);
-    await _prefs.setString(
-      keyPrivacyPassword,
-      'pbkdf2:sha256:${trimmed.length}:$iterations:$saltHex:$hashHex',
+    final salt = _generatePinSalt();
+    final runner = _pbkdf2Runner;
+    final formatted = await runner(
+      () => _deriveFormattedPinInIsolate(trimmed, salt),
     );
+    await _prefs.setString(keyPrivacyPassword, formatted);
   }
 
   void _handleSubscriptionsCorruption({
@@ -1059,19 +1215,20 @@ class StorageService {
     }
     final merged = loadSavedConfig();
     if (merged != null &&
-        merged.publicSupportedSites.isNotEmpty &&
-        !merged.supportedSites.any((s) => s.key == selectedSiteKey)) {
-      final preferredDefault = merged.publicSupportedSites.firstWhere(
-        (s) => !CspBridge.isBannerNoticeSite(s) && s.supported,
-        orElse: () => merged.publicSupportedSites.firstWhere(
-          (s) => s.supported,
-          orElse: () => merged.publicSupportedSites.first,
-        ),
-      );
-      await _prefs.setString(
-        keySelectedSite,
-        preferredDefault.key,
-      );
+        !merged.availableSites.any((s) => s.key == selectedSiteKey)) {
+      final availPublic = merged.publicAvailableSites;
+      if (availPublic.isNotEmpty) {
+        final preferredDefault = availPublic.firstWhere(
+          (s) => !CspBridge.isBannerNoticeSite(s),
+          orElse: () => availPublic.first,
+        );
+        await _prefs.setString(
+          keySelectedSite,
+          preferredDefault.key,
+        );
+      } else if (merged.sites.any((s) => s.key == selectedSiteKey)) {
+        await _prefs.setString(keySelectedSite, '');
+      }
     }
     return merged;
   }
@@ -1133,17 +1290,17 @@ class StorageService {
     await _prefs.setString(keyActiveDepotName, public.isEmpty ? '' : public.first.activeDepotName);
     _invalidateConfigCache();
     final config = loadSavedConfig();
-    final sites = config?.publicSupportedSites ?? const <CmsSite>[];
-    if (!sites.any((s) => s.key == selectedSiteKey)) {
-      final fallbackSite = sites.isEmpty
+    final availPublic = config?.publicAvailableSites ?? const <CmsSite>[];
+    if (!availPublic.any((s) => s.key == selectedSiteKey)) {
+      final fallbackSite = availPublic.isEmpty
           ? null
-          : sites.firstWhere(
-              (s) => s.supported,
-              orElse: () => sites.first,
+          : availPublic.firstWhere(
+              (s) => !CspBridge.isBannerNoticeSite(s),
+              orElse: () => availPublic.first,
             );
       await _prefs.setString(keySelectedSite, fallbackSite?.key ?? '');
     }
-    if (!sites.any((s) => s.key == (_prefs.getString(keyPreferredSite) ?? ''))) {
+    if (!availPublic.any((s) => s.key == (_prefs.getString(keyPreferredSite) ?? ''))) {
       await _prefs.remove(keyPreferredSite);
     }
     return config;
@@ -1523,21 +1680,18 @@ class StorageService {
           parses: parsed.parses,
           spider: parsed.spider,
         );
-    final visibleSites =
-        isPrivate ? merged.supportedSites : merged.publicSupportedSites;
-    if (visibleSites.isNotEmpty &&
-        !visibleSites.any((s) => s.key == selectedSiteKey)) {
-      final fallbackSite = visibleSites.firstWhere(
-        (s) => s.supported,
-        orElse: () => visibleSites.first,
-      );
-      await _prefs.setString(keySelectedSite, fallbackSite.key);
-    } else if (merged.supportedSites.isEmpty && merged.sites.isNotEmpty) {
-      final fallbackSite = merged.sites.firstWhere(
-        (s) => s.supported,
-        orElse: () => merged.sites.first,
-      );
-      await _prefs.setString(keySelectedSite, fallbackSite.key);
+    final availableVisible =
+        isPrivate ? merged.availableSites : merged.publicAvailableSites;
+    if (!availableVisible.any((s) => s.key == selectedSiteKey)) {
+      if (availableVisible.isNotEmpty) {
+        final fallbackSite = availableVisible.firstWhere(
+          (s) => !CspBridge.isBannerNoticeSite(s),
+          orElse: () => availableVisible.first,
+        );
+        await _prefs.setString(keySelectedSite, fallbackSite.key);
+      } else if (merged.sites.any((s) => s.key == selectedSiteKey)) {
+        await _prefs.setString(keySelectedSite, '');
+      }
     }
     return merged;
   }
@@ -1566,7 +1720,10 @@ class StorageService {
     await _prefs.setBool(keyEpisodesDescending, value);
   }
   Future<void> setPlaySpeed(double speed) async {
-    await _prefs.setDouble(keyPlaySpeed, speed.clamp(0.5, 2.0));
+    await _prefs.setDouble(
+      keyPlaySpeed,
+      speed.clamp(minPlaySpeed, maxPlaySpeed),
+    );
   }
   Future<void> setAutoNext(bool value) async {
     await _prefs.setBool(keyAutoNext, value);
@@ -1908,24 +2065,16 @@ class StorageService {
     switch (driveKey) {
       case 'quark':
         quarkAccounts.invalidate();
-        _credentialCache[keyQuarkCookie] = trimmed;
-        await _secureStore.write(keyQuarkCookie, trimmed);
-        await _prefs.remove(keyQuarkCookie);
+        await _writeSecret(keyQuarkCookie, trimmed);
         break;
       case 'uc':
-        _credentialCache[keyUcCookie] = trimmed;
-        await _secureStore.write(keyUcCookie, trimmed);
-        await _prefs.remove(keyUcCookie);
+        await _writeSecret(keyUcCookie, trimmed);
         break;
       case 'baidu':
-        _credentialCache[keyBaiduCookie] = trimmed;
-        await _secureStore.write(keyBaiduCookie, trimmed);
-        await _prefs.remove(keyBaiduCookie);
+        await _writeSecret(keyBaiduCookie, trimmed);
         break;
       case 'ali':
-        _credentialCache[keyAliToken] = trimmed;
-        await _secureStore.write(keyAliToken, trimmed);
-        await _prefs.remove(keyAliToken);
+        await _writeSecret(keyAliToken, trimmed);
         break;
     }
     unawaited(CatPawHost.instance.syncNetdiskConfig());
@@ -2601,27 +2750,47 @@ class StorageService {
     if (decoded.rawConfig.isNotEmpty) {
       await _prefs.setString(keyRawConfig, decoded.rawConfig);
       await _prefs.setString(keyOrigin, decoded.origin);
-      if (parsedConfig != null &&
-          parsedConfig.supportedSites.isNotEmpty &&
-          !parsedConfig.supportedSites.any((s) => s.key == selectedSiteKey)) {
-        final fallbackSite = parsedConfig.supportedSites.firstWhere(
-          (s) => s.supported,
-          orElse: () => parsedConfig.supportedSites.first,
-        );
-        await _prefs.setString(
-          keySelectedSite,
-          fallbackSite.key,
-        );
+      if (parsedConfig != null) {
+        final availSites = parsedConfig.publicAvailableSites;
+        if (!availSites.any((s) => s.key == selectedSiteKey)) {
+          if (availSites.isNotEmpty) {
+            final fallbackSite = availSites.firstWhere(
+              (s) => !CspBridge.isBannerNoticeSite(s),
+              orElse: () => availSites.first,
+            );
+            await _prefs.setString(keySelectedSite, fallbackSite.key);
+          } else {
+            await _prefs.setString(keySelectedSite, '');
+          }
+        }
       }
     }
     _invalidateConfigCache();
+    final restoredConfig = loadSavedConfig();
+    final restoredPublicAvail =
+        restoredConfig?.publicAvailableSites ?? const <CmsSite>[];
     if (settings[keyPreferredSite] is String) {
-      final key = settings[keyPreferredSite] as String;
-      final exists = (loadSavedConfig()?.publicSupportedSites ?? const <CmsSite>[]).any((s) => s.key == key);
+      final key = (settings[keyPreferredSite] as String).trim();
+      final exists =
+          key.isNotEmpty && restoredPublicAvail.any((s) => s.key == key);
       await setPreferredSiteKey(exists ? key : '');
     }
     if (settings[keySelectedSite] is String) {
-      await setSelectedSiteKey(settings[keySelectedSite] as String);
+      final candidate = (settings[keySelectedSite] as String).trim();
+      if (candidate.isNotEmpty &&
+          restoredPublicAvail.any((s) => s.key == candidate)) {
+        await setSelectedSiteKey(candidate);
+      } else if (!restoredPublicAvail.any((s) => s.key == selectedSiteKey)) {
+        if (restoredPublicAvail.isNotEmpty) {
+          final fallbackSite = restoredPublicAvail.firstWhere(
+            (s) => !CspBridge.isBannerNoticeSite(s),
+            orElse: () => restoredPublicAvail.first,
+          );
+          await setSelectedSiteKey(fallbackSite.key);
+        } else {
+          await setSelectedSiteKey('');
+        }
+      }
     }
     if (nextHistory != null) {
       _historyFlushTimer?.cancel();
@@ -2657,7 +2826,7 @@ class StorageService {
     }
     if (settings[keyPlaySpeed] is num) {
       final speed = (settings[keyPlaySpeed] as num).toDouble();
-      if (speed >= 0.5 && speed <= 2.0) {
+      if (speed >= minPlaySpeed && speed <= maxPlaySpeed) {
         await setPlaySpeed(speed);
       }
     }
@@ -2707,11 +2876,9 @@ class StorageService {
     required bool auto,
     bool? syncSubs,
   }) async {
-    _credentialCache[keyWebdavPass] = pass;
+    await _writeSecret(keyWebdavPass, pass);
     await _prefs.setString(keyWebdavUrl, url.trim());
     await _prefs.setString(keyWebdavUser, user.trim());
-    await _secureStore.write(keyWebdavPass, pass);
-    await _prefs.remove(keyWebdavPass);
     await _prefs.setBool(keyWebdavAuto, auto);
     if (syncSubs != null) {
       await _prefs.setBool(keyWebdavSyncSubs, syncSubs);

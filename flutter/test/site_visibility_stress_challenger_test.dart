@@ -254,12 +254,10 @@ void main() {
       await storage.saveConfig(jsonEncode(jsonMap), origin: 'https://test.example/unsupported.json');
 
       final loadedConfig = storage.loadSavedConfig();
-      // Selected site key safely falls back to first site without throwing exception
+      // Selected site key never auto-selects an unsupported site and does not throw
       expect(loadedConfig?.supportedSites.length, 2);
       expect(loadedConfig?.availableSiteCount, 0);
-      expect(storage.selectedSiteKey, 'bad_jar');
-      expect(loadedConfig?.availableSiteCount, 0);
-      expect(storage.selectedSiteKey, 'bad_jar');
+      expect(storage.selectedSiteKey, isEmpty);
     });
   });
 

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:marco_movie/core/lan_sync_server.dart';
@@ -30,23 +31,35 @@ void main() {
   });
 
   group('F1: Platform-Secure Credential Storage & Migration', () {
-    test('DefaultSecureCredentialStore encrypts and decrypts roundtrip', () async {
-      final store = DefaultSecureCredentialStore(dataDirectory: tempDir);
-      await store.write('test_key', 'super_secret_value_123');
+    test('DefaultSecureCredentialStore persists via flutter_secure_storage and migrates legacy .enc file', () async {
+      FlutterSecureStorage.setMockInitialValues({});
+      final encFile = File('${tempDir.path}/secure_credentials.enc');
+      await encFile.writeAsString(
+        DefaultSecureCredentialStore.encryptLegacyPayloadForTest({
+          'legacy_key': 'migrated_secret_value',
+        }),
+        flush: true,
+      );
 
+      final store = DefaultSecureCredentialStore(dataDirectory: tempDir);
+      expect(await store.read('legacy_key'), equals('migrated_secret_value'));
+      expect(await encFile.exists(), isFalse);
+
+      await store.write('test_key', 'super_secret_value_123');
       final readBack = await store.read('test_key');
       expect(readBack, equals('super_secret_value_123'));
+      expect(await encFile.exists(), isFalse);
 
-      // Check that file on disk is encrypted and does not contain plaintext
-      final encFile = File('${tempDir.path}/secure_credentials.enc');
-      expect(await encFile.exists(), isTrue);
-      final rawDisk = await encFile.readAsString();
-      expect(rawDisk.contains('super_secret_value_123'), isFalse);
-      expect(rawDisk.startsWith('mm_sec_v1:'), isTrue);
+      // Verify fresh instance reads persisted secret from flutter_secure_storage
+      final storeReloaded = DefaultSecureCredentialStore(dataDirectory: tempDir);
+      expect(
+        await storeReloaded.read('test_key'),
+        equals('super_secret_value_123'),
+      );
 
       // Verify deletion
-      await store.delete('test_key');
-      expect(await store.read('test_key'), isNull);
+      await storeReloaded.delete('test_key');
+      expect(await storeReloaded.read('test_key'), isNull);
     });
 
     test('Startup migration migrates plaintext credentials from SharedPreferences to secure store', () async {
@@ -142,9 +155,9 @@ void main() {
       expect(parts[5].length, equals(64)); // 32-byte hex derived key
 
       expect(storage.privacyPasswordLength, equals(4));
-      expect(storage.verifyPrivacyPassword('5678'), isTrue);
-      expect(storage.verifyPrivacyPassword('0000'), isFalse);
-      expect(storage.verifyPrivacyPassword('56789'), isFalse);
+      expect(await storage.verifyPrivacyPassword('5678'), isTrue);
+      expect(await storage.verifyPrivacyPassword('0000'), isFalse);
+      expect(await storage.verifyPrivacyPassword('56789'), isFalse);
     });
 
     test('Legacy SHA-256 PIN hash verifies and automatically upgrades to PBKDF2', () async {
@@ -165,15 +178,15 @@ void main() {
       expect(storage.privacyPasswordLength, equals(4));
 
       // Wrong PIN fails and does not upgrade
-      expect(storage.verifyPrivacyPassword('1111'), isFalse);
+      expect(await storage.verifyPrivacyPassword('1111'), isFalse);
       expect(storage.privacyPassword, equals(legacyStored));
 
       // Correct PIN verifies and triggers automatic upgrade
-      expect(storage.verifyPrivacyPassword('2468'), isTrue);
+      expect(await storage.verifyPrivacyPassword('2468'), isTrue);
       await pumpEventQueue();
 
       expect(storage.privacyPassword, startsWith('pbkdf2:sha256:4:100000:'));
-      expect(storage.verifyPrivacyPassword('2468'), isTrue);
+      expect(await storage.verifyPrivacyPassword('2468'), isTrue);
     });
 
     test('Ancient plaintext PIN verifies and automatically upgrades to PBKDF2', () async {
@@ -187,12 +200,12 @@ void main() {
       );
 
       expect(storage.privacyPasswordLength, equals(4));
-      expect(storage.verifyPrivacyPassword('1234'), isFalse);
-      expect(storage.verifyPrivacyPassword('9999'), isTrue);
+      expect(await storage.verifyPrivacyPassword('1234'), isFalse);
+      expect(await storage.verifyPrivacyPassword('9999'), isTrue);
       await pumpEventQueue();
 
       expect(storage.privacyPassword, startsWith('pbkdf2:sha256:4:100000:'));
-      expect(storage.verifyPrivacyPassword('9999'), isTrue);
+      expect(await storage.verifyPrivacyPassword('9999'), isTrue);
     });
   });
 

@@ -271,33 +271,35 @@ class _SourceVerificationDialogState extends State<SourceVerificationDialog> {
                         ),
                       ),
                     ),
-                    CupertinoTextField(
-                      controller: _input,
-                      focusNode: _focus,
-                      enabled: !_busy && _challenge != null && !_imageFailed,
-                      keyboardType: TextInputType.text,
-                      textInputAction: TextInputAction.done,
-                      autocorrect: false,
-                      enableSuggestions: false,
-                      placeholder: '输入图片中的字符',
-                      padding: const EdgeInsets.all(14),
-                      style: CupertinoTheme.of(context).textTheme.textStyle
-                          .copyWith(color: Colors.white, fontSize: 18),
-                      placeholderStyle: CupertinoTheme.of(context)
-                          .textTheme
-                          .textStyle
-                          .copyWith(color: const Color(0xFFD0D0D5)),
-                      decoration: BoxDecoration(
-                        color: const Color(0x33000000),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      inputFormatters: [
-                        FilteringTextInputFormatter.allow(
-                          RegExp('[a-zA-Z0-9]'),
+                    TextSelectionMouseGuard(
+                      child: CupertinoTextField(
+                        controller: _input,
+                        focusNode: _focus,
+                        enabled: !_busy && _challenge != null && !_imageFailed,
+                        keyboardType: TextInputType.text,
+                        textInputAction: TextInputAction.done,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        placeholder: '输入图片中的字符',
+                        padding: const EdgeInsets.all(14),
+                        style: CupertinoTheme.of(context).textTheme.textStyle
+                            .copyWith(color: Colors.white, fontSize: 18),
+                        placeholderStyle: CupertinoTheme.of(context)
+                            .textTheme
+                            .textStyle
+                            .copyWith(color: const Color(0xFFD0D0D5)),
+                        decoration: BoxDecoration(
+                          color: const Color(0x33000000),
+                          borderRadius: BorderRadius.circular(12),
                         ),
-                        LengthLimitingTextInputFormatter(6),
-                      ],
-                      onSubmitted: (_) => _submit(),
+                        inputFormatters: [
+                          FilteringTextInputFormatter.allow(
+                            RegExp('[a-zA-Z0-9]'),
+                          ),
+                          LengthLimitingTextInputFormatter(6),
+                        ],
+                        onSubmitted: (_) => _submit(),
+                      ),
                     ),
                     if (_error != null)
                       Padding(

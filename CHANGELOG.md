@@ -18,13 +18,13 @@
 
 - [Security/All] 全平台安全加固（Lane F § F1–F8）：
   - F1 (平台级安全凭据存储与无损迁移)：
-    - Flutter: 新增 `SecureCredentialStore` 抽象与默认带认证加密存储（CTR + HMAC-SHA256 与平台原生密钥派生），`StorageService` 维持内存缓存同步访问，启动自动对 WebDAV 密码与四大网盘 Cookie/Token 执行写后即删无损迁移，SharedPreferences 不再驻留敏感明文凭据；
-    - Android: 新增 `SecureStorage`，采用 `AndroidKeyStore` AES-256-GCM 系统随机 IV 硬件加密存储敏感配置凭据，在后台同步线程确认密文 `commit()` 成功后安全清除旧版 `movie` 明文，KeyStore 不可用时保留明文存储，密钥永久失效时自动移除别名并提示重新输入密码；
+    - Flutter: 新增 `SecureCredentialStore` 抽象并基于 `flutter_secure_storage`（`9.2.4`）接入平台安全凭据存储（Windows 采用 DPAPI，iOS / macOS 采用系统 Keychain），`StorageService` 维持内存缓存同步访问，启动自动对旧版 SharedPreferences 明文及旧混淆凭据文件执行写入成功后才删除旧数据的迁移（旧文件解密失败时保留为 `.bak` 备份并提示用户重新输入，底层持久化失败时显式抛出异常），SharedPreferences 不再驻留敏感明文凭据；
+    - Android: 新增 `SecureStorage`，采用 `AndroidKeyStore` 托管密钥的 AES-256-GCM（系统随机生成 IV）加密存储敏感配置凭据（具体是否具备硬件级密钥隔离取决于设备系统实现），在后台同步线程确认密文 `commit()` 成功后安全清除旧版 `movie` 明文，KeyStore 不可用时保留明文存储，密钥永久失效时自动移除别名并提示重新输入密码；
     - TV Lite: 新增 `SecureStorage`，基于设备特征盐与随机 IV 采用 AES/CBC/PKCS5Padding 加密持久化凭据，兼顾 API 14+ 旧电视系统兼容与静态配置防窃取。
   - F2 (基于 PBKDF2-SHA256 的加盐隐私 PIN 密码防护)：
-    - Flutter: 基于 `package:crypto` 实现 16 字节随机盐与 100,000 次迭代的 PBKDF2-HMAC-SHA256 密码哈希派生与恒定时间比较，新哈希格式为 `pbkdf2:sha256:<len>:100000:<salt>:<hash>`；支持旧版单次 SHA-256 哈希及明文 PIN 密码在首次验证通过后平滑无感升级。
+    - Flutter: 基于 `package:crypto` 在后台 `Isolate.run` 中执行 16 字节随机盐与 100,000 次迭代的 PBKDF2-HMAC-SHA256 密码哈希派生与恒定时间比较（界面同步展示加载状态），新哈希格式为 `pbkdf2:sha256:<len>:100000:<salt>:<hash>`；支持旧版单次 SHA-256 哈希及明文 PIN 密码在首次验证通过后平滑无感升级。
   - F3 (明文 HTTP WebDAV 敏感凭据保存二次警示)：
-    - Flutter / Android / TV Lite 三端在用户配置带有密码且使用明文 `http://` 的 WebDAV 服务时，在保存或测试连接前弹出二次确认警告对话框，提示局域网明文传输密码风险，经用户显式确认后方可提交。
+    - Flutter / Android / TV Lite 三端在用户配置带有密码且使用明文 `http://` 的 WebDAV 服务时，在保存或测试连接前弹出二次确认警告对话框（Flutter 端仅在服务地址或密码发生变化时弹出），提示局域网明文传输密码风险，经用户显式确认后方可提交。
   - F4 (非受信任明文 HTTP Spider 插件预警与仅 HTTPS 插件策略开关)：
     - Android 电视与手机设置中新增「仅允许 HTTPS 插件」（`only_allow_https_plugins`）安全策略开关（默认关闭）；开启时严格拦截所有明文 HTTP 插件下载并防止跨协议重定向；未开启时遇到缺少 MD5 校验的明文 HTTP Spider 插件自动记录安全警告并弹出 Toast 提示。
   - F5 (Ed25519 签名更新清单按需校验与发布 CLI 工具)：
@@ -32,7 +32,7 @@
     - CLI: 新增纯 Python RFC 8032 更新清单签名工具（`scripts/sign_manifest.py`），不含内置测试密钥，支持离线生成密钥文件并通过命令行参数（`--key-file`）或环境变量（`MARCOMOVIE_SIGN_KEY_FILE`）读取私钥文件对更新清单签名。
   - F6 (现代 TLS 传输协议与根证书链兼容加固)：
     - Android: 配置 `network_security_config.xml`，移除非受信任的全局明文流量声明，并打包内置 Let's Encrypt `ISRG Root X1` 根证书（`res/raw/isrg_root_x1.crt`）；
-    - TV Lite: `build_lite.py` 构建时无条件打包 Conscrypt 2.5.2 引擎（`classes.dex` 及 `lib/armeabi-v7a/libconscrypt_jni.so`），并在 `NetworkTls` 中装配内嵌 ISRG Root X1 的复合 `X509TrustManager`，彻底解决旧版 Android 4.0-7.0 (API 14-24) 电视机因根证书过期导致的 HTTPS SNI 与 Let's Encrypt 证书握手失败问题。
+    - TV Lite: `build_lite.py` 构建时打包 Conscrypt 2.5.2 引擎（`classes.dex` 及 `lib/armeabi-v7a/libconscrypt_jni.so`），并在 `NetworkTls` 中装配内嵌 ISRG Root X1 的复合 `X509TrustManager`（缓存复用 `SSLContext`、`TrustManager` 与 `SSLSocketFactory`；Conscrypt 加载抛出 `Throwable` 时记录日志并自动回退至系统 TLS），解决旧版 Android 4.0-7.0 (API 14-24) 电视机因根证书过期导致的 HTTPS SNI 与 Let's Encrypt 证书握手失败问题。
   - F7 (TV Lite ConfigServer 局域网配对端点生命周期加固)：
     - TV Lite `ConfigServer` 设定 5 分钟固定生命周期（`SESSION_LIFETIME_MS = 300,000`），ServerSocket 动态超时超时自动退出监听；单次请求设定 20 秒超时（`REQUEST_TIMEOUT_MS = 20,000`）；进入请求立即验证对端是否为局域网/回环地址（`isAllowedLanPeer`），非局域网请求即刻返回 403 Forbidden，过期会话返回 410 Gone 并主动关闭套接字。
   - F8 (Flutter 局域网同步端点会话超时与套接字优雅关闭)：

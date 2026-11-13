@@ -351,6 +351,9 @@ class _DetailScreenState extends State<DetailScreen> {
     unawaited(PosterLoader.fetchSeriesEpisodeStills(title, year: _video.year));
   }
 
+  final Map<(CmsLine, String, List<CmsParse>), String?> _lineUnavailableCache =
+      {};
+
   List<CmsParse> get _configuredParses =>
       widget.storage.loadSavedConfig()?.parses ?? const [];
 
@@ -366,12 +369,26 @@ class _DetailScreenState extends State<DetailScreen> {
 
   String? _lineUnavailableReason(CmsLine line, {CmsSite? siteOverride}) {
     if (line.episodes.isEmpty) return '当前线路暂无剧集';
+    final effectiveSite = siteOverride ?? _activeSite;
+    final parses = _configuredParses;
+    final cacheKey = (line, effectiveSite.key, parses);
+    if (_lineUnavailableCache.containsKey(cacheKey)) {
+      return _lineUnavailableCache[cacheKey];
+    }
     String? firstReason;
     for (final ep in line.episodes) {
-      final r = _episodeUnavailableReason(ep, siteOverride: siteOverride);
-      if (r == null) return null;
+      final r = WebMediaResolver.episodeUnavailableReason(
+        ep,
+        site: effectiveSite,
+        parses: parses,
+      );
+      if (r == null) {
+        _lineUnavailableCache[cacheKey] = null;
+        return null;
+      }
       firstReason ??= r;
     }
+    _lineUnavailableCache[cacheKey] = firstReason;
     return firstReason;
   }
 

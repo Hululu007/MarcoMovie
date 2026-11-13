@@ -61,6 +61,54 @@ public final class LiteTlsChecks {
         }
         if (!hasIsrg)
             throw new AssertionError("Composite TrustManager must include embedded ISRG Root X1");
-        System.out.println("PASS 4 Lite TLS capability checks");
+
+        // M-A8: TrustManager, SSLContext, and SSLSocketFactory must be cached across connections
+        TrustManager[] tms2 = NetworkTls.getDefaultTrustManagers();
+        if (tms != tms2 || tms[0] != tms2[0])
+            throw new AssertionError("Default TrustManager array and instance must be cached");
+
+        SSLContext ctx1 = NetworkTls.context(null);
+        SSLContext ctx2 = NetworkTls.context(null);
+        if (ctx1 == null || ctx1 != ctx2)
+            throw new AssertionError("Default SSLContext must be cached across calls");
+
+        java.net.URL httpsUrl = new java.net.URL("https://example.com/");
+        HttpsURLConnection conn1 = (HttpsURLConnection) httpsUrl.openConnection();
+        HttpsURLConnection conn2 = (HttpsURLConnection) httpsUrl.openConnection();
+        NetworkTls.configure(conn1);
+        NetworkTls.configure(conn2);
+        if (conn1.getSSLSocketFactory() != conn2.getSSLSocketFactory())
+            throw new AssertionError("HttpsURLConnection must reuse cached SSLSocketFactory");
+
+        // M-A8: Loading Conscrypt throwing UnsatisfiedLinkError / Throwable must fall back to system TLS
+        final UnsatisfiedLinkError jniError =
+                new UnsatisfiedLinkError("dlopen failed: libconscrypt_jni.so is 32-bit");
+        NetworkTls.lastFallbackCause = null;
+        SSLContext fallbackCtx =
+                NetworkTls.buildContext(
+                        tms,
+                        new NetworkTls.ProviderFactory() {
+                            public java.security.Provider create() throws Throwable {
+                                throw jniError;
+                            }
+                        });
+        if (fallbackCtx == null || fallbackCtx.getSocketFactory() == null)
+            throw new AssertionError("UnsatisfiedLinkError must fall back to a working system SSLContext");
+        if (NetworkTls.lastFallbackCause != jniError)
+            throw new AssertionError("Fallback cause must be recorded and logged when Conscrypt fails");
+
+        final ExceptionInInitializerError initError = new ExceptionInInitializerError(jniError);
+        SSLContext fallbackCtx2 =
+                NetworkTls.buildContext(
+                        tms,
+                        new NetworkTls.ProviderFactory() {
+                            public java.security.Provider create() throws Throwable {
+                                throw initError;
+                            }
+                        });
+        if (fallbackCtx2 == null || NetworkTls.lastFallbackCause != initError)
+            throw new AssertionError("ExceptionInInitializerError must also fall back cleanly");
+
+        System.out.println("PASS 8 Lite TLS capability checks");
     }
 }
