@@ -1621,7 +1621,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                 ? 0.25
                 : -0.25;
             final newSpeed = double.parse(
-              ((_normalSpeed + delta).clamp(0.5, 3.0)).toStringAsFixed(2),
+              ((_normalSpeed + delta).clamp(
+                StorageService.minPlaySpeed,
+                StorageService.maxPlaySpeed,
+              )).toStringAsFixed(2),
             );
             setState(() => _normalSpeed = newSpeed);
             _player.setRate(newSpeed);
@@ -3350,7 +3353,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _showSpeedSheet() {
-    const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
+    const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
     showAppleModalSheet<void>(
       context: context,
       title: '播放倍速',
@@ -3414,6 +3417,11 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _showLinesSheet() {
     final parses = widget.storage.loadSavedConfig()?.parses ?? const [];
+    final lineReasons = List<String?>.generate(
+      _lines.length,
+      (i) => _lineUnavailableReason(_lines[i], parses),
+      growable: false,
+    );
     showAppleModalSheet<void>(
       context: context,
       title: '切换播放线路',
@@ -3424,7 +3432,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           AppleGroupedSection(
             children: List.generate(_lines.length, (i) {
               final selected = i == _lineIndex;
-              final lineReason = _lineUnavailableReason(_lines[i], parses);
+              final lineReason = lineReasons[i];
               final tile = AppleGroupedTile(
                 icon: CupertinoIcons.layers_alt_fill,
                 iconBgColor: selected
@@ -3494,16 +3502,18 @@ class _PlayerScreenState extends State<PlayerScreen>
     final screenSize = MediaQuery.sizeOf(context);
     final isLandscape = screenSize.width > screenSize.height;
     final parses = widget.storage.loadSavedConfig()?.parses ?? const [];
+    String? episodeChecker(CmsEpisode ep) =>
+        _episodeUnavailableReason(ep, parses);
     showAppleModalSheet<void>(
       context: context,
       title: '选集与线路 (${_currentLine.episodes.length})',
       maxWidth: isLandscape ? math.min(screenSize.width - 24, 760.0) : 560.0,
-      builder: (ctx) => _PlayerEpisodePickerSheet(
+      builder: (ctx) => PlayerEpisodePickerSheet(
         lines: _lines,
         initialLineIndex: _lineIndex,
         activeLineIndex: _lineIndex,
         activeEpisodeIndex: _episodeIndex,
-        episodeUnavailableReason: (ep) => _episodeUnavailableReason(ep, parses),
+        episodeUnavailableReason: episodeChecker,
         onSelect: (lineIdx, epIdx) {
           Navigator.of(ctx).pop();
           _failedLinesForEpisode.clear();
@@ -3567,7 +3577,8 @@ class _ParsedEpisodeLabel {
   }
 }
 
-class _PlayerEpisodePickerSheet extends StatefulWidget {
+@visibleForTesting
+class PlayerEpisodePickerSheet extends StatefulWidget {
   final List<CmsLine> lines;
   final int initialLineIndex;
   final int activeLineIndex;
@@ -3575,7 +3586,8 @@ class _PlayerEpisodePickerSheet extends StatefulWidget {
   final String? Function(CmsEpisode episode)? episodeUnavailableReason;
   final void Function(int lineIndex, int episodeIndex) onSelect;
 
-  const _PlayerEpisodePickerSheet({
+  const PlayerEpisodePickerSheet({
+    super.key,
     required this.lines,
     required this.initialLineIndex,
     required this.activeLineIndex,
@@ -3585,16 +3597,17 @@ class _PlayerEpisodePickerSheet extends StatefulWidget {
   });
 
   @override
-  State<_PlayerEpisodePickerSheet> createState() =>
+  State<PlayerEpisodePickerSheet> createState() =>
       _PlayerEpisodePickerSheetState();
 }
 
-class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
+class _PlayerEpisodePickerSheetState extends State<PlayerEpisodePickerSheet> {
   static const int _groupSize = 40;
   late int _previewLineIndex;
   late int _groupIndex;
   bool _descending = false;
   String? _blockedEpisodeNotice;
+  late List<String?> _cachedLineBlockedReasons;
   final ScrollController _linesScrollController = ScrollController();
   final ScrollController _groupScrollController = ScrollController();
 
@@ -3612,6 +3625,43 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
         .clamp(0, math.max(0, widget.lines.length - 1))
         .toInt();
     _groupIndex = (widget.activeEpisodeIndex ~/ _groupSize);
+    _cachedLineBlockedReasons = _computeLineBlockedReasons();
+  }
+
+  @override
+  void didUpdateWidget(covariant PlayerEpisodePickerSheet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!_sameLines(oldWidget.lines, widget.lines) ||
+        oldWidget.episodeUnavailableReason != widget.episodeUnavailableReason) {
+      _cachedLineBlockedReasons = _computeLineBlockedReasons();
+    }
+  }
+
+  static bool _sameLines(List<CmsLine> a, List<CmsLine> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!identical(a[i], b[i])) return false;
+    }
+    return true;
+  }
+
+  List<String?> _computeLineBlockedReasons() {
+    final checker = widget.episodeUnavailableReason;
+    if (checker == null) {
+      return List<String?>.filled(widget.lines.length, null);
+    }
+    return List<String?>.generate(widget.lines.length, (idx) {
+      final eps = widget.lines[idx].episodes;
+      if (eps.isEmpty) return null;
+      String? firstReason;
+      for (final ep in eps) {
+        final r = checker(ep);
+        if (r == null) return null;
+        firstReason ??= r;
+      }
+      return firstReason;
+    }, growable: false);
   }
 
   CmsLine get _line => widget.lines.isEmpty
@@ -3637,19 +3687,12 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
     final screenSize = MediaQuery.sizeOf(context);
     final isLandscape = screenSize.width > screenSize.height;
     final crossAxisCount = isLandscape ? 5 : 3;
-    String? lineBlockedReason;
-    if (episodes.isNotEmpty && widget.episodeUnavailableReason != null) {
-      var allBlocked = true;
-      for (final ep in episodes) {
-        final r = widget.episodeUnavailableReason!(ep);
-        if (r == null) {
-          allBlocked = false;
-          break;
-        }
-        lineBlockedReason ??= r;
-      }
-      if (!allBlocked) lineBlockedReason = null;
-    }
+    final safeLineIdx = widget.lines.isEmpty
+        ? 0
+        : _previewLineIndex.clamp(0, widget.lines.length - 1).toInt();
+    final lineBlockedReason = safeLineIdx < _cachedLineBlockedReasons.length
+        ? _cachedLineBlockedReasons[safeLineIdx]
+        : null;
     final activeNotice = _blockedEpisodeNotice ?? lineBlockedReason;
 
     return Padding(
@@ -3674,11 +3717,9 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                       final line = widget.lines[i];
                       final selected = i == _previewLineIndex;
                       final isPlayingLine = i == widget.activeLineIndex;
-                      final isLineUnavailable = line.episodes.isNotEmpty &&
-                          widget.episodeUnavailableReason != null &&
-                          line.episodes.every(
-                            (e) => widget.episodeUnavailableReason!(e) != null,
-                          );
+                      final isLineUnavailable =
+                          i < _cachedLineBlockedReasons.length &&
+                          _cachedLineBlockedReasons[i] != null;
                       return Padding(
                         padding: const EdgeInsets.only(right: 8),
                         child: Opacity(
@@ -3900,7 +3941,7 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                   crossAxisCount: crossAxisCount,
                   mainAxisSpacing: 8,
                   crossAxisSpacing: 8,
-                  mainAxisExtent: 52,
+                  mainAxisExtent: 56,
                 ),
                 itemCount: indices.length,
                 itemBuilder: (ctx, idx) {

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 package com.pilipala.marcomovie.lite;
 
+import android.util.Log;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -49,7 +50,39 @@ public final class NetworkTls {
                     + "emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=\n"
                     + "-----END CERTIFICATE-----";
 
+    private static final String TAG = "NetworkTls";
+    private static final Object CACHE_LOCK = new Object();
+    private static volatile TrustManager[] cachedTrustManagers;
+    private static volatile SSLContext cachedSslContext;
+    private static volatile SSLSocketFactory cachedSocketFactory;
+    static volatile Throwable lastFallbackCause;
+
+    interface ProviderFactory {
+        Provider create() throws Throwable;
+    }
+
+    private static final ProviderFactory DEFAULT_CONSCRYPT_FACTORY =
+            new ProviderFactory() {
+                public Provider create() throws Throwable {
+                    Class<?> type = Class.forName("org.conscrypt.Conscrypt");
+                    return (Provider) type.getMethod("newProvider").invoke(null);
+                }
+            };
+
     public static TrustManager[] getDefaultTrustManagers() {
+        TrustManager[] existing = cachedTrustManagers;
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (CACHE_LOCK) {
+            if (cachedTrustManagers == null) {
+                cachedTrustManagers = buildDefaultTrustManagers();
+            }
+            return cachedTrustManagers;
+        }
+    }
+
+    private static TrustManager[] buildDefaultTrustManagers() {
         X509TrustManager systemTm = null;
         try {
             TrustManagerFactory tmf =
@@ -128,22 +161,63 @@ public final class NetworkTls {
         return new TrustManager[] {compositeTm};
     }
 
-    static SSLContext context(TrustManager[] trust) throws Exception {
-        SSLContext context;
+    static SSLContext buildContext(TrustManager[] trust, ProviderFactory conscryptFactory)
+            throws Exception {
+        TrustManager[] effectiveTrust = trust != null ? trust : getDefaultTrustManagers();
         try {
-            Class<?> type = Class.forName("org.conscrypt.Conscrypt");
-            Provider provider = (Provider) type.getMethod("newProvider").invoke(null);
-            context = SSLContext.getInstance("TLS", provider);
-        } catch (ClassNotFoundException unavailable) {
-            context = SSLContext.getInstance("TLS");
+            Provider provider = conscryptFactory.create();
+            SSLContext conscryptCtx = SSLContext.getInstance("TLS", provider);
+            conscryptCtx.init(null, effectiveTrust, null);
+            return conscryptCtx;
+        } catch (Throwable failure) {
+            lastFallbackCause = failure;
+            Log.w(
+                    TAG,
+                    "Conscrypt TLS provider unavailable; falling back to platform TLS",
+                    failure);
         }
-        context.init(null, trust != null ? trust : getDefaultTrustManagers(), null);
-        return context;
+        SSLContext fallback = SSLContext.getInstance("TLS");
+        fallback.init(null, effectiveTrust, null);
+        return fallback;
+    }
+
+    static SSLContext getDefaultContext() throws Exception {
+        SSLContext existing = cachedSslContext;
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (CACHE_LOCK) {
+            if (cachedSslContext == null) {
+                cachedSslContext =
+                        buildContext(getDefaultTrustManagers(), DEFAULT_CONSCRYPT_FACTORY);
+            }
+            return cachedSslContext;
+        }
+    }
+
+    static SSLSocketFactory getDefaultSocketFactory() throws Exception {
+        SSLSocketFactory existing = cachedSocketFactory;
+        if (existing != null) {
+            return existing;
+        }
+        synchronized (CACHE_LOCK) {
+            if (cachedSocketFactory == null) {
+                cachedSocketFactory = new ModernTlsFactory(getDefaultContext().getSocketFactory());
+            }
+            return cachedSocketFactory;
+        }
+    }
+
+    static SSLContext context(TrustManager[] trust) throws Exception {
+        if (trust == null) {
+            return getDefaultContext();
+        }
+        return buildContext(trust, DEFAULT_CONSCRYPT_FACTORY);
     }
 
     public static void configure(HttpsURLConnection connection) throws java.io.IOException {
         try {
-            connection.setSSLSocketFactory(new ModernTlsFactory(context(null).getSocketFactory()));
+            connection.setSSLSocketFactory(getDefaultSocketFactory());
         } catch (Exception failure) {
             throw new java.io.IOException("HTTPS 加密组件无法初始化", failure);
         } catch (LinkageError failure) {

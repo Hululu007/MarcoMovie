@@ -390,7 +390,9 @@ void main() {
           await tester.sendKeyEvent(LogicalKeyboardKey.bracketRight);
           await tester.pump(const Duration(milliseconds: 50));
         }
-        // HUD displays clamped 3x
+        // HUD and storage both clamp at unified maximum 3.0x
+        expect(storage.playSpeed, 3.0,
+            reason: 'Storage speed must match unified upper clamp 3.0x');
         expect(find.text('倍速 3x'), findsOneWidget,
             reason: 'Speed HUD must clamp at maximum 3.0x');
 

@@ -75,6 +75,18 @@ class CloudSyncSettingsPanel extends StatefulWidget {
     return trimmed.startsWith('http://') && password.isNotEmpty;
   }
 
+  static bool shouldPromptCleartextHttpWarning({
+    required String url,
+    required String password,
+    required String savedUrl,
+    required String savedPassword,
+  }) {
+    if (!isCleartextHttpWithPassword(url, password)) {
+      return false;
+    }
+    return url.trim() != savedUrl.trim() || password != savedPassword;
+  }
+
   @override
   State<CloudSyncSettingsPanel> createState() => _CloudSyncSettingsPanelState();
 }
@@ -84,6 +96,9 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
   late final TextEditingController _userCtrl;
   late final TextEditingController _passCtrl;
   late final TextEditingController _lanPeerCtrl;
+
+  String _confirmedUrl = '';
+  String _confirmedPass = '';
 
   bool _autoSync = true;
   bool _syncSubs = true;
@@ -101,10 +116,14 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
   @override
   void initState() {
     super.initState();
-    _urlCtrl = TextEditingController(text: widget.storage.webdavUrl);
+    final initialUrl = widget.storage.webdavUrl;
+    final initialPass = widget.storage.webdavPass;
+    _urlCtrl = TextEditingController(text: initialUrl);
     _userCtrl = TextEditingController(text: widget.storage.webdavUser);
-    _passCtrl = TextEditingController(text: widget.storage.webdavPass);
+    _passCtrl = TextEditingController(text: initialPass);
     _lanPeerCtrl = TextEditingController();
+    _confirmedUrl = initialUrl.trim();
+    _confirmedPass = initialPass;
     _autoSync = widget.storage.webdavAuto;
     _syncSubs = widget.storage.webdavSyncSubs;
   }
@@ -136,19 +155,26 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
   }
 
   Future<void> _saveWebdavFields() async {
+    final nextUrl = _urlCtrl.text.trim();
+    final nextPass = _passCtrl.text;
     await widget.storage.saveWebdavConfig(
-      url: _urlCtrl.text.trim(),
+      url: nextUrl,
       user: _userCtrl.text.trim(),
-      pass: _passCtrl.text,
+      pass: nextPass,
       auto: _autoSync,
       syncSubs: _syncSubs,
     );
+    _confirmedUrl = nextUrl;
+    _confirmedPass = nextPass;
   }
 
-  static bool isCleartextHttpWithPassword(String url, String password) {
-    final trimmed = url.trim().toLowerCase();
-    return trimmed.startsWith('http://') && password.isNotEmpty;
-  }
+  bool get _needsCleartextHttpWarning =>
+      CloudSyncSettingsPanel.shouldPromptCleartextHttpWarning(
+        url: _urlCtrl.text,
+        password: _passCtrl.text,
+        savedUrl: _confirmedUrl,
+        savedPassword: _confirmedPass,
+      );
 
   Future<bool> _confirmCleartextHttpWarning() async {
     final confirmed = await showCupertinoDialog<bool>(
@@ -181,7 +207,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
       _notifyNotice('请填写地址', '请先填写 WebDAV 服务器目录或文件地址。', isError: true);
       return;
     }
-    if (isCleartextHttpWithPassword(_urlCtrl.text, _passCtrl.text)) {
+    if (_needsCleartextHttpWarning) {
       final ok = await _confirmCleartextHttpWarning();
       if (!ok) return;
     }
@@ -209,7 +235,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
   }
 
   Future<void> _handleSaveOnly() async {
-    if (isCleartextHttpWithPassword(_urlCtrl.text, _passCtrl.text)) {
+    if (_needsCleartextHttpWarning) {
       final ok = await _confirmCleartextHttpWarning();
       if (!ok) return;
     }
@@ -229,6 +255,8 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
       auto: _autoSync,
       syncSubs: _syncSubs,
     );
+    _confirmedUrl = '';
+    _confirmedPass = '';
     widget.onSynced?.call(subscriptionsChanged: false);
     _notifyNotice('已清空配置', '已移除本机保存的 WebDAV 地址与凭据。');
   }
@@ -343,7 +371,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
     );
   }
 
-  CupertinoTextField _styledTextField({
+  Widget _styledTextField({
     Key? fieldKey,
     required TextEditingController controller,
     required String placeholder,
@@ -351,29 +379,31 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
     Widget? suffix,
     TextInputType? keyboardType,
   }) {
-    return CupertinoTextField(
-      key: fieldKey,
-      controller: controller,
-      placeholder: placeholder,
-      obscureText: obscureText,
-      keyboardType: keyboardType,
-      autocorrect: false,
-      enableSuggestions: false,
-      smartQuotesType: SmartQuotesType.disabled,
-      smartDashesType: SmartDashesType.disabled,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      placeholderStyle: const TextStyle(
-        color: Color(0x66EBEBF5),
-        fontSize: 14,
-      ),
-      style: const TextStyle(
-        color: AppleColors.labelPrimary,
-        fontSize: 14.5,
-      ),
-      suffix: suffix,
-      decoration: BoxDecoration(
-        color: const Color(0xFF2C2C2E),
-        borderRadius: BorderRadius.circular(10),
+    return TextSelectionMouseGuard(
+      child: CupertinoTextField(
+        key: fieldKey,
+        controller: controller,
+        placeholder: placeholder,
+        obscureText: obscureText,
+        keyboardType: keyboardType,
+        autocorrect: false,
+        enableSuggestions: false,
+        smartQuotesType: SmartQuotesType.disabled,
+        smartDashesType: SmartDashesType.disabled,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        placeholderStyle: const TextStyle(
+          color: Color(0x66EBEBF5),
+          fontSize: 14,
+        ),
+        style: const TextStyle(
+          color: AppleColors.labelPrimary,
+          fontSize: 14.5,
+        ),
+        suffix: suffix,
+        decoration: BoxDecoration(
+          color: const Color(0xFF2C2C2E),
+          borderRadius: BorderRadius.circular(10),
+        ),
       ),
     );
   }

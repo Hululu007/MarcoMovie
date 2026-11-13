@@ -220,16 +220,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   int _liveEpoch = 0;
   // Favorites / History segmented index
   int _librarySegment = 0;
-  // Desktop horizontal scroll controllers
+  // Desktop horizontal scroll controllers (inline shell views only; sheets own their own)
   final ScrollController _continueWatchingScrollController = ScrollController();
   final ScrollController _categoryPillsScrollController = ScrollController();
   final ScrollController _filterCategoryScrollController = ScrollController();
   final ScrollController _filterAreaScrollController = ScrollController();
   final ScrollController _filterYearScrollController = ScrollController();
-  final ScrollController _searchHistoryScrollController = ScrollController();
   final ScrollController _liveSourcesScrollController = ScrollController();
   final ScrollController _liveGroupsScrollController = ScrollController();
-  final ScrollController _sourcePickerGroupsScrollController = ScrollController();
   // Expandable drawer keys in Settings tab
   final Set<String> _expandedSettings = <String>{};
   List<WatchHistoryEntry> _cachedWatchHistory = const [];
@@ -277,15 +275,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     widget.storage.subscriptionsCorruptionNotifier.addListener(
       _onSubscriptionsCorruption,
     );
+    widget.storage.credentialMigrationFailureNotifier.addListener(
+      _onCredentialMigrationFailure,
+    );
     if (widget.storage.isHistoryCorrupted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _onHistoryCorruption();
       });
     }
     if (widget.storage.isSubscriptionsCorrupted) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _onSubscriptionsCorruption();
-      });
+      _onSubscriptionsCorruption();
+    }
+    if (widget.storage.credentialMigrationFailureNotifier.value) {
+      _onCredentialMigrationFailure();
     }
     _reloadSavedConfig();
     if (!Platform.environment.containsKey('FLUTTER_TEST')) {
@@ -423,9 +425,54 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       if (!mounted || !widget.storage.consumeSubscriptionsCorruptionNotice()) {
         return;
       }
+      showCupertinoDialog<void>(
+        context: context,
+        builder: (ctx) => CupertinoAlertDialog(
+          title: const Text('订阅数据异常'),
+          content: const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: Text(
+              '检测到本地订阅文件读取或解析异常，已自动隔离备份并开启写保护以防止覆盖原数据。修复或替换文件后可点击「重新加载订阅」恢复。',
+            ),
+          ),
+          actions: [
+            CupertinoDialogAction(
+              key: const ValueKey('reload-subscriptions-action'),
+              onPressed: () async {
+                Navigator.of(ctx).pop();
+                final recovered =
+                    await widget.storage.reloadSubscriptionsFromDisk();
+                if (!mounted) return;
+                _reloadSavedConfig();
+                if (recovered) {
+                  _showAppleNotice('已重新加载订阅', '订阅文件已恢复正常并解除写保护。');
+                }
+              },
+              child: const Text('重新加载订阅'),
+            ),
+            CupertinoDialogAction(
+              isDefaultAction: true,
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('好'),
+            ),
+          ],
+        ),
+      );
+    });
+  }
+
+  void _onCredentialMigrationFailure() {
+    if (!mounted || !widget.storage.credentialMigrationFailureNotifier.value) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          !widget.storage.consumeCredentialMigrationFailureNotice()) {
+        return;
+      }
       _showAppleNotice(
-        '订阅数据异常',
-        '检测到本地订阅文件读取或解析异常，已自动隔离备份并开启写保护以防止覆盖原数据。',
+        '凭据迁移提示',
+        '旧版加密凭据文件无法解密，原文件已保留为 .bak 备份。请重新输入 WebDAV 密码或云盘登录凭据。',
       );
     });
   }
@@ -455,20 +502,32 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       oldWidget.storage.subscriptionsCorruptionNotifier.removeListener(
         _onSubscriptionsCorruption,
       );
+      oldWidget.storage.credentialMigrationFailureNotifier.removeListener(
+        _onCredentialMigrationFailure,
+      );
       widget.storage.watchHistoryRevision.addListener(_onWatchHistoryRevision);
       widget.storage.historyCorruptionNotifier.addListener(_onHistoryCorruption);
       widget.storage.subscriptionsCorruptionNotifier.addListener(
         _onSubscriptionsCorruption,
       );
+      widget.storage.credentialMigrationFailureNotifier.addListener(
+        _onCredentialMigrationFailure,
+      );
       _cachedWatchHistory = widget.storage.getWatchHistory();
       if (widget.storage.isSubscriptionsCorrupted) {
         _onSubscriptionsCorruption();
+      }
+      if (widget.storage.credentialMigrationFailureNotifier.value) {
+        _onCredentialMigrationFailure();
       }
     }
   }
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.storage.credentialMigrationFailureNotifier.removeListener(
+      _onCredentialMigrationFailure,
+    );
     widget.storage.subscriptionsCorruptionNotifier.removeListener(
       _onSubscriptionsCorruption,
     );
@@ -507,10 +566,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _filterCategoryScrollController.dispose();
     _filterAreaScrollController.dispose();
     _filterYearScrollController.dispose();
-    _searchHistoryScrollController.dispose();
     _liveSourcesScrollController.dispose();
     _liveGroupsScrollController.dispose();
-    _sourcePickerGroupsScrollController.dispose();
     super.dispose();
   }
   void _reloadSavedConfig() {
@@ -3286,15 +3343,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       const SizedBox(height: 10),
                       SizedBox(
                         height: 30,
-                        child: DesktopHorizontalScroller(
-                          controller: _searchHistoryScrollController,
-                          child: ListView.separated(
-                            controller: _searchHistoryScrollController,
-                            scrollDirection: Axis.horizontal,
-                            physics: const BouncingScrollPhysics(),
-                            itemCount: history.length,
-                            separatorBuilder: (_, __) => const SizedBox(width: 8),
-                            itemBuilder: (ctx, i) {
+                        child: _SheetOwnedScrollController(
+                          builder: (ctx, historyScrollController) =>
+                              DesktopHorizontalScroller(
+                            controller: historyScrollController,
+                            child: ListView.separated(
+                              controller: historyScrollController,
+                              scrollDirection: Axis.horizontal,
+                              physics: const BouncingScrollPhysics(),
+                              itemCount: history.length,
+                              separatorBuilder: (_, __) =>
+                                  const SizedBox(width: 8),
+                              itemBuilder: (ctx, i) {
                             final kw = history[i];
                             return ApplePressableScale(
                               pressedScale: 0.92,
@@ -3332,7 +3392,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         ),
                       ),
                     ),
-                  ],
+                  ),
+                ],
                     const SizedBox(height: 12),
                     Expanded(
                       child: Row(
@@ -3736,6 +3797,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     String firstPin = '';
     String currentPin = '';
     bool confirming = false;
+    bool isBusy = false;
     String? err;
     showGeneralDialog<void>(
       context: context,
@@ -3748,7 +3810,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           child: StatefulBuilder(
             builder: (ctx, setPadState) {
               void handleDigit(String digit) async {
-                if (currentPin.length >= 4) return;
+                if (isBusy || currentPin.length >= 4) return;
                 HapticFeedback.selectionClick();
                 setPadState(() {
                   err = null;
@@ -3765,7 +3827,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     });
                   } else {
                     if (currentPin == firstPin) {
-                      await widget.storage.setPrivacyPassword(currentPin);
+                      setPadState(() {
+                        isBusy = true;
+                        err = null;
+                      });
+                      try {
+                        await widget.storage.setPrivacyPassword(currentPin);
+                      } finally {
+                        if (ctx.mounted) {
+                          setPadState(() => isBusy = false);
+                        }
+                      }
                       if (!ctx.mounted || !mounted ||
                           ModalRoute.of(ctx)?.isCurrent != true) {
                         return;
@@ -3786,7 +3858,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               }
 
               void handleBackspace() {
-                if (currentPin.isEmpty) return;
+                if (isBusy || currentPin.isEmpty) return;
                 HapticFeedback.selectionClick();
                 setPadState(() {
                   err = null;
@@ -3801,6 +3873,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 pinLength: 4,
                 enteredCount: currentPin.length,
                 errorText: err,
+                isLoading: isBusy,
+                loadingText: '正在加密保存密码…',
                 onDigit: handleDigit,
                 onBackspace: handleBackspace,
                 onCancel: () => Navigator.of(ctx).pop(),
@@ -3825,6 +3899,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   void _showVerifyPrivacyPasswordDialog({required VoidCallback onSuccess}) {
     final targetLen = widget.storage.privacyPasswordLength;
     String currentPin = '';
+    bool isBusy = false;
     String? err;
     showGeneralDialog<void>(
       context: context,
@@ -3837,13 +3912,31 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           child: StatefulBuilder(
             builder: (ctx, setPadState) {
               void handleDigit(String digit) async {
-                if (currentPin.length >= targetLen) return;
+                if (isBusy || currentPin.length >= targetLen) return;
                 HapticFeedback.selectionClick();
                 setPadState(() {
                   err = null;
                   currentPin += digit;
                 });
-                if (widget.storage.verifyPrivacyPassword(currentPin)) {
+                if (currentPin.length < targetLen) {
+                  return;
+                }
+                setPadState(() {
+                  isBusy = true;
+                  err = null;
+                });
+                bool verified = false;
+                try {
+                  verified = await widget.storage.verifyPrivacyPassword(
+                    currentPin,
+                  );
+                } finally {
+                  if (ctx.mounted && !verified) {
+                    setPadState(() => isBusy = false);
+                  }
+                }
+                if (!ctx.mounted) return;
+                if (verified) {
                   await Future<void>.delayed(const Duration(milliseconds: 90));
                   if (!ctx.mounted || !mounted ||
                       ModalRoute.of(ctx)?.isCurrent != true) {
@@ -3853,22 +3946,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   onSuccess();
                   return;
                 }
-                if (currentPin.length >= targetLen) {
-                  HapticFeedback.heavyImpact();
+                HapticFeedback.heavyImpact();
+                setPadState(() {
+                  err = '密码错误，请重新输入';
+                });
+                await Future<void>.delayed(const Duration(milliseconds: 340));
+                if (ctx.mounted) {
                   setPadState(() {
-                    err = '密码错误，请重新输入';
+                    currentPin = '';
                   });
-                  await Future<void>.delayed(const Duration(milliseconds: 340));
-                  if (ctx.mounted) {
-                    setPadState(() {
-                      currentPin = '';
-                    });
-                  }
                 }
               }
 
               void handleBackspace() {
-                if (currentPin.isEmpty) return;
+                if (isBusy || currentPin.isEmpty) return;
                 HapticFeedback.selectionClick();
                 setPadState(() {
                   err = null;
@@ -3883,6 +3974,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 pinLength: targetLen,
                 enteredCount: currentPin.length,
                 errorText: err,
+                isLoading: isBusy,
+                loadingText: '正在验证密码…',
                 onDigit: handleDigit,
                 onBackspace: handleBackspace,
                 onCancel: () => Navigator.of(ctx).pop(),
@@ -3911,6 +4004,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required int pinLength,
     required int enteredCount,
     required String? errorText,
+    bool isLoading = false,
+    String? loadingText,
     required ValueChanged<String> onDigit,
     required VoidCallback onBackspace,
     required VoidCallback onCancel,
@@ -3951,11 +4046,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ],
                   ),
                   alignment: Alignment.center,
-                  child: const Icon(
-                    CupertinoIcons.lock_shield_fill,
-                    color: Colors.white,
-                    size: 24,
-                  ),
+                  child: isLoading
+                      ? const CupertinoActivityIndicator(
+                          key: ValueKey('privacy-pin-loading'),
+                          color: Colors.white,
+                          radius: 11,
+                        )
+                      : const Icon(
+                          CupertinoIcons.lock_shield_fill,
+                          color: Colors.white,
+                          size: 24,
+                        ),
                 ),
                 const SizedBox(height: 12),
                 Text(
@@ -3969,12 +4070,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  hasError ? errorText : subtitle,
+                  isLoading
+                      ? (loadingText ?? '正在安全校验…')
+                      : (hasError ? errorText : subtitle),
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    color: hasError
-                        ? AppleColors.systemRed
-                        : AppleColors.labelSecondary,
+                    color: isLoading
+                        ? AppleColors.labelPrimary
+                        : (hasError
+                            ? AppleColors.systemRed
+                            : AppleColors.labelSecondary),
                     fontSize: 12.5,
                     height: 1.35,
                   ),
@@ -8523,28 +8628,30 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ),
                 const SizedBox(height: 8),
-                CupertinoTextField(
-                  controller: urlCtrl,
-                  placeholder: 'https://wallpaper.example/cinema.jpg 或本地图片路径',
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    color: AppleColors.groupedSecondary,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: AppleColors.glassBorder,
-                      width: 0.5,
+                TextSelectionMouseGuard(
+                  child: CupertinoTextField(
+                    controller: urlCtrl,
+                    placeholder: 'https://wallpaper.example/cinema.jpg 或本地图片路径',
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
                     ),
-                  ),
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
-                    fontSize: 13.5,
-                  ),
-                  placeholderStyle: const TextStyle(
-                    color: AppleColors.labelTertiary,
-                    fontSize: 13,
+                    decoration: BoxDecoration(
+                      color: AppleColors.groupedSecondary,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: AppleColors.glassBorder,
+                        width: 0.5,
+                      ),
+                    ),
+                    style: const TextStyle(
+                      color: AppleColors.labelPrimary,
+                      fontSize: 13.5,
+                    ),
+                    placeholderStyle: const TextStyle(
+                      color: AppleColors.labelTertiary,
+                      fontSize: 13,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 12),
@@ -9225,15 +9332,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               // Centered Group Pills Row
               SizedBox(
                 height: MediaQuery.textScalerOf(ctx).scale(16) + 20,
-                child: DesktopHorizontalScroller(
-                  controller: _sourcePickerGroupsScrollController,
-                  child: ListView.separated(
-                    controller: _sourcePickerGroupsScrollController,
-                    scrollDirection: Axis.horizontal,
-                    physics: const BouncingScrollPhysics(),
-                    itemCount: groups.length,
-                    separatorBuilder: (_, __) => const SizedBox(width: 8),
-                    itemBuilder: (ctx, idx) {
+                child: _SheetOwnedScrollController(
+                  builder: (ctx, groupsScrollController) =>
+                      DesktopHorizontalScroller(
+                    controller: groupsScrollController,
+                    child: ListView.separated(
+                      controller: groupsScrollController,
+                      scrollDirection: Axis.horizontal,
+                      physics: const BouncingScrollPhysics(),
+                      itemCount: groups.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 8),
+                      itemBuilder: (ctx, idx) {
                     final g = groups[idx];
                     final count = groupCounts[g] ?? 0;
                     final isSelected = selectedGroup == g;
@@ -9316,6 +9425,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ),
               ),
             ),
+          ),
             const SizedBox(height: 12),
                 ],
               )),
@@ -9429,23 +9539,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  CupertinoTextField(
-                    placeholder: '服务器地址（含端口或子路径）',
-                    keyboardType: TextInputType.url,
-                    autocorrect: false,
-                    onChanged: (v) => server = v,
+                  TextSelectionMouseGuard(
+                    child: CupertinoTextField(
+                      placeholder: '服务器地址（含端口或子路径）',
+                      keyboardType: TextInputType.url,
+                      autocorrect: false,
+                      onChanged: (v) => server = v,
+                    ),
                   ),
                   const SizedBox(height: 10),
-                  CupertinoTextField(
-                    placeholder: '用户名',
-                    autocorrect: false,
-                    onChanged: (v) => username = v,
+                  TextSelectionMouseGuard(
+                    child: CupertinoTextField(
+                      placeholder: '用户名',
+                      autocorrect: false,
+                      onChanged: (v) => username = v,
+                    ),
                   ),
                   const SizedBox(height: 10),
-                  CupertinoTextField(
-                    placeholder: '密码',
-                    obscureText: true,
-                    onChanged: (v) => password = v,
+                  TextSelectionMouseGuard(
+                    child: CupertinoTextField(
+                      placeholder: '密码',
+                      obscureText: true,
+                      onChanged: (v) => password = v,
+                    ),
                   ),
                   if (error.isNotEmpty)
                     Padding(
@@ -9627,28 +9743,30 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ],
                 ),
                 const SizedBox(height: 8),
-                CupertinoTextField(
-                  controller: groupCtrl,
-                  placeholder: '输入自定义分组名称（如：主力4K、少儿专区）',
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
-                    fontSize: 13.5,
-                  ),
-                  placeholderStyle: const TextStyle(
-                    color: AppleColors.labelTertiary,
-                    fontSize: 13,
-                  ),
-                  onChanged: (_) => setModalState(() {}),
-                  decoration: BoxDecoration(
-                    color: AppleColors.groupedSecondary,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: AppleColors.glassBorder,
-                      width: 0.5,
+                TextSelectionMouseGuard(
+                  child: CupertinoTextField(
+                    controller: groupCtrl,
+                    placeholder: '输入自定义分组名称（如：主力4K、少儿专区）',
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    style: const TextStyle(
+                      color: AppleColors.labelPrimary,
+                      fontSize: 13.5,
+                    ),
+                    placeholderStyle: const TextStyle(
+                      color: AppleColors.labelTertiary,
+                      fontSize: 13,
+                    ),
+                    onChanged: (_) => setModalState(() {}),
+                    decoration: BoxDecoration(
+                      color: AppleColors.groupedSecondary,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: AppleColors.glassBorder,
+                        width: 0.5,
+                      ),
                     ),
                   ),
                 ),
@@ -9756,35 +9874,37 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ],
                 ),
                 const SizedBox(height: 8),
-                CupertinoTextField(
-                  controller: urlCtrl,
-                  placeholder:
-                      '每行一个订阅地址（如：https://config.example/config.json）\n支持 JSON单仓/多仓、MacCMS VOD接口、M3U/M3U8/TXT 直播与点播',
-                  maxLines: 4,
-                  minLines: 2,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  smartQuotesType: SmartQuotesType.disabled,
-                  smartDashesType: SmartDashesType.disabled,
-                  keyboardType: TextInputType.multiline,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 10,
-                  ),
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
-                    fontSize: 13.5,
-                  ),
-                  placeholderStyle: const TextStyle(
-                    color: AppleColors.labelTertiary,
-                    fontSize: 12.5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: AppleColors.groupedSecondary,
-                    borderRadius: BorderRadius.circular(11),
-                    border: Border.all(
-                      color: AppleColors.glassBorder,
-                      width: 0.5,
+                TextSelectionMouseGuard(
+                  child: CupertinoTextField(
+                    controller: urlCtrl,
+                    placeholder:
+                        '每行一个订阅地址（如：https://config.example/config.json）\n支持 JSON单仓/多仓、MacCMS VOD接口、M3U/M3U8/TXT 直播与点播',
+                    maxLines: 4,
+                    minLines: 2,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    smartQuotesType: SmartQuotesType.disabled,
+                    smartDashesType: SmartDashesType.disabled,
+                    keyboardType: TextInputType.multiline,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
+                    style: const TextStyle(
+                      color: AppleColors.labelPrimary,
+                      fontSize: 13.5,
+                    ),
+                    placeholderStyle: const TextStyle(
+                      color: AppleColors.labelTertiary,
+                      fontSize: 12.5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppleColors.groupedSecondary,
+                      borderRadius: BorderRadius.circular(11),
+                      border: Border.all(
+                        color: AppleColors.glassBorder,
+                        width: 0.5,
+                      ),
                     ),
                   ),
                 ),
@@ -9798,31 +9918,33 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ),
                 const SizedBox(height: 8),
-                CupertinoTextField(
-                  controller: jsonCtrl,
-                  placeholder:
-                      '{"sites": [...]} 或 #EXTM3U 播放列表 或 频道名,https://live.example/tv.m3u8',
-                  maxLines: 4,
-                  minLines: 2,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  smartQuotesType: SmartQuotesType.disabled,
-                  smartDashesType: SmartDashesType.disabled,
-                  padding: const EdgeInsets.all(12),
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
-                    fontSize: 13,
-                  ),
-                  placeholderStyle: const TextStyle(
-                    color: AppleColors.labelTertiary,
-                    fontSize: 12.5,
-                  ),
-                  decoration: BoxDecoration(
-                    color: AppleColors.groupedSecondary,
-                    borderRadius: BorderRadius.circular(11),
-                    border: Border.all(
-                      color: AppleColors.glassBorder,
-                      width: 0.5,
+                TextSelectionMouseGuard(
+                  child: CupertinoTextField(
+                    controller: jsonCtrl,
+                    placeholder:
+                        '{"sites": [...]} 或 #EXTM3U 播放列表 或 频道名,https://live.example/tv.m3u8',
+                    maxLines: 4,
+                    minLines: 2,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    smartQuotesType: SmartQuotesType.disabled,
+                    smartDashesType: SmartDashesType.disabled,
+                    padding: const EdgeInsets.all(12),
+                    style: const TextStyle(
+                      color: AppleColors.labelPrimary,
+                      fontSize: 13,
+                    ),
+                    placeholderStyle: const TextStyle(
+                      color: AppleColors.labelTertiary,
+                      fontSize: 12.5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppleColors.groupedSecondary,
+                      borderRadius: BorderRadius.circular(11),
+                      border: Border.all(
+                        color: AppleColors.glassBorder,
+                        width: 0.5,
+                      ),
                     ),
                   ),
                 ),
@@ -9915,25 +10037,27 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ),
               ),
               const SizedBox(height: 10),
-              CupertinoTextField(
-                controller: ctrl,
-                maxLines: 9,
-                minLines: 6,
-                autocorrect: false,
-                enableSuggestions: false,
-                smartQuotesType: SmartQuotesType.disabled,
-                smartDashesType: SmartDashesType.disabled,
-                padding: const EdgeInsets.all(12),
-                style: const TextStyle(
-                  color: AppleColors.labelPrimary,
-                  fontSize: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: AppleColors.groupedSecondary,
-                  borderRadius: BorderRadius.circular(11),
-                  border: Border.all(
-                    color: AppleColors.glassBorder,
-                    width: 0.5,
+              TextSelectionMouseGuard(
+                child: CupertinoTextField(
+                  controller: ctrl,
+                  maxLines: 9,
+                  minLines: 6,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  smartQuotesType: SmartQuotesType.disabled,
+                  smartDashesType: SmartDashesType.disabled,
+                  padding: const EdgeInsets.all(12),
+                  style: const TextStyle(
+                    color: AppleColors.labelPrimary,
+                    fontSize: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppleColors.groupedSecondary,
+                    borderRadius: BorderRadius.circular(11),
+                    border: Border.all(
+                      color: AppleColors.glassBorder,
+                      width: 0.5,
+                    ),
                   ),
                 ),
               ),
@@ -10014,19 +10138,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
             ),
             const SizedBox(height: 12),
-            CupertinoTextField(
-              controller: TextEditingController(text: bundle),
-              maxLines: 12,
-              minLines: 8,
-              readOnly: true,
-              style: const TextStyle(
-                color: AppleColors.labelPrimary,
-                fontSize: 11,
-                fontFamily: 'monospace',
-              ),
-              decoration: BoxDecoration(
-                color: AppleColors.groupedSecondary,
-                borderRadius: BorderRadius.circular(10),
+            TextSelectionMouseGuard(
+              child: CupertinoTextField(
+                controller: TextEditingController(text: bundle),
+                maxLines: 12,
+                minLines: 8,
+                readOnly: true,
+                style: const TextStyle(
+                  color: AppleColors.labelPrimary,
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                ),
+                decoration: BoxDecoration(
+                  color: AppleColors.groupedSecondary,
+                  borderRadius: BorderRadius.circular(10),
+                ),
               ),
             ),
             const SizedBox(height: 16),
@@ -10120,23 +10246,25 @@ class _IosBackupRestorePanelState extends State<_IosBackupRestorePanel> {
           children: [
             Padding(
               padding: const EdgeInsets.all(14),
-              child: CupertinoTextField(
-                key: const ValueKey('ios-backup-textfield'),
-                controller: _ctrl,
-                maxLines: 8,
-                minLines: 5,
-                autocorrect: false,
-                enableSuggestions: false,
-                smartQuotesType: SmartQuotesType.disabled,
-                smartDashesType: SmartDashesType.disabled,
-                padding: const EdgeInsets.all(12),
-                style: const TextStyle(
-                  color: AppleColors.labelPrimary,
-                  fontSize: 12.5,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF2C2C2E),
-                  borderRadius: BorderRadius.circular(10),
+              child: TextSelectionMouseGuard(
+                child: CupertinoTextField(
+                  key: const ValueKey('ios-backup-textfield'),
+                  controller: _ctrl,
+                  maxLines: 8,
+                  minLines: 5,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  smartQuotesType: SmartQuotesType.disabled,
+                  smartDashesType: SmartDashesType.disabled,
+                  padding: const EdgeInsets.all(12),
+                  style: const TextStyle(
+                    color: AppleColors.labelPrimary,
+                    fontSize: 12.5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2C2C2E),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
                 ),
               ),
             ),
@@ -10701,4 +10829,32 @@ class _PrivacyModePortalAnimationState
       },
     );
   }
+}
+
+/// Provides a dedicated [ScrollController] owned and disposed by an individual
+/// modal sheet instance (M-F7), preventing multiple overlapping sheet routes
+/// (e.g. during exit/enter animations) from attaching to a shared controller.
+class _SheetOwnedScrollController extends StatefulWidget {
+  final Widget Function(BuildContext context, ScrollController controller)
+      builder;
+
+  const _SheetOwnedScrollController({required this.builder});
+
+  @override
+  State<_SheetOwnedScrollController> createState() =>
+      _SheetOwnedScrollControllerState();
+}
+
+class _SheetOwnedScrollControllerState
+    extends State<_SheetOwnedScrollController> {
+  final ScrollController _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context, _controller);
 }

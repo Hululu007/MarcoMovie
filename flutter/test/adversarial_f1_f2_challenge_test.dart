@@ -24,13 +24,11 @@ void main() {
   });
 
   group('Adversarial Challenge F1: Credential Storage & Migration', () {
-    test('Tampered ciphertext (flipped bit in ciphertext) fails safely to null', () async {
-      final store = DefaultSecureCredentialStore(dataDirectory: tempDir);
-      await store.write('secret_key', 'my_precious_secret');
-
+    test('Tampered legacy ciphertext fails safely to null and preserves .bak', () async {
       final encFile = File('${tempDir.path}/secure_credentials.enc');
-      expect(await encFile.exists(), isTrue);
-      final raw = await encFile.readAsString();
+      final raw = DefaultSecureCredentialStore.encryptLegacyPayloadForTest({
+        'secret_key': 'my_precious_secret',
+      });
       final parts = raw.trim().split(':');
       expect(parts.length, equals(5));
 
@@ -41,61 +39,85 @@ void main() {
       final tamperedRaw = '${parts[0]}:${parts[1]}:${parts[2]}:${parts[3]}:$tamperedCipher';
       await encFile.writeAsString(tamperedRaw, flush: true);
 
-      // Re-instantiate store to force read from disk
-      final store2 = DefaultSecureCredentialStore(dataDirectory: tempDir);
+      final store2 = DefaultSecureCredentialStore(
+        dataDirectory: tempDir,
+        backend: InMemorySecureCredentialStore(),
+      );
       final result = await store2.read('secret_key');
       expect(result, isNull, reason: 'Tampered ciphertext should fail HMAC check and return null');
+      expect(store2.didLegacyMigrationFail, isTrue);
+      expect(await File('${tempDir.path}/secure_credentials.enc.bak').exists(), isTrue);
     });
 
-    test('Tampered tag (HMAC) fails safely to null', () async {
-      final store = DefaultSecureCredentialStore(dataDirectory: tempDir);
-      await store.write('secret_key', 'my_precious_secret');
-
+    test('Tampered tag (HMAC) fails safely to null and preserves .bak', () async {
       final encFile = File('${tempDir.path}/secure_credentials.enc');
-      final raw = await encFile.readAsString();
+      final raw = DefaultSecureCredentialStore.encryptLegacyPayloadForTest({
+        'secret_key': 'my_precious_secret',
+      });
       final parts = raw.trim().split(':');
 
       // Tamper with tag hex
       final originalTag = parts[3];
-      final tamperedTag = '00' + originalTag.substring(2);
+      final tamperedTag = '00${originalTag.substring(2)}';
       final tamperedRaw = '${parts[0]}:${parts[1]}:${parts[2]}:$tamperedTag:${parts[4]}';
       await encFile.writeAsString(tamperedRaw, flush: true);
 
-      final store2 = DefaultSecureCredentialStore(dataDirectory: tempDir);
+      final store2 = DefaultSecureCredentialStore(
+        dataDirectory: tempDir,
+        backend: InMemorySecureCredentialStore(),
+      );
       expect(await store2.read('secret_key'), isNull);
+      expect(store2.didLegacyMigrationFail, isTrue);
+      expect(await File('${tempDir.path}/secure_credentials.enc.bak').exists(), isTrue);
     });
 
-    test('Truncated ciphertext file fails safely to null without crashing', () async {
-      final store = DefaultSecureCredentialStore(dataDirectory: tempDir);
-      await store.write('secret_key', 'my_precious_secret');
-
+    test('Truncated ciphertext file fails safely to null without crashing and preserves .bak', () async {
       final encFile = File('${tempDir.path}/secure_credentials.enc');
-      final raw = await encFile.readAsString();
+      final raw = DefaultSecureCredentialStore.encryptLegacyPayloadForTest({
+        'secret_key': 'my_precious_secret',
+      });
 
       // Truncate file halfway
       await encFile.writeAsString(raw.substring(0, raw.length ~/ 2), flush: true);
 
-      final store2 = DefaultSecureCredentialStore(dataDirectory: tempDir);
+      final store2 = DefaultSecureCredentialStore(
+        dataDirectory: tempDir,
+        backend: InMemorySecureCredentialStore(),
+      );
       expect(await store2.read('secret_key'), isNull);
+      expect(store2.didLegacyMigrationFail, isTrue);
+      expect(await File('${tempDir.path}/secure_credentials.enc.bak').exists(), isTrue);
     });
 
-    test('Corrupted prefix or garbage bytes in file fails safely to null', () async {
+    test('Corrupted prefix or garbage bytes in file fails safely to null and preserves .bak', () async {
       final encFile = File('${tempDir.path}/secure_credentials.enc');
       await encFile.writeAsString('BAD_PREFIX:deadbeef:1234:5678:9abc', flush: true);
 
-      final store = DefaultSecureCredentialStore(dataDirectory: tempDir);
+      final store = DefaultSecureCredentialStore(
+        dataDirectory: tempDir,
+        backend: InMemorySecureCredentialStore(),
+      );
       expect(await store.read('secret_key'), isNull);
+      expect(store.didLegacyMigrationFail, isTrue);
+      expect(await File('${tempDir.path}/secure_credentials.enc.bak').exists(), isTrue);
 
       await encFile.writeAsString('\x00\xFF\xFE\xFDGARBAGE_BINARY', flush: true);
-      final store3 = DefaultSecureCredentialStore(dataDirectory: tempDir);
+      final store3 = DefaultSecureCredentialStore(
+        dataDirectory: tempDir,
+        backend: InMemorySecureCredentialStore(),
+      );
       expect(await store3.read('secret_key'), isNull);
+      expect(store3.didLegacyMigrationFail, isTrue);
     });
 
-    test('Empty ciphertext file fails safely to null', () async {
+    test('Empty ciphertext file returns null cleanly without migration failure prompt', () async {
       final encFile = File('${tempDir.path}/secure_credentials.enc');
       await encFile.writeAsString('', flush: true);
 
-      final store = DefaultSecureCredentialStore(dataDirectory: tempDir);
+      final store = DefaultSecureCredentialStore(
+        dataDirectory: tempDir,
+        backend: InMemorySecureCredentialStore(),
+      );
       expect(await store.read('secret_key'), isNull);
     });
 
@@ -238,7 +260,7 @@ void main() {
       );
 
       // What does verifyPrivacyPassword do?
-      final verified = storage.verifyPrivacyPassword('1234');
+      final verified = await storage.verifyPrivacyPassword('1234');
       print('Iteration downgrade (1 iter) verified result: $verified');
 
       // Requirement: Iteration count must be strictly >= 100,000 iterations and cannot be downgraded!
@@ -268,7 +290,7 @@ void main() {
         secureStore: InMemorySecureCredentialStore(),
       );
 
-      final verified = storage.verifyPrivacyPassword('1234');
+      final verified = await storage.verifyPrivacyPassword('1234');
       print('Iteration downgrade (99999 iter) verified result: $verified');
 
       expect(verified, isFalse, reason: 'PIN hash with iterations < 100,000 must be rejected');
@@ -287,7 +309,7 @@ void main() {
         secureStore: InMemorySecureCredentialStore(),
       );
 
-      final verified = storage.verifyPrivacyPassword('1234');
+      final verified = await storage.verifyPrivacyPassword('1234');
       expect(verified, isFalse, reason: 'Zero iterations must not verify');
     });
 
@@ -319,7 +341,7 @@ void main() {
 
         // Verification must safely return false and not crash or throw unhandled exceptions
         expect(
-          storage.verifyPrivacyPassword('1234'),
+          await storage.verifyPrivacyPassword('1234'),
           isFalse,
           reason: 'Malformed hash should not verify: $badHash',
         );
@@ -327,7 +349,7 @@ void main() {
         // Crucial: A malformed hash starting with pbkdf2: or bcrypt: must NOT be treated as a plaintext PIN matching the badHash itself!
         // If a user types the badHash as their PIN, does it verify?!
         if (badHash.startsWith('pbkdf2:') || badHash.startsWith('bcrypt:')) {
-          final verifiedAsPlaintext = storage.verifyPrivacyPassword(badHash);
+          final verifiedAsPlaintext = await storage.verifyPrivacyPassword(badHash);
           print('Bad hash $badHash verified as plaintext: $verifiedAsPlaintext');
           expect(
             verifiedAsPlaintext,

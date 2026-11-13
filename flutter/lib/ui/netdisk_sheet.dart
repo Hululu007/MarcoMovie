@@ -516,13 +516,15 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                     ),
                   ),
                   const SizedBox(height: 14),
-                  TextField(
-                    controller: controller,
-                    maxLines: 3,
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    decoration: const InputDecoration(
-                      hintText: '粘贴 Cookie 或 Token…',
+                  TextSelectionMouseGuard(
+                    child: TextField(
+                      controller: controller,
+                      maxLines: 3,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      decoration: const InputDecoration(
+                        hintText: '粘贴 Cookie 或 Token…',
+                      ),
                     ),
                   ),
                   if (error.isNotEmpty) ...[

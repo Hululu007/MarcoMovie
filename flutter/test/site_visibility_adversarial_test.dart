@@ -296,8 +296,8 @@ void main() {
       expect(loaded.publicAvailableSites, isEmpty);
       expect(loaded.publicAvailableSiteCount, 0);
 
-      // Safe fallback: did not crash, selectedSiteKey is gracefully assigned fallback
-      expect(storage.selectedSiteKey, 'u1');
+      // Safe fallback: did not crash, selectedSiteKey never selects an unavailable site
+      expect(storage.selectedSiteKey, isEmpty);
     });
 
     test('Config with mixed supported and unsupported preserves order and filters correctly', () {

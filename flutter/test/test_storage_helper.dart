@@ -9,11 +9,13 @@ Future<StorageService> initTestStorage({
   Map<String, Object> initialPrefs = const <String, Object>{},
   StorageFileStore? fileStore,
   SecureCredentialStore? secureStore,
+  Pbkdf2ComputeRunner? pbkdf2Runner,
 }) async {
   SharedPreferences.setMockInitialValues(initialPrefs);
   final storage = await StorageService.init(
     fileStore: fileStore,
     secureStore: secureStore,
+    pbkdf2Runner: pbkdf2Runner ?? <T>(computation) => Future<T>.sync(computation),
   );
   addTearDown(() {
     storage.cancelPendingHistoryFlush();

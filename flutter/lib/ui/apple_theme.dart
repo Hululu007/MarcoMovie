@@ -2204,24 +2204,26 @@ class _AppleSearchFieldState extends State<AppleSearchField> {
             ),
             const SizedBox(width: 6),
             Expanded(
-              child: CupertinoTextField.borderless(
-                controller: widget.controller,
-                focusNode: _effectiveFocusNode,
-                autofocus: widget.autofocus,
-                placeholder: widget.placeholder,
-                placeholderStyle: const TextStyle(
-                  color: AppleColors.labelSecondary,
-                  fontSize: 15,
+              child: TextSelectionMouseGuard(
+                child: CupertinoTextField.borderless(
+                  controller: widget.controller,
+                  focusNode: _effectiveFocusNode,
+                  autofocus: widget.autofocus,
+                  placeholder: widget.placeholder,
+                  placeholderStyle: const TextStyle(
+                    color: AppleColors.labelSecondary,
+                    fontSize: 15,
+                  ),
+                  style: const TextStyle(
+                    color: AppleColors.labelPrimary,
+                    fontSize: 15,
+                  ),
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  cursorColor: AppleColors.systemBlue,
+                  textInputAction: TextInputAction.search,
+                  onChanged: widget.onChanged,
+                  onSubmitted: _submit,
                 ),
-                style: const TextStyle(
-                  color: AppleColors.labelPrimary,
-                  fontSize: 15,
-                ),
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                cursorColor: AppleColors.systemBlue,
-                textInputAction: TextInputAction.search,
-                onChanged: widget.onChanged,
-                onSubmitted: _submit,
               ),
             ),
             ValueListenableBuilder<TextEditingValue>(
@@ -2260,6 +2262,33 @@ class _AppleSearchFieldState extends State<AppleSearchField> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Excludes [PointerDeviceKind.mouse] from [ScrollConfiguration.dragDevices]
+/// around text inputs (`TextField`, `TextFormField`, `CupertinoTextField`) so
+/// mouse dragging selects text instead of scrolling the field's internal
+/// [Scrollable] on desktop.
+class TextSelectionMouseGuard extends StatelessWidget {
+  final Widget child;
+
+  const TextSelectionMouseGuard({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final behavior = ScrollConfiguration.of(context);
+    final devices = behavior.dragDevices;
+    if (!devices.contains(PointerDeviceKind.mouse)) {
+      return child;
+    }
+    final withoutMouse = <PointerDeviceKind>{
+      for (final device in devices)
+        if (device != PointerDeviceKind.mouse) device,
+    };
+    return ScrollConfiguration(
+      behavior: behavior.copyWith(dragDevices: withoutMouse),
+      child: child,
     );
   }
 }
