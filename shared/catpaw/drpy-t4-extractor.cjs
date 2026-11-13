@@ -15,6 +15,10 @@ const PROFILES = {
   'da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096': {
     nativeSha: 'd5d8adee01e1bdc4c18b445e19ce7c94fb296ca6dce6f18a08786504fc961f01',
     mask: 0x15
+  },
+  '6f88b2001d45018aad4e7293566ef739be92dee85c123db4cc062539973fe799': {
+    nativeSha: 'd5d8adee01e1bdc4c18b445e19ce7c94fb296ca6dce6f18a08786504fc961f01',
+    mask: 0x15
   }
 };
 const fail = () => { throw Error('guard_artifact_invalid'); };

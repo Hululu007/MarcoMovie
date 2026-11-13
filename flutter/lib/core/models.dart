@@ -393,8 +393,15 @@ class CmsSite {
     if (lowerApi.startsWith('csp_sixv')) {
       return '该线路依赖 P2P / 磁力种子协议，受当前系统沙盒限制暂不支持';
     }
-    if (lowerApi.startsWith('csp_music')) {
+    if (lowerApi.startsWith('csp_music') ||
+        lowerApi.startsWith('csp_wexaiyueyue') ||
+        lowerApi.startsWith('csp_ainewguanying') ||
+        lowerApi.startsWith('csp_ainewlibvio') ||
+        lowerApi.startsWith('csp_soaipansoo')) {
       return '该线路依赖交互式人机验证，当前设备暂不支持';
+    }
+    if (lowerApi.startsWith('csp_aipan1me')) {
+      return '该线路依赖论坛回复解锁，当前设备暂不支持';
     }
     if (lowerApi.startsWith('csp_aidj')) {
       return '该线路使用专有加密流保护，当前设备暂不支持';

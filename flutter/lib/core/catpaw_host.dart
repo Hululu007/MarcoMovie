@@ -441,8 +441,43 @@ class CatPawHost {
       'kkss-v1',
       'uuss-v1',
     ];
-    final isFty = ftyAdapters.contains(adapter);
-    if ((!isFty && !baseAdapters.contains(adapter)) ||
+    const wexAdapters = [
+      'wexappv7-v1',
+      'wexguazi-v1',
+      'wexduboku-v1',
+      'wexwencai-v1',
+      'wexfengye-v1',
+      'wexjianpian-v1',
+      'wexjuxiafan-v1',
+      'wexrebo-v1',
+      'wexbobo-v1',
+      'wexikanbot-v1',
+      'wexyiys-v1',
+      'wexhanxiaoquan-v1',
+      'wexduoduo-v1',
+      'wexhuban-v1',
+      'wexkuaiying-v1',
+      'wexlabi-v1',
+      'wexmuou-v1',
+      'wexshandian-v1',
+      'wexxiaopan-v1',
+      'wexzhizhen-v1',
+      'wexwogg-v1',
+      'wexhuajuan-v1',
+      'wexjutou-v1',
+      'wexzhinan-v1',
+      'wexwoniu-v1',
+      'wexpianku-v1',
+      'wexqiwei-v1',
+      'wexyidong-v1',
+      'wexaipanso-v1',
+      'wexhaiyin-v1',
+      'wexquanpan-v1',
+      'wexkaka-v1',
+    ];
+    final isOptionalExt =
+        ftyAdapters.contains(adapter) || wexAdapters.contains(adapter);
+    if ((!isOptionalExt && !baseAdapters.contains(adapter)) ||
         bytes.isEmpty ||
         bytes.length > _maxBundleBytes ||
         bytes.any((b) => b < 0 || b > 255)) {
@@ -460,7 +495,7 @@ class CatPawHost {
           utf8.encode(extension).length > 16 * 1024) {
         throw const FormatException('插件扩展配置无效');
       }
-    } else if (isFty) {
+    } else if (isOptionalExt) {
       if (extension != null && utf8.encode(extension).length > 16 * 1024) {
         throw const FormatException('插件扩展配置无效');
       }

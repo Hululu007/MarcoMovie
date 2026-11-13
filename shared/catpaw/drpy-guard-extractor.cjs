@@ -118,6 +118,44 @@ const PROFILES = {
       ver: [1190, 7, 1200],
       code: [1208, 6, 2364]
     }
+  },
+  '6f88b2001d45018aad4e7293566ef739be92dee85c123db4cc062539973fe799': {
+    auete: {
+      init: '1ca0b0cb8382e382e0fcb3618ed6db3983480e15881dd162e0bc9da4d02e3136',
+      player: '6d80cc0b70360c0af6995fd618632b184920b49a73556d7a46e358eb368139a5'
+    },
+    bttwoo: {
+      init: '49ad4592d9aa5f747518891e297c82b357f7cd2ae0124f10b55472ec80f82a47',
+      encodePlayKey: '82985609b8a2621de45855ab8430439170be33fb1ddd0f8ece76440c8231353d',
+      clinit: '0e6ebb68799c497da9d287d322194ac2ee07fd3c964b64afdd109187274e68c1',
+      headerClass: 'Lcom/github/catvod/spider/merge/g8;',
+      headerClinit: '0646d6af48b53e6fbb7466b2b53245324f1a15e7e91b3992ef9825d6f0466613',
+      headerCount: 1667,
+      originMask: 1710,
+      playKeyMask: 2905,
+      userAgentMask: 1841
+    },
+    appgz: {
+      methods: {
+        '<init>': '83f2f88c9f2e8ebd393ab389cb81e13c979e528ab9682935c8a2db210a1aab45',
+        'N': '1c8cde14d8d762efade0bbe69d4d4b836571e4bf4380c78331e6d0f0b85e1eb5',
+        'tF': 'ebd346bd246c75ed73fd8f03d8ce64ce3b040fbcc947bc90a7d189e80d58f579',
+        'init': 'bc71567abd955873c59b6ebbd4e2da7fc0bc731c7516480e5b861ddd8a6c5da3',
+        'playerContent': '4d82600507d4042a158843a7362f7ee1916e689b789a37bad17ece35608c192b'
+      },
+      clinit: 'de7eafb4f831d7df2f8beb56986412461ae553a7914318e59b80d14813100649',
+      count: 3085,
+      origin: [1266, 21, 2403],
+      privateKey: [16, 848, 2451],
+      publicKey: [864, 216, 3222],
+      signatureSuffix: [1452, 36, 2877],
+      utdidKey: [1905, 44, 3129],
+      ua: [1150, 13, 2667],
+      version: [1170, 7, 2261],
+      pkg: [1188, 44, 1577],
+      ver: [1235, 7, 353],
+      code: [1253, 6, 795]
+    }
   }
 };
 const fail = () => { throw Error('invalid_artifact'); };

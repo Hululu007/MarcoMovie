@@ -41,6 +41,18 @@ const PROFILES = {
     count: 726,
     ua: [0, 21, 2088],
     signKey: [73, 38, 602]
+  },
+  '6f88b2001d45018aad4e7293566ef739be92dee85c123db4cc062539973fe799': {
+    nativeSha: 'd5d8adee01e1bdc4c18b445e19ce7c94fb296ca6dce6f18a08786504fc961f01',
+    mask: 0x15,
+    methods: {
+      '<init>': '3f970906b7eb4f2deceecd714b7ad044946a9700fb1e5c8bfe2c419c36ce3767',
+      'yq': '6779524e53241c77dda4ef5613c95317eb774a3b9773c71ffafa0e45233b36a6'
+    },
+    clinit: 'b10c18a67e0e922902a05e0d2783ca1a29a3f833786f838a7541a6979d43af8d',
+    count: 726,
+    ua: [0, 21, 2168],
+    signKey: [73, 38, 2271]
   }
 };
 

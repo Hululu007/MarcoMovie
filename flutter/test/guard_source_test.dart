@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -8,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:marco_movie/core/catpaw_host.dart';
 import 'package:marco_movie/core/cms_client.dart';
+import 'package:marco_movie/core/csp_bridge.dart';
 import 'package:marco_movie/core/drpy_source.dart';
 import 'package:marco_movie/core/guard_source.dart';
 import 'package:marco_movie/core/models.dart';
@@ -655,7 +657,69 @@ void main() {
         'csp_SoAiPanSooGuard',
         'csp_AiPan1MeGuard',
       ]) {
-        expect(GuardSource.supports(base.copyWith(api: gated)), isFalse, reason: gated);
+        final s = base.copyWith(api: gated);
+        expect(GuardSource.supports(s), isFalse, reason: gated);
+        if (gated == 'csp_AiPan1MeGuard') {
+          expect(s.unsupportedReason, '该线路依赖论坛回复解锁，当前设备暂不支持');
+        } else {
+          expect(s.unsupportedReason, '该线路依赖交互式人机验证，当前设备暂不支持');
+        }
+      }
+
+      // Every Guard adapter mapped by CspBridge must pass CatPawHost.bootstrapGuard allowlist validation.
+      final realHost = CatPawHost(
+        directory: () => Future<Directory>.error(StateError('passed_validation')),
+      );
+      final allApis = <String>[
+        'csp_Dm84Guard',
+        'csp_AueteGuard',
+        'csp_BttwooGuard',
+        'csp_AppgzGuard',
+        'csp_T4Guard',
+        'csp_AppTTGuard',
+        'csp_FyGuard',
+        'csp_JpysGuard',
+        'csp_JpjGuard',
+        'csp_NmyswvGuard',
+        'csp_HmysGuard',
+        'csp_App99Guard',
+        'csp_AppSxGuard',
+        'csp_NewCzGuard',
+        'csp_LibvioGuard',
+        'csp_YgpGuard',
+        'csp_KanqiuGuard',
+        'csp_DoubaoGuard',
+        'csp_LiveGzGuard',
+        'csp_AllliveGuard',
+        'csp_Tingshu275Guard',
+        'csp_YuetingGuard',
+        'csp_SeedhubGuard',
+        'csp_S_zpsGuard',
+        'csp_YpanSoGuard',
+        'csp_BpanSoGuard',
+        'csp_KkSsGuard',
+        'csp_UuSsGuard',
+        ...vodApis,
+        ...panApis,
+      ];
+      const strictRequiredExt = {'t4-v1', 'apptt-v1', 'app99-v1', 'appsx-v1'};
+      const baseNoExt = {'dm84-v1', 'auete-v1', 'bttwoo-v1', 'appgz-v1', 'fy-v1'};
+      for (final api in allApis) {
+        final adapter = CspBridge.guardAdapterFor(base.copyWith(api: api));
+        expect(adapter, isNotNull, reason: api);
+        final ext = baseNoExt.contains(adapter) ? null : 'fixture';
+        await expectLater(
+          realHost.bootstrapGuard([1, 2, 3], adapter: adapter!, extension: ext),
+          throwsA(isA<StateError>()),
+          reason: '$api ($adapter, ext=$ext)',
+        );
+        if (!strictRequiredExt.contains(adapter) && !baseNoExt.contains(adapter)) {
+          await expectLater(
+            realHost.bootstrapGuard([1, 2, 3], adapter: adapter),
+            throwsA(isA<StateError>()),
+            reason: '$api ($adapter, ext=null)',
+          );
+        }
       }
     },
   );
