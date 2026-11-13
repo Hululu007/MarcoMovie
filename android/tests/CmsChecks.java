@@ -184,19 +184,19 @@ public final class CmsChecks {
                 "missing type site with jar field is not treated as CMS");
 
         // C4: Relative ext resolution with HTTP and file origins
-        String httpOrigin = "https://example.com/sub/config.json";
+        String httpOrigin = "https://site.example/sub/config.json";
         String httpRelCfg =
-                "{\"sites\":[{\"key\":\"rel1\",\"name\":\"Rel1\",\"type\":1,\"api\":\"https://example.com/api\",\"ext\":\"./rules/custom.json\"}]}";
+                "{\"sites\":[{\"key\":\"rel1\",\"name\":\"Rel1\",\"type\":1,\"api\":\"https://site.example/api\",\"ext\":\"./rules/custom.json\"}]}";
         Cms.Config cRelHttp = Cms.parseConfig(httpRelCfg, httpOrigin);
         check(
-                "https://example.com/sub/rules/custom.json".equals(cRelHttp.sites.get(0).ext),
+                "https://site.example/sub/rules/custom.json".equals(cRelHttp.sites.get(0).ext),
                 "HTTP origin resolves relative string ext ./");
 
         String httpDotDotCfg =
-                "{\"sites\":[{\"key\":\"rel2\",\"name\":\"Rel2\",\"type\":1,\"api\":\"https://example.com/api\",\"ext\":\"../top_rule.js\"}]}";
+                "{\"sites\":[{\"key\":\"rel2\",\"name\":\"Rel2\",\"type\":1,\"api\":\"https://site.example/api\",\"ext\":\"../top_rule.js\"}]}";
         Cms.Config cDotDotHttp = Cms.parseConfig(httpDotDotCfg, httpOrigin);
         check(
-                "https://example.com/top_rule.js".equals(cDotDotHttp.sites.get(0).ext),
+                "https://site.example/top_rule.js".equals(cDotDotHttp.sites.get(0).ext),
                 "HTTP origin resolves relative string ext ../");
 
         JSONObject objExtCfg = new JSONObject();
@@ -205,7 +205,7 @@ public final class CmsChecks {
         siteObjExt.put("key", "relObj");
         siteObjExt.put("name", "RelObj");
         siteObjExt.put("type", 1);
-        siteObjExt.put("api", "https://example.com/api");
+        siteObjExt.put("api", "https://site.example/api");
         JSONObject innerExt = new JSONObject();
         innerExt.put("json", "./data/data.json");
         innerExt.put("url", "../remote/feed.json");
@@ -217,13 +217,13 @@ public final class CmsChecks {
         Cms.Config cObjExt = Cms.parseConfig(objExtCfg.toString(), httpOrigin);
         JSONObject resolvedExtObj = (JSONObject) cObjExt.sites.get(0).ext;
         check(
-                "https://example.com/sub/data/data.json".equals(resolvedExtObj.optString("json")),
+                "https://site.example/sub/data/data.json".equals(resolvedExtObj.optString("json")),
                 "HTTP origin resolves object ext.json ./");
         check(
-                "https://example.com/remote/feed.json".equals(resolvedExtObj.optString("url")),
+                "https://site.example/remote/feed.json".equals(resolvedExtObj.optString("url")),
                 "HTTP origin resolves object ext.url ../");
         check(
-                "https://example.com/sub/script.js".equals(resolvedExtObj.optString("rule")),
+                "https://site.example/sub/script.js".equals(resolvedExtObj.optString("rule")),
                 "HTTP origin resolves object ext.rule ./");
         check(
                 "keepMe".equals(resolvedExtObj.optString("normal")),
@@ -231,7 +231,7 @@ public final class CmsChecks {
 
         String fileOrigin = "file:///sdcard/Download/tvbox.json";
         String fileRelCfg =
-                "{\"sites\":[{\"key\":\"fileRel\",\"name\":\"FileRel\",\"type\":1,\"api\":\"http://example.com/api\",\"ext\":\"./local_rules.json\"}]}";
+                "{\"sites\":[{\"key\":\"fileRel\",\"name\":\"FileRel\",\"type\":1,\"api\":\"http://site.example/api\",\"ext\":\"./local_rules.json\"}]}";
         Cms.Config cRelFile = Cms.parseConfig(fileRelCfg, fileOrigin);
         String resolvedFileExt = (String) cRelFile.sites.get(0).ext;
         check(

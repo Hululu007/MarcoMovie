@@ -1,13 +1,13 @@
 {
-  "spider": "https://hub.example.com/channel/v2/spiders/custom.jar;md5;abc12345",
+  "spider": "https://hub.example/channel/v2/spiders/custom.jar;md5;abc12345",
   "sites": [
     {
       "key": "rel_site",
       "name": "Relative Site",
       "type": 1,
-      "api": "https://api.example.com/vod",
-      "jar": "https://hub.example.com/channel/jars/site.jar",
-      "ext": "https://hub.example.com/channel/v2/rules/site.json",
+      "api": "https://api.example/vod",
+      "jar": "https://hub.example/channel/jars/site.jar",
+      "ext": "https://hub.example/channel/v2/rules/site.json",
       "searchable": true,
       "capabilityStatus": "needs-jar"
     }

@@ -193,6 +193,11 @@ def run_jvm_checks() -> None:
             print(res.stderr.rstrip())
         if res.returncode != 0:
             raise SystemExit(res.returncode)
+        # Pin the exact check count so accidentally skipped or deleted checks fail CI;
+        # update this number in lockstep whenever checks are added to or removed from SecureStorageChecks.java.
+        assert "ALL PASS (36 checks)" in (res.stdout or ""), (
+            f"Expected 'ALL PASS (36 checks)' in SecureStorageChecks output, got:\n{res.stdout}"
+        )
 
         # Verify API 23 bytecode compatibility on compiled SecureStorage classes (no java.util.Base64,
         # java.util.function, or java.util.stream references).

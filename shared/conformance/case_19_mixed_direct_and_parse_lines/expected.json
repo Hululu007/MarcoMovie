@@ -8,7 +8,7 @@
           "episodes": [
             {
               "name": "第1集",
-              "url": "https://cdn.example.com/video.m3u8"
+              "url": "https://cdn.example/video.m3u8"
             }
           ]
         },
@@ -17,7 +17,7 @@
           "episodes": [
             {
               "name": "第1集",
-              "url": "https://parse.example.com/play/101"
+              "url": "https://parse.example/play/101"
             }
           ]
         },
@@ -26,11 +26,16 @@
           "episodes": [
             {
               "name": "第1集",
-              "url": "https://other.example.com/play/202"
+              "url": "https://other.example/play/202"
             }
           ]
         }
       ]
     }
-  ]
+  ],
+  "platformOverrides": {
+    "lite": {
+      "skip": true
+    }
+  }
 }

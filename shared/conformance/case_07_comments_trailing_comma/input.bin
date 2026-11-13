@@ -7,7 +7,7 @@
       "key": "comment_site",
       "name": "Comment Site", // inline
       "type": 1,
-      "api": "https://api.example.com/vod",
+      "api": "https://api.example/vod",
     }, // trailing array comma
   ], // trailing object comma
 }

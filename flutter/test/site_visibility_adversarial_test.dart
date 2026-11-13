@@ -42,19 +42,19 @@ void main() {
             'key': 'site_ok',
             'name': '正常CMS源',
             'type': 1,
-            'api': 'https://cms.test.org/api.php/provide/vod',
+            'api': 'https://cms.test/api.php/provide/vod',
           },
           {
             'key': 'site_needs_jar',
             'name': '未适配Spider源',
             'type': 3,
-            'api': 'https://spider.test.org/spider.jar',
+            'api': 'https://spider.test/spider.jar',
           },
           {
             'key': 'site_unsupported_type',
             'name': '未知类型源',
             'type': 99,
-            'api': 'https://unknown.test.org/api',
+            'api': 'https://unknown.test/api',
           },
           {
             'key': 'site_adapter_missing',
@@ -66,7 +66,7 @@ void main() {
             'key': 'site_ext_too_large',
             'name': '超大参数源',
             'type': 1,
-            'api': 'https://cms.test.org/vod',
+            'api': 'https://cms.test/vod',
             'ext': 'x' * (128 * 1024 + 10),
           },
           {
@@ -79,14 +79,14 @@ void main() {
             'key': 'site_parser_required',
             'name': '需外部解析源',
             'type': 1,
-            'api': 'https://cms.test.org/vod',
+            'api': 'https://cms.test/vod',
             'playUrl': '',
             'parse': 1,
           },
         ]
       });
 
-      final config = CmsParser.parseConfig(jsonConfig, origin: 'https://test.org/cfg.json');
+      final config = CmsParser.parseConfig(jsonConfig, origin: 'https://site.test/cfg.json');
       expect(config.sites.length, 7);
 
       final okSite = config.sites.firstWhere((s) => s.key == 'site_ok');
@@ -132,7 +132,7 @@ void main() {
         key: 'boundary',
         name: '边界测试',
         type: 1,
-        api: 'https://test.org/api',
+        api: 'https://site.test/api',
         ext: 'A' * boundary,
       );
       expect(atBoundary.isExtTooLarge, isFalse);
@@ -143,7 +143,7 @@ void main() {
         key: 'over',
         name: '超限测试',
         type: 1,
-        api: 'https://test.org/api',
+        api: 'https://site.test/api',
         ext: 'A' * (boundary + 1),
       );
       expect(overBoundary.isExtTooLarge, isTrue);
@@ -154,7 +154,7 @@ void main() {
         key: 'explicit',
         name: '显式标志测试',
         type: 1,
-        api: 'https://test.org/api',
+        api: 'https://site.test/api',
         extTooLarge: true,
       );
       expect(explicitFlag.isExtTooLarge, isTrue);
@@ -187,7 +187,7 @@ void main() {
         key: 'c3',
         name: 'Jar且类型99',
         type: 99,
-        api: 'https://test.org/custom.js',
+        api: 'https://site.test/custom.js',
       );
       expect(jarUnsupportedType.capabilityStatus, CmsSite.statusNeedsJar);
 
@@ -216,9 +216,9 @@ void main() {
         key: 'c6',
         name: '需要解析但已有playUrl',
         type: 1,
-        api: 'https://test.org/api',
+        api: 'https://site.test/api',
         requiresParser: true,
-        playUrl: 'https://parser.test.org/parse?url=',
+        playUrl: 'https://parser.test/parse?url=',
       );
       expect(parserResolved.capabilityStatus, CmsSite.statusOk);
       expect(parserResolved.supported, isTrue);

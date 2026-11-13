@@ -1,5 +1,5 @@
 {
-  "origin": "https://example.com/headers.json",
+  "origin": "https://root.example/headers.json",
   "type": "config",
   "encoding": "utf-8"
 }

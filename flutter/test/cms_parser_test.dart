@@ -623,7 +623,7 @@ https://depot.example/config.json
     final keyBytes = _testPadRightBytes(utf8.encode(keyStr), 16, 0x30);
     final ivBytes = _testPadRightBytes(utf8.encode(ivStr), 16, 0x30);
 
-    const plainText = '{"sites":[{"key":"odd_tvbox","name":"TVBox Odd Align Site","type":1,"api":"https://cms.tvbox/vod"}]}';
+    const plainText = '{"sites":[{"key":"odd_tvbox","name":"TVBox Odd Align Site","type":1,"api":"https://cms.tvbox.test/vod"}]}';
     final cipherBytes = CmsParser.aes128CbcEncrypt(
       Uint8List.fromList(utf8.encode(plainText)),
       keyBytes,
@@ -656,7 +656,7 @@ https://depot.example/config.json
     final keyBytes = _testPadRightBytes(utf8.encode(keyStr), 16, 0x30);
     final ivBytes = _testPadRightBytes(utf8.encode(ivStr), 16, 0x30);
 
-    const plainText = '{"sites":[{"key":"ws_tvbox","name":"TVBox Whitespace Site","type":1,"api":"https://cms.tvbox/vod"}]}';
+    const plainText = '{"sites":[{"key":"ws_tvbox","name":"TVBox Whitespace Site","type":1,"api":"https://cms.tvbox.test/vod"}]}';
     final cipherBytes = CmsParser.aes128CbcEncrypt(
       Uint8List.fromList(utf8.encode(plainText)),
       keyBytes,

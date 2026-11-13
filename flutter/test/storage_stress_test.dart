@@ -21,8 +21,10 @@ void main() {
     if (await tempDir.exists()) {
       try {
         await tempDir.delete(recursive: true);
-      } on Object catch (e) {
-        assert(e.toString().isNotEmpty);
+      } on FileSystemException catch (e) {
+        // Ignore transient Windows temp cleanup lock in teardown.
+        expect(e, isA<FileSystemException>());
+        expect(e.message, isNotEmpty);
       }
     }
   });
@@ -105,7 +107,7 @@ void main() {
       // Generate ~1.5MB of subscription raw payload
       final largePayload = List.generate(
         150,
-        (i) => '{"key":"site_$i","name":"站点_$i","api":"https://example.com/$i","data":"${"A" * 10000}"}',
+        (i) => '{"key":"site_$i","name":"站点_$i","api":"https://site.example/$i","data":"${"A" * 10000}"}',
       ).join(',');
       final subs = [
         SubscriptionEntry(

@@ -67,6 +67,14 @@ public final class JsPlayerChecks {
         gatewayScript.api = "https://x/api/drpy?id=1";
         check(JsEngine.eligible(gatewayScript), "extensionless type 3 remote script is eligible");
 
+        Cms.Site case10Gateway = new Cms.Site();
+        case10Gateway.key = "type3_script";
+        case10Gateway.type = 3;
+        case10Gateway.api = "https://gateway.example/api/v1/source/live_stream";
+        check(
+                JsEngine.eligible(case10Gateway),
+                "case_10 extensionless type 3 endpoint is actually runnable via JsEngine");
+
         java.io.IOException unrecognizedErr =
                 JsEngine.wrapScriptLoadFailure(
                         gatewayScript, false, false, new java.io.IOException("SyntaxError"));

@@ -411,6 +411,29 @@ public final class ConformanceChecks {
         }
     }
 
+    private static void verifyAospOrgJsonBehavior() throws Exception {
+        JSONObject parsed = new JSONObject("{\"k\":null}");
+        String optNull = parsed.optString("k");
+        if (!"null".equals(optNull)) {
+            throw new AssertionError(
+                    "Expected AOSP org.json device behavior where JSONObject.NULL optString returns \"null\", got: "
+                            + optNull);
+        }
+        JSONObject putNull = new JSONObject().put("k", JSONObject.NULL);
+        if (!"null".equals(putNull.optString("k"))
+                || !"null".equals(putNull.optString("k", "fallback"))) {
+            throw new AssertionError(
+                    "Expected JSONObject.NULL put() + optString() to return \"null\" under AOSP org.json");
+        }
+        if (!"".equals(new JSONObject("{}").optString("k"))) {
+            throw new AssertionError("Missing key optString() should return empty string");
+        }
+        if (!"".equals(Json.str(parsed, "k"))) {
+            throw new AssertionError("Json.str() must coerce JSONObject.NULL to empty string");
+        }
+        System.out.println("PASS runtime_aosp_org_json_null_opt_string");
+    }
+
     public static void main(String[] args) throws Exception {
         Path root = Paths.get(args.length > 0 ? args[0] : ".");
         Path conformanceDir = resolveConformanceDir(root);
@@ -423,6 +446,7 @@ public final class ConformanceChecks {
 
         System.out.println("=== Tri-Platform Conformance Suite: Android Runner ===");
         System.out.println("Discovered " + caseDirs.length + " cases in " + conformanceDir);
+        verifyAospOrgJsonBehavior();
 
         for (File dir : caseDirs) {
             String caseId = dir.getName();

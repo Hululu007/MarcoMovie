@@ -1,21 +1,12 @@
 package com.pilipala.marcomovie;
 
-import com.pilipala.source.Json;
-import com.pilipala.source.Warehouse;
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -23,9 +14,7 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import org.json.JSONObject;
 
 /**
  * Pure JVM automated verification suite for Milestone 8 (Lane E: Android Performance & Stability § E1–E5).
@@ -87,8 +76,9 @@ public final class LaneEChecks {
         original.duration = 120000;
         original.updated = 1700000000000L;
 
-        // Verify clone logic creates a detached snapshot
-        WatchHistory.Entry cloned = cloneBookmarkHelper(original);
+        // Verify clone logic creates a detached snapshot using real
+        // PlaybackController.cloneBookmark
+        WatchHistory.Entry cloned = PlaybackController.cloneBookmark(original);
         check(cloned != null, "E1: cloneBookmark creates non-null instance");
         check(cloned != original, "E1: cloneBookmark produces detached instance");
         check(
@@ -111,23 +101,9 @@ public final class LaneEChecks {
                 cloned.position == 45000 && "Sample Movie".equals(cloned.title),
                 "E1: mutating original bookmark does not affect snapshot");
 
-        check(cloneBookmarkHelper(null) == null, "E1: cloneBookmark handles null input gracefully");
-    }
-
-    private static WatchHistory.Entry cloneBookmarkHelper(WatchHistory.Entry src) {
-        if (src == null) return null;
-        WatchHistory.Entry e = new WatchHistory.Entry();
-        e.site = src.site;
-        e.id = src.id;
-        e.title = src.title;
-        e.poster = src.poster;
-        e.line = src.line;
-        e.episode = src.episode;
-        e.index = src.index;
-        e.position = src.position;
-        e.duration = src.duration;
-        e.updated = src.updated;
-        return e;
+        check(
+                PlaybackController.cloneBookmark(null) == null,
+                "E1: cloneBookmark handles null input gracefully");
     }
 
     private static void testE1StorageExecutorThreading() throws Exception {
@@ -336,7 +312,7 @@ public final class LaneEChecks {
 
         server.start();
         try {
-            byte[] downloaded = downloadZipHelper(baseUrl + "/hop1");
+            byte[] downloaded = MobileShell.fetchZipBytes(baseUrl + "/hop1");
             check(
                     Arrays.equals(fakeZipBytes, downloaded),
                     "E3: fetchZipBytes follows multi-hop redirects and returns payload");
@@ -365,7 +341,7 @@ public final class LaneEChecks {
         try {
             boolean caught = false;
             try {
-                downloadZipHelper(baseUrl + "/infinite");
+                MobileShell.fetchZipBytes(baseUrl + "/infinite");
             } catch (IOException e) {
                 if (e.getMessage() != null && e.getMessage().contains("来源重定向次数过多")) {
                     caught = true;
@@ -405,7 +381,7 @@ public final class LaneEChecks {
         try {
             boolean protoBlocked = false;
             try {
-                downloadZipHelper(baseUrl + "/proto_bad");
+                MobileShell.fetchZipBytes(baseUrl + "/proto_bad");
             } catch (IOException e) {
                 protoBlocked = e.getMessage() != null && e.getMessage().contains("不支持此重定向协议");
             }
@@ -413,7 +389,7 @@ public final class LaneEChecks {
 
             boolean userinfoBlocked = false;
             try {
-                downloadZipHelper(baseUrl + "/userinfo_bad");
+                MobileShell.fetchZipBytes(baseUrl + "/userinfo_bad");
             } catch (IOException e) {
                 userinfoBlocked =
                         e.getMessage() != null && e.getMessage().contains("来源重定向不能注入登录凭据");
@@ -454,7 +430,7 @@ public final class LaneEChecks {
         try {
             boolean limitEnforced = false;
             try {
-                downloadZipHelper(baseUrl + "/huge.zip");
+                MobileShell.fetchZipBytes(baseUrl + "/huge.zip");
             } catch (IOException e) {
                 limitEnforced = e.getMessage() != null && e.getMessage().contains("超过 28 MB 限制");
             }
@@ -462,88 +438,6 @@ public final class LaneEChecks {
         } finally {
             server.stop(0);
         }
-    }
-
-    private static byte[] downloadZipHelper(String address) throws Exception {
-        if (!Cms.isHttp(address)) throw new IOException("只支持 HTTP(S) 地址");
-        URL current = new URL(Cms.normalizeHttp(address));
-        Map<String, String> forwardedHeaders = new LinkedHashMap<>();
-        forwardedHeaders.put("User-Agent", Cms.USER_AGENT);
-        forwardedHeaders.put("Accept", "*/*");
-        Map<String, Cms.RedirectCookie> redirectCookies = new LinkedHashMap<>();
-
-        for (int hop = 0; hop < 5; hop++) {
-            HttpURLConnection conn = (HttpURLConnection) current.openConnection();
-            conn.setInstanceFollowRedirects(false);
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
-            for (Map.Entry<String, String> entry : forwardedHeaders.entrySet()) {
-                conn.setRequestProperty(entry.getKey(), entry.getValue());
-            }
-
-            try {
-                int status = conn.getResponseCode();
-
-                List<String> setCookies = conn.getHeaderFields().get("Set-Cookie");
-                if (setCookies == null) {
-                    for (Map.Entry<String, List<String>> entry :
-                            conn.getHeaderFields().entrySet()) {
-                        if ("set-cookie".equalsIgnoreCase(entry.getKey())) {
-                            setCookies = entry.getValue();
-                            break;
-                        }
-                    }
-                }
-                List<Cms.RedirectCookie> newCookies = Cms.parseSetCookies(setCookies, current);
-                for (Cms.RedirectCookie cookie : newCookies) {
-                    redirectCookies.put(
-                            cookie.domain
-                                    + "|"
-                                    + cookie.hostOnly
-                                    + "|"
-                                    + cookie.path
-                                    + "|"
-                                    + cookie.name,
-                            cookie);
-                }
-
-                if (status == 301
-                        || status == 302
-                        || status == 303
-                        || status == 307
-                        || status == 308) {
-                    String loc = conn.getHeaderField("Location");
-                    if (loc == null || loc.trim().isEmpty()) throw new IOException("重定向缺少地址");
-                    URL target = new URL(current, loc.trim());
-                    if (!Cms.isHttp(target.toString()))
-                        throw new IOException("不支持此重定向协议: " + target.getProtocol());
-                    if (target.getUserInfo() != null) throw new IOException("来源重定向不能注入登录凭据");
-                    forwardedHeaders =
-                            Cms.inheritedHeaders(
-                                    current.toString(), target.toString(), forwardedHeaders);
-                    Cms.mergeRedirectCookies(forwardedHeaders, redirectCookies.values(), target);
-                    current = target;
-                    continue;
-                }
-
-                if (status < 200 || status >= 300) throw new IOException("远程服务器返回 HTTP " + status);
-
-                try (InputStream in = conn.getInputStream();
-                        ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-                    byte[] buf = new byte[8192];
-                    int n;
-                    while ((n = in.read(buf)) != -1) {
-                        if (bos.size() + n > 28 * 1024 * 1024)
-                            throw new IOException("远程包超过 28 MB 限制");
-                        bos.write(buf, 0, n);
-                    }
-                    return bos.toByteArray();
-                }
-            } finally {
-                conn.disconnect();
-            }
-        }
-        throw new IOException("来源重定向次数过多");
     }
 
     // =========================================================================
@@ -602,7 +496,7 @@ public final class LaneEChecks {
             requestHeaders.put("Proxy-Authorization", "Basic secret");
             requestHeaders.put("X-Custom-Client", "MarcoMovie-Test");
 
-            String body = fetchDanmakuHelper(originBase + "/danmaku", requestHeaders);
+            String body = DanmakuView.fetchDanmaku(originBase + "/danmaku", requestHeaders);
             check(
                     xmlBody.equals(body),
                     "E4: Danmaku fetch resolves cross-origin target response body");
@@ -659,7 +553,7 @@ public final class LaneEChecks {
             requestHeaders.put("Authorization", "Bearer keep-me");
             requestHeaders.put("Cookie", "session=keep-me");
 
-            String body = fetchDanmakuHelper(originBase + "/same_redirect", requestHeaders);
+            String body = DanmakuView.fetchDanmaku(originBase + "/same_redirect", requestHeaders);
             check(xmlBody.equals(body), "E4: Same-origin redirect returns body");
             check(authKept.get(), "E4: Same-origin redirect preserves Authorization header");
             check(cookieKept.get(), "E4: Same-origin redirect preserves Cookie header");
@@ -701,92 +595,12 @@ public final class LaneEChecks {
 
         originServer.start();
         try {
-            fetchDanmakuHelper(originBase + "/dmk_init", Collections.emptyMap());
+            DanmakuView.fetchDanmaku(originBase + "/dmk_init", Collections.emptyMap());
             check(
                     serverCookieReceived.get(),
                     "E4: Danmaku redirect parses Set-Cookie and merges into redirected request");
         } finally {
             originServer.stop(0);
-        }
-    }
-
-    private static String fetchDanmakuHelper(String candidate, Map<String, String> headers)
-            throws Exception {
-        String address = candidate;
-        if (!Cms.isHttp(address)) throw new IOException("来源没有提供有效弹幕地址");
-        Map<String, String> reqHeaders = new LinkedHashMap<>(headers);
-        URL currentUrl = new URL(Cms.normalizeHttp(address));
-        HttpURLConnection connection = null;
-        Map<String, Cms.RedirectCookie> redirectCookies = new LinkedHashMap<>();
-
-        try {
-            for (int redirect = 0; redirect < 5; redirect++) {
-                if (connection != null) connection.disconnect();
-                connection = (HttpURLConnection) currentUrl.openConnection();
-                connection.setInstanceFollowRedirects(false);
-                connection.setConnectTimeout(5000);
-                connection.setReadTimeout(5000);
-                connection.setRequestProperty("User-Agent", Cms.USER_AGENT);
-                for (Map.Entry<String, String> h : reqHeaders.entrySet()) {
-                    if (h.getKey() != null) connection.setRequestProperty(h.getKey(), h.getValue());
-                }
-                int status = connection.getResponseCode();
-
-                List<String> setCookies = connection.getHeaderFields().get("Set-Cookie");
-                if (setCookies == null) {
-                    for (Map.Entry<String, List<String>> entry :
-                            connection.getHeaderFields().entrySet()) {
-                        if ("set-cookie".equalsIgnoreCase(entry.getKey())) {
-                            setCookies = entry.getValue();
-                            break;
-                        }
-                    }
-                }
-                List<Cms.RedirectCookie> newCookies = Cms.parseSetCookies(setCookies, currentUrl);
-                for (Cms.RedirectCookie cookie : newCookies) {
-                    redirectCookies.put(
-                            cookie.domain
-                                    + "|"
-                                    + cookie.hostOnly
-                                    + "|"
-                                    + cookie.path
-                                    + "|"
-                                    + cookie.name,
-                            cookie);
-                }
-
-                if (status == 301
-                        || status == 302
-                        || status == 303
-                        || status == 307
-                        || status == 308) {
-                    String loc = connection.getHeaderField("Location");
-                    if (loc == null || loc.trim().isEmpty()) throw new IOException("弹幕重定向缺少地址");
-                    URL targetUrl = new URL(currentUrl, loc.trim());
-                    if (!Cms.isHttp(targetUrl.toString()))
-                        throw new IOException("不支持此弹幕重定向协议: " + targetUrl.getProtocol());
-                    if (targetUrl.getUserInfo() != null) throw new IOException("弹幕重定向不能注入登录凭据");
-                    reqHeaders =
-                            Cms.inheritedHeaders(
-                                    currentUrl.toString(), targetUrl.toString(), reqHeaders);
-                    Cms.mergeRedirectCookies(reqHeaders, redirectCookies.values(), targetUrl);
-                    currentUrl = targetUrl;
-                    continue;
-                }
-
-                if (status < 200 || status >= 300) throw new IOException("弹幕服务器返回 HTTP " + status);
-
-                try (InputStream in = connection.getInputStream();
-                        ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
-                    byte[] buf = new byte[8192];
-                    int n;
-                    while ((n = in.read(buf)) != -1) bos.write(buf, 0, n);
-                    return new String(bos.toByteArray(), StandardCharsets.UTF_8);
-                }
-            }
-            throw new IOException("弹幕重定向次数过多");
-        } finally {
-            if (connection != null) connection.disconnect();
         }
     }
 

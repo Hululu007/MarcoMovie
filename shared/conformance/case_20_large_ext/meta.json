@@ -1,5 +1,5 @@
 {
-  "origin": "https://hub.example.com/subs/main.json",
+  "origin": "https://hub.example/subs/main.json",
   "type": "config",
   "encoding": "utf-8"
 }

@@ -3,17 +3,17 @@
     {
       "name": "Web 解析",
       "type": 0,
-      "url": "https://parse.example.com/web?url="
+      "url": "https://parse.example/web?url="
     },
     {
       "name": "首选 JSON 解析",
       "type": 1,
-      "url": "https://parse.example.com/json1?url="
+      "url": "https://parse.example/json1?url="
     },
     {
       "name": "备选 JSON 解析",
       "type": 1,
-      "url": "https://parse.example.com/json2?url="
+      "url": "https://parse.example/json2?url="
     }
   ],
   "sites": [
@@ -21,8 +21,8 @@
       "key": "parse_site",
       "name": "Parse Site",
       "type": 1,
-      "api": "https://api.example.com/vod",
-      "playUrl": "https://parse.example.com/json1?url=",
+      "api": "https://api.example/vod",
+      "playUrl": "https://parse.example/json1?url=",
       "searchable": true,
       "capabilityStatus": "ok"
     }

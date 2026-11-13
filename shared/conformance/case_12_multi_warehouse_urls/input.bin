@@ -2,7 +2,7 @@
   "urls": [
     {
       "name": "主仓库",
-      "url": "https://depot1.example.com/tvbox.json"
+      "url": "https://depot1.example/tvbox.json"
     },
     {
       "name": "备用仓库",

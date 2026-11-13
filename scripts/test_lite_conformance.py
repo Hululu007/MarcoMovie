@@ -9,8 +9,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 JDK = Path(os.environ.get('MARCOMOVIE_JDK', os.environ.get('JAVA_HOME', 'missing-jdk')))
-JSON_JAR_URL = 'https://repo.maven.apache.org/maven2/org/json/json/20240303/json-20240303.jar'
-JSON_JAR_SHA256 = '3cf6cd6892e32e2b4c1c39e0f52f5248a2f5b37646fdfbb79a66b46b618414ed'
+ZXING_URL = 'https://repo.maven.apache.org/maven2/com/google/zxing/core/3.2.1/core-3.2.1.jar'
 
 ANDROID_SHIM_BASE64 = """package android.util;
 public final class Base64 {
@@ -174,14 +173,47 @@ public class XmlPullParserException extends Exception {
 }
 """
 
-def prepare_json_jar():
-    jar = ROOT / 'android/tests/lib/json-20240303.jar'
+def compile_aosp_json(aosp_classes_dir: Path) -> Path:
+    aosp_root = ROOT / 'android/tests/lib/aosp-json'
+    sources = sorted((aosp_root / 'src/org/json').glob('*.java'))
+    if not sources:
+        raise RuntimeError(f'Missing AOSP org.json sources in {aosp_root}')
+    aosp_classes_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            exe('javac'), '-encoding', 'UTF-8',
+            '-sourcepath', str(aosp_root / 'annotations'),
+            '-d', str(aosp_classes_dir),
+            *[str(s) for s in sources],
+        ],
+        check=True,
+    )
+    return aosp_classes_dir
+
+
+def prepare_zxing_jar() -> Path:
+    jar = ROOT / 'tools/java-dependencies/core-3.2.1.jar'
+    pin = ROOT / 'lite/zxing.sha256'
+    expected_sha = pin.read_text(encoding='utf-8').strip()
     if not jar.exists():
         jar.parent.mkdir(parents=True, exist_ok=True)
-        jar.write_bytes(urllib.request.urlopen(JSON_JAR_URL, timeout=30).read())
-    if hashlib.sha256(jar.read_bytes()).hexdigest() != JSON_JAR_SHA256:
-        raise RuntimeError('Test JSON library digest mismatch')
+        jar.write_bytes(urllib.request.urlopen(ZXING_URL, timeout=30).read())
+    if hashlib.sha256(jar.read_bytes()).hexdigest() != expected_sha:
+        raise RuntimeError('ZXing core-3.2.1.jar digest mismatch')
     return jar
+
+
+def prepare_android_jar() -> Path:
+    override = os.environ.get('MARCOMOVIE_ANDROID_JAR')
+    if override and Path(override).is_file():
+        return Path(override)
+    local_jar = ROOT / 'tools/android-35/android.jar'
+    if local_jar.is_file():
+        return local_jar
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    from prepare_android_platform import prepare
+    return prepare()
+
 
 def exe(name):
     return str(JDK / 'bin' / (name + ('.exe' if os.name == 'nt' else '')))
@@ -192,9 +224,11 @@ def main():
         print(f"Skipping TV Lite conformance checks: {conformance_dir} does not exist yet.")
         return 0
 
-    json_jar = prepare_json_jar()
+    zxing_jar = prepare_zxing_jar()
+    android_jar = prepare_android_jar()
     with tempfile.TemporaryDirectory(prefix='lite-conformance-') as tmp:
         work = Path(tmp)
+        aosp_classes_dir = compile_aosp_json(work / 'aosp-json-classes')
         classes_dir = work / 'classes'
         classes_dir.mkdir()
 
@@ -208,35 +242,41 @@ def main():
         (shim_dir / 'org/xmlpull/v1/XmlPullParser.java').write_text(XMLPULL_PARSER, encoding='utf-8')
         (shim_dir / 'org/xmlpull/v1/XmlPullParserException.java').write_text(XMLPULL_EXCEPTION, encoding='utf-8')
 
+        lite_sources = sorted((ROOT / 'lite/src/main/java').rglob('*.java'))
+        shared_sources = [
+            p
+            for pkg in ('emby', 'source', 'glass')
+            for p in sorted((ROOT / 'shared/java/com/pilipala' / pkg).rglob('*.java'))
+        ]
         sources = [
             shim_dir / 'org/xmlpull/v1/XmlPullParser.java',
             shim_dir / 'org/xmlpull/v1/XmlPullParserException.java',
             shim_dir / 'android/util/Base64.java',
             shim_dir / 'android/util/Log.java',
             shim_dir / 'android/util/Xml.java',
-            ROOT / 'shared/java/com/pilipala/source/Json.java',
-            ROOT / 'shared/java/com/pilipala/source/Warehouse.java',
-            ROOT / 'lite/src/main/java/com/pilipala/marcomovie/lite/NetworkTls.java',
-            ROOT / 'lite/src/main/java/com/pilipala/marcomovie/lite/LiteCatalog.java',
+            *shared_sources,
+            *lite_sources,
             ROOT / 'lite/tests/LiteConformanceChecks.java',
         ]
 
+        compile_cp = os.pathsep.join([str(aosp_classes_dir), str(zxing_jar), str(android_jar)])
         compile_cmd = [
             exe('javac'), '-encoding', 'UTF-8',
-            '-cp', str(json_jar),
+            '-source', '8', '-target', '8', '-Xlint:-options',
+            '-cp', compile_cp,
             '-d', str(classes_dir),
             *[str(s) for s in sources],
         ]
         subprocess.run(compile_cmd, check=True)
 
-        run_cp = os.pathsep.join([str(classes_dir), str(json_jar)])
+        run_cp = os.pathsep.join([str(classes_dir), str(aosp_classes_dir), str(zxing_jar), str(android_jar)])
         run_cmd = [
             exe('java'), '-Dfile.encoding=UTF-8',
             '-cp', run_cp,
             'com.pilipala.marcomovie.lite.LiteConformanceChecks',
             str(conformance_dir),
         ]
-        res = subprocess.run(run_cmd, check=True, text=True, encoding='utf-8')
+        res = subprocess.run(run_cmd, check=True, text=True, encoding='utf-8', errors='replace')
         return res.returncode
 
 if __name__ == '__main__':

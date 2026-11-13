@@ -82,6 +82,9 @@ jobs:
           python android/tests/run_script_proxy_checks.py
           python android/tests/run_catvod_transport_checks.py
           python android/tests/run_update_checks.py
+          python android/tests/run_lane_e_checks.py
+          python android/tests/run_conformance_checks.py
+          python scripts/test_lite_conformance.py
           python scripts/test_movie_mirror.py
           python scripts/test_platform_packages.py
           python scripts/test_android_update_packages.py

@@ -1,18 +1,23 @@
 package com.pilipala.marcomovie;
 
+import android.content.SharedPreferences;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -46,6 +51,7 @@ public final class CloudSyncChecks {
         testWebdavMkcolAndRoundtrip();
         testWebdavEtagAndConcurrency();
         testWatchHistoryCorruptionBackupAndLockout();
+        testMainActivityRestartWatchHistoryBackup();
         testUiLatchTimeoutAndErrorPropagation();
         System.out.println("ALL PASS (" + checks + " checks)");
     }
@@ -76,8 +82,8 @@ public final class CloudSyncChecks {
                                         "https://dav.jianguoyun.com/dav/a/x.json")),
                 "Jianguoyun explicit json file URL left untouched");
         check(
-                "https://nas.local:5006/marco-movie-sync.json"
-                        .equals(CloudSync.resolveWebdavFileUrl("https://nas.local:5006/")),
+                "https://nas.test:5006/marco-movie-sync.json"
+                        .equals(CloudSync.resolveWebdavFileUrl("https://nas.test:5006/")),
                 "Non-Jianguoyun WebDAV server does not append MarcoMovie subfolder");
     }
 
@@ -770,6 +776,247 @@ public final class CloudSyncChecks {
                         && !WatchHistory.isCorrupted()
                         && Boolean.FALSE.equals(prefCorrupted.get()),
                 "WatchHistory.overwrite with valid JSON clears flag and pref");
+    }
+
+    private static final class InMemorySharedPreferences implements SharedPreferences {
+        final Map<String, Object> data = new HashMap<>();
+        final AtomicInteger corruptBackupWrites = new AtomicInteger();
+
+        @Override
+        public Map<String, ?> getAll() {
+            return new HashMap<>(data);
+        }
+
+        @Override
+        public String getString(String key, String defValue) {
+            Object v = data.get(key);
+            return v instanceof String ? (String) v : defValue;
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public Set<String> getStringSet(String key, Set<String> defValues) {
+            Object v = data.get(key);
+            return v instanceof Set ? new HashSet<>((Set<String>) v) : defValues;
+        }
+
+        @Override
+        public int getInt(String key, int defValue) {
+            Object v = data.get(key);
+            return v instanceof Integer ? (Integer) v : defValue;
+        }
+
+        @Override
+        public long getLong(String key, long defValue) {
+            Object v = data.get(key);
+            return v instanceof Long ? (Long) v : defValue;
+        }
+
+        @Override
+        public float getFloat(String key, float defValue) {
+            Object v = data.get(key);
+            return v instanceof Float ? (Float) v : defValue;
+        }
+
+        @Override
+        public boolean getBoolean(String key, boolean defValue) {
+            Object v = data.get(key);
+            return v instanceof Boolean ? (Boolean) v : defValue;
+        }
+
+        @Override
+        public boolean contains(String key) {
+            return data.containsKey(key);
+        }
+
+        @Override
+        public Editor edit() {
+            return new Editor() {
+                private final Map<String, Object> pending = new HashMap<>();
+                private final Set<String> removals = new HashSet<>();
+                private boolean clearAll;
+
+                @Override
+                public Editor putString(String key, String value) {
+                    pending.put(key, value);
+                    return this;
+                }
+
+                @Override
+                public Editor putStringSet(String key, Set<String> values) {
+                    pending.put(key, values == null ? null : new HashSet<>(values));
+                    return this;
+                }
+
+                @Override
+                public Editor putInt(String key, int value) {
+                    pending.put(key, value);
+                    return this;
+                }
+
+                @Override
+                public Editor putLong(String key, long value) {
+                    pending.put(key, value);
+                    return this;
+                }
+
+                @Override
+                public Editor putFloat(String key, float value) {
+                    pending.put(key, value);
+                    return this;
+                }
+
+                @Override
+                public Editor putBoolean(String key, boolean value) {
+                    pending.put(key, value);
+                    return this;
+                }
+
+                @Override
+                public Editor remove(String key) {
+                    removals.add(key);
+                    return this;
+                }
+
+                @Override
+                public Editor clear() {
+                    clearAll = true;
+                    return this;
+                }
+
+                @Override
+                public boolean commit() {
+                    apply();
+                    return true;
+                }
+
+                @Override
+                public void apply() {
+                    if (clearAll) {
+                        data.clear();
+                    }
+                    for (String k : removals) {
+                        data.remove(k);
+                    }
+                    for (Map.Entry<String, Object> entry : pending.entrySet()) {
+                        if (entry.getKey() != null
+                                && entry.getKey().startsWith("watch_history_corrupt_")) {
+                            corruptBackupWrites.incrementAndGet();
+                        }
+                        if (entry.getValue() == null) {
+                            data.remove(entry.getKey());
+                        } else {
+                            data.put(entry.getKey(), entry.getValue());
+                        }
+                    }
+                }
+            };
+        }
+
+        @Override
+        public void registerOnSharedPreferenceChangeListener(
+                OnSharedPreferenceChangeListener listener) {}
+
+        @Override
+        public void unregisterOnSharedPreferenceChangeListener(
+                OnSharedPreferenceChangeListener listener) {}
+    }
+
+    private static MainActivity allocateMainActivity(SharedPreferences prefs) throws Exception {
+        Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+        Field theUnsafe = unsafeClass.getDeclaredField("theUnsafe");
+        theUnsafe.setAccessible(true);
+        Object unsafe = theUnsafe.get(null);
+        MainActivity activity =
+                (MainActivity)
+                        unsafeClass
+                                .getMethod("allocateInstance", Class.class)
+                                .invoke(unsafe, MainActivity.class);
+        activity.prefs = prefs;
+        activity.privateMode = false;
+        return activity;
+    }
+
+    private static List<String> corruptBackupKeys(InMemorySharedPreferences prefs) {
+        List<String> keys = new ArrayList<>();
+        for (String key : prefs.data.keySet()) {
+            if (key.startsWith("watch_history_corrupt_")) {
+                keys.add(key);
+            }
+        }
+        return keys;
+    }
+
+    private static void testMainActivityRestartWatchHistoryBackup() throws Exception {
+        WatchHistory.setCorrupted(false);
+        String corruptJson = "{\"corrupt\": true, [invalid json...";
+        InMemorySharedPreferences prefs = new InMemorySharedPreferences();
+        prefs.data.put(Prefs.WATCH_HISTORY, corruptJson);
+
+        MainActivity session1 = allocateMainActivity(prefs);
+        check(
+                session1.watchHistory().isEmpty(),
+                "MainActivity.watchHistory returns empty list on initial corrupt JSON");
+        check(
+                WatchHistory.isCorrupted() && prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false),
+                "MainActivity.watchHistory persists CORRUPTED_PREF and sets corrupted flag");
+        check(
+                prefs.corruptBackupWrites.get() == 1 && corruptBackupKeys(prefs).size() == 1,
+                "MainActivity.watchHistory writes exactly one backup before restart");
+
+        // Repeat calls in same session never write a second backup
+        session1.watchHistory();
+        session1.watchHistory();
+        check(
+                prefs.corruptBackupWrites.get() == 1 && corruptBackupKeys(prefs).size() == 1,
+                "MainActivity.watchHistory does not re-backup within same session");
+
+        // Advance clock > 1ms and simulate cold process restart (in-memory flag wiped, prefs kept)
+        Thread.sleep(5);
+        WatchHistory.setCorrupted(false);
+        MainActivity session2AfterRestart = allocateMainActivity(prefs);
+        check(
+                session2AfterRestart.watchHistory().isEmpty(),
+                "MainActivity.watchHistory after restart returns empty list on corrupt JSON");
+        check(
+                WatchHistory.isCorrupted() && prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false),
+                "MainActivity.watchHistory after restart restores in-memory corrupted flag from prefs");
+        check(
+                prefs.corruptBackupWrites.get() == 1 && corruptBackupKeys(prefs).size() == 1,
+                "MainActivity.watchHistory after restart performs only one backup total across restarts");
+
+        String originalBackupKey = corruptBackupKeys(prefs).get(0);
+        check(
+                corruptJson.equals(prefs.getString(originalBackupKey, "")),
+                "MainActivity.watchHistory preserves original corrupt backup payload verbatim across restart");
+
+        // Clearing via MainActivity resets CORRUPTED_PREF and flag while retaining backup key
+        session2AfterRestart.clearWatchHistory();
+        check(
+                !WatchHistory.isCorrupted()
+                        && !prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false)
+                        && "[]".equals(prefs.getString(Prefs.WATCH_HISTORY, ""))
+                        && corruptBackupKeys(prefs).size() == 1,
+                "MainActivity.clearWatchHistory clears flag and CORRUPTED_PREF while preserving backup");
+
+        // Re-corrupt, re-trigger via MainActivity, then clear cleanly via overwriteWatchHistory
+        Thread.sleep(5);
+        prefs.data.put(Prefs.WATCH_HISTORY, corruptJson);
+        session2AfterRestart.watchHistory();
+        check(
+                WatchHistory.isCorrupted() && corruptBackupKeys(prefs).size() == 2,
+                "MainActivity.watchHistory records a new backup only after explicit clear + new corruption");
+
+        String validJson = "[{\"site\":\"s1\",\"id\":\"v1\",\"title\":\"Valid After Overwrite\"}]";
+        boolean overwrittenOk = session2AfterRestart.overwriteWatchHistory(validJson);
+        List<WatchHistory.Entry> restored = session2AfterRestart.watchHistory();
+        check(
+                overwrittenOk
+                        && !WatchHistory.isCorrupted()
+                        && !prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false)
+                        && restored.size() == 1
+                        && "v1".equals(restored.get(0).id),
+                "MainActivity.overwriteWatchHistory resets CORRUPTED_PREF and restores readable history");
     }
 
     private static void testUiLatchTimeoutAndErrorPropagation() {

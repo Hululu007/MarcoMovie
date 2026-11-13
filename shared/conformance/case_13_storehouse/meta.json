@@ -1,5 +1,5 @@
 {
-  "origin": "https://store.example.com/root.json",
+  "origin": "https://store.example/root.json",
   "type": "config",
   "encoding": "utf-8"
 }

@@ -135,8 +135,8 @@ public final class LiteJvmChecks {
                         .equals(LiteSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/dav/a/x.json")),
                 "LiteSync Jianguoyun explicit json file URL left untouched");
         check(
-                "https://nas.local:5006/marco-movie-sync.json"
-                        .equals(LiteSync.resolveWebdavFileUrl("https://nas.local:5006/")),
+                "https://nas.test:5006/marco-movie-sync.json"
+                        .equals(LiteSync.resolveWebdavFileUrl("https://nas.test:5006/")),
                 "LiteSync Non-Jianguoyun WebDAV server does not append MarcoMovie subfolder");
     }
 
@@ -1420,7 +1420,7 @@ public final class LiteJvmChecks {
         headersToStrip.put("Custom-Header", "kept");
         Map<String, String> stripped =
                 LiteCatalog.inheritedHeaders(
-                        new URL("http://a.com/"), new URL("http://b.com/"), headersToStrip);
+                        new URL("http://a.test/"), new URL("http://b.test/"), headersToStrip);
         check(
                 !stripped.containsKey("Authorization")
                         && !stripped.containsKey("Cookie")

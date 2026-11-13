@@ -36,7 +36,7 @@ void main() {
 
     test('Pass 4: Redacts sensitive URL query parameters while preserving regular params', () {
       const input =
-          'GET https://example.com/play?id=9988&token=myToken123&sign=xyz789&key=myKey&page=2&secret=s456&auth=a1&session=sess789';
+          'GET https://site.example/play?id=9988&token=myToken123&sign=xyz789&key=myKey&page=2&secret=s456&auth=a1&session=sess789';
       final redacted = AppLog.redact(input);
       expect(redacted, contains('id=9988'));
       expect(redacted, contains('token=[REDACTED]'));
@@ -54,7 +54,7 @@ void main() {
 
     test('Pass 5: Redacts JSON credential keys', () {
       const input =
-          '{"url": "https://foo", "password": "secret_pass", "apiKey": "k123", "pin": "9999", "accessToken": "tok1", "normal": "val"}';
+          '{"url": "https://foo.test", "password": "secret_pass", "apiKey": "k123", "pin": "9999", "accessToken": "tok1", "normal": "val"}';
       final redacted = AppLog.redact(input);
       expect(redacted, contains('"password": "[REDACTED]"'));
       expect(redacted, contains('"apiKey": "[REDACTED]"'));
@@ -133,7 +133,7 @@ void main() {
       final storage = await StorageService.init();
 
       AppLog.instance.logError(
-        'Connection failed to https://api.com/v1?token=supersecret&id=123',
+        'Connection failed to https://api.test/v1?token=supersecret&id=123',
         source: 'Worker',
       );
 
