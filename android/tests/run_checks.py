@@ -25,3 +25,4 @@ try:
     print(r.stdout);(test/'results.txt').write_text(r.stdout,encoding='utf8')
 finally:server.shutdown()
 subprocess.run([sys.executable, str(test/'run_cloud_sync_checks.py')], check=True)
+subprocess.run([sys.executable, str(test/'run_secure_storage_checks.py')], check=True)

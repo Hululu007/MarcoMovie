@@ -3,7 +3,7 @@
 - [Security/All] 全平台安全加固（Lane F § F1–F8）：
   - F1 (平台级安全凭据存储与无损迁移)：
     - Flutter: 新增 `SecureCredentialStore` 抽象与默认带认证加密存储（CTR + HMAC-SHA256 与平台原生密钥派生），`StorageService` 维持内存缓存同步访问，启动自动对 WebDAV 密码与四大网盘 Cookie/Token 执行写后即删无损迁移，SharedPreferences 不再驻留敏感明文凭据；
-    - Android: 新增 `SecureStorage`，采用 `AndroidKeyStore` AES-256-GCM 硬件加密存储敏感配置凭据，自动迁移旧版 `movie` SharedPreferences 明文并安全清除；
+    - Android: 新增 `SecureStorage`，采用 `AndroidKeyStore` AES-256-GCM 系统随机 IV 硬件加密存储敏感配置凭据，在后台同步线程确认密文 `commit()` 成功后安全清除旧版 `movie` 明文，KeyStore 不可用时保留明文存储，密钥永久失效时自动移除别名并提示重新输入密码；
     - TV Lite: 新增 `SecureStorage`，基于设备特征盐与随机 IV 采用 AES/CBC/PKCS5Padding 加密持久化凭据，兼顾 API 14+ 旧电视系统兼容与静态配置防窃取。
   - F2 (基于 PBKDF2-SHA256 的加盐隐私 PIN 密码防护)：
     - Flutter: 基于 `package:crypto` 实现 16 字节随机盐与 100,000 次迭代的 PBKDF2-HMAC-SHA256 密码哈希派生与恒定时间比较，新哈希格式为 `pbkdf2:sha256:<len>:100000:<salt>:<hash>`；支持旧版单次 SHA-256 哈希及明文 PIN 密码在首次验证通过后平滑无感升级。
