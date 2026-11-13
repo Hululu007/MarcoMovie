@@ -90,6 +90,40 @@ public final class JsPlayerChecks {
                 "SyntaxError".equals(explicitJsErr.getMessage()),
                 "explicit .js failure preserves original JS error message");
 
+        java.io.InterruptedIOException cancelEx = new java.io.InterruptedIOException("canceled");
+        Exception unwrappedCancel =
+                JsEngine.rethrowOrWrapScriptLoadFailure(
+                        gatewayScript, false, false, cancelEx, null);
+        check(
+                unwrappedCancel == cancelEx,
+                "extensionless type 3 InterruptedIOException is rethrown unwrapped");
+
+        java.net.SocketTimeoutException timeoutEx =
+                new java.net.SocketTimeoutException("Read timed out");
+        Exception unwrappedTimeout =
+                JsEngine.rethrowOrWrapScriptLoadFailure(
+                        gatewayScript,
+                        false,
+                        false,
+                        new IllegalStateException("QuickJS host error", timeoutEx),
+                        null);
+        check(
+                unwrappedTimeout == timeoutEx,
+                "extensionless type 3 nested SocketTimeoutException is rethrown unwrapped");
+
+        java.io.InterruptedIOException hostCancelEx =
+                new java.io.InterruptedIOException("request scope canceled");
+        Exception unwrappedHostCancel =
+                JsEngine.rethrowOrWrapScriptLoadFailure(
+                        gatewayScript,
+                        false,
+                        false,
+                        new RuntimeException("QuickJS aborted"),
+                        hostCancelEx);
+        check(
+                unwrappedHostCancel == hostCancelEx,
+                "extensionless type 3 recorded host cancellation is rethrown unwrapped");
+
         Cms.Site queryTokenCsp = new Cms.Site();
         queryTokenCsp.type = 3;
         queryTokenCsp.api = "https://x/api/drpy?token=csp_123";

@@ -243,7 +243,7 @@ public final class MainActivity extends Activity {
                         AppLog.w("PluginGuard", "extension main-thread callback failed", error);
                         MainActivity activity = activeActivity;
                         if (activity != null && activity.prefs != null) {
-                            activity.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+                            activity.prefs.edit().putString(Prefs.LOADING_SITE, "").commit();
                             activity.ui.post(
                                     () -> {
                                         if (!activity.isFinishing()) activity.toast("扩展操作未能完成，请重试");
@@ -689,10 +689,7 @@ public final class MainActivity extends Activity {
                                     boolean recoveredFromCrash =
                                             crashedSite != null && !crashedSite.isEmpty();
                                     if (recoveredFromCrash) {
-                                        prefs.edit()
-                                                .putString(Prefs.LOADING_SITE, "")
-                                                .putString(Prefs.SELECTED_SITE, "")
-                                                .apply();
+                                        clearRecoveredCrashSite(prefs);
                                     }
                                     worker.execute(
                                             () ->
@@ -1673,6 +1670,39 @@ public final class MainActivity extends Activity {
         PlaybackController.finishSeek(this, commit);
     }
 
+    static void clearRecoveredCrashSite(SharedPreferences prefs) {
+        if (prefs == null) return;
+        prefs.edit().putString(Prefs.LOADING_SITE, "").putString(Prefs.SELECTED_SITE, "").commit();
+    }
+
+    WatchHistory.Persistence historyPersistence() {
+        final SharedPreferences targetPrefs = prefs;
+        return new WatchHistory.Persistence() {
+            @Override
+            public String readRaw() {
+                return targetPrefs == null
+                        ? "[]"
+                        : targetPrefs.getString(Prefs.WATCH_HISTORY, "[]");
+            }
+
+            @Override
+            public boolean readCorruptedPref() {
+                return targetPrefs != null
+                        && targetPrefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
+            }
+
+            @Override
+            public void writeState(String historyJson, boolean corrupted) {
+                if (targetPrefs == null) return;
+                targetPrefs
+                        .edit()
+                        .putString(Prefs.WATCH_HISTORY, historyJson)
+                        .putBoolean(WatchHistory.CORRUPTED_PREF, corrupted)
+                        .apply();
+            }
+        };
+    }
+
     java.util.List<WatchHistory.Entry> watchHistory() {
         if (privateMode) return java.util.Collections.emptyList();
         if (prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false)) {
@@ -1691,23 +1721,44 @@ public final class MainActivity extends Activity {
     }
 
     void clearWatchHistory() {
-        WatchHistory.clear(
-                (json, corrupted) ->
-                        prefs.edit()
-                                .putString(Prefs.WATCH_HISTORY, json)
-                                .putBoolean(WatchHistory.CORRUPTED_PREF, corrupted)
-                                .apply());
+        clearWatchHistory(null);
+    }
+
+    void clearWatchHistory(final Runnable onUiComplete) {
+        WatchHistory.setCorrupted(false);
+        WatchHistory.enqueueClear(
+                historyPersistence(),
+                onUiComplete == null
+                        ? null
+                        : () ->
+                                ui.post(
+                                        () -> {
+                                            if (!isFinishing() && !isDestroyed()) {
+                                                onUiComplete.run();
+                                            }
+                                        }));
+    }
+
+    void removeWatchHistory(final String key, final Runnable onUiComplete) {
+        WatchHistory.enqueueRemove(
+                historyPersistence(),
+                key,
+                onUiComplete == null
+                        ? null
+                        : () ->
+                                ui.post(
+                                        () -> {
+                                            if (!isFinishing() && !isDestroyed()) {
+                                                onUiComplete.run();
+                                            }
+                                        }));
     }
 
     boolean overwriteWatchHistory(String validJson) {
-        return WatchHistory.overwrite(
-                        validJson,
-                        (json, corrupted) ->
-                                prefs.edit()
-                                        .putString(Prefs.WATCH_HISTORY, json)
-                                        .putBoolean(WatchHistory.CORRUPTED_PREF, corrupted)
-                                        .apply())
-                != null;
+        String validated = WatchHistory.validateBackupJson(validJson);
+        if (validated == null) return false;
+        WatchHistory.enqueueBackupRestore(historyPersistence(), validated, null);
+        return true;
     }
 
     void savePlaybackHistory(boolean force) {

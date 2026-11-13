@@ -92,29 +92,48 @@ public final class Cms {
         }
 
         public boolean supported() {
-            return (type == 0 || type == 1) && isHttp(api) && !isExtTooLarge();
+            return !"mydrive".equals(key)
+                    && (type == 0 || type == 1)
+                    && isHttp(api)
+                    && !isScriptOrJarApi(api)
+                    && !isExtTooLarge();
         }
 
         public String capabilityStatus() {
             if (isExtTooLarge()) {
                 return STATUS_EXT_TOO_LARGE;
             }
-            if (isNetdiskSite()) {
+            if ("mydrive".equals(key)) {
+                return STATUS_UNSUPPORTED_TYPE;
+            }
+            if (api != null
+                    && (api.startsWith("emby://")
+                            || api.startsWith("catpaw://")
+                            || (type == 4 && isHttp(api) && !isScriptOrJarApi(api)))) {
+                return STATUS_OK;
+            }
+            if ((type == 3 || isScriptOrJarApi(api)) && isNetdiskSite()) {
                 return STATUS_ADAPTER_MISSING;
             }
-            if (type == 3 || isScriptOrJarApi(api) || (jar != null && !jar.isEmpty())) {
+            if (type == 3
+                    || isScriptOrJarApi(api)
+                    || (type != 0 && type != 1 && type != 4 && jar != null && !jar.isEmpty())) {
                 return STATUS_NEEDS_JAR;
             }
-            if (type != 0 && type != 1) {
+            if (type != 0 && type != 1 && type != 4) {
                 return STATUS_UNSUPPORTED_TYPE;
             }
             if (!isHttp(api)) {
                 return STATUS_CUSTOM_SITE_URL;
             }
-            if (requiresParser && (playUrl == null || playUrl.isEmpty())) {
-                return STATUS_PARSER_REQUIRED;
-            }
             return STATUS_OK;
+        }
+
+        public String playbackHint() {
+            if (requiresParser && (playUrl == null || playUrl.trim().isEmpty())) {
+                return capabilityReason(STATUS_PARSER_REQUIRED);
+            }
+            return "";
         }
 
         public static String capabilityReason(String status) {
@@ -341,6 +360,18 @@ public final class Cms {
 
     static String fileUri(java.io.File file) {
         return "file://" + file.toURI().getRawPath();
+    }
+
+    /**
+     * Preserves {@code file://} origins only for real filesystem URIs; {@code content://} document
+     * picks keep an empty origin so relative paths are not rewritten against bogus {@code
+     * file:///document/...} paths and imported configs remain eligible for ConfigLibrary & sync.
+     */
+    public static String localImportOrigin(String scheme, String uriString) {
+        if ("file".equalsIgnoreCase(scheme) && uriString != null) {
+            return uriString.trim();
+        }
+        return "";
     }
 
     static String resolve(String origin, String target) {

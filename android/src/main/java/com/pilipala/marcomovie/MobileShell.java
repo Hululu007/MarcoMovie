@@ -1508,7 +1508,7 @@ final class MobileShell {
                     final HomeScreen.Snapshot cached =
                             siteSnapshot == null ? null : a.homeData.get(siteSnapshot.key);
                     if (catSnapshot.isEmpty() && pageSnapshot == 1 && siteSnapshot != null) {
-                        a.prefs.edit().putString(Prefs.LOADING_SITE, siteSnapshot.key).apply();
+                        commitLoadingSite(a, siteSnapshot.key);
                     }
                     a.submitPage(
                             () -> {
@@ -1725,7 +1725,7 @@ final class MobileShell {
                                     if (siteSnapshot != null
                                             && siteSnapshot.key.equals(
                                                     a.prefs.getString(Prefs.LOADING_SITE, ""))) {
-                                        a.prefs.edit().putString(Prefs.LOADING_SITE, "").apply();
+                                        commitLoadingSite(a, "");
                                     }
                                 }
                             });
@@ -3492,18 +3492,14 @@ final class MobileShell {
                                 MobileDetailScreen.bindTouchFeedback(del);
                                 del.setOnClickListener(
                                         v -> {
-                                            a.prefs
-                                                    .edit()
-                                                    .putString(
-                                                            Prefs.WATCH_HISTORY,
-                                                            WatchHistory.remove(
-                                                                    a.prefs.getString(
-                                                                            Prefs.WATCH_HISTORY,
-                                                                            "[]"),
-                                                                    e.key()))
-                                                    .apply();
-                                            CloudSyncDialog.onHistoryDeleted(a, e.key());
-                                            run();
+                                            final String entryKey = e.key();
+                                            a.removeWatchHistory(
+                                                    entryKey,
+                                                    () -> {
+                                                        CloudSyncDialog.onHistoryDeleted(
+                                                                a, entryKey);
+                                                        run();
+                                                    });
                                         });
                                 row.addView(del);
 
@@ -3640,15 +3636,31 @@ final class MobileShell {
                             .setPositiveButton(
                                     "清空",
                                     (d, w) -> {
-                                        List<WatchHistory.Entry> prev = a.watchHistory();
-                                        a.clearWatchHistory();
-                                        CloudSyncDialog.onHistoryCleared(a, prev);
-                                        renderSubTab.run();
+                                        final boolean wasCorrupted =
+                                                WatchHistory.isCorrupted()
+                                                        || a.prefs.getBoolean(
+                                                                WatchHistory.CORRUPTED_PREF, false);
+                                        final List<WatchHistory.Entry> prev =
+                                                wasCorrupted
+                                                        ? Collections.emptyList()
+                                                        : a.watchHistory();
+                                        a.clearWatchHistory(
+                                                () -> {
+                                                    if (!wasCorrupted) {
+                                                        CloudSyncDialog.onHistoryCleared(a, prev);
+                                                    }
+                                                    renderSubTab.run();
+                                                });
                                     })
                             .show();
                 });
 
         renderSubTab.run();
+    }
+
+    private static void commitLoadingSite(MainActivity a, String siteKey) {
+        if (a == null || a.prefs == null) return;
+        a.prefs.edit().putString(Prefs.LOADING_SITE, siteKey == null ? "" : siteKey).commit();
     }
 
     private void styleLibraryPill(TextView pill, boolean active) {

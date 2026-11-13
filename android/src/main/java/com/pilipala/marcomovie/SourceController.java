@@ -1195,23 +1195,14 @@ final class SourceController {
                                     });
                             return;
                         }
-                        String fileOrigin = null;
-                        if (uri != null) {
-                            if ("file".equalsIgnoreCase(uri.getScheme())) {
-                                fileOrigin = uri.toString();
-                            } else if (uri.getPath() != null) {
-                                String path = uri.getPath();
-                                fileOrigin =
-                                        path.startsWith("/")
-                                                ? ("file://" + path)
-                                                : ("file:///" + path);
-                            } else {
-                                fileOrigin = uri.toString();
-                            }
-                        }
+                        final String finalOrigin =
+                                uri == null
+                                        ? ""
+                                        : Cms.localImportOrigin(uri.getScheme(), uri.toString());
                         try {
-                            Cms.Config parsed = Cms.parseConfig(text, fileOrigin);
-                            final String finalOrigin = fileOrigin != null ? fileOrigin : "";
+                            Cms.Config parsed =
+                                    Cms.parseConfig(
+                                            text, finalOrigin.isEmpty() ? null : finalOrigin);
                             a.ui.post(
                                     () -> {
                                         try {
@@ -1271,13 +1262,58 @@ final class SourceController {
         }
     }
 
+    static final class SavedState {
+        final Cms.Config config;
+        final String configOrigin;
+
+        SavedState(Cms.Config config, String configOrigin) {
+            this.config = config;
+            this.configOrigin = configOrigin;
+        }
+    }
+
+    static ConfigStore.PointerStore pointerStoreFor(final MainActivity a) {
+        return new ConfigStore.PointerStore() {
+            @Override
+            public ConfigStore.PointerSnapshot readCurrentPointers() {
+                String curOrigin =
+                        a.prefs.contains(Prefs.ORIGIN)
+                                ? a.prefs.getString(Prefs.ORIGIN, null)
+                                : null;
+                String curSelected =
+                        a.prefs.contains(Prefs.SELECTED_SITE)
+                                ? a.prefs.getString(Prefs.SELECTED_SITE, null)
+                                : null;
+                return new ConfigStore.PointerSnapshot(
+                        curOrigin, curSelected, new SavedState(a.config, a.configOrigin));
+            }
+
+            @Override
+            public void applyPointers(ConfigStore.PointerSnapshot snapshot) {
+                if (snapshot == null || a.prefs == null) return;
+                android.content.SharedPreferences.Editor editor = a.prefs.edit();
+                if (snapshot.origin != null) {
+                    editor.putString(Prefs.ORIGIN, snapshot.origin);
+                } else {
+                    editor.remove(Prefs.ORIGIN);
+                }
+                if (snapshot.selectedSite != null) {
+                    editor.putString(Prefs.SELECTED_SITE, snapshot.selectedSite);
+                } else {
+                    editor.remove(Prefs.SELECTED_SITE);
+                }
+                editor.apply();
+            }
+        };
+    }
+
     static void saveConfig(MainActivity a, Cms.Config c, String origin) throws Exception {
         if (!c.warehouse.isEmpty()) origin = c.warehouse;
         else if (!c.origin.isEmpty()) origin = c.origin;
+        if (origin == null) origin = "";
         ConfigLibrary library = new ConfigLibrary(a.configStore.directory);
         String selected = a.prefs.getString(Prefs.SELECTED_SITE, "");
-        boolean isLocalFile =
-                origin != null && origin.toLowerCase(java.util.Locale.ROOT).startsWith("file:");
+        boolean isLocalFile = ConfigLibrary.isLocalFileOrigin(origin);
         if (a.isTvDevice() || !isLocalFile) {
             try {
                 rememberConfig(a, library);
@@ -1297,24 +1333,6 @@ final class SourceController {
                 if (a.isTvDevice()) throw e;
             }
         }
-        final String rawConfig = c.raw;
-        final ConfigStore store = a.configStore;
-        if (store != null) {
-            a.worker.execute(
-                    () -> {
-                        try {
-                            store.write(rawConfig);
-                        } catch (Exception e) {
-                            AppLog.w("SourceController", "Background configStore.write failed", e);
-                        }
-                    });
-        }
-        SourcePicker.applyEdits(a, c, origin);
-        a.closeEngines();
-        a.config = c;
-        a.configOrigin = origin;
-        android.content.SharedPreferences.Editor editor =
-                a.prefs.edit().putString(Prefs.ORIGIN, origin);
         String currentKey = selected;
         boolean hasSelected = false;
         Cms.Site firstAvailable = null;
@@ -1324,13 +1342,54 @@ final class SourceController {
                 if (s.key.equals(currentKey)) hasSelected = true;
             }
         }
-        if (!hasSelected && firstAvailable != null) {
-            editor.putString(Prefs.SELECTED_SITE, firstAvailable.key);
-        } else if (hasSelected) editor.putString(Prefs.SELECTED_SITE, currentKey);
-        else editor.remove(Prefs.SELECTED_SITE);
-        editor.apply();
+        final String nextSelectedSite =
+                !hasSelected && firstAvailable != null
+                        ? firstAvailable.key
+                        : (hasSelected ? currentKey : null);
+        final String rawConfig = c.raw;
+        final String targetOrigin = origin;
+        final ConfigStore store = a.configStore;
+        final ConfigStore.PointerStore pointerStore = pointerStoreFor(a);
+        final ConfigStore.PointerSnapshot nextPointers =
+                new ConfigStore.PointerSnapshot(
+                        targetOrigin, nextSelectedSite, new SavedState(c, targetOrigin));
+        if (store != null) {
+            store.saveAsync(
+                    rawConfig,
+                    nextPointers,
+                    pointerStore,
+                    (seq, error, rolledBackTo) ->
+                            a.ui.post(
+                                    () -> {
+                                        if (store.latestWriteSeq() != seq
+                                                || a.isFinishing()
+                                                || a.isDestroyed()) {
+                                            return;
+                                        }
+                                        if (rolledBackTo != null
+                                                && rolledBackTo.stateTag instanceof SavedState) {
+                                            SavedState prev = (SavedState) rolledBackTo.stateTag;
+                                            a.closeEngines();
+                                            a.config = prev.config;
+                                            a.configOrigin =
+                                                    prev.configOrigin == null
+                                                            ? ""
+                                                            : prev.configOrigin;
+                                            if (a.current != null && a.player == null) {
+                                                a.refresh();
+                                            }
+                                        }
+                                        a.notice("配置保存失败，已回滚至原配置：" + a.message(error));
+                                    }));
+        } else {
+            pointerStore.applyPointers(nextPointers);
+        }
+        SourcePicker.applyEdits(a, c, targetOrigin);
+        a.closeEngines();
+        a.config = c;
+        a.configOrigin = targetOrigin;
         if (!isLocalFile) {
-            CloudSyncDialog.onSubscriptionSaved(a, origin, c.raw);
+            CloudSyncDialog.onSubscriptionSaved(a, targetOrigin, c.raw);
         }
         a.back.clear();
         a.current = new MainActivity.Screen(a::home);

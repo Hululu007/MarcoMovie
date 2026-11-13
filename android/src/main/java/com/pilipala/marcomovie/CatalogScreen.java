@@ -288,10 +288,21 @@ final class CatalogScreen {
                 .setPositiveButton(
                         "清空",
                         (d, n) -> {
-                            List<WatchHistory.Entry> prev = a.watchHistory();
-                            a.clearWatchHistory();
-                            CloudSyncDialog.onHistoryCleared(a, prev);
-                            a.refresh();
+                            final boolean wasCorrupted =
+                                    WatchHistory.isCorrupted()
+                                            || a.prefs.getBoolean(
+                                                    WatchHistory.CORRUPTED_PREF, false);
+                            final List<WatchHistory.Entry> prev =
+                                    wasCorrupted
+                                            ? java.util.Collections.emptyList()
+                                            : a.watchHistory();
+                            a.clearWatchHistory(
+                                    () -> {
+                                        if (!wasCorrupted) {
+                                            CloudSyncDialog.onHistoryCleared(a, prev);
+                                        }
+                                        a.refresh();
+                                    });
                         })
                 .show();
     }
@@ -304,17 +315,13 @@ final class CatalogScreen {
                         (d, n) -> {
                             if (n == 0) resumeHistory(a, e);
                             else {
-                                a.prefs
-                                        .edit()
-                                        .putString(
-                                                Prefs.WATCH_HISTORY,
-                                                WatchHistory.remove(
-                                                        a.prefs.getString(
-                                                                Prefs.WATCH_HISTORY, "[]"),
-                                                        e.key()))
-                                        .apply();
-                                CloudSyncDialog.onHistoryDeleted(a, e.key());
-                                a.refresh();
+                                final String entryKey = e.key();
+                                a.removeWatchHistory(
+                                        entryKey,
+                                        () -> {
+                                            CloudSyncDialog.onHistoryDeleted(a, entryKey);
+                                            a.refresh();
+                                        });
                             }
                         })
                 .setNegativeButton("返回", null)
@@ -566,17 +573,13 @@ final class CatalogScreen {
                             "移除",
                             "history-remove:" + e.key(),
                             () -> {
-                                a.prefs
-                                        .edit()
-                                        .putString(
-                                                Prefs.WATCH_HISTORY,
-                                                WatchHistory.remove(
-                                                        a.prefs.getString(
-                                                                Prefs.WATCH_HISTORY, "[]"),
-                                                        e.key()))
-                                        .apply();
-                                CloudSyncDialog.onHistoryDeleted(a, e.key());
-                                a.refresh();
+                                final String entryKey = e.key();
+                                a.removeWatchHistory(
+                                        entryKey,
+                                        () -> {
+                                            CloudSyncDialog.onHistoryDeleted(a, entryKey);
+                                            a.refresh();
+                                        });
                             }));
             a.body.addView(line);
             a.gap(a.body, 8);

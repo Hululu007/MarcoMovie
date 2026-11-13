@@ -169,6 +169,36 @@ public final class JsHttpChecks {
                 denied = expected.getMessage().equals("JS 重定向地址不能包含用户名密码");
             }
             check(denied, "redirect cannot inject new URL credentials");
+
+            first.createContext(
+                    "/slow-timeout",
+                    exchange -> {
+                        try {
+                            Thread.sleep(250);
+                        } catch (InterruptedException ignored) {
+                            Thread.currentThread().interrupt();
+                        }
+                        byte[] body = "{}".getBytes("UTF-8");
+                        exchange.sendResponseHeaders(200, body.length);
+                        exchange.getResponseBody().write(body);
+                        exchange.close();
+                    });
+            Cms.Site extlessGateway = new Cms.Site();
+            extlessGateway.type = 3;
+            extlessGateway.api = origin + "/slow-timeout?id=1";
+            Exception timeoutRethrown = null;
+            try {
+                get(engine, extlessGateway.api, new JSONObject().put("timeout", 40));
+            } catch (Exception reqErr) {
+                timeoutRethrown =
+                        JsEngine.rethrowOrWrapScriptLoadFailure(
+                                extlessGateway, false, false, reqErr, null);
+            }
+            check(
+                    timeoutRethrown instanceof SocketTimeoutException
+                            && (timeoutRethrown.getMessage() == null
+                                    || !timeoutRethrown.getMessage().contains("脚本类型无法识别")),
+                    "real HTTP timeout on extensionless type 3 source rethrows SocketTimeoutException unwrapped");
             System.out.println(
                     "OK " + checks + " native JS HTTP checks; no JNI/device playback implied");
         } finally {
