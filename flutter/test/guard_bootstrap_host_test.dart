@@ -379,6 +379,30 @@ void main() {
               .having((e) => e.message, 'message', '此片源不支持当前筛选条件'),
         ),
       );
+      await expectLater(
+        host.callDrpy(address, 'search', ['drpy_authentication_required']),
+        throwsA(
+          isA<DrpySourceException>()
+              .having((e) => e.code, 'code', 'drpy_authentication_required')
+              .having((e) => e.message, 'message', '此站点需要登录账号后才能查看网盘或播放链接，请切换其他片源'),
+        ),
+      );
+      await expectLater(
+        host.callDrpy(address, 'search', ['drpy_http_timeout']),
+        throwsA(
+          isA<DrpySourceException>()
+              .having((e) => e.code, 'code', 'drpy_http_timeout')
+              .having((e) => e.message, 'message', '连接片源服务器超时，请稍后重试或切换其他片源'),
+        ),
+      );
+      await expectLater(
+        host.callDrpy(address, 'search', ['drpy_unmapped_code']),
+        throwsA(
+          isA<DrpySourceException>()
+              .having((e) => e.code, 'code', 'drpy_unmapped_code')
+              .having((e) => e.message, 'message', '此片源暂时无法连接或返回异常，请稍后重试或切换其他片源'),
+        ),
+      );
       for (final mode in ['private-error-body', 'malformed']) {
         await expectLater(
           host.callDrpy(address, 'search', [mode]),

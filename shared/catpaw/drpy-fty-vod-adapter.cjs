@@ -2,7 +2,7 @@
 'use strict';
 
 const VOD_ADAPTERS = Object.freeze([
-  'jpys-v1', 'jpj-v1', 'nmyswv-v1', 'hmys-v1', 'app99-v1', 'appsx-v1', 'newcz-v1', 'libvio-v1', 'ygp-v1'
+  'jpys-v1', 'jpj-v1', 'nmyswv-v1', 'hmys-v1', 'app99-v1', 'appsx-v1', 'newcz-v1', 'libvio-v1', 'ygp-v1', 'jumitv-v1'
 ]);
 
 function installFtyVod() {
@@ -17,7 +17,7 @@ function installFtyVod() {
   function checkChallenge(body) {
     var t = str(body);
     if (!t) return;
-    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|验证码不正确|请完成滑块验证|verifySlider)/i.test(t) ||
+    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|验证码不正确|请完成滑块验证|verifySlider|challenges\.cloudflare\.com|<title>\s*Just a moment\.\.\.\s*<\/title>|Attention Required!\s*\|\s*Cloudflare|cf-turnstile)/i.test(t) ||
         /<input[^>]+(?:name|id)=["']?(?:verify|validate|captcha)/i.test(t)) {
       fail('drpy_verification_required');
     }
@@ -84,6 +84,19 @@ function installFtyVod() {
     if (!r || typeof r.content !== 'string') fail('drpy_source_unavailable');
     checkChallenge(r.content);
     return r;
+  }
+  function httpReqSoft(url, opts) {
+    try {
+      var r = req(url, Object.assign({ timeout: 4500 }, opts || {}));
+      if (!r || typeof r.content !== 'string') return { ok: false, code: 0, content: '' };
+      if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|验证码不正确|请完成滑块验证|verifySlider|challenges\.cloudflare\.com|<title>\s*Just a moment\.\.\.\s*<\/title>|cf-turnstile)/i.test(r.content) ||
+          /<input[^>]+(?:name|id)=["']?(?:verify|validate|captcha)/i.test(r.content)) {
+        return { ok: false, code: 403, challenge: true, content: r.content };
+      }
+      return { ok: r.code >= 200 && r.code < 400, code: r.code, content: r.content, headers: r.headers };
+    } catch (_) {
+      return { ok: false, code: 0, content: '' };
+    }
   }
   function isDirectMedia(u) {
     return /\.(?:m3u8|mp4|flv|mpd|mkv|ts|mp3|m4a)(?:[?#]|$)/i.test(str(u));
@@ -218,7 +231,7 @@ function installFtyVod() {
         str(cfg.extText).split(/[|,;\s]+/).forEach(function (u) { if (/^https?:\/\//i.test(u)) candidates.push(u.replace(/\/+$/, '')); });
       }
       try {
-        var dnsRes = req(cfg.alidnsUrl, { timeout: 3500, headers: { Accept: 'application/json' } });
+        var dnsRes = req(cfg.alidnsUrl, { timeout: 2200, headers: { Accept: 'application/json' } });
         if (dnsRes && dnsRes.code === 200 && typeof dnsRes.content === 'string') {
           var dnsDoc = JSON.parse(dnsRes.content);
           if (dnsDoc && Array.isArray(dnsDoc.Answer)) {
@@ -232,10 +245,11 @@ function installFtyVod() {
         }
       } catch (_) {}
       candidates.push(jpjHost);
-      for (var i = 0; i < candidates.length; i++) {
+      var probeLimit = Math.min(candidates.length, 3);
+      for (var i = 0; i < probeLimit; i++) {
         var cand = candidates[i].replace(/\/+$/, '');
         try {
-          var r = req(cand + cfg.domainConfigPath, { timeout: 3500, headers: { 'User-Agent': cfg.userAgent } });
+          var r = req(cand + cfg.domainConfigPath, { timeout: 2200, headers: { 'User-Agent': cfg.userAgent } });
           if (r && r.code >= 200 && r.code < 300 && typeof r.content === 'string') {
             jpjHost = cand;
             try {
@@ -1162,16 +1176,39 @@ function installFtyVod() {
   // ==================== 7. newcz-v1 (NewCz / 厂长资源) ====================
   if (cfg.adapter === 'newcz-v1') {
     var czHost = (str(cfg.extText).match(/^https?:\/\/[^\s|,;]+/i) ? str(cfg.extText).split(/[|,;\s]+/)[0] : str(cfg.defaultHost)).replace(/\/+$/, '');
-    function czHtml(pathOrUrl) {
-      var u = address(pathOrUrl, czHost + '/').url;
-      var r = httpReq(u, { headers: { 'User-Agent': cfg.userAgent, 'Accept-Language': 'zh-CN,zh;q=0.9', Referer: czHost + '/' } });
-      if (r.code >= 400 && czHost === str(cfg.defaultHost).replace(/\/+$/, '') && cfg.altHost) {
-        czHost = str(cfg.altHost).replace(/\/+$/, '');
-        u = address(pathOrUrl, czHost + '/').url;
-        r = httpReq(u, { headers: { 'User-Agent': cfg.userAgent, 'Accept-Language': 'zh-CN,zh;q=0.9', Referer: czHost + '/' } });
+    function expandCzHosts() {
+      var raw = [czHost];
+      if (cfg.altHost) raw.push(str(cfg.altHost).replace(/\/+$/, ''));
+      var out = [];
+      var seen = Object.create(null);
+      function addH(h) {
+        var clean = str(h).trim().replace(/\/+$/, '');
+        if (clean && !seen[clean]) { seen[clean] = 1; out.push(clean); }
       }
-      if (r.code < 200 || r.code >= 400) fail();
-      return r.content;
+      for (var i = 0; i < raw.length; i++) {
+        addH(raw[i]);
+        try {
+          var u = new URL(raw[i]);
+          if (u.hostname.indexOf('www.') === 0) addH(u.protocol + '//' + u.hostname.slice(4) + (u.port ? ':' + u.port : ''));
+          else addH(u.protocol + '//www.' + u.hostname + (u.port ? ':' + u.port : ''));
+        } catch (_) {}
+      }
+      return out;
+    }
+    function czHtml(pathOrUrl) {
+      var list = expandCzHosts();
+      var sawChallenge = false;
+      for (var i = 0; i < list.length; i++) {
+        var hostBase = list[i];
+        var u = address(pathOrUrl, hostBase + '/').url;
+        var r = httpReqSoft(u, { timeout: 5000, headers: { 'User-Agent': cfg.userAgent, 'Accept-Language': 'zh-CN,zh;q=0.9', Referer: hostBase + '/' } });
+        if (r.challenge) sawChallenge = true;
+        if (r.ok) {
+          czHost = hostBase;
+          return r.content;
+        }
+      }
+      fail(sawChallenge ? 'drpy_verification_required' : 'drpy_source_unavailable');
     }
     function czList(html) {
       return pdfa(html, 'div.bt_img.mi_ne_kd > ul > li').map(function (li) {
@@ -1446,7 +1483,7 @@ function installFtyVod() {
       try { filters = JSON.parse(cfg.filtersJson); } catch (_) {}
       return {
         class: [
-          { type_id: 'movlist/', type_name: '最新预告' }
+          { type_id: 'allmovies', type_name: '最新预告' }
         ],
         filters: filters
       };
@@ -1493,6 +1530,265 @@ function installFtyVod() {
       var html = ygHtml(id);
       var mp4 = (/["'](https?:\/\/[^"']+\.(?:mp4|m3u8)[^"']*)["']/i.exec(html) || [])[1];
       if (mp4) return { parse: 0, url: address(mp4).url, header: ygHeaders };
+      fail('drpy_media_unresolved');
+    };
+    return;
+  }
+
+  // ==================== 10. jumitv-v1 (JumiTv) ====================
+  if (cfg.adapter === 'jumitv-v1') {
+    var jmHosts = (Array.isArray(cfg.apiHosts) && cfg.apiHosts.length ? cfg.apiHosts : []).slice();
+    var jmPlayHosts = (Array.isArray(cfg.playHosts) && cfg.playHosts.length ? cfg.playHosts : []).slice();
+    var jmUa = str(cfg.userAgent || 'okhttp/3.12.11');
+    var jmHeaders = { 'User-Agent': jmUa };
+    function rc4HexDecrypt(rawText, keyStr) {
+      var s = str(rawText).replace(/^\uFEFF/, '').trim();
+      if (!s) return '';
+      if (s.charAt(0) === '{' || s.charAt(0) === '[') return s;
+      var hex = s.replace(/\s+/g, '');
+      if (!/^[0-9a-fA-F]+$/.test(hex) || (hex.length & 1) !== 0) return s;
+      var key = [], i;
+      for (i = 0; i < keyStr.length; i++) key.push(keyStr.charCodeAt(i) & 0xff);
+      var box = new Array(256);
+      for (i = 0; i < 256; i++) box[i] = i;
+      var j = 0, tmp;
+      for (i = 0; i < 256; i++) {
+        j = (j + box[i] + key[i % key.length]) & 255;
+        tmp = box[i]; box[i] = box[j]; box[j] = tmp;
+      }
+      var len = hex.length >> 1;
+      var out = new Uint8Array(len);
+      var a = 0, b = 0;
+      for (i = 0; i < len; i++) {
+        a = (a + 1) & 255;
+        b = (b + box[a]) & 255;
+        tmp = box[a]; box[a] = box[b]; box[b] = tmp;
+        var byteVal = parseInt(hex.substr(i * 2, 2), 16);
+        out[i] = byteVal ^ box[(box[a] + box[b]) & 255];
+      }
+      if (typeof TextDecoder === 'function') {
+        try { return new TextDecoder('utf-8').decode(out); } catch (_) {}
+      }
+      var bin = '';
+      for (i = 0; i < out.length; i++) bin += String.fromCharCode(out[i]);
+      try { return decodeURIComponent(escape(bin)); } catch (_) { return bin; }
+    }
+    function jmApi(path) {
+      var list = jmHosts.length ? jmHosts : [str(cfg.origin).replace(/^https?:\/\//i, '').replace(/:\d+$/, '')];
+      var scheme = str(cfg.scheme || 'http://');
+      var port = str(cfg.apiPort || ':1122');
+      var prefix = str(cfg.apiPrefix || '/api.php/localhost');
+      for (var i = 0; i < list.length; i++) {
+        var h = str(list[i]).trim();
+        if (!h) continue;
+        var u = scheme + h + port + prefix + path;
+        var r = httpReqSoft(u, { headers: jmHeaders, timeout: 5500 });
+        if (r && r.ok && str(r.content)) {
+          var dec = rc4HexDecrypt(r.content, str(cfg.rc4Key));
+          try {
+            var doc = JSON.parse(dec);
+            if (i > 0) {
+              jmHosts.splice(i, 1);
+              jmHosts.unshift(h);
+            }
+            return doc;
+          } catch (_) {}
+        }
+      }
+      fail('drpy_source_unavailable');
+    }
+    function jmMapList(arr) {
+      if (!Array.isArray(arr)) return [];
+      return arr.map(function (it) {
+        if (!isObj(it)) return null;
+        var nl = str(it.nextlink);
+        var idM = /ids=(\d+)/.exec(nl);
+        var id = idM ? idM[1] : (/^\d+$/.test(nl) ? nl : str(it.id));
+        if (!id) return null;
+        return {
+          vod_id: id,
+          vod_name: str(it.title),
+          vod_pic: safePic(it.pic),
+          vod_remarks: str(it.state)
+        };
+      }).filter(Boolean);
+    }
+    function jmMapTop(arr) {
+      if (!Array.isArray(arr)) return [];
+      return arr.map(function (it) {
+        if (!isObj(it) || !it.id) return null;
+        return {
+          vod_id: String(it.id),
+          vod_name: str(it.tjinfo),
+          vod_pic: safePic(it.tjpicurl),
+          vod_remarks: ''
+        };
+      }).filter(Boolean);
+    }
+    function jmFilters() {
+      try {
+        var raw = jmApi(str(cfg.flitterPath));
+        if (!isObj(raw)) return {};
+        var out = {};
+        var keys = Object.keys(raw);
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i];
+          var groups = raw[k];
+          if (!Array.isArray(groups)) continue;
+          var arr = [];
+          for (var g = 0; g < groups.length; g++) {
+            var grp = groups[g];
+            if (!isObj(grp) || !str(grp.field)) continue;
+            var vals = [{ n: '全部', v: '' }];
+            if (Array.isArray(grp.values)) {
+              for (var v = 0; v < grp.values.length; v++) {
+                var val = str(grp.values[v]);
+                if (val) vals.push({ n: val, v: val });
+              }
+            }
+            arr.push({ key: str(grp.field), name: str(grp.name), value: vals });
+          }
+          if (arr.length) out[k] = arr;
+        }
+        return out;
+      } catch (_) { return {}; }
+    }
+    __drpy.home = function () {
+      var ts = String(Date.now());
+      var cats = jmApi(str(cfg.catPath) + ts + '&tt=' + ts);
+      var classes = [];
+      if (Array.isArray(cats)) {
+        for (var i = 0; i < cats.length; i++) {
+          var c = cats[i];
+          if (!isObj(c) || Number(c.type_status) === 0) continue;
+          var tid = str(c.type_en || c.type_id);
+          var tname = str(c.type_name);
+          if (tid && tname) classes.push({ type_id: tid, type_name: tname });
+        }
+      }
+      var list = [];
+      try {
+        var topDoc = jmApi(str(cfg.topPath));
+        list = jmMapTop(topDoc && topDoc.data);
+      } catch (_) {}
+      return { class: classes, list: list, filters: jmFilters() };
+    };
+    __drpy.homeVod = function () {
+      var topDoc = jmApi(str(cfg.topPath));
+      return { list: jmMapTop(topDoc && topDoc.data) };
+    };
+    __drpy.category = function (tid, pg, filter, extend) {
+      var page = Math.max(1, Number(pg) || 1);
+      var cid = str(tid || '1');
+      var path = str(cfg.listPath) + encodeURIComponent(cid) + '&page=' + page;
+      if (isObj(extend)) {
+        var eKeys = Object.keys(extend);
+        for (var i = 0; i < eKeys.length; i++) {
+          var ek = eKeys[i];
+          if (ek === 'filters' || !str(extend[ek])) continue;
+          path += '&' + encodeURIComponent(ek) + '=' + encodeURIComponent(str(extend[ek]));
+        }
+      }
+      var doc = jmApi(path);
+      var list = jmMapList(doc && doc.data);
+      var pc = (doc && Number(doc.totalpage)) || (list.length >= 12 ? page + 1 : page);
+      return { page: page, pagecount: pc, limit: 20, total: (doc && Number(doc.videonum)) || list.length, list: list };
+    };
+    __drpy.search = function (wd, quick, pg) {
+      var kw = str(wd).trim();
+      if (!kw) return { page: 1, pagecount: 1, limit: 20, total: 0, list: [] };
+      var page = Math.max(1, Number(pg) || 1);
+      var doc = jmApi(str(cfg.searchPath) + encodeURIComponent(kw) + '&page=' + page);
+      var list = jmMapList(doc && doc.data);
+      var pc = (doc && Number(doc.totalpage)) || (list.length >= 12 ? page + 1 : page);
+      return { page: page, pagecount: pc, limit: 20, total: (doc && Number(doc.videonum)) || list.length, list: list };
+    };
+    __drpy.detail = function (vid) {
+      var doc = jmApi(str(cfg.detailPath) + encodeURIComponent(str(vid)));
+      if (!isObj(doc)) fail('drpy_source_unavailable');
+      var showMap = {};
+      var playerArr = doc.player;
+      if (typeof playerArr === 'string' && playerArr) {
+        try { playerArr = JSON.parse(rc4HexDecrypt(playerArr, str(cfg.rc4Key))); } catch (_) { playerArr = []; }
+      }
+      if (Array.isArray(playerArr)) {
+        for (var p = 0; p < playerArr.length; p++) {
+          var pl = playerArr[p];
+          if (isObj(pl) && str(pl.from)) showMap[str(pl.from)] = str(pl.show || pl.from);
+        }
+      }
+      var froms = [], urls = [];
+      if (isObj(doc.videolist)) {
+        var vKeys = Object.keys(doc.videolist);
+        for (var k = 0; k < vKeys.length; k++) {
+          var fk = vKeys[k];
+          var epsArr = doc.videolist[fk];
+          if (!Array.isArray(epsArr) || !epsArr.length) continue;
+          var eps = [];
+          for (var e = 0; e < epsArr.length; e++) {
+            var ep = epsArr[e];
+            if (isObj(ep) && str(ep.url)) {
+              eps.push((str(ep.title) || ('第' + (e + 1) + '集')).replace(/[$#]/g, ' ') + '$' + str(ep.url));
+            }
+          }
+          if (eps.length) {
+            froms.push(showMap[fk] || fk);
+            urls.push(eps.join('#'));
+          }
+        }
+      }
+      function joinField(val) {
+        if (Array.isArray(val)) return val.map(str).filter(Boolean).join(',');
+        return str(val);
+      }
+      return {
+        list: [{
+          vod_id: str(vid),
+          vod_name: str(doc.title),
+          vod_pic: safePic(doc.img_url),
+          type_name: joinField(doc.type),
+          vod_year: str(doc.pubtime),
+          vod_area: joinField(doc.area),
+          vod_remarks: str(doc.trunk),
+          vod_actor: joinField(doc.actor),
+          vod_director: joinField(doc.director),
+          vod_content: str(doc.intro),
+          vod_play_from: froms.join('$$$'),
+          vod_play_url: urls.join('$$$')
+        }]
+      };
+    };
+    __drpy.play = function (flag, id) {
+      var s = str(id).trim();
+      if (!s) fail('drpy_media_unresolved');
+      var scheme = str(cfg.playScheme || 'http://');
+      var portPath = str(cfg.playPortPath || ':6001/Client/?url=');
+      var appVal = str(cfg.playApp || '10000');
+      for (var i = 0; i < jmPlayHosts.length; i++) {
+        var h = str(jmPlayHosts[i]).trim();
+        if (!h) continue;
+        var api = scheme + h + portPath + encodeURIComponent(s);
+        var body = 'app=' + encodeURIComponent(appVal) + '&key=' + encodeURIComponent(String(Date.now()));
+        var r = httpReqSoft(api, {
+          method: 'POST',
+          data: body,
+          headers: { 'User-Agent': jmUa, 'Content-Type': 'application/x-www-form-urlencoded' },
+          timeout: 6500
+        });
+        if (r && r.ok && str(r.content)) {
+          try {
+            var decPlay = rc4HexDecrypt(r.content, str(cfg.rc4Key));
+            var pd = JSON.parse(decPlay);
+            var playUrl = str(pd && pd.url).trim();
+            if (/^https?:\/\//i.test(playUrl)) {
+              return { parse: 0, url: address(playUrl).url, header: jmHeaders };
+            }
+          } catch (_) {}
+        }
+      }
+      if (/^https?:\/\//i.test(s) && isDirectMedia(s)) {
+        return { parse: 0, url: address(s).url, header: jmHeaders };
+      }
       fail('drpy_media_unresolved');
     };
     return;

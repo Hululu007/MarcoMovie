@@ -17,7 +17,7 @@ function installFtyLive() {
   function checkChallenge(body) {
     var t = str(body);
     if (!t) return;
-    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|验证码不正确|请完成滑块验证)/i.test(t) ||
+    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|验证码不正确|请完成滑块验证|verifySlider|challenges\.cloudflare\.com|<title>\s*Just a moment\.\.\.\s*<\/title>|Attention Required!\s*\|\s*Cloudflare|cf-turnstile)/i.test(t) ||
         /<input[^>]+(?:name|id)=["']?(?:verify|validate|captcha)/i.test(t)) {
       fail('drpy_verification_required');
     }

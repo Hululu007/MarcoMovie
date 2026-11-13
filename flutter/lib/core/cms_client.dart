@@ -19,6 +19,7 @@ import 'checksum_source.dart';
 import 'catpaw_host.dart';
 import 'drpy_source.dart';
 import 'guard_source.dart';
+import 'trailer_source.dart';
 import 'wogg_source.dart';
 import 'cloud_share.dart';
 import 'ali_share.dart';
@@ -114,7 +115,7 @@ class CmsClient {
     final cleaned = raw
         .replaceFirst(
           RegExp(
-            r'^(?:FormatException|Exception|StateError|HttpException|SocketException|HandshakeException):\s*',
+            r'^(?:Bad state|FormatException|Exception|StateError|HttpException|SocketException|HandshakeException):\s*',
           ),
           '',
         )
@@ -948,10 +949,18 @@ class CmsClient {
     return '';
   }
 
-  bool _usesJs(CmsSite site) => WoggSource.supports(site) || GuardSource.supports(site) || site.isDrpySource || site.isPythonSource || (site.isJavaScriptSource || site.isRemoteScriptSource) &&
-      !(CspBridge.isHuyaSite(site) || CspBridge.isDouyuSite(site) ||
-        CspBridge.isTuxiaobeiSite(site) || CspBridge.isMyDriveSite(site) ||
-        CspBridge.isBannerNoticeSite(site));
+  bool _usesJs(CmsSite site) =>
+      !TrailerSource.matches(site) &&
+      (WoggSource.supports(site) ||
+          GuardSource.supports(site) ||
+          site.isDrpySource ||
+          site.isPythonSource ||
+          (site.isJavaScriptSource || site.isRemoteScriptSource) &&
+              !(CspBridge.isHuyaSite(site) ||
+                  CspBridge.isDouyuSite(site) ||
+                  CspBridge.isTuxiaobeiSite(site) ||
+                  CspBridge.isMyDriveSite(site) ||
+                  CspBridge.isBannerNoticeSite(site)));
 
   static String _scriptSessionKey(CmsSite site) => sha256.convert(utf8.encode(jsonEncode([
     site.subscriptionId, site.sourceKey, site.isEffectivelyPrivate,

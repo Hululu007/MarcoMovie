@@ -172,7 +172,7 @@ class CspRuleEngines {
   static void _checkChallenge(String html) {
     if (html.isEmpty) return;
     if (RegExp(
-          r'(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|请完成滑块验证)',
+          r'(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|challenges\.cloudflare\.com|<title>\s*Just a moment\.\.\.\s*</title>|cf-turnstile|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|请完成滑块验证)',
           caseSensitive: false,
         ).hasMatch(html) ||
         RegExp(r'<input[^>]+(?:name|id)=["\x27]?(?:verify|validate|captcha)',

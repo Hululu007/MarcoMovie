@@ -389,11 +389,16 @@ class CmsSite {
   bool get supported => capabilityStatus == statusOk;
 
   String get unsupportedReason {
+    final status = capabilityStatus;
+    if (status == statusOk || status == statusExtTooLarge) {
+      return capabilityReason(status);
+    }
     final lowerApi = api.trim().toLowerCase();
     if (lowerApi.startsWith('csp_sixv')) {
       return '该线路依赖 P2P / 磁力种子协议，受当前系统沙盒限制暂不支持';
     }
-    if (lowerApi.startsWith('csp_music') ||
+    if (lowerApi == 'csp_music' ||
+        lowerApi == 'csp_musicguard' ||
         lowerApi.startsWith('csp_wexaiyueyue') ||
         lowerApi.startsWith('csp_ainewguanying') ||
         lowerApi.startsWith('csp_ainewlibvio') ||
@@ -403,8 +408,39 @@ class CmsSite {
     if (lowerApi.startsWith('csp_aipan1me')) {
       return '该线路依赖论坛回复解锁，当前设备暂不支持';
     }
-    if (lowerApi.startsWith('csp_aidj')) {
+    if (lowerApi.startsWith('csp_aidj') ||
+        lowerApi.startsWith('csp_manjuaihongguo') ||
+        lowerApi.startsWith('csp_bookhongguo')) {
       return '该线路使用专有加密流保护，当前设备暂不支持';
+    }
+    if (lowerApi.startsWith('csp_emby') ||
+        lowerApi.startsWith('csp_alist') ||
+        lowerApi.startsWith('csp_webdav') ||
+        lowerApi.startsWith('csp_diyvod') ||
+        lowerApi.startsWith('csp_fakeai115')) {
+      return '该线路为自建服务模板（Emby / AList / WebDAV），需配置私有服务器参数';
+    }
+    if (lowerApi.startsWith('csp_maiduidui')) {
+      return '该线路上游接口启用了专有设备签名限制，当前设备暂不支持';
+    }
+    if (lowerApi.startsWith('csp_sportaifeiqiu')) {
+      return '该线路上游接口已失效或停服，当前暂不可用';
+    }
+    if (lowerApi.startsWith('csp_sssp')) {
+      return '该线路包含受限第三方插件接口，当前设备暂不支持';
+    }
+    if (CspBridge.guardAdapterFor(this) != null) {
+      return capabilityReason(status);
+    }
+    if (lowerApi.startsWith('csp_manjuai') ||
+        lowerApi.startsWith('csp_duanjuai') ||
+        lowerApi.startsWith('csp_anime') ||
+        lowerApi.startsWith('csp_book') ||
+        lowerApi.startsWith('csp_childrenai') ||
+        lowerApi.startsWith('csp_musicai') ||
+        lowerApi.startsWith('csp_sportai') ||
+        lowerApi.startsWith('csp_liveaibili')) {
+      return '该线路依赖 Android 原生加密组件（.so），iOS 与桌面端暂不支持';
     }
     return capabilityReason(capabilityStatus);
   }

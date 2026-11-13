@@ -15,7 +15,7 @@ function installWexVod() {
   function checkChallenge(body) {
     var t = str(body);
     if (!t) return;
-    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|验证码不正确|请完成滑块验证|verifySlider)/i.test(t) ||
+    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|验证码不正确|请完成滑块验证|verifySlider|challenges\.cloudflare\.com|<title>\s*Just a moment\.\.\.\s*<\/title>|Attention Required!\s*\|\s*Cloudflare|cf-turnstile)/i.test(t) ||
         /<input[^>]+(?:name|id)=["']?(?:verify|validate|captcha)/i.test(t)) {
       fail('drpy_verification_required');
     }
@@ -44,9 +44,11 @@ function installWexVod() {
     if (!isObj(raw)) return out;
     var keys = Object.keys(raw);
     for (var i = 0; i < keys.length; i++) {
+      var rawVal = raw[keys[i]];
+      if (rawVal === undefined || rawVal === null) continue;
       var k = str(keys[i]).trim();
-      var v = str(raw[keys[i]]).replace(/[\r\n\0]/g, '').trim();
-      if (k && v) out[k] = v;
+      var v = String(rawVal).replace(/[\r\n\0]/g, '').trim();
+      if (k) out[k] = v;
     }
     return out;
   }
@@ -148,14 +150,26 @@ function installWexVod() {
       return aesCbcDecryptText(s, str(cfg.remoteAesKey), str(cfg.remoteAesIv)).replace(/^\uFEFF/, '').trim();
     } catch (_) { return ''; }
   }
+  var memRemoteCfg = null;
+  var memRemoteTriedAt = 0;
   function loadRemoteWexConfig() {
+    if (memRemoteCfg && (str(memRemoteCfg.siteUrl) || (isObj(memRemoteCfg.siteConfig) && Object.keys(memRemoteCfg.siteConfig).length))) {
+      return memRemoteCfg;
+    }
     var cached = local.get('wex-remote', 'cfg_v1');
-    if (isObj(cached) && Number(cached.exp) > Date.now() && str(cached.siteUrl)) return cached;
+    if (isObj(cached) && Number(cached.exp) > Date.now() && str(cached.siteUrl)) {
+      memRemoteCfg = cached;
+      return cached;
+    }
+    if (memRemoteTriedAt && Date.now() - memRemoteTriedAt < 3 * 60 * 1000) {
+      return { siteUrl: '', mySiteUrl: '', siteConfig: {}, exp: 0 };
+    }
+    memRemoteTriedAt = Date.now();
     var rHeaders = { 'User-Agent': str(cfg.remoteUa || cfg.userAgent || 'Mozilla/5.0'), Accept: 'application/json,text/plain,*/*' };
     var apiUrls = [cfg.apiTxt0, cfg.apiTxt1, cfg.apiTxt2, cfg.apiTxt3].map(str).filter(Boolean);
     var siteUrl = '';
     for (var i = 0; i < apiUrls.length; i++) {
-      var r = httpReqSoft(apiUrls[i], { headers: rHeaders, timeout: 4500 });
+      var r = httpReqSoft(apiUrls[i], { headers: rHeaders, timeout: 2500 });
       if (r && r.code >= 200 && r.code < 300) {
         var dec = decryptRemoteText(r.content).split(/[\r\n]+/)[0].trim().replace(/\/+$/, '');
         if (/^https?:\/\//i.test(dec)) { siteUrl = dec; break; }
@@ -164,13 +178,13 @@ function installWexVod() {
     var siteConfig = {};
     var itemUrls = [cfg.itemTxt0, cfg.itemTxt1, cfg.itemTxt2].map(str).filter(Boolean);
     for (var j = 0; j < itemUrls.length; j++) {
-      var ir = httpReqSoft(itemUrls[j], { headers: rHeaders, timeout: 4500 });
+      var ir = httpReqSoft(itemUrls[j], { headers: rHeaders, timeout: 2500 });
       if (ir && ir.code >= 200 && ir.code < 300) {
         var itemObj = parseJsonSafe(decryptRemoteText(ir.content));
         if (isObj(itemObj)) {
           var csUrl = str(itemObj.config_site).trim();
           if (/^https?:\/\//i.test(csUrl)) {
-            var sr = httpReqSoft(csUrl, { headers: rHeaders, timeout: 4500 });
+            var sr = httpReqSoft(csUrl, { headers: rHeaders, timeout: 2500 });
             if (sr && sr.code >= 200 && sr.code < 300) {
               var sc = parseJsonSafe(decryptRemoteText(sr.content));
               if (isObj(sc)) siteConfig = sc;
@@ -186,7 +200,10 @@ function installWexVod() {
       siteConfig: siteConfig,
       exp: Date.now() + 20 * 60 * 1000
     };
-    if (siteUrl || Object.keys(siteConfig).length) local.set('wex-remote', 'cfg_v1', out);
+    if (siteUrl || Object.keys(siteConfig).length) {
+      memRemoteCfg = out;
+      local.set('wex-remote', 'cfg_v1', out);
+    }
     return out;
   }
   function pickSiteHosts(siteKey, fallbacks) {
@@ -2313,6 +2330,1050 @@ function installWexVod() {
       merged.splice(2, 0, '#EXT-X-TARGETDURATION:' + targetDur, '#EXT-X-MEDIA-SEQUENCE:0');
       merged.push('#EXT-X-ENDLIST');
       return [200, 'application/vnd.apple.mpegurl', merged.join('\n')];
+    };
+    return;
+  }
+
+  // ==================== 13. wexmodu-v1 (AnimeAiMoDu) ====================
+  if (cfg.adapter === 'wexmodu-v1') {
+    var mdUa = str(cfg.userAgent || 'Mozilla/5.0');
+    var mdHdr = { 'User-Agent': mdUa };
+    function mdMapList(arr) {
+      if (!Array.isArray(arr)) return [];
+      return arr.map(function (it) {
+        if (!isObj(it) || !it.vod_id) return null;
+        return {
+          vod_id: String(it.vod_id),
+          vod_name: str(it.vod_name),
+          vod_pic: safePic(it.vod_pic),
+          vod_remarks: str(it.vod_remarks)
+        };
+      }).filter(Boolean);
+    }
+    __drpy.home = function () {
+      return {
+        class: [
+          { type_id: '4', type_name: '港台动漫' },
+          { type_id: '5', type_name: '动漫电影' },
+          { type_id: '1', type_name: '国产动漫' },
+          { type_id: '2', type_name: '日韩动漫' },
+          { type_id: '3', type_name: '欧美动漫' }
+        ],
+        filters: {}
+      };
+    };
+    __drpy.homeVod = function () {
+      var doc = parseJsonSafe(httpReq(cfg.apiBase + '?ac=detail&t=1&pg=1', { headers: mdHdr }).content);
+      return { list: mdMapList(doc && doc.list) };
+    };
+    __drpy.category = function (tid, pg, filter, extend) {
+      var page = Math.max(1, Number(pg) || 1);
+      var cid = str((extend && extend.cateId) || tid || '1');
+      var doc = parseJsonSafe(httpReq(cfg.apiBase + '?ac=detail&t=' + encodeURIComponent(cid) + '&pg=' + page, { headers: mdHdr }).content);
+      var list = mdMapList(doc && doc.list);
+      return {
+        page: Number(doc && doc.page) || page,
+        pagecount: Number(doc && doc.pagecount) || (list.length ? page + 1 : page),
+        limit: Number(doc && doc.limit) || 20,
+        total: Number(doc && doc.total) || list.length,
+        list: list
+      };
+    };
+    __drpy.search = function (wd, quick, pg) {
+      var kw = str(wd).trim();
+      if (!kw) return { page: 1, pagecount: 1, limit: 20, total: 0, list: [] };
+      var page = Math.max(1, Number(pg) || 1);
+      var doc = parseJsonSafe(httpReq(cfg.searchApiPrefix + page + '&wd=' + encodeURIComponent(kw), { headers: mdHdr }).content);
+      var list = mdMapList(doc && doc.list);
+      return {
+        page: page,
+        pagecount: Number(doc && doc.pagecount) || 1,
+        limit: Number(doc && doc.limit) || 20,
+        total: Number(doc && doc.total) || list.length,
+        list: list
+      };
+    };
+    __drpy.detail = function (vid) {
+      var doc = parseJsonSafe(httpReq(cfg.detailApiPrefix + encodeURIComponent(str(vid)), { headers: mdHdr }).content);
+      var item = doc && Array.isArray(doc.list) && doc.list[0];
+      if (!isObj(item)) fail('drpy_source_unavailable');
+      return {
+        list: [{
+          vod_id: String(item.vod_id || vid),
+          vod_name: str(item.vod_name),
+          vod_pic: safePic(item.vod_pic),
+          vod_year: str(item.vod_year),
+          vod_content: stripHtml(item.vod_content),
+          vod_director: str(item.vod_director),
+          vod_actor: str(item.vod_actor),
+          vod_play_from: str(item.vod_play_from || '播放'),
+          vod_play_url: str(item.vod_play_url)
+        }]
+      };
+    };
+    __drpy.play = function (flag, id) {
+      return { parse: 0, url: address(str(id)).url, header: mdHdr };
+    };
+    return;
+  }
+
+  // ==================== 14. wexhaokan-v1 (DuanJuAiHaoKan) ====================
+  if (cfg.adapter === 'wexhaokan-v1') {
+    var hkHdr = {
+      'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
+      'User-Agent': str(cfg.userAgent),
+      'Cookie': str(cfg.cookie),
+      'Talos-Module-Version': str(cfg.modVersion),
+      'Talos-Module-Name': str(cfg.modName)
+    };
+    var hkDefaultTag = '';
+    function hkPost(url, formStr) {
+      var r = httpReq(url, { method: 'POST', data: formStr, headers: hkHdr, timeout: 9000 });
+      var doc = parseJsonSafe(r.content);
+      if (!isObj(doc)) fail('drpy_source_response');
+      return doc;
+    }
+    __drpy.home = function () {
+      var doc = hkPost(cfg.originUrl, 'from=feed');
+      var dataObj = isObj(doc.data) ? doc.data : {};
+      var classes = [], seenTag = {};
+      function pushTag(t) {
+        if (!isObj(t) || !str(t.tag_id) || !str(t.name) || seenTag[str(t.tag_id)]) return;
+        seenTag[str(t.tag_id)] = true;
+        classes.push({ type_id: str(t.tag_id), type_name: str(t.name) });
+      }
+      if (Array.isArray(dataObj.playlet_tags)) {
+        for (var i = 0; i < dataObj.playlet_tags.length; i++) pushTag(dataObj.playlet_tags[i]);
+      }
+      if (Array.isArray(dataObj.playlet_shelf_filter_panel)) {
+        for (var p = 0; p < dataObj.playlet_shelf_filter_panel.length; p++) {
+          var grp = dataObj.playlet_shelf_filter_panel[p];
+          if (isObj(grp) && Array.isArray(grp.tag_list)) {
+            for (var j = 0; j < grp.tag_list.length; j++) pushTag(grp.tag_list[j]);
+          }
+        }
+      } else if (isObj(dataObj.playlet_shelf_filter_panel) && Array.isArray(dataObj.playlet_shelf_filter_panel.tag_list)) {
+        for (var k = 0; k < dataObj.playlet_shelf_filter_panel.tag_list.length; k++) pushTag(dataObj.playlet_shelf_filter_panel.tag_list[k]);
+      }
+      hkDefaultTag = classes.length ? classes[0].type_id : '1';
+      return { class: classes, filters: {} };
+    };
+    __drpy.category = function (tid, pg) {
+      var page = Math.max(1, Number(pg) || 1);
+      var tagId = str(tid || hkDefaultTag || '1');
+      var doc = hkPost(cfg.tagsFeedUrl, 'rn=9&tag_id=' + encodeURIComponent(tagId) + '&pn=' + page);
+      var arr = isObj(doc.data) && Array.isArray(doc.data.list) ? doc.data.list : [];
+      var list = arr.map(function (it) {
+        if (!isObj(it) || !str(it.playlet_id)) return null;
+        return {
+          vod_id: str(it.playlet_id) + '|||' + str(it.progress_vid),
+          vod_name: str(it.playlet_title),
+          vod_pic: safePic(it.playlet_poster),
+          vod_remarks: str(it.episodes_num_text)
+        };
+      }).filter(Boolean);
+      return { page: page, pagecount: list.length >= 9 ? page + 1 : page, limit: 9, total: 999, list: list };
+    };
+    __drpy.homeVod = function () {
+      if (!hkDefaultTag) { try { __drpy.home(); } catch (_) {} }
+      return { list: __drpy.category(hkDefaultTag || '1', 1).list };
+    };
+    __drpy.search = function (wd) {
+      var kw = str(wd).trim();
+      if (!kw) return { page: 1, pagecount: 1, limit: 20, total: 0, list: [] };
+      var doc = hkPost(cfg.searchUrl, 'search_word=' + encodeURIComponent(kw));
+      var arr = Array.isArray(doc.data) ? doc.data : (isObj(doc.data) && Array.isArray(doc.data.list) ? doc.data.list : []);
+      var list = arr.map(function (it) {
+        if (!isObj(it) || !str(it.id)) return null;
+        return {
+          vod_id: str(it.id) + '|||',
+          vod_name: str(it.title),
+          vod_pic: safePic(it.cover_url),
+          vod_remarks: str(it.tag)
+        };
+      }).filter(Boolean);
+      return { page: 1, pagecount: 1, limit: 20, total: list.length, list: list };
+    };
+    __drpy.detail = function (vid) {
+      var parts = str(vid).split('|||');
+      var pid = str(parts[0]).trim();
+      var evid = str(parts[1] || '').trim();
+      if (!pid) fail('drpy_source_unavailable');
+      if (!evid) {
+        try {
+          var formData = str(cfg.detailFormPart1) + String(Date.now()) + str(cfg.detailFormPart2) + encodeURIComponent(pid) + str(cfg.detailFormPart3);
+          var clDoc = hkPost(cfg.detailApiUrl, encodeURIComponent('video/commonlist') + '=' + encodeURIComponent(formData));
+          var clData = isObj(clDoc['video/commonlist']) ? clDoc['video/commonlist'].data : clDoc.data;
+          var results = isObj(clData) && Array.isArray(clData.results) ? clData.results : [];
+          if (results.length && isObj(results[0]) && isObj(results[0].content) && str(results[0].content.vid)) {
+            evid = str(results[0].content.vid).trim();
+          }
+        } catch (_) {}
+      }
+      var recBody = 'playlet_id=' + encodeURIComponent(pid) + (evid ? ('&vid=' + encodeURIComponent(evid)) : '');
+      var recDoc = hkPost(cfg.recDetailUrl, recBody);
+      var rd = isObj(recDoc.data) ? recDoc.data : {};
+      var eps = [];
+      var vidList = Array.isArray(rd.vid_list) ? rd.vid_list : [];
+      if (vidList.length) {
+        for (var i = 0; i < vidList.length; i++) {
+          var vItem = vidList[i];
+          var itemVid = isObj(vItem) ? str(vItem.vid || vItem.id) : str(vItem);
+          if (itemVid) eps.push('第' + (i + 1) + '集$' + itemVid + '|||' + pid);
+        }
+      } else if (evid) {
+        eps.push('第1集$' + evid + '|||' + pid);
+      }
+      return {
+        list: [{
+          vod_id: str(vid),
+          vod_name: str(rd.playlet_title),
+          vod_pic: safePic(rd.playlet_poster),
+          vod_content: stripHtml(rd.description),
+          vod_play_from: eps.length ? '播放' : '',
+          vod_play_url: eps.join('#')
+        }]
+      };
+    };
+    __drpy.play = function (flag, id) {
+      var parts = str(id).split('|||');
+      var evid = str(parts[0]).trim();
+      var pid = str(parts[1] || '').trim();
+      if (!evid) fail('drpy_media_unresolved');
+      var qData = 'method=post&vid=' + encodeURIComponent(evid) + str(cfg.playPart1) + encodeURIComponent(pid) + str(cfg.playPart2);
+      var doc = hkPost(cfg.playApiUrl, encodeURIComponent('video/relate') + '=' + encodeURIComponent(qData));
+      var rel = isObj(doc['video/relate']) ? doc['video/relate'] : doc;
+      var clarity = isObj(rel.data) && isObj(rel.data.cur_video) && Array.isArray(rel.data.cur_video.clarityUrl)
+        ? rel.data.cur_video.clarityUrl : [];
+      var bestUrl = '';
+      var prefs = ['1080p', 'sc'];
+      for (var p = 0; p < prefs.length && !bestUrl; p++) {
+        for (var i = 0; i < clarity.length; i++) {
+          if (isObj(clarity[i]) && str(clarity[i].key) === prefs[p] && str(clarity[i].url)) {
+            bestUrl = str(clarity[i].url);
+            break;
+          }
+        }
+      }
+      if (!bestUrl) {
+        for (var j = 0; j < clarity.length; j++) {
+          if (isObj(clarity[j]) && str(clarity[j].url)) { bestUrl = str(clarity[j].url); break; }
+        }
+      }
+      if (!bestUrl) fail('drpy_media_unresolved');
+      return { parse: 0, url: address(bestUrl).url, header: { 'User-Agent': str(cfg.userAgent) } };
+    };
+    return;
+  }
+
+  // ==================== 15. wexqimiao-v1 (DuanJuAiQiMiao) ====================
+  if (cfg.adapter === 'wexqimiao-v1') {
+    var qmHostBc = '', qmHostKs = '';
+    var qmSignSalt = str(cfg.signSalt || '');
+    function qmEncodeParams(jsonStr) {
+      var b64 = utf8ToB64(jsonStr);
+      var digits = 'MUlErYWbdJ';
+      var upper = str(cfg.qmParams1);
+      var lower = str(cfg.qmParams2);
+      var out = '';
+      for (var i = 0; i < b64.length; i++) {
+        var c = b64.charCodeAt(i);
+        if (c === 0x2b) out += 'P';
+        else if (c === 0x2f) out += 'X';
+        else if (c >= 0x30 && c <= 0x39) out += digits.charAt(c - 0x30);
+        else if (c >= 0x41 && c <= 0x5a) out += upper.charAt(c - 0x41);
+        else if (c >= 0x61 && c <= 0x7a) out += lower.charAt(c - 0x61);
+        else out += b64.charAt(i);
+      }
+      return out;
+    }
+    function qmHeaders() {
+      var dev = {
+        'static_score': '0.8',
+        'uuid': str(cfg.uuid),
+        'device-id': str(cfg.deviceId),
+        'mac': '',
+        'sourceuid': str(cfg.sourceUid),
+        'refresh-type': '0',
+        'model': 'M2012K10C',
+        'wlb-imei': '',
+        'client-id': str(cfg.trackId),
+        'brand': 'Redmi',
+        'oaid': '',
+        'oaid-no-cache': '',
+        'sys-ver': '11',
+        'trusted-id': '',
+        'phone-level': 'H',
+        'imei': '',
+        'wlb-uid': '',
+        'session-id': String(Date.now())
+      };
+      var qp = qmEncodeParams(JSON.stringify(dev));
+      return {
+        'authorization': '',
+        'reg': '',
+        'is-white': '',
+        'user-agent': 'webviewversion/0',
+        'net-env': '1',
+        'channel': str(cfg.channel),
+        'platform': 'android',
+        'application-id': str(cfg.appId),
+        'app-version': '10001',
+        'qm-params': qp,
+        'no-permiss': '3',
+        'sign': md5Hex(str(cfg.authPrefix) + qp + 'reg=' + qmSignSalt)
+      };
+    }
+    function qmSignParams(map) {
+      var keys = Object.keys(map).sort();
+      var s = '';
+      for (var i = 0; i < keys.length; i++) s += keys[i] + '=' + str(map[keys[i]]);
+      return md5Hex(s + qmSignSalt);
+    }
+    function qmQueryStr(map) {
+      var keys = Object.keys(map);
+      var out = [];
+      for (var i = 0; i < keys.length; i++) out.push(encodeURIComponent(keys[i]) + '=' + encodeURIComponent(str(map[keys[i]])));
+      return out.join('&');
+    }
+    function ensureQmHosts() {
+      if (qmHostBc && qmHostKs) return { bc: qmHostBc, ks: qmHostKs };
+      var doc = parseJsonSafe(httpReq(cfg.originUrl, { headers: qmHeaders(), timeout: 8000 }).content);
+      var d = isObj(doc) && isObj(doc.data) ? doc.data : {};
+      var bc = (str(d.bc) || str(d.ks)).replace(/\/+$/, '');
+      var ks = (str(d.ks) || str(d.bc)).replace(/\/+$/, '');
+      if (!/^https?:\/\//i.test(bc) || !/^https?:\/\//i.test(ks)) fail('drpy_source_unavailable');
+      qmHostBc = bc;
+      qmHostKs = ks;
+      return { bc: qmHostBc, ks: qmHostKs };
+    }
+    __drpy.home = function () {
+      var h = ensureQmHosts().bc;
+      var p = { tag_id: '0', playlet_privacy: '1', operation: '1' };
+      p.sign = qmSignParams(p);
+      var doc = parseJsonSafe(httpReq(h + '/api/v1/playlet/index?' + qmQueryStr(p), { headers: qmHeaders() }).content);
+      var tags = isObj(doc) && isObj(doc.data) && Array.isArray(doc.data.tag_items) ? doc.data.tag_items : [];
+      var classes = tags.map(function (it) {
+        if (!isObj(it) || !str(it.tag_id)) return null;
+        return { type_id: str(it.tag_id), type_name: str(it.tag_name) };
+      }).filter(Boolean);
+      return { class: classes, filters: {} };
+    };
+    __drpy.category = function (tid, pg) {
+      var h = ensureQmHosts().bc;
+      var page = Math.max(1, Number(pg) || 1);
+      var p = { tag_id: str(tid || '0'), playlet_privacy: '1', operation: '1', next_id: String((page - 1) * 10) };
+      p.sign = qmSignParams(p);
+      var doc = parseJsonSafe(httpReq(h + '/api/v1/playlet/index?' + qmQueryStr(p), { headers: qmHeaders() }).content);
+      var arr = isObj(doc) && isObj(doc.data) && Array.isArray(doc.data.list) ? doc.data.list : [];
+      var list = arr.map(function (it) {
+        if (!isObj(it) || !str(it.playlet_id)) return null;
+        return {
+          vod_id: str(it.playlet_id),
+          vod_name: str(it.title),
+          vod_pic: safePic(it.image_link),
+          vod_remarks: (it.total_episode_num ? (str(it.total_episode_num) + '集') : '')
+        };
+      }).filter(Boolean);
+      return { page: page, pagecount: list.length >= 10 ? page + 1 : page, limit: 10, total: 999, list: list };
+    };
+    __drpy.homeVod = function () { return { list: __drpy.category('0', 1).list }; };
+    __drpy.search = function (wd, quick, pg) {
+      var kw = str(wd).trim();
+      if (!kw) return { page: 1, pagecount: 1, limit: 20, total: 0, list: [] };
+      var h = ensureQmHosts().bc;
+      var page = Math.max(1, Number(pg) || 1);
+      var p = { page: String(page), wd: kw, read_preference: '0', track_id: str(cfg.trackId) };
+      p.sign = qmSignParams(p);
+      var doc = parseJsonSafe(httpReq(h + '/api/v1/playlet/search?' + qmQueryStr(p), { headers: qmHeaders() }).content);
+      var arr = isObj(doc) && isObj(doc.data) && Array.isArray(doc.data.list) ? doc.data.list : [];
+      var list = arr.map(function (it) {
+        if (!isObj(it) || !str(it.id || it.playlet_id)) return null;
+        return {
+          vod_id: str(it.id || it.playlet_id),
+          vod_name: str(it.title),
+          vod_pic: safePic(it.image_link),
+          vod_remarks: str(it.total_num)
+        };
+      }).filter(Boolean);
+      return { page: page, pagecount: list.length >= 10 ? page + 1 : page, limit: 20, total: list.length, list: list };
+    };
+    __drpy.detail = function (vid) {
+      var h = ensureQmHosts().ks;
+      var pid = str(vid).trim();
+      var p = { playlet_id: pid };
+      p.sign = qmSignParams(p);
+      var doc = parseJsonSafe(httpReq(h + '/player/api/v1/playlet/info?' + qmQueryStr(p), { headers: qmHeaders() }).content);
+      var d = isObj(doc) && isObj(doc.data) ? doc.data : {};
+      var eps = (Array.isArray(d.play_list) ? d.play_list : []).map(function (ep, idx) {
+        if (!isObj(ep) || !str(ep.video_url)) return null;
+        return (str(ep.sort || (idx + 1))).replace(/[$#]/g, ' ') + '$' + str(ep.video_url);
+      }).filter(Boolean);
+      return {
+        list: [{
+          vod_id: pid,
+          vod_name: str(d.title),
+          vod_pic: safePic(d.image_link),
+          vod_content: stripHtml(d.intro),
+          vod_play_from: eps.length ? '播放' : '',
+          vod_play_url: eps.join('#')
+        }]
+      };
+    };
+    __drpy.play = function (flag, id) {
+      return { parse: 0, url: address(str(id)).url, header: { 'User-Agent': str(cfg.playUserAgent || 'Dalvik/2.1.0') } };
+    };
+    return;
+  }
+
+  // ==================== 16. wexkuwoa-v1 (MusicAiKuWoa) ====================
+  if (cfg.adapter === 'wexkuwoa-v1') {
+    var kwHdr = { Referer: str(cfg.referer), 'User-Agent': str(cfg.userAgent) };
+    __drpy.home = function () {
+      return {
+        class: [
+          { type_id: '1', type_name: '华语男' }, { type_id: '2', type_name: '华语女' },
+          { type_id: '3', type_name: '华语组合' }, { type_id: '4', type_name: '日韩男' },
+          { type_id: '5', type_name: '日韩女' }, { type_id: '6', type_name: '日韩组合' },
+          { type_id: '7', type_name: '欧美男' }, { type_id: '8', type_name: '欧美女' },
+          { type_id: '9', type_name: '欧美组合' }, { type_id: '0', type_name: '其他' }
+        ],
+        filters: {}
+      };
+    };
+    __drpy.category = function (tid, pg) {
+      var page = Math.max(1, Number(pg) || 1);
+      var cid = str(tid || '1');
+      var doc = parseJsonSafe(httpReq(cfg.originUrl + encodeURIComponent(cid) + '&prefix=&pn=' + page + '&rn=30', { headers: kwHdr }).content);
+      var arr = isObj(doc) && isObj(doc.data) && Array.isArray(doc.data.artistList) ? doc.data.artistList : [];
+      var list = arr.map(function (it) {
+        if (!isObj(it) || !it.id) return null;
+        return {
+          vod_id: String(it.id),
+          vod_name: str(it.name),
+          vod_pic: safePic(it.pic300 || it.pic || it.pic120),
+          vod_remarks: ''
+        };
+      }).filter(Boolean);
+      return { page: page, pagecount: list.length >= 30 ? page + 1 : page, limit: 30, total: 999, list: list };
+    };
+    __drpy.homeVod = function () { return __drpy.category('1', 1); };
+    __drpy.search = function (wd, quick, pg) {
+      var kw = str(wd).trim();
+      if (!kw) return { page: 1, pagecount: 1, limit: 30, total: 0, list: [] };
+      var page = Math.max(1, Number(pg) || 1);
+      var doc = parseJsonSafe(httpReq(cfg.searchUrl + page + '&rn=30&all=' + encodeURIComponent(kw) + '&vipver=1&ft=artist&encoding=utf8&rformat=json&mobi=1', { headers: kwHdr }).content);
+      var basePic = str((doc && doc.BASEPICPATH) || cfg.searchPicBase);
+      var arr = isObj(doc) && Array.isArray(doc.abslist) ? doc.abslist : [];
+      var list = arr.map(function (it) {
+        var aid = str(it && (it.ARTISTID || it.DC_TARGETID));
+        if (!aid) return null;
+        var pic = str(it.hts_PICPATH || it.PICPATH);
+        if (pic && !/^https?:\/\//i.test(pic)) pic = basePic + pic.replace(/^\/+/, '');
+        return {
+          vod_id: aid,
+          vod_name: str(it.ARTIST),
+          vod_pic: safePic(pic),
+          vod_remarks: it.SONGNUM ? ('歌曲 : ' + str(it.SONGNUM) + '首') : ''
+        };
+      }).filter(Boolean);
+      return { page: page, pagecount: list.length >= 30 ? page + 1 : page, limit: 30, total: list.length, list: list };
+    };
+    __drpy.detail = function (vid) {
+      var aid = encodeURIComponent(str(vid));
+      var infoDoc = parseJsonSafe(httpReq(cfg.artistDetailUrl + aid, { headers: kwHdr }).content);
+      var aData = isObj(infoDoc) && isObj(infoDoc.data) ? infoDoc.data : {};
+      var eps = [];
+      for (var pn = 1; pn <= 2; pn++) {
+        var mRes = httpReqSoft(cfg.artistMusicUrl + aid + '&pn=' + pn + '&rn=30', { headers: kwHdr, timeout: 6000 });
+        var mDoc = mRes ? parseJsonSafe(mRes.content) : null;
+        var songs = isObj(mDoc) && isObj(mDoc.data) && Array.isArray(mDoc.data.list) ? mDoc.data.list : [];
+        if (!songs.length) break;
+        for (var i = 0; i < songs.length; i++) {
+          var s = songs[i];
+          if (!isObj(s) || !s.rid) continue;
+          var label = str(s.name || '歌曲') + (str(s.album) ? (' - ' + str(s.album)) : '');
+          eps.push(label.replace(/[$#]/g, ' ').trim() + '$' + String(s.rid));
+        }
+        if (songs.length < 30) break;
+      }
+      return {
+        list: [{
+          vod_id: str(vid),
+          vod_name: str(aData.name),
+          vod_pic: safePic(aData.pic300 || aData.pic),
+          vod_remarks: eps.length ? ('歌曲 : ' + eps.length + '首') : '',
+          vod_content: stripHtml(aData.info) || '暂无歌手简介',
+          vod_play_from: eps.length ? '无损FLAC$$$高品质320K$$$标准128K' : '',
+          vod_play_url: eps.length ? [eps.join('#'), eps.join('#'), eps.join('#')].join('$$$') : ''
+        }]
+      };
+    };
+    __drpy.play = function (flag, id) {
+      var rid = encodeURIComponent(str(id).trim());
+      var tries = flag === '标准128K'
+        ? [['128kmp3', 'mp3'], ['320kmp3', 'mp3'], ['2000kflac', 'flac']]
+        : (flag === '高品质320K' ? [['320kmp3', 'mp3'], ['128kmp3', 'mp3']] : [['2000kflac', 'flac'], ['320kmp3', 'mp3'], ['128kmp3', 'mp3']]);
+      var pHdr = { 'User-Agent': 'Mozilla/5.0 (Linux; Android 10)', Referer: str(cfg.playReferer) };
+      for (var i = 0; i < tries.length; i++) {
+        var r = httpReqSoft(cfg.mobiPlayUrl + rid + '&bitrate=' + tries[i][0] + '&format=' + tries[i][1], { headers: pHdr, timeout: 6000 });
+        var doc = r ? parseJsonSafe(r.content) : null;
+        var u = isObj(doc) && isObj(doc.data) ? str(doc.data.url).trim() : '';
+        if (/^https?:\/\//i.test(u)) return { parse: 0, url: address(u).url, header: { 'User-Agent': str(cfg.userAgent), Referer: str(cfg.playReferer) } };
+      }
+      fail('drpy_media_unresolved');
+    };
+    return;
+  }
+
+  // ==================== 17. wexqingting-v1 (MusicAiQingTing) ====================
+  if (cfg.adapter === 'wexqingting-v1') {
+    var qtHdr = { Referer: str(cfg.originUrl), 'User-Agent': str(cfg.userAgent), 'Content-Type': 'application/json' };
+    function qtGql(queryStr) {
+      var r = httpReq(cfg.graphqlUrl, { method: 'POST', data: JSON.stringify({ query: queryStr }), headers: qtHdr });
+      var doc = parseJsonSafe(r.content);
+      if (!isObj(doc)) fail('drpy_source_response');
+      return isObj(doc.data) ? doc.data : {};
+    }
+    function qtMapItems(arr) {
+      if (!Array.isArray(arr)) return [];
+      return arr.map(function (it) {
+        if (!isObj(it) || !it.id) return null;
+        return {
+          vod_id: String(it.id),
+          vod_name: str(it.title),
+          vod_pic: safePic(it.cover || it.imgUrl),
+          vod_remarks: str(it.description || it.desc)
+        };
+      }).filter(Boolean);
+    }
+    __drpy.home = function () {
+      var ids = ['436','434','217','99','3','5','7','83','19','31','44','59','69','85','111','129','139','151','169','187','202','239','254','257','259','281','291','316','327','351','357','308','342','433','442','429','439','432','441','430','431','440','438','435'];
+      var names = ['曲艺','方言','广东','浙江','北京','天津','河北','上海','山西','内蒙古','辽宁','吉林','黑龙江','江苏','安徽','福建','江西','山东','河南','湖北','湖南','广西','海南','重庆','四川','贵州','云南','陕西','甘肃','宁夏','新疆','西藏','青海','资讯','音乐','交通','经济','文艺','都市','体育','双语','综合','生活','旅游'];
+      return { class: ids.map(function (id, idx) { return { type_id: id, type_name: names[idx] }; }), filters: {} };
+    };
+    __drpy.category = function (tid, pg) {
+      var page = Math.max(1, Number(pg) || 1);
+      var cid = Number(tid) || 436;
+      var data = qtGql('{\n  radioPage(cid:' + cid + ', page:' + page + '){\n    contents\n  }\n}');
+      var items = isObj(data.radioPage) && isObj(data.radioPage.contents) ? data.radioPage.contents.items : [];
+      var list = qtMapItems(items);
+      return { page: page, pagecount: list.length >= 12 ? page + 1 : page, limit: 20, total: 999, list: list };
+    };
+    __drpy.homeVod = function () { return __drpy.category('436', 1); };
+    __drpy.search = function (wd, quick, pg) {
+      var kw = str(wd).trim();
+      if (!kw) return { page: 1, pagecount: 1, limit: 20, total: 0, list: [] };
+      var page = Math.max(1, Number(pg) || 1);
+      var data = qtGql('{\n  searchResultsPage(keyword:' + JSON.stringify(kw) + ', page:' + page + ', include:"channel_live") {\n    searchData,\n    numFound\n  }\n}');
+      var items = isObj(data.searchResultsPage) ? data.searchResultsPage.searchData : [];
+      var list = qtMapItems(items);
+      return { page: page, pagecount: 1, limit: 20, total: list.length, list: list };
+    };
+    __drpy.detail = function (vid) {
+      var doc = parseJsonSafe(httpReq(cfg.detailApiUrl + encodeURIComponent(str(vid)), { headers: { Referer: str(cfg.originUrl), 'User-Agent': str(cfg.userAgent) } }).content);
+      var alb = (isObj(doc) && isObj(doc.data) && isObj(doc.data.album) ? doc.data.album : (isObj(doc) && isObj(doc.album) ? doc.album : {}));
+      var title = str(alb.title) || ('电台 ' + str(vid));
+      return {
+        list: [{
+          vod_id: str(vid),
+          vod_name: title,
+          vod_pic: safePic(alb.cover),
+          vod_content: stripHtml(alb.description),
+          vod_play_from: '广播直播',
+          vod_play_url: title.replace(/[$#]/g, ' ') + '$' + str(vid)
+        }]
+      };
+    };
+    __drpy.play = function (flag, id) {
+      return {
+        parse: 0,
+        url: address(str(cfg.livePrefix) + encodeURIComponent(str(id).trim()) + '/64k.mp3').url,
+        header: { Referer: str(cfg.originUrl), 'User-Agent': str(cfg.userAgent) }
+      };
+    };
+    return;
+  }
+
+  // ==================== 18. wexsportguazi-v1 (SportAiGuaZi) ====================
+  if (cfg.adapter === 'wexsportguazi-v1') {
+    var gzHdr = {
+      'content-type': 'application/x-www-form-urlencoded',
+      'User-Agent': str(cfg.userAgent),
+      'user-platform': 'null',
+      'client-version': str(cfg.clientVersion),
+      'client-channel': '',
+      'token': ''
+    };
+    function gzCall(url, payloadObj) {
+      var enc = aesCbcEncryptB64(JSON.stringify(payloadObj), str(cfg.aesKey), str(cfg.aesIv)).replace(/\s+/g, '');
+      var r = httpReq(url, { method: 'POST', data: 'parameter=' + encodeURIComponent(enc), headers: gzHdr });
+      var doc = parseJsonSafe(r.content);
+      var raw = isObj(doc) && str(doc.data) ? doc.data : (isObj(doc) && str(doc.parameter) ? doc.parameter : '');
+      if (raw) {
+        var dec = aesCbcDecryptText(raw, str(cfg.aesKey), str(cfg.aesIv));
+        var inner = parseJsonSafe(dec);
+        if (inner !== null) return inner;
+      }
+      return isObj(doc) && isObj(doc.data) ? doc.data : (doc || {});
+    }
+    function gzTimeStr(ts) {
+      var n = Number(ts);
+      if (!n) return '';
+      if (n < 1e12) n *= 1000;
+      var d = new Date(n + 8 * 3600 * 1000);
+      return ('0' + (d.getUTCMonth() + 1)).slice(-2) + '-' + ('0' + d.getUTCDate()).slice(-2) + ' ' + ('0' + d.getUTCHours()).slice(-2) + ':' + ('0' + d.getUTCMinutes()).slice(-2);
+    }
+    __drpy.home = function () {
+      return {
+        class: [
+          { type_id: 'football', type_name: '足球' },
+          { type_id: 'basketball', type_name: '篮球' },
+          { type_id: 'hot', type_name: '热门' },
+          { type_id: 'nba', type_name: 'NBA' }
+        ],
+        filters: {}
+      };
+    };
+    __drpy.category = function (tid) {
+      var map = {
+        nba: { frame: '0', hot: '0', tag: '37', type: '0' },
+        hot: { frame: '0', hot: '1', tag: '0', type: '0' },
+        football: { frame: '0', hot: '0', tag: '0', type: '1' },
+        basketball: { frame: '0', hot: '0', tag: '0', type: '2' }
+      };
+      var d = gzCall(cfg.originUrl, map[str(tid)] || map.hot);
+      var arr = Array.isArray(d) ? d : (Array.isArray(d.list) ? d.list : []);
+      var list = arr.map(function (it) {
+        if (!isObj(it) || !it.mid) return null;
+        var h = isObj(it.home) ? it.home : {};
+        var v = isObj(it.visiting) ? it.visiting : {};
+        var rem = [str(it.event_name), Number(it.m_status) === 1 ? (str(it.match_status_info) + ' ' + str(it.score)) : gzTimeStr(it.match_time)].filter(Boolean).join(' ');
+        return {
+          vod_id: String(it.mid),
+          vod_name: str(h.name) + ' vs ' + str(v.name),
+          vod_pic: safePic(h.logo || v.logo),
+          vod_remarks: rem
+        };
+      }).filter(Boolean);
+      return { page: 1, pagecount: 1, limit: list.length || 20, total: list.length, list: list };
+    };
+    __drpy.homeVod = function () { return __drpy.category('hot', 1); };
+    __drpy.search = function () { return { page: 1, pagecount: 1, limit: 0, total: 0, list: [] }; };
+    __drpy.detail = function (vid) {
+      var d = gzCall(cfg.detailApiUrl, { mid: str(vid) });
+      var h = isObj(d.home) ? d.home : {};
+      var v = isObj(d.visiting) ? d.visiting : {};
+      var lines = Array.isArray(d.live_line) ? d.live_line : [];
+      var eps = lines.map(function (ln, idx) {
+        var u = isObj(ln) ? str(ln.m3u8 || ln.url) : '';
+        if (!u) return null;
+        return ('线路' + (idx + 1) + (ln.name ? ('-' + str(ln.name)) : '')).replace(/[$#]/g, ' ') + '$' + u;
+      }).filter(Boolean);
+      return {
+        list: [{
+          vod_id: str(vid),
+          vod_name: str(h.name) + ' vs ' + str(v.name),
+          vod_pic: safePic(h.logo || v.logo),
+          vod_remarks: str(d.match_status_info),
+          vod_content: '不要相信视频中的任何广告',
+          vod_play_from: eps.length ? '瓜子体育' : '',
+          vod_play_url: eps.join('#')
+        }]
+      };
+    };
+    __drpy.play = function (flag, id) {
+      return {
+        parse: 0,
+        url: address(str(id)).url,
+        header: { 'User-Agent': str(cfg.playUserAgent || 'Lavf/57.83.100'), Referer: str(cfg.playReferer) }
+      };
+    };
+    return;
+  }
+
+  // ==================== 19. wexkafei-v1 (SportAiKaFei) ====================
+  if (cfg.adapter === 'wexkafei-v1') {
+    var kfHdr = { referer: str(cfg.originUrl), 'User-Agent': str(cfg.userAgent) };
+    __drpy.home = function () {
+      return {
+        class: [
+          { type_id: '1', type_name: '足球' },
+          { type_id: '2', type_name: '篮球' },
+          { type_id: 'all', type_name: '全部' },
+          { type_id: 'hot', type_name: '热门' }
+        ],
+        filters: {}
+      };
+    };
+    __drpy.category = function (tid, pg) {
+      var page = Math.max(1, Number(pg) || 1);
+      var doc = parseJsonSafe(httpReq(cfg.scheduleUrl + page + '&type=' + encodeURIComponent(str(tid || 'all')) + '&platform=h5', { headers: kfHdr }).content);
+      var arr = isObj(doc) && Array.isArray(doc.data) ? doc.data : (isObj(doc) && isObj(doc.data) && Array.isArray(doc.data.list) ? doc.data.list : []);
+      var list = [];
+      for (var i = 0; i < arr.length; i++) {
+        var it = arr[i];
+        if (!isObj(it)) continue;
+        var archors = Array.isArray(it.archors) ? it.archors : (isObj(it.archor) ? [it.archor] : []);
+        var rid = (archors[0] && str(archors[0].room_id)) || str(it.room_id);
+        if (!rid) continue;
+        var st = str(it.status) === 'live'
+          ? (str(it.home_score) + ':' + str(it.away_score) + ' 直播中')
+          : (str(it.start_time) + ' 未开赛');
+        list.push({
+          vod_id: rid,
+          vod_name: str(it.home_team) + ' vs ' + str(it.away_team),
+          vod_pic: safePic(it.home_team_logo),
+          vod_remarks: (str(it.league_name) ? (str(it.league_name) + ' ') : '') + st
+        });
+      }
+      var total = Number(doc && doc.total) || list.length;
+      return { page: page, pagecount: Math.max(1, Math.ceil(total / 30)), limit: 30, total: total, list: list };
+    };
+    __drpy.homeVod = function () { return __drpy.category('all', 1); };
+    __drpy.search = function () { return { page: 1, pagecount: 1, limit: 0, total: 0, list: [] }; };
+    __drpy.detail = function (vid) {
+      var doc = parseJsonSafe(httpReq(cfg.roomUrl + encodeURIComponent(str(vid)), { headers: kfHdr }).content);
+      var info = isObj(doc) && isObj(doc.data) && isObj(doc.data.room_info) ? doc.data.room_info : (isObj(doc) && isObj(doc.data) ? doc.data : {});
+      var d = isObj(doc) && isObj(doc.data) ? doc.data : {};
+      var sigs = [];
+      ['signals', 'external_signals', 'external_signals_h5'].forEach(function (k) {
+        if (Array.isArray(d[k])) {
+          for (var i = 0; i < d[k].length; i++) {
+            var s = d[k][i];
+            var u = isObj(s) ? str(s.stream_url || s.url).trim() : '';
+            if (u) sigs.push((str(s.name) || ('线路' + (sigs.length + 1))).replace(/[$#]/g, ' ') + '$' + u);
+          }
+        }
+      });
+      return {
+        list: [{
+          vod_id: str(vid),
+          vod_name: str(info.title) || ('直播间 ' + str(vid)),
+          vod_pic: safePic(info.avatar, cfg.originUrl),
+          vod_content: '不要相信视频中的任何广告',
+          vod_play_from: sigs.length ? '咖啡体育' : '',
+          vod_play_url: sigs.join('#')
+        }]
+      };
+    };
+    __drpy.play = function (flag, id) {
+      return { parse: 0, url: address(str(id)).url, header: kfHdr };
+    };
+    return;
+  }
+
+  // ==================== 20. wexkanqiutong-v1 (SportAiKanQiuTong) ====================
+  if (cfg.adapter === 'wexkanqiutong-v1') {
+    var kqtHdr = { 'User-Agent': str(cfg.userAgent) };
+    __drpy.home = function () {
+      return {
+        class: [
+          { type_id: '-1', type_name: '全部' },
+          { type_id: '1', type_name: '足球' },
+          { type_id: '2', type_name: '篮球' }
+        ],
+        filters: {}
+      };
+    };
+    __drpy.category = function (tid, pg) {
+      var page = Math.max(1, Number(pg) || 1);
+      var navId = str(tid) === '-1' ? '' : str(tid || '');
+      var doc = parseJsonSafe(httpReq(cfg.originUrl + encodeURIComponent(navId) + '&roomId=&word=&page=' + page + '&pageSize=30&channelId=3&platform=1', { headers: kqtHdr }).content);
+      var d = isObj(doc) && isObj(doc.data) ? doc.data : {};
+      var arr = Array.isArray(d.list) ? d.list : [];
+      var list = arr.map(function (it) {
+        if (!isObj(it) || !it.roomId) return null;
+        return {
+          vod_id: String(it.roomId),
+          vod_name: str(it.title),
+          vod_pic: safePic(it.cover),
+          vod_remarks: str(it.navName)
+        };
+      }).filter(Boolean);
+      return { page: page, pagecount: Number(d.pages) || 1, limit: 30, total: Number(d.total) || list.length, list: list };
+    };
+    __drpy.homeVod = function () { return __drpy.category('-1', 1); };
+    __drpy.search = function () { return { page: 1, pagecount: 1, limit: 0, total: 0, list: [] }; };
+    __drpy.detail = function (vid) {
+      var doc = parseJsonSafe(httpReq(cfg.detailApiUrl + encodeURIComponent(str(vid)) + '&channelId=3&platform=1', { headers: kqtHdr }).content);
+      var d = isObj(doc) && isObj(doc.data) ? doc.data : {};
+      var eps = [];
+      if (str(d.pushUrl)) eps.push('flv$' + str(d.pushUrl));
+      if (str(d.pullUrl)) eps.push('m3u8$' + str(d.pullUrl));
+      return {
+        list: [{
+          vod_id: str(vid),
+          vod_name: str(d.title),
+          vod_pic: safePic(d.cover),
+          vod_remarks: str(d.nickName),
+          vod_content: '不要相信视频中的任何广告',
+          vod_play_from: eps.length ? '看球通' : '',
+          vod_play_url: eps.join('#')
+        }]
+      };
+    };
+    __drpy.play = function (flag, id) {
+      return { parse: 0, url: address(str(id)).url, header: kqtHdr };
+    };
+    return;
+  }
+
+  // ==================== 21. wexkanqiu-v1 (SportAiKanqiu) ====================
+  if (cfg.adapter === 'wexkanqiu-v1') {
+    var kqHost = (str(cfg.extText).match(/^https?:\/\/[^\s|,;]+/i) ? str(cfg.extText).split(/[|,;\s]+/)[0] : str(cfg.defaultHost)).replace(/\/+$/, '');
+    var kqHdr = { 'User-Agent': str(cfg.userAgent), Referer: kqHost + '/' };
+    function xxteaDecryptB64(dataB64, keyStr) {
+      var wordArr = CryptoJS.enc.Base64.parse(str(dataB64).trim().replace(/\s+/g, ''));
+      var data = new Uint8Array(wordArr.sigBytes);
+      for (var wi = 0; wi < wordArr.sigBytes; wi++) {
+        data[wi] = (wordArr.words[wi >>> 2] >>> (24 - (wi & 3) * 8)) & 0xff;
+      }
+      if (!data.length) return '';
+      function toU32(bytes, includeLen) {
+        var n = (bytes.length & 3) === 0 ? (bytes.length >>> 2) : ((bytes.length >>> 2) + 1);
+        var v = new Uint32Array(includeLen ? n + 1 : n);
+        if (includeLen) v[n] = bytes.length;
+        for (var i = 0; i < bytes.length; i++) v[i >>> 2] |= bytes[i] << ((i & 3) << 3);
+        return v;
+      }
+      var v = toU32(data, false);
+      var kBytes = new Uint8Array(16);
+      for (var ki = 0; ki < 16 && ki < keyStr.length; ki++) kBytes[ki] = keyStr.charCodeAt(ki) & 0xff;
+      var k = toU32(kBytes, false);
+      var n = v.length - 1;
+      if (n < 1) return '';
+      var z, y = v[0], delta = 0x9E3779B9, q = Math.floor(6 + 52 / (n + 1)), sum = (q * delta) >>> 0;
+      while (sum !== 0) {
+        var e = (sum >>> 2) & 3;
+        for (var p = n; p > 0; p--) {
+          z = v[p - 1];
+          var mx = (((z >>> 5) ^ (y << 2)) + ((y >>> 3) ^ (z << 4))) ^ ((sum ^ y) + (k[(p & 3) ^ e] ^ z));
+          y = v[p] = (v[p] - mx) >>> 0;
+        }
+        z = v[n];
+        var mx0 = (((z >>> 5) ^ (y << 2)) + ((y >>> 3) ^ (z << 4))) ^ ((sum ^ y) + (k[e] ^ z));
+        y = v[0] = (v[0] - mx0) >>> 0;
+        sum = (sum - delta) >>> 0;
+      }
+      var mLen = v[n];
+      var totalBytes = n * 4;
+      if (mLen < 0 || mLen > totalBytes) mLen = totalBytes;
+      var out = new Uint8Array(mLen);
+      for (var bi = 0; bi < mLen; bi++) out[bi] = (v[bi >>> 2] >>> ((bi & 3) << 3)) & 0xff;
+      if (typeof TextDecoder === 'function') {
+        try { return new TextDecoder('utf-8').decode(out); } catch (_) {}
+      }
+      var bin = '';
+      for (var oi = 0; oi < out.length; oi++) bin += String.fromCharCode(out[oi]);
+      try { return decodeURIComponent(escape(bin)); } catch (_) { return bin; }
+    }
+    __drpy.home = function () {
+      var filters = parseJsonSafe(cfg.filtersJson) || {};
+      return {
+        class: [
+          { type_id: '8', type_name: '足球直播' },
+          { type_id: '21', type_name: '其他直播' },
+          { type_id: '', type_name: '全部直播' },
+          { type_id: '1', type_name: '篮球直播' }
+        ],
+        filters: filters
+      };
+    };
+    __drpy.category = function (tid, pg, filter, extend) {
+      var cat = str((extend && extend.cateId) || tid);
+      var targetUrl = cat ? (kqHost + '/match/' + encodeURIComponent(cat) + '/live') : (kqHost + '/');
+      var html = httpReq(targetUrl, { headers: kqHdr }).content;
+      var items = pdfa(html, '.list-group-item');
+      var list = items.map(function (it) {
+        var btn = pdfh(it, '.btn.btn-primary&&href') || pdfh(it, 'a[href*="/match/"]&&href');
+        var title = stripHtml(pdfh(it, '.row.d-none&&Html') || pdfh(it, '.row&&Html') || pdfh(it, '.list-group-item&&Text'));
+        if (!btn || !title) return null;
+        var status = pdfh(it, '.btn.btn-primary&&Text') || pdfh(it, '.btn.btn-default&&Text') || '直播';
+        var img = pdfh(it, 'img&&data-src') || pdfh(it, 'img&&src') || str(cfg.defaultPic);
+        return { vod_id: btn, vod_name: title, vod_pic: safePic(img, kqHost + '/'), vod_remarks: status };
+      }).filter(Boolean);
+      return { page: 1, pagecount: 1, limit: list.length || 20, total: list.length, list: list };
+    };
+    __drpy.homeVod = function () { return __drpy.category('', 1, true, {}); };
+    __drpy.search = function () { return { page: 1, pagecount: 1, limit: 0, total: 0, list: [] }; };
+    __drpy.detail = function (id) {
+      var u = address(id, kqHost + '/').url;
+      var html = httpReq(u, { headers: kqHdr }).content;
+      var sourceUrl = /\/play\/?$/.test(u) ? u.replace(/\/play\/?$/, '/source') : (u.replace(/\/$/, '') + '-links');
+      var eps = [];
+      var lr = httpReqSoft(sourceUrl, { timeout: 6000, headers: Object.assign({ 'X-Requested-With': 'XMLHttpRequest', Referer: u }, kqHdr) });
+      if (lr && lr.code === 200 && str(lr.content)) {
+        var outer = parseJsonSafe(lr.content);
+        var decText = lr.content.trim().replace(/^jsonp\(/i, '').replace(/\);?$/, '').replace(/^"+|"+$/g, '');
+        if (isObj(outer) && typeof outer.data === 'string' && outer.data.length > 8) {
+          try {
+            decText = b64ToUtf8(outer.data.slice(6, -2));
+          } catch (_) {}
+        } else if (decText.charAt(0) !== '{' && decText.charAt(0) !== '[') {
+          try { decText = xxteaDecryptB64(decText, str(cfg.xxteaKey)); } catch (_) {}
+        }
+        var lDoc = parseJsonSafe(decText);
+        var arr = Array.isArray(lDoc) ? lDoc : (isObj(lDoc) && Array.isArray(lDoc.links) ? lDoc.links : (isObj(lDoc) && Array.isArray(lDoc.data) ? lDoc.data : []));
+        arr = arr.slice().sort(function (a, b) {
+          var ad = isObj(a) && str(a.url).indexOf('?url=') >= 0 ? 0 : 1;
+          var bd = isObj(b) && str(b.url).indexOf('?url=') >= 0 ? 0 : 1;
+          return ad - bd;
+        });
+        for (var i = 0; i < arr.length; i++) {
+          var lk = arr[i];
+          if (isObj(lk) && (lk.url || lk.id)) {
+            eps.push(str(lk.name || ('线路' + (i + 1))).replace(/[$#]/g, ' ') + '$' + str(lk.url || lk.id));
+          }
+        }
+      }
+      if (!eps.length) {
+        pdfa(html, 'a[data-url], .play-btn, a[href*="play"]').forEach(function (a, idx) {
+          var du = pdfh(a, 'a&&data-url') || pdfh(a, 'a&&href');
+          var nm = pdfh(a, 'a&&Text') || ('线路' + (idx + 1));
+          if (du) eps.push(nm.replace(/[$#]/g, ' ').trim() + '$' + du);
+        });
+      }
+      return {
+        list: [{
+          vod_id: str(id),
+          vod_name: stripHtml(pdfh(html, 'title&&Text')) || '体育直播',
+          vod_pic: safePic(pdfh(html, 'img.team-logo&&src') || str(cfg.defaultPic), kqHost + '/'),
+          vod_content: '不要相信视频中的任何广告',
+          vod_play_from: eps.length ? '看球直播' : '',
+          vod_play_url: eps.join('#')
+        }]
+      };
+    };
+    __drpy.play = function (flag, id) {
+      var raw = str(id).trim();
+      var urlPart = raw;
+      if (raw.indexOf('?url=') >= 0) {
+        var qPart = raw.slice(raw.indexOf('?url=') + 5);
+        try { urlPart = decodeURIComponent(qPart); } catch (_) { urlPart = qPart; }
+      }
+      if (isDirectMedia(urlPart)) {
+        return { parse: 0, url: address(urlPart, kqHost + '/').url, header: kqHdr };
+      }
+      var pageUrl = address(urlPart, kqHost + '/').url;
+      var html = httpReq(pageUrl, { headers: kqHdr }).content;
+      var encM = /encodedStr\s*=\s*'([^']+)'/.exec(html);
+      if (!encM) {
+        var subM = /src=['"]([^'"]+?)['"]\s*\+\s*id/.exec(html);
+        if (subM && pageUrl.indexOf('?id=') >= 0) {
+          var idVal = pageUrl.split('?id=')[1].split('&')[0];
+          var subUrl = address(subM[1] + idVal, pageUrl).url;
+          html = httpReq(subUrl, { headers: Object.assign({}, kqHdr, { Referer: pageUrl }) }).content;
+          encM = /encodedStr\s*=\s*'([^']+)'/.exec(html);
+        }
+      }
+      if (encM && encM[1]) {
+        try {
+          var dec = xxteaDecryptB64(encM[1], str(cfg.xxteaKey));
+          var decObj = parseJsonSafe(dec);
+          var resolved = isObj(decObj) ? str(decObj.url).trim() : dec.trim();
+          if (/^https?:\/\//i.test(resolved)) return { parse: 0, url: address(resolved).url, header: { 'User-Agent': str(cfg.userAgent), Referer: pageUrl } };
+        } catch (_) {}
+      }
+      var m = /["'](https?:\/\/[^"']+\.(?:m3u8|flv|mp4)[^"']*)["']/i.exec(html);
+      if (m && m[1]) return { parse: 0, url: address(m[1]).url, header: { 'User-Agent': str(cfg.userAgent), Referer: pageUrl } };
+      fail('drpy_media_unresolved');
+    };
+    return;
+  }
+
+  // ==================== 22. wexwwe-v1 (SportAiWwe) ====================
+  if (cfg.adapter === 'wexwwe-v1') {
+    var wweHdr = { Referer: str(cfg.referer), 'User-Agent': str(cfg.userAgent) };
+    var wweCursors = {};
+    __drpy.home = function () {
+      return {
+        class: [
+          { type_id: str(cfg.id0), type_name: 'AEW' },
+          { type_id: str(cfg.id1), type_name: 'TNA' },
+          { type_id: str(cfg.id2), type_name: 'WWE-SD' },
+          { type_id: str(cfg.id3), type_name: 'WWE-PPV' },
+          { type_id: str(cfg.id4), type_name: 'WWE-RAW' },
+          { type_id: str(cfg.id5), type_name: 'WWE-NXT' }
+        ],
+        filters: {}
+      };
+    };
+    __drpy.category = function (tid, pg) {
+      var page = Math.max(1, Number(pg) || 1);
+      var cid = str(tid || cfg.id4);
+      var beginMsg = page > 1 ? str(wweCursors[cid + ':' + page]) : '';
+      var reqUrl = beginMsg
+        ? (str(cfg.originUrl) + encodeURIComponent(cid) + '&count=10&begin_msgid=' + encodeURIComponent(beginMsg) + '&begin_itemidx=1&f=json')
+        : (str(cfg.originUrl).replace('action=paging', 'action=getalbum') + encodeURIComponent(cid) + '&f=json');
+      var doc = parseJsonSafe(httpReq(reqUrl, { headers: wweHdr }).content);
+      var resp = isObj(doc) && isObj(doc.getalbum_resp) ? doc.getalbum_resp : {};
+      var arr = Array.isArray(resp.article_list) ? resp.article_list : [];
+      var lastMsg = '';
+      var list = arr.map(function (it) {
+        if (!isObj(it) || !str(it.url)) return null;
+        if (str(it.msgid)) lastMsg = str(it.msgid);
+        var artUrl = str(it.url).split('#')[0];
+        return {
+          vod_id: str(it.vid) + '|||' + artUrl + '|||' + str(it.cover_img_1_1),
+          vod_name: str(it.title),
+          vod_pic: safePic(it.cover_img_1_1),
+          vod_remarks: ''
+        };
+      }).filter(Boolean);
+      if (lastMsg) wweCursors[cid + ':' + (page + 1)] = lastMsg;
+      return { page: page, pagecount: list.length >= 10 ? page + 1 : page, limit: 10, total: 999, list: list };
+    };
+    __drpy.homeVod = function () { return __drpy.category(str(cfg.id4), 1); };
+    __drpy.search = function () { return { page: 1, pagecount: 1, limit: 0, total: 0, list: [] }; };
+    __drpy.detail = function (vid) {
+      var parts = str(vid).split('|||');
+      var wxVid = parts.length >= 3 ? str(parts[0]).trim() : '';
+      var articleUrl = address((parts.length >= 3 ? parts[1] : parts[0]).split('#')[0]).url;
+      var pic = safePic(parts.length >= 3 ? parts[2] : parts[1]);
+      var html = httpReq(articleUrl, { headers: wweHdr }).content;
+      var title = stripHtml(pdfh(html, '#js_video_page_title&&Text') || pdfh(html, 'meta[property="og:title"]&&content') || pdfh(html, 'title&&Text'));
+      var idx = html.indexOf('mp_video_trans_info:');
+      var eps = [];
+      if (idx >= 0) {
+        var bStart = html.indexOf('[', idx);
+        var depth = 0, bEnd = -1;
+        if (bStart >= 0) {
+          for (var i = bStart; i < html.length && i < bStart + 60000; i++) {
+            var ch = html.charAt(i);
+            if (ch === '[') depth++;
+            else if (ch === ']') { depth--; if (depth === 0) { bEnd = i; break; } }
+          }
+        }
+        if (bStart >= 0 && bEnd > bStart) {
+          var objs = html.slice(bStart, bEnd + 1).split(/\}\s*,\s*\{/);
+          for (var j = 0; j < objs.length; j++) {
+            var chunk = objs[j];
+            var uM = /url\s*:\s*(?:JsDecode\()?['"]([^'"]+)['"]/.exec(chunk);
+            var qM = /video_quality_wording\s*:\s*(?:JsDecode\()?['"]([^'"]+)['"]/.exec(chunk);
+            var fM = /format_id\s*:\s*['"]?(\d+)['"]?/.exec(chunk);
+            if (!uM || !uM[1]) continue;
+            var vu = uM[1].replace(/\\x26amp;/g, '&').replace(/\\x26/g, '&').replace(/&amp;/g, '&').replace(/\\\//g, '/').replace(/\\/g, '');
+            if (vu.indexOf('&vid=') < 0) {
+              if (wxVid) vu += '&vid=' + wxVid;
+              else if (fM && fM[1]) vu += '&vid=' + fM[1];
+            }
+            eps.push(((qM && qM[1]) || ('画质' + (j + 1))).replace(/[$#]/g, ' ') + '$' + vu);
+          }
+        }
+      }
+      return {
+        list: [{
+          vod_id: str(vid),
+          vod_name: title || 'WWE赛事',
+          vod_pic: pic,
+          vod_play_from: eps.length ? 'WWE直播' : '',
+          vod_play_url: eps.join('#')
+        }]
+      };
+    };
+    __drpy.play = function (flag, id) {
+      return { parse: 0, url: address(str(id)).url, header: wweHdr };
     };
     return;
   }

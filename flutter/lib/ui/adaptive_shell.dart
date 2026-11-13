@@ -1885,15 +1885,40 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   child: (_homeLoading || _loadingMore)
                       ? const CupertinoActivityIndicator(radius: 13)
                       : (_homeVideos.isEmpty && _homeError == null)
-                          ? const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 40),
-                              child: Text(
-                                '当前筛选条件下暂无影片，试试调整筛选或切换分类',
-                                style: TextStyle(
-                                  color: AppleColors.labelSecondary,
-                                  fontSize: 14,
-                                ),
+                          ? Padding(
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 40,
+                                horizontal: 20,
                               ),
+                              child: (_activeSite != null &&
+                                      CspBridge.isSearchOnlySite(_activeSite!))
+                                  ? Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          '「${_activeSite!.name}」为网盘搜索专用源，不提供首页推荐片单，请直接搜索影片',
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            color: AppleColors.labelSecondary,
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 14),
+                                        AppleCapsuleButton(
+                                          label: '立即搜索影片',
+                                          icon: CupertinoIcons.search,
+                                          compact: true,
+                                          onPressed: _showGlobalSearchSheet,
+                                        ),
+                                      ],
+                                    )
+                                  : const Text(
+                                      '当前筛选条件下暂无影片，试试调整筛选或切换分类',
+                                      style: TextStyle(
+                                        color: AppleColors.labelSecondary,
+                                        fontSize: 14,
+                                      ),
+                                    ),
                             )
                       : (_loadMoreError != null && _currentPage < _pageCount
                           ? AppleCapsuleButton(
@@ -9254,6 +9279,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           String siteBadgeLabel(CmsSite s) {
             final lower = '${s.name} ${s.api} ${s.key}'.toLowerCase();
             if (CspBridge.isMyDriveSite(s)) return '云盘配置';
+            if (CspBridge.isSearchOnlySite(s)) return '搜索专用';
             if (CspBridge.isNetdiskSite(s)) return '4K网盘';
             if (lower.contains('豆瓣') || lower.contains('douban')) {
               return '官方片单';
@@ -9269,6 +9295,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             final badge = siteBadgeLabel(s);
             return switch (badge) {
               '云盘配置' => const Color(0xFF0A84FF),
+              '搜索专用' => const Color(0xFF64D2FF),
               '4K网盘' => const Color(0xFF30D158),
               '4K超清' => const Color(0xFF30D158),
               '官方片单' => const Color(0xFFFF9F0A),

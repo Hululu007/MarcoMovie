@@ -440,6 +440,7 @@ class CatPawHost {
       'bpanso-v1',
       'kkss-v1',
       'uuss-v1',
+      'jumitv-v1',
     ];
     const wexAdapters = [
       'wexappv7-v1',
@@ -474,6 +475,16 @@ class CatPawHost {
       'wexhaiyin-v1',
       'wexquanpan-v1',
       'wexkaka-v1',
+      'wexmodu-v1',
+      'wexhaokan-v1',
+      'wexqimiao-v1',
+      'wexkuwoa-v1',
+      'wexqingting-v1',
+      'wexsportguazi-v1',
+      'wexkafei-v1',
+      'wexkanqiutong-v1',
+      'wexkanqiu-v1',
+      'wexwwe-v1',
     ];
     final isOptionalExt =
         ftyAdapters.contains(adapter) || wexAdapters.contains(adapter);
@@ -935,13 +946,44 @@ class CatPawHost {
           'drpy_source_unavailable': '此片源暂时无法访问',
           'drpy_source_response': '此片源返回了无法识别的数据',
           'drpy_crypto_invalid': '此片源的加密响应暂不兼容',
-          'drpy_authentication_required': '此片源的访问认证尚未通过',
+          'drpy_authentication_required': '此站点需要登录账号后才能查看网盘或播放链接，请切换其他片源',
           'drpy_filter_not_supported': '此片源不支持当前筛选条件',
           'drpy_local_module_missing': '本地规则包缺少依赖文件，请导入完整的规则包',
+          'drpy_http_timeout': '连接片源服务器超时，请稍后重试或切换其他片源',
+          'drpy_http_connection_failed': '无法连接片源服务器，该站点可能暂时离线或受当前网络限制',
+          'drpy_http_response_failed': '读取片源服务器响应失败，请稍后重试',
+          'drpy_http_response_too_large': '片源返回的数据超过大小上限',
+          'drpy_http_encoding': '片源响应编码异常，暂时无法解析',
+          'drpy_http_headers': '片源请求头格式不受支持',
+          'drpy_http_method': '片源请求方式不受支持',
+          'drpy_http_body_too_large': '片源请求体超过大小上限',
+          'drpy_http_protocol': '片源请求地址协议不受支持',
+          'drpy_redirect_credentials': '片源重定向包含不安全的认证信息',
+          'drpy_http_redirect_limit': '片源服务器重定向次数过多',
+          'drpy_http_redirect': '片源服务器返回了无效的重定向地址',
+          'drpy_http_request': '片源网络请求参数无效',
+          'drpy_http_response': '片源服务器返回了异常响应',
+          'drpy_execution_timeout': '片源脚本加载超时，请重试或切换其他片源',
+          'drpy_source_failed': '片源线路暂时无法返回有效数据，请稍后重试或切换其他片源',
+          'drpy_host_error': '片源本地运行环境处理失败，请重试',
+          'drpy_storage_key': '片源本地缓存键无效',
+          'drpy_storage_action': '片源本地缓存操作不受支持',
+          'drpy_storage_limit': '片源本地缓存超出容量限制',
+          'drpy_random_size': '片源随机参数长度无效',
+          'drpy_rule_missing': '片源规则尚未初始化完成，请重试',
+          'drpy_async_result': '片源异步响应格式异常',
+          'drpy_result': '片源返回结果超过大小上限或格式无效',
+          'drpy_proxy_result': '片源代理响应格式不受支持',
         };
         final code = error is Map ? error['error'] : null;
         if (code is String && messages.containsKey(code)) {
           throw DrpySourceException(code, messages[code]!);
+        }
+        if (code is String && RegExp(r'^drpy_[a-z0-9_]+$').hasMatch(code)) {
+          throw DrpySourceException(
+            code,
+            '此片源暂时无法连接或返回异常，请稍后重试或切换其他片源',
+          );
         }
       }
       if (response.statusCode != 200)

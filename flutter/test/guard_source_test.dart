@@ -612,11 +612,22 @@ void main() {
         'csp_WexAiYiYsGuard',
         'csp_AiNewYiYsGuard',
         'csp_WexAiHanXiaoQuanGuard',
+        'csp_AnimeAiMoDuGuard',
+        'csp_DuanjuAiHaoKanGuard',
+        'csp_DuanjuAiQiMiaoGuard',
+        'csp_MusicAiKuWoaGuard',
+        'csp_MusicAiQingTingGuard',
+        'csp_SportAiGuaziGuard',
+        'csp_SportAiKaFeiGuard',
+        'csp_SportAiKanQiuTongGuard',
+        'csp_SportAiKanQiuGuard',
+        'csp_SportAiWWEGuard',
       ];
       for (final api in vodApis) {
         final s = base.copyWith(api: api, name: '线路', ext: 'AppV7Dsx');
         expect(GuardSource.supports(s), isTrue, reason: api);
         expect(s.canBrowse, isTrue, reason: api);
+        expect(s.unsupportedReason, '正常可用', reason: api);
         await guard.invoke(s, 'home', [false]);
       }
       expect(host.extensions.every((e) => e == 'AppV7Dsx'), isTrue);
@@ -699,9 +710,14 @@ void main() {
         'csp_BpanSoGuard',
         'csp_KkSsGuard',
         'csp_UuSsGuard',
+        'csp_JumiTvGuard',
         ...vodApis,
         ...panApis,
       ];
+      final jumi = base.copyWith(api: 'csp_JumiTvGuard', name: '橘猫');
+      expect(GuardSource.supports(jumi), isTrue);
+      expect(jumi.canBrowse, isTrue);
+      expect(jumi.unsupportedReason, '正常可用');
       const strictRequiredExt = {'t4-v1', 'apptt-v1', 'app99-v1', 'appsx-v1'};
       const baseNoExt = {'dm84-v1', 'auete-v1', 'bttwoo-v1', 'appgz-v1', 'fy-v1'};
       for (final api in allApis) {
@@ -721,6 +737,60 @@ void main() {
           );
         }
       }
+    },
+  );
+
+  test(
+    'ChildrenAiTuTu native mapping, search-only flags, unsupportedReason and cleanErrorMessage',
+    () {
+      const base = CmsSite(
+        key: 'k',
+        name: '站点',
+        type: 3,
+        api: 'csp_JumiTvGuard',
+        jar: 'https://import.invalid/plugin.jar',
+      );
+
+      final tutu = base.copyWith(key: 'tutu', name: '兔兔', api: 'csp_ChildrenAiTuTuGuard');
+      expect(CspBridge.isTuxiaobeiSite(tutu), isTrue);
+      expect(tutu.canBrowse, isTrue);
+      expect(tutu.supported, isTrue);
+      expect(tutu.unsupportedReason, '正常可用');
+
+      for (final searchApi in const [
+        'csp_S_zpsGuard',
+        'csp_YpanSoGuard',
+        'csp_BpanSoGuard',
+        'csp_SoAiAiPanSoGuard',
+        'csp_SoAiHaiYinGuard',
+        'csp_SoAiQuanPanGuard',
+        'csp_SoKakaGuard',
+      ]) {
+        expect(CspBridge.isSearchOnlySite(base.copyWith(api: searchApi)), isTrue, reason: searchApi);
+      }
+      expect(CspBridge.isSearchOnlySite(base.copyWith(api: 'csp_JumiTvGuard')), isFalse);
+      expect(CspBridge.isSearchOnlySite(base.copyWith(api: 'csp_AiNewWoNiu4KGuard')), isFalse);
+
+      expect(
+        base.copyWith(api: 'csp_MaiDuiDuiGuard').unsupportedReason,
+        '该线路上游接口启用了专有设备签名限制，当前设备暂不支持',
+      );
+      expect(
+        base.copyWith(api: 'csp_SportAiFeiQiuGuard').unsupportedReason,
+        '该线路上游接口已失效或停服，当前暂不可用',
+      );
+      expect(
+        base.copyWith(api: 'csp_Music').unsupportedReason,
+        '该线路依赖交互式人机验证，当前设备暂不支持',
+      );
+      expect(
+        base.copyWith(api: 'csp_MusicAiKuWoaGuard').unsupportedReason,
+        '正常可用',
+      );
+      expect(
+        CmsClient.cleanErrorMessage(StateError('CatPaw 线路请求失败（HTTP 422）')),
+        'CatPaw 线路请求失败（HTTP 422）',
+      );
     },
   );
 }

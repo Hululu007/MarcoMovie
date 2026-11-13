@@ -6,7 +6,7 @@ const { zipMember, unwrapGuard, Dex, MAX } = require('./drpy-guard-extractor.cjs
 const { elfBytes, decodeShiftedExt, decodeUtf8Fatal } = require('./drpy-t4-extractor.cjs');
 
 const FTY_ADAPTERS = Object.freeze([
-  'jpys-v1', 'jpj-v1', 'nmyswv-v1', 'hmys-v1', 'app99-v1', 'appsx-v1', 'newcz-v1', 'libvio-v1', 'ygp-v1',
+  'jpys-v1', 'jpj-v1', 'nmyswv-v1', 'hmys-v1', 'app99-v1', 'appsx-v1', 'newcz-v1', 'libvio-v1', 'ygp-v1', 'jumitv-v1',
   'kanqiu-v1', 'doubao-v1', 'livegz-v1', 'alllive-v1', 'tingshu275-v1', 'yueting-v1',
   'seedhub-v1', 'szps-v1', 'ypanso-v1', 'bpanso-v1', 'kkss-v1', 'uuss-v1'
 ]);
@@ -4992,6 +4992,75 @@ const PROFILES = {
             3264
           ]
         }
+      },
+      "jumitv-v1": {
+        "cls": "Lcom/github/catvod/spider/JumiTv;",
+        "shortArray": [
+          "c4a76f3189db4eb2104246964309bd18863f500b39e8c85bb3d6a7bb3a2586fd",
+          "short",
+          96,
+          816
+        ],
+        "methods": {
+          "clinit": [
+            "<clinit>",
+            "c4a76f3189db4eb2104246964309bd18863f500b39e8c85bb3d6a7bb3a2586fd"
+          ],
+          "init": [
+            "<init>",
+            "0a48f771a3ceac4a1ec9fa182ca4bd8f6778f3def397d031f7cacb367d6c52f6"
+          ],
+          "homeContent": [
+            "homeContent",
+            "b617eeb9f5a4716850324ea46f4712be3ad3c3a2f1977d42252b78a45b921a5b"
+          ],
+          "homeVideoContent": [
+            "homeVideoContent",
+            "27708bb150d3211ee483f022a9e55fbed593f0d01ecce60e5bbbf5c7402f0b9a"
+          ],
+          "categoryContent": [
+            "categoryContent",
+            "e42b8fd8ca61acbfb31f948d8797b374f693bce16996cfa935115b181b52e7dc"
+          ],
+          "detailContent": [
+            "detailContent",
+            "810704697d8aa59370b7e038caa04e3e1b03842cf561933f952568145c393184"
+          ],
+          "playerContent": [
+            "playerContent",
+            "63404c1e8099f929e87d960ebfb6dbd4e68aea12f68364723cf10b378f74bc29"
+          ],
+          "searchContent": [
+            "searchContent",
+            "6679ce88730c46cf9295095bbdf1b1f7051e4d0103627486782b54953dcf607b"
+          ]
+        },
+        "tripleLists": {
+          "apiHosts": [
+            [0, 14, 554],
+            [14, 12, 651],
+            [26, 14, 1578]
+          ],
+          "playHosts": [
+            [40, 13, 1189]
+          ]
+        },
+        "triples": {
+          "scheme": [273, 7, 536],
+          "apiPort": [280, 5, 910],
+          "apiPrefix": [285, 18, 1701],
+          "playScheme": [64, 7, 1966],
+          "playPortPath": [71, 18, 1110],
+          "playApp": [56, 5, 2851],
+          "rc4Key": [170, 9, 2437],
+          "userAgent": [189, 14, 2061],
+          "catPath": [656, 14, 3231],
+          "topPath": [207, 4, 1999],
+          "flitterPath": [305, 17, 1569],
+          "listPath": [350, 20, 1424],
+          "detailPath": [442, 20, 2721],
+          "searchPath": [746, 16, 2528]
+        }
       }
     }
   }
@@ -5070,6 +5139,9 @@ function resolveOrigin(adapter, extracted, extText, extObj) {
   if (typeof extracted.defaultInitUrl === 'string' && /^https?:\/\//i.test(extracted.defaultInitUrl)) candidates.push(extracted.defaultInitUrl);
   if (typeof extracted.jsonBase === 'string' && /^https?:\/\//i.test(extracted.jsonBase)) candidates.push(extracted.jsonBase);
   if (typeof extracted.huyaBase === 'string' && /^https?:\/\//i.test(extracted.huyaBase)) candidates.push(extracted.huyaBase);
+  if (typeof extracted.scheme === 'string' && Array.isArray(extracted.apiHosts) && extracted.apiHosts.length && typeof extracted.apiPort === 'string') {
+    candidates.push(extracted.scheme + extracted.apiHosts[0] + extracted.apiPort);
+  }
   if (Array.isArray(extracted.sites)) {
     for (const s of extracted.sites) if (/^https?:\/\//i.test(s)) candidates.push(s);
   }

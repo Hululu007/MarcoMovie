@@ -6,7 +6,7 @@ const crypto = require('node:crypto');
 const { extractKnownPlugin, MAX } = require('./drpy-guard-extractor.cjs');
 const { FTY_ADAPTERS, extractFty } = require('./drpy-fty-extractor.cjs');
 const { WEX_ADAPTERS, VOD_WEX_ADAPTERS, extractWex } = require('./drpy-wex-extractor.cjs');
-const VOD_FTY = new Set(['jpys-v1', 'jpj-v1', 'nmyswv-v1', 'hmys-v1', 'app99-v1', 'appsx-v1', 'newcz-v1', 'libvio-v1', 'ygp-v1']);
+const VOD_FTY = new Set(['jpys-v1', 'jpj-v1', 'nmyswv-v1', 'hmys-v1', 'app99-v1', 'appsx-v1', 'newcz-v1', 'libvio-v1', 'ygp-v1', 'jumitv-v1']);
 const LIVE_FTY = new Set(['kanqiu-v1', 'doubao-v1', 'livegz-v1', 'alllive-v1', 'tingshu275-v1', 'yueting-v1']);
 const VOD_WEX = new Set(VOD_WEX_ADAPTERS);
 try {

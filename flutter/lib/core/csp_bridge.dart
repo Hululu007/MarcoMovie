@@ -187,6 +187,28 @@ class CspBridge {
     'csp_soaiquanpan': 'wexquanpan-v1',
     'csp_sokakaguard': 'wexkaka-v1',
     'csp_sokaka': 'wexkaka-v1',
+    'csp_jumitvguard': 'jumitv-v1',
+    'csp_jumitv': 'jumitv-v1',
+    'csp_animeaimoduguard': 'wexmodu-v1',
+    'csp_animeaimodu': 'wexmodu-v1',
+    'csp_duanjuaihaokanguard': 'wexhaokan-v1',
+    'csp_duanjuaihaokan': 'wexhaokan-v1',
+    'csp_duanjuaiqimiaoguard': 'wexqimiao-v1',
+    'csp_duanjuaiqimiao': 'wexqimiao-v1',
+    'csp_musicaikuwoaguard': 'wexkuwoa-v1',
+    'csp_musicaikuwoa': 'wexkuwoa-v1',
+    'csp_musicaiqingtingguard': 'wexqingting-v1',
+    'csp_musicaiqingting': 'wexqingting-v1',
+    'csp_sportaiguaziguard': 'wexsportguazi-v1',
+    'csp_sportaiguazi': 'wexsportguazi-v1',
+    'csp_sportaikafeiguard': 'wexkafei-v1',
+    'csp_sportaikafei': 'wexkafei-v1',
+    'csp_sportaikanqiutongguard': 'wexkanqiutong-v1',
+    'csp_sportaikanqiutong': 'wexkanqiutong-v1',
+    'csp_sportaikanqiuguard': 'wexkanqiu-v1',
+    'csp_sportaikanqiu': 'wexkanqiu-v1',
+    'csp_sportaiwweguard': 'wexwwe-v1',
+    'csp_sportaiwwe': 'wexwwe-v1',
   }[site.api.toLowerCase()];
 
   static bool hasAdapter(CmsSite site) => WoggSource.supports(site) || (guardAdapterFor(site) != null && site.pluginReference.trim().isNotEmpty) || site.isDrpySource || site.isRemoteScriptSource || site.isJavaScriptSource || site.isPythonSource || TrailerSource.matches(site) || hasBuiltinAdapter(site);
@@ -312,6 +334,16 @@ class CspBridge {
         lowerKey.contains('bpanso');
   }
 
+  static bool isSearchOnlySite(CmsSite site) => const {
+        'szps-v1',
+        'ypanso-v1',
+        'bpanso-v1',
+        'wexaipanso-v1',
+        'wexhaiyin-v1',
+        'wexquanpan-v1',
+        'wexkaka-v1',
+      }.contains(guardAdapterFor(site));
+
   /// Maps a playback line name (e.g. `夸父智1`, `夸克`, `优汐智1`, `嘟嘟无限2`, `百度`, `阿狸原画`)
   /// to its corresponding Netdisk drive key (`quark`, `uc`, `baidu`, `ali`), or `null` if it is a normal VOD line.
   static String? netdiskDriveKeyForLineName(String lineName) {
@@ -393,6 +425,7 @@ class CspBridge {
     final lowerName = site.name.toLowerCase();
     final lowerExt = site.ext.toLowerCase();
     return lowerApi.contains('tuxiaobei') ||
+        lowerApi.contains('childrenaitutu') ||
         lowerKey.contains('兔小贝') ||
         lowerName.contains('兔小贝') ||
         lowerExt.contains('tuxiaobei') ||

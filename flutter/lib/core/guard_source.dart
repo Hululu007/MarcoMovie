@@ -106,6 +106,17 @@ class GuardSource {
       'wexhaiyin-v1',
       'wexquanpan-v1',
       'wexkaka-v1',
+      'jumitv-v1',
+      'wexmodu-v1',
+      'wexhaokan-v1',
+      'wexqimiao-v1',
+      'wexkuwoa-v1',
+      'wexqingting-v1',
+      'wexsportguazi-v1',
+      'wexkafei-v1',
+      'wexkanqiutong-v1',
+      'wexkanqiu-v1',
+      'wexwwe-v1',
     };
     final needsExtension = requiredExtAdapters.contains(adapter);
     final optionalExtension = optionalExtAdapters.contains(adapter);
