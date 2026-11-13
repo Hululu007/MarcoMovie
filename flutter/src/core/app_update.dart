@@ -31,13 +31,39 @@ class UpdateCancellation {
 }
 
 class AppUpdate {
-  /// Production Ed25519 public key (hex) for verifying update manifests.
-  static const String defaultUpdatePublicKeyHex =
-      'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+  /// 用于校验更新清单的 Ed25519 公钥（64 位十六进制字符串），默认为空（不启用验签）。
+  /// 正式启用需要项目所有者离线生成密钥对，私钥不得进入仓库。
+  static const String defaultUpdatePublicKeyHex = '';
 
   /// Optional testing override for unit tests.
   @visibleForTesting
   static String? debugPublicKeyHexOverride;
+
+  static String _effectivePublicKeyHex([String? publicKeyHex]) =>
+      (publicKeyHex ?? debugPublicKeyHexOverride ?? defaultUpdatePublicKeyHex)
+          .trim();
+
+  static bool _hasSignatureField(Map<String, dynamic> body) =>
+      (body['signature'] ?? body['sig']) != null;
+
+  /// Extracts only the signed portion of [body].
+  /// When `payload` is present, only `payload` is returned and any unsigned
+  /// outer fields (outside `payload`, `signature`, `sig`) cause rejection.
+  static Map<String, dynamic>? extractSignedPayload(Map<String, dynamic> body) {
+    if (body.containsKey('payload')) {
+      final rawPayload = body['payload'];
+      if (rawPayload is! Map) return null;
+      for (final key in body.keys) {
+        if (key != 'payload' && key != 'signature' && key != 'sig') {
+          return null;
+        }
+      }
+      return Map<String, dynamic>.from(rawPayload);
+    }
+    return Map<String, dynamic>.from(body)
+      ..remove('signature')
+      ..remove('sig');
+  }
 
   static String canonicalizeJson(dynamic obj) {
     if (obj is Map) {
@@ -65,23 +91,24 @@ class AppUpdate {
     Map<String, dynamic> body, {
     String? publicKeyHex,
   }) {
-    final sigB64 = body['signature'] as String? ?? body['sig'] as String?;
-    if (sigB64 == null || sigB64.isEmpty) {
+    final pubHex = _effectivePublicKeyHex(publicKeyHex);
+    if (pubHex.isEmpty || pubHex.length != 64) {
       return false;
     }
-    final payload = body.containsKey('payload') && body['payload'] is Map
-        ? body['payload']
-        : (Map<String, dynamic>.from(body)
-          ..remove('signature')
-          ..remove('sig'));
+    final rawSig = body['signature'] ?? body['sig'];
+    if (rawSig is! String || rawSig.trim().isEmpty) {
+      return false;
+    }
+    final payload = extractSignedPayload(body);
+    if (payload == null) {
+      return false;
+    }
     final canonical = canonicalizeJson(payload);
     final messageBytes = Uint8List.fromList(utf8.encode(canonical));
     try {
-      final sigBytes = base64Decode(sigB64);
-      final pubHex =
-          publicKeyHex ?? debugPublicKeyHexOverride ?? defaultUpdatePublicKeyHex;
-      final pubBytes = Uint8List(pubHex.length ~/ 2);
-      for (var i = 0; i < pubBytes.length; i++) {
+      final sigBytes = base64Decode(rawSig);
+      final pubBytes = Uint8List(32);
+      for (var i = 0; i < 32; i++) {
         pubBytes[i] = int.parse(pubHex.substring(i * 2, i * 2 + 2), radix: 16);
       }
       return Ed25519.verify(
@@ -89,7 +116,8 @@ class AppUpdate {
         message: messageBytes,
         signature: sigBytes,
       );
-    } catch (_) {
+    } on FormatException catch (e) {
+      debugPrint('AppUpdate: 签名或公钥格式无效: $e');
       return false;
     }
   }
@@ -333,14 +361,38 @@ class AppUpdate {
           if (url.contains('api.github.com')) {
             return _githubRelease(body, platform);
           }
-          if (body is! Map<String, dynamic> || body['prerelease'] == true) {
+          if (body is! Map<String, dynamic>) {
             continue;
           }
-          if (!verifyManifestSignature(body)) {
-            throw const FormatException(
-                '更新清单数字签名无效或缺失 (Ed25519 signature missing or invalid)');
+          final pubKeyHex = _effectivePublicKeyHex();
+          final Map<String, dynamic> manifest;
+          if (!_hasSignatureField(body)) {
+            debugPrint('AppUpdate: 更新清单缺少 signature 字段，按旧逻辑继续 ($url)');
+            manifest = body;
+          } else if (pubKeyHex.isEmpty) {
+            debugPrint('AppUpdate: 更新公钥常量为空，跳过签名校验 ($url)');
+            final extracted = extractSignedPayload(body);
+            if (extracted == null) {
+              debugPrint('AppUpdate: 更新清单 payload 结构无效，跳过当前来源 ($url)');
+              continue;
+            }
+            manifest = extracted;
+          } else {
+            if (!verifyManifestSignature(body, publicKeyHex: pubKeyHex)) {
+              debugPrint('AppUpdate: 更新清单签名校验失败，跳过当前来源 ($url)');
+              continue;
+            }
+            final signedPayload = extractSignedPayload(body);
+            if (signedPayload == null) {
+              debugPrint('AppUpdate: 更新清单签名载荷无效，跳过当前来源 ($url)');
+              continue;
+            }
+            manifest = signedPayload;
           }
-          final release = parse(body, platform: platform);
+          if (manifest['prerelease'] == true) {
+            continue;
+          }
+          final release = parse(manifest, platform: platform);
           if (platform == 'windows' && release.windowsUrl == null ||
               platform == 'ios' && release.iosUrl == null) {
             continue;
@@ -348,9 +400,9 @@ class AppUpdate {
           return release;
         } on UpdateCancelled {
           rethrow;
-        } on FormatException {
-          rethrow;
-        } catch (_) {/* Try the second release endpoint. */} finally {
+        } catch (e) {
+          debugPrint('AppUpdate: 更新源检查失败，继续尝试下一来源 ($url): $e');
+        } finally {
           stop();
         }
       }

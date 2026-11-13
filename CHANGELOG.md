@@ -11,9 +11,9 @@
     - Flutter / Android / TV Lite 三端在用户配置带有密码且使用明文 `http://` 的 WebDAV 服务时，在保存或测试连接前弹出二次确认警告对话框，提示局域网明文传输密码风险，经用户显式确认后方可提交。
   - F4 (非受信任明文 HTTP Spider 插件预警与仅 HTTPS 插件策略开关)：
     - Android 电视与手机设置中新增「仅允许 HTTPS 插件」（`only_allow_https_plugins`）安全策略开关（默认关闭）；开启时严格拦截所有明文 HTTP 插件下载并防止跨协议重定向；未开启时遇到缺少 MD5 校验的明文 HTTP Spider 插件自动记录安全警告并弹出 Toast 提示。
-  - F5 (Ed25519 签名更新清单校验与发布 CLI 工具)：
-    - Flutter: 引入零外部依赖纯 Dart RFC 8032 Ed25519 签名验证器与规范化 JSON（RFC 8785 键排序与紧凑格式）摘要验签，在 `AppUpdate.check()` 中内置官方 Ed25519 公钥强制校验更新清单签名，自动拦截被篡改或缺少签名的第三方镜像更新；
-    - CLI: 新增纯 Python RFC 8032 更新清单签名工具（`scripts/sign_manifest.py`），支持生成私钥/公钥与对 `release-manifest.json` 执行内联签名。
+  - F5 (Ed25519 签名更新清单按需校验与发布 CLI 工具)：
+    - Flutter: 引入零外部依赖纯 Dart RFC 8032 Ed25519 签名验证器与规范化 JSON 摘要验签；更新公钥常量默认留空（正式启用需项目所有者离线生成密钥对，私钥不进入仓库）；配置公钥后，未包含 `signature` 字段的线上清单记录日志并按兼容逻辑继续解析，包含 `signature` 字段时校验签名并仅解析签名覆盖的 `payload`（拒绝外层篡改字段），验签失败则跳过当前来源继续尝试备用通道（如 GitHub Releases）；
+    - CLI: 新增纯 Python RFC 8032 更新清单签名工具（`scripts/sign_manifest.py`），不含内置测试密钥，支持离线生成密钥文件并通过命令行参数（`--key-file`）或环境变量（`MARCOMOVIE_SIGN_KEY_FILE`）读取私钥文件对更新清单签名。
   - F6 (现代 TLS 传输协议与根证书链兼容加固)：
     - Android: 配置 `network_security_config.xml`，移除非受信任的全局明文流量声明，并打包内置 Let's Encrypt `ISRG Root X1` 根证书（`res/raw/isrg_root_x1.crt`）；
     - TV Lite: `build_lite.py` 构建时无条件打包 Conscrypt 2.5.2 引擎（`classes.dex` 及 `lib/armeabi-v7a/libconscrypt_jni.so`），并在 `NetworkTls` 中装配内嵌 ISRG Root X1 的复合 `X509TrustManager`，彻底解决旧版 Android 4.0-7.0 (API 14-24) 电视机因根证书过期导致的 HTTPS SNI 与 Let's Encrypt 证书握手失败问题。
