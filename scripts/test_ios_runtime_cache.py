@@ -51,7 +51,7 @@ class IosRuntimeCacheChecks(unittest.TestCase):
 
     def test_unrelated_dart_drpy_and_html_changes_preserve_key(self):
         before = self.key()
-        for relative in ("flutter/src/ui/netdisk_sheet.dart", "shared/catpaw/drpy-http.cjs",
+        for relative in ("flutter/lib/ui/netdisk_sheet.dart", "shared/catpaw/drpy-http.cjs",
                          "android/src/main/assets/python-host/parser-provenance.json"):
             path = self.root / relative
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -46,11 +46,11 @@
 
 ## Flutter 界面接入修改文件
 
-- `flutter/src/core/source_verification.dart`：受限图片响应数据。
-- `flutter/src/core/cms_client.dart`：验证请求、取消及首页验证错误传递。
-- `flutter/src/core/csp_bridge.dart`、`flutter/src/core/catpaw_host.dart`：FY 入口与可信错误提示。
-- `flutter/src/ui/source_verification_dialog.dart`：复用既有 Glasswork 材质的验证码弹窗。
-- `flutter/src/ui/adaptive_shell.dart`：首页、筛选和搜索验证后的定向重试。
-- `flutter/src/ui/detail_screen.dart`、`flutter/src/ui/player_screen.dart`：详情与播放验证入口。
+- `flutter/lib/core/source_verification.dart`：受限图片响应数据。
+- `flutter/lib/core/cms_client.dart`：验证请求、取消及首页验证错误传递。
+- `flutter/lib/core/csp_bridge.dart`、`flutter/lib/core/catpaw_host.dart`：FY 入口与可信错误提示。
+- `flutter/lib/ui/source_verification_dialog.dart`：复用既有 Glasswork 材质的验证码弹窗。
+- `flutter/lib/ui/adaptive_shell.dart`：首页、筛选和搜索验证后的定向重试。
+- `flutter/lib/ui/detail_screen.dart`、`flutter/lib/ui/player_screen.dart`：详情与播放验证入口。
 - `flutter/test/source_verification_test.dart`、`flutter/test/guard_source_test.dart`：交互和线路分派回归。
 - `docs/ios-source-acceptance.md`、本文：证据范围和未完成事项。

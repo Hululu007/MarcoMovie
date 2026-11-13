@@ -36,4 +36,4 @@ flutter build macos --release
 flutter build ios --release --no-codesign
 ```
 
-`src/` 为受版本控制的源码，`prepare_platform.py` 同步到生成目录 `lib/` 并准备品牌资源、平台配置。不要只修改生成的 `lib/`。自动构建入口见 [workflow](../.github/workflows/build-multiplatform.yml)；产物名称以实际上传的附件为准。
+`lib/` 为受版本控制的源码，`prepare_platform.py` 准备品牌资源与平台配置。自动构建入口见 [workflow](../.github/workflows/build-multiplatform.yml)；产物名称以实际上传的附件为准。

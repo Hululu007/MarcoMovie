@@ -29,7 +29,7 @@ import java.util.Locale;
  * Unified netdisk login & QR credential center.
  *
  * <p>On Android phones/tablets, opens a full-screen iOS secondary page ("我的云盘") aligned 1:1 with
- * {@code flutter/src/ui/netdisk_sheet.dart} (obsidian-slate palette, priority banner card, and 4
+ * {@code flutter/lib/ui/netdisk_sheet.dart} (obsidian-slate palette, priority banner card, and 4
  * two-tier cloud drive cards for 夸父 / 优汐 / 嘟嘟 / 阿狸). Keeps the anchored D-pad menu on Android TV.
  */
 final class AccountPanel {
@@ -484,7 +484,7 @@ final class AccountPanel {
 
     /**
      * Renders the full-screen iOS secondary page "我的云盘" matching {@code IosSettingsScaffold} +
-     * {@code _NetdiskAccountSheet} in {@code flutter/src/ui/netdisk_sheet.dart}.
+     * {@code _NetdiskAccountSheet} in {@code flutter/lib/ui/netdisk_sheet.dart}.
      */
     private static void renderMobileCloudDrivePage(final MainActivity a, final String backLabel) {
         a.applyMobileSystemBars(false);

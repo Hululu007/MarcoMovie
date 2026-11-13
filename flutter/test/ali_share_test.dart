@@ -4,8 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
-import '../src/core/ali_share.dart';
-import '../src/core/models.dart';
+import 'package:marco_movie/core/ali_share.dart';
+import 'package:marco_movie/core/models.dart';
 
 http.Response jsonResponse(Object value, [int status = 200]) =>
     http.Response(jsonEncode(value), status,
