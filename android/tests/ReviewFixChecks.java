@@ -184,6 +184,9 @@ public final class ReviewFixChecks {
                         && ImageDecodePolicy.cacheBytes(512) == 32 * 1024 * 1024,
                 "image memory cache budget scales within 10MB..32MB bounds");
 
+        // Keep this count synchronized whenever backup-eligible appearance/playback keys are added
+        // to or removed from Prefs.KEYS. Security policy switches (such as EXPERIMENTAL_CSP and
+        // ONLY_ALLOW_HTTPS_PLUGINS) are intentionally excluded so backups cannot weaken policy.
         check(
                 Prefs.KEYS.length == 38,
                 "backup settings key table includes TV dock position, TV player style, tunneled playback, and existing appearance settings");
@@ -227,8 +230,10 @@ public final class ReviewFixChecks {
                         && Prefs.sanitizeSetting(Prefs.REDUCED_TRANSPARENCY, "true") == null
                         && Prefs.sanitizeSetting(Prefs.AUTO_NEXT, "true") == null
                         && Prefs.sanitizeSetting(Prefs.EXPERIMENTAL_CSP, true) == null
+                        && Prefs.sanitizeSetting(Prefs.ONLY_ALLOW_HTTPS_PLUGINS, true) == null
+                        && Prefs.sanitizeSetting(Prefs.ONLY_ALLOW_HTTPS_PLUGINS, false) == null
                         && Prefs.sanitizeSetting(null, true) == null,
-                "boolean settings validate type and never restore experimental_csp");
+                "boolean settings validate type and never restore experimental_csp or only_allow_https_plugins");
         check(
                 Integer.valueOf(120).equals(Prefs.sanitizeSetting(Prefs.UI_SCALE_PERCENT, 120))
                         && Integer.valueOf(100)

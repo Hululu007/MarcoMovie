@@ -2,16 +2,20 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from java_dependencies import ensure_json_jar
 
 root = Path(__file__).resolve().parents[2]
 jdk = Path(os.environ.get("MARCOMOVIE_JDK") or os.environ["JAVA_HOME"]) / "bin"
 src = root / "android/src/main/java/com/pilipala/marcomovie"
-parser = root / "android/tests/lib/json-20240303.jar"
+parser = ensure_json_jar()
 with tempfile.TemporaryDirectory() as output, tempfile.TemporaryDirectory() as imports:
     shim = Path(output) / 'android/util/Base64.java'
     shim.parent.mkdir(parents=True)
-    shim.write_text('package android.util; public final class Base64 { public static final int DEFAULT=0; public static final int URL_SAFE=8; public static byte[] decode(String value,int flags){return ((flags & URL_SAFE) != 0 ? java.util.Base64.getUrlDecoder() : java.util.Base64.getMimeDecoder()).decode(value);} }', encoding='utf-8')
+    shim.write_text('package android.util; public final class Base64 { public static final int DEFAULT=0; public static final int URL_SAFE=8; public static byte[] decode(String value,int flags){return ((flags & URL_SAFE) != 0 ? java.util.Base64.getUrlDecoder() : java.util.Base64.getMimeDecoder()).decode(value);} public static byte[] decode(byte[] value,int flags){return decode(new String(value, java.nio.charset.StandardCharsets.ISO_8859_1), flags);} }', encoding='utf-8')
     xml_shim = Path(output) / 'android/util/Xml.java'
     xml_shim.write_text('package android.util; public final class Xml { public static org.xmlpull.v1.XmlPullParser newPullParser() { return null; } }', encoding='utf-8')
     xpp_shim = Path(output) / 'org/xmlpull/v1/XmlPullParser.java'
