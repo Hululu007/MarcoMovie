@@ -53,6 +53,8 @@ jobs:
           flutter-version: "3.38.9"
       - name: Check public content guardrails
         run: python scripts/check_public_content.py
+      - name: Check README versions alignment
+        run: python scripts/sync_readme_versions.py --check
       - name: Verify runtime assets before platform builds
         run: |
           python scripts/test_drpy_assets.py
