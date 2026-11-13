@@ -339,34 +339,36 @@ class CmsSite {
     if (isExtTooLarge) {
       return statusExtTooLarge;
     }
-    if (CspBridge.isNetdiskSite(this) && !CspBridge.hasAdapter(this)) {
-      return statusAdapterMissing;
-    }
-    if (jar.isNotEmpty) {
-      return statusNeedsJar;
-    }
-    if (type == 3 ||
-        api.startsWith('csp_') ||
-        api.endsWith('.js')) {
-      if (!CspBridge.hasAdapter(this)) {
-        return statusNeedsJar;
-      }
-    }
-    if (!CspBridge.hasAdapter(this)) {
-      if (type != 0 && type != 1 && type != 4 && !isEmby && !isCatPaw) {
-        return statusUnsupportedType;
-      }
-      if (!isHttpApi && !isEmby && !isCatPaw && !isM3uVodApi) {
-        return statusCustomSiteUrl;
-      }
-    }
-    if (requiresParser && playUrl.isEmpty) {
-      return statusParserRequired;
-    }
-    if (!canBrowse) {
+    if (key == 'mydrive') {
       return statusUnsupportedType;
     }
+    if ((type == 3 || isScriptOrJarApi) && CspBridge.hasAdapter(this)) {
+      return statusOk;
+    }
+    if (isEmby || isCatPaw || isM3uVodApi || (type == 4 && isHttpApi)) {
+      return statusOk;
+    }
+    if ((type == 3 || isScriptOrJarApi) && CspBridge.isNetdiskSite(this)) {
+      return statusAdapterMissing;
+    }
+    if (type == 3 || isScriptOrJarApi) {
+      return statusNeedsJar;
+    }
+    if (type != 0 && type != 1 && type != 4 && !(type == -1 && isHttpApi)) {
+      return statusUnsupportedType;
+    }
+    if (!isHttpApi) {
+      return statusCustomSiteUrl;
+    }
     return statusOk;
+  }
+
+  /// Non-blocking playback-stage hint for sites marked `parse: 1` without a built-in `playUrl`.
+  String get playbackHint {
+    if (requiresParser && playUrl.trim().isEmpty) {
+      return capabilityReason(statusParserRequired);
+    }
+    return '';
   }
 
   static String capabilityReason(String status) {

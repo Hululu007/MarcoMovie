@@ -120,9 +120,9 @@ void main() {
       expect(customUrlSite.unsupportedReason, '此来源不是可直接请求的 HTTP(S) CMS');
 
       final parserSite = config.sites.firstWhere((s) => s.key == 'site_parser_required');
-      expect(parserSite.capabilityStatus, CmsSite.statusParserRequired);
-      expect(parserSite.supported, isFalse);
-      expect(parserSite.unsupportedReason, '需要解析器，当前环境缺少可用解析配置');
+      expect(parserSite.capabilityStatus, CmsSite.statusOk);
+      expect(parserSite.supported, isTrue);
+      expect(parserSite.playbackHint, '需要解析器，当前环境缺少可用解析配置');
     });
 
     test('isExtTooLarge strict byte boundary stress test (131072 vs 131073)', () {
@@ -278,7 +278,7 @@ void main() {
           {'key': 'u3', 'name': '网盘源3', 'type': 3, 'api': 'csp_Pansou'},
           {'key': 'u4', 'name': '超大4', 'type': 1, 'api': 'https://big.test/4', 'ext': 'x' * 200000},
           {'key': 'u5', 'name': '协议5', 'type': 1, 'api': 'custom://test/5'},
-          {'key': 'u6', 'name': '解析6', 'type': 1, 'api': 'https://parse.test/6', 'parse': 1},
+          {'key': 'u6', 'name': '未适配脚本6', 'type': 3, 'api': 'csp_Unported6'},
         ]
       });
 
@@ -432,6 +432,9 @@ void main() {
       for (final tc in testCases) {
         final site = tc['site'] as CmsSite;
         final expectedReason = tc['expectedReason'] as String;
+        final displayedMessage = site.supported && site.playbackHint.isNotEmpty
+            ? site.playbackHint
+            : site.unsupportedReason;
 
         await tester.pumpWidget(
           CupertinoApp(
@@ -446,7 +449,7 @@ void main() {
                         title: Text(site.name),
                         content: Padding(
                           padding: const EdgeInsets.only(top: 8),
-                          child: Text(site.unsupportedReason),
+                          child: Text(displayedMessage),
                         ),
                         actions: [
                           CupertinoDialogAction(

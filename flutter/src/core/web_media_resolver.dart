@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'cms_parser.dart';
 import 'local_media_proxy.dart';
 import 'models.dart';
+import 'resilient_http_client.dart';
 import 'source_playback.dart';
 
 class WebSniffResult {
@@ -89,7 +90,7 @@ class WebMediaResolver {
   );
 
   static final RegExp _webPageHintPattern = RegExp(
-    r'(?:\.(?:s?html?|php|asp|aspx|jsp)(?:$|[?#])|/(?:vodplay|play|video|watch|v_show|x/cover|x/page|bangumi/play)(?:/|$|[?#]))',
+    r'(?:\.(?:s?html?|php|asp|aspx|jsp)(?:$|[?#])|/(?:vodplay|play|share|video|watch|v_show|x/cover|x/page|bangumi/play)(?:/|$|[?#]))',
     caseSensitive: false,
   );
 
@@ -112,6 +113,48 @@ class WebMediaResolver {
     if (uri.host.isEmpty || isDirectStreamUrl(value)) return false;
     return _webPageHintPattern.hasMatch('${uri.path}?${uri.query}');
   }
+
+  /// Returns `null` when [episode] can be played directly or resolved via
+  /// source adapter, cloud-share resolver, parser waterfall (`site.playUrl` /
+  /// [parses]), or `WebMediaResolver`; otherwise returns a user-facing Chinese
+  /// diagnostic reason explaining why the episode is unavailable in the picker.
+  static String? episodeUnavailableReason(
+    CmsEpisode episode, {
+    required CmsSite site,
+    List<CmsParse> parses = const [],
+  }) {
+    final raw = episode.url.trim();
+    if (raw.isEmpty) {
+      return '当前剧集缺少有效播放地址';
+    }
+    if (episode.isDirectPlayable || episode.needsSourceResolution) {
+      return null;
+    }
+    final lower = raw.toLowerCase();
+    if (raw.startsWith('mmshare://') ||
+        lower.startsWith('push://') ||
+        ResilientHttpClient.cloudProviderForShare(raw) != null) {
+      return null;
+    }
+    if (lower.startsWith('magnet:') ||
+        lower.startsWith('ed2k://') ||
+        lower.startsWith('thunder://')) {
+      return '当前剧集为磁力 / P2P 链接，暂不支持直接播放';
+    }
+    final hasParser = site.playUrl.trim().isNotEmpty ||
+        parses.any((p) => p.url.trim().isNotEmpty);
+    if (hasParser || looksLikeWebPlayerPageUrl(raw)) {
+      return null;
+    }
+    return '当前线路缺少可用解析配置（playUrl / parses），暂无法解析播放';
+  }
+
+  static bool canPlayOrResolveEpisode(
+    CmsEpisode episode, {
+    required CmsSite site,
+    List<CmsParse> parses = const [],
+  }) =>
+      episodeUnavailableReason(episode, site: site, parses: parses) == null;
 
   static bool _isCandidateMediaUrl(
     String rawCandidate, {

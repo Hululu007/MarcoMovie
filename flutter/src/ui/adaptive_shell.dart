@@ -221,9 +221,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final pool = _visibleSupportedSites;
     CmsSite? matched;
     for (final s in pool) {
-      if (s.key == siteKey) {
+      if (s.key == siteKey && s.supported) {
         matched = s;
         break;
+      }
+    }
+    if (matched == null) {
+      for (final s in pool) {
+        if (s.key == siteKey) {
+          matched = s;
+          break;
+        }
       }
     }
     if (matched != null) {
@@ -242,7 +250,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       );
       return;
     }
-    if (pool.isEmpty) {
+    final availablePool = pool.where((s) => s.supported).toList();
+    if (availablePool.isEmpty) {
       _showAppleNotice(
         '尚未导入对应片源',
         '本机暂无可用片源，可在「设置 → 多端网络同步」开启订阅源同步或导入订阅后继续观看「$title」。',
@@ -362,10 +371,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final availableSites = saved == null
         ? const <CmsSite>[]
         : (_privateSessionUnlocked
-            ? saved.privateSupportedSites
-            : (saved.publicSupportedSites.isNotEmpty
-                ? saved.publicSupportedSites
-                : saved.supportedSites
+            ? saved.privateAvailableSites
+            : (saved.publicAvailableSites.isNotEmpty
+                ? saved.publicAvailableSites
+                : saved.availableSites
                     .where((s) => !s.isEffectivelyPrivate)
                     .toList()));
     if (availableSites.isNotEmpty) {
@@ -838,6 +847,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
   }
   void _openVideoDetail(CmsSite site, CmsVideo video) {
+    if (!site.supported) {
+      _showAppleNotice(site.name, site.unsupportedReason);
+      return;
+    }
     if (video.id.startsWith('netdisk_qr:')) {
       final driveKey = video.id.substring('netdisk_qr:'.length).trim();
       showNetdiskAccountSheet(
@@ -3040,7 +3053,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             final siteCounts = <String, int>{};
             final siteByKey = <String, CmsSite>{};
             for (final s in _visibleSupportedSites) {
-              siteByKey['${s.subscriptionId}:${s.key}'] = s;
+              if (s.supported) {
+                siteByKey['${s.subscriptionId}:${s.key}'] = s;
+              }
             }
             for (final (site, _) in _searchResults) {
               final k = '${site.subscriptionId}:${site.key}';
@@ -4087,27 +4102,51 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   footer: '点击任意隐私片源即可在主页立即加载浏览；点击右上角「锁定退出」后自动恢复隐藏。',
                   children: privateSites.map((s) {
                     final selected = s.key == _activeSite?.key;
-                    return AppleGroupedTile(
+                    final tile = AppleGroupedTile(
                       icon: CupertinoIcons.lock_shield_fill,
                       iconBgColor: selected
                           ? AppleColors.systemBlue
                           : AppleColors.systemPurple,
                       title: s.name,
-                      subtitle: '${s.group} · ${s.api}',
+                      subtitle: s.supported
+                          ? '${s.group} · ${s.api}'
+                          : '${s.group} · ${s.unsupportedReason}',
                       trailing: selected
                           ? const Icon(
                               CupertinoIcons.checkmark_alt,
                               color: AppleColors.systemBlue,
                               size: 18,
                             )
-                          : const Text(
-                              '立即访问',
+                          : Text(
+                              s.supported ? '立即访问' : '未适配',
                               style: TextStyle(
-                                color: AppleColors.systemBlue,
+                                color: s.supported
+                                    ? AppleColors.systemBlue
+                                    : AppleColors.labelTertiary,
                                 fontSize: 12,
                               ),
                             ),
                       onTap: () {
+                        if (!s.supported) {
+                          showCupertinoDialog<void>(
+                            context: ctx,
+                            builder: (dCtx) => CupertinoAlertDialog(
+                              title: Text(s.name),
+                              content: Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: Text(s.unsupportedReason),
+                              ),
+                              actions: [
+                                CupertinoDialogAction(
+                                  isDefaultAction: true,
+                                  onPressed: () => Navigator.of(dCtx).pop(),
+                                  child: const Text('我知道了'),
+                                ),
+                              ],
+                            ),
+                          );
+                          return;
+                        }
                         Navigator.of(ctx).pop();
                         if (s.isCatPaw && Uri.parse(s.api).path == '/api/baseset') {
                           _showCatPawSettings(s);
@@ -4120,6 +4159,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         _loadSiteHome();
                       },
                     );
+                    return s.supported
+                        ? tile
+                        : Opacity(opacity: 0.52, child: tile);
                   }).toList(),
                 ),
                 const SizedBox(height: 16),
@@ -5011,25 +5053,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         posterUrl: resolvedPoster,
                         onTap: () {
                           Navigator.of(ctx).pop();
-                          if (_config == null) return;
-                          final site = _config!.publicSupportedSites.firstWhere(
-                            (s) => s.key == h.site,
-                            orElse: () =>
-                                _activeSite ??
-                                CmsSite(
-                                  key: h.site,
-                                  name: h.site,
-                                  type: 1,
-                                  api: '',
-                                ),
-                          );
-                          _openVideoDetail(
-                            site,
-                            CmsVideo(
-                              id: h.id,
-                              title: h.title,
-                              poster: resolvedPoster,
-                            ),
+                          _openSyncedMediaEntry(
+                            siteKey: h.site,
+                            videoId: h.id,
+                            title: h.title,
+                            poster: resolvedPoster,
                           );
                         },
                         onDelete: () async {
@@ -5246,7 +5274,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                   api: '',
                                   isPrivate: _privateSessionUnlocked,
                                 );
-                            return _buildVideoCard(
+                            final card = _buildVideoCard(
                               displaySite,
                               CmsVideo(
                                 id: fav.id,
@@ -5262,6 +5290,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 remarks: fav.remarks,
                               ),
                             );
+                            return (matched != null && !matched.supported)
+                                ? Opacity(opacity: 0.55, child: card)
+                                : card;
                           },
                         ))
                   : (_privateSessionUnlocked

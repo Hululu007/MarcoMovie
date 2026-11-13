@@ -11,6 +11,7 @@ import '../core/csp_bridge.dart';
 import '../core/download_service.dart';
 import '../core/models.dart';
 import '../core/storage_service.dart';
+import '../core/web_media_resolver.dart';
 import '../core/wogg_source.dart';
 import 'apple_theme.dart';
 import 'desktop_horizontal_scroller.dart';
@@ -39,6 +40,25 @@ class DetailScreen extends StatefulWidget {
     required this.client,
     required this.storage,
   });
+
+  static List<CmsSite> selectRelatedSeasonSiblings(
+    CmsSite site,
+    Iterable<CmsSite> allSites, {
+    int limit = 6,
+  }) {
+    return allSites
+        .where(
+          (s) =>
+              s.supported &&
+              s.key != site.key &&
+              s.searchable &&
+              s.isEffectivelyPrivate == site.isEffectivelyPrivate &&
+              (s.group == site.group || !site.isEffectivelyPrivate),
+        )
+        .take(limit)
+        .toList();
+  }
+
   @override
   State<DetailScreen> createState() => _DetailScreenState();
 }
@@ -331,6 +351,49 @@ class _DetailScreenState extends State<DetailScreen> {
     unawaited(PosterLoader.fetchSeriesEpisodeStills(title, year: _video.year));
   }
 
+  List<CmsParse> get _configuredParses =>
+      widget.storage.loadSavedConfig()?.parses ?? const [];
+
+  String? _episodeUnavailableReason(
+    CmsEpisode episode, {
+    CmsSite? siteOverride,
+  }) =>
+      WebMediaResolver.episodeUnavailableReason(
+        episode,
+        site: siteOverride ?? _activeSite,
+        parses: _configuredParses,
+      );
+
+  String? _lineUnavailableReason(CmsLine line, {CmsSite? siteOverride}) {
+    if (line.episodes.isEmpty) return '当前线路暂无剧集';
+    String? firstReason;
+    for (final ep in line.episodes) {
+      final r = _episodeUnavailableReason(ep, siteOverride: siteOverride);
+      if (r == null) return null;
+      firstReason ??= r;
+    }
+    return firstReason;
+  }
+
+  int _pickRecommendedPlayableLineIndex(
+    List<CmsLine> lines, {
+    CmsSite? siteOverride,
+  }) {
+    if (lines.isEmpty) return 0;
+    final picked = widget.storage.pickRecommendedLineIndex(lines);
+    if (_lineUnavailableReason(lines[picked], siteOverride: siteOverride) ==
+        null) {
+      return picked;
+    }
+    for (var i = 0; i < lines.length; i++) {
+      if (_lineUnavailableReason(lines[i], siteOverride: siteOverride) ==
+          null) {
+        return i;
+      }
+    }
+    return picked;
+  }
+
   Future<void> _loadDetail() async {
     _cancelDetailWork();
     final epoch = ++_detailEpoch;
@@ -348,12 +411,21 @@ class _DetailScreenState extends State<DetailScreen> {
         final found = targetVideo.lines.indexWhere(
           (l) => l.name == immediateBookmark.line,
         );
-        initialImmediateLine = found >= 0
+        initialImmediateLine = found >= 0 &&
+                _lineUnavailableReason(
+                      targetVideo.lines[found],
+                      siteOverride: targetSite,
+                    ) ==
+                    null
             ? found
-            : widget.storage.pickRecommendedLineIndex(targetVideo.lines);
+            : _pickRecommendedPlayableLineIndex(
+                targetVideo.lines,
+                siteOverride: targetSite,
+              );
       } else {
-        initialImmediateLine = widget.storage.pickRecommendedLineIndex(
+        initialImmediateLine = _pickRecommendedPlayableLineIndex(
           targetVideo.lines,
+          siteOverride: targetSite,
         );
       }
     }
@@ -369,7 +441,7 @@ class _DetailScreenState extends State<DetailScreen> {
     try {
       final (owner, detailed) = await widget.client.runSourceOperation(
         () => widget.client.playableDetail(targetSite, targetVideo,
-            widget.storage.prioritizeSites(widget.storage.loadSavedConfig()?.sites ?? const [])),
+            widget.storage.prioritizeSites(widget.storage.loadSavedConfig()?.availableSites ?? const [])),
         cancellation: abort,
       );
       if (!mounted || abort.isCompleted || epoch != _detailEpoch ||
@@ -384,11 +456,22 @@ class _DetailScreenState extends State<DetailScreen> {
       if (bookmark != null && detailed.lines.isNotEmpty) {
         final found =
             detailed.lines.indexWhere((l) => l.name == bookmark.line);
-        initialLine = found >= 0
+        initialLine = found >= 0 &&
+                _lineUnavailableReason(
+                      detailed.lines[found],
+                      siteOverride: owner,
+                    ) ==
+                    null
             ? found
-            : widget.storage.pickRecommendedLineIndex(detailed.lines);
+            : _pickRecommendedPlayableLineIndex(
+                detailed.lines,
+                siteOverride: owner,
+              );
       } else if (detailed.lines.isNotEmpty) {
-        initialLine = widget.storage.pickRecommendedLineIndex(detailed.lines);
+        initialLine = _pickRecommendedPlayableLineIndex(
+          detailed.lines,
+          siteOverride: owner,
+        );
       }
       setState(() {
         _video = detailed;
@@ -471,9 +554,7 @@ class _DetailScreenState extends State<DetailScreen> {
         if (!current() || !(_relatedSeasons.length < 3 ||
             (info.seasonNumber > 1 && _relatedSeasons.length < info.seasonNumber))) return;
         final allSites = widget.storage.loadSavedConfig()?.supportedSites ?? const <CmsSite>[];
-        final siblings = allSites.where((s) => s.key != site.key && s.searchable &&
-            s.isEffectivelyPrivate == site.isEffectivelyPrivate &&
-            (s.group == site.group || !site.isEffectivelyPrivate)).take(6).toList();
+        final siblings = DetailScreen.selectRelatedSeasonSiblings(site, allSites);
         // Leave capacity for the foreground detail/player instead of starting
         // six background source runtimes at once on a phone.
         for (var i = 0; i < siblings.length && current(); i += 2) {
@@ -781,6 +862,11 @@ class _DetailScreenState extends State<DetailScreen> {
     if (line.episodes.isEmpty) return;
     final safeEp = epIdx.clamp(0, line.episodes.length - 1);
     final targetEp = line.episodes[safeEp];
+    final blockReason = _episodeUnavailableReason(targetEp);
+    if (blockReason != null) {
+      _toast(blockReason);
+      return;
+    }
     final provider = targetEp.cloudProvider;
     if (provider != null && provider != 'uc' &&
         !widget.storage.isNetdiskLoggedIn(provider)) {
@@ -1116,7 +1202,8 @@ class _DetailScreenState extends State<DetailScreen> {
               builder: (_) {
                 final line = _video.lines[i];
                 final selected = i == safeLineIdx;
-                return Container(
+                final lineReason = _lineUnavailableReason(line);
+                final tile = Container(
                   decoration: BoxDecoration(
                     color: selected
                         ? const Color(0x330A84FF)
@@ -1129,7 +1216,9 @@ class _DetailScreenState extends State<DetailScreen> {
                         ? AppleColors.systemBlue
                         : AppleColors.groupedTertiary,
                     title: line.name,
-                    subtitle: '共 ${line.episodes.length} 集 · ${_activeSite.name}',
+                    subtitle: lineReason != null
+                        ? '共 ${line.episodes.length} 集 · $lineReason'
+                        : '共 ${line.episodes.length} 集 · ${_activeSite.name}',
                     trailing: _activeSite.isEffectivelyPrivate ? null : IconButton(
                       tooltip: widget.storage.preferredLineName == line.name ? '取消默认播放线路' : '设为默认播放线路',
                       icon: Icon(widget.storage.preferredLineName == line.name ? Icons.star_rounded : Icons.star_border_rounded,
@@ -1149,6 +1238,9 @@ class _DetailScreenState extends State<DetailScreen> {
                     },
                   ),
                 );
+                return lineReason != null
+                    ? Opacity(opacity: 0.52, child: tile)
+                    : tile;
               },
             ),
           ],
@@ -1158,8 +1250,8 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   Future<void> _searchOtherSources() async {
-    final sites = widget.storage.loadSavedConfig()?.supportedSites ?? const <CmsSite>[];
-    final candidates = sites.where((s) => s.key != _activeSite.key &&
+    final sites = widget.storage.loadSavedConfig()?.availableSites ?? const <CmsSite>[];
+    final candidates = sites.where((s) => s.supported && s.key != _activeSite.key &&
         s.searchable && s.isEffectivelyPrivate == _activeSite.isEffectivelyPrivate).toList();
     final results = widget.client.searchAcrossSites(widget.storage.prioritizeSites(candidates), _video.title);
     final pick = await showAppleModalSheet<(CmsSite, CmsVideo)>(
@@ -1199,11 +1291,34 @@ class _DetailScreenState extends State<DetailScreen> {
           final posIdx = _descending ? (total - 1 - idx) : idx;
           final originalIdx = activeIndices[posIdx];
           final ep = line.episodes[originalIdx];
-          final isBookmarked = bookmark != null &&
+          final unavailReason = _episodeUnavailableReason(ep);
+          final isUnavailable = unavailReason != null;
+          final isBookmarked = !isUnavailable &&
+              bookmark != null &&
               bookmark.line == line.name &&
               bookmark.index == originalIdx;
-          return GestureDetector(
+          final cell = GestureDetector(
             onTap: () {
+              if (unavailReason != null) {
+                showCupertinoDialog<void>(
+                  context: ctx,
+                  builder: (dCtx) => CupertinoAlertDialog(
+                    title: Text(ep.name),
+                    content: Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(unavailReason),
+                    ),
+                    actions: [
+                      CupertinoDialogAction(
+                        isDefaultAction: true,
+                        onPressed: () => Navigator.of(dCtx).pop(),
+                        child: const Text('我知道了'),
+                      ),
+                    ],
+                  ),
+                );
+                return;
+              }
               Navigator.of(ctx).pop();
               _openPlayer(safeLineIdx, originalIdx);
             },
@@ -1223,7 +1338,7 @@ class _DetailScreenState extends State<DetailScreen> {
               ),
               alignment: Alignment.center,
               child: Text(
-                ep.name,
+                isUnavailable ? '${ep.name} (不可解析)' : ep.name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -1237,6 +1352,7 @@ class _DetailScreenState extends State<DetailScreen> {
               ),
             ),
           );
+          return isUnavailable ? Opacity(opacity: 0.48, child: cell) : cell;
         },
       ),
     );
@@ -1688,6 +1804,10 @@ class _DetailScreenState extends State<DetailScreen> {
                               const SizedBox(height: 18),
                               if (!_loading && _video.sourceWarnings.isNotEmpty)
                                 _buildSourceWarningsSection(),
+                              if (!_loading &&
+                                  _activeSite.playbackHint.isNotEmpty &&
+                                  _configuredParses.isEmpty)
+                                _buildPlaybackHintBanner(),
                               if (_loading)
                                 const Padding(
                                   padding: EdgeInsets.symmetric(vertical: 32),
@@ -1743,6 +1863,41 @@ class _DetailScreenState extends State<DetailScreen> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildPlaybackHintBanner() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Container(
+        key: const ValueKey('detail-playback-hint-banner'),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: const Color(0x22FF9F0A),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: const Color(0x45FF9F0A), width: 0.6),
+        ),
+        child: Row(
+          children: [
+            const Icon(
+              CupertinoIcons.info_circle,
+              size: 14,
+              color: Color(0xFFFFD60A),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                _activeSite.playbackHint,
+                style: const TextStyle(
+                  color: Color(0xFFFFD60A),
+                  fontSize: 12.5,
+                  height: 1.35,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -2656,6 +2811,26 @@ class _DetailScreenState extends State<DetailScreen> {
           ),
         ),
       ],
+        if (_lineUnavailableReason(line) case final lineReason?) ...[
+          const SizedBox(height: 10),
+          Container(
+            key: const ValueKey('detail-line-unavailable-banner'),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0x26FF9F0A),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0x4DFF9F0A), width: 0.6),
+            ),
+            child: Text(
+              lineReason,
+              style: const TextStyle(
+                color: Color(0xFFFFD60A),
+                fontSize: 12.5,
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
         const SizedBox(height: 12),
 
         // 2. Quick Episode Number Strip (12 13 14 [15] 16 17 ...)
@@ -2672,8 +2847,11 @@ class _DetailScreenState extends State<DetailScreen> {
               final visualIdx = start + idx;
               final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
               final originalIdx = activeIndices[posIdx];
-              final isCurrent = originalIdx == currentActiveEpIdx;
-              return GestureDetector(
+              final unavailReason =
+                  _episodeUnavailableReason(line.episodes[originalIdx]);
+              final isUnavailable = unavailReason != null;
+              final isCurrent = !isUnavailable && originalIdx == currentActiveEpIdx;
+              final pill = GestureDetector(
                 onTap: () => _openPlayer(safeLineIdx, originalIdx),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 160),
@@ -2705,6 +2883,7 @@ class _DetailScreenState extends State<DetailScreen> {
                   ),
                 ),
               );
+              return isUnavailable ? Opacity(opacity: 0.45, child: pill) : pill;
             },
           ),
         ),
@@ -2728,16 +2907,21 @@ class _DetailScreenState extends State<DetailScreen> {
               final posIdx = _descending ? (total - 1 - visualIdx) : visualIdx;
               final originalIdx = activeIndices[posIdx];
               final ep = line.episodes[originalIdx];
-              final isCurrent = originalIdx == currentActiveEpIdx;
-              final (cleanTitle, specBadge) =
+              final unavailReason = _episodeUnavailableReason(ep);
+              final isUnavailable = unavailReason != null;
+              final isCurrent = !isUnavailable && originalIdx == currentActiveEpIdx;
+              final (cleanTitle, parsedBadge) =
                   _parseEpisodeDisplay(ep.name, posIdx + 1);
+              final specBadge = isUnavailable ? '不可解析' : parsedBadge;
               final unitLabel =
                   _isVarietyShow ? '第${posIdx + 1}期' : '第${posIdx + 1}集';
-              final subMeta = [
-                if (_video.year.trim().isNotEmpty) _video.year.trim(),
-                unitLabel,
-                if (specBadge != null) specBadge,
-              ].join(' · ');
+              final subMeta = isUnavailable
+                  ? unavailReason
+                  : [
+                      if (_video.year.trim().isNotEmpty) _video.year.trim(),
+                      unitLabel,
+                      if (specBadge != null) specBadge,
+                    ].join(' · ');
               final headline =
                   _formatEpisodeCardHeadline(cleanTitle, posIdx + 1);
               final epDesc = _resolveAuthenticEpisodeSummary(
@@ -2745,7 +2929,7 @@ class _DetailScreenState extends State<DetailScreen> {
                 cleanTitle,
               );
 
-              return GestureDetector(
+              final card = GestureDetector(
                 key: ValueKey('ep_card_${safeLineIdx}_$originalIdx'),
                 onTap: () => _openPlayer(safeLineIdx, originalIdx),
                 child: SizedBox(
@@ -2939,6 +3123,7 @@ class _DetailScreenState extends State<DetailScreen> {
                   ),
                 ),
               );
+              return isUnavailable ? Opacity(opacity: 0.48, child: card) : card;
             },
           ),
         ),
@@ -3232,6 +3417,10 @@ class _DetailScreenState extends State<DetailScreen> {
                               const SizedBox(height: 8),
                               if (!_loading && _video.sourceWarnings.isNotEmpty)
                                 _buildSourceWarningsSection(),
+                              if (!_loading &&
+                                  _activeSite.playbackHint.isNotEmpty &&
+                                  _configuredParses.isEmpty)
+                                _buildPlaybackHintBanner(),
                               if (_loading)
                                 const Padding(
                                   padding: EdgeInsets.symmetric(vertical: 32),
