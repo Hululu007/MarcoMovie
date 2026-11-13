@@ -11,5 +11,15 @@
       "searchable": true,
       "capabilityStatus": "needs-jar"
     }
-  ]
+  ],
+  "platformOverrides": {
+    "flutter": {
+      "sites": [
+        {
+          "key": "rel_site",
+          "capabilityStatus": "ok"
+        }
+      ]
+    }
+  }
 }

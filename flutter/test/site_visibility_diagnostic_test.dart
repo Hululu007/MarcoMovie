@@ -50,9 +50,10 @@ void main() {
       expect(customUrlSite.supported, isFalse);
 
       const parserReqSite = CmsSite(key: 's7', name: '需解析源', type: 1, api: 'https://parse.example/api', requiresParser: true);
-      expect(parserReqSite.capabilityStatus, CmsSite.statusParserRequired);
-      expect(parserReqSite.unsupportedReason, '需要解析器，当前环境缺少可用解析配置');
-      expect(parserReqSite.supported, isFalse);
+      expect(CmsSite.capabilityReason(CmsSite.statusParserRequired), '需要解析器，当前环境缺少可用解析配置');
+      expect(parserReqSite.capabilityStatus, CmsSite.statusOk);
+      expect(parserReqSite.supported, isTrue);
+      expect(parserReqSite.playbackHint, '需要解析器，当前环境缺少可用解析配置');
     });
   });
 

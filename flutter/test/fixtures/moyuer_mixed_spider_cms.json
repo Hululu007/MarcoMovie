@@ -1,0 +1,18 @@
+{
+  "spider": "https://hub.fixture.invalid/spider/moyuer.jar;md5;deadbeef12345678",
+  "sites": [
+    {"key": "moyu_douban", "name": "豆瓣热播", "type": 3, "api": "csp_Douban", "searchable": 0},
+    {"key": "moyu_wogg", "name": "玩偶4K臻享", "type": 3, "api": "csp_WoGGGuard", "jar": "./jars/wogg.jar", "ext": {"Cloud-drive": "https://hub.fixture.invalid/cloud.json"}},
+    {"key": "moyu_mugu", "name": "木偶4K原盘", "type": 3, "api": "csp_AINewMuguGuard", "jar": "./jars/mugu.jar"},
+    {"key": "moyu_cms_json", "name": "量子资源CMS", "type": 1, "api": "https://lz.fixture.invalid/api.php/provide/vod/", "jar": "./jars/cms_helper.jar", "searchable": 1},
+    {"key": "moyu_cms_4k", "name": "极速4K资源站", "type": 1, "api": "https://js4k.fixture.invalid/api.php/provide/vod/", "searchable": 1},
+    {"key": "moyu_cms_xml", "name": "非凡XML采集", "type": 0, "api": "https://ffxml.fixture.invalid/inc/api.php", "jar": "./jars/xml.jar", "searchable": 1},
+    {"key": "moyu_t4_http", "name": "远程T4爬虫", "type": 4, "api": "https://t4.fixture.invalid/spider/vod", "jar": "./jars/t4.jar", "searchable": 1},
+    {"key": "moyu_py_site", "name": "Python影视", "type": 3, "api": "https://hub.fixture.invalid/py/vod_spider.py", "searchable": 1},
+    {"key": "moyu_unported_pan", "name": "未适配夸父盘搜", "type": 3, "api": "csp_PansouCustom", "searchable": 1},
+    {"key": "moyu_unported_jar", "name": "未适配专用Jar", "type": 3, "api": "https://hub.fixture.invalid/jars/only_android.jar", "searchable": 1},
+    {"key": "moyu_unported_csp", "name": "未适配AppV2", "type": 3, "api": "csp_UnknownVendorV9", "searchable": 1},
+    {"key": "moyu_bad_type", "name": "实验类型源", "type": 99, "api": "https://exp.fixture.invalid/api", "searchable": 1},
+    {"key": "moyu_custom_scheme", "name": "私有协议源", "type": 1, "api": "tvbox-rpc://local/vod", "searchable": 1}
+  ]
+}

@@ -101,7 +101,7 @@ void main() {
       );
       expect(conflictCustomUrlAndParser.capabilityStatus, CmsSite.statusCustomSiteUrl);
 
-      // 6. parser-required overrides ok
+      // 6. parser-required remains browsable (ok) and exposes playbackHint instead
       const conflictParserAndOk = CmsSite(
         key: 'c6',
         name: 'Parser and Ok',
@@ -109,7 +109,9 @@ void main() {
         api: 'https://ok.example/api',
         requiresParser: true,
       );
-      expect(conflictParserAndOk.capabilityStatus, CmsSite.statusParserRequired);
+      expect(conflictParserAndOk.capabilityStatus, CmsSite.statusOk);
+      expect(conflictParserAndOk.supported, isTrue);
+      expect(conflictParserAndOk.playbackHint, '需要解析器，当前环境缺少可用解析配置');
     });
 
     test('Byte boundary stress for isExtTooLarge at 128KB limit', () {
@@ -159,7 +161,7 @@ void main() {
             unsuppSites.add(CmsSite(key: 'u_$i', name: '非HTTP站 $i', type: 1, api: 'udp://custom.test/$i'));
             break;
           case 5:
-            unsuppSites.add(CmsSite(key: 'u_$i', name: '缺少解析站 $i', type: 1, api: 'https://parse.test/$i', requiresParser: true));
+            unsuppSites.add(CmsSite(key: 'u_$i', name: '未适配脚本站 $i', type: 3, api: 'csp_Unported_$i'));
             break;
         }
       }
@@ -446,6 +448,9 @@ void main() {
       ];
 
       for (final (site, expectedReason) in failureCases) {
+        final displayedMessage = site.supported && site.playbackHint.isNotEmpty
+            ? site.playbackHint
+            : site.unsupportedReason;
         await tester.pumpWidget(
           CupertinoApp(
             home: CupertinoPageScaffold(
@@ -460,7 +465,7 @@ void main() {
                         title: Text(site.name),
                         content: Padding(
                           padding: const EdgeInsets.only(top: 8),
-                          child: Text(site.unsupportedReason),
+                          child: Text(displayedMessage),
                         ),
                         actions: [
                           CupertinoDialogAction(

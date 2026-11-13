@@ -15,6 +15,7 @@ import '../core/models.dart';
 import '../core/playback_recovery_policy.dart';
 import '../core/playback_startup.dart';
 import '../core/playback_wakelock.dart';
+import '../core/web_media_resolver.dart';
 import '../core/wogg_source.dart';
 import 'player_interaction_layers.dart';
 import '../core/storage_service.dart';
@@ -858,13 +859,24 @@ class _PlayerScreenState extends State<PlayerScreen>
     _outroSkippedForSession = false;
     _initialHistoryRecorded = false;
 
+    final configuredParses =
+        widget.storage.loadSavedConfig()?.parses ?? const [];
     final canOpenDirectly = _isLiveStream
         ? (_currentEpisode.isLocalFile ||
             const {'http', 'https', 'rtmp', 'rtsp'}.contains(
               Uri.tryParse(_currentEpisode.url.trim())?.scheme.toLowerCase(),
             ))
         : _currentEpisode.isDirectPlayable;
-    if (!canOpenDirectly && !_currentEpisode.needsSourceResolution) {
+    final unavailableReason = _isLiveStream
+        ? (canOpenDirectly ? null : '当前直播源地址格式不受支持，请切换线路')
+        : WebMediaResolver.episodeUnavailableReason(
+            _currentEpisode,
+            site: widget.site,
+            parses: configuredParses,
+          );
+    if (!canOpenDirectly &&
+        !_currentEpisode.needsSourceResolution &&
+        unavailableReason != null) {
       _pendingResumeMs = 0;
       if (mounted) {
         setState(() {
@@ -872,7 +884,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _playing = false;
           _position = Duration.zero;
           _duration = Duration.zero;
-          _playbackError = '当前剧集需要专用插件解析，请切换线路';
+          _playbackError = unavailableReason;
           _controlsVisible = true;
         });
       }
@@ -897,8 +909,6 @@ class _PlayerScreenState extends State<PlayerScreen>
     CloudMediaLease? pendingLease;
     LocalMediaLease? pendingLocalLease;
     try {
-      final configuredParses =
-          widget.storage.loadSavedConfig()?.parses ?? const [];
       var resolvedEpisode = quality ?? (_currentEpisode.isLocalFile
           ? _currentEpisode
           : widget.isLive
@@ -3364,7 +3374,32 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  String? _episodeUnavailableReason(
+    CmsEpisode episode,
+    List<CmsParse> parses,
+  ) {
+    if (_isLiveStream) return null;
+    return WebMediaResolver.episodeUnavailableReason(
+      episode,
+      site: widget.site,
+      parses: parses,
+    );
+  }
+
+  String? _lineUnavailableReason(CmsLine line, List<CmsParse> parses) {
+    if (_isLiveStream) return null;
+    if (line.episodes.isEmpty) return '当前线路暂无剧集';
+    String? firstReason;
+    for (final ep in line.episodes) {
+      final r = _episodeUnavailableReason(ep, parses);
+      if (r == null) return null;
+      firstReason ??= r;
+    }
+    return firstReason;
+  }
+
   void _showLinesSheet() {
+    final parses = widget.storage.loadSavedConfig()?.parses ?? const [];
     showAppleModalSheet<void>(
       context: context,
       title: '切换播放线路',
@@ -3375,13 +3410,16 @@ class _PlayerScreenState extends State<PlayerScreen>
           AppleGroupedSection(
             children: List.generate(_lines.length, (i) {
               final selected = i == _lineIndex;
-              return AppleGroupedTile(
+              final lineReason = _lineUnavailableReason(_lines[i], parses);
+              final tile = AppleGroupedTile(
                 icon: CupertinoIcons.layers_alt_fill,
                 iconBgColor: selected
                     ? AppleColors.systemBlue
                     : AppleColors.groupedTertiary,
                 title: _lines[i].name,
-                subtitle: '${_lines[i].episodes.length} 集',
+                subtitle: lineReason != null
+                    ? '${_lines[i].episodes.length} 集 · $lineReason'
+                    : '${_lines[i].episodes.length} 集',
                 trailing: selected
                     ? const Icon(
                         CupertinoIcons.checkmark_alt,
@@ -3390,9 +3428,29 @@ class _PlayerScreenState extends State<PlayerScreen>
                       )
                     : null,
                 onTap: () {
+                  if (lineReason != null) {
+                    showCupertinoDialog<void>(
+                      context: ctx,
+                      builder: (dCtx) => CupertinoAlertDialog(
+                        title: Text(_lines[i].name),
+                        content: Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(lineReason),
+                        ),
+                        actions: [
+                          CupertinoDialogAction(
+                            isDefaultAction: true,
+                            onPressed: () => Navigator.of(dCtx).pop(),
+                            child: const Text('我知道了'),
+                          ),
+                        ],
+                      ),
+                    );
+                    return;
+                  }
                   Navigator.of(ctx).pop();
                   _failedLinesForEpisode.clear();
-    _failedLiveEpisodes.clear();
+                  _failedLiveEpisodes.clear();
                   final keepPos = _position.inMilliseconds >= 1000
                       ? _position.inMilliseconds
                       : _lastKnownPositionMs;
@@ -3408,6 +3466,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                   _openCurrentEpisode(resumeMs: keepPos);
                 },
               );
+              return lineReason != null
+                  ? Opacity(opacity: 0.48, child: tile)
+                  : tile;
             }),
           ),
         ],
@@ -3418,6 +3479,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _showEpisodesSheet() {
     final screenSize = MediaQuery.sizeOf(context);
     final isLandscape = screenSize.width > screenSize.height;
+    final parses = widget.storage.loadSavedConfig()?.parses ?? const [];
     showAppleModalSheet<void>(
       context: context,
       title: '选集与线路 (${_currentLine.episodes.length})',
@@ -3427,10 +3489,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         initialLineIndex: _lineIndex,
         activeLineIndex: _lineIndex,
         activeEpisodeIndex: _episodeIndex,
+        episodeUnavailableReason: (ep) => _episodeUnavailableReason(ep, parses),
         onSelect: (lineIdx, epIdx) {
           Navigator.of(ctx).pop();
           _failedLinesForEpisode.clear();
-    _failedLiveEpisodes.clear();
+          _failedLiveEpisodes.clear();
           final sameEpisode = epIdx == _episodeIndex;
           final keepPos = sameEpisode
               ? (_position.inMilliseconds >= 1000
@@ -3495,6 +3558,7 @@ class _PlayerEpisodePickerSheet extends StatefulWidget {
   final int initialLineIndex;
   final int activeLineIndex;
   final int activeEpisodeIndex;
+  final String? Function(CmsEpisode episode)? episodeUnavailableReason;
   final void Function(int lineIndex, int episodeIndex) onSelect;
 
   const _PlayerEpisodePickerSheet({
@@ -3502,6 +3566,7 @@ class _PlayerEpisodePickerSheet extends StatefulWidget {
     required this.initialLineIndex,
     required this.activeLineIndex,
     required this.activeEpisodeIndex,
+    this.episodeUnavailableReason,
     required this.onSelect,
   });
 
@@ -3515,6 +3580,7 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
   late int _previewLineIndex;
   late int _groupIndex;
   bool _descending = false;
+  String? _blockedEpisodeNotice;
   final ScrollController _linesScrollController = ScrollController();
   final ScrollController _groupScrollController = ScrollController();
 
@@ -3557,6 +3623,20 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
     final screenSize = MediaQuery.sizeOf(context);
     final isLandscape = screenSize.width > screenSize.height;
     final crossAxisCount = isLandscape ? 5 : 3;
+    String? lineBlockedReason;
+    if (episodes.isNotEmpty && widget.episodeUnavailableReason != null) {
+      var allBlocked = true;
+      for (final ep in episodes) {
+        final r = widget.episodeUnavailableReason!(ep);
+        if (r == null) {
+          allBlocked = false;
+          break;
+        }
+        lineBlockedReason ??= r;
+      }
+      if (!allBlocked) lineBlockedReason = null;
+    }
+    final activeNotice = _blockedEpisodeNotice ?? lineBlockedReason;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
@@ -3580,21 +3660,29 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                       final line = widget.lines[i];
                       final selected = i == _previewLineIndex;
                       final isPlayingLine = i == widget.activeLineIndex;
+                      final isLineUnavailable = line.episodes.isNotEmpty &&
+                          widget.episodeUnavailableReason != null &&
+                          line.episodes.every(
+                            (e) => widget.episodeUnavailableReason!(e) != null,
+                          );
                       return Padding(
                         padding: const EdgeInsets.only(right: 8),
-                        child: GestureDetector(
-                          onTap: () {
-                            setState(() {
-                              _previewLineIndex = i;
-                              final newGroupCount = line.episodes.isEmpty
-                                  ? 1
-                                  : ((line.episodes.length - 1) ~/ _groupSize) +
-                                        1;
-                              if (_groupIndex >= newGroupCount) {
-                                _groupIndex = 0;
-                              }
-                            });
-                          },
+                        child: Opacity(
+                          opacity: isLineUnavailable ? 0.52 : 1.0,
+                          child: GestureDetector(
+                            onTap: () {
+                              setState(() {
+                                _previewLineIndex = i;
+                                _blockedEpisodeNotice = null;
+                                final newGroupCount = line.episodes.isEmpty
+                                    ? 1
+                                    : ((line.episodes.length - 1) ~/ _groupSize) +
+                                          1;
+                                if (_groupIndex >= newGroupCount) {
+                                  _groupIndex = 0;
+                                }
+                              });
+                            },
                           child: AnimatedContainer(
                             duration: const Duration(milliseconds: 200),
                             curve: Curves.easeOutCubic,
@@ -3656,6 +3744,7 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                               ],
                             ),
                           ),
+                        ),
                         ),
                       );
                     }),
@@ -3761,6 +3850,26 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
             ),
           ),
         ],
+          if (activeNotice != null) ...[
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              decoration: BoxDecoration(
+                color: const Color(0x26FF9F0A),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0x4DFF9F0A), width: 0.6),
+              ),
+              child: Text(
+                activeNotice,
+                style: const TextStyle(
+                  color: Color(0xFFFFD60A),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 10),
           // 剧集网格卡片
           Flexible(
@@ -3783,15 +3892,26 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                 itemBuilder: (ctx, idx) {
                   final epIndex = indices[idx];
                   final ep = episodes[epIndex];
+                  final unavailReason =
+                      widget.episodeUnavailableReason?.call(ep);
+                  final isUnavailable = unavailReason != null;
                   final selected =
+                      !isUnavailable &&
                       _previewLineIndex == widget.activeLineIndex &&
                       epIndex == widget.activeEpisodeIndex;
                   final parsed = _ParsedEpisodeLabel.parse(ep.name, epIndex);
                   final numBadge =
                       '#${(epIndex + 1).toString().padLeft(2, '0')}';
+                  final badgeText = isUnavailable ? '不可解析' : parsed.sizeBadge;
 
-                  return GestureDetector(
-                    onTap: () => widget.onSelect(_previewLineIndex, epIndex),
+                  final tile = GestureDetector(
+                    onTap: () {
+                      if (unavailReason != null) {
+                        setState(() => _blockedEpisodeNotice = unavailReason);
+                        return;
+                      }
+                      widget.onSelect(_previewLineIndex, epIndex);
+                    },
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 180),
                       padding: const EdgeInsets.symmetric(
@@ -3852,7 +3972,7 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                                 ),
                               ),
                               const Spacer(),
-                              if (parsed.sizeBadge.isNotEmpty)
+                              if (badgeText.isNotEmpty)
                                 Container(
                                   padding: const EdgeInsets.symmetric(
                                     horizontal: 5.5,
@@ -3865,7 +3985,7 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                                     borderRadius: BorderRadius.circular(5),
                                   ),
                                   child: Text(
-                                    parsed.sizeBadge,
+                                    badgeText,
                                     style: TextStyle(
                                       color: selected
                                           ? Colors.white
@@ -3895,6 +4015,9 @@ class _PlayerEpisodePickerSheetState extends State<_PlayerEpisodePickerSheet> {
                       ),
                     ),
                   );
+                  return isUnavailable
+                      ? Opacity(opacity: 0.48, child: tile)
+                      : tile;
                 },
               ),
             ),

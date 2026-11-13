@@ -2363,7 +2363,16 @@ class CmsClient {
           sourceHeaders: site.headers,
           sourceOrigin: _sourceCredentialOrigin(site),
         );
+      } else if (!resolved.isDirectPlayable) {
+        throw const FormatException('未能从网页或解析接口提取可播放视频流，请切换其他线路');
       }
+    } else if (!resolved.isDirectPlayable && !ownedLocalProxy) {
+      final blockReason = WebMediaResolver.episodeUnavailableReason(
+        resolved,
+        site: site,
+        parses: parses,
+      );
+      throw FormatException(blockReason ?? '当前剧集缺少可用解析配置，请切换其他线路');
     }
     return SourcePlayback.inheritSourceHeaders(resolved,
         sourceHeaders: site.headers, sourceOrigin: _sourceCredentialOrigin(site));

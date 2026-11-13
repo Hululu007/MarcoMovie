@@ -1,0 +1,14 @@
+{
+  "sites": [
+    {"key": "cms_direct_1", "name": "暴风直连CMS", "type": 1, "api": "https://bf.fixture.invalid/api.php/provide/vod/", "searchable": 1},
+    {"key": "cms_parse_no_playurl", "name": "官源聚合CMS(无内置解析)", "type": 1, "api": "https://guan.fixture.invalid/api.php/provide/vod/", "parse": 1, "playUrl": "", "searchable": 1},
+    {"key": "cms_parse_with_playurl", "name": "官源聚合CMS(含playUrl)", "type": 1, "api": "https://guan2.fixture.invalid/api.php/provide/vod/", "parse": 1, "playUrl": "https://jx.fixture.invalid/?url=", "searchable": 1},
+    {"key": "cms_xml_parse", "name": "老牌XML官源", "type": 0, "api": "https://xml.fixture.invalid/api.php", "parse": 1, "searchable": 1},
+    {"key": "cms_guanying_name", "name": "观影高清CMS", "type": 1, "api": "https://gy.fixture.invalid/api.php/provide/vod/", "searchable": 1},
+    {"key": "cms_m3u_vod", "name": "点播列表M3U", "type": 1, "api": "m3u_vod://https://list.fixture.invalid/movies.m3u", "searchable": 0},
+    {"key": "cms_emby", "name": "家庭媒体库Emby", "type": 1, "api": "emby://account/home-server", "searchable": 1},
+    {"key": "cms_catpaw", "name": "本地CatPaw节点", "type": 3, "api": "catpaw://local-bundle/spider/vod", "searchable": 1},
+    {"key": "cms_mydrive_builtin", "name": "内部网盘占位", "type": 3, "api": "csp_MyDrive", "searchable": 0},
+    {"key": "mydrive", "name": "禁用占位键", "type": 1, "api": "https://disabled.fixture.invalid/api", "searchable": 0}
+  ]
+}
