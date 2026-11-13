@@ -61,6 +61,51 @@ class EpisodeRealMeta {
 /// 4. Resolves real per-episode synopses (`分集剧情`), episode titles, and 16:9
 ///    episode frame covers via 360 Baike `tvplot`, Bilibili PGC `eps`, Bangumi
 ///    `/v0/episodes`, and Bing widescreen scene stills.
+/// A bounded Least-Recently-Used (LRU) [Map] implementation.
+///
+/// When the map reaches [capacity], inserting a new key evicts the
+/// least-recently-used entry. Reading an existing key via [operator []]
+/// refreshes its recency to Most Recently Used (MRU).
+class LruMap<K, V> extends MapBase<K, V> {
+  final int capacity;
+  final LinkedHashMap<K, V> _map = LinkedHashMap<K, V>();
+
+  LruMap([this.capacity = 500]) : assert(capacity > 0);
+
+  @override
+  V? operator [](Object? key) {
+    if (key == null) return null;
+    if (!_map.containsKey(key)) return null;
+    final value = _map.remove(key);
+    _map[key as K] = value as V;
+    return value;
+  }
+
+  @override
+  void operator []=(K key, V value) {
+    _map.remove(key);
+    while (_map.length >= capacity) {
+      _map.remove(_map.keys.first);
+    }
+    _map[key] = value;
+  }
+
+  @override
+  void clear() => _map.clear();
+
+  @override
+  Iterable<K> get keys => _map.keys;
+
+  @override
+  V? remove(Object? key) => _map.remove(key);
+
+  @override
+  int get length => _map.length;
+
+  @override
+  bool containsKey(Object? key) => _map.containsKey(key);
+}
+
 class PosterLoader {
   PosterLoader._();
 
@@ -101,13 +146,13 @@ class PosterLoader {
   static final Map<String, Future<Uint8List>> _inflight = {};
   static final Map<String, Future<Uint8List>> _inflightTitleBytes = {};
   static final Map<String, Future<Uint8List>> _inflightHdTitleBytes = {};
-  static final Map<String, List<String>> _titleCoverUrlsCache = {};
-  static final Map<String, List<String>> _verifiedTitleCoverUrlsCache = {};
-  static final Map<String, String> _titleSynopsisCache = {};
-  static final Map<String, List<String>> _seriesEpisodeStillsCache = {};
-  static final Map<String, List<String>> _seriesEpisodeCaptionsCache = {};
+  static final Map<String, List<String>> _titleCoverUrlsCache = LruMap(500);
+  static final Map<String, List<String>> _verifiedTitleCoverUrlsCache = LruMap(500);
+  static final Map<String, String> _titleSynopsisCache = LruMap(500);
+  static final Map<String, List<String>> _seriesEpisodeStillsCache = LruMap(500);
+  static final Map<String, List<String>> _seriesEpisodeCaptionsCache = LruMap(500);
   static final Map<String, Map<int, EpisodeRealMeta>> _seriesEpisodeMetaCache =
-      {};
+      LruMap(500);
   static final Map<String, Future<List<String>>> _inflightSeriesStills = {};
   static final Map<String, Future<Map<int, EpisodeRealMeta>>>
       _inflightEpisodeMeta = {};
@@ -115,10 +160,11 @@ class PosterLoader {
       _ratingsCache = LinkedHashMap<String, ({double? douban, int? rt})>();
   static final Map<String, Future<({double? douban, int? rt})>>
       _inflightRatings = {};
-  static final Map<String, ({String id, bool isTv})> _doubanSubjectIdCache = {};
-  static final Map<int, Color> _ambientColorCache = {};
-  static final Map<int, bool> _hdDimensionCache = {};
-  static final Map<int, bool> _clearDimensionCache = {};
+  static final Map<String, ({String id, bool isTv})> _doubanSubjectIdCache =
+      LruMap(500);
+  static final Map<int, Color> _ambientColorCache = LruMap(500);
+  static final Map<int, bool> _hdDimensionCache = LruMap(500);
+  static final Map<int, bool> _clearDimensionCache = LruMap(500);
   static int _active = 0;
   static final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
   static Directory? _diskDir;
@@ -713,6 +759,29 @@ class PosterLoader {
     return scoped.isEmpty ? '' : 'title:$scoped';
   }
 
+  /// Safely extracts image dimensions from encoded bytes using [ui.ImageDescriptor]
+  /// header parsing without decoding full raster pixel memory.
+  /// Guarantees immediate explicit disposal of both [ui.ImageDescriptor] and [ui.ImmutableBuffer].
+  static Future<({int width, int height})?> _decodeDimensions(
+    Uint8List bytes,
+  ) async {
+    try {
+      final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+      try {
+        final descriptor = await ui.ImageDescriptor.encoded(buffer);
+        try {
+          return (width: descriptor.width, height: descriptor.height);
+        } finally {
+          descriptor.dispose();
+        }
+      } finally {
+        buffer.dispose();
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Verifies whether [bytes] is already a clear, readable cover image (`>= 340x460`
   /// or `>= 160K` pixels or `>= 65KB`) so authentic CMS posters are kept intact
   /// rather than replaced by heuristic title searches.
@@ -722,20 +791,16 @@ class PosterLoader {
     final fp = _bytesFingerprint(bytes);
     final cached = _clearDimensionCache[fp];
     if (cached != null) return cached;
-    try {
-      final codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      final w = frame.image.width;
-      final h = frame.image.height;
-      frame.image.dispose();
-      final clear = (w >= 340 && h >= 460) || (w * h >= 160000);
+    final dims = await _decodeDimensions(bytes);
+    if (dims != null) {
+      final clear = (dims.width >= 340 && dims.height >= 460) ||
+          (dims.width * dims.height >= 160000);
       _clearDimensionCache[fp] = clear;
       return clear;
-    } catch (_) {
-      final fallback = bytes.length >= 42 * 1024;
-      _clearDimensionCache[fp] = fallback;
-      return fallback;
     }
+    final fallback = bytes.length >= 42 * 1024;
+    _clearDimensionCache[fp] = fallback;
+    return fallback;
   }
 
   /// Decodes the image header to verify whether [bytes] is a true high-definition
@@ -746,20 +811,16 @@ class PosterLoader {
     final fp = _bytesFingerprint(bytes);
     final cached = _hdDimensionCache[fp];
     if (cached != null) return cached;
-    try {
-      final codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      final w = frame.image.width;
-      final h = frame.image.height;
-      frame.image.dispose();
-      final isHd = (w >= 560 && h >= 760) || (w * h >= 450000);
+    final dims = await _decodeDimensions(bytes);
+    if (dims != null) {
+      final isHd = (dims.width >= 560 && dims.height >= 760) ||
+          (dims.width * dims.height >= 450000);
       _hdDimensionCache[fp] = isHd;
       return isHd;
-    } catch (_) {
-      final fallback = bytes.length >= 110 * 1024;
-      _hdDimensionCache[fp] = fallback;
-      return fallback;
     }
+    final fallback = bytes.length >= 110 * 1024;
+    _hdDimensionCache[fp] = fallback;
+    return fallback;
   }
 
   /// Synchronously peeks in-memory LRU cache so already-loaded posters render

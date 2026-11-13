@@ -98,6 +98,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   late final VideoController _controller;
   late Future<void> _playerConfiguration;
   final CmsClient _client = CmsClient();
+  final List<StreamSubscription<dynamic>> _playerSubscriptions = [];
 
   late List<CmsLine> _lines;
   late int _lineIndex;
@@ -255,15 +256,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
     _playerConfiguration = _applyPlayerKernel(_playerKernel);
 
-    _player.stream.width.listen((w) {
+    _playerSubscriptions.add(_player.stream.width.listen((w) {
       if (!mounted || w == null || w <= 0 || w == _videoWidth) return;
       setState(() => _videoWidth = w);
-    });
-    _player.stream.height.listen((h) {
+    }));
+    _playerSubscriptions.add(_player.stream.height.listen((h) {
       if (!mounted || h == null || h <= 0 || h == _videoHeight) return;
       setState(() => _videoHeight = h);
-    });
-    _player.stream.track.listen((track) {
+    }));
+    _playerSubscriptions.add(_player.stream.track.listen((track) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
       final vCodec = (track.video.codec ?? track.video.decoder ?? '').trim();
       final aCodec = (track.audio.codec ?? track.audio.decoder ?? '').trim();
@@ -274,8 +275,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (aCodec.isNotEmpty) _audioCodec = aCodec;
         });
       }
-    });
-    _player.stream.tracks.listen((tracks) {
+    }));
+    _playerSubscriptions.add(_player.stream.tracks.listen((tracks) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
       String pickCodec(Iterable<({String id, String? codec, String? decoder})> list) {
         for (final item in list) {
@@ -298,9 +299,9 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (_audioCodec.isEmpty && aCodec.isNotEmpty) _audioCodec = aCodec;
         });
       }
-    });
+    }));
 
-    _player.stream.position.listen((pos) {
+    _playerSubscriptions.add(_player.stream.position.listen((pos) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
       _startup.position(pos);
       final nextPos = (!_isDraggingSeek && !_isSliderDragging)
@@ -349,9 +350,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         _showHud('已自动跳过片尾 ${_skipOutroSec}s');
         _handleEpisodeEnd();
       }
-    });
+    }));
 
-    _player.stream.duration.listen((dur) {
+    _playerSubscriptions.add(_player.stream.duration.listen((dur) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
       if (!_isLiveStream && _currentEpisode.playbackSession['isTrial'] == true) {
         unawaited(
@@ -410,9 +411,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         _player.seek(Duration(seconds: _skipIntroSec));
         _showHud('已自动跳过片头 ${_skipIntroSec}s');
       }
-    });
+    }));
 
-    _player.stream.playing.listen((playing) {
+    _playerSubscriptions.add(_player.stream.playing.listen((playing) {
       if (mounted && _allowEvents && _matchesActiveMedia) {
         if (playing && widget.site.isEmby && _embySession == null) {
           _openCurrentEpisode(resumeMs: 0);
@@ -434,9 +435,9 @@ class _PlayerScreenState extends State<PlayerScreen>
           _embySession?.update(_position.inMilliseconds, !playing, force: true);
         }
       }
-    });
+    }));
 
-    _player.stream.buffering.listen((buffering) {
+    _playerSubscriptions.add(_player.stream.buffering.listen((buffering) {
       if (mounted && _allowEvents && _matchesActiveMedia) {
         _startup.updateState(buffering: buffering);
         setState(() => _buffering = buffering);
@@ -468,9 +469,9 @@ class _PlayerScreenState extends State<PlayerScreen>
           }
         }
       }
-    });
+    }));
 
-    _player.stream.completed.listen((completed) {
+    _playerSubscriptions.add(_player.stream.completed.listen((completed) {
       if (completed &&
           mounted &&
           _allowEvents &&
@@ -481,9 +482,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         unawaited(_saveProgress(completed: true, immediate: true));
         _handleEpisodeEnd();
       }
-    });
+    }));
 
-    _player.stream.error.listen((message) {
+    _playerSubscriptions.add(_player.stream.error.listen((message) {
       if (mounted &&
           _allowEvents &&
           _matchesActiveMedia &&
@@ -493,7 +494,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _position <= Duration.zero) {
         _failPlayback();
       }
-    });
+    }));
 
     _openCurrentEpisode(resumeMs: widget.initialPositionMs);
     _historyTimer = Timer.periodic(
@@ -1497,6 +1498,10 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    for (final sub in _playerSubscriptions) {
+      unawaited(sub.cancel());
+    }
+    _playerSubscriptions.clear();
     _playerFocusNode.dispose();
     _portraitToolsScrollController.dispose();
     _startup.cancel();
