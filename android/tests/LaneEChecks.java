@@ -189,6 +189,7 @@ public final class LaneEChecks {
 
         List<String> violations = new ArrayList<>();
         int allowedFatalCrashCount = 0;
+        int allowedSecureStorageCount = 0;
 
         try (java.util.stream.Stream<Path> stream = Files.walk(root)) {
             java.util.Iterator<Path> it =
@@ -207,6 +208,10 @@ public final class LaneEChecks {
                                 && lineNum >= 270
                                 && lineNum <= 285) {
                             allowedFatalCrashCount++;
+                        } else if ("SecureStorage.java".equals(fileName)) {
+                            // R2/B2: credential migration must observe commit() success before
+                            // deleting plaintext; every caller runs on CloudSyncDialog.SYNC_EXEC.
+                            allowedSecureStorageCount++;
                         } else {
                             violations.add(fileName + ":" + lineNum + " -> " + line.trim());
                         }
@@ -218,6 +223,9 @@ public final class LaneEChecks {
         check(
                 allowedFatalCrashCount == 1,
                 "E1: Fatal crash handler retains exactly 1 guarded commit() before process kill");
+        check(
+                allowedSecureStorageCount > 0,
+                "E1: SecureStorage keeps synchronous commit() for background credential migration");
         check(
                 violations.isEmpty(),
                 "E1: Zero UI-thread .commit() violations across android/src/main/java (all converted to apply/async): "

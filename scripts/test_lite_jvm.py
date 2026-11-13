@@ -1,4 +1,4 @@
-"""Compile LiteProbe against API14 and run JVM verification checks for TV Lite."""
+﻿"""Compile LiteProbe against API14 and run JVM verification checks for TV Lite."""
 import hashlib
 import os
 from pathlib import Path
@@ -242,7 +242,7 @@ def main():
         print(out.strip())
         # Pin the exact check count so accidentally skipped or deleted checks fail CI;
         # update this number in lockstep whenever checks are added to or removed from LiteJvmChecks.java.
-        assert 'PASS 132 TV Lite JVM checks' in out, f'Expected 132 TV Lite JVM checks, got: {out.strip()}'
+        assert 'PASS 161 TV Lite JVM checks' in out, f'Expected 161 TV Lite JVM checks, got: {out.strip()}'
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteCredentialProbe', capture=True).strip())
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteTlsChecks', capture=True).strip())
 

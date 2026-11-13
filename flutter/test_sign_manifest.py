@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'scripts' / 'sign_manifest.py'
-APP_UPDATE = ROOT / 'flutter' / 'src' / 'core' / 'app_update.dart'
+APP_UPDATE = ROOT / 'flutter' / 'lib' / 'core' / 'app_update.dart'
 
 
 class SignManifestCliChecks(unittest.TestCase):
