@@ -795,6 +795,20 @@ final class SettingsScreen {
                 () -> pick(46, "application/json", false));
         link("观看历史", "查看、继续播放或删除本机观看记录", "settings-history", () -> open(a::historyPage));
         link(
+                "重置观看历史（保留损坏备份）",
+                "清空本机观看记录并解除损坏锁定，已生成的本地备份继续保留",
+                "settings-reset-history",
+                () ->
+                        confirm(
+                                "重置观看历史（保留损坏备份）？",
+                                () -> {
+                                    java.util.List<WatchHistory.Entry> prev = a.watchHistory();
+                                    a.clearWatchHistory();
+                                    CloudSyncDialog.onHistoryCleared(a, prev);
+                                    a.toast("已重置观看历史");
+                                    a.refresh();
+                                }));
+        link(
                 "清除搜索记录",
                 "清除最近搜索，保留网盘登录",
                 "settings-clear-history",
@@ -1318,7 +1332,18 @@ final class SettingsScreen {
                 }) {
             if (settings.has(dataKey)) {
                 String cleanData = Prefs.sanitizeUserData(dataKey, settings.opt(dataKey));
-                if (cleanData != null) edit.putString(dataKey, cleanData);
+                if (cleanData != null) {
+                    if (Prefs.WATCH_HISTORY.equals(dataKey)) {
+                        WatchHistory.overwrite(
+                                cleanData,
+                                (json, corrupted) ->
+                                        edit.putString(Prefs.WATCH_HISTORY, json)
+                                                .putBoolean(
+                                                        WatchHistory.CORRUPTED_PREF, corrupted));
+                    } else {
+                        edit.putString(dataKey, cleanData);
+                    }
+                }
             }
         }
         edit.apply();

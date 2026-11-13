@@ -514,13 +514,19 @@ final class CloudSyncDialog {
                 CloudSync.merge(snap[0], snap[1], snap[2], localSubs, syncSubs, remoteJson, now);
 
         final boolean isHistCorrupt =
-                WatchHistory.isCorrupted() || a.prefs.getBoolean("watch_history_corrupted", false);
+                WatchHistory.isCorrupted()
+                        || a.prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
         runOnMainSync(
                 a,
                 () -> {
                     SharedPreferences.Editor ed = a.prefs.edit();
                     if (!isHistCorrupt) {
-                        ed.putString(Prefs.WATCH_HISTORY, res.historyJson);
+                        WatchHistory.overwrite(
+                                res.historyJson,
+                                (json, corrupted) ->
+                                        ed.putString(Prefs.WATCH_HISTORY, json)
+                                                .putBoolean(
+                                                        WatchHistory.CORRUPTED_PREF, corrupted));
                     }
                     ed.putString(Prefs.FAVORITES, res.favoritesJson)
                             .putString(Prefs.SYNC_TOMBSTONES, res.tombstonesJson)

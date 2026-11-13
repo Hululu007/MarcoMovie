@@ -102,9 +102,7 @@ public final class Cms {
             if (isNetdiskSite()) {
                 return STATUS_ADAPTER_MISSING;
             }
-            if (type == 3
-                    || (api != null && (api.startsWith("csp_") || api.endsWith(".js")))
-                    || (jar != null && !jar.isEmpty())) {
+            if (type == 3 || isScriptOrJarApi(api) || (jar != null && !jar.isEmpty())) {
                 return STATUS_NEEDS_JAR;
             }
             if (type != 0 && type != 1) {
@@ -601,8 +599,29 @@ public final class Cms {
 
     public static boolean isHtml(String s) {
         if (s == null) return false;
-        String t = s.trim().toLowerCase(Locale.ROOT);
+        String t = s.replaceFirst("^\\uFEFF", "").trim().toLowerCase(Locale.ROOT);
         return t.startsWith("<!doctype") || t.startsWith("<html");
+    }
+
+    static boolean isScriptOrJarApi(String api) {
+        if (api == null) return false;
+        String lower = api.trim().toLowerCase(Locale.ROOT).split("[?#]", 2)[0];
+        return lower.startsWith("csp_")
+                || lower.endsWith(".js")
+                || lower.endsWith(".mjs")
+                || lower.endsWith(".py")
+                || lower.endsWith(".jar");
+    }
+
+    static boolean hasXmlInUrlPath(String httpUrl) {
+        try {
+            String urlPath = new URL(normalizeHttp(httpUrl)).getPath();
+            if (urlPath == null) return false;
+            String lowerPath = urlPath.toLowerCase(Locale.ROOT);
+            return lowerPath.contains("xml") || lowerPath.endsWith(".xml");
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     public static Config parseConfig(String text, String origin) throws Exception {
@@ -704,7 +723,7 @@ public final class Cms {
                     Warehouse.resolve(
                             text,
                             origin,
-                            url -> fetch(url, null),
+                            Cms::fetchImport,
                             raw -> new JSONObject(withoutComments(raw)),
                             (raw, base) -> parseConfig(raw, base));
             return parseConfig(resolved, origin);
@@ -777,16 +796,18 @@ public final class Cms {
             if (!keys.add(s.key)) s.key = s.key + "-" + i;
             s.type = Json.integer(j, "type", -1);
             s.api = resolve(origin, Json.str(j, "api", ""));
-            if (s.type == -1 && isHttp(s.api)) {
-                String path = s.api.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
-                s.type = (path.contains("xml") || path.endsWith(".xml")) ? 0 : 1;
-            }
             String rawJar = Json.str(j, "jar", "");
             if (!rawJar.isEmpty()) {
                 String[] jarParts = rawJar.split(";md5;", 2);
                 s.jar =
                         resolve(origin, jarParts[0])
                                 + (jarParts.length == 2 ? ";md5;" + jarParts[1] : "");
+            }
+            if (s.type == -1
+                    && isHttp(s.api)
+                    && (s.jar == null || s.jar.isEmpty())
+                    && !isScriptOrJarApi(s.api)) {
+                s.type = hasXmlInUrlPath(s.api) ? 0 : 1;
             }
             s.playUrl = Json.str(j, "playUrl", "");
             if (s.playUrl.isEmpty()
@@ -1144,32 +1165,36 @@ public final class Cms {
         return fetch(address, headers, form, USER_AGENT);
     }
 
+    static final class HttpStatusException extends IOException {
+        final int status;
+
+        HttpStatusException(int status) {
+            super("来源返回 HTTP " + status);
+            this.status = status;
+        }
+    }
+
     public static String fetchImport(String address) throws Exception {
-        String[] uas = new String[] {USER_AGENT, SAFARI_USER_AGENT};
-        Exception firstError = null;
-        boolean sawHtml = false;
-        for (String ua : uas) {
-            try {
-                Map<String, String> headers = new LinkedHashMap<>();
-                headers.put("User-Agent", ua);
-                String result = fetch(address, headers, null, ua);
-                if (isHtml(result)) {
-                    sawHtml = true;
-                    firstError = new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
-                    continue;
-                }
+        Map<String, String> headers = new LinkedHashMap<>();
+        headers.put("User-Agent", USER_AGENT);
+        String result;
+        try {
+            result = fetch(address, headers, null, USER_AGENT);
+            if (!isHtml(result)) {
                 return result;
-            } catch (Exception e) {
-                if (e.getMessage() != null && e.getMessage().contains("地址返回的是网页而不是配置")) {
-                    sawHtml = true;
-                }
-                firstError = e;
+            }
+        } catch (HttpStatusException e) {
+            if (e.status != 403) {
+                throw e;
             }
         }
-        if (sawHtml) {
+        Map<String, String> fallbackHeaders = new LinkedHashMap<>();
+        fallbackHeaders.put("User-Agent", SAFARI_USER_AGENT);
+        result = fetch(address, fallbackHeaders, null, SAFARI_USER_AGENT);
+        if (isHtml(result)) {
             throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
         }
-        throw firstError != null ? firstError : new IOException("无法连接配置地址");
+        return result;
     }
 
     static final class RedirectCookie {
@@ -1381,23 +1406,14 @@ public final class Cms {
                     next = target;
                     continue;
                 }
-                if (status < 200 || status >= 300) throw new IOException("来源返回 HTTP " + status);
-                String contentType = c.getContentType();
-                boolean isHtmlContentType =
-                        contentType != null
-                                && contentType.toLowerCase(Locale.ROOT).contains("text/html");
+                if (status < 200 || status >= 300) throw new HttpStatusException(status);
                 InputStream rawIn = c.getInputStream();
                 if ("gzip".equalsIgnoreCase(c.getContentEncoding())) {
                     rawIn = new java.util.zip.GZIPInputStream(rawIn);
                 }
-                String result;
                 try (InputStream input = rawIn) {
-                    result = read(input, MAX_JSON);
+                    return read(input, MAX_JSON);
                 }
-                if (isHtmlContentType || isHtml(result)) {
-                    throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
-                }
-                return result;
             } finally {
                 RequestScope.detach(c);
                 c.disconnect();
@@ -1595,8 +1611,8 @@ public final class Cms {
                     JSONObject p = playList.optJSONObject(i);
                     if (p == null) continue;
                     String u = Json.str(p, "url", "");
-                    if (u.isEmpty() && p.optJSONObject("urls") != null) {
-                        JSONObject urlsObj = p.getJSONObject("urls");
+                    JSONObject urlsObj = p.optJSONObject("urls");
+                    if (u.isEmpty() && urlsObj != null) {
                         List<String> segs = new ArrayList<>();
                         Iterator<String> it = urlsObj.keys();
                         while (it.hasNext()) {

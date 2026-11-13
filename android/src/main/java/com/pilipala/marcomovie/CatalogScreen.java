@@ -289,7 +289,7 @@ final class CatalogScreen {
                         "清空",
                         (d, n) -> {
                             List<WatchHistory.Entry> prev = a.watchHistory();
-                            a.prefs.edit().remove(Prefs.WATCH_HISTORY).apply();
+                            a.clearWatchHistory();
                             CloudSyncDialog.onHistoryCleared(a, prev);
                             a.refresh();
                         })
@@ -325,7 +325,18 @@ final class CatalogScreen {
         a.renderPage("观看历史", "CONTINUE WATCHING");
         List<WatchHistory.Entry> entries = a.watchHistory();
         if (entries.isEmpty()) {
-            a.paragraph("播放后会在这里记录集数和进度。");
+            boolean corrupted =
+                    WatchHistory.isCorrupted()
+                            || a.prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
+            a.paragraph(corrupted ? "观看历史数据异常，已暂停更新并保留本地损坏备份。可重置历史后恢复记录。" : "播放后会在这里记录集数和进度。");
+            if (corrupted) {
+                a.addButton(
+                        a.body,
+                        a.navButton(
+                                "重置观看历史（保留损坏备份）",
+                                "history-reset-corrupted",
+                                () -> confirmClearHistory(a)));
+            }
             if (!a.privateMode) {
                 a.addButton(
                         a.body,

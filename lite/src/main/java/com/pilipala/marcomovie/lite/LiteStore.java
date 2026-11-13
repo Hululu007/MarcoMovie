@@ -17,6 +17,7 @@ public final class LiteStore {
     private static final String KEY_FAVORITES = "favorites_v1";
     private static final String KEY_SEARCH_HISTORY = "search_history_v1";
     private static final String KEY_SYNC_TOMBSTONES = "sync_tombstones_v1";
+    public static final String KEY_HISTORY_CORRUPTED = "watch_history_corrupted";
     public static final int MAX_HISTORY = 40;
     public static final int MAX_FAVORITES = 100;
     public static final int MAX_SEARCH_HISTORY = 16;
@@ -26,8 +27,24 @@ public final class LiteStore {
         return historyCorrupted;
     }
 
+    public static boolean isHistoryCorrupted(Context context) {
+        return isHistoryCorrupted(context == null ? null : prefs(context));
+    }
+
+    public static boolean isHistoryCorrupted(SharedPreferences sp) {
+        if (sp != null && sp.getBoolean(KEY_HISTORY_CORRUPTED, false)) {
+            historyCorrupted = true;
+        }
+        return historyCorrupted;
+    }
+
     public static void setHistoryCorrupted(boolean corrupted) {
         historyCorrupted = corrupted;
+    }
+
+    public static String clearHistoryJson() {
+        historyCorrupted = false;
+        return "[]";
     }
 
     public static boolean isMalformedHistory(String raw) {
@@ -139,14 +156,23 @@ public final class LiteStore {
     }
 
     public static List<HistoryEntry> getHistory(Context context) {
-        return parseHistoryJson(context, prefs(context).getString(KEY_HISTORY, "[]"));
+        return getHistory(context == null ? null : prefs(context));
+    }
+
+    public static List<HistoryEntry> getHistory(SharedPreferences sp) {
+        if (sp == null) return new ArrayList<HistoryEntry>();
+        return parseHistoryJson(sp, sp.getString(KEY_HISTORY, "[]"));
     }
 
     public static List<HistoryEntry> parseHistoryJson(String raw) {
-        return parseHistoryJson(null, raw);
+        return parseHistoryJson((SharedPreferences) null, raw);
     }
 
     public static List<HistoryEntry> parseHistoryJson(Context context, String raw) {
+        return parseHistoryJson(context == null ? null : prefs(context), raw);
+    }
+
+    public static List<HistoryEntry> parseHistoryJson(SharedPreferences sp, String raw) {
         List<HistoryEntry> out = new ArrayList<HistoryEntry>();
         if (raw == null) return out;
         String t = raw.trim();
@@ -160,18 +186,21 @@ public final class LiteStore {
                 }
             }
         } catch (Exception e) {
+            boolean alreadyCorrupted =
+                    historyCorrupted || (sp != null && sp.getBoolean(KEY_HISTORY_CORRUPTED, false));
             historyCorrupted = true;
-            if (context != null) {
+            if (!alreadyCorrupted && sp != null) {
                 long ts = System.currentTimeMillis();
-                prefs(context)
-                        .edit()
+                sp.edit()
                         .putString("watch_history_corrupt_" + ts, raw)
-                        .putBoolean("watch_history_corrupted", true)
-                        .commit();
+                        .putBoolean(KEY_HISTORY_CORRUPTED, true)
+                        .apply();
             }
             try {
-                android.util.Log.w("LiteStore", "History JSON corrupted, parse failed: " + e.getMessage());
-            } catch (Throwable ignored) {
+                android.util.Log.w(
+                        "LiteStore", "History JSON corrupted, parse failed: " + e.getMessage());
+            } catch (Throwable stubUnavailable) {
+                if (stubUnavailable instanceof Error) throw (Error) stubUnavailable;
             }
         }
         return out;
@@ -205,15 +234,19 @@ public final class LiteStore {
     }
 
     public static void saveHistory(Context context, HistoryEntry entry) {
-        if (context == null || entry == null) return;
-        if (historyCorrupted
-                || (context != null
-                        && prefs(context).getBoolean("watch_history_corrupted", false))) {
+        if (context == null) return;
+        saveHistory(prefs(context), entry);
+    }
+
+    public static void saveHistory(SharedPreferences sp, HistoryEntry entry) {
+        if (sp == null || entry == null) return;
+        if (isHistoryCorrupted(sp)) {
             return;
         }
-        SharedPreferences sp = prefs(context);
         String updated = recordHistoryJson(sp.getString(KEY_HISTORY, "[]"), entry);
-        sp.edit().putString(KEY_HISTORY, updated).commit();
+        if (!isHistoryCorrupted()) {
+            sp.edit().putString(KEY_HISTORY, updated).apply();
+        }
     }
 
     public static HistoryEntry findHistory(Context context, String siteKey, String vodId) {
@@ -227,6 +260,7 @@ public final class LiteStore {
     }
 
     public static void removeHistory(Context context, String siteKey, String vodId) {
+        if (context == null || isHistoryCorrupted(context)) return;
         List<HistoryEntry> current = getHistory(context);
         JSONArray next = new JSONArray();
         try {
@@ -236,13 +270,26 @@ public final class LiteStore {
                     next.put(old.toJson());
                 }
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            return;
         }
-        prefs(context).edit().putString(KEY_HISTORY, next.toString()).commit();
+        if (!isHistoryCorrupted()) {
+            prefs(context).edit().putString(KEY_HISTORY, next.toString()).apply();
+        }
     }
 
     public static void clearHistory(Context context) {
-        prefs(context).edit().putString(KEY_HISTORY, "[]").commit();
+        clearHistory(context == null ? null : prefs(context));
+    }
+
+    public static void clearHistory(SharedPreferences sp) {
+        historyCorrupted = false;
+        if (sp != null) {
+            sp.edit()
+                    .putString(KEY_HISTORY, "[]")
+                    .putBoolean(KEY_HISTORY_CORRUPTED, false)
+                    .apply();
+        }
     }
 
     public static List<FavoriteEntry> getFavorites(Context context) {
@@ -352,7 +399,21 @@ public final class LiteStore {
     }
 
     public static void setHistoryRaw(Context context, String raw) {
-        prefs(context).edit().putString(KEY_HISTORY, raw == null ? "[]" : raw).commit();
+        setHistoryRaw(context == null ? null : prefs(context), raw);
+    }
+
+    public static void setHistoryRaw(SharedPreferences sp, String raw) {
+        String normalized = raw == null || raw.trim().length() == 0 ? "[]" : raw.trim();
+        if (isMalformedHistory(normalized)) {
+            return;
+        }
+        historyCorrupted = false;
+        if (sp != null) {
+            sp.edit()
+                    .putString(KEY_HISTORY, normalized)
+                    .putBoolean(KEY_HISTORY_CORRUPTED, false)
+                    .apply();
+        }
     }
 
     public static String getFavoritesRaw(Context context) {

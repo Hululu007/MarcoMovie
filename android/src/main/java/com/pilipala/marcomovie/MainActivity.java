@@ -586,7 +586,7 @@ public final class MainActivity extends Activity {
             applyMobileSystemBars(false);
         }
         prefs = getSharedPreferences(privateMode ? "movie-private" : Prefs.FILE, MODE_PRIVATE);
-        WatchHistory.historyCorrupted = prefs.getBoolean("watch_history_corrupted", false);
+        WatchHistory.historyCorrupted = prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
         if (WatchHistory.historyCorrupted) {
             ui.post(() -> toast("检测到观看历史数据损坏，已自动备份至本地。为保护数据，已暂停历史更新与云端覆盖。"));
         }
@@ -1674,15 +1674,40 @@ public final class MainActivity extends Activity {
     }
 
     java.util.List<WatchHistory.Entry> watchHistory() {
-        return privateMode
-                ? java.util.Collections.emptyList()
-                : WatchHistory.read(
-                        prefs.getString(Prefs.WATCH_HISTORY, "[]"),
-                        (key, raw) ->
+        if (privateMode) return java.util.Collections.emptyList();
+        if (prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false)) {
+            WatchHistory.setCorrupted(true);
+        }
+        return WatchHistory.read(
+                prefs.getString(Prefs.WATCH_HISTORY, "[]"),
+                (key, raw) -> {
+                    if (!prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false)) {
+                        prefs.edit()
+                                .putString(key, raw)
+                                .putBoolean(WatchHistory.CORRUPTED_PREF, true)
+                                .apply();
+                    }
+                });
+    }
+
+    void clearWatchHistory() {
+        WatchHistory.clear(
+                (json, corrupted) ->
+                        prefs.edit()
+                                .putString(Prefs.WATCH_HISTORY, json)
+                                .putBoolean(WatchHistory.CORRUPTED_PREF, corrupted)
+                                .apply());
+    }
+
+    boolean overwriteWatchHistory(String validJson) {
+        return WatchHistory.overwrite(
+                        validJson,
+                        (json, corrupted) ->
                                 prefs.edit()
-                                        .putString(key, raw)
-                                        .putBoolean("watch_history_corrupted", true)
-                                        .apply());
+                                        .putString(Prefs.WATCH_HISTORY, json)
+                                        .putBoolean(WatchHistory.CORRUPTED_PREF, corrupted)
+                                        .apply())
+                != null;
     }
 
     void savePlaybackHistory(boolean force) {

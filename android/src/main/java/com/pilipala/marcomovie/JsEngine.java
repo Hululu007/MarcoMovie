@@ -99,25 +99,51 @@ public final class JsEngine implements SourceEngine {
         if (s.type != 3) return false;
         if (checkedScript) return true;
         if (s.api == null) return false;
+        if (s.api.trim().toLowerCase(Locale.ROOT).startsWith("csp_")) return false;
         if (s.api.startsWith("file://")) {
             return s.api.split("[?#]", 2)[0].toLowerCase(Locale.ROOT).matches(".*\\.(m?js|py)");
         }
         if (Cms.isHttp(s.api)) {
             String clean = s.api.split("[?#]", 2)[0];
-            String path = clean;
-            try {
-                path = new URL(clean).getPath();
-            } catch (Exception ignored) {
-            }
             String lowerClean = clean.toLowerCase(Locale.ROOT);
-            String lowerPath = path.toLowerCase(Locale.ROOT);
-            if (lowerClean.endsWith(".jar") || lowerPath.endsWith(".jar")) return false;
-            if (clean.startsWith("csp_")
-                    || lowerPath.contains("/csp_")
-                    || lowerPath.startsWith("csp_")) return false;
+            if (lowerClean.endsWith(".jar")) return false;
+            try {
+                String path = new URL(clean).getPath();
+                if (path != null && path.toLowerCase(Locale.ROOT).endsWith(".jar")) return false;
+            } catch (MalformedURLException e) {
+                return false;
+            }
             return true;
         }
         return false;
+    }
+
+    static boolean hasRecognizedScriptExtension(String api) {
+        if (api == null) return false;
+        String clean = api.trim().split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
+        return clean.endsWith(".js") || clean.endsWith(".mjs") || clean.endsWith(".py");
+    }
+
+    static IOException wrapScriptLoadFailure(
+            Cms.Site site, boolean inlinePython, boolean checkedScript, Exception cause) {
+        if (!inlinePython
+                && !checkedScript
+                && (site == null || !hasRecognizedScriptExtension(site.api))) {
+            if (cause instanceof IOException
+                    && cause.getMessage() != null
+                    && cause.getMessage().contains("脚本类型无法识别")) {
+                return (IOException) cause;
+            }
+            String detail = cause == null ? "" : cause.getMessage();
+            String msg =
+                    detail == null || detail.trim().isEmpty()
+                            ? "脚本类型无法识别：无扩展名来源按 JavaScript 执行失败"
+                            : "脚本类型无法识别：" + detail;
+            return cause == null ? new IOException(msg) : new IOException(msg, cause);
+        }
+        if (cause instanceof IOException) return (IOException) cause;
+        return new IOException(
+                cause == null || cause.getMessage() == null ? "脚本加载失败" : cause.getMessage(), cause);
     }
 
     public JsEngine(Application application, Cms.Config config, Cms.Site selected)
@@ -421,43 +447,63 @@ public final class JsEngine implements SourceEngine {
                                             + JSONObject.quote(packageData.toString())
                                             + ")")
                             + ");void 0;");
-        } else if (catApi) {
-            context.evaluate(source, site.api);
-            context.evaluate(
-                    "globalThis.__movieSpider=__movieSelectSpider(__jsEvalReturn(),{preserveInit:true});");
-        } else if (isEsModule(source))
-            context.evaluateModule(
-                    "import * as spider from "
-                            + JSONObject.quote(site.api)
-                            + ";globalThis.__movieSpider=__movieSelectSpider(spider,"
-                            + spiderOptions
-                            + ");",
-                    site.api + ".host-entry.mjs");
-        else if (isCommonJs(source)) {
-            bind(
-                    global,
-                    "__hostCommonJsModule",
-                    args -> commonJsModule(string(args, 0), string(args, 1)));
-            context.evaluate(
-                    "globalThis.__movieSpider=__movieSelectSpider(__movieLoadCommonJS("
-                            + JSONObject.quote(site.api)
-                            + ",(name,parent)=>JSON.parse(__hostCommonJsModule(name,parent))),"
-                            + spiderOptions
-                            + ");void 0;",
-                    "commonjs-entry.js");
-        } else throw new IOException("脚本没有兼容的 Spider 模块入口；DRPY rule 需要对应宿主适配");
+        } else {
+            try {
+                if (catApi) {
+                    context.evaluate(source, site.api);
+                    context.evaluate(
+                            "globalThis.__movieSpider=__movieSelectSpider(__jsEvalReturn(),{preserveInit:true});");
+                } else if (isEsModule(source)) {
+                    context.evaluateModule(
+                            "import * as spider from "
+                                    + JSONObject.quote(site.api)
+                                    + ";globalThis.__movieSpider=__movieSelectSpider(spider,"
+                                    + spiderOptions
+                                    + ");",
+                            site.api + ".host-entry.mjs");
+                } else if (isCommonJs(source)) {
+                    bind(
+                            global,
+                            "__hostCommonJsModule",
+                            args -> commonJsModule(string(args, 0), string(args, 1)));
+                    context.evaluate(
+                            "globalThis.__movieSpider=__movieSelectSpider(__movieLoadCommonJS("
+                                    + JSONObject.quote(site.api)
+                                    + ",(name,parent)=>JSON.parse(__hostCommonJsModule(name,parent))),"
+                                    + spiderOptions
+                                    + ");void 0;",
+                            "commonjs-entry.js");
+                } else if (!checkedScript && !hasRecognizedScriptExtension(site.api)) {
+                    throw new IOException("脚本类型无法识别：未检测到有效的 JavaScript Spider 入口");
+                } else {
+                    throw new IOException("脚本没有兼容的 Spider 模块入口；DRPY rule 需要对应宿主适配");
+                }
+            } catch (Exception e) {
+                if (!checkedScript && !hasRecognizedScriptExtension(site.api)) {
+                    throw wrapScriptLoadFailure(site, false, false, e);
+                }
+                throw e;
+            }
+        }
         Object ext = inlinePython || checkedScript || site.ext == null ? "" : site.ext;
         String value =
                 ext instanceof JSONObject || ext instanceof JSONArray
                         ? ext.toString()
                         : JSONObject.quote(String.valueOf(ext));
         if (catApi) value = "{stype:3,skey:" + JSONObject.quote(site.key) + ",ext:" + value + "}";
-        evaluateSettled(
-                context,
-                "(async()=>{if(typeof __movieSpider.init==='function') await __movieSpider.init("
-                        + value
-                        + ");if(typeof __movieSpider.getRule==='function'){const r=await __movieSpider.getRule();if(!r||(!r.host&&!r.title&&!r.class_name))throw new Error('DRPY rule failed to initialize');}})()",
-                "source-init.js");
+        try {
+            evaluateSettled(
+                    context,
+                    "(async()=>{if(typeof __movieSpider.init==='function') await __movieSpider.init("
+                            + value
+                            + ");if(typeof __movieSpider.getRule==='function'){const r=await __movieSpider.getRule();if(!r||(!r.host&&!r.title&&!r.class_name))throw new Error('DRPY rule failed to initialize');}})()",
+                    "source-init.js");
+        } catch (Exception e) {
+            if (!inlinePython && !checkedScript && !hasRecognizedScriptExtension(site.api)) {
+                throw wrapScriptLoadFailure(site, false, false, e);
+            }
+            throw e;
+        }
         checkBudget();
         initialized = true;
     }
