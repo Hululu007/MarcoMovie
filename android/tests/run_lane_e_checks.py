@@ -2,12 +2,16 @@
 from pathlib import Path
 import os
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from java_dependencies import ensure_json_jar
 
 ROOT = Path(__file__).resolve().parents[2]
 JDK = Path(os.environ.get('MARCOMOVIE_JDK') or os.environ.get('JAVA_HOME', 'missing-jdk'))
 SUFFIX = '.exe' if os.name == 'nt' else ''
-JSON_JAR = ROOT / 'android/tests/lib/json-20240303.jar'
+JSON_JAR = ensure_json_jar()
 
 SOURCES = [
     ROOT / 'shared/java/com/pilipala/source/Json.java',
@@ -34,4 +38,4 @@ with tempfile.TemporaryDirectory(prefix='lane-e-checks-') as out:
         '-Dfile.encoding=UTF-8',
         '-cp', out + os.pathsep + str(JSON_JAR),
         'com.pilipala.marcomovie.LaneEChecks'
-    ], check=True)
+    ], cwd=ROOT, check=True)

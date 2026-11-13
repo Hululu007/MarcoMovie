@@ -3,13 +3,16 @@
 from pathlib import Path
 import os
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from java_dependencies import ensure_java_dependencies, ensure_json_jar
 
 ROOT = Path(__file__).resolve().parents[2]
 JDK = Path(os.environ.get("MARCOMOVIE_JDK") or os.environ["JAVA_HOME"]) / "bin"
-JSON_JAR = ROOT / "android/tests/lib/json-20240303.jar"
-OKHTTP_JAR = ROOT / "tools/java-dependencies/okhttp-3.14.9.jar"
-OKIO_JAR = ROOT / "tools/java-dependencies/okio-1.17.2.jar"
+JSON_JAR = ensure_json_jar()
+OKHTTP_JAR, OKIO_JAR = ensure_java_dependencies("OkHttp", "Okio")
 CLASSPATH = os.pathsep.join([str(JSON_JAR), str(OKHTTP_JAR), str(OKIO_JAR)])
 SUFFIX = ".exe" if os.name == "nt" else ""
 

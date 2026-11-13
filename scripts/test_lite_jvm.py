@@ -2,7 +2,6 @@
 import hashlib
 import os
 from pathlib import Path
-import re
 import subprocess
 import tempfile
 import urllib.request
@@ -40,6 +39,10 @@ public final class Base64 {
         }
         while (cleaned.length() % 4 != 0) cleaned += "=";
         return java.util.Base64.getDecoder().decode(cleaned);
+    }
+
+    public static byte[] decode(byte[] input, int flags) {
+        return decode(new String(input, java.nio.charset.StandardCharsets.US_ASCII), flags);
     }
 
     public static String encodeToString(byte[] input, int flags) {
@@ -237,7 +240,9 @@ def main():
         run_cp = sep.join([str(jvm_classes), str(BUILD / 'classes.jar'), str(json_jar), str(API14)])
         out = run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteJvmChecks', capture=True)
         print(out.strip())
-        assert re.search(r'PASS \d+ TV Lite JVM checks', out)
+        # Pin the exact check count so accidentally skipped or deleted checks fail CI;
+        # update this number in lockstep whenever checks are added to or removed from LiteJvmChecks.java.
+        assert 'PASS 132 TV Lite JVM checks' in out, f'Expected 132 TV Lite JVM checks, got: {out.strip()}'
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteCredentialProbe', capture=True).strip())
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteTlsChecks', capture=True).strip())
 

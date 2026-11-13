@@ -92,6 +92,8 @@ final class Prefs {
     static final String VIDEO_SKIP_RECORDS = "video_skip_records";
     static final String PLAYER_ALWAYS_SHOW_CLOCK = "player_always_show_clock";
 
+    // Appearance & playback settings exported/restored in backups; update the Prefs.KEYS.length
+    // assertion in ReviewFixChecks.java whenever keys are added or removed.
     static final String[] KEYS = {
         UI_SCALE_PERCENT,
         NAV_SCALE_PERCENT,
@@ -130,8 +132,7 @@ final class Prefs {
         AUDIO_EFFECT,
         SEARCH_THREADS,
         SEARCH_TIMEOUT,
-        EPISODES_DESCENDING,
-        ONLY_ALLOW_HTTPS_PLUGINS
+        EPISODES_DESCENDING
     };
 
     private static final Set<String> BOOLEAN_KEYS =
@@ -149,8 +150,7 @@ final class Prefs {
                                     SOFTWARE_AUDIO,
                                     PREFER_AAC,
                                     TUNNELED_PLAYBACK,
-                                    EPISODES_DESCENDING,
-                                    ONLY_ALLOW_HTTPS_PLUGINS)));
+                                    EPISODES_DESCENDING)));
 
     private static final Map<String, int[]> INT_RANGES;
 
