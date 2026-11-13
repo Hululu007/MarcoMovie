@@ -3,12 +3,12 @@
     {
       "key": "missing_json",
       "name": "Auto JSON Site",
-      "api": "https://cms.example.com/api.php/provide/vod"
+      "api": "https://cms.example/api.php/provide/vod"
     },
     {
       "key": "missing_xml",
       "name": "Auto XML Site",
-      "api": "https://cms.example.com/api.php/provide/vod/at/xml"
+      "api": "https://cms.example/api.php/provide/vod/at/xml"
     }
   ]
 }

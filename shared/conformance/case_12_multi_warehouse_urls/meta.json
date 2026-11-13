@@ -1,5 +1,5 @@
 {
-  "origin": "https://hub.example.com/warehouse/index.json",
+  "origin": "https://hub.example/warehouse/index.json",
   "type": "config",
   "encoding": "utf-8"
 }

@@ -175,6 +175,12 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 500));
       expect(find.byType(SourceChoiceSliver), findsOneWidget);
+      expect(find.text('切换片源 (可用 1 / 共 2)'), findsOneWidget);
+      expect(find.text('全部'), findsOneWidget);
+      expect(find.text('2'), findsOneWidget);
+      expect(find.text('默认分组'), findsAtLeastNWidgets(1));
+      expect(find.text('扩展分组'), findsAtLeastNWidgets(1));
+      expect(find.text('1'), findsNWidgets(2));
       final favorite = find.byKey(const ValueKey('source-preference-long'));
       expect(favorite, findsOneWidget);
       await tester.ensureVisible(favorite);
@@ -191,6 +197,9 @@ void main() {
       await tester.enterText(find.byType(EditableText).first, '未移植');
       await tester.pumpAndSettle();
       expect(find.text('未移植测试线路'), findsOneWidget);
+      expect(find.text('扩展分组'), findsAtLeastNWidgets(1));
+      expect(find.text('1'), findsAtLeastNWidgets(1));
+      expect(find.text('切换片源 (可用 1 / 共 2)'), findsOneWidget);
       expect(find.text('未适配'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());

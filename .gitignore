@@ -5,7 +5,9 @@ dist/
 android/build/
 android/tests/*classes/
 android/tests/*compile/
-android/tests/lib/
+android/tests/lib/*
+!android/tests/lib/aosp-json/
+!android/tests/lib/aosp-json/**
 android/tests/*results.txt
 __pycache__/
 *.pyc

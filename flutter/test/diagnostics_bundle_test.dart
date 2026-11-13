@@ -2,7 +2,6 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:marco_movie/core/app_log.dart';
 import 'package:marco_movie/ui/apple_theme.dart';
 
 void main() {

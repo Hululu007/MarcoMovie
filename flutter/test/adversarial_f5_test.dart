@@ -152,19 +152,6 @@ void main() {
     });
 
     test('Adversarial 6: Canonical JSON tamper resistance - altering version, URL, or hash', () {
-      // Construct a valid signed payload using test key
-      // Vector 2 test key:
-      // PubKey: 3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c
-      // Message: 0x72
-      // Sig: 92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00
-      final v2PubKeyHex = '3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c';
-      final v2SigB64 = base64Encode(fromHex(
-        '92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da'
-        '085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00',
-      ));
-
-      // For Vector 2, message was single byte 0x72 = ASCII 'r'
-      // In canonical JSON, a string "r" encodes as '"r"' which is 3 bytes, so let's verify canonical JSON rules:
       final baseManifest = {
         'version': '0.5.25',
         'platform': 'windows',

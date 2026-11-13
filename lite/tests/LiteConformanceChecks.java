@@ -38,21 +38,6 @@ public final class LiteConformanceChecks {
         }
     }
 
-    private static boolean isDirectStreamUrl(String value) {
-        if (value == null || value.isEmpty()) return false;
-        String lower = value.trim().toLowerCase(Locale.ROOT);
-        String path = lower.split("[?#]", 2)[0];
-        return path.endsWith(".m3u8")
-                || path.endsWith(".mp4")
-                || path.endsWith(".flv")
-                || path.endsWith(".mkv")
-                || path.endsWith(".ts")
-                || path.endsWith(".webm")
-                || path.endsWith(".mpd")
-                || lower.contains(".m3u8?")
-                || lower.contains(".mp4?");
-    }
-
     private static JSONObject applyPlatformOverrides(JSONObject expected, String platform) throws Exception {
         JSONObject copy = new JSONObject(expected.toString());
         JSONObject overrides = copy.optJSONObject("platformOverrides");
@@ -166,115 +151,33 @@ public final class LiteConformanceChecks {
             for (int i = 0; i < list.length(); i++) {
                 JSONObject item = list.getJSONObject(i);
                 JSONObject vObj = new JSONObject();
-                vObj.put("id", item.optString("vod_id", item.optString("id", "")));
-                vObj.put("title", item.optString("vod_name", item.optString("title", "")));
-                List<JSONObject> linesList = new ArrayList<>();
-                if (item.has("vod_play_list")) {
-                    JSONArray playList = item.optJSONArray("vod_play_list");
-                    if (playList != null) {
-                        for (int j = 0; j < playList.length(); j++) {
-                            JSONObject lineObj = playList.getJSONObject(j);
-                            JSONObject lObj = new JSONObject();
-                            JSONObject pInfo = lineObj.optJSONObject("player_info");
-                            String lineName = pInfo != null
-                                ? pInfo.optString("show", pInfo.optString("from", "线路 " + (j + 1)))
-                                : lineObj.optString("show", lineObj.optString("name", lineObj.optString("from", "线路 " + (j + 1))));
-                            lObj.put("name", lineName);
-                            JSONArray epsArr = new JSONArray();
-                            Object urlsRaw = lineObj.opt("urls");
-                            if (urlsRaw instanceof JSONArray) {
-                                JSONArray urlsArr = (JSONArray) urlsRaw;
-                                for (int k = 0; k < urlsArr.length(); k++) {
-                                    JSONObject urlObj = urlsArr.getJSONObject(k);
-                                    JSONObject eObj = new JSONObject();
-                                    eObj.put("name", urlObj.optString("name", ""));
-                                    eObj.put("url", urlObj.optString("url", ""));
-                                    epsArr.put(eObj);
-                                }
-                            } else if (urlsRaw instanceof JSONObject) {
-                                JSONObject urlsObj = (JSONObject) urlsRaw;
-                                Iterator<String> uIt = urlsObj.keys();
-                                while (uIt.hasNext()) {
-                                    JSONObject urlObj = urlsObj.optJSONObject(uIt.next());
-                                    if (urlObj == null) continue;
-                                    JSONObject eObj = new JSONObject();
-                                    eObj.put("name", urlObj.optString("name", ""));
-                                    eObj.put("url", urlObj.optString("url", ""));
-                                    epsArr.put(eObj);
-                                }
-                            }
-                            String singleUrl = lineObj.optString("url", "");
-                            if (!singleUrl.isEmpty()) {
-                                for (String seg : singleUrl.split("#")) {
-                                    String trimmedSeg = seg.trim();
-                                    if (trimmedSeg.isEmpty()) continue;
-                                    int sep = trimmedSeg.indexOf('$');
-                                    JSONObject eObj = new JSONObject();
-                                    if (sep < 0) {
-                                        eObj.put("name", "第" + (epsArr.length() + 1) + "集");
-                                        eObj.put("url", trimmedSeg);
-                                    } else {
-                                        eObj.put("name", trimmedSeg.substring(0, sep).trim());
-                                        eObj.put("url", trimmedSeg.substring(sep + 1).trim());
-                                    }
-                                    epsArr.put(eObj);
-                                }
-                            }
-                            lObj.put("episodes", epsArr);
-                            linesList.add(lObj);
-                        }
-                    }
-                } else if (item.has("vod_play_url") || item.has("vod_play_from")) {
-                    String fromStr = item.optString("vod_play_from", "默认");
-                    String urlStr = item.optString("vod_play_url", "");
-                    String[] froms = fromStr.split("\\$\\$\\$");
-                    String[] rawLines = urlStr.split("\\$\\$\\$");
-                    for (int j = 0; j < rawLines.length; j++) {
-                        JSONObject lObj = new JSONObject();
-                        String lineName = j < froms.length && !froms[j].trim().isEmpty() ? froms[j].trim() : ("线路 " + (j + 1));
-                        lObj.put("name", lineName);
-                        JSONArray epsArr = new JSONArray();
-                        String[] entries = rawLines[j].split("#");
-                        for (int k = 0; k < entries.length; k++) {
-                            String entry = entries[k].trim();
-                            if (entry.isEmpty()) continue;
-                            int sep = entry.indexOf('$');
-                            String eName, eUrl;
-                            if (sep < 0) {
-                                eName = "第" + (epsArr.length() + 1) + "集";
-                                eUrl = entry;
-                            } else {
-                                eName = entry.substring(0, sep).trim();
-                                eUrl = entry.substring(sep + 1).trim();
-                            }
-                            JSONObject eObj = new JSONObject();
-                            eObj.put("name", eName);
-                            eObj.put("url", eUrl);
-                            epsArr.put(eObj);
-                        }
-                        lObj.put("episodes", epsArr);
-                        linesList.add(lObj);
-                    }
-                }
-                // Prioritize direct stream lines
-                List<JSONObject> direct = new ArrayList<>();
-                List<JSONObject> indirect = new ArrayList<>();
-                for (JSONObject l : linesList) {
-                    JSONArray eps = l.optJSONArray("episodes");
-                    boolean hasDirect = false;
-                    if (eps != null && eps.length() > 0) {
-                        String firstUrl = eps.getJSONObject(0).optString("url", "");
-                        String lName = l.optString("name", "");
-                        if (isDirectStreamUrl(firstUrl) || lName.toLowerCase(Locale.ROOT).contains("m3u8")) {
-                            hasDirect = true;
-                        }
-                    }
-                    if (hasDirect) direct.add(l);
-                    else indirect.add(l);
-                }
+                String id = Json.str(item, "vod_id");
+                if (id.isEmpty()) id = Json.str(item, "id");
+                String title = Json.str(item, "vod_name");
+                if (title.isEmpty()) title = Json.str(item, "title");
+                vObj.put("id", id);
+                vObj.put("title", title);
+
                 JSONArray finalLines = new JSONArray();
-                for (JSONObject d : direct) finalLines.put(d);
-                for (JSONObject ind : indirect) finalLines.put(ind);
+                String[][] ordered = LiteActivity.orderedPlayLines(item, "");
+                String[] rawLines = ordered[0];
+                String[] lineNames = ordered[1];
+                for (int j = 0; j < rawLines.length; j++) {
+                    List<LiteActivity.EpisodeItem> episodes =
+                            LiteActivity.parseLineEpisodes(rawLines[j]);
+                    if (episodes.isEmpty()) continue;
+                    JSONObject lObj = new JSONObject();
+                    lObj.put("name", lineNames[j]);
+                    JSONArray epsArr = new JSONArray();
+                    for (LiteActivity.EpisodeItem ep : episodes) {
+                        JSONObject eObj = new JSONObject();
+                        eObj.put("name", ep.name);
+                        eObj.put("url", ep.url);
+                        epsArr.put(eObj);
+                    }
+                    lObj.put("episodes", epsArr);
+                    finalLines.put(lObj);
+                }
 
                 vObj.put("lines", finalLines);
                 videosArr.put(vObj);
@@ -477,6 +380,23 @@ public final class LiteConformanceChecks {
                 JSONObject expected = applyPlatformOverrides(rawExpected, "lite");
 
                 if (expected.optBoolean("skip", false)) {
+                    String skipEntry = meta.optString("entrypoint", meta.optString("type", "config")).toLowerCase(Locale.ROOT);
+                    if ("listing".equals(skipEntry) || "lines".equals(skipEntry)) {
+                        JSONObject probeActual = normalizeListing(LiteCatalog.parseCmsResponse(LiteCatalog.decodeText(inputBytes)));
+                        JSONArray pv = probeActual.optJSONArray("videos");
+                        if ("case_15_vod_play_list".equals(caseId)) {
+                            if (pv != null && pv.length() > 0 && pv.getJSONObject(0).getJSONArray("lines").length() > 0) {
+                                throw new AssertionError("[case_15_vod_play_list] Lite unexpectedly parsed vod_play_list; remove lite.skip");
+                            }
+                        } else if ("case_19_mixed_direct_and_parse_lines".equals(caseId)) {
+                            if (pv != null && pv.length() > 0) {
+                                JSONArray pl = pv.getJSONObject(0).getJSONArray("lines");
+                                if (pl.length() > 0 && "官方直链".equals(pl.getJSONObject(0).optString("name"))) {
+                                    throw new AssertionError("[case_19_mixed_direct_and_parse_lines] Lite now prioritizes direct streams; remove lite.skip");
+                                }
+                            }
+                        }
+                    }
                     System.out.println("SKIP " + caseId + " (platformOverrides.lite.skip=true)");
                     passCount++;
                     continue;

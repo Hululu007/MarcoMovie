@@ -4,7 +4,7 @@
       "key": "null_site",
       "name": "Null Site",
       "type": 1,
-      "api": "https://null.example.com/vod",
+      "api": "https://null.example/vod",
       "ua": null,
       "jar": null,
       "playUrl": null,

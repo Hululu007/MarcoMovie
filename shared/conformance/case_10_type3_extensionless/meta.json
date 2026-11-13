@@ -1,5 +1,5 @@
 {
-  "origin": "https://example.com/type3.json",
+  "origin": "https://root.example/type3.json",
   "type": "config",
   "encoding": "utf-8"
 }

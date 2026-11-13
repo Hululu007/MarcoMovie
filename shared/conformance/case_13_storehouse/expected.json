@@ -3,11 +3,11 @@
   "depots": [
     {
       "name": "精品线路 A",
-      "url": "https://store.example.com/a.json"
+      "url": "https://store.example/a.json"
     },
     {
       "name": "精品线路 B",
-      "url": "https://store.example.com/b.json"
+      "url": "https://store.example/b.json"
     }
   ]
 }

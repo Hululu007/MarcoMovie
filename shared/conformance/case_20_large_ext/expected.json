@@ -4,20 +4,20 @@
       "key": "sub_obj_ext_site",
       "name": "Sub Object Ext Site",
       "type": 1,
-      "api": "https://api.example.com/cms",
+      "api": "https://api.example/cms",
       "searchable": true,
       "capabilityStatus": "ok",
       "ext": {
-        "json": "https://hub.example.com/subs/extra.json",
-        "url": "https://hub.example.com/shared.json",
-        "rule": "https://hub.example.com/subs/rules.rule"
+        "json": "https://hub.example/subs/extra.json",
+        "url": "https://hub.example/shared.json",
+        "rule": "https://hub.example/subs/rules.rule"
       }
     },
     {
       "key": "oversized_ext_site",
       "name": "Oversized Ext Site",
       "type": 1,
-      "api": "https://api.example.com/cms",
+      "api": "https://api.example/cms",
       "searchable": true,
       "extTooLarge": true,
       "capabilityStatus": "ext-too-large"

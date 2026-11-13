@@ -21,9 +21,10 @@ void main() {
     if (await tempDir.exists()) {
       try {
         await tempDir.delete(recursive: true);
-      } on Object catch (e) {
+      } on FileSystemException catch (e) {
         // Ignore transient Windows temp cleanup lock in teardown.
-        assert(e.toString().isNotEmpty);
+        expect(e, isA<FileSystemException>());
+        expect(e.message, isNotEmpty);
       }
     }
   });

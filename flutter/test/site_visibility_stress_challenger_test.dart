@@ -247,7 +247,7 @@ void main() {
       final jsonMap = {
         'sites': [
           {'key': 'bad_jar', 'name': '全不支持1', 'type': 3, 'api': 'https://bad.example/spider.jar'},
-          {'key': 'bad_type', 'name': '全不支持2', 'type': 88, 'api': 'https://bad.type/api'},
+          {'key': 'bad_type', 'name': '全不支持2', 'type': 88, 'api': 'https://bad.invalid/api'},
         ]
       };
 
@@ -422,11 +422,11 @@ void main() {
     testWidgets('Full dialog lifecycle for each of the 6 unsupported types: open, verify exact Chinese text, close cleanly', (tester) async {
       final failureCases = [
         (
-          CmsSite(key: 'jar_case', name: 'Spider源', type: 3, api: 'https://test/s.jar'),
+          CmsSite(key: 'jar_case', name: 'Spider源', type: 3, api: 'https://site.test/s.jar'),
           '此来源需要 Spider / JS / JAR 运行环境，基础版尚未支持',
         ),
         (
-          CmsSite(key: 'type_case', name: '未知类型源', type: 99, api: 'https://test/api'),
+          CmsSite(key: 'type_case', name: '未知类型源', type: 99, api: 'https://site.test/api'),
           '暂不支持此类型来源，已保留在列表中',
         ),
         (
@@ -434,7 +434,7 @@ void main() {
           '此网盘源的原始插件尚未适配当前设备，无法读取原始网盘线路',
         ),
         (
-          CmsSite(key: 'ext_case', name: '超大参数源', type: 1, api: 'https://test/api', extTooLarge: true),
+          CmsSite(key: 'ext_case', name: '超大参数源', type: 1, api: 'https://site.test/api', extTooLarge: true),
           '扩展参数超过大小上限，无法加载',
         ),
         (
@@ -442,7 +442,7 @@ void main() {
           '此来源不是可直接请求的 HTTP(S) CMS',
         ),
         (
-          CmsSite(key: 'parser_case', name: '需解析源', type: 1, api: 'https://test/api', requiresParser: true),
+          CmsSite(key: 'parser_case', name: '需解析源', type: 1, api: 'https://site.test/api', requiresParser: true),
           '需要解析器，当前环境缺少可用解析配置',
         ),
       ];

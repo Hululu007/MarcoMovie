@@ -1,4 +1,4 @@
-"""Pure JVM checks for Lane E: Performance, Stability, Redirects, UA, and Turkish Locale (§ E1–E5)."""
+"""Pure JVM checks for Lane E: compiled against real Android sources (§ E1–E5)."""
 from pathlib import Path
 import os
 import subprocess
@@ -6,36 +6,23 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from java_dependencies import ensure_json_jar
+from android_compile_support import SUFFIX, compile_real_android_sources, resolve_jdk_bin
 
 ROOT = Path(__file__).resolve().parents[2]
-JDK = Path(os.environ.get('MARCOMOVIE_JDK') or os.environ.get('JAVA_HOME', 'missing-jdk'))
-SUFFIX = '.exe' if os.name == 'nt' else ''
-JSON_JAR = ensure_json_jar()
+JDK = resolve_jdk_bin()
 
-SOURCES = [
-    ROOT / 'shared/java/com/pilipala/source/Json.java',
-    ROOT / 'shared/java/com/pilipala/source/Warehouse.java',
-    ROOT / 'android/src/main/java/com/pilipala/marcomovie/AppLog.java',
-    ROOT / 'android/src/main/java/com/pilipala/marcomovie/Cms.java',
-    ROOT / 'android/src/main/java/com/pilipala/marcomovie/RequestScope.java',
-    ROOT / 'android/src/main/java/com/pilipala/marcomovie/WatchHistory.java',
-    ROOT / 'android/src/main/java/com/pilipala/marcomovie/ConfigStore.java',
-    ROOT / 'android/tests/LaneEChecks.java',
-]
-
-with tempfile.TemporaryDirectory(prefix='lane-e-checks-') as out:
+with tempfile.TemporaryDirectory(prefix='lane-e-checks-') as tmp:
+    work_dir = Path(tmp)
+    classes_dir = work_dir / 'classes'
+    runtime_cp = compile_real_android_sources(
+        classes_dir=classes_dir,
+        work_dir=work_dir,
+        test_sources=[ROOT / 'android/tests/LaneEChecks.java'],
+    )
+    run_cp = os.pathsep.join(str(p) for p in runtime_cp)
     subprocess.run([
-        str(JDK / ('bin/javac' + SUFFIX)),
-        '-encoding', 'UTF-8',
-        '-source', '8', '-target', '8', '-Xlint:-options',
-        '-cp', str(JSON_JAR),
-        '-d', out,
-        *map(str, SOURCES)
-    ], check=True)
-    subprocess.run([
-        str(JDK / ('bin/java' + SUFFIX)),
+        str(JDK / ('java' + SUFFIX)),
         '-Dfile.encoding=UTF-8',
-        '-cp', out + os.pathsep + str(JSON_JAR),
-        'com.pilipala.marcomovie.LaneEChecks'
+        '-cp', run_cp,
+        'com.pilipala.marcomovie.LaneEChecks',
     ], cwd=ROOT, check=True)

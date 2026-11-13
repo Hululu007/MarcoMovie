@@ -4,10 +4,10 @@
       "key": "header_site",
       "name": "Header Site",
       "type": 1,
-      "api": "https://api.example.com/vod",
+      "api": "https://api.example/vod",
       "ua": "SiteUA/1.0",
       "headers": {
-        "Referer": "https://site.example.com",
+        "Referer": "https://site.example",
         "Cookie": "site_cookie=1",
         "X-Ignored": "evil"
       },

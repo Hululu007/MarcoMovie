@@ -1,5 +1,5 @@
 {
-  "origin": "https://hub.example.com/channel/v2/config.json",
+  "origin": "https://hub.example/channel/v2/config.json",
   "type": "config",
   "encoding": "utf-8"
 }

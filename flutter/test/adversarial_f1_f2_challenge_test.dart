@@ -1,8 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/secure_credential_store.dart';
 import 'package:marco_movie/core/storage_service.dart';
@@ -185,7 +183,7 @@ void main() {
 
       // Call saveWebdavConfig
       final fut = storage.saveWebdavConfig(
-        url: 'https://dav.test.com',
+        url: 'https://dav.test',
         user: 'user',
         pass: 'instant_webdav_pass',
         auto: false,
@@ -347,13 +345,6 @@ void main() {
         StorageService.pbkdf2Sha256(utf8.encode('1234'), utf8.encode('salt'), 1, 32),
         equals(StorageService.pbkdf2Sha256(utf8.encode('1234'), utf8.encode('salt'), 1, 32)),
       );
-
-      // Timing / length differences
-      final a = Uint8List.fromList([1, 2, 3, 4]);
-      final b = Uint8List.fromList([1, 2, 3, 5]);
-      final c = Uint8List.fromList([1, 2, 3]);
-
-      // We can invoke verifyPrivacyPassword with mismatched length strings
     });
   });
 }

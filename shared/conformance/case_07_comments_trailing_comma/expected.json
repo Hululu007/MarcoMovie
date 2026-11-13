@@ -4,7 +4,7 @@
       "key": "comment_site",
       "name": "Comment Site",
       "type": 1,
-      "api": "https://api.example.com/vod",
+      "api": "https://api.example/vod",
       "searchable": true,
       "capabilityStatus": "ok"
     }

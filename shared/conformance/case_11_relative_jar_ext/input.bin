@@ -5,7 +5,7 @@
       "key": "rel_site",
       "name": "Relative Site",
       "type": 1,
-      "api": "https://api.example.com/vod",
+      "api": "https://api.example/vod",
       "jar": "../jars/site.jar",
       "ext": "./rules/site.json"
     }

@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -56,7 +55,7 @@ void main() {
         StorageService.keyUcCookie: 'legacy_uc_cookie_def',
         StorageService.keyBaiduCookie: 'legacy_baidu_cookie_xyz',
         StorageService.keyAliToken: 'legacy_ali_token_123',
-        StorageService.keyWebdavUrl: 'https://dav.example.com/',
+        StorageService.keyWebdavUrl: 'https://dav.example/',
         StorageService.keyWebdavUser: 'user@example.com',
       });
 
@@ -75,7 +74,7 @@ void main() {
       expect(prefs.containsKey(StorageService.keyAliToken), isFalse);
 
       // Non-sensitive preferences remain intact
-      expect(prefs.getString(StorageService.keyWebdavUrl), equals('https://dav.example.com/'));
+      expect(prefs.getString(StorageService.keyWebdavUrl), equals('https://dav.example/'));
       expect(prefs.getString(StorageService.keyWebdavUser), equals('user@example.com'));
 
       // Secure store has received the secrets
@@ -95,7 +94,7 @@ void main() {
 
       // Writing new credentials persists to secure store and keeps SharedPreferences clear
       await storage.saveWebdavConfig(
-        url: 'https://dav.example.com/',
+        url: 'https://dav.example/',
         user: 'user@example.com',
         pass: 'new_dav_secret_456',
         auto: true,
@@ -198,15 +197,15 @@ void main() {
 
   group('F3: Cleartext HTTP WebDAV Warning Dialog', () {
     test('isCleartextHttpWithPassword triggers warning for cleartext http with password', () {
-      expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('http://dav.example.com', 'secret'), isTrue);
-      expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('HTTP://DAV.EXAMPLE.COM', 'secret'), isTrue);
+      expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('http://dav.example', 'secret'), isTrue);
+      expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('HTTP://DAV.EXAMPLE', 'secret'), isTrue);
       expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('http://192.168.1.10:5005/dav/', 'secret'), isTrue);
     });
 
     test('isCleartextHttpWithPassword ignores HTTPS, empty password, or scheme-less URLs', () {
-      expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('https://dav.example.com', 'secret'), isFalse);
-      expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('http://dav.example.com', ''), isFalse);
-      expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('dav.example.com', 'secret'), isFalse);
+      expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('https://dav.example', 'secret'), isFalse);
+      expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('http://dav.example', ''), isFalse);
+      expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('dav.example', 'secret'), isFalse);
       expect(CloudSyncSettingsPanel.isCleartextHttpWithPassword('', 'secret'), isFalse);
     });
   });

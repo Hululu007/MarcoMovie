@@ -1,5 +1,5 @@
 {
-  "origin": "https://cms.example.com/api.php/provide/vod?ac=detail&ids=2001",
+  "origin": "https://cms.example/api.php/provide/vod?ac=detail&ids=2001",
   "type": "listing",
   "entrypoint": "listing",
   "encoding": "utf-8"
