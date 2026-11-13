@@ -74,7 +74,7 @@ remain separate acceptance requirements.
 
 `scripts/test_native_python_source.py` runs each owned source in a fresh host
 process using the pinned requests wheels. The iOS Flutter experiment additionally
-uses this exact loader and `flutter/src/core/python_http_transport.dart` through
+uses this exact loader and `flutter/lib/core/python_http_transport.dart` through
 the real native bridge. Its added requirements cover all source methods, memory
 package resources, repeated calls, same-name isolation, actual HTTP binary GET
 and HEAD proxy responses, and release/recreation without rebinding old URLs.

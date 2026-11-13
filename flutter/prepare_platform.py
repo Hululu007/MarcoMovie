@@ -1,4 +1,4 @@
-"""Sync flutter/src to flutter/lib, bundle brand logo assets, and configure Apple/Windows native shells."""
+"""Bundle brand logo assets, and configure Apple/Windows native shells."""
 from pathlib import Path
 import re
 import plistlib
@@ -991,14 +991,11 @@ def main() -> None:
     subprocess.run([sys.executable, str(REPO_ROOT / 'scripts/prepare_python_html.py'), '--check'], check=True)
     subprocess.run([sys.executable, str(REPO_ROOT / 'scripts/prepare_python_modules.py'), '--check'], check=True)
     src = ROOT / "src"
-    lib = ROOT / "lib"
     if src.exists():
-        if lib.exists():
-            for existing in list(lib.rglob("*.dart")):
-                rel = existing.relative_to(lib)
-                if not (src / rel).exists():
-                    existing.unlink()
-        shutil.copytree(src, lib, dirs_exist_ok=True)
+        raise RuntimeError(
+            "flutter/src has been migrated to flutter/lib. "
+            "Please delete flutter/src to prevent accidental divergence."
+        )
     # Bundle user's brand logo into flutter/assets/logo_mark.png
     assets_dir = ROOT / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)

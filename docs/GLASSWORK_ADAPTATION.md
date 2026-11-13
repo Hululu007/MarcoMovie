@@ -6,10 +6,10 @@
 
 | 表面 | 组件／文件 | 处理 |
 | --- | --- | --- |
-| 横竖屏 Dock、浮动玻璃控件 | `flutter/src/ui/apple_theme.dart` 的 LiquidGlass、AppleLiquidGlassDock | 统一玻璃背景与边缘，保留布局和交互 |
+| 横竖屏 Dock、浮动玻璃控件 | `flutter/lib/ui/apple_theme.dart` 的 LiquidGlass、AppleLiquidGlassDock | 统一玻璃背景与边缘，保留布局和交互 |
 | 工具栏、弹窗、玻璃卡片 | 同文件 AppleGlassSurface、GlassworkBackdrop、showAppleModalSheet | 通过公共材质组件继承 |
-| 播放器浮动控件 | `flutter/src/ui/player_screen.dart` 中的 LiquidGlass | 继承公共材质 |
-| 换源卡片、普通设置列表 | `flutter/src/ui/source_choice_sliver.dart`、adaptive_shell | 纯色容器上的列表保持普通材质，避免叠加模糊变灰 |
+| 播放器浮动控件 | `flutter/lib/ui/player_screen.dart` 中的 LiquidGlass | 继承公共材质 |
+| 换源卡片、普通设置列表 | `flutter/lib/ui/source_choice_sliver.dart`、adaptive_shell | 纯色容器上的列表保持普通材质，避免叠加模糊变灰 |
 | 原生 TV／手机 Dock、顶部胶囊 | `HomeDock.java`、`MobileShell.java` | 共用有上限的背景采样、模糊、边缘折射与高光 |
 | 原生手机详情页海报上的返回、换源、操作胶囊与资料标签 | `MobileDetailScreen.java` | 共用材质，保留布局、圆角和字体 |
 | 原生弹窗、换源、提示 | `AppDialog.java`、`SourcePicker.java`、`MainActivity.java` | 同一材质和减少透明效果设置 |
@@ -21,7 +21,7 @@
 - `flutter/shaders/glasswork.frag` 移植 rim=40、edge=1.1、power=2.6、dispersion=±0.15，边缘折射随圆角变化，中间保留平坦区域。
 - 参照 refract.js 加入中心与 12 个螺旋采样的 2px 模糊。参照 adapt.js 采样 5×3 网格，剔除最亮和最暗各两个点，根据纹理和色彩调整浓度。
 - 采用项目现有暗色外观对应的 Glasswork dark 参数，饱和度 1.6、亮度 0.8、基础染色 0.16–0.38。按文字对比需求提高染色浓度，替代旧实现对所有颜色的固定亮度封顶。
-- `flutter/src/ui/apple_theme.dart` 去掉材质上重复叠加的厚重灰色渐变，调整边缘高光比例。减少透明度／高对比模式使用实色。窗口不支持背景 shader 滤镜时采用模糊、暗色染色和边缘高光回退。弹窗移除独立的 44px 厚重模糊层，改用相同的 LiquidGlass 公共材质。
+- `flutter/lib/ui/apple_theme.dart` 去掉材质上重复叠加的厚重灰色渐变，调整边缘高光比例。减少透明度／高对比模式使用实色。窗口不支持背景 shader 滤镜时采用模糊、暗色染色和边缘高光回退。弹窗移除独立的 44px 厚重模糊层，改用相同的 LiquidGlass 公共材质。
 - `shared/java/com/pilipala/glass/GlassworkMaterial.java` 提供可离线验证的原生像素处理：同源采样／染色参数、2dp 高斯模糊、圆角距离边缘折射与色散。按整幅采样图像的最差颜色提高染色，保证指定前景色的 4.5:1 对比；这不替代界面中每种文字颜色的实机验收。
 - `shared/java/com/pilipala/glass/GlassworkSurface.java` 只抓取目标前的背景与兄弟视图，避免把控件自己的文字画进玻璃；每片最多 24,576 像素、最长边 384，单个处理线程和最多 4 项等待。滚动、布局、图片或柔光变化触发刷新，限制到每 100ms 一次，无静止页面轮询；卸载移除监听并丢弃过期结果。`VideoOutput.java` 新增共享异步画面读回，`PlaybackController.java` / `PlaybackControls.java` 随播放状态启动和停止刷新；不可读画面回退为暗色可读面板。
 - 原生刷新接线文件为 `ImageLoader.java`、`HomeAmbient.java`；减少透明效果涉及 `Prefs.java`、`SettingsScreen.java`、`MobileShell.java` 与 `HomeScreen.java` 的外观缓存判断。原生界面目前只有暗色外观；像素处理器的浅色模式仅有离线检查，未宣称已有原生浅色主题。

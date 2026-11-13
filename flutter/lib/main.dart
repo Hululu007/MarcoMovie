@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
+import 'core/app_log.dart';
 import 'core/cms_client.dart';
 import 'core/download_service.dart';
 import 'core/storage_service.dart';
@@ -14,6 +15,7 @@ import 'ui/apple_theme.dart';
 import 'ui/windows_title_bar.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  AppLog.init();
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     await windowManager.ensureInitialized();
     await windowManager.setMinimumSize(const Size(720, 520));
@@ -41,6 +43,7 @@ Future<void> main() async {
     );
   } catch (_) {}
   final storage = await StorageService.init();
+  AppLog.instance.setLogDirectory(Directory('${storage.dataDirectory.path}/logs'));
   GlassworkBackdrop.reduceTransparency.value = storage.glassBlurLevel == 'solid';
   GlassworkBackdrop.intensity.value = storage.glassBlurStrength;
   final client = CmsClient();

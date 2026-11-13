@@ -22,6 +22,7 @@ import '../core/download_service.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
 import '../core/storage_service.dart';
+import '../core/app_log.dart';
 import '../core/search_source_notice.dart';
 import 'apple_theme.dart';
 import 'cloud_sync_panel.dart';
@@ -5976,6 +5977,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     trailingText: 'v$_currentAppVersion',
                     onTap: _showUpdateCheckSheet,
                   ),
+                  _buildSettingsQuickActionRow(
+                    icon: CupertinoIcons.doc_plaintext,
+                    iconBgColor: AppleColors.systemOrange,
+                    title: '导出诊断日志包',
+                    subtitle: '导出脱敏系统环境信息与最近 1MB 异常运行日志',
+                    trailingText: '导出',
+                    onTap: () => _exportDiagnosticsBundle(context),
+                  ),
                 ],
               ),
             ],
@@ -6930,6 +6939,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 key: const ValueKey('ios-about-version'),
                 title: '版本',
                 trailingText: _currentAppVersion,
+              ),
+              IosSettingsRow(
+                title: '导出诊断日志包',
+                subtitle: '脱敏系统环境信息与最近异常日志',
+                onTap: () => _exportDiagnosticsBundle(context),
               ),
             ],
           ),
@@ -9755,6 +9769,78 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _exportDiagnosticsBundle(
+    BuildContext context, {
+    String iosBackLabel = '返回',
+  }) async {
+    final bundle = await AppLog.generateDiagnosticsBundle(
+      storage: widget.storage,
+      currentAppVersion: _currentAppVersion,
+    );
+    if (!mounted) return;
+    await _openIosOrModalPage<void>(
+      title: '导出诊断日志包',
+      backLabel: iosBackLabel,
+      trailingAction: CupertinoButton(
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        minimumSize: const Size(28, 28),
+        onPressed: () {
+          Clipboard.setData(ClipboardData(text: bundle));
+          _showAppleNotice('已复制诊断包', '脱敏后的诊断日志已复制到剪贴板。');
+        },
+        child: const Text(
+          '复制',
+          style: TextStyle(color: AppleColors.systemBlue, fontSize: 14),
+        ),
+      ),
+      builder: (ctx) => SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          20,
+          20,
+          20 + MediaQuery.viewInsetsOf(ctx).bottom,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              '诊断包已自动脱敏所有 Cookie、Token、密码及私有 URL 参数，可安全分享用于排查故障：',
+              style: TextStyle(
+                color: AppleColors.labelSecondary,
+                fontSize: 12,
+              ),
+            ),
+            const SizedBox(height: 12),
+            CupertinoTextField(
+              controller: TextEditingController(text: bundle),
+              maxLines: 12,
+              minLines: 8,
+              readOnly: true,
+              style: const TextStyle(
+                color: AppleColors.labelPrimary,
+                fontSize: 11,
+                fontFamily: 'monospace',
+              ),
+              decoration: BoxDecoration(
+                color: AppleColors.groupedSecondary,
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            const SizedBox(height: 16),
+            CupertinoButton.filled(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: bundle));
+                if (ctx.mounted) Navigator.of(ctx).pop();
+                _showAppleNotice('已复制诊断包', '脱敏后的诊断日志已复制到剪贴板。');
+              },
+              child: const Text('复制诊断包内容到剪贴板'),
+            ),
+          ],
         ),
       ),
     );

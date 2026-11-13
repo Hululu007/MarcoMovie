@@ -22,8 +22,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 TRANSPORT = HERE.parent / "ios_cpython_transport"
 NATIVE_SOURCE = ROOT / "android/src/main/assets/python-native"
-PRODUCT_TRANSPORT = ROOT / "flutter/src/core/python_http_transport.dart"
-PRODUCT_SESSIONS = [ROOT / "flutter/src/core" / name for name in (
+PRODUCT_TRANSPORT = ROOT / "flutter/lib/core/python_http_transport.dart"
+PRODUCT_SESSIONS = [ROOT / "flutter/lib/core" / name for name in (
     "python_source_sessions.dart", "python_source_channel.dart", "python_source_host.dart", "script_proxy_protocol.dart", "script_proxy_server.dart")]
 NATIVE_RUNTIME = ROOT / "flutter/packages/python_source_runtime"
 PACKAGE_FIXTURE = ROOT / "scripts/fixtures/native_python_package"

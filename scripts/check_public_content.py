@@ -66,9 +66,9 @@ EXPERIMENT_HOSTS = {
 # and account. Keep review scoped to the adapter rather than permitting these
 # hosts in arbitrary public files. Synthetic media URLs stay test-scoped above.
 CLOUD_SHARE_HOSTS = {
-    'flutter/src/core/ali_share.dart': {'api.aliyundrive.com', 'auth.aliyundrive.com', 'bj29.api.aliyunpds.com'},
-    'flutter/src/core/netdisk_service.dart': {'auth.aliyundrive.com'},
-    'flutter/src/core/cloud_share.dart': {'fast.uc.cn'},
+    'flutter/lib/core/ali_share.dart': {'api.aliyundrive.com', 'auth.aliyundrive.com', 'bj29.api.aliyunpds.com'},
+    'flutter/lib/core/netdisk_service.dart': {'auth.aliyundrive.com'},
+    'flutter/lib/core/cloud_share.dart': {'fast.uc.cn'},
 }
 
 def paths():
@@ -91,7 +91,7 @@ for p in files:
     if relative.as_posix()=='flutter/test/fixtures/cloud-playback.mkv':
         if hashlib.sha256(p.read_bytes()).hexdigest()!='158d193f2fc0b9096c77cf2fb8402e347a5761b3503e4612e25d42c6d4a93347':issues.append(f'{relative}: unreviewed playback fixture')
         continue
-    vendor_dart = relative.as_posix().startswith('flutter/packages/quickjs_engine/lib/') and p.suffix == '.dart'
+    vendor_dart = relative.as_posix().startswith(('flutter/lib/', 'flutter/packages/quickjs_engine/lib/')) and p.suffix == '.dart'
     if any(part in (EXCLUDED - {'lib'} if vendor_dart else EXCLUDED) for part in relative.parts) or p.suffix in {'.apk','.aab','.p12','.jks','.keystore','.rar','.zip','.bin','.mp4'}:
         issues.append(f'{relative}: excluded file type/path');continue
     if p.suffix=='.png':continue

@@ -1,5 +1,21 @@
 ## 未发布
 
+- [Engineering/CI] CI 构建与工程架构现代化（Lane G § G1–G6）：
+  - G1 (Flutter 目录结构规范化与路径同步)：
+    - 将 `flutter/src` 规范化迁移至 Flutter 标准的 `flutter/lib` 目录结构；同步更新 `flutter/prepare_platform.py`（增加弃用防护与异常拦截）、CI 工作流触发路径（`.github/workflows/http-source.yml`）、开源合规检查（`scripts/check_public_content.py`）及全平台构建脚本文档。
+  - G3 (CI 隔离触发分支对齐与构建检查自动化)：
+    - 修正 `.github/workflows/android-update-isolation.yml` 触发分支指向 `main`；验证 `scripts/test_lite_jvm.py` 自动化集成至全平台 CI 流程。
+  - G4 (生产故障诊断与脱敏日志管道)：
+    - 实现 `AppLog` 日志管道与双层循环缓冲区（内存最近错误 + 磁盘滚动文件 `error.log` / `error.log.old` 各 512KB，总容量严格限定不超过 1MB）；自动挂钩 `FlutterError.onError` 与 `PlatformDispatcher.instance.onError` 全局未捕获异常；
+    - 严苛红线：内建 6 轮全自动脱敏过滤，涵盖 Bearer/Basic 授权头、Cookie/Set-Cookie、URL 内嵌凭据、敏感 URL Query 参数（token, sign, password, key 等）及私有 token/cookie 字段，确保绝无凭据外泄；
+    - 桌面端与 iOS 设置页提供「导出诊断日志包」一键导出与剪贴板复制功能。
+  - G5 (播放器 Stream 订阅生命周期安全释放与海报缓存内存治理)：
+    - `player_screen.dart:dispose()` 统一保存并显式取消全部 10 个 `_player.stream.*.listen` 订阅，防止后台泄漏播放状态与持有废弃上下文；
+    - `poster_image.dart` 海报缓存改造：新增 500 容量限制的 `LruMap`，替换 7 处无界静态海报缓存，海报尺寸预解码采用 `ImageDescriptor.encoded` 并保证 `finally` 块中立即释放原生图片显存。
+  - G6 (版本号单一可信源与 README/构建脚本动态同步)：
+    - `scripts/build_lite.py` 动态加载 `android/edition-versions.json`，解决构建版本硬编码与发版脱节问题；
+    - 同步 `README.md` 第 5 行各端版本号至当前真实发版版本；新增 `scripts/sync_readme_versions.py` 脚本支持 `--check` 校验，并纳入 CI 自动化质量门禁。
+
 - [Security/All] 全平台安全加固（Lane F § F1–F8）：
   - F1 (平台级安全凭据存储与无损迁移)：
     - Flutter: 新增 `SecureCredentialStore` 抽象与默认带认证加密存储（CTR + HMAC-SHA256 与平台原生密钥派生），`StorageService` 维持内存缓存同步访问，启动自动对 WebDAV 密码与四大网盘 Cookie/Token 执行写后即删无损迁移，SharedPreferences 不再驻留敏感明文凭据；

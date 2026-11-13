@@ -77,7 +77,14 @@ def build():
   for name,data in native.items():out.writestr(name,data)
   for file in [ROOT/'lite/LICENSE',ROOT/'lite/NOTICE',*list((ROOT/'lite/licenses').glob('*.txt'))]:out.write(file,'assets/licenses/'+file.name)
  run(exe(SDK,'zipalign'),'-f','4',BUILD/'unsigned.apk',BUILD/'aligned.apk')
- apk=DIST/'MarcoMovie-Lite-0.1.1-alpha.apk'
+ edition_versions_file=ROOT/'android/edition-versions.json'
+ edition_versions=json.loads(edition_versions_file.read_text(encoding='utf-8')) if edition_versions_file.exists() else {}
+ lite_meta=edition_versions.get('android-lite',{})
+ manifest_root=ET.parse(SRC/'AndroidManifest.xml').getroot()
+ manifest_version=manifest_root.get('{http://schemas.android.com/apk/res/android}versionName','0.5.4')
+ version=lite_meta.get('versionName',manifest_version)
+ from android_package_names import package_name, compatibility_alias
+ apk=DIST/package_name(version,'lite')
  key=Path(os.environ.get('MARCOMOVIE_SIGNING_KEY',str(ROOT/'android/private/development.p12')))
  run(exe(JDK/'bin','java'),'-jar',SDK/'lib/apksigner.jar','sign','--min-sdk-version','14','--ks',key,'--ks-key-alias','marcomovie','--ks-pass','env:MARCOMOVIE_KEY_PASSWORD','--out',apk,BUILD/'aligned.apk')
  signature=run(exe(JDK/'bin','java'),'-jar',SDK/'lib/apksigner.jar','verify','--min-sdk-version','14','--verbose','--print-certs',apk,capture=True)
@@ -88,12 +95,13 @@ def build():
  run(exe(SDK,'zipalign'),'-c','4',apk)
  sha=hashlib.sha256(apk.read_bytes()).hexdigest()
  apk.with_suffix('.apk.sha256').write_text(sha+'  '+apk.name+'\n')
+ legacy_alpha=DIST/'MarcoMovie-Lite-0.1.1-alpha.apk'
+ shutil.copy2(apk,legacy_alpha)
  if not candidate:
-  version=ET.parse(SRC/'AndroidManifest.xml').getroot().get('{http://schemas.android.com/apk/res/android}versionName','0.4.35')
-  from android_package_names import package_name, compatibility_alias
   release_apk=ROOT/'dist'/package_name(version, 'lite')
-  shutil.copy2(apk,release_apk)
-  release_apk.with_suffix('.apk.sha256').write_text(sha+'  '+release_apk.name+'\n',encoding='utf8')
+  if release_apk!=apk:
+   shutil.copy2(apk,release_apk)
+   release_apk.with_suffix('.apk.sha256').write_text(sha+'  '+release_apk.name+'\n',encoding='utf8')
   compatibility_alias(release_apk, version, 'lite')
  result=dict(package='com.pilipala.marcomovie.lite',experimental_candidate=candidate,compile_api=14,min_api=14,bytes=apk.stat().st_size,sha256=sha,signature=signature,signer_sha256=signer,release_signer_verified=bool(expected),physical_tv_tested=False)
  (BUILD/'build-report.json').write_text(json.dumps(result,indent=2),encoding='utf8');print(json.dumps(result,indent=2))
