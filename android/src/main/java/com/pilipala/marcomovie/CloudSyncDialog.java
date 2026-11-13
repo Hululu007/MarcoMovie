@@ -444,8 +444,7 @@ final class CloudSyncDialog {
             ConfigLibrary library = new ConfigLibrary(filesDir);
             String currentSelectedSite = prefs.getString(Prefs.SELECTED_SITE, "");
             for (ConfigLibrary.Entry entry : library.entries()) {
-                if (entry.origin != null
-                        && entry.origin.toLowerCase(Locale.ROOT).startsWith("file:")) {
+                if (ConfigLibrary.isLocalFileOrigin(entry.origin)) {
                     continue;
                 }
                 try {
@@ -497,8 +496,7 @@ final class CloudSyncDialog {
                 }
             }
             for (ConfigLibrary.Entry existing : library.entries()) {
-                if (existing.origin != null
-                        && existing.origin.toLowerCase(Locale.ROOT).startsWith("file:")) {
+                if (ConfigLibrary.isLocalFileOrigin(existing.origin)) {
                     continue;
                 }
                 if (!keepIds.contains(existing.id)
@@ -620,9 +618,10 @@ final class CloudSyncDialog {
         final String resolvedPickSite;
         if (finalRaw != null && !finalRaw.isEmpty()) {
             parsedConfig = Cms.parseConfig(finalRaw, finalOrigin);
+            SourcePicker.applyEdits(a, parsedConfig, finalOrigin);
             String candidateSite = "";
             for (Cms.Site s : parsedConfig.sites) {
-                if (SourceController.available(a, s)) {
+                if (SourceController.available(a, parsedConfig, s)) {
                     if (candidateSite.isEmpty()) candidateSite = s.key;
                     if (!finalSelected.isEmpty() && s.key.equals(finalSelected)) {
                         candidateSite = s.key;
@@ -651,7 +650,6 @@ final class CloudSyncDialog {
                     try {
                         if (a.isFinishing() || a.isDestroyed() || a.privateMode) return;
                         if (parsedConfig != null) {
-                            SourcePicker.applyEdits(a, parsedConfig, finalOrigin);
                             a.closeEngines();
                             a.config = parsedConfig;
                             a.configOrigin = finalOrigin;
@@ -731,6 +729,37 @@ final class CloudSyncDialog {
                         .apply();
             }
         };
+    }
+
+    private static void runOnMainSync(MainActivity a, Runnable task) throws java.io.IOException {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            task.run();
+            return;
+        }
+        CountDownLatch latch = new CountDownLatch(1);
+        final AtomicReference<Throwable> mainError = new AtomicReference<>();
+        a.ui.post(
+                () -> {
+                    try {
+                        task.run();
+                    } catch (Throwable t) {
+                        mainError.set(t);
+                    } finally {
+                        latch.countDown();
+                    }
+                });
+        try {
+            if (!latch.await(15, TimeUnit.SECONDS)) {
+                throw new java.io.IOException("主线程同步超时 (15s)");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new java.io.IOException("主线程同步中断", e);
+        }
+        if (mainError.get() != null) {
+            throw new java.io.IOException(
+                    "主线程执行失败: " + mainError.get().getMessage(), mainError.get());
+        }
     }
 
     private static CloudSync.MergeResult mergeAndPersistLocal(

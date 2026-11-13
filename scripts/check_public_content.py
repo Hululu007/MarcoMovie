@@ -48,6 +48,8 @@ TEST_AUTHORITIES = {
     'scripts/ios_cpython_transport/dart/fixture_http_transport.dart': {'127'},
     'scripts/ios_cpython_transport/dart/fixture_http_transport_test.dart': {'user@127.0.0.1:${server.port}'},
     'flutter/lib/core/app_log.dart': {'user:password@host'},
+    'flutter/test/app_log_test.dart': {'user:super_secret_pw@dav.jianguoyun.com', 'user:[REDACTED]@dav.jianguoyun.com'},
+    'android/tests/LaneEChecks.java': {'user:secret@127.0.0.1:'},
     'flutter/test/security_hardening_test.dart': {'192.168.1.10:5005'},
     'shared/conformance/case_01_bom/meta.json': {'example.com'},
     'shared/conformance/case_01_bom/expected.json': {'api.example.com'},
@@ -162,12 +164,11 @@ for p in files:
         if authority in TEST_AUTHORITIES.get(relative.as_posix(), set()):continue
         if re.fullmatch(r'\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_.]*\})',authority):continue
         tail=text[match.end():]
-        host_part=authority.rsplit('@',1)[-1] if ('@' in authority and not authority.endswith('@')) else authority
         if tail.startswith('\\.'):
             escaped=re.match(r'^((?:[A-Za-z0-9-]+\\\.)+[A-Za-z]{2,})',authority+tail)
-            host=escaped.group(1).replace('\\.','.').lower() if escaped else host_part.split(':')[0].lower().rstrip('.,;')
+            host=escaped.group(1).replace('\\.','.').lower() if escaped else authority.split(':')[0].lower().rstrip('.,;')
         else:
-            host=host_part.split(':')[0].lower().rstrip('.,;')
+            host=authority.split(':')[0].lower().rstrip('.,;')
         if host in EXPERIMENT_HOSTS.get(relative.as_posix(), set()):continue
         if host in CLOUD_SHARE_HOSTS.get(relative.as_posix(), set()):continue
         if relative.as_posix() == 'flutter/pubspec.lock' and host in {'pub.dev','dart.dev'}:continue

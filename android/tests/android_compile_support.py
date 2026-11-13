@@ -18,55 +18,6 @@ DEPENDENCY_MANIFESTS = (
 )
 R_REF_PATTERN = re.compile(r"(?<!\.)\bR\.([a-z_]+)\.([A-Za-z0-9_]+)\b")
 
-# Compile-only signature stub used while CloudSyncDialog.java has a checked-IOException bug
-# in applyMergedSubscriptions (lines 454, 457, 460 without throws IOException).
-CLOUD_SYNC_DIALOG_STUB = """package com.pilipala.marcomovie;
-
-import java.util.List;
-
-final class CloudSyncDialog {
-    static void cancel() {}
-
-    static boolean isConfigured(MainActivity a) {
-        return false;
-    }
-
-    static boolean isAutoEnabled(MainActivity a) {
-        return false;
-    }
-
-    static boolean isSyncSubscriptionsEnabled(MainActivity a) {
-        return false;
-    }
-
-    static String statusSummary(MainActivity a) {
-        return "";
-    }
-
-    static void onHistoryDeleted(MainActivity a, String s) {}
-
-    static void onHistoryCleared(MainActivity a, List<WatchHistory.Entry> l) {}
-
-    static void onFavoriteToggled(MainActivity a, String s, String id, boolean add) {}
-
-    static void onSubscriptionSaved(MainActivity a, String u, String n) {}
-
-    static void onSubscriptionDeleted(MainActivity a, String u) {}
-
-    static void scheduleAutoPush(MainActivity a, boolean b) {}
-
-    static void pullOnStartup(MainActivity a) {}
-
-    static ConfigTransferServer.SyncHandler lanSyncHandler(MainActivity a) {
-        return null;
-    }
-
-    static void runWebdavSync(MainActivity a, boolean b, Runnable r) {}
-
-    static void show(MainActivity a, Runnable r) {}
-}
-"""
-
 
 def resolve_jdk_bin() -> Path:
     jdk_home = os.environ.get("MARCOMOVIE_JDK") or os.environ.get("JAVA_HOME")
@@ -192,19 +143,14 @@ def compile_real_android_sources(
     aar_cache = ROOT / "android/build/test-dep-classes"
     dep_jars = [ensure_json_jar(), *ensure_all_android_dep_jars(aar_cache), ensure_android_jar()]
 
-    real_sources = sorted((ROOT / "shared/java").rglob("*.java")) + [
-        p
-        for p in sorted((ROOT / "android/src/main/java").rglob("*.java"))
-        if p.name != "CloudSyncDialog.java"
-    ]
+    real_sources = sorted((ROOT / "shared/java").rglob("*.java")) + sorted(
+        (ROOT / "android/src/main/java").rglob("*.java")
+    )
 
     gen_dir = work_dir / "gen-src"
     r_file = generate_r_java(gen_dir, real_sources + list(test_sources))
-    csd_file = gen_dir / "com/pilipala/marcomovie/CloudSyncDialog.java"
-    csd_file.parent.mkdir(parents=True, exist_ok=True)
-    csd_file.write_text(CLOUD_SYNC_DIALOG_STUB, encoding="utf-8")
 
-    all_sources = [r_file, csd_file, *real_sources, *test_sources]
+    all_sources = [r_file, *real_sources, *test_sources]
     sources_argfile = work_dir / "javac-sources.txt"
     sources_argfile.write_text(
         "\n".join(f'"{Path(p).resolve().as_posix()}"' for p in all_sources) + "\n",

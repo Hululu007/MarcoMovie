@@ -72,7 +72,7 @@ public final class LiteTlsChecks {
         if (ctx1 == null || ctx1 != ctx2)
             throw new AssertionError("Default SSLContext must be cached across calls");
 
-        java.net.URL httpsUrl = new java.net.URL("https://example.com/");
+        java.net.URL httpsUrl = new java.net.URL("https://tls.example/");
         HttpsURLConnection conn1 = (HttpsURLConnection) httpsUrl.openConnection();
         HttpsURLConnection conn2 = (HttpsURLConnection) httpsUrl.openConnection();
         NetworkTls.configure(conn1);

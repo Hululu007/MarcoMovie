@@ -124,8 +124,8 @@ public final class LiteJvmChecks {
                         .equals(LiteSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/")),
                 "LiteSync Jianguoyun root slash resolves to /dav/MarcoMovie/marco-movie-sync.json");
         check(
-                "http://nas.local:5006/My%20Movies/marco-movie-sync.json"
-                        .equals(LiteSync.resolveWebdavFileUrl("http://nas.local:5006/My Movies/")),
+                "http://nas.test:5006/My%20Movies/marco-movie-sync.json"
+                        .equals(LiteSync.resolveWebdavFileUrl("http://nas.test:5006/My Movies/")),
                 "LiteSync URL with spaces encodes space as %20");
         check(
                 "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
@@ -1906,10 +1906,10 @@ public final class LiteJvmChecks {
                 "M-W2 Lite Jianguoyun host-only skips /dav/");
         String ncFile =
                 LiteSync.resolveWebdavFileUrl(
-                        "https://nc.example.com/remote.php/dav/files/alice/MarcoMovie/");
+                        "https://nc.example/remote.php/dav/files/alice/MarcoMovie/");
         check(
                 LiteSync.baseCollectionDepth(
-                                "https://nc.example.com/remote.php/dav/files/alice/",
+                                "https://nc.example/remote.php/dav/files/alice/",
                                 java.net.URI.create(ncFile))
                         == 4,
                 "M-W2 Lite Nextcloud base skips /remote.php/dav/files/<user>/");

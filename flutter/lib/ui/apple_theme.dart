@@ -1764,7 +1764,7 @@ Future<T?> showAppleModalSheet<T>({
                           ),
                         ),
                         Container(height: 0.5, color: const Color(0x22FFFFFF)),
-                        Flexible(child: builder(ctx)),
+                        Flexible(child: TextSelectionMouseGuard(child: builder(ctx))),
                       ],
                     ),
                   ),

@@ -239,26 +239,36 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
       final ok = await _confirmCleartextHttpWarning();
       if (!ok) return;
     }
-    await _saveWebdavFields();
-    widget.onSynced?.call(subscriptionsChanged: false);
-    _notifyNotice('已保存配置', 'WebDAV 同步配置与同步范围已保存。');
+    try {
+      await _saveWebdavFields();
+      widget.onSynced?.call(subscriptionsChanged: false);
+      _notifyNotice('已保存配置', 'WebDAV 同步配置与同步范围已保存。');
+    } catch (e) {
+      final msg = e is FormatException ? e.message : e.toString();
+      _notifyNotice('保存配置失败', msg, isError: true);
+    }
   }
 
   Future<void> _handleClearWebdav() async {
-    _urlCtrl.clear();
-    _userCtrl.clear();
-    _passCtrl.clear();
-    await widget.storage.saveWebdavConfig(
-      url: '',
-      user: '',
-      pass: '',
-      auto: _autoSync,
-      syncSubs: _syncSubs,
-    );
-    _confirmedUrl = '';
-    _confirmedPass = '';
-    widget.onSynced?.call(subscriptionsChanged: false);
-    _notifyNotice('已清空配置', '已移除本机保存的 WebDAV 地址与凭据。');
+    try {
+      await widget.storage.saveWebdavConfig(
+        url: '',
+        user: '',
+        pass: '',
+        auto: _autoSync,
+        syncSubs: _syncSubs,
+      );
+      _urlCtrl.clear();
+      _userCtrl.clear();
+      _passCtrl.clear();
+      _confirmedUrl = '';
+      _confirmedPass = '';
+      widget.onSynced?.call(subscriptionsChanged: false);
+      _notifyNotice('已清空配置', '已移除本机保存的 WebDAV 地址与凭据。');
+    } catch (e) {
+      final msg = e is FormatException ? e.message : e.toString();
+      _notifyNotice('清空配置失败', msg, isError: true);
+    }
   }
 
   Future<void> _toggleLanReceiver() async {
@@ -475,15 +485,24 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
               subtitle: '启动时静默拉取最新进度，播放进度、收藏与订阅变更自动同步',
               value: _autoSync,
               onChanged: (v) async {
+                final prev = _autoSync;
                 setState(() => _autoSync = v);
-                await widget.storage.saveWebdavConfig(
-                  url: _urlCtrl.text.trim(),
-                  user: _userCtrl.text.trim(),
-                  pass: _passCtrl.text,
-                  auto: v,
-                  syncSubs: _syncSubs,
-                );
-                widget.onSynced?.call(subscriptionsChanged: false);
+                try {
+                  await widget.storage.saveWebdavConfig(
+                    url: _urlCtrl.text.trim(),
+                    user: _userCtrl.text.trim(),
+                    pass: _passCtrl.text,
+                    auto: v,
+                    syncSubs: _syncSubs,
+                  );
+                  widget.onSynced?.call(subscriptionsChanged: false);
+                } catch (e) {
+                  if (mounted) {
+                    setState(() => _autoSync = prev);
+                  }
+                  final msg = e is FormatException ? e.message : e.toString();
+                  _notifyNotice('保存配置失败', msg, isError: true);
+                }
               },
             ),
             IosSettingsSwitchRow(
@@ -722,13 +741,15 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
       return content;
     }
     final safeBottom = MediaQuery.paddingOf(context).bottom;
-    return SingleChildScrollView(
-      padding: EdgeInsets.fromLTRB(16, 16, 16, safeBottom + 28),
-      child: Align(
-        alignment: Alignment.topCenter,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 680),
-          child: content,
+    return TextSelectionMouseGuard(
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(16, 16, 16, safeBottom + 28),
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 680),
+            child: content,
+          ),
         ),
       ),
     );

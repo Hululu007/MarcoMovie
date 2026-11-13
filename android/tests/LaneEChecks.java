@@ -14,6 +14,7 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -249,7 +250,9 @@ public final class LaneEChecks {
                     new HashSet<>(
                             Arrays.asList(
                                     "SecureStorage.consumeReenterPasswordRequired",
+                                    "SecureStorage.isKeyStoreUnavailableMarked",
                                     "SecureStorage.markKeyStoreUnavailable",
+                                    "SecureStorage.savePlaintextFallback",
                                     "SecureStorage.handleInvalidatedKey",
                                     "SecureStorage.getWebdavPass",
                                     "SecureStorage.setWebdavPass",

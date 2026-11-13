@@ -182,9 +182,22 @@ class _DesktopHorizontalScrollerState extends State<DesktopHorizontalScroller> {
       return widget.child;
     }
 
+    final behavior = ScrollConfiguration.of(context);
+    final draggableChild = behavior.dragDevices.contains(PointerDeviceKind.mouse)
+        ? widget.child
+        : ScrollConfiguration(
+            behavior: behavior.copyWith(
+              dragDevices: <PointerDeviceKind>{
+                ...behavior.dragDevices,
+                PointerDeviceKind.mouse,
+              },
+            ),
+            child: widget.child,
+          );
+
     final content = Listener(
       onPointerSignal: _handlePointerSignal,
-      child: widget.child,
+      child: draggableChild,
     );
 
     return MouseRegion(

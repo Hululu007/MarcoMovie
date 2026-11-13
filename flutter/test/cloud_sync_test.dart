@@ -529,8 +529,8 @@ void main() {
       'https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json',
     );
     expect(
-      StorageService.resolveWebdavFileUrl('https://nas.local:5006/My Movies/'),
-      'https://nas.local:5006/My%20Movies/marco-movie-sync.json',
+      StorageService.resolveWebdavFileUrl('https://nas.test:5006/My Movies/'),
+      'https://nas.test:5006/My%20Movies/marco-movie-sync.json',
     );
     expect(
       StorageService.resolveWebdavFileUrl('https://dav.jianguoyun.com/dav/'),

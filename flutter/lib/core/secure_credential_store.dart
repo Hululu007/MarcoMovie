@@ -8,6 +8,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import 'app_log.dart';
+
 /// Abstract contract for platform-secure credential storage.
 abstract class SecureCredentialStore {
   Future<String?> read(String key);
@@ -23,8 +25,9 @@ abstract class SecureStorageBackend {
 }
 
 /// Production backend powered by `flutter_secure_storage`:
-/// - Windows: DPAPI (`CryptProtectData` / `CryptUnprotectData`, `useBackwardCompatibility: false`)
-/// - iOS / macOS: Apple Keychain (`first_unlock`)
+/// - Windows: AES-GCM key wrapped by DPAPI (`CryptProtectData` / `CryptUnprotectData`, `useBackwardCompatibility: false`)
+/// - iOS: Apple Keychain (`first_unlock`)
+/// - macOS: Legacy file-based Apple Keychain (`first_unlock`, `useDataProtectionKeyChain: false` for ad-hoc signed builds)
 /// - Android: EncryptedSharedPreferences / Android Keystore
 class FlutterSecureStorageBackend implements SecureStorageBackend {
   final FlutterSecureStorage _storage;
@@ -36,7 +39,10 @@ class FlutterSecureStorageBackend implements SecureStorageBackend {
   static const FlutterSecureStorage defaultStorage = FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
     iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
-    mOptions: MacOsOptions(accessibility: KeychainAccessibility.first_unlock),
+    mOptions: MacOsOptions(
+      accessibility: KeychainAccessibility.first_unlock,
+      useDataProtectionKeyChain: false,
+    ),
     wOptions: WindowsOptions(useBackwardCompatibility: false),
   );
 
@@ -117,11 +123,6 @@ class DefaultSecureCredentialStore implements SecureCredentialStore {
   static const String legacyBackupFileName = 'secure_credentials.enc.bak';
   static const String _legacyFormatPrefix = 'mm_sec_v1';
 
-  /// Test-only fallback registry keyed by directory path when running under `flutter test`
-  /// without an explicit [FlutterSecureStorage.setMockInitialValues] platform mock.
-  static final Map<String, InMemorySecureCredentialStore> _testDirBackends =
-      <String, InMemorySecureCredentialStore>{};
-
   final Directory? _dataDirectory;
   final SecureStorageBackend _backend;
   final Map<String, String?> _cache = <String, String?>{};
@@ -139,7 +140,6 @@ class DefaultSecureCredentialStore implements SecureCredentialStore {
 
   @visibleForTesting
   static void clearTestBackends() {
-    _testDirBackends.clear();
     FlutterSecureStorageBackend._unmockedTestFallback.clear();
   }
 
@@ -279,7 +279,11 @@ class DefaultSecureCredentialStore implements SecureCredentialStore {
         for (final entry in decoded.entries)
           entry.key.toString(): entry.value?.toString() ?? '',
       };
-    } catch (_) {
+    } catch (e) {
+      AppLog.instance.logError(
+        'Legacy credential decryption failed: $e',
+        source: 'SecureCredentialStore',
+      );
       return null;
     }
   }

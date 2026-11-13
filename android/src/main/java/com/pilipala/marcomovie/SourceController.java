@@ -44,6 +44,10 @@ final class SourceController {
     }
 
     static boolean available(MainActivity a, Cms.Site s) {
+        return available(a, a != null ? a.config : null, s);
+    }
+
+    static boolean available(MainActivity a, Cms.Config cfg, Cms.Site s) {
         return s.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)
                 || s.api.startsWith("catpaw://")
                 || HttpT4Engine.eligible(s)
@@ -51,10 +55,9 @@ final class SourceController {
                 || (a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true)
                         && ((CspEngine.eligible(s)
                                         && ((s.jar != null && !s.jar.isEmpty())
-                                                || (a.config != null
-                                                        && !a.config.spider.isEmpty())))
+                                                || (cfg != null && !cfg.spider.isEmpty())))
                                 || ((JsEngine.eligible(s) || DrpyEngine.eligible(s))
-                                        && a.config != null)));
+                                        && cfg != null)));
     }
 
     static SourceEngine engine(MainActivity a, Cms.Site s) throws Exception {
@@ -1333,11 +1336,14 @@ final class SourceController {
                 if (a.isTvDevice()) throw e;
             }
         }
+        final String rawConfig = c.raw;
+        final String targetOrigin = origin;
+        SourcePicker.applyEdits(a, c, targetOrigin);
         String currentKey = selected;
         boolean hasSelected = false;
         Cms.Site firstAvailable = null;
         for (Cms.Site s : c.sites) {
-            if (available(a, s)) {
+            if (available(a, c, s)) {
                 if (firstAvailable == null) firstAvailable = s;
                 if (s.key.equals(currentKey)) hasSelected = true;
             }
@@ -1346,8 +1352,6 @@ final class SourceController {
                 !hasSelected && firstAvailable != null
                         ? firstAvailable.key
                         : (hasSelected ? currentKey : null);
-        final String rawConfig = c.raw;
-        final String targetOrigin = origin;
         final ConfigStore store = a.configStore;
         final ConfigStore.PointerStore pointerStore = pointerStoreFor(a);
         final ConfigStore.PointerSnapshot nextPointers =
@@ -1384,7 +1388,6 @@ final class SourceController {
         } else {
             pointerStore.applyPointers(nextPointers);
         }
-        SourcePicker.applyEdits(a, c, targetOrigin);
         a.closeEngines();
         a.config = c;
         a.configOrigin = targetOrigin;

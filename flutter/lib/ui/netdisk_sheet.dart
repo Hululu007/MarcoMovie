@@ -503,8 +503,9 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
           child: AppleGlassSurface(
             padding: const EdgeInsets.all(22),
             borderRadius: BorderRadius.circular(26),
-            child: SingleChildScrollView(
-              child: Column(
+            child: TextSelectionMouseGuard(
+              child: SingleChildScrollView(
+                child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -589,6 +590,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                     ],
                   ),
                 ],
+              ),
               ),
             ),
           ),
@@ -1029,9 +1031,17 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                   compact: true,
                   onPressed: () async {
                     setState(_cancelQr);
-                    await widget.storage.setNetdiskCredential(drive.key, '');
-                    widget.onChanged?.call();
-                    if (mounted) setState(() {});
+                    try {
+                      await widget.storage.setNetdiskCredential(drive.key, '');
+                      widget.onChanged?.call();
+                      if (mounted) setState(() {});
+                    } catch (e) {
+                      if (mounted) {
+                        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                          SnackBar(content: Text('清除凭据失败：$e')),
+                        );
+                      }
+                    }
                   },
                 ),
               ],

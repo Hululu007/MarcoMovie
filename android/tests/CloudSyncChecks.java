@@ -1194,6 +1194,9 @@ public final class CloudSyncChecks {
 
         // Clearing via MainActivity resets CORRUPTED_PREF and flag while retaining backup key
         session2AfterRestart.clearWatchHistory();
+        WatchHistory.STORAGE_EXECUTOR
+                .submit(() -> {})
+                .get(5, java.util.concurrent.TimeUnit.SECONDS);
         check(
                 !WatchHistory.isCorrupted()
                         && !prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false)
@@ -1211,6 +1214,9 @@ public final class CloudSyncChecks {
 
         String validJson = "[{\"site\":\"s1\",\"id\":\"v1\",\"title\":\"Valid After Overwrite\"}]";
         boolean overwrittenOk = session2AfterRestart.overwriteWatchHistory(validJson);
+        WatchHistory.STORAGE_EXECUTOR
+                .submit(() -> {})
+                .get(5, java.util.concurrent.TimeUnit.SECONDS);
         List<WatchHistory.Entry> restored = session2AfterRestart.watchHistory();
         check(
                 overwrittenOk
@@ -1260,10 +1266,10 @@ public final class CloudSyncChecks {
                 "M-W2 Jianguoyun host-only input skips /dav/ and creates MarcoMovie/ below base");
         String ncFile =
                 CloudSync.resolveWebdavFileUrl(
-                        "https://nc.example.com/remote.php/dav/files/alice/MarcoMovie/");
+                        "https://nc.example/remote.php/dav/files/alice/MarcoMovie/");
         check(
                 CloudSync.baseCollectionDepth(
-                                "https://nc.example.com/remote.php/dav/files/alice/",
+                                "https://nc.example/remote.php/dav/files/alice/",
                                 java.net.URI.create(ncFile))
                         == 4,
                 "M-W2 Nextcloud base skips /remote.php/dav/files/<user>/");

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:ui' show PointerDeviceKind;
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -18,6 +19,7 @@ import 'package:marco_movie/main.dart' show AppScrollBehavior;
 import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:marco_movie/ui/apple_theme.dart';
 import 'package:marco_movie/ui/cloud_sync_panel.dart';
+import 'package:marco_movie/ui/desktop_horizontal_scroller.dart';
 import 'package:marco_movie/ui/player_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -86,6 +88,11 @@ void main() {
         storage.mOptions.toMap()['accessibility'],
         equals('first_unlock'),
       );
+      expect(
+        storage.mOptions.toMap()['useDataProtectionKeyChain'],
+        equals('false'),
+        reason: 'Ad-hoc signed macOS builds must use legacy file-based Keychain to avoid -34018',
+      );
     });
 
     test('Migrates legacy secure_credentials.enc only deleting old file after write succeeds', () async {
@@ -98,7 +105,8 @@ void main() {
         flush: true,
       );
 
-      // 1. Mid-migration failure must throw or abort WITHOUT deleting secure_credentials.enc
+      // 1. Mid-migration failure must throw on direct read AND must not crash StorageService.init(),
+      //    while keeping secure_credentials.enc intact on disk for next startup retry.
       final flakyBackend = _FailingSecureBackend(failOnWriteNumber: 2);
       final failingStore = DefaultSecureCredentialStore(
         dataDirectory: tempDir,
@@ -108,6 +116,16 @@ void main() {
         failingStore.read(StorageService.keyWebdavPass),
         throwsStateError,
       );
+      SharedPreferences.setMockInitialValues({});
+      final survivingStorage = await StorageService.init(
+        dataDirectory: tempDir,
+        secureStore: DefaultSecureCredentialStore(
+          dataDirectory: tempDir,
+          backend: _FailingSecureBackend(failAllWrites: true),
+        ),
+        pbkdf2Runner: <T>(c) => Future<T>.sync(c),
+      );
+      expect(survivingStorage.webdavPass, isEmpty);
       expect(
         await encFile.exists(),
         isTrue,
@@ -183,7 +201,7 @@ void main() {
       // Explicit write failure MUST throw and roll back cache
       await expectLater(
         storage.saveWebdavConfig(
-          url: 'https://dav.example.com/',
+          url: 'https://dav.example/',
           user: 'u',
           pass: 'new_secret_that_fails',
           auto: false,
@@ -339,6 +357,113 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(listController.offset, greaterThan(100.0));
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('Diagonal mouse drag inside modal sheet multiline input selects text without scrolling ancestor sheet', (tester) async {
+      final multilineCtrl = TextEditingController(
+        text: 'Line1 MarcoMovie\nLine2 DesktopSelection\nLine3 SheetScrollGuard\nLine4 EndOfText',
+      );
+      final sheetScrollCtrl = ScrollController();
+      final stripScrollCtrl = ScrollController();
+      addTearDown(() {
+        multilineCtrl.dispose();
+        sheetScrollCtrl.dispose();
+        stripScrollCtrl.dispose();
+      });
+
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            scrollBehavior: const AppScrollBehavior(),
+            home: Builder(
+              builder: (ctx) => Scaffold(
+                body: Center(
+                  child: ElevatedButton(
+                    key: const ValueKey('open-sheet'),
+                    onPressed: () {
+                      showAppleModalSheet<void>(
+                        context: ctx,
+                        title: '测试弹窗文本选择',
+                        builder: (_) => SingleChildScrollView(
+                          controller: sheetScrollCtrl,
+                          child: Column(
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: TextSelectionMouseGuard(
+                                  child: CupertinoTextField(
+                                    key: const ValueKey('sheet-multiline-input'),
+                                    controller: multilineCtrl,
+                                    maxLines: 5,
+                                    minLines: 4,
+                                  ),
+                                ),
+                              ),
+                              SizedBox(
+                                height: 48,
+                                child: DesktopHorizontalScroller(
+                                  controller: stripScrollCtrl,
+                                  child: ListView.builder(
+                                    key: const ValueKey('sheet-horizontal-strip'),
+                                    controller: stripScrollCtrl,
+                                    scrollDirection: Axis.horizontal,
+                                    itemCount: 30,
+                                    itemBuilder: (_, i) => SizedBox(
+                                      width: 90,
+                                      child: Center(child: Text('Chip $i')),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 900),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                    child: const Text('打开弹窗'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tester.tap(find.byKey(const ValueKey('open-sheet')));
+        await tester.pumpAndSettle();
+
+        final inputRect = tester.getRect(find.byKey(const ValueKey('sheet-multiline-input')));
+        final drag = await tester.startGesture(
+          Offset(inputRect.left + 12, inputRect.top + 14),
+          kind: PointerDeviceKind.mouse,
+        );
+        await tester.pump(const Duration(milliseconds: 40));
+        // Move diagonally (both dx and dy > slop) so an unguarded vertical SingleChildScrollView would steal it
+        await drag.moveBy(const Offset(120, 42));
+        await tester.pump(const Duration(milliseconds: 40));
+        await drag.up();
+        await tester.pumpAndSettle();
+
+        expect(
+          sheetScrollCtrl.offset,
+          equals(0.0),
+          reason: 'Ancestor modal sheet SingleChildScrollView must not steal diagonal mouse drag',
+        );
+        expect(multilineCtrl.selection.isCollapsed, isFalse);
+        expect(multilineCtrl.selection.end - multilineCtrl.selection.start, greaterThan(4));
+
+        // Meanwhile DesktopHorizontalScroller inside the sheet still supports mouse drag scrolling
+        await tester.drag(
+          find.byKey(const ValueKey('sheet-horizontal-strip')),
+          const Offset(-220, 0),
+          kind: PointerDeviceKind.mouse,
+        );
+        await tester.pumpAndSettle();
+        expect(stripScrollCtrl.offset, greaterThan(80.0));
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }
@@ -509,7 +634,7 @@ void main() {
     test('Cleartext HTTP warning triggers only when URL or password changed', () {
       expect(
         CloudSyncSettingsPanel.shouldPromptCleartextHttpWarning(
-          url: 'http://192.168.1.2:5005/dav/',
+          url: 'http://dav.example:5005/dav/',
           password: 'secret',
           savedUrl: '',
           savedPassword: '',
@@ -519,9 +644,9 @@ void main() {
       // Unchanged URL & password -> should NOT prompt again
       expect(
         CloudSyncSettingsPanel.shouldPromptCleartextHttpWarning(
-          url: 'http://192.168.1.2:5005/dav/',
+          url: 'http://dav.example:5005/dav/',
           password: 'secret',
-          savedUrl: 'http://192.168.1.2:5005/dav/',
+          savedUrl: 'http://dav.example:5005/dav/',
           savedPassword: 'secret',
         ),
         isFalse,
@@ -529,9 +654,9 @@ void main() {
       // Changed password -> prompts again
       expect(
         CloudSyncSettingsPanel.shouldPromptCleartextHttpWarning(
-          url: 'http://192.168.1.2:5005/dav/',
+          url: 'http://dav.example:5005/dav/',
           password: 'new_secret',
-          savedUrl: 'http://192.168.1.2:5005/dav/',
+          savedUrl: 'http://dav.example:5005/dav/',
           savedPassword: 'secret',
         ),
         isTrue,
@@ -539,9 +664,9 @@ void main() {
       // Changed URL -> prompts again
       expect(
         CloudSyncSettingsPanel.shouldPromptCleartextHttpWarning(
-          url: 'http://192.168.1.99:5005/dav/',
+          url: 'http://dav2.example:5005/dav/',
           password: 'secret',
-          savedUrl: 'http://192.168.1.2:5005/dav/',
+          savedUrl: 'http://dav.example:5005/dav/',
           savedPassword: 'secret',
         ),
         isTrue,
@@ -751,7 +876,7 @@ void main() {
         1500,
         (i) => CmsEpisode(
           name: '第${i + 1}集',
-          url: 'https://vip.example.com/watch/${i + 1}.html',
+          url: 'https://vip.example/watch/${i + 1}.html',
         ),
         growable: false,
       );
@@ -802,24 +927,24 @@ void main() {
       );
     });
 
-    test('7.e: cms_parser checks xml only in URL path, not host (e.g. xmflv.com / xmlvod.org)', () {
+    test('7.e: cms_parser checks xml only in URL path, not host (e.g. xmflv / xmlvod hosts)', () {
       final cfgHostXml = CmsParser.parseConfig(
         jsonEncode({
           'sites': [
             {
               'key': 'xmflv_host',
               'name': 'XMFLV站点',
-              'api': 'https://xmflv.com/api.php/provide/vod/',
+              'api': 'https://xmflv.example/api.php/provide/vod/',
             },
             {
               'key': 'xml_host_2',
               'name': 'XML域名JSON接口',
-              'api': 'https://api.xmlvod.org/api.php/provide/vod/?ac=list',
+              'api': 'https://api.xmlvod.example/api.php/provide/vod/?ac=list',
             },
             {
               'key': 'true_xml_path',
               'name': '真实XML路径接口',
-              'api': 'https://cms.example.com/api.php/provide/vod/at/xml/',
+              'api': 'https://cms.example/api.php/provide/vod/at/xml/',
             },
           ],
         }),

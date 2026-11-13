@@ -190,8 +190,9 @@ class _SourceVerificationDialogState extends State<SourceVerificationDialog> {
     child: Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
       child: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
+        child: TextSelectionMouseGuard(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 420),
             child: LiquidGlass(
@@ -345,6 +346,7 @@ class _SourceVerificationDialogState extends State<SourceVerificationDialog> {
                 ),
               ),
             ),
+          ),
           ),
         ),
       ),

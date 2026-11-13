@@ -5,7 +5,7 @@
   "android/src/main/assets/python-host/parser.js": "94494a395e0c679ff4c305a78d861dba280ddb95176c6c082511167b485f7ed6",
   "android/src/main/assets/python-host/skulpt-stdlib.js": "e3ecccbc17c6164d19ed3c5561aaaeb752c38c8efa2d88b62b5fb7a7e1b086a7",
   "android/src/main/assets/python-host/skulpt.min.js": "1a319d8eedf314dba5af2444313e3cf2ac072a335df0f5100277e8f49b64eae9",
-  "android/tests/lib/aosp-json/LICENSE": "067d8f7f645efe1131a9df13aa80ec2910d4ff898f9b14d337443a4202d56ab6",
+  "android/tests/lib/aosp-json/LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
   "android/tests/lib/aosp-json/NOTICE": "ded3eab76e881c8c18ab9e4ed9e888b1afcac41435913930f88f8188cecb2e8f",
   "android/tests/lib/aosp-json/src/org/json/JSON.java": "a2cc5e4bf64bfe3edd73c6a14409f3200640454051d9947ee79f16a2396a19b1",
   "android/tests/lib/aosp-json/src/org/json/JSONArray.java": "24f10dbe57a9228b8aec8a891355c26285e7fc4e070a2f826a080300e3ca4180",

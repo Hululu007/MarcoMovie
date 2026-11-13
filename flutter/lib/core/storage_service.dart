@@ -482,7 +482,11 @@ class StorageService {
   Future<void> _migrateCredentialsIfNeeded() async {
     final store = _secureStore;
     if (store is DefaultSecureCredentialStore) {
-      await store.ensureInitialized();
+      try {
+        await store.ensureInitialized();
+      } on Object catch (e) {
+        debugPrint('StorageService: ensureInitialized secure store failed: $e');
+      }
     }
     for (final key in [
       keyWebdavPass,
@@ -1712,12 +1716,12 @@ class StorageService {
   }
   String get preferredSiteKey {
     final key = _prefs.getString(keyPreferredSite) ?? '';
-    return (loadSavedConfig()?.publicSupportedSites ?? const <CmsSite>[])
+    return (loadSavedConfig()?.publicAvailableSites ?? const <CmsSite>[])
         .any((s) => s.key == key) ? key : '';
   }
   String get preferredLineName => _prefs.getString(keyPreferredLine) ?? '';
   Future<void> setPreferredSiteKey(String key) async {
-    if (key.isNotEmpty && !(loadSavedConfig()?.publicSupportedSites ?? const <CmsSite>[])
+    if (key.isNotEmpty && !(loadSavedConfig()?.publicAvailableSites ?? const <CmsSite>[])
         .any((s) => s.key == key)) throw const FormatException('请选择已启用的公开片源');
     await _prefs.setString(keyPreferredSite, key);
   }
