@@ -122,6 +122,7 @@ public final class LiteActivity extends Activity {
     long lastUpKeyAt;
     int upKeyStreak;
     volatile boolean syncInFlight;
+    boolean exitPushSubmitted;
     long lastAutoPushMs;
     final Runnable autoPushTask =
             new Runnable() {
@@ -4287,9 +4288,26 @@ public final class LiteActivity extends Activity {
         home();
     }
 
+    void submitExitWebdavPushIfNeeded() {
+        if (exitPushSubmitted) return;
+        if (!isWebdavConfigured() || !getPreferences(0).getBoolean("webdav_auto", true)) {
+            return;
+        }
+        String url = getPreferences(0).getString("webdav_url", "").trim();
+        if (url.length() == 0) return;
+        String user = getPreferences(0).getString("webdav_user", "").trim();
+        boolean syncSubs = getPreferences(0).getBoolean("webdav_sync_subs", true);
+        LiteSync.LocalSubscription subSnap = syncSubs ? readLocalSubscriptionForSync() : null;
+        android.content.Context appCtx =
+                getApplicationContext() != null ? getApplicationContext() : this;
+        exitPushSubmitted = true;
+        LiteSync.submitExitPush(appCtx, url, user, syncSubs, subSnap, getPreferences(0));
+    }
+
     @Override
     protected void onStart() {
         super.onStart();
+        exitPushSubmitted = false;
         if (backgrounded) {
             backgrounded = false;
             if (inPlayback && currentDetail != null) showDetail(currentDetail);
@@ -4305,6 +4323,9 @@ public final class LiteActivity extends Activity {
         cancelWork();
         closePairing();
         release();
+        if (isFinishing()) {
+            submitExitWebdavPushIfNeeded();
+        }
     }
 
     @Override
@@ -4315,6 +4336,7 @@ public final class LiteActivity extends Activity {
         cancelWork();
         closePairing();
         release();
+        submitExitWebdavPushIfNeeded();
         io.shutdownNow();
         super.onDestroy();
     }

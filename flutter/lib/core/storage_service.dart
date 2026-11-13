@@ -133,7 +133,22 @@ class StorageService {
   Timer? _autoSyncTimer;
   bool _syncInFlight = false;
   bool _resyncRequested = false;
+  bool _resyncImmediate = false;
   int _lastHistoryAutoPushMs = 0;
+  http.Client? _webdavTestClient;
+
+  static final Set<String> _noConditionalWriteHosts = <String>{};
+
+  @visibleForTesting
+  void setWebdavClientForTesting(http.Client? client) {
+    _webdavTestClient = client;
+  }
+
+  @visibleForTesting
+  bool get hasPendingAutoSyncForTesting => _autoSyncTimer?.isActive ?? false;
+
+  @visibleForTesting
+  int get lastHistoryAutoPushMsForTesting => _lastHistoryAutoPushMs;
   static final Expando<QuarkAccountProvider> _quarkProviders = Expando();
   static final Expando<Map<String, String>> _credentialCaches = Expando();
   QuarkAccountProvider get quarkAccounts => _quarkProviders[_prefs] ??=
@@ -2081,16 +2096,19 @@ class StorageService {
   Future<void> _handleHistoryPersistence({
     required bool immediate,
     required bool isPrivate,
+    bool triggerSync = true,
+    bool? syncImmediate,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
+    final effectiveSyncImmediate = syncImmediate ?? immediate;
     if (immediate) {
       _historyFlushTimer?.cancel();
       _historyFlushTimer = null;
       await _flushHistoryToDisk();
       _lastHistoryDiskWriteMs = now;
       _historyDirty = false;
-      if (!isPrivate) {
-        scheduleAutoWebdavSync(immediate: true);
+      if (!isPrivate && triggerSync) {
+        scheduleAutoWebdavSync(immediate: effectiveSyncImmediate, nowMs: now);
       }
       return;
     }
@@ -2101,8 +2119,8 @@ class StorageService {
       await _flushHistoryToDisk();
       _lastHistoryDiskWriteMs = now;
       _historyDirty = false;
-      if (!isPrivate) {
-        scheduleAutoWebdavSync();
+      if (!isPrivate && triggerSync) {
+        scheduleAutoWebdavSync(immediate: effectiveSyncImmediate, nowMs: now);
       }
     } else {
       _historyDirty = true;
@@ -2114,7 +2132,7 @@ class StorageService {
               await _flushHistoryToDisk();
               _lastHistoryDiskWriteMs = DateTime.now().millisecondsSinceEpoch;
               _historyDirty = false;
-              if (!isPrivate) {
+              if (!isPrivate && triggerSync) {
                 scheduleAutoWebdavSync();
               }
             }
@@ -2146,6 +2164,8 @@ class StorageService {
   Future<void> upsertWatchHistory(
     WatchHistoryEntry entry, {
     bool immediate = false,
+    bool triggerSync = true,
+    bool? syncImmediate,
   }) {
     return _runSequentialMutation(() async {
       if (_historyCorrupted) {
@@ -2168,7 +2188,12 @@ class StorageService {
         }
         _allHistoryCache = combined;
         watchHistoryRevision.value++;
-        await _handleHistoryPersistence(immediate: immediate, isPrivate: true);
+        await _handleHistoryPersistence(
+          immediate: immediate,
+          isPrivate: true,
+          triggerSync: triggerSync,
+          syncImmediate: syncImmediate,
+        );
         return;
       }
 
@@ -2181,7 +2206,12 @@ class StorageService {
       _allHistoryCache = combined;
       _historyCache = List.unmodifiable(updatedPublic);
       watchHistoryRevision.value++;
-      await _handleHistoryPersistence(immediate: immediate, isPrivate: false);
+      await _handleHistoryPersistence(
+        immediate: immediate,
+        isPrivate: false,
+        triggerSync: triggerSync,
+        syncImmediate: syncImmediate,
+      );
     });
   }
 
@@ -2861,9 +2891,11 @@ class StorageService {
     if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
       trimmed = 'https://$trimmed';
     }
+    trimmed = trimmed.replaceAll(' ', '%20');
     final uri = Uri.tryParse(trimmed);
     if (uri == null ||
         !uri.hasScheme ||
+        uri.host.isEmpty ||
         (uri.scheme != 'http' && uri.scheme != 'https')) {
       throw const FormatException('仅支持 HTTP 或 HTTPS WebDAV 地址');
     }
@@ -2874,12 +2906,19 @@ class StorageService {
     final host = uri.host.toLowerCase();
     final isJianguoyun =
         host == 'jianguoyun.com' || host.endsWith('.jianguoyun.com');
-    final isRootPath =
-        path.isEmpty || path == '/' || path == '/dav' || path == '/dav/';
-    final folderPrefix = (isJianguoyun && isRootPath) ? 'MarcoMovie/' : '';
+    if (isJianguoyun && (path.isEmpty || path == '/')) {
+      return trimmed.endsWith('/')
+          ? '${trimmed}dav/MarcoMovie/$defaultSyncFileName'
+          : '$trimmed/dav/MarcoMovie/$defaultSyncFileName';
+    }
+    if (isJianguoyun && (path == '/dav' || path == '/dav/')) {
+      return trimmed.endsWith('/')
+          ? '${trimmed}MarcoMovie/$defaultSyncFileName'
+          : '$trimmed/MarcoMovie/$defaultSyncFileName';
+    }
     return trimmed.endsWith('/')
-        ? '$trimmed$folderPrefix$defaultSyncFileName'
-        : '$trimmed/$folderPrefix$defaultSyncFileName';
+        ? '$trimmed$defaultSyncFileName'
+        : '$trimmed/$defaultSyncFileName';
   }
 
   static String resolveLanSyncEndpoint(String rawUrl) {
@@ -3491,6 +3530,9 @@ class StorageService {
     if (!webdavAuto || !isWebdavConfigured) return;
     if (_syncInFlight) {
       _resyncRequested = true;
+      if (immediate) {
+        _resyncImmediate = true;
+      }
       return;
     }
     final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
@@ -3515,6 +3557,9 @@ class StorageService {
       _lastHistoryAutoPushMs = DateTime.now().millisecondsSinceEpoch;
       if (_syncInFlight) {
         _resyncRequested = true;
+        if (immediate) {
+          _resyncImmediate = true;
+        }
         return;
       }
       syncWithWebdav().ignore();
@@ -3523,6 +3568,7 @@ class StorageService {
 
   Future<void> flushPendingSync({
     Duration timeout = const Duration(seconds: 3),
+    http.Client? client,
   }) async {
     cancelPendingAutoSync();
     if (!isWebdavConfigured || !webdavAuto) return;
@@ -3534,11 +3580,129 @@ class StorageService {
       return;
     }
     try {
-      await syncWithWebdav().timeout(timeout);
+      await syncWithWebdav(client: client).timeout(timeout);
     } on Object catch (e) {
       // Best-effort push on exit
       debugPrint('StorageService: flushPendingSync best-effort skipped: $e');
     }
+  }
+
+  static bool isWeakEtag(String? etag) {
+    if (etag == null) return false;
+    final trimmed = etag.trim();
+    return trimmed.startsWith('W/') || trimmed.startsWith('w/');
+  }
+
+  static String _extractHostKey(Uri uri) {
+    final host = uri.host.toLowerCase();
+    if (host.isEmpty) return '';
+    final scheme = uri.scheme.toLowerCase();
+    final port = uri.hasPort ? uri.port : (scheme == 'http' ? 80 : 443);
+    return '$scheme://$host:$port';
+  }
+
+  @visibleForTesting
+  static bool isHostMarkedNoConditionalWrite(String rawOrFileUrl) {
+    try {
+      final resolved = rawOrFileUrl.trim().toLowerCase().endsWith('.json')
+          ? rawOrFileUrl.trim()
+          : resolveWebdavFileUrl(rawOrFileUrl);
+      final key = _extractHostKey(Uri.parse(resolved));
+      return key.isNotEmpty && _noConditionalWriteHosts.contains(key);
+    } on Object {
+      return false;
+    }
+  }
+
+  @visibleForTesting
+  static void clearNoConditionalWriteHostsForTest() {
+    _noConditionalWriteHosts.clear();
+  }
+
+  static bool _isIfNoneMatchRejectedStatus(int code) {
+    return code == 400 ||
+        code == 405 ||
+        code == 406 ||
+        code == 417 ||
+        code == 428 ||
+        code == 500 ||
+        code == 501;
+  }
+
+  @visibleForTesting
+  static int baseCollectionDepth(String rawBaseUrl, Uri fileUri) {
+    final allSegs =
+        fileUri.pathSegments.where((s) => s.isNotEmpty).toList(growable: false);
+    if (allSegs.length <= 1) return 0;
+    final parentSegs = allSegs.sublist(0, allSegs.length - 1);
+    final baseSegs = _extractBaseDirSegments(rawBaseUrl);
+
+    final host = fileUri.host.toLowerCase();
+    final isJianguoyun =
+        host == 'jianguoyun.com' || host.endsWith('.jianguoyun.com');
+    if (isJianguoyun && parentSegs.first.toLowerCase() == 'dav') {
+      var skip = 1;
+      if (baseSegs.isNotEmpty &&
+          baseSegs.length < parentSegs.length &&
+          _isSegmentPrefix(baseSegs, parentSegs)) {
+        if (baseSegs.length > skip) skip = baseSegs.length;
+      }
+      return skip;
+    }
+    if (parentSegs.length >= 4 &&
+        parentSegs[0].toLowerCase() == 'remote.php' &&
+        parentSegs[1].toLowerCase() == 'dav' &&
+        parentSegs[2].toLowerCase() == 'files') {
+      var skip = 4;
+      if (baseSegs.isNotEmpty &&
+          baseSegs.length < parentSegs.length &&
+          _isSegmentPrefix(baseSegs, parentSegs)) {
+        if (baseSegs.length > skip) skip = baseSegs.length;
+      }
+      return skip;
+    }
+    if (parentSegs.length >= 2 &&
+        parentSegs[0].toLowerCase() == 'remote.php' &&
+        parentSegs[1].toLowerCase() == 'webdav') {
+      var skip = 2;
+      if (baseSegs.isNotEmpty &&
+          baseSegs.length < parentSegs.length &&
+          _isSegmentPrefix(baseSegs, parentSegs)) {
+        if (baseSegs.length > skip) skip = baseSegs.length;
+      }
+      return skip;
+    }
+
+    if (baseSegs.isNotEmpty &&
+        baseSegs.length < parentSegs.length &&
+        _isSegmentPrefix(baseSegs, parentSegs)) {
+      return baseSegs.length;
+    }
+    return 0;
+  }
+
+  static List<String> _extractBaseDirSegments(String rawBaseUrl) {
+    var trimmed = rawBaseUrl.trim();
+    if (trimmed.isEmpty) return const [];
+    final lower = trimmed.toLowerCase();
+    if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+      trimmed = 'https://$trimmed';
+    }
+    trimmed = trimmed.replaceAll(' ', '%20');
+    final u = Uri.tryParse(trimmed);
+    if (u == null) return const [];
+    if (u.path.toLowerCase().endsWith('.json')) return const [];
+    return u.pathSegments.where((s) => s.isNotEmpty).toList(growable: false);
+  }
+
+  static bool _isSegmentPrefix(List<String> prefix, List<String> full) {
+    if (prefix.length > full.length) return false;
+    for (var i = 0; i < prefix.length; i++) {
+      if (prefix[i].toLowerCase() != full[i].toLowerCase()) {
+        return false;
+      }
+    }
+    return true;
   }
 
   Map<String, String> _webdavHeaders({
@@ -3580,24 +3744,31 @@ class StorageService {
     return 'WebDAV 写入失败 (HTTP $code)';
   }
 
-  Future<void> _ensureWebdavCollections(http.Client client, Uri fileUri) async {
-    final segments = fileUri.pathSegments;
+  Future<void> _ensureWebdavCollections(
+    http.Client client,
+    String rawBaseUrl,
+    Uri fileUri,
+  ) async {
+    final segments =
+        fileUri.pathSegments.where((s) => s.isNotEmpty).toList(growable: false);
     if (segments.length <= 1) return;
-    for (var i = 0; i < segments.length - 1; i++) {
-      final subPath = '/${segments.sublist(0, i + 1).join('/')}/';
-      final collUri = fileUri.replace(path: subPath);
-      final req = http.Request('MKCOL', collUri)..headers.addAll(_webdavHeaders());
+    final skipSegments = baseCollectionDepth(rawBaseUrl, fileUri);
+    for (var i = skipSegments; i < segments.length - 1; i++) {
+      final collUri = fileUri.replace(
+        pathSegments: <String>[...segments.sublist(0, i + 1), ''],
+      );
+      final req = http.Request('MKCOL', collUri)
+        ..headers.addAll(_webdavHeaders());
       try {
         final streamed =
             await client.send(req).timeout(const Duration(seconds: 10));
         final status = streamed.statusCode;
-        if (status == 401 || status == 403) {
-          throw FormatException('WebDAV 权限验证失败 (HTTP $status)');
+        await streamed.stream.drain<void>();
+        if (status == 401) {
+          break;
         }
-      } on FormatException {
-        rethrow;
-      } catch (e) {
-        // Continue creating intermediate directories
+      } on Object catch (e) {
+        debugPrint('StorageService: MKCOL failed for $collUri: $e');
       }
     }
   }
@@ -3616,6 +3787,42 @@ class StorageService {
     return '$prefix $hh:$mm（历史 $historyCount · 收藏 $favoriteCount$subSegment）';
   }
 
+  Future<http.Response> _putWebdavWithMkcolRetry(
+    http.Client httpClient,
+    String rawBaseUrl,
+    Uri uri,
+    List<int> encodedPayload, {
+    String? ifMatch,
+    String? ifNoneMatch,
+  }) async {
+    var putResp = await httpClient
+        .put(
+          uri,
+          headers: _webdavHeaders(
+            jsonContent: true,
+            ifMatch: ifMatch,
+            ifNoneMatch: ifNoneMatch,
+          ),
+          body: encodedPayload,
+        )
+        .timeout(const Duration(seconds: 15));
+    if (putResp.statusCode == 404 || putResp.statusCode == 409) {
+      await _ensureWebdavCollections(httpClient, rawBaseUrl, uri);
+      putResp = await httpClient
+          .put(
+            uri,
+            headers: _webdavHeaders(
+              jsonContent: true,
+              ifMatch: ifMatch,
+              ifNoneMatch: ifNoneMatch,
+            ),
+            body: encodedPayload,
+          )
+          .timeout(const Duration(seconds: 15));
+    }
+    return putResp;
+  }
+
   Future<
     ({
       int historyCount,
@@ -3629,14 +3836,18 @@ class StorageService {
     if (_syncInFlight) {
       throw StateError('正在同步中，请稍候');
     }
-    final targetUrl = resolveWebdavFileUrl(webdavUrl);
+    final rawBaseUrl = webdavUrl;
+    final targetUrl = resolveWebdavFileUrl(rawBaseUrl);
     _syncInFlight = true;
-    final httpClient = client ?? http.Client();
-    final ownsClient = client == null;
+    _lastHistoryAutoPushMs = DateTime.now().millisecondsSinceEpoch;
+    final effectiveClient = client ?? _webdavTestClient ?? http.Client();
+    final ownsClient = client == null && _webdavTestClient == null;
     try {
       final uri = Uri.parse(targetUrl);
+      final hostKey = _extractHostKey(uri);
       const maxRetries = 2;
       var attempt = 0;
+      var sawAbsent412 = false;
       final rand = Random();
 
       while (true) {
@@ -3644,7 +3855,7 @@ class StorageService {
         String? remoteEtag;
         var fileAbsent = false;
 
-        final getResp = await httpClient
+        final getResp = await effectiveClient
             .get(uri, headers: _webdavHeaders())
             .timeout(const Duration(seconds: 15));
         if (getResp.statusCode >= 200 && getResp.statusCode < 300) {
@@ -3653,7 +3864,7 @@ class StorageService {
           }
           remoteBody = utf8.decode(getResp.bodyBytes);
           final h = getResp.headers['etag']?.trim();
-          if (h != null && h.isNotEmpty) {
+          if (h != null && h.isNotEmpty && !isWeakEtag(h)) {
             remoteEtag = h;
           }
         } else if (getResp.statusCode == 404) {
@@ -3674,46 +3885,71 @@ class StorageService {
           throw const FormatException('本地待同步数据超过 8 MB 大小限制');
         }
 
+        final skipCond =
+            hostKey.isNotEmpty && _noConditionalWriteHosts.contains(hostKey);
+        final absent412Fallback = fileAbsent && sawAbsent412;
         String? ifMatch;
         String? ifNoneMatch;
-        if (fileAbsent) {
-          ifNoneMatch = '*';
-        } else if (remoteEtag != null && remoteEtag.isNotEmpty) {
-          ifMatch = remoteEtag;
+        if (!skipCond) {
+          if (fileAbsent) {
+            if (!absent412Fallback) {
+              ifNoneMatch = '*';
+            }
+          } else if (remoteEtag != null && remoteEtag.isNotEmpty) {
+            ifMatch = remoteEtag;
+          }
+        }
+        final usedConditional = ifMatch != null || ifNoneMatch != null;
+
+        var putResp = await _putWebdavWithMkcolRetry(
+          effectiveClient,
+          rawBaseUrl,
+          uri,
+          encodedPayload,
+          ifMatch: ifMatch,
+          ifNoneMatch: ifNoneMatch,
+        );
+
+        if (ifNoneMatch != null &&
+            _isIfNoneMatchRejectedStatus(putResp.statusCode)) {
+          final retryResp = await _putWebdavWithMkcolRetry(
+            effectiveClient,
+            rawBaseUrl,
+            uri,
+            encodedPayload,
+          );
+          if (retryResp.statusCode >= 200 && retryResp.statusCode < 300) {
+            if (hostKey.isNotEmpty) _noConditionalWriteHosts.add(hostKey);
+            putResp = retryResp;
+          } else {
+            putResp = retryResp;
+          }
         }
 
-        var putResp = await httpClient
-            .put(
+        if (putResp.statusCode == 412) {
+          if (attempt < maxRetries && !(fileAbsent && sawAbsent412)) {
+            if (ifNoneMatch != null) {
+              sawAbsent412 = true;
+            }
+            attempt++;
+            final jitterMs = 50 + rand.nextInt(100);
+            await Future<void>.delayed(Duration(milliseconds: jitterMs));
+            continue;
+          }
+          if (usedConditional) {
+            final fallbackResp = await _putWebdavWithMkcolRetry(
+              effectiveClient,
+              rawBaseUrl,
               uri,
-              headers: _webdavHeaders(
-                jsonContent: true,
-                ifMatch: ifMatch,
-                ifNoneMatch: ifNoneMatch,
-              ),
-              body: encodedPayload,
-            )
-            .timeout(const Duration(seconds: 15));
-
-        if (putResp.statusCode == 404 || putResp.statusCode == 409) {
-          await _ensureWebdavCollections(httpClient, uri);
-          putResp = await httpClient
-              .put(
-                uri,
-                headers: _webdavHeaders(
-                  jsonContent: true,
-                  ifMatch: ifMatch,
-                  ifNoneMatch: ifNoneMatch,
-                ),
-                body: encodedPayload,
-              )
-              .timeout(const Duration(seconds: 15));
-        }
-
-        if (putResp.statusCode == 412 && attempt < maxRetries) {
-          attempt++;
-          final jitterMs = 50 + rand.nextInt(100);
-          await Future<void>.delayed(Duration(milliseconds: jitterMs));
-          continue;
+              encodedPayload,
+            );
+            if (fallbackResp.statusCode >= 200 &&
+                fallbackResp.statusCode < 300 &&
+                hostKey.isNotEmpty) {
+              _noConditionalWriteHosts.add(hostKey);
+            }
+            putResp = fallbackResp;
+          }
         }
 
         if (putResp.statusCode == 401 || putResp.statusCode == 403) {
@@ -3721,6 +3957,10 @@ class StorageService {
         }
         if (putResp.statusCode < 200 || putResp.statusCode >= 300) {
           throw FormatException(_formatWebdavWriteError(putResp.statusCode));
+        }
+
+        if (absent412Fallback && hostKey.isNotEmpty) {
+          _noConditionalWriteHosts.add(hostKey);
         }
 
         _lastHistoryAutoPushMs = now;
@@ -3748,10 +3988,12 @@ class StorageService {
       rethrow;
     } finally {
       _syncInFlight = false;
-      if (ownsClient) httpClient.close();
+      if (ownsClient) effectiveClient.close();
       if (_resyncRequested) {
+        final immediateNext = _resyncImmediate;
         _resyncRequested = false;
-        scheduleAutoWebdavSync(immediate: true);
+        _resyncImmediate = false;
+        scheduleAutoWebdavSync(immediate: immediateNext);
       }
     }
   }

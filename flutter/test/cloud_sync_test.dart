@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -7,6 +8,7 @@ import 'package:http/testing.dart';
 import 'package:marco_movie/core/lan_sync_server.dart';
 import 'package:marco_movie/core/models.dart';
 import 'package:marco_movie/core/storage_service.dart';
+import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -519,6 +521,18 @@ void main() {
 
   test('normalizes Jianguoyun and WebDAV file URLs consistently', () {
     expect(
+      StorageService.resolveWebdavFileUrl('dav.jianguoyun.com'),
+      'https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json',
+    );
+    expect(
+      StorageService.resolveWebdavFileUrl('https://dav.jianguoyun.com/'),
+      'https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json',
+    );
+    expect(
+      StorageService.resolveWebdavFileUrl('https://nas.local:5006/My Movies/'),
+      'https://nas.local:5006/My%20Movies/marco-movie-sync.json',
+    );
+    expect(
       StorageService.resolveWebdavFileUrl('https://dav.jianguoyun.com/dav/'),
       'https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json',
     );
@@ -921,4 +935,377 @@ void main() {
       storage.cancelPendingAutoSync();
     },
   );
+
+  test(
+    'M-W1: weak ETag omits If-Match, rejected If-None-Match retries without header, and 412 exhaustion falls back to unconditional PUT + host memory',
+    () async {
+      StorageService.clearNoConditionalWriteHostsForTest();
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final storage = await StorageService.init();
+
+      // 1. Weak ETag W/"..." must NOT send If-Match
+      await storage.saveWebdavConfig(
+        url: 'https://weak-host.example/dav/MarcoMovie/',
+        user: 'alice',
+        pass: 'secret',
+        auto: false,
+        syncSubs: false,
+      );
+      String? weakSentIfMatch;
+      String? weakSentIfNoneMatch;
+      final mockWeak = MockClient((req) async {
+        if (req.method == 'GET') {
+          return http.Response(
+            jsonEncode({
+              'schema': 'marco-movie-sync',
+              'version': 2,
+              'updated': 100,
+              'watch_history': <dynamic>[],
+            }),
+            200,
+            headers: {'etag': 'W/"weak-etag-99"'},
+          );
+        }
+        if (req.method == 'PUT') {
+          weakSentIfMatch = req.headers['if-match'];
+          weakSentIfNoneMatch = req.headers['if-none-match'];
+          return http.Response('', 204);
+        }
+        return http.Response('', 405);
+      });
+      await storage.syncWithWebdav(client: mockWeak);
+      expect(weakSentIfMatch, isNull);
+      expect(weakSentIfNoneMatch, isNull);
+
+      // 2. Server rejecting If-None-Match: * (HTTP 501) retries without header and remembers host
+      StorageService.clearNoConditionalWriteHostsForTest();
+      const noInmUrl = 'https://no-inm-host.example/dav/MarcoMovie/';
+      await storage.saveWebdavConfig(
+        url: noInmUrl,
+        user: 'alice',
+        pass: 'secret',
+        auto: false,
+        syncSubs: false,
+      );
+      final inmAttempts = <String?>[];
+      final mockRejectInm = MockClient((req) async {
+        if (req.method == 'GET') return http.Response('', 404);
+        if (req.method == 'PUT') {
+          final inm = req.headers['if-none-match'];
+          inmAttempts.add(inm);
+          if (inm != null) return http.Response('', 501);
+          return http.Response('', 201);
+        }
+        return http.Response('', 405);
+      });
+      await storage.syncWithWebdav(client: mockRejectInm);
+      expect(inmAttempts, equals(['*', null]));
+      expect(
+        StorageService.isHostMarkedNoConditionalWrite(noInmUrl),
+        isTrue,
+      );
+
+      // 3. 412 retries exhausted -> one unconditional PUT + per-host memory on next sync
+      StorageService.clearNoConditionalWriteHostsForTest();
+      const cond412Url = 'https://gzip-etag-host.example/dav/MarcoMovie/';
+      await storage.saveWebdavConfig(
+        url: cond412Url,
+        user: 'alice',
+        pass: 'secret',
+        auto: false,
+        syncSubs: false,
+      );
+      final putConditionalLog = <String>[];
+      final mockCond412 = MockClient((req) async {
+        if (req.method == 'GET') {
+          return http.Response(
+            jsonEncode({
+              'schema': 'marco-movie-sync',
+              'version': 2,
+              'updated': 200,
+              'watch_history': <dynamic>[],
+            }),
+            200,
+            headers: {'etag': '"etag-gzip"'},
+          );
+        }
+        if (req.method == 'PUT') {
+          final im = req.headers['if-match'];
+          final inm = req.headers['if-none-match'];
+          putConditionalLog.add('im=$im,inm=$inm');
+          if (im != null || inm != null) {
+            return http.Response('', 412);
+          }
+          return http.Response('', 204);
+        }
+        return http.Response('', 405);
+      });
+      await storage.syncWithWebdav(client: mockCond412);
+      expect(putConditionalLog.length, 4);
+      expect(putConditionalLog.last, 'im=null,inm=null');
+      expect(
+        StorageService.isHostMarkedNoConditionalWrite(cond412Url),
+        isTrue,
+      );
+
+      // Subsequent sync to remembered host immediately sends unconditional PUT
+      putConditionalLog.clear();
+      await storage.syncWithWebdav(client: mockCond412);
+      expect(putConditionalLog, equals(['im=null,inm=null']));
+      StorageService.clearNoConditionalWriteHostsForTest();
+    },
+  );
+
+  test(
+    'M-W2: MKCOL skips base depth for Jianguoyun, continues on /dav/ 403 while draining stream, stops only on 401, and supports URLs with spaces',
+    () async {
+      StorageService.clearNoConditionalWriteHostsForTest();
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final storage = await StorageService.init();
+
+      // 1. Jianguoyun base skip: MKCOL only creates MarcoMovie/ below /dav/
+      await storage.saveWebdavConfig(
+        url: 'dav.jianguoyun.com',
+        user: 'alice',
+        pass: 'secret',
+        auto: false,
+        syncSubs: false,
+      );
+      final jgyMkcols = <String>[];
+      var jgyFolderCreated = false;
+      final mockJgy = MockClient((req) async {
+        if (req.method == 'GET') return http.Response('', 404);
+        if (req.method == 'MKCOL') {
+          jgyMkcols.add(req.url.path);
+          if (req.url.path == '/dav/') return http.Response('forbidden', 403);
+          jgyFolderCreated = true;
+          return http.Response('created', 201);
+        }
+        if (req.method == 'PUT') {
+          return jgyFolderCreated
+              ? http.Response('', 201)
+              : http.Response('', 409);
+        }
+        return http.Response('', 405);
+      });
+      await storage.syncWithWebdav(client: mockJgy);
+      expect(jgyMkcols, equals(['/dav/MarcoMovie/']));
+
+      // 2. Mock /dav/ returning 403 on generic host continues to /dav/MarcoMovie/ and drains MKCOL stream
+      await storage.saveWebdavConfig(
+        url: 'https://dav403.example/dav/MarcoMovie/',
+        user: 'alice',
+        pass: 'secret',
+        auto: false,
+        syncSubs: false,
+      );
+      final mkcolPaths403 = <String>[];
+      var drainedCount = 0;
+      var marcoCreated = false;
+      final drainingClient = _StreamTrackingClient((req) async {
+        if (req.method == 'GET') {
+          return _TrackedReply(404, const <int>[]);
+        }
+        if (req.method == 'MKCOL') {
+          mkcolPaths403.add(req.url.path);
+          if (req.url.path == '/dav/') {
+            return _TrackedReply(
+              403,
+              utf8.encode('403 parent collection forbidden'),
+              onDrained: () => drainedCount++,
+            );
+          }
+          marcoCreated = true;
+          return _TrackedReply(
+            201,
+            utf8.encode('201 created'),
+            onDrained: () => drainedCount++,
+          );
+        }
+        if (req.method == 'PUT') {
+          return marcoCreated
+              ? _TrackedReply(201, const <int>[])
+              : _TrackedReply(409, const <int>[]);
+        }
+        return _TrackedReply(405, const <int>[]);
+      });
+      await storage.syncWithWebdav(client: drainingClient);
+      expect(mkcolPaths403, equals(['/dav/', '/dav/MarcoMovie/']));
+      expect(drainedCount, 2);
+
+      // 3. MKCOL stops immediately on 401 without issuing child MKCOLs
+      await storage.saveWebdavConfig(
+        url: 'https://dav401.example/auth401/sub1/sub2/',
+        user: 'alice',
+        pass: 'secret',
+        auto: false,
+        syncSubs: false,
+      );
+      final mkcolPaths401 = <String>[];
+      final mock401 = MockClient((req) async {
+        if (req.method == 'GET') return http.Response('', 404);
+        if (req.method == 'MKCOL') {
+          mkcolPaths401.add(req.url.path);
+          return http.Response('', 401);
+        }
+        if (req.method == 'PUT') return http.Response('', 409);
+        return http.Response('', 405);
+      });
+      await expectLater(
+        storage.syncWithWebdav(client: mock401),
+        throwsA(isA<FormatException>()),
+      );
+      expect(mkcolPaths401, equals(['/auth401/']));
+
+      // 4. URL with spaces syncs cleanly
+      await storage.saveWebdavConfig(
+        url: 'https://space-dav.example/My Sync Folder/',
+        user: 'alice',
+        pass: 'secret',
+        auto: false,
+        syncSubs: false,
+      );
+      String? uploadedPath;
+      final mockSpaces = MockClient((req) async {
+        if (req.method == 'GET') return http.Response('', 404);
+        if (req.method == 'MKCOL') return http.Response('', 201);
+        if (req.method == 'PUT') {
+          uploadedPath = req.url.path;
+          return http.Response('', 201);
+        }
+        return http.Response('', 405);
+      });
+      await storage.syncWithWebdav(client: mockSpaces);
+      expect(uploadedPath, '/My%20Sync%20Folder/marco-movie-sync.json');
+      StorageService.clearNoConditionalWriteHostsForTest();
+    },
+  );
+
+  test(
+    'M-W5: AdaptiveShell.runWindowCloseSequence bounds hung steps to <= 4 seconds total',
+    () async {
+      final events = <String>[];
+      final sw = Stopwatch()..start();
+
+      await AdaptiveShell.runWindowCloseSequence(
+        setPreventClose: (prevent) async {
+          events.add('prevent:$prevent');
+        },
+        flushHistory: () async {
+          events.add('flushHistory');
+        },
+        flushSync: (_) => Completer<void>().future, // Hung WebDAV network
+        closeHost: () => Completer<void>().future, // Hung CatPaw host
+        closeScripts: () => Completer<void>().future, // Hung script session
+        destroyWindow: () async {
+          events.add('destroy');
+        },
+      );
+      sw.stop();
+
+      expect(sw.elapsedMilliseconds, lessThanOrEqualTo(4000));
+      expect(
+        events,
+        equals(['prevent:true', 'flushHistory', 'prevent:false', 'destroy']),
+      );
+    },
+  );
+
+  test(
+    'M-W7: slider/seek saves watch history locally without scheduling push, and playback throttles pushes to at most once every 5 minutes',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final storage = await StorageService.init();
+      await storage.saveConfig(
+        publicSubJsonA,
+        origin: 'https://a.example/sub.json',
+      );
+      await storage.saveWebdavConfig(
+        url: 'https://throttle-dav.example/dav/MarcoMovie/',
+        user: 'alice',
+        pass: 'secret',
+        auto: true,
+        syncSubs: false,
+      );
+      var syncPutCount = 0;
+      storage.setWebdavClientForTesting(
+        MockClient((req) async {
+          if (req.method == 'GET') return http.Response('', 404);
+          if (req.method == 'PUT') {
+            syncPutCount++;
+            return http.Response('', 201);
+          }
+          return http.Response('', 201);
+        }),
+      );
+      storage.cancelPendingAutoSync();
+
+      // 1. Dragging progress bar / seeking saves locally immediately WITHOUT triggering WebDAV push
+      await storage.upsertWatchHistory(
+        const WatchHistoryEntry(
+          site: 'siteA',
+          id: 'vod_seek',
+          title: '拖动测试片',
+          position: 120000,
+          duration: 600000,
+          updated: 1000,
+        ),
+        immediate: true,
+        triggerSync: false,
+      );
+      expect(storage.getWatchHistory().first.position, 120000);
+      expect(storage.hasPendingAutoSyncForTesting, isFalse);
+      expect(syncPutCount, 0);
+
+      // 2. Playback save with immediate disk persistence + syncImmediate:false schedules throttled push
+      await storage.upsertWatchHistory(
+        const WatchHistoryEntry(
+          site: 'siteA',
+          id: 'vod_seek',
+          title: '拖动测试片',
+          position: 135000,
+          duration: 600000,
+          updated: 2000,
+        ),
+        immediate: true,
+        triggerSync: true,
+        syncImmediate: false,
+      );
+      expect(storage.hasPendingAutoSyncForTesting, isTrue);
+
+      storage.cancelPendingAutoSync();
+    },
+  );
+}
+
+class _TrackedReply {
+  final int statusCode;
+  final List<int> body;
+  final void Function()? onDrained;
+
+  _TrackedReply(this.statusCode, this.body, {this.onDrained});
+}
+
+class _StreamTrackingClient extends http.BaseClient {
+  final Future<_TrackedReply> Function(http.BaseRequest request) _handler;
+
+  _StreamTrackingClient(this._handler);
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    await request.finalize().drain<void>();
+    final reply = await _handler(request);
+    final controller = StreamController<List<int>>(
+      onCancel: () {
+        // Tracked via onListen completion below when fully drained
+      },
+    );
+    controller.onListen = () {
+      if (reply.body.isNotEmpty) {
+        controller.add(reply.body);
+      }
+      controller.close().then((_) => reply.onDrained?.call());
+    };
+    return http.StreamedResponse(controller.stream, reply.statusCode);
+  }
 }

@@ -400,8 +400,11 @@ public final class SecureStorageChecks {
         AppLog.clear();
         SecureStorage.setWebdavPass(ctx, "new_pass_that_fails_to_encrypt");
         check(
-                "must_survive_cipher_failure".equals(legacy.getString(Prefs.WEBDAV_PASS, "")),
-                "Existing plaintext pref is NOT deleted before encryption succeeds in setWebdavPass");
+                "new_pass_that_fails_to_encrypt".equals(legacy.getString(Prefs.WEBDAV_PASS, "")),
+                "setWebdavPass writes new password to legacy plaintext pref when encryption fails");
+        check(
+                "new_pass_that_fails_to_encrypt".equals(SecureStorage.getWebdavPass(ctx)),
+                "getWebdavPass returns new fallback plaintext password after encryption failure");
         check(
                 AppLog.dump().contains("W/SecureStorage"),
                 "AppLog records warning when setWebdavPass encryption fails");
@@ -460,65 +463,148 @@ public final class SecureStorageChecks {
                 "Legacy plaintext removed once commit() returns true");
     }
 
-    private static void testKeyStoreUnavailableFallsBackToPlaintextWithMarker() {
-        // Passing null restores DEFAULT_BACKEND, which tries
-        // KeyStore.getInstance("AndroidKeyStore")
-        // and fails on JVM because AndroidKeyStore is absent — exercising the real unavailable
-        // path!
-        SecureStorage.setBackendForTest(null);
+    private static void testKeyStoreUnavailableFallsBackToPlaintextWithMarker() throws Exception {
+        final long[] nowHolder = new long[] {1_000_000L};
+        SecureStorage.setClockForTest(() -> nowHolder[0]);
+        try {
+            // Passing null restores DEFAULT_BACKEND, which tries
+            // KeyStore.getInstance("AndroidKeyStore")
+            // and fails on JVM because AndroidKeyStore provider is absent — exercising the real
+            // unavailable path!
+            SecureStorage.setBackendForTest(null);
 
-        FakeContext ctx = new FakeContext();
-        InMemoryPrefs legacy = ctx.getSharedPreferences(Prefs.FILE, Context.MODE_PRIVATE);
-        InMemoryPrefs secure =
-                ctx.getSharedPreferences(SecureStorage.PREF_FILE, Context.MODE_PRIVATE);
-        legacy.edit().putString(Prefs.WEBDAV_PASS, "legacy_tv_box_pass").commit();
+            FakeContext ctx = new FakeContext();
+            InMemoryPrefs legacy = ctx.getSharedPreferences(Prefs.FILE, Context.MODE_PRIVATE);
+            InMemoryPrefs secure =
+                    ctx.getSharedPreferences(SecureStorage.PREF_FILE, Context.MODE_PRIVATE);
+            // Simulate a legacy permanent marker from an older release as well
+            secure.edit().putBoolean(SecureStorage.KEY_KEYSTORE_UNAVAILABLE, true).commit();
+            legacy.edit().putString(Prefs.WEBDAV_PASS, "legacy_tv_box_pass").commit();
 
-        AppLog.clear();
-        String readBack = SecureStorage.getWebdavPass(ctx);
-        check(
-                "legacy_tv_box_pass".equals(readBack),
-                "When AndroidKeyStore is unavailable, legacy plaintext password remains readable");
-        check(
-                SecureStorage.isKeyStoreUnavailableMarked(ctx)
-                        && secure.getBoolean(SecureStorage.KEY_KEYSTORE_UNAVAILABLE, false),
-                "KeyStore unavailable marker is persisted");
-        check(
-                !secure.contains(SecureStorage.KEY_WEBDAV_PASS_ENC),
-                "No hardcoded constant fallback key is used when KeyStore is unavailable");
-        check(
-                "legacy_tv_box_pass".equals(legacy.getString(Prefs.WEBDAV_PASS, "")),
-                "Plaintext password remains in legacy prefs when KeyStore is unavailable");
-        check(
-                AppLog.dump().contains("AndroidKeyStore unavailable"),
-                "AppLog warns when AndroidKeyStore is unavailable");
+            AppLog.clear();
+            String readBack = SecureStorage.getWebdavPass(ctx);
+            check(
+                    "legacy_tv_box_pass".equals(readBack),
+                    "When AndroidKeyStore is unavailable, legacy plaintext password remains readable");
+            check(
+                    SecureStorage.isKeyStoreUnavailableMarked(ctx)
+                            && !secure.contains(SecureStorage.KEY_KEYSTORE_UNAVAILABLE),
+                    "KeyStore unavailable marker is in-memory retryable and cleans up legacy permanent pref");
+            check(
+                    !secure.contains(SecureStorage.KEY_WEBDAV_PASS_ENC),
+                    "No hardcoded constant fallback key is used when KeyStore is unavailable");
+            check(
+                    "legacy_tv_box_pass".equals(legacy.getString(Prefs.WEBDAV_PASS, "")),
+                    "Plaintext password remains in legacy prefs when KeyStore is unavailable");
+            check(
+                    AppLog.dump().contains("AndroidKeyStore unavailable"),
+                    "AppLog warns when AndroidKeyStore is unavailable");
 
-        SecureStorage.setWebdavPass(ctx, "updated_plaintext_fallback_pass");
-        check(
-                "updated_plaintext_fallback_pass".equals(SecureStorage.getWebdavPass(ctx)),
-                "setWebdavPass continues using legacy plaintext storage when KeyStore is unavailable");
+            SecureStorage.setWebdavPass(ctx, "updated_plaintext_fallback_pass");
+            check(
+                    "updated_plaintext_fallback_pass".equals(SecureStorage.getWebdavPass(ctx)),
+                    "setWebdavPass continues using legacy plaintext storage when KeyStore is unavailable");
 
-        // Also test explicit KeyStoreException backend
-        SecureStorage.setBackendForTest(
-                new SecureStorage.CryptoBackend() {
-                    @Override
-                    public SecretKey getOrCreateKey() throws Exception {
-                        throw new KeyStoreException("Hardware keystore missing");
-                    }
+            // TTL expiry allows retrying KeyStore
+            nowHolder[0] += SecureStorage.KEYSTORE_UNAVAILABLE_TTL_MS + 1L;
+            check(
+                    !SecureStorage.isKeyStoreUnavailableMarked(ctx),
+                    "KeyStore unavailable marker expires after TTL so KeyStore can be retried");
 
-                    @Override
-                    public void deleteKey() {}
+            // Degraded mode MUST still attempt decrypt whenever webdav_pass_enc exists
+            final SecretKey validKey = generateJvmAesKey();
+            final AtomicBoolean failProviderMissing = new AtomicBoolean(false);
+            SecureStorage.setBackendForTest(
+                    new SecureStorage.CryptoBackend() {
+                        @Override
+                        public SecretKey getOrCreateKey() throws Exception {
+                            if (failProviderMissing.get()) {
+                                throw new KeyStoreException("Hardware keystore missing");
+                            }
+                            return validKey;
+                        }
 
-                    @Override
-                    public SecureStorage.CipherAdapter createCipher() throws Exception {
-                        return new StrictKeyStoreCipher();
-                    }
-                });
-        FakeContext ctx2 = new FakeContext();
-        SecureStorage.setWebdavPass(ctx2, "fresh_user_no_keystore");
-        check(
-                "fresh_user_no_keystore".equals(SecureStorage.getWebdavPass(ctx2))
-                        && SecureStorage.isKeyStoreUnavailableMarked(ctx2),
-                "New password on device without KeyStore falls back to plaintext with marker");
+                        @Override
+                        public void deleteKey() {}
+
+                        @Override
+                        public SecureStorage.CipherAdapter createCipher() throws Exception {
+                            return new StrictKeyStoreCipher();
+                        }
+                    });
+            FakeContext ctxEnc = new FakeContext();
+            SecureStorage.setWebdavPass(ctxEnc, "encrypted_secret_not_masked");
+            // Force degraded marker while webdav_pass_enc exists, then let KeyStore work again
+            failProviderMissing.set(true);
+            FakeContext otherCtx = new FakeContext();
+            SecureStorage.setWebdavPass(otherCtx, "triggers_degraded_marker");
+            check(
+                    SecureStorage.isKeyStoreUnavailableMarked(ctxEnc),
+                    "Missing provider sets retryable degraded marker");
+            failProviderMissing.set(false);
+            check(
+                    "encrypted_secret_not_masked".equals(SecureStorage.getWebdavPass(ctxEnc)),
+                    "Degraded mode still attempts decrypt when webdav_pass_enc exists");
+
+            // Transient KeyStore failure (e.g. daemon not ready at boot) must NOT mark unavailable
+            final AtomicBoolean daemonNotReady = new AtomicBoolean(true);
+            SecureStorage.setBackendForTest(
+                    new SecureStorage.CryptoBackend() {
+                        @Override
+                        public SecretKey getOrCreateKey() throws Exception {
+                            if (daemonNotReady.get()) {
+                                throw new KeyStoreException("Keystore daemon not ready");
+                            }
+                            return validKey;
+                        }
+
+                        @Override
+                        public void deleteKey() {}
+
+                        @Override
+                        public SecureStorage.CipherAdapter createCipher() throws Exception {
+                            return new StrictKeyStoreCipher();
+                        }
+                    });
+            check(
+                    "".equals(SecureStorage.getWebdavPass(ctxEnc)),
+                    "Transient KeyStore daemon error fails cleanly without crashing");
+            check(
+                    !SecureStorage.isKeyStoreUnavailableMarked(ctxEnc),
+                    "Transient non-provider KeyStore error does NOT mark KeyStore unavailable");
+            daemonNotReady.set(false);
+            check(
+                    "encrypted_secret_not_masked".equals(SecureStorage.getWebdavPass(ctxEnc)),
+                    "Subsequent call immediately decrypts once transient KeyStore failure clears");
+
+            // Explicit missing-provider KeyStoreException marks unavailable and falls back to
+            // plaintext
+            failProviderMissing.set(true);
+            SecureStorage.setBackendForTest(
+                    new SecureStorage.CryptoBackend() {
+                        @Override
+                        public SecretKey getOrCreateKey() throws Exception {
+                            throw new KeyStoreException("Hardware keystore missing");
+                        }
+
+                        @Override
+                        public void deleteKey() {}
+
+                        @Override
+                        public SecureStorage.CipherAdapter createCipher() throws Exception {
+                            return new StrictKeyStoreCipher();
+                        }
+                    });
+            FakeContext ctx2 = new FakeContext();
+            SecureStorage.setWebdavPass(ctx2, "fresh_user_no_keystore");
+            check(
+                    "fresh_user_no_keystore".equals(SecureStorage.getWebdavPass(ctx2))
+                            && SecureStorage.isKeyStoreUnavailableMarked(ctx2),
+                    "New password on device without KeyStore falls back to plaintext with retryable marker");
+        } finally {
+            SecureStorage.setClockForTest(null);
+            SecureStorage.setBackendForTest(null);
+        }
     }
 
     private static void testInvalidatedAndUnrecoverableKeysDeleteAliasAndPrompt() throws Exception {
@@ -608,6 +694,80 @@ public final class SecureStorageChecks {
                             && SecureStorage.REENTER_PASSWORD_MESSAGE.equals(prompts.get(0))
                             && SecureStorage.consumeReenterPasswordRequired(ctx),
                     "UnrecoverableKeyException prompts user to re-enter password");
+
+            // Case C (9b): setWebdavPass encounters invalidated key on first encrypt, deletes
+            // alias and retries once with a new key
+            final AtomicBoolean failOnceInSet = new AtomicBoolean(true);
+            throwUnrecoverable.set(false);
+            SecureStorage.setBackendForTest(
+                    new SecureStorage.CryptoBackend() {
+                        @Override
+                        public SecretKey getOrCreateKey() throws Exception {
+                            if (failOnceInSet.getAndSet(false)) {
+                                throw new UnrecoverableKeyException("Stale alias during save");
+                            }
+                            if (currentKey[0] == null) {
+                                currentKey[0] = generateJvmAesKey();
+                            }
+                            return currentKey[0];
+                        }
+
+                        @Override
+                        public void deleteKey() {
+                            deleteAliasCount.incrementAndGet();
+                            currentKey[0] = null;
+                        }
+
+                        @Override
+                        public SecureStorage.CipherAdapter createCipher() throws Exception {
+                            return new StrictKeyStoreCipher();
+                        }
+                    });
+            int beforeDeleteCount = deleteAliasCount.get();
+            SecureStorage.setWebdavPass(ctx, "retried_with_fresh_key_in_one_save");
+            check(
+                    deleteAliasCount.get() == beforeDeleteCount + 1,
+                    "setWebdavPass deletes invalidated alias before retrying encryption");
+            check(
+                    "retried_with_fresh_key_in_one_save".equals(SecureStorage.getWebdavPass(ctx)),
+                    "setWebdavPass succeeds in one call after deleting invalidated alias and regenerating key");
+
+            // Case D (9c): DEFAULT_PROMPT_LISTENER logs warning instead of showing duplicate Toast,
+            // leaving CloudSyncDialog's consumeReenterPasswordRequired notice as the single prompt
+            SecureStorage.setPromptListenerForTest(null);
+            final AtomicBoolean alwaysInvalid = new AtomicBoolean(true);
+            SecureStorage.setBackendForTest(
+                    new SecureStorage.CryptoBackend() {
+                        @Override
+                        public SecretKey getOrCreateKey() throws Exception {
+                            if (alwaysInvalid.get()) {
+                                throw new KeyPermanentlyInvalidatedException("Invalidated");
+                            }
+                            return generateJvmAesKey();
+                        }
+
+                        @Override
+                        public void deleteKey() {
+                            deleteAliasCount.incrementAndGet();
+                        }
+
+                        @Override
+                        public SecureStorage.CipherAdapter createCipher() throws Exception {
+                            return new StrictKeyStoreCipher();
+                        }
+                    });
+            alwaysInvalid.set(false);
+            FakeContext ctxDefaultPrompt = new FakeContext();
+            SecureStorage.setWebdavPass(ctxDefaultPrompt, "before_default_prompt_check");
+            alwaysInvalid.set(true);
+            AppLog.clear();
+            check(
+                    "".equals(SecureStorage.getWebdavPass(ctxDefaultPrompt)),
+                    "Invalidated key with default listener returns empty string");
+            check(
+                    AppLog.dump().contains("re-authentication required")
+                            && SecureStorage.consumeReenterPasswordRequired(ctxDefaultPrompt),
+                    "Default prompt listener logs once and sets single re-auth flag for CloudSyncDialog");
         } finally {
             SecureStorage.setPromptListenerForTest(null);
             SecureStorage.setBackendForTest(null);

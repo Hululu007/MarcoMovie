@@ -21,6 +21,7 @@ import android.widget.TextView;
 import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -29,7 +30,6 @@ import java.util.Set;
 import java.lang.ref.WeakReference;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -40,35 +40,47 @@ import java.util.concurrent.atomic.AtomicReference;
  * subscriptions).
  */
 final class CloudSyncDialog {
-    private static final ExecutorService SYNC_EXEC =
-            Executors.newSingleThreadExecutor(
-                    r -> {
-                        Thread t = new Thread(r, "marco-cloud-sync");
-                        t.setDaemon(true);
-                        return t;
-                    });
+    static final CloudSync.SyncRuntime RUNTIME = new CloudSync.SyncRuntime();
+    private static final ExecutorService SYNC_EXEC = RUNTIME.syncExec;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static final CloudSync.DelayScheduler MAIN_SCHEDULER =
+            new CloudSync.DelayScheduler() {
+                @Override
+                public void postDelayed(Runnable task, long delayMs) {
+                    MAIN.postDelayed(task, delayMs);
+                }
+
+                @Override
+                public void removeCallbacks(Runnable task) {
+                    MAIN.removeCallbacks(task);
+                }
+            };
     private static final AtomicBoolean IN_FLIGHT = new AtomicBoolean(false);
-    private static volatile long lastAutoPushMs = 0L;
-    private static Runnable pendingAutoPush;
-    private static WeakReference<MainActivity> pendingActivityRef;
     private static WeakReference<AppDialog> activeDialogRef;
+    private static WeakReference<MainActivity> activeDialogOwnerRef;
+    private static WeakReference<MainActivity> lastExitPushActivityRef;
 
     static void cancel() {
-        if (pendingAutoPush != null) {
-            MAIN.removeCallbacks(pendingAutoPush);
-            pendingAutoPush = null;
-        }
-        pendingActivityRef = null;
+        cancel(null);
+    }
+
+    static void cancel(MainActivity a) {
+        RUNTIME.cancelOwned(a);
         if (activeDialogRef != null) {
-            AppDialog d = activeDialogRef.get();
-            if (d != null) {
-                try {
-                    d.dismiss();
-                } catch (Exception ignored) {
+            MainActivity dialogOwner =
+                    activeDialogOwnerRef == null ? null : activeDialogOwnerRef.get();
+            if (a == null || dialogOwner == null || dialogOwner == a) {
+                AppDialog d = activeDialogRef.get();
+                if (d != null) {
+                    try {
+                        d.dismiss();
+                    } catch (Exception e) {
+                        AppLog.w("CloudSync", "Failed to dismiss active CloudSyncDialog", e);
+                    }
                 }
+                activeDialogRef = null;
+                activeDialogOwnerRef = null;
             }
-            activeDialogRef = null;
         }
     }
 
@@ -116,10 +128,16 @@ final class CloudSyncDialog {
         final long deletedAt = System.currentTimeMillis();
         WatchHistory.STORAGE_EXECUTOR.execute(
                 () -> {
-                    String next =
-                            CloudSync.Tombstones.recordHistoryDelete(
-                                    prefs.getString(Prefs.SYNC_TOMBSTONES, ""), itemKey, deletedAt);
-                    prefs.edit().putString(Prefs.SYNC_TOMBSTONES, next).apply();
+                    try {
+                        String next =
+                                CloudSync.Tombstones.recordHistoryDelete(
+                                        prefs.getString(Prefs.SYNC_TOMBSTONES, ""),
+                                        itemKey,
+                                        deletedAt);
+                        prefs.edit().putString(Prefs.SYNC_TOMBSTONES, next).apply();
+                    } catch (Exception e) {
+                        AppLog.w("CloudSync", "Failed to persist history deletion tombstone", e);
+                    }
                     MAIN.post(() -> scheduleAutoPush(a, true));
                 });
     }
@@ -134,19 +152,23 @@ final class CloudSyncDialog {
         final long clearedAt = System.currentTimeMillis();
         WatchHistory.STORAGE_EXECUTOR.execute(
                 () -> {
-                    String next =
-                            CloudSync.Tombstones.recordHistoryClear(
-                                    prefs.getString(Prefs.SYNC_TOMBSTONES, ""),
-                                    snapshot,
-                                    clearedAt);
-                    prefs.edit().putString(Prefs.SYNC_TOMBSTONES, next).apply();
+                    try {
+                        String next =
+                                CloudSync.Tombstones.recordHistoryClear(
+                                        prefs.getString(Prefs.SYNC_TOMBSTONES, ""),
+                                        snapshot,
+                                        clearedAt);
+                        prefs.edit().putString(Prefs.SYNC_TOMBSTONES, next).apply();
+                    } catch (Exception e) {
+                        AppLog.w("CloudSync", "Failed to persist history clear tombstones", e);
+                    }
                     MAIN.post(() -> scheduleAutoPush(a, true));
                 });
     }
 
     /** Records a local favorite addition/removal timestamp and schedules auto-push. */
     static void onFavoriteToggled(
-            MainActivity a, String siteKey, String videoId, boolean nowFavorited) {
+            MainActivity a, String siteKey, String videoId, final boolean nowFavorited) {
         if (a == null
                 || a.privateMode
                 || a.prefs == null
@@ -154,14 +176,23 @@ final class CloudSyncDialog {
                 || videoId == null
                 || siteKey.isEmpty()
                 || videoId.isEmpty()) return;
-        String itemKey = siteKey + "\n" + videoId;
-        String next =
-                CloudSync.Tombstones.recordFavoriteToggle(
-                        a.prefs.getString(Prefs.SYNC_TOMBSTONES, ""),
-                        itemKey,
-                        nowFavorited,
-                        System.currentTimeMillis());
-        a.prefs.edit().putString(Prefs.SYNC_TOMBSTONES, next).apply();
+        final SharedPreferences prefs = a.prefs;
+        final String itemKey = siteKey + "\n" + videoId;
+        final long now = System.currentTimeMillis();
+        WatchHistory.STORAGE_EXECUTOR.execute(
+                () -> {
+                    try {
+                        String nextTomb =
+                                CloudSync.Tombstones.recordFavoriteToggle(
+                                        prefs.getString(Prefs.SYNC_TOMBSTONES, ""),
+                                        itemKey,
+                                        nowFavorited,
+                                        now);
+                        prefs.edit().putString(Prefs.SYNC_TOMBSTONES, nextTomb).apply();
+                    } catch (Exception e) {
+                        AppLog.w("CloudSync", "Failed to persist favorite tombstone", e);
+                    }
+                });
         scheduleAutoPush(a, true);
     }
 
@@ -173,28 +204,44 @@ final class CloudSyncDialog {
             String cleanUrl = origin != null && Cms.isHttp(origin.trim()) ? origin.trim() : "";
             String publicRaw = CloudSync.sanitizePublicRawConfig(raw);
             if (cleanUrl.isEmpty() && publicRaw.isEmpty()) return;
-            String subId = ConfigLibrary.identity(cleanUrl, publicRaw);
-            String next =
-                    CloudSync.Tombstones.recordSubscriptionUpsert(
-                            a.prefs.getString(Prefs.SYNC_TOMBSTONES, ""), subId);
-            a.prefs.edit().putString(Prefs.SYNC_TOMBSTONES, next).apply();
+            final String subId = ConfigLibrary.identity(cleanUrl, publicRaw);
+            final SharedPreferences prefs = a.prefs;
+            WatchHistory.STORAGE_EXECUTOR.execute(
+                    () -> {
+                        try {
+                            String nextTomb =
+                                    CloudSync.Tombstones.recordSubscriptionUpsert(
+                                            prefs.getString(Prefs.SYNC_TOMBSTONES, ""), subId);
+                            prefs.edit().putString(Prefs.SYNC_TOMBSTONES, nextTomb).apply();
+                        } catch (Exception e) {
+                            AppLog.w("CloudSync", "Failed to persist subscription upsert", e);
+                        }
+                    });
             if (isSyncSubscriptionsEnabled(a)) {
                 scheduleAutoPush(a, true);
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            AppLog.w("CloudSync", "onSubscriptionSaved failed", e);
         }
     }
 
     /** Records a subscription deletion tombstone so deleted subscriptions do not resurrect. */
-    static void onSubscriptionDeleted(MainActivity a, String subId) {
+    static void onSubscriptionDeleted(MainActivity a, final String subId) {
         if (a == null || a.privateMode || a.prefs == null || subId == null || subId.isEmpty())
             return;
-        String next =
-                CloudSync.Tombstones.recordSubscriptionDelete(
-                        a.prefs.getString(Prefs.SYNC_TOMBSTONES, ""),
-                        subId,
-                        System.currentTimeMillis());
-        a.prefs.edit().putString(Prefs.SYNC_TOMBSTONES, next).apply();
+        final SharedPreferences prefs = a.prefs;
+        final long now = System.currentTimeMillis();
+        WatchHistory.STORAGE_EXECUTOR.execute(
+                () -> {
+                    try {
+                        String nextTomb =
+                                CloudSync.Tombstones.recordSubscriptionDelete(
+                                        prefs.getString(Prefs.SYNC_TOMBSTONES, ""), subId, now);
+                        prefs.edit().putString(Prefs.SYNC_TOMBSTONES, nextTomb).apply();
+                    } catch (Exception e) {
+                        AppLog.w("CloudSync", "Failed to persist subscription delete tombstone", e);
+                    }
+                });
         if (isSyncSubscriptionsEnabled(a)) {
             scheduleAutoPush(a, true);
         }
@@ -205,28 +252,13 @@ final class CloudSyncDialog {
         if (a == null || a.isDestroyed() || a.isFinishing() || a.privateMode || a.prefs == null)
             return;
         if (!isConfigured(a) || !a.prefs.getBoolean(Prefs.WEBDAV_AUTO, true)) return;
-        long now = System.currentTimeMillis();
-        long delayMs;
-        if (immediate) {
-            delayMs = 2500L;
-        } else {
-            long minInterval = 300000L; // 5 minutes
-            long elapsed = now - lastAutoPushMs;
-            if (elapsed < minInterval) {
-                delayMs = minInterval - elapsed;
-            } else {
-                delayMs = 3000L;
-            }
-        }
-        if (pendingAutoPush != null) {
-            MAIN.removeCallbacks(pendingAutoPush);
-        }
+        long delayMs = RUNTIME.tracker.computeDelayMs(System.currentTimeMillis(), immediate);
         final WeakReference<MainActivity> weakAct = new WeakReference<>(a);
-        pendingActivityRef = weakAct;
-        pendingAutoPush =
+        RUNTIME.scheduleOwned(
+                a,
+                MAIN_SCHEDULER,
+                delayMs,
                 () -> {
-                    pendingAutoPush = null;
-                    pendingActivityRef = null;
                     MainActivity act = weakAct.get();
                     if (act != null
                             && !act.isFinishing()
@@ -234,8 +266,93 @@ final class CloudSyncDialog {
                             && !act.privateMode) {
                         runWebdavSync(act, true, null);
                     }
-                };
-        MAIN.postDelayed(pendingAutoPush, delayMs);
+                });
+    }
+
+    /**
+     * Submits a final un-cancellable WebDAV push using Application Context when exiting an
+     * Activity ({@code isFinishing} / {@code onDestroy}).
+     */
+    static synchronized void pushOnExit(MainActivity a) {
+        if (a == null || a.privateMode || a.switchingPrivacy || a.prefs == null) return;
+        if (lastExitPushActivityRef != null && lastExitPushActivityRef.get() == a) {
+            return;
+        }
+        final Context appCtx = a.getApplicationContext() != null ? a.getApplicationContext() : a;
+        final SharedPreferences appPrefs =
+                appCtx.getSharedPreferences(Prefs.FILE, Context.MODE_PRIVATE);
+        final String url = appPrefs.getString(Prefs.WEBDAV_URL, "").trim();
+        final boolean auto = appPrefs.getBoolean(Prefs.WEBDAV_AUTO, true);
+        if (url.isEmpty() || !auto) return;
+        lastExitPushActivityRef = new WeakReference<>(a);
+        RUNTIME.cancelOwned(a);
+        final String user = appPrefs.getString(Prefs.WEBDAV_USER, "").trim();
+        final boolean syncSubs = appPrefs.getBoolean(Prefs.WEBDAV_SYNC_SUBS, true);
+        final File filesDir = appCtx.getFilesDir();
+
+        SYNC_EXEC.execute(
+                () -> {
+                    final String pass = SecureStorage.getWebdavPass(appCtx);
+                    if (SecureStorage.consumeReenterPasswordRequired(appCtx)) {
+                        RUNTIME.tracker.onFailure(System.currentTimeMillis());
+                        appPrefs.edit()
+                                .putString(
+                                        Prefs.SYNC_LAST_STATUS,
+                                        "失败: " + SecureStorage.REENTER_PASSWORD_MESSAGE)
+                                .apply();
+                        return;
+                    }
+                    IN_FLIGHT.set(true);
+                    final long startMs = System.currentTimeMillis();
+                    RUNTIME.tracker.onAttemptStart(startMs);
+                    try {
+                        final List<CloudSync.SubscriptionItem> localSubs =
+                                syncSubs
+                                        ? collectPublicSubscriptionsFromDisk(filesDir, appPrefs)
+                                        : null;
+                        CloudSync.MergeResult merged =
+                                CloudSync.syncWebdav(
+                                        url,
+                                        user,
+                                        pass,
+                                        remoteJson -> {
+                                            CloudSync.MergeResult res =
+                                                    CloudSync.mergeSerial(
+                                                            WatchHistory.STORAGE_EXECUTOR,
+                                                            buildPrefsStore(appPrefs),
+                                                            localSubs,
+                                                            syncSubs,
+                                                            remoteJson,
+                                                            startMs);
+                                            if (syncSubs
+                                                    && res.subscriptions != null
+                                                    && filesDir != null) {
+                                                persistMergedSubscriptionsToLibrary(
+                                                        filesDir,
+                                                        res.subscriptions,
+                                                        res.tombstonesJson);
+                                            }
+                                            return res;
+                                        });
+                        long doneMs = System.currentTimeMillis();
+                        RUNTIME.tracker.onSuccess(doneMs);
+                        String okSummary = formatCounts("同步成功", merged, syncSubs);
+                        appPrefs.edit()
+                                .putLong(Prefs.SYNC_LAST_TIME, doneMs)
+                                .putString(Prefs.SYNC_LAST_STATUS, okSummary)
+                                .apply();
+                    } catch (Exception e) {
+                        RUNTIME.tracker.onFailure(System.currentTimeMillis());
+                        AppLog.w("CloudSync", "Exit WebDAV sync failed", e);
+                        String errMsg =
+                                e.getMessage() == null
+                                        ? e.getClass().getSimpleName()
+                                        : e.getMessage();
+                        appPrefs.edit().putString(Prefs.SYNC_LAST_STATUS, "失败: " + errMsg).apply();
+                    } finally {
+                        IN_FLIGHT.set(false);
+                    }
+                });
     }
 
     /** Silently pulls and merges cloud state shortly after app launch. */
@@ -282,14 +399,16 @@ final class CloudSyncDialog {
                             a.configOrigin,
                             SourceController.configName(a.config),
                             a.prefs.getString(Prefs.SELECTED_SITE, ""));
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    AppLog.w("CloudSync", "rememberIfAbsent active config failed", e);
                 }
             }
             String activeId = "";
             if (a.config != null && a.config.raw != null && !a.config.raw.isEmpty()) {
                 try {
                     activeId = ConfigLibrary.identity(a.configOrigin, a.config.raw);
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    AppLog.w("CloudSync", "identity active config failed", e);
                 }
             }
             String currentSelectedSite = a.prefs.getString(Prefs.SELECTED_SITE, "");
@@ -307,12 +426,89 @@ final class CloudSyncDialog {
                             CloudSync.SubscriptionItem.create(
                                     entry.name, entry.origin, raw, true, sel, entry.updated);
                     if (item != null) out.add(item);
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    AppLog.w("CloudSync", "collectPublicSubscriptions entry failed", e);
                 }
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            AppLog.w("CloudSync", "collectPublicSubscriptions failed", e);
         }
         return out;
+    }
+
+    private static List<CloudSync.SubscriptionItem> collectPublicSubscriptionsFromDisk(
+            File filesDir, SharedPreferences prefs) {
+        List<CloudSync.SubscriptionItem> out = new ArrayList<>();
+        if (filesDir == null || prefs == null) return out;
+        try {
+            ConfigLibrary library = new ConfigLibrary(filesDir);
+            String currentSelectedSite = prefs.getString(Prefs.SELECTED_SITE, "");
+            for (ConfigLibrary.Entry entry : library.entries()) {
+                if (entry.origin != null
+                        && entry.origin.toLowerCase(Locale.ROOT).startsWith("file:")) {
+                    continue;
+                }
+                try {
+                    String raw = library.raw(entry);
+                    String sel =
+                            (entry.selected == null || entry.selected.isEmpty())
+                                    ? currentSelectedSite
+                                    : entry.selected;
+                    CloudSync.SubscriptionItem item =
+                            CloudSync.SubscriptionItem.create(
+                                    entry.name, entry.origin, raw, true, sel, entry.updated);
+                    if (item != null) out.add(item);
+                } catch (Exception e) {
+                    AppLog.w("CloudSync", "collectPublicSubscriptionsFromDisk entry failed", e);
+                }
+            }
+        } catch (Exception e) {
+            AppLog.w("CloudSync", "collectPublicSubscriptionsFromDisk failed", e);
+        }
+        return out;
+    }
+
+    private static void persistMergedSubscriptionsToLibrary(
+            File filesDir, List<CloudSync.SubscriptionItem> mergedSubs, String tombstonesJson) {
+        if (filesDir == null || mergedSubs == null) return;
+        try {
+            ConfigLibrary library = new ConfigLibrary(filesDir);
+            CloudSync.Tombstones tombs = CloudSync.Tombstones.read(tombstonesJson);
+            Set<String> keepIds = new HashSet<>();
+            for (CloudSync.SubscriptionItem sub : mergedSubs) {
+                if (sub == null) continue;
+                String raw = sub.rawContent == null ? "" : sub.rawContent.trim();
+                String origin = sub.url == null ? "" : sub.url.trim();
+                if (raw.isEmpty()) continue;
+                try {
+                    Cms.Config parsed = Cms.parseConfig(raw, origin);
+                    String name =
+                            sub.name == null
+                                            || sub.name.isEmpty()
+                                            || "我的订阅".equals(sub.name)
+                                            || "备份订阅".equals(sub.name)
+                                    ? SourceController.configName(parsed)
+                                    : sub.name;
+                    ConfigLibrary.Entry saved =
+                            library.remember(raw, origin, name, sub.selectedSiteKey, sub.updatedAt);
+                    keepIds.add(saved.id);
+                } catch (Exception e) {
+                    AppLog.w("CloudSync", "persistMergedSubscriptionsToLibrary item failed", e);
+                }
+            }
+            for (ConfigLibrary.Entry existing : library.entries()) {
+                if (existing.origin != null
+                        && existing.origin.toLowerCase(Locale.ROOT).startsWith("file:")) {
+                    continue;
+                }
+                if (!keepIds.contains(existing.id)
+                        && tombs.get("sub:" + existing.id) >= existing.updated) {
+                    library.remove(existing.id);
+                }
+            }
+        } catch (Exception e) {
+            AppLog.w("CloudSync", "persistMergedSubscriptionsToLibrary failed", e);
+        }
     }
 
     /**
@@ -341,7 +537,8 @@ final class CloudSyncDialog {
                 try {
                     raw = SourceController.fetchImport(a, origin);
                     origin = SourceController.importOrigin(origin);
-                } catch (Exception ignored) {
+                } catch (Exception e) {
+                    AppLog.w("CloudSync", "fetchImport for merged subscription failed", e);
                 }
             }
             if (raw.isEmpty()) continue;
@@ -361,7 +558,8 @@ final class CloudSyncDialog {
                     firstValid = sub;
                     firstValidRaw = raw;
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                AppLog.w("CloudSync", "parse/remember merged subscription failed", e);
             }
         }
 
@@ -370,7 +568,8 @@ final class CloudSyncDialog {
         if (a.config != null && a.config.raw != null && !a.config.raw.isEmpty()) {
             try {
                 activeId = ConfigLibrary.identity(a.configOrigin, a.config.raw);
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                AppLog.w("CloudSync", "identity check for active subscription failed", e);
             }
         }
         try {
@@ -386,7 +585,8 @@ final class CloudSyncDialog {
                     }
                 }
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            AppLog.w("CloudSync", "pruning tombstoned subscriptions failed", e);
         }
 
         final boolean needActivateNew =
@@ -407,7 +607,8 @@ final class CloudSyncDialog {
                     targetOrigin = fallback.origin;
                     targetSelected = fallback.selected;
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                AppLog.w("CloudSync", "reading fallback library entry failed", e);
             }
         }
 
@@ -491,35 +692,45 @@ final class CloudSyncDialog {
         return true;
     }
 
-    private static void runOnMainSync(MainActivity a, Runnable task) throws java.io.IOException {
-        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-            task.run();
-            return;
-        }
-        CountDownLatch latch = new CountDownLatch(1);
-        final AtomicReference<Throwable> mainError = new AtomicReference<>();
-        a.ui.post(
-                () -> {
-                    try {
-                        task.run();
-                    } catch (Throwable t) {
-                        mainError.set(t);
-                    } finally {
-                        latch.countDown();
-                    }
-                });
-        try {
-            if (!latch.await(15, TimeUnit.SECONDS)) {
-                throw new java.io.IOException("主线程同步超时 (15s)");
+    private static CloudSync.LocalStore buildPrefsStore(final SharedPreferences prefs) {
+        return new CloudSync.LocalStore() {
+            @Override
+            public String readHistoryJson() {
+                return prefs.getString(Prefs.WATCH_HISTORY, "[]");
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new java.io.IOException("主线程同步中断", e);
-        }
-        if (mainError.get() != null) {
-            throw new java.io.IOException(
-                    "主线程执行失败: " + mainError.get().getMessage(), mainError.get());
-        }
+
+            @Override
+            public String readFavoritesJson() {
+                return prefs.getString(Prefs.FAVORITES, "[]");
+            }
+
+            @Override
+            public String readTombstonesJson() {
+                return prefs.getString(Prefs.SYNC_TOMBSTONES, "");
+            }
+
+            @Override
+            public void writeMerged(
+                    String historyJson,
+                    String favoritesJson,
+                    String tombstonesJson,
+                    CloudSync.MergeResult result) {
+                boolean isHistCorrupt =
+                        WatchHistory.isCorrupted()
+                                || prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
+                SharedPreferences.Editor ed = prefs.edit();
+                if (!isHistCorrupt) {
+                    WatchHistory.overwrite(
+                            historyJson,
+                            (json, corrupted) ->
+                                    ed.putString(Prefs.WATCH_HISTORY, json)
+                                            .putBoolean(WatchHistory.CORRUPTED_PREF, corrupted));
+                }
+                ed.putString(Prefs.FAVORITES, favoritesJson)
+                        .putString(Prefs.SYNC_TOMBSTONES, tombstonesJson)
+                        .apply();
+            }
+        };
     }
 
     private static CloudSync.MergeResult mergeAndPersistLocal(
@@ -531,40 +742,15 @@ final class CloudSyncDialog {
                 syncSubs ? collectPublicSubscriptions(a) : null;
         final SharedPreferences prefs = a.prefs;
         CloudSync.MergeResult res =
-                WatchHistory.callOnStorageExecutor(
-                        () -> {
-                            String localHistory = prefs.getString(Prefs.WATCH_HISTORY, "[]");
-                            String localFavs = prefs.getString(Prefs.FAVORITES, "[]");
-                            String localTombs = prefs.getString(Prefs.SYNC_TOMBSTONES, "");
-                            CloudSync.MergeResult merged =
-                                    CloudSync.merge(
-                                            localHistory,
-                                            localFavs,
-                                            localTombs,
-                                            localSubs,
-                                            syncSubs,
-                                            remoteJson,
-                                            now);
-                            boolean isHistCorrupt =
-                                    WatchHistory.isCorrupted()
-                                            || prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
-                            final SharedPreferences.Editor ed = prefs.edit();
-                            if (!isHistCorrupt) {
-                                WatchHistory.overwrite(
-                                        merged.historyJson,
-                                        (json, corrupted) ->
-                                                ed.putString(Prefs.WATCH_HISTORY, json)
-                                                        .putBoolean(
-                                                                WatchHistory.CORRUPTED_PREF,
-                                                                corrupted));
-                            }
-                            ed.putString(Prefs.FAVORITES, merged.favoritesJson)
-                                    .putString(Prefs.SYNC_TOMBSTONES, merged.tombstonesJson)
-                                    .apply();
-                            return merged;
-                        });
+                CloudSync.mergeSerial(
+                        WatchHistory.STORAGE_EXECUTOR,
+                        buildPrefsStore(prefs),
+                        localSubs,
+                        syncSubs,
+                        remoteJson,
+                        now);
 
-        if (syncSubs && res.subscriptions != null) {
+        if (syncSubs && res.subscriptions != null && !a.isDestroyed() && !a.isFinishing()) {
             applyMergedSubscriptions(a, res.subscriptions, res.tombstonesJson);
         }
         return res;
@@ -658,6 +844,7 @@ final class CloudSyncDialog {
                     try {
                         final String pass = SecureStorage.getWebdavPass(appCtx);
                         if (SecureStorage.consumeReenterPasswordRequired(appCtx)) {
+                            RUNTIME.tracker.onFailure(System.currentTimeMillis());
                             MainActivity reauthAct = weakAct.get();
                             if (reauthAct != null
                                     && !reauthAct.isDestroyed()
@@ -689,6 +876,7 @@ final class CloudSyncDialog {
                             return;
                         }
                         final long now = System.currentTimeMillis();
+                        RUNTIME.tracker.onAttemptStart(now);
                         final AtomicReference<CloudSync.MergeResult> resultRef =
                                 new AtomicReference<>();
                         CloudSync.syncWebdav(
@@ -705,7 +893,8 @@ final class CloudSyncDialog {
                                     resultRef.set(res);
                                     return res;
                                 });
-                        lastAutoPushMs = System.currentTimeMillis();
+                        final long doneMs = System.currentTimeMillis();
+                        RUNTIME.tracker.onSuccess(doneMs);
                         final CloudSync.MergeResult r = resultRef.get();
                         final String okSummary = formatCounts("同步成功", r, syncSubs);
                         MainActivity currentAct = weakAct.get();
@@ -720,7 +909,7 @@ final class CloudSyncDialog {
                                         currentAct
                                                 .prefs
                                                 .edit()
-                                                .putLong(Prefs.SYNC_LAST_TIME, lastAutoPushMs)
+                                                .putLong(Prefs.SYNC_LAST_TIME, doneMs)
                                                 .putString(Prefs.SYNC_LAST_STATUS, okSummary)
                                                 .apply();
                                         if (!silent && !currentAct.isFinishing()) {
@@ -732,6 +921,7 @@ final class CloudSyncDialog {
                                     });
                         }
                     } catch (Exception e) {
+                        RUNTIME.tracker.onFailure(System.currentTimeMillis());
                         AppLog.w("CloudSync", "WebDAV sync failed", e);
                         final String errMsg =
                                 e.getMessage() == null
@@ -1110,6 +1300,7 @@ final class CloudSyncDialog {
                         .create();
         holder[0] = dialog;
         activeDialogRef = new WeakReference<>(dialog);
+        activeDialogOwnerRef = new WeakReference<>(a);
         dialog.show();
         if (a.isTvDevice()) {
             a.ui.post(syncNowBtn::requestFocus);
@@ -1182,6 +1373,7 @@ final class CloudSyncDialog {
                                 })
                         .create();
         activeDialogRef = new WeakReference<>(lanDialog);
+        activeDialogOwnerRef = new WeakReference<>(a);
         lanDialog.show();
     }
 
@@ -1220,6 +1412,7 @@ final class CloudSyncDialog {
             CheckBox autoCheck,
             CheckBox subsCheck) {
         final String pass = passInput.getText().toString();
+        RUNTIME.tracker.resetBackoff();
         a.prefs
                 .edit()
                 .putString(Prefs.WEBDAV_URL, urlInput.getText().toString().trim())

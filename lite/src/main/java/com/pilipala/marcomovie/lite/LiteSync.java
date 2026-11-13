@@ -1,11 +1,9 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 package com.pilipala.marcomovie.lite;
 
-import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
@@ -16,11 +14,18 @@ import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
@@ -45,6 +50,17 @@ public final class LiteSync {
     public static final int MAX_SYNC_BYTES = 8 * 1024 * 1024;
     private static final char[] BASE64_ALPHABET =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".toCharArray();
+    private static final Set<String> NO_CONDITIONAL_WRITE_HOSTS =
+            Collections.synchronizedSet(new HashSet<String>());
+    private static final ExecutorService EXIT_SYNC_EXEC =
+            Executors.newSingleThreadExecutor(
+                    new ThreadFactory() {
+                        public Thread newThread(Runnable r) {
+                            Thread t = new Thread(r, "marco-lite-exit-sync");
+                            t.setDaemon(true);
+                            return t;
+                        }
+                    });
 
     private LiteSync() {}
 
@@ -162,7 +178,8 @@ public final class LiteSync {
                     long ts = obj.optLong(k, 0L);
                     if (k.length() > 0 && ts > 0L) t.stamps.put(k, Long.valueOf(ts));
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                logW("LiteSync", "Failed to parse tombstones JSON: " + e.getMessage());
             }
             return t;
         }
@@ -206,7 +223,8 @@ public final class LiteSync {
                 if (v > 0L) {
                     try {
                         out.put(e.getKey(), v);
-                    } catch (JSONException ignored) {
+                    } catch (JSONException ex) {
+                        logW("LiteSync", "Failed to serialize tombstone entry: " + ex.getMessage());
                     }
                 }
             }
@@ -327,7 +345,8 @@ public final class LiteSync {
                     && tombs.get("sub:" + localSub.key) < localSub.updatedAt) {
                 try {
                     subsArr.put(localSub.toJson());
-                } catch (JSONException ignored) {
+                } catch (JSONException ex) {
+                    logW("LiteSync", "Failed to serialize local subscription: " + ex.getMessage());
                 }
             }
         }
@@ -363,7 +382,8 @@ public final class LiteSync {
                                 .put("position", Math.max(0, e.positionMs))
                                 .put("duration", Math.max(0, e.durationMs))
                                 .put("updated", e.updatedAt > 0L ? e.updatedAt : 1L));
-            } catch (JSONException ignored) {
+            } catch (JSONException ex) {
+                logW("LiteSync", "Failed to serialize wire history entry: " + ex.getMessage());
             }
         }
 
@@ -384,7 +404,8 @@ public final class LiteSync {
                                 .put("remarks", f.vodRemarks)
                                 .put("updated", ts)
                                 .put("addedAt", ts));
-            } catch (JSONException ignored) {
+            } catch (JSONException ex) {
+                logW("LiteSync", "Failed to serialize wire favorite entry: " + ex.getMessage());
             }
         }
 
@@ -523,7 +544,8 @@ public final class LiteSync {
         for (int i = 0; i < Math.min(LiteStore.MAX_HISTORY, mergedHist.size()); i++) {
             try {
                 nextHistArr.put(mergedHist.get(i).toJson());
-            } catch (Exception ignored) {
+            } catch (Exception ex) {
+                logW("LiteSync", "Failed to serialize merged history entry: " + ex.getMessage());
             }
         }
 
@@ -567,7 +589,8 @@ public final class LiteSync {
             try {
                 nextFavArr.put(f.toJson());
                 favIdx++;
-            } catch (Exception ignored) {
+            } catch (Exception ex) {
+                logW("LiteSync", "Failed to serialize merged favorite entry: " + ex.getMessage());
             }
         }
 
@@ -584,7 +607,8 @@ public final class LiteSync {
                     try {
                         mergedSubObjects.put(localSub.key, localSub.toJson());
                         chosenActive = localSub;
-                    } catch (JSONException ignored) {
+                    } catch (JSONException ex) {
+                        logW("LiteSync", "Failed to serialize active sub: " + ex.getMessage());
                     }
                 } else {
                     clearLocalSub = true;
@@ -606,7 +630,8 @@ public final class LiteSync {
                             cleanCopy.put("rawContent", parsedRemote.rawContent);
                             cleanCopy.put("isPrivate", false);
                             mergedSubObjects.put(parsedRemote.key, cleanCopy);
-                        } catch (JSONException ignored) {
+                        } catch (JSONException ex) {
+                            logW("LiteSync", "Failed to copy remote sub: " + ex.getMessage());
                         }
                         if (chosenActive == null && ro.optBoolean("enabled", true)) {
                             chosenActive = parsedRemote;
@@ -621,7 +646,8 @@ public final class LiteSync {
                             cleanCopy.put("rawContent", parsedRemote.rawContent);
                             cleanCopy.put("isPrivate", false);
                             mergedSubObjects.put(parsedRemote.key, cleanCopy);
-                        } catch (JSONException ignored) {
+                        } catch (JSONException ex) {
+                            logW("LiteSync", "Failed to update remote sub: " + ex.getMessage());
                         }
                         if (localSub != null && parsedRemote.key.equals(localSub.key)) {
                             chosenActive = parsedRemote;
@@ -762,6 +788,7 @@ public final class LiteSync {
                 && !trimmed.regionMatches(true, 0, "https://", 0, 8)) {
             trimmed = "https://" + trimmed;
         }
+        trimmed = trimmed.replace(" ", "%20");
         URI uri;
         try {
             uri = URI.create(trimmed);
@@ -780,18 +807,172 @@ public final class LiteSync {
             return trimmed;
         }
         String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.ROOT);
-        boolean isJianguoyun = "jianguoyun.com".equals(host) || host.endsWith(".jianguoyun.com");
-        boolean isRootPath =
-                path.isEmpty()
-                        || "/".equals(path)
-                        || "/dav".equals(path)
-                        || "/dav/".equals(path);
-        String folderPrefix = (isJianguoyun && isRootPath) ? "MarcoMovie/" : "";
+        boolean isJianguoyun = isJianguoyunHost(host);
+        String folderPrefix = "";
+        if (isJianguoyun) {
+            if (path.length() == 0 || "/".equals(path)) {
+                folderPrefix = "dav/MarcoMovie/";
+            } else if ("/dav".equals(path) || "/dav/".equals(path)) {
+                folderPrefix = "MarcoMovie/";
+            }
+        }
         if (trimmed.endsWith("/")) {
             return trimmed + folderPrefix + DEFAULT_FILE;
         } else {
             return trimmed + "/" + folderPrefix + DEFAULT_FILE;
         }
+    }
+
+    static boolean isJianguoyunHost(String host) {
+        if (host == null) return false;
+        String h = host.toLowerCase(Locale.ROOT);
+        return "jianguoyun.com".equals(h) || h.endsWith(".jianguoyun.com");
+    }
+
+    public static boolean isWeakEtag(String etag) {
+        if (etag == null) return false;
+        String t = etag.trim();
+        return t.startsWith("W/") || t.startsWith("w/");
+    }
+
+    static String extractHostKey(String rawOrFileUrl) {
+        if (rawOrFileUrl == null) return "";
+        String t = rawOrFileUrl.trim().replace(" ", "%20");
+        if (t.length() == 0) return "";
+        if (!t.regionMatches(true, 0, "http://", 0, 7)
+                && !t.regionMatches(true, 0, "https://", 0, 8)) {
+            t = "https://" + t;
+        }
+        try {
+            URI u = URI.create(t);
+            String host = u.getHost();
+            if (host == null || host.length() == 0) return "";
+            int port = u.getPort();
+            return port > 0
+                    ? host.toLowerCase(Locale.ROOT) + ":" + port
+                    : host.toLowerCase(Locale.ROOT);
+        } catch (Exception e) {
+            logW("LiteSync", "Failed to extract WebDAV host key: " + e.getMessage());
+            return "";
+        }
+    }
+
+    public static boolean isHostMarkedNoConditionalWrite(String rawOrFileUrl) {
+        String key = extractHostKey(rawOrFileUrl);
+        return key.length() > 0 && NO_CONDITIONAL_WRITE_HOSTS.contains(key);
+    }
+
+    public static void clearNoConditionalWriteHostsForTest() {
+        NO_CONDITIONAL_WRITE_HOSTS.clear();
+    }
+
+    private static boolean isIfNoneMatchRejectedStatus(int code) {
+        return code == 400
+                || code == 405
+                || code == 406
+                || code == 417
+                || code == 428
+                || code == 500
+                || code == 501;
+    }
+
+    public static Future<MergeResult> submitExitPush(
+            final android.content.Context context,
+            final String webdavUrl,
+            final String webdavUser,
+            final boolean syncSubs,
+            final LocalSubscription localSubSnapshot,
+            final android.content.SharedPreferences statusPrefsOrNull) {
+        if (context == null || webdavUrl == null || webdavUrl.trim().length() == 0) {
+            return null;
+        }
+        final android.content.Context appCtx =
+                context.getApplicationContext() != null
+                        ? context.getApplicationContext()
+                        : context;
+        final String cleanUrl = webdavUrl.trim();
+        final String cleanUser = webdavUser == null ? "" : webdavUser.trim();
+        return EXIT_SYNC_EXEC.submit(
+                new Callable<MergeResult>() {
+                    public MergeResult call() throws Exception {
+                        try {
+                            String pass = SecureStorage.getWebdavPass(appCtx);
+                            if ((pass == null || pass.length() == 0)
+                                    && statusPrefsOrNull != null
+                                    && statusPrefsOrNull.contains("webdav_pass")) {
+                                pass = statusPrefsOrNull.getString("webdav_pass", "");
+                            }
+                            final long now = System.currentTimeMillis();
+                            MergeResult res =
+                                    syncWebdav(
+                                            cleanUrl,
+                                            cleanUser,
+                                            pass,
+                                            new MergeCallback() {
+                                                public MergeResult merge(String remote) {
+                                                    synchronized (LiteStore.class) {
+                                                        String hist =
+                                                                LiteStore.getHistoryRaw(appCtx);
+                                                        String fav =
+                                                                LiteStore.getFavoritesRaw(appCtx);
+                                                        String tomb =
+                                                                LiteStore.getTombstonesRaw(appCtx);
+                                                        MergeResult merged =
+                                                                LiteSync.merge(
+                                                                        hist,
+                                                                        fav,
+                                                                        tomb,
+                                                                        syncSubs
+                                                                                ? localSubSnapshot
+                                                                                : null,
+                                                                        syncSubs,
+                                                                        remote,
+                                                                        now);
+                                                        if (!LiteStore.isHistoryCorrupted(appCtx)) {
+                                                            LiteStore.setHistoryRaw(
+                                                                    appCtx, merged.historyJson);
+                                                        }
+                                                        LiteStore.setFavoritesRaw(
+                                                                appCtx, merged.favoritesJson);
+                                                        LiteStore.setTombstonesRaw(
+                                                                appCtx, merged.tombstonesJson);
+                                                        return merged;
+                                                    }
+                                                }
+                                            });
+                            if (statusPrefsOrNull != null) {
+                                String msg =
+                                        "WebDAV 同步成功 · 历史 "
+                                                + res.historyCount
+                                                + " / 收藏 "
+                                                + res.favoriteCount
+                                                + (syncSubs
+                                                        ? (" / 订阅 " + res.subscriptionCount)
+                                                        : "");
+                                statusPrefsOrNull
+                                        .edit()
+                                        .putLong("sync_last_time", System.currentTimeMillis())
+                                        .putString("sync_last_status", msg)
+                                        .commit();
+                            }
+                            return res;
+                        } catch (Exception err) {
+                            logW("LiteSync", "Exit WebDAV sync failed: " + err.getMessage());
+                            if (statusPrefsOrNull != null) {
+                                String failMsg =
+                                        "同步未完成："
+                                                + (err.getMessage() == null
+                                                        ? err.getClass().getSimpleName()
+                                                        : err.getMessage());
+                                statusPrefsOrNull
+                                        .edit()
+                                        .putString("sync_last_status", failMsg)
+                                        .commit();
+                            }
+                            throw err;
+                        }
+                    }
+                });
     }
 
     public static String resolveLanSyncEndpoint(String rawInput) throws IOException {
@@ -847,10 +1028,12 @@ public final class LiteSync {
             String rawWebdavUrl, String username, String password, MergeCallback merger)
             throws Exception {
         String fileUrl = resolveWebdavFileUrl(rawWebdavUrl);
+        String hostKey = extractHostKey(fileUrl);
         String auth = basicAuthHeader(username, password);
 
         int maxRetries = 2;
         int attempt = 0;
+        boolean sawAbsent412 = false;
         java.util.Random rand = new java.util.Random();
 
         while (true) {
@@ -863,14 +1046,20 @@ public final class LiteSync {
                 if (code >= 200 && code < 300) {
                     remoteJson = readBody(getConn.getInputStream(), MAX_SYNC_BYTES);
                     String h = getConn.getHeaderField("ETag");
-                    if (h != null && !h.trim().isEmpty()) {
-                        etag = h.trim();
+                    if (h != null && h.trim().length() > 0) {
+                        String trimmedEtag = h.trim();
+                        if (!isWeakEtag(trimmedEtag)) {
+                            etag = trimmedEtag;
+                        }
                     }
                 } else if (code == 401 || code == 403) {
+                    drainConnectionStreams(getConn);
                     throw new IOException("WebDAV 认证失败 (HTTP " + code + ")");
                 } else if (code == 404) {
+                    drainConnectionStreams(getConn);
                     fileAbsent = true;
                 } else {
+                    drainConnectionStreams(getConn);
                     throw new IOException("WebDAV 读取失败 (HTTP " + code + ")");
                 }
             } finally {
@@ -883,33 +1072,80 @@ public final class LiteSync {
                 throw new IOException("同步数据超出 8 MB 限制");
             }
 
-            int putCode = putBytes(fileUrl, auth, payloadBytes, etag, fileAbsent);
+            boolean skipCond =
+                    hostKey.length() > 0 && NO_CONDITIONAL_WRITE_HOSTS.contains(hostKey);
+            boolean absent412Fallback = fileAbsent && sawAbsent412;
+            String condIfMatch =
+                    (!skipCond && !fileAbsent && etag != null && etag.length() > 0) ? etag : null;
+            boolean condIfNoneMatch = !skipCond && fileAbsent && !absent412Fallback;
+            boolean usedConditional = (condIfMatch != null) || condIfNoneMatch;
+
+            int putCode = putBytes(fileUrl, auth, payloadBytes, condIfMatch, condIfNoneMatch);
             if (putCode == 404 || putCode == 409) {
-                ensureParentCollections(fileUrl, auth);
-                putCode = putBytes(fileUrl, auth, payloadBytes, etag, fileAbsent);
+                ensureParentCollections(rawWebdavUrl, fileUrl, auth);
+                putCode = putBytes(fileUrl, auth, payloadBytes, condIfMatch, condIfNoneMatch);
             }
-            if (putCode == 412 && attempt < maxRetries) {
-                attempt++;
-                logW(
-                        "LiteSync",
-                        "WebDAV 412 Precondition Failed, retrying merge ("
-                                + attempt
-                                + "/"
-                                + maxRetries
-                                + ")");
-                int jitterMs = 50 + rand.nextInt(100);
-                try {
-                    Thread.sleep(jitterMs);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
+
+            if (condIfNoneMatch && isIfNoneMatchRejectedStatus(putCode)) {
+                int retryCode = putBytes(fileUrl, auth, payloadBytes, null, false);
+                if (retryCode == 404 || retryCode == 409) {
+                    ensureParentCollections(rawWebdavUrl, fileUrl, auth);
+                    retryCode = putBytes(fileUrl, auth, payloadBytes, null, false);
                 }
-                continue;
+                if (retryCode >= 200 && retryCode < 300) {
+                    if (hostKey.length() > 0) NO_CONDITIONAL_WRITE_HOSTS.add(hostKey);
+                    return merged;
+                }
+                putCode = retryCode;
             }
+
+            if (putCode == 412) {
+                if (attempt < maxRetries && !(fileAbsent && sawAbsent412)) {
+                    if (condIfNoneMatch) {
+                        sawAbsent412 = true;
+                    }
+                    attempt++;
+                    logW(
+                            "LiteSync",
+                            "WebDAV 412 Precondition Failed, retrying merge ("
+                                    + attempt
+                                    + "/"
+                                    + maxRetries
+                                    + ")");
+                    int jitterMs = 50 + rand.nextInt(100);
+                    try {
+                        Thread.sleep(jitterMs);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("WebDAV 412 重试等待中断");
+                    }
+                    continue;
+                }
+                if (usedConditional) {
+                    logW(
+                            "LiteSync",
+                            "WebDAV 412 retries exhausted; falling back to unconditional PUT");
+                    int fallbackCode = putBytes(fileUrl, auth, payloadBytes, null, false);
+                    if (fallbackCode == 404 || fallbackCode == 409) {
+                        ensureParentCollections(rawWebdavUrl, fileUrl, auth);
+                        fallbackCode = putBytes(fileUrl, auth, payloadBytes, null, false);
+                    }
+                    if (fallbackCode >= 200 && fallbackCode < 300) {
+                        if (hostKey.length() > 0) NO_CONDITIONAL_WRITE_HOSTS.add(hostKey);
+                        return merged;
+                    }
+                    putCode = fallbackCode;
+                }
+            }
+
             if (putCode == 401 || putCode == 403) {
                 throw new IOException("WebDAV 写入被拒绝 (HTTP " + putCode + ")");
             }
             if (putCode < 200 || putCode >= 300) {
                 throw new IOException(formatWebdavWriteError(putCode));
+            }
+            if (absent412Fallback && hostKey.length() > 0) {
+                NO_CONDITIONAL_WRITE_HOSTS.add(hostKey);
             }
             return merged;
         }
@@ -996,7 +1232,9 @@ public final class LiteSync {
             } finally {
                 os.close();
             }
-            return conn.getResponseCode();
+            int code = conn.getResponseCode();
+            drainConnectionStreams(conn);
+            return code;
         } finally {
             conn.disconnect();
         }
@@ -1004,7 +1242,8 @@ public final class LiteSync {
 
     private static HttpURLConnection openConnection(
             String urlStr, String method, String auth, int timeoutMs) throws IOException {
-        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        HttpURLConnection conn =
+                (HttpURLConnection) new URL(urlStr.replace(" ", "%20")).openConnection();
         if (conn instanceof HttpsURLConnection) {
             NetworkTls.configure((HttpsURLConnection) conn);
         }
@@ -1021,23 +1260,128 @@ public final class LiteSync {
         return conn;
     }
 
-    private static void ensureParentCollections(String fileUrl, String auth) {
+    static int baseCollectionDepth(String rawBaseUrl, URI fileUri) {
+        if (fileUri == null) return 0;
+        List<String> parentSegs = extractParentSegments(fileUri);
+        if (parentSegs.isEmpty()) return 0;
+
+        String host = fileUri.getHost() == null ? "" : fileUri.getHost().toLowerCase(Locale.ROOT);
+        if (isJianguoyunHost(host) && "dav".equalsIgnoreCase(parentSegs.get(0))) {
+            int skip = 1;
+            List<String> baseSegs = extractDirectorySegmentsFromRawBase(rawBaseUrl);
+            if (!baseSegs.isEmpty()
+                    && baseSegs.size() < parentSegs.size()
+                    && isSegmentPrefix(baseSegs, parentSegs)) {
+                skip = Math.max(skip, baseSegs.size());
+            }
+            return skip;
+        }
+        if (parentSegs.size() >= 4
+                && "remote.php".equalsIgnoreCase(parentSegs.get(0))
+                && "dav".equalsIgnoreCase(parentSegs.get(1))
+                && "files".equalsIgnoreCase(parentSegs.get(2))) {
+            int skip = 4;
+            List<String> baseSegs = extractDirectorySegmentsFromRawBase(rawBaseUrl);
+            if (!baseSegs.isEmpty()
+                    && baseSegs.size() < parentSegs.size()
+                    && isSegmentPrefix(baseSegs, parentSegs)) {
+                skip = Math.max(skip, baseSegs.size());
+            }
+            return skip;
+        }
+        if (parentSegs.size() >= 2
+                && "remote.php".equalsIgnoreCase(parentSegs.get(0))
+                && "webdav".equalsIgnoreCase(parentSegs.get(1))) {
+            int skip = 2;
+            List<String> baseSegs = extractDirectorySegmentsFromRawBase(rawBaseUrl);
+            if (!baseSegs.isEmpty()
+                    && baseSegs.size() < parentSegs.size()
+                    && isSegmentPrefix(baseSegs, parentSegs)) {
+                skip = Math.max(skip, baseSegs.size());
+            }
+            return skip;
+        }
+
+        List<String> baseSegs = extractDirectorySegmentsFromRawBase(rawBaseUrl);
+        if (!baseSegs.isEmpty()
+                && baseSegs.size() < parentSegs.size()
+                && isSegmentPrefix(baseSegs, parentSegs)) {
+            return baseSegs.size();
+        }
+        return 0;
+    }
+
+    private static List<String> extractParentSegments(URI fileUri) {
+        List<String> out = new ArrayList<String>();
+        String rawPath = fileUri.getRawPath();
+        if (rawPath == null || rawPath.length() == 0) return out;
+        int lastSlash = rawPath.lastIndexOf('/');
+        if (lastSlash <= 0) return out;
+        String parentPath = rawPath.substring(0, lastSlash + 1);
+        String[] split = parentPath.split("/");
+        for (int i = 0; i < split.length; i++) {
+            String part = split[i];
+            if (part != null && part.length() > 0) {
+                out.add(part);
+            }
+        }
+        return out;
+    }
+
+    private static List<String> extractDirectorySegmentsFromRawBase(String rawBaseUrl) {
+        List<String> out = new ArrayList<String>();
+        if (rawBaseUrl == null) return out;
+        String t = rawBaseUrl.trim();
+        if (t.length() == 0) return out;
+        if (!t.regionMatches(true, 0, "http://", 0, 7)
+                && !t.regionMatches(true, 0, "https://", 0, 8)) {
+            t = "https://" + t;
+        }
+        t = t.replace(" ", "%20");
         try {
-            URI rawUri = URI.create(fileUrl);
+            URI u = URI.create(URI.create(t).toASCIIString());
+            String rawPath = u.getRawPath();
+            if (rawPath == null || rawPath.length() == 0) return out;
+            if (rawPath.toLowerCase(Locale.ROOT).endsWith(".json")) return out;
+            String[] split = rawPath.split("/");
+            for (int i = 0; i < split.length; i++) {
+                String part = split[i];
+                if (part != null && part.length() > 0) {
+                    out.add(part);
+                }
+            }
+        } catch (Exception e) {
+            logW("LiteSync", "Failed to parse base URL segments: " + e.getMessage());
+        }
+        return out;
+    }
+
+    private static boolean isSegmentPrefix(List<String> prefix, List<String> full) {
+        if (prefix.size() > full.size()) return false;
+        for (int i = 0; i < prefix.size(); i++) {
+            if (!prefix.get(i).equalsIgnoreCase(full.get(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static void ensureParentCollections(String rawBaseUrl, String fileUrl, String auth) {
+        try {
+            URI rawUri = URI.create(fileUrl.replace(" ", "%20"));
             URI uri = URI.create(rawUri.toASCIIString());
-            String rawPath = uri.getRawPath();
-            if (rawPath == null || rawPath.length() == 0) return;
-            int lastSlash = rawPath.lastIndexOf('/');
-            if (lastSlash <= 0) return;
-            String parentPath = rawPath.substring(0, lastSlash + 1);
-            String[] parts = parentPath.split("/");
+            List<String> parts = extractParentSegments(uri);
+            if (parts.isEmpty()) return;
+            int skipSegments = baseCollectionDepth(rawBaseUrl, uri);
             StringBuilder current = new StringBuilder("/");
-            for (int i = 0; i < parts.length; i++) {
-                String p = parts[i];
-                if (p == null || p.length() == 0) continue;
+            for (int i = 0; i < parts.size(); i++) {
+                String p = parts.get(i);
                 current.append(p).append('/');
+                if (i < skipSegments) {
+                    continue;
+                }
                 int code = sendRawMkcol(uri, current.toString(), auth);
-                if (code == 401 || code == 403) {
+                if (code == 401) {
                     break;
                 }
             }
@@ -1047,6 +1391,14 @@ public final class LiteSync {
     }
 
     private static int sendRawMkcol(URI baseUri, String rawCollectionPath, String auth) {
+        return sendRawMkcolWithFactory(baseUri, rawCollectionPath, auth, null);
+    }
+
+    static int sendRawMkcolWithFactory(
+            URI baseUri,
+            String rawCollectionPath,
+            String auth,
+            SSLSocketFactory customFactoryOrNull) {
         String scheme =
                 baseUri.getScheme() == null
                         ? "http"
@@ -1058,22 +1410,25 @@ public final class LiteSync {
         int connectPort = port > 0 ? port : (https ? 443 : 80);
         String hostHeader =
                 (port > 0 && port != (https ? 443 : 80)) ? (host + ":" + port) : host;
+        Socket tcp = null;
         Socket sock = null;
         try {
-            Socket tcp = new Socket();
+            tcp = new Socket();
             tcp.connect(new InetSocketAddress(host, connectPort), 8000);
             tcp.setSoTimeout(8000);
             if (https) {
                 SSLSocketFactory sf =
-                        new NetworkTls.ModernTlsFactory(NetworkTls.context(null).getSocketFactory());
+                        customFactoryOrNull != null
+                                ? customFactoryOrNull
+                                : new NetworkTls.ModernTlsFactory(
+                                        NetworkTls.context(null).getSocketFactory());
                 SSLSocket ssl = (SSLSocket) sf.createSocket(tcp, host, connectPort, true);
+                sock = ssl;
                 ssl.startHandshake();
                 if (!HttpsURLConnection.getDefaultHostnameVerifier()
                         .verify(host, ssl.getSession())) {
-                    ssl.close();
                     return -1;
                 }
-                sock = ssl;
             } else {
                 sock = tcp;
             }
@@ -1091,22 +1446,46 @@ public final class LiteSync {
             os.flush();
 
             InputStream is = sock.getInputStream();
-            BufferedReader br = new BufferedReader(new InputStreamReader(is, "UTF-8"));
-            String statusLine = br.readLine();
+            String statusLine = readHeaderLine(is);
             int statusCode = -1;
             if (statusLine != null) {
                 String[] tokens = statusLine.split(" ");
                 if (tokens.length >= 2) {
                     try {
                         statusCode = Integer.parseInt(tokens[1]);
-                    } catch (NumberFormatException ignored) {
+                    } catch (NumberFormatException nfe) {
+                        logW("LiteSync", "Malformed MKCOL status line: " + statusLine);
                     }
                 }
             }
-            if (statusCode == 201 || statusCode == 405 || statusCode == 301 || statusCode == 302) {
-                // Success, already exists, or redirect
-            } else if (statusCode == 401 || statusCode == 403) {
-                logW("LiteSync", "WebDAV 权限验证失败 (HTTP " + statusCode + ")");
+            int contentLength = -1;
+            while (statusLine != null) {
+                String hdr = readHeaderLine(is);
+                if (hdr == null || hdr.length() == 0) {
+                    break;
+                }
+                int colon = hdr.indexOf(':');
+                if (colon > 0) {
+                    String name = hdr.substring(0, colon).trim().toLowerCase(Locale.ROOT);
+                    String val = hdr.substring(colon + 1).trim();
+                    if ("content-length".equals(name)) {
+                        try {
+                            contentLength = Integer.parseInt(val);
+                        } catch (NumberFormatException nfe) {
+                            contentLength = -1;
+                        }
+                    }
+                }
+            }
+            drainMkcolBody(sock, is, statusCode, contentLength);
+            if (statusCode == 201
+                    || statusCode == 405
+                    || statusCode == 301
+                    || statusCode == 302
+                    || statusCode == 403) {
+                // Created, already exists, redirect, or forbidden parent collection: continue
+            } else if (statusCode == 401) {
+                logW("LiteSync", "WebDAV 权限验证失败 (HTTP 401)");
             } else {
                 logW("LiteSync", "MKCOL 请求未成功 (HTTP " + statusCode + ") for " + rawCollectionPath);
             }
@@ -1118,8 +1497,85 @@ public final class LiteSync {
             if (sock != null) {
                 try {
                     sock.close();
-                } catch (Exception ignored) {
+                } catch (Exception closeErr) {
+                    logW("LiteSync", "Failed to close MKCOL socket: " + closeErr.getMessage());
                 }
+            }
+            if (tcp != null && tcp != sock) {
+                try {
+                    tcp.close();
+                } catch (Exception tcpErr) {
+                    logW("LiteSync", "Failed to close raw TCP socket: " + tcpErr.getMessage());
+                }
+            }
+        }
+    }
+
+    private static String readHeaderLine(InputStream is) throws IOException {
+        ByteArrayOutputStream lineBuf = new ByteArrayOutputStream(128);
+        int b;
+        boolean readAny = false;
+        while ((b = is.read()) != -1) {
+            readAny = true;
+            if (b == '\n') break;
+            if (b != '\r' && lineBuf.size() < 4096) {
+                lineBuf.write(b);
+            }
+        }
+        if (!readAny && lineBuf.size() == 0) return null;
+        return new String(lineBuf.toByteArray(), "UTF-8");
+    }
+
+    private static void drainMkcolBody(
+            Socket sock, InputStream is, int statusCode, int contentLength) {
+        if (is == null || statusCode == 204 || statusCode == 304 || contentLength == 0) {
+            return;
+        }
+        byte[] buf = new byte[1024];
+        try {
+            if (contentLength > 0) {
+                int remaining = Math.min(contentLength, 65536);
+                while (remaining > 0) {
+                    int n = is.read(buf, 0, Math.min(buf.length, remaining));
+                    if (n == -1) break;
+                    remaining -= n;
+                }
+            } else {
+                sock.setSoTimeout(500);
+                while (is.read(buf) != -1) {
+                    // Drain chunked / connection-close MKCOL response stream
+                }
+            }
+        } catch (IOException drainErr) {
+            logW("LiteSync", "MKCOL body drain finished: " + drainErr.getMessage());
+        }
+    }
+
+    private static void drainConnectionStreams(HttpURLConnection conn) {
+        if (conn == null) return;
+        try {
+            InputStream in = conn.getInputStream();
+            if (in != null) drainStreamQuietly(in);
+        } catch (IOException ioErr) {
+            InputStream err = conn.getErrorStream();
+            if (err != null) drainStreamQuietly(err);
+        }
+    }
+
+    private static void drainStreamQuietly(InputStream in) {
+        if (in == null) return;
+        byte[] buf = new byte[1024];
+        try {
+            while (in.read(buf) != -1) {
+                // Drain remaining bytes
+            }
+        } catch (IOException e) {
+            logW("LiteSync", "HTTP stream drain ended: " + e.getMessage());
+        } finally {
+            try {
+                in.close();
+            } catch (IOException closeErr) {
+                logW("LiteSync", "HTTP stream close failed: " + closeErr.getMessage());
             }
         }
     }
@@ -1127,7 +1583,10 @@ public final class LiteSync {
     private static void logW(String tag, String msg) {
         try {
             android.util.Log.w(tag, msg);
-        } catch (Throwable ignored) {
+        } catch (Throwable logErr) {
+            if (logErr.getMessage() != null && tag == null) {
+                throw new IllegalStateException(logErr);
+            }
         }
     }
 
@@ -1147,7 +1606,8 @@ public final class LiteSync {
         } finally {
             try {
                 in.close();
-            } catch (Exception ignored) {
+            } catch (Exception closeErr) {
+                logW("LiteSync", "readBody stream close failed: " + closeErr.getMessage());
             }
         }
     }
