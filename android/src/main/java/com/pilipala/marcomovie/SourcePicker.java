@@ -135,6 +135,15 @@ final class SourcePicker {
         }
     }
 
+    private static void commitSelectedSiteForCrashGuard(MainActivity a, String siteKey) {
+        if (a == null || a.prefs == null) return;
+        a.prefs
+                .edit()
+                .putString(Prefs.SELECTED_SITE, siteKey)
+                .putString(Prefs.LOADING_SITE, siteKey)
+                .commit();
+    }
+
     static void show(MainActivity a) {
         if (a.config == null) {
             a.importDialog();
@@ -290,11 +299,7 @@ final class SourcePicker {
                                     a.notice(site.limitation());
                                     return;
                                 }
-                                a.prefs
-                                        .edit()
-                                        .putString(Prefs.SELECTED_SITE, site.key)
-                                        .putString(Prefs.LOADING_SITE, site.key)
-                                        .apply();
+                                commitSelectedSiteForCrashGuard(a, site.key);
                                 dialog.dismiss();
                                 a.back.clear();
                                 a.open(new MainActivity.Screen(a::home), false);

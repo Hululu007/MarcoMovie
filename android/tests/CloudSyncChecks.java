@@ -770,6 +770,199 @@ public final class CloudSyncChecks {
                         && !WatchHistory.isCorrupted()
                         && Boolean.FALSE.equals(prefCorrupted.get()),
                 "WatchHistory.overwrite with valid JSON clears flag and pref");
+
+        // 5. (6a) WatchHistory.overwrite with malformed JSON rejects payload WITHOUT setting
+        // historyCorrupted or locking out subsequent local WatchHistory.upsert calls
+        String healthyBeforeBadOverwrite = storedHistoryJson.get();
+        String rejectedOverwrite = WatchHistory.overwrite("[corrupted_restore_payload", store);
+        check(
+                rejectedOverwrite == null
+                        && !WatchHistory.isCorrupted()
+                        && Boolean.FALSE.equals(prefCorrupted.get())
+                        && healthyBeforeBadOverwrite.equals(storedHistoryJson.get()),
+                "6a: WatchHistory.overwrite rejects malformed JSON without touching historyCorrupted");
+
+        WatchHistory.Entry e2 = new WatchHistory.Entry();
+        e2.site = "site_b";
+        e2.id = "vod_b";
+        e2.title = "Still Writable";
+        String afterRejectedUpsert = WatchHistory.upsert(storedHistoryJson.get(), e2);
+        check(
+                WatchHistory.read(afterRejectedUpsert).size() == 2,
+                "6a: local WatchHistory.upsert remains unlocked after rejected malformed overwrite");
+        storedHistoryJson.set(afterRejectedUpsert);
+
+        // 6. (6a & M-A5) WatchHistory.enqueueBackupRestore rejects malformed data via
+        // callback(false)
+        // without setting historyCorrupted, and restores valid JSON on STORAGE_EXECUTOR
+        final WatchHistory.Persistence memPersistence =
+                new WatchHistory.Persistence() {
+                    @Override
+                    public String readRaw() {
+                        return storedHistoryJson.get();
+                    }
+
+                    @Override
+                    public boolean readCorruptedPref() {
+                        return Boolean.TRUE.equals(prefCorrupted.get());
+                    }
+
+                    @Override
+                    public void writeState(String historyJson, boolean corrupted) {
+                        storedHistoryJson.set(historyJson);
+                        prefCorrupted.set(corrupted);
+                    }
+                };
+        try {
+            final AtomicReference<Boolean> badCb = new AtomicReference<>();
+            boolean badResult =
+                    WatchHistory.enqueueBackupRestore(
+                                    memPersistence, "[malformed_backup]", badCb::set)
+                            .get();
+            check(
+                    !badResult
+                            && Boolean.FALSE.equals(badCb.get())
+                            && !WatchHistory.isCorrupted()
+                            && afterRejectedUpsert.equals(storedHistoryJson.get()),
+                    "6a: enqueueBackupRestore rejects [malformed_backup] and notifies callback(false)");
+
+            final AtomicReference<Boolean> nonArrayCb = new AtomicReference<>();
+            boolean nonArrayResult =
+                    WatchHistory.enqueueBackupRestore(
+                                    memPersistence, "{\"not\":\"an_array\"}", nonArrayCb::set)
+                            .get();
+            check(
+                    !nonArrayResult
+                            && Boolean.FALSE.equals(nonArrayCb.get())
+                            && !WatchHistory.isCorrupted(),
+                    "6a: enqueueBackupRestore rejects non-array backup object and notifies callback(false)");
+
+            final AtomicReference<Boolean> goodCb = new AtomicReference<>();
+            boolean goodResult =
+                    WatchHistory.enqueueBackupRestore(memPersistence, afterClearUpsert, goodCb::set)
+                            .get();
+            check(
+                    goodResult
+                            && Boolean.TRUE.equals(goodCb.get())
+                            && WatchHistory.read(storedHistoryJson.get()).size() == 1,
+                    "6a/M-A5: enqueueBackupRestore persists valid backup history on STORAGE_EXECUTOR");
+
+            // 7. (M-A5) Concurrent playback enqueueUpsert + cloud merge on STORAGE_EXECUTOR
+            testConcurrentHistoryAndCloudMerge(memPersistence, storedHistoryJson);
+        } catch (Exception ex) {
+            throw new AssertionError("Async WatchHistory verification failed", ex);
+        }
+    }
+
+    private static void testConcurrentHistoryAndCloudMerge(
+            final WatchHistory.Persistence persistence,
+            final AtomicReference<String> storedHistoryJson)
+            throws Exception {
+        WatchHistory.enqueueClear(persistence, null).get();
+        final AtomicReference<String> storedTombstones = new AtomicReference<>("");
+        final Set<String> observedThreads =
+                java.util.Collections.synchronizedSet(new HashSet<String>());
+
+        WatchHistory.Persistence trackedPersistence =
+                new WatchHistory.Persistence() {
+                    @Override
+                    public String readRaw() {
+                        observedThreads.add(Thread.currentThread().getName());
+                        return persistence.readRaw();
+                    }
+
+                    @Override
+                    public boolean readCorruptedPref() {
+                        return persistence.readCorruptedPref();
+                    }
+
+                    @Override
+                    public void writeState(String historyJson, boolean corrupted) {
+                        observedThreads.add(Thread.currentThread().getName());
+                        persistence.writeState(historyJson, corrupted);
+                    }
+                };
+
+        // Enqueue 12 playback bookmarks, delete #3, and interleave a cloud merge concurrently
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            WatchHistory.Entry item = new WatchHistory.Entry();
+            item.site = "cms";
+            item.id = "vod_" + i;
+            item.title = "Title " + i;
+            item.position = (i + 1) * 1000;
+            item.duration = 60000;
+            item.updated = 10000L + i;
+            futures.add(WatchHistory.enqueueUpsert(trackedPersistence, item));
+            if (i == 5) {
+                final String deleteKey = "cms\nvod_3";
+                futures.add(
+                        WatchHistory.enqueueRemove(
+                                trackedPersistence,
+                                deleteKey,
+                                () ->
+                                        storedTombstones.set(
+                                                CloudSync.Tombstones.recordHistoryDelete(
+                                                        storedTombstones.get(),
+                                                        deleteKey,
+                                                        20000L))));
+            }
+        }
+
+        // Cloud merge bringing a remote item vod_remote AND stale vod_3 (older than tombstone
+        // 20000L)
+        WatchHistory.Entry remoteOnly = new WatchHistory.Entry();
+        remoteOnly.site = "cms";
+        remoteOnly.id = "vod_remote";
+        remoteOnly.title = "Remote Movie";
+        remoteOnly.position = 15000;
+        remoteOnly.duration = 90000;
+        remoteOnly.updated = 18000L;
+        WatchHistory.Entry staleDeleted = new WatchHistory.Entry();
+        staleDeleted.site = "cms";
+        staleDeleted.id = "vod_3";
+        staleDeleted.title = "Title 3";
+        staleDeleted.position = 4000;
+        staleDeleted.duration = 60000;
+        staleDeleted.updated = 10003L;
+        String remoteHist =
+                WatchHistory.upsert(WatchHistory.upsert("[]", remoteOnly), staleDeleted);
+        final String remotePayload =
+                CloudSync.exportPayload(remoteHist, "[]", "", null, false, 19000L);
+
+        CloudSync.MergeResult merged =
+                WatchHistory.callOnStorageExecutor(
+                        () -> {
+                            observedThreads.add(Thread.currentThread().getName());
+                            CloudSync.MergeResult r =
+                                    CloudSync.merge(
+                                            trackedPersistence.readRaw(),
+                                            "[]",
+                                            storedTombstones.get(),
+                                            null,
+                                            false,
+                                            remotePayload,
+                                            25000L);
+                            WatchHistory.overwrite(r.historyJson, trackedPersistence::writeState);
+                            storedTombstones.set(r.tombstonesJson);
+                            return r;
+                        });
+        for (java.util.concurrent.Future<?> f : futures) {
+            f.get();
+        }
+        List<WatchHistory.Entry> finalEntries = WatchHistory.read(storedHistoryJson.get());
+        Set<String> ids = new HashSet<>();
+        for (WatchHistory.Entry entry : finalEntries) ids.add(entry.id);
+        check(
+                merged != null
+                        && finalEntries.size() == 12
+                        && ids.contains("vod_remote")
+                        && !ids.contains("vod_3"),
+                "M-A5: serialized STORAGE_EXECUTOR preserves all 11 local upserts + 1 remote merge without resurrecting deleted vod_3");
+        check(
+                observedThreads.size() == 1 && observedThreads.contains("playback-storage"),
+                "M-A5: all WatchHistory reads/merges/writes execute exclusively on single playback-storage thread: "
+                        + observedThreads);
     }
 
     private static void testUiLatchTimeoutAndErrorPropagation() {

@@ -73,6 +73,7 @@ public final class JsEngine implements SourceEngine {
     private boolean catvodModule;
     private volatile boolean initialized;
     private volatile boolean failedOperation;
+    private volatile Exception lastHostCancellation;
 
     static boolean isCommonJs(String source) {
         return java.util.regex.Pattern.compile(
@@ -124,8 +125,79 @@ public final class JsEngine implements SourceEngine {
         return clean.endsWith(".js") || clean.endsWith(".mjs") || clean.endsWith(".py");
     }
 
+    static boolean isCancellationOrTimeout(Throwable error) {
+        if (Thread.currentThread().isInterrupted()) {
+            return true;
+        }
+        RequestScope scope = RequestScope.current();
+        if (scope != null && scope.cancelled) {
+            return true;
+        }
+        int depth = 0;
+        for (Throwable cur = error; cur != null && depth < 16; cur = cur.getCause(), depth++) {
+            if (cur instanceof InterruptedIOException
+                    || cur instanceof InterruptedException
+                    || cur instanceof CancellationException
+                    || cur instanceof TimeoutException) {
+                return true;
+            }
+            String msg = cur.getMessage();
+            if (msg != null
+                    && (msg.contains("请求已取消")
+                            || msg.contains("脚本执行超过时间限制")
+                            || msg.contains("来源请求超时")
+                            || msg.contains("来源已关闭"))) {
+                return true;
+            }
+            if (cur.getCause() == cur) break;
+        }
+        return false;
+    }
+
+    static Exception rethrowOrWrapScriptLoadFailure(
+            Cms.Site site,
+            boolean inlinePython,
+            boolean checkedScript,
+            Exception cause,
+            Exception recordedHostCancellation) {
+        if (recordedHostCancellation != null) {
+            return recordedHostCancellation;
+        }
+        if (cause != null && isCancellationOrTimeout(cause)) {
+            int depth = 0;
+            for (Throwable cur = cause; cur != null && depth < 16; cur = cur.getCause(), depth++) {
+                if (cur instanceof InterruptedIOException
+                        || cur instanceof InterruptedException
+                        || cur instanceof CancellationException
+                        || cur instanceof TimeoutException) {
+                    return (Exception) cur;
+                }
+                if (cur.getCause() == cur) break;
+            }
+            return cause;
+        }
+        return wrapScriptLoadFailure(site, inlinePython, checkedScript, cause);
+    }
+
     static IOException wrapScriptLoadFailure(
             Cms.Site site, boolean inlinePython, boolean checkedScript, Exception cause) {
+        if (cause != null && isCancellationOrTimeout(cause)) {
+            if (cause instanceof IOException) {
+                return (IOException) cause;
+            }
+            int depth = 0;
+            for (Throwable cur = cause.getCause();
+                    cur != null && depth < 16;
+                    cur = cur.getCause(), depth++) {
+                if (cur instanceof IOException) {
+                    return (IOException) cur;
+                }
+                if (cur.getCause() == cur) break;
+            }
+            InterruptedIOException interrupted = new InterruptedIOException(cause.getMessage());
+            interrupted.initCause(cause);
+            return interrupted;
+        }
         if (!inlinePython
                 && !checkedScript
                 && (site == null || !hasRecognizedScriptExtension(site.api))) {
@@ -218,6 +290,7 @@ public final class JsEngine implements SourceEngine {
         if (closed) throw new IOException("JavaScript 来源已关闭");
         deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(operationTimeoutMillis);
         activeOperation = state;
+        lastHostCancellation = null;
         Runnable cancelled = state::cancel;
         RequestScope.onCancel(cancelled);
         boolean unhandledCatvodFailure = false;
@@ -359,6 +432,9 @@ public final class JsEngine implements SourceEngine {
                         try {
                             return module(name);
                         } catch (Exception e) {
+                            if (isCancellationOrTimeout(e)) {
+                                lastHostCancellation = e;
+                            }
                             throw new IllegalStateException(
                                     "JS module load failed: " + e.getClass().getSimpleName(), e);
                         }
@@ -480,8 +556,10 @@ public final class JsEngine implements SourceEngine {
                 }
             } catch (Exception e) {
                 if (!checkedScript && !hasRecognizedScriptExtension(site.api)) {
-                    throw wrapScriptLoadFailure(site, false, false, e);
+                    throw rethrowOrWrapScriptLoadFailure(
+                            site, false, false, e, lastHostCancellation);
                 }
+                if (lastHostCancellation != null) throw lastHostCancellation;
                 throw e;
             }
         }
@@ -500,8 +578,9 @@ public final class JsEngine implements SourceEngine {
                     "source-init.js");
         } catch (Exception e) {
             if (!inlinePython && !checkedScript && !hasRecognizedScriptExtension(site.api)) {
-                throw wrapScriptLoadFailure(site, false, false, e);
+                throw rethrowOrWrapScriptLoadFailure(site, false, false, e, lastHostCancellation);
             }
+            if (lastHostCancellation != null) throw lastHostCancellation;
             throw e;
         }
         checkBudget();
@@ -562,6 +641,9 @@ public final class JsEngine implements SourceEngine {
                                 checkBudget();
                                 return call.run(args);
                             } catch (Exception e) {
+                                if (isCancellationOrTimeout(e)) {
+                                    lastHostCancellation = e;
+                                }
                                 throw new IllegalStateException(e.getMessage(), e);
                             }
                         });

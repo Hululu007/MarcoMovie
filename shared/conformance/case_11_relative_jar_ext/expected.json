@@ -9,17 +9,7 @@
       "jar": "https://hub.example.com/channel/jars/site.jar",
       "ext": "https://hub.example.com/channel/v2/rules/site.json",
       "searchable": true,
-      "capabilityStatus": "needs-jar"
+      "capabilityStatus": "ok"
     }
-  ],
-  "platformOverrides": {
-    "flutter": {
-      "sites": [
-        {
-          "key": "rel_site",
-          "capabilityStatus": "ok"
-        }
-      ]
-    }
-  }
+  ]
 }

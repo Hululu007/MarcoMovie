@@ -1380,10 +1380,28 @@ public final class LiteJvmChecks {
         sParse.api = "http://127.0.0.1:9/api";
         sParse.requiresParser = true;
         sParse.playUrl = "";
+        List<LiteCatalog.Site> explicitJarCms =
+                LiteCatalog.parse(
+                        "{\"sites\":["
+                                + "{\"key\":\"cms_jar_1\",\"name\":\"CMS1\",\"type\":1,\"api\":\"http://127.0.0.1:9/vod\",\"jar\":\"./spider.jar\"},"
+                                + "{\"key\":\"cms_jar_0\",\"name\":\"CMS0\",\"type\":0,\"api\":\"http://127.0.0.1:9/xml\",\"jar\":\"./spider.jar\"},"
+                                + "{\"key\":\"jar_only\",\"name\":\"JarOnly\",\"api\":\"csp_Demo\",\"jar\":\"./spider.jar\"}"
+                                + "]}",
+                        "http://127.0.0.1:9/cfg.json");
         check(
-                LiteCatalog.Site.STATUS_PARSER_REQUIRED.equals(sParse.capabilityStatus())
-                        && "需要解析器，当前环境缺少可用解析配置".equals(sParse.limitation()),
-                "Lite capability status parser-required");
+                LiteCatalog.Site.STATUS_OK.equals(sParse.capabilityStatus())
+                        && "需要解析器，当前环境缺少可用解析配置".equals(sParse.playbackHint())
+                        && LiteCatalog.Site.STATUS_OK.equals(
+                                explicitJarCms.get(0).capabilityStatus())
+                        && explicitJarCms.get(0).supported
+                        && LiteCatalog.Site.STATUS_OK.equals(
+                                explicitJarCms.get(1).capabilityStatus())
+                        && explicitJarCms.get(1).supported
+                        && LiteCatalog.Site.STATUS_NEEDS_JAR.equals(
+                                explicitJarCms.get(2).capabilityStatus())
+                        && !explicitJarCms.get(2).supported,
+                "Lite capability status parser hint and explicit CMS jar alignment");
+        verifyRound2LiteFixes();
 
         // 2. decodeConfig HTML detection
         boolean directHtmlCaught = false;
@@ -1740,5 +1758,79 @@ public final class LiteJvmChecks {
         } finally {
             server.stop(0);
         }
+    }
+
+    private static void require(boolean cond, String label) {
+        if (!cond) throw new AssertionError("FAILED: " + label);
+    }
+
+    private static void verifyRound2LiteFixes() throws Exception {
+        // 6b: resetHistoryKeepBackups skips tombstone recording when history is corrupted
+        LiteStore.setHistoryCorrupted(false);
+        Map<String, Object> storeMap = new HashMap<String, Object>();
+        Map<String, Object> appMap = new HashMap<String, Object>();
+        storeMap.put("watch_history_v1", "{corrupt-watch-history");
+        java.util.concurrent.atomic.AtomicInteger commits =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger applies =
+                new java.util.concurrent.atomic.AtomicInteger();
+        android.content.SharedPreferences storePrefs =
+                createMemoryPrefs(storeMap, commits, applies);
+        android.content.SharedPreferences appPrefs = createMemoryPrefs(appMap, commits, applies);
+
+        LiteStore.lastWarnMessage = null;
+        require(LiteStore.getHistory(storePrefs).isEmpty(), "6b/6c: corrupted getHistory empty");
+        require(
+                LiteStore.lastWarnMessage != null
+                        && LiteStore.lastWarnMessage.contains("History JSON corrupted"),
+                "6c: parseHistoryJson logs warning instead of swallowing");
+        require(LiteStore.isHistoryCorrupted(storePrefs), "6b: storePrefs marked corrupted");
+
+        final java.util.concurrent.atomic.AtomicInteger tombstoneRuns =
+                new java.util.concurrent.atomic.AtomicInteger();
+        boolean recordedOnCorrupted =
+                LiteStore.resetHistoryKeepBackups(
+                        storePrefs, appPrefs, () -> tombstoneRuns.incrementAndGet());
+        require(!recordedOnCorrupted, "6b: resetHistoryKeepBackups skips sync when corrupted");
+        require(
+                tombstoneRuns.get() == 0,
+                "6b: resetHistoryKeepBackups must NOT write tombstones when history was corrupted");
+        require(
+                !LiteStore.isHistoryCorrupted(storePrefs)
+                        && !storePrefs.getBoolean(LiteStore.KEY_HISTORY_CORRUPTED, false)
+                        && "[]".equals(storePrefs.getString("watch_history_v1", "")),
+                "6b: resetHistoryKeepBackups clears corrupted flag and resets history to []");
+        boolean keptCorruptBackup = false;
+        for (String key : storeMap.keySet()) {
+            if (key.startsWith("watch_history_corrupt_")) keptCorruptBackup = true;
+        }
+        require(keptCorruptBackup, "6b: resetHistoryKeepBackups preserves corrupt backup key");
+
+        // Healthy history reset DOES invoke tombstone callback
+        LiteStore.HistoryEntry valid = new LiteStore.HistoryEntry();
+        valid.siteKey = "s1";
+        valid.vodId = "v1";
+        valid.vodName = "Movie 1";
+        valid.updatedAt = 1000L;
+        storeMap.put("watch_history_v1", LiteStore.recordHistoryJson("[]", valid));
+        boolean recordedOnHealthy =
+                LiteStore.resetHistoryKeepBackups(
+                        storePrefs, appPrefs, () -> tombstoneRuns.incrementAndGet());
+        require(
+                recordedOnHealthy && tombstoneRuns.get() == 1,
+                "6b: healthy history reset invokes tombstone callback exactly once");
+
+        // 6c: setHistoryRaw logs warning on malformed payload without setting historyCorrupted
+        LiteStore.setHistoryCorrupted(false);
+        storeMap.put(LiteStore.KEY_HISTORY_CORRUPTED, Boolean.FALSE);
+        LiteStore.lastWarnMessage = null;
+        LiteStore.setHistoryRaw(storePrefs, "[malformed_unquoted_item]");
+        require(
+                LiteStore.lastWarnMessage != null
+                        && LiteStore.lastWarnMessage.contains(
+                                "Rejected malformed history overwrite")
+                        && !LiteStore.isHistoryCorrupted(storePrefs),
+                "6c/6a: setHistoryRaw logs warning and rejects malformed payload without corrupting flag");
+        LiteStore.setHistoryCorrupted(false);
     }
 }

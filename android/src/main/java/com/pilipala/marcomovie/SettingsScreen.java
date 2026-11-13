@@ -802,11 +802,22 @@ final class SettingsScreen {
                         confirm(
                                 "重置观看历史（保留损坏备份）？",
                                 () -> {
-                                    java.util.List<WatchHistory.Entry> prev = a.watchHistory();
-                                    a.clearWatchHistory();
-                                    CloudSyncDialog.onHistoryCleared(a, prev);
-                                    a.toast("已重置观看历史");
-                                    a.refresh();
+                                    final boolean wasCorrupted =
+                                            WatchHistory.isCorrupted()
+                                                    || a.prefs.getBoolean(
+                                                            WatchHistory.CORRUPTED_PREF, false);
+                                    final java.util.List<WatchHistory.Entry> prev =
+                                            wasCorrupted
+                                                    ? java.util.Collections.emptyList()
+                                                    : a.watchHistory();
+                                    a.clearWatchHistory(
+                                            () -> {
+                                                if (!wasCorrupted) {
+                                                    CloudSyncDialog.onHistoryCleared(a, prev);
+                                                }
+                                                a.toast("已重置观看历史");
+                                                a.refresh();
+                                            });
                                 }));
         link(
                 "清除搜索记录",
@@ -1324,29 +1335,37 @@ final class SettingsScreen {
             else if (clean instanceof Integer) edit.putInt(key, (Integer) clean);
         }
         for (String dataKey :
-                new String[] {
-                    Prefs.SELECTED_SITE,
-                    Prefs.WATCH_HISTORY,
-                    Prefs.FAVORITES,
-                    Prefs.GLOBAL_SEARCH_HISTORY
-                }) {
+                new String[] {Prefs.SELECTED_SITE, Prefs.FAVORITES, Prefs.GLOBAL_SEARCH_HISTORY}) {
             if (settings.has(dataKey)) {
                 String cleanData = Prefs.sanitizeUserData(dataKey, settings.opt(dataKey));
                 if (cleanData != null) {
-                    if (Prefs.WATCH_HISTORY.equals(dataKey)) {
-                        WatchHistory.overwrite(
-                                cleanData,
-                                (json, corrupted) ->
-                                        edit.putString(Prefs.WATCH_HISTORY, json)
-                                                .putBoolean(
-                                                        WatchHistory.CORRUPTED_PREF, corrupted));
-                    } else {
-                        edit.putString(dataKey, cleanData);
-                    }
+                    edit.putString(dataKey, cleanData);
                 }
             }
         }
         edit.apply();
+        if (settings.has(Prefs.WATCH_HISTORY) && !settings.isNull(Prefs.WATCH_HISTORY)) {
+            Object rawHistory = settings.opt(Prefs.WATCH_HISTORY);
+            final boolean validCandidate = WatchHistory.validateBackupJson(rawHistory) != null;
+            if (!validCandidate) {
+                a.notice("备份中的观看历史格式错误，未能恢复观看历史。");
+            }
+            WatchHistory.enqueueBackupRestore(
+                    a.historyPersistence(),
+                    rawHistory,
+                    restored ->
+                            a.ui.post(
+                                    () -> {
+                                        if (a.isFinishing() || a.isDestroyed()) return;
+                                        if (!restored) {
+                                            if (validCandidate) {
+                                                a.notice("备份中的观看历史格式错误，未能恢复观看历史。");
+                                            }
+                                        } else if (a.current != null && a.player == null) {
+                                            a.refresh();
+                                        }
+                                    }));
+        }
         a.reduced = a.prefs.getBoolean(Prefs.REDUCED, false);
     }
 }

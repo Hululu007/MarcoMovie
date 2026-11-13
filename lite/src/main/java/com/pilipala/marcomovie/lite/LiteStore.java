@@ -52,7 +52,12 @@ public final class LiteStore {
         String t = raw.trim();
         if (t.length() == 0 || "[]".equals(t)) return false;
         try {
-            new JSONArray(t);
+            JSONArray arr = new JSONArray(t);
+            for (int i = 0; i < arr.length(); i++) {
+                if (!(arr.get(i) instanceof JSONObject)) {
+                    return true;
+                }
+            }
             return false;
         } catch (Exception e) {
             return true;
@@ -151,8 +156,27 @@ public final class LiteStore {
         }
     }
 
-    private static SharedPreferences prefs(Context context) {
+    static SharedPreferences prefs(Context context) {
         return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
+    }
+
+    static volatile String lastWarnMessage;
+
+    static void logWarn(String message, Throwable error) {
+        lastWarnMessage = message;
+        try {
+            if (error != null) {
+                android.util.Log.w("LiteStore", message, error);
+            } else {
+                android.util.Log.w("LiteStore", message);
+            }
+        } catch (Throwable stubUnavailable) {
+            if (stubUnavailable instanceof Error) throw (Error) stubUnavailable;
+            System.err.println(
+                    "W/LiteStore: "
+                            + message
+                            + (error != null ? " (" + error + ")" : ""));
+        }
     }
 
     public static List<HistoryEntry> getHistory(Context context) {
@@ -196,12 +220,7 @@ public final class LiteStore {
                         .putBoolean(KEY_HISTORY_CORRUPTED, true)
                         .apply();
             }
-            try {
-                android.util.Log.w(
-                        "LiteStore", "History JSON corrupted, parse failed: " + e.getMessage());
-            } catch (Throwable stubUnavailable) {
-                if (stubUnavailable instanceof Error) throw (Error) stubUnavailable;
-            }
+            logWarn("History JSON corrupted, parse failed: " + e.getMessage(), e);
         }
         return out;
     }
@@ -209,10 +228,7 @@ public final class LiteStore {
     public static String recordHistoryJson(String existingRaw, HistoryEntry entry) {
         if (historyCorrupted || isMalformedHistory(existingRaw)) {
             historyCorrupted = true;
-            try {
-                android.util.Log.w("LiteStore", "Skipping history record because history is corrupted");
-            } catch (Throwable ignored) {
-            }
+            logWarn("Skipping history record because history is corrupted", null);
             return existingRaw == null ? "[]" : existingRaw;
         }
         if (entry == null || entry.vodId == null || entry.vodId.length() == 0) {
@@ -228,7 +244,8 @@ public final class LiteStore {
                 if (sameVideo(old.siteKey, old.vodId, entry.siteKey, entry.vodId)) continue;
                 next.put(old.toJson());
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            logWarn("Failed to serialize history entry", e);
         }
         return next.toString();
     }
@@ -260,8 +277,13 @@ public final class LiteStore {
     }
 
     public static void removeHistory(Context context, String siteKey, String vodId) {
-        if (context == null || isHistoryCorrupted(context)) return;
-        List<HistoryEntry> current = getHistory(context);
+        if (context == null) return;
+        removeHistory(prefs(context), siteKey, vodId);
+    }
+
+    public static void removeHistory(SharedPreferences sp, String siteKey, String vodId) {
+        if (sp == null || isHistoryCorrupted(sp)) return;
+        List<HistoryEntry> current = getHistory(sp);
         JSONArray next = new JSONArray();
         try {
             for (int i = 0; i < current.size(); i++) {
@@ -271,10 +293,13 @@ public final class LiteStore {
                 }
             }
         } catch (Exception e) {
+            logWarn(
+                    "Failed to serialize history while removing entry " + siteKey + ":" + vodId,
+                    e);
             return;
         }
         if (!isHistoryCorrupted()) {
-            prefs(context).edit().putString(KEY_HISTORY, next.toString()).apply();
+            sp.edit().putString(KEY_HISTORY, next.toString()).apply();
         }
     }
 
@@ -290,6 +315,26 @@ public final class LiteStore {
                     .putBoolean(KEY_HISTORY_CORRUPTED, false)
                     .apply();
         }
+    }
+
+    /**
+     * Resets watch history while preserving any {@code watch_history_corrupt_*} backups. When the
+     * store is already marked corrupted, tombstone recording and cloud sync push are skipped so a
+     * local recovery reset never wipes valid history on other devices.
+     */
+    public static boolean resetHistoryKeepBackups(
+            SharedPreferences storePrefs,
+            SharedPreferences appPrefs,
+            Runnable recordTombstonesAndSync) {
+        boolean wasCorrupted = isHistoryCorrupted(storePrefs);
+        if (!wasCorrupted && recordTombstonesAndSync != null) {
+            recordTombstonesAndSync.run();
+        }
+        clearHistory(storePrefs);
+        if (appPrefs != null) {
+            appPrefs.edit().remove("resume_address").remove("resume_ms").apply();
+        }
+        return !wasCorrupted;
     }
 
     public static List<FavoriteEntry> getFavorites(Context context) {
@@ -405,6 +450,7 @@ public final class LiteStore {
     public static void setHistoryRaw(SharedPreferences sp, String raw) {
         String normalized = raw == null || raw.trim().length() == 0 ? "[]" : raw.trim();
         if (isMalformedHistory(normalized)) {
+            logWarn("Rejected malformed history overwrite", null);
             return;
         }
         historyCorrupted = false;

@@ -400,6 +400,11 @@ final class HomeScreen {
         }
     }
 
+    private static void commitLoadingSite(MainActivity a, String siteKey) {
+        if (a == null || a.prefs == null) return;
+        a.prefs.edit().putString(Prefs.LOADING_SITE, siteKey == null ? "" : siteKey).commit();
+    }
+
     void loadHome() {
         if (busy) return;
         busy = true;
@@ -407,7 +412,7 @@ final class HomeScreen {
         status.setText("正在整理片单…");
         more.setVisibility(View.GONE);
         int token = ++request;
-        a.prefs.edit().putString(Prefs.LOADING_SITE, site.key).apply();
+        commitLoadingSite(a, site.key);
         a.submitPage(
                 () -> {
                     try {

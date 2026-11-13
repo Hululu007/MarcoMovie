@@ -41,31 +41,13 @@ final class PlaybackController {
                         t.setDaemon(true);
                         return t;
                     });
-    static final ExecutorService STORAGE_EXECUTOR =
-            Executors.newSingleThreadExecutor(
-                    r -> {
-                        Thread t = new Thread(r, "playback-storage");
-                        t.setDaemon(true);
-                        return t;
-                    });
+    static final ExecutorService STORAGE_EXECUTOR = WatchHistory.STORAGE_EXECUTOR;
     private static final long DISK_SAVE_INTERVAL_MS = 15000L;
 
     private PlaybackController() {}
 
     static WatchHistory.Entry cloneBookmark(WatchHistory.Entry src) {
-        if (src == null) return null;
-        WatchHistory.Entry e = new WatchHistory.Entry();
-        e.site = src.site;
-        e.id = src.id;
-        e.title = src.title;
-        e.poster = src.poster;
-        e.line = src.line;
-        e.episode = src.episode;
-        e.index = src.index;
-        e.position = src.position;
-        e.duration = src.duration;
-        e.updated = src.updated;
-        return e;
+        return WatchHistory.cloneEntry(src);
     }
 
     static void updateInMemoryBookmark(MainActivity a) {
@@ -1050,17 +1032,9 @@ final class PlaybackController {
             a.playingBookmark.updated = System.currentTimeMillis();
             a.lastBookmarkSave = a.playingBookmark.updated;
             final WatchHistory.Entry snapshot = cloneBookmark(a.playingBookmark);
-            final android.content.SharedPreferences prefs = a.prefs;
-            STORAGE_EXECUTOR.execute(
-                    () -> {
-                        try {
-                            if (prefs == null || snapshot == null) return;
-                            String current = prefs.getString(Prefs.WATCH_HISTORY, "[]");
-                            String updated = WatchHistory.upsert(current, snapshot);
-                            prefs.edit().putString(Prefs.WATCH_HISTORY, updated).apply();
-                        } catch (Exception ignored) {
-                        }
-                    });
+            if (a.prefs != null && snapshot != null) {
+                WatchHistory.enqueueUpsert(a.historyPersistence(), snapshot);
+            }
             CloudSyncDialog.scheduleAutoPush(a, false);
         }
         a.generation++;
@@ -1748,21 +1722,9 @@ final class PlaybackController {
         updateInMemoryBookmark(a);
         a.lastBookmarkSave = a.playingBookmark.updated;
         final WatchHistory.Entry snapshot = cloneBookmark(a.playingBookmark);
-        final android.content.SharedPreferences prefs = a.prefs;
-        STORAGE_EXECUTOR.execute(
-                () -> {
-                    try {
-                        if (prefs == null || snapshot == null) return;
-                        String current = prefs.getString(Prefs.WATCH_HISTORY, "[]");
-                        String updated = WatchHistory.upsert(current, snapshot);
-                        prefs.edit().putString(Prefs.WATCH_HISTORY, updated).apply();
-                    } catch (Exception error) {
-                        AppLog.w(
-                                "PlaybackController",
-                                "savePlaybackHistoryOnPrepared failed",
-                                error);
-                    }
-                });
+        if (a.prefs != null && snapshot != null) {
+            WatchHistory.enqueueUpsert(a.historyPersistence(), snapshot);
+        }
         CloudSyncDialog.scheduleAutoPush(a, false);
     }
 
@@ -1775,18 +1737,9 @@ final class PlaybackController {
         if (!force && now - a.lastBookmarkSave < DISK_SAVE_INTERVAL_MS) return;
         a.lastBookmarkSave = now;
         final WatchHistory.Entry snapshot = cloneBookmark(a.playingBookmark);
-        final android.content.SharedPreferences prefs = a.prefs;
-        STORAGE_EXECUTOR.execute(
-                () -> {
-                    try {
-                        if (prefs == null || snapshot == null) return;
-                        String current = prefs.getString(Prefs.WATCH_HISTORY, "[]");
-                        String updated = WatchHistory.upsert(current, snapshot);
-                        prefs.edit().putString(Prefs.WATCH_HISTORY, updated).apply();
-                    } catch (Exception error) {
-                        AppLog.w("PlaybackController", "async savePlaybackHistory failed", error);
-                    }
-                });
+        if (a.prefs != null && snapshot != null) {
+            WatchHistory.enqueueUpsert(a.historyPersistence(), snapshot);
+        }
         CloudSyncDialog.scheduleAutoPush(a, force);
     }
 

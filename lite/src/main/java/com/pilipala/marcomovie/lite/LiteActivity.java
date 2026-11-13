@@ -945,13 +945,46 @@ public final class LiteActivity extends Activity {
         }
     }
 
-    void resetWatchHistoryKeepBackups(List<LiteStore.HistoryEntry> currentEntries) {
-        if (currentEntries != null && !currentEntries.isEmpty()) {
-            recordHistoryClearTombstones(currentEntries);
-        }
-        LiteStore.clearHistory(this);
-        getPreferences(0).edit().remove("resume_address").remove("resume_ms").apply();
-        scheduleAutoPush(true);
+    void resetWatchHistoryKeepBackups(final List<LiteStore.HistoryEntry> currentEntries) {
+        final List<LiteStore.HistoryEntry> entries =
+                currentEntries != null ? currentEntries : LiteStore.getHistory(this);
+        LiteStore.resetHistoryKeepBackups(
+                LiteStore.prefs(this),
+                getPreferences(0),
+                new Runnable() {
+                    public void run() {
+                        if (entries != null && !entries.isEmpty()) {
+                            recordHistoryClearTombstones(entries);
+                        }
+                        scheduleAutoPush(true);
+                    }
+                });
+    }
+
+    void confirmResetWatchHistory(
+            final String title,
+            final List<LiteStore.HistoryEntry> currentEntries,
+            final Runnable afterReset) {
+        final List<LiteStore.HistoryEntry> entries =
+                currentEntries != null ? currentEntries : LiteStore.getHistory(this);
+        boolean corrupted = LiteStore.isHistoryCorrupted(this);
+        String message =
+                corrupted
+                        ? "当前观看历史数据异常，重置后将清空本地观看历史以恢复正常记录功能（本地损坏备份将继续保留，且不会向其他设备同步删除标记）。\n\n是否确认重置？"
+                        : "确定要重置本地观看历史吗？若已开启多端网络同步，清空操作会同步至其他设备（本地损坏备份仍会保留）。";
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton(
+                        "确认重置",
+                        new DialogInterface.OnClickListener() {
+                            public void onClick(DialogInterface dialog, int which) {
+                                resetWatchHistoryKeepBackups(entries);
+                                if (afterReset != null) afterReset.run();
+                            }
+                        })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     void historyPage() {
@@ -975,8 +1008,14 @@ public final class LiteActivity extends Activity {
                         "重置观看历史（保留损坏备份）",
                         new Runnable() {
                             public void run() {
-                                resetWatchHistoryKeepBackups(list);
-                                historyPage();
+                                confirmResetWatchHistory(
+                                        "重置观看历史？",
+                                        list,
+                                        new Runnable() {
+                                            public void run() {
+                                                historyPage();
+                                            }
+                                        });
                             }
                         });
             }
@@ -994,8 +1033,14 @@ public final class LiteActivity extends Activity {
                 "清空全部观看历史",
                 new Runnable() {
                     public void run() {
-                        resetWatchHistoryKeepBackups(list);
-                        historyPage();
+                        confirmResetWatchHistory(
+                                "清空观看历史？",
+                                list,
+                                new Runnable() {
+                                    public void run() {
+                                        historyPage();
+                                    }
+                                });
                     }
                 });
         List<View> cards = new ArrayList<View>();
@@ -1692,8 +1737,14 @@ public final class LiteActivity extends Activity {
                 "重置观看历史（保留损坏备份）",
                 new Runnable() {
                     public void run() {
-                        resetWatchHistoryKeepBackups(LiteStore.getHistory(LiteActivity.this));
-                        status.setText("已重置观看历史，本地损坏备份已继续保留。");
+                        confirmResetWatchHistory(
+                                "重置观看历史？",
+                                null,
+                                new Runnable() {
+                                    public void run() {
+                                        status.setText("已重置观看历史，本地损坏备份已继续保留。");
+                                    }
+                                });
                     }
                 });
         button(
@@ -1731,7 +1782,10 @@ public final class LiteActivity extends Activity {
                         parsed.get(0).name
                                 + (parsed.size() > 1 ? " · " + parsed.size() + " 个片源" : "");
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable parseFailure) {
+            if (parseFailure instanceof Error) throw (Error) parseFailure;
+            android.util.Log.w(
+                    "LiteActivity", "Failed to parse local subscription title for sync", parseFailure);
         }
         return LiteSync.LocalSubscription.create(name, addr, raw, sel, ts);
     }
@@ -1742,7 +1796,8 @@ public final class LiteActivity extends Activity {
             LiteSync.Tombstones t = LiteSync.Tombstones.read(LiteStore.getTombstonesRaw(this));
             t.stamps.remove("sub:" + key);
             LiteStore.setTombstonesRaw(this, t.json());
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            android.util.Log.w("LiteActivity", "Failed to clear subscription tombstone", e);
         }
     }
 
@@ -1819,6 +1874,10 @@ public final class LiteActivity extends Activity {
                             LiteCatalog.importConfig(
                                     LiteCatalog.fetchConfig(fetchedOrigin), fetchedOrigin);
                 } catch (Exception fetchFailure) {
+                    android.util.Log.w(
+                            "LiteActivity",
+                            "Failed to fetch synced subscription config from " + fetchedOrigin,
+                            fetchFailure);
                     fetchedRaw = null;
                 }
             }
@@ -1867,7 +1926,12 @@ public final class LiteActivity extends Activity {
                                 ed.commit();
                                 selected = null;
                             }
-                        } catch (Throwable ignored) {
+                        } catch (Throwable applyFailure) {
+                            if (applyFailure instanceof Error) throw (Error) applyFailure;
+                            android.util.Log.w(
+                                    "LiteActivity",
+                                    "Failed to parse or apply synced subscription config",
+                                    applyFailure);
                         }
                     }
                 }

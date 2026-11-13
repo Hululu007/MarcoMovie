@@ -40,6 +40,10 @@ final class ConfigLibrary {
         return out.toString();
     }
 
+    static boolean isLocalFileOrigin(String origin) {
+        return origin != null && origin.trim().toLowerCase(Locale.ROOT).startsWith("file:");
+    }
+
     static String identity(String origin, String raw) throws Exception {
         return hash(
                 origin == null || origin.trim().isEmpty()

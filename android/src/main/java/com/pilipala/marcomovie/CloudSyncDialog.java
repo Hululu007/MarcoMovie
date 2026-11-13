@@ -109,28 +109,39 @@ final class CloudSyncDialog {
     }
 
     /** Records a local watch-history deletion tombstone and schedules an auto-push. */
-    static void onHistoryDeleted(MainActivity a, String itemKey) {
+    static void onHistoryDeleted(final MainActivity a, final String itemKey) {
         if (a == null || a.privateMode || a.prefs == null || itemKey == null || itemKey.isEmpty())
             return;
-        String next =
-                CloudSync.Tombstones.recordHistoryDelete(
-                        a.prefs.getString(Prefs.SYNC_TOMBSTONES, ""),
-                        itemKey,
-                        System.currentTimeMillis());
-        a.prefs.edit().putString(Prefs.SYNC_TOMBSTONES, next).apply();
-        scheduleAutoPush(a, true);
+        final SharedPreferences prefs = a.prefs;
+        final long deletedAt = System.currentTimeMillis();
+        WatchHistory.STORAGE_EXECUTOR.execute(
+                () -> {
+                    String next =
+                            CloudSync.Tombstones.recordHistoryDelete(
+                                    prefs.getString(Prefs.SYNC_TOMBSTONES, ""), itemKey, deletedAt);
+                    prefs.edit().putString(Prefs.SYNC_TOMBSTONES, next).apply();
+                    MAIN.post(() -> scheduleAutoPush(a, true));
+                });
     }
 
     /** Records deletion tombstones for all cleared watch-history items and schedules auto-push. */
-    static void onHistoryCleared(MainActivity a, List<WatchHistory.Entry> previousEntries) {
+    static void onHistoryCleared(
+            final MainActivity a, final List<WatchHistory.Entry> previousEntries) {
         if (a == null || a.privateMode || a.prefs == null) return;
-        String next =
-                CloudSync.Tombstones.recordHistoryClear(
-                        a.prefs.getString(Prefs.SYNC_TOMBSTONES, ""),
-                        previousEntries,
-                        System.currentTimeMillis());
-        a.prefs.edit().putString(Prefs.SYNC_TOMBSTONES, next).apply();
-        scheduleAutoPush(a, true);
+        if (previousEntries == null || previousEntries.isEmpty()) return;
+        final SharedPreferences prefs = a.prefs;
+        final List<WatchHistory.Entry> snapshot = new ArrayList<>(previousEntries);
+        final long clearedAt = System.currentTimeMillis();
+        WatchHistory.STORAGE_EXECUTOR.execute(
+                () -> {
+                    String next =
+                            CloudSync.Tombstones.recordHistoryClear(
+                                    prefs.getString(Prefs.SYNC_TOMBSTONES, ""),
+                                    snapshot,
+                                    clearedAt);
+                    prefs.edit().putString(Prefs.SYNC_TOMBSTONES, next).apply();
+                    MAIN.post(() -> scheduleAutoPush(a, true));
+                });
     }
 
     /** Records a local favorite addition/removal timestamp and schedules auto-push. */
@@ -157,7 +168,7 @@ final class CloudSyncDialog {
     /** Clears any prior deletion tombstone when a public subscription is imported or updated. */
     static void onSubscriptionSaved(MainActivity a, String origin, String raw) {
         if (a == null || a.privateMode || a.prefs == null) return;
-        if (origin != null && origin.toLowerCase(Locale.ROOT).startsWith("file:")) return;
+        if (ConfigLibrary.isLocalFileOrigin(origin)) return;
         try {
             String cleanUrl = origin != null && Cms.isHttp(origin.trim()) ? origin.trim() : "";
             String publicRaw = CloudSync.sanitizePublicRawConfig(raw);
@@ -264,8 +275,7 @@ final class CloudSyncDialog {
             if (a.config != null
                     && a.config.raw != null
                     && !a.config.raw.isEmpty()
-                    && (a.configOrigin == null
-                            || !a.configOrigin.toLowerCase(Locale.ROOT).startsWith("file:"))) {
+                    && !ConfigLibrary.isLocalFileOrigin(a.configOrigin)) {
                 try {
                     library.rememberIfAbsent(
                             a.config.raw,
@@ -284,8 +294,7 @@ final class CloudSyncDialog {
             }
             String currentSelectedSite = a.prefs.getString(Prefs.SELECTED_SITE, "");
             for (ConfigLibrary.Entry entry : library.entries()) {
-                if (entry.origin != null
-                        && entry.origin.toLowerCase(Locale.ROOT).startsWith("file:")) {
+                if (ConfigLibrary.isLocalFileOrigin(entry.origin)) {
                     continue;
                 }
                 try {
@@ -313,7 +322,8 @@ final class CloudSyncDialog {
     private static boolean applyMergedSubscriptions(
             final MainActivity a,
             List<CloudSync.SubscriptionItem> mergedSubs,
-            String tombstonesJson) {
+            String tombstonesJson)
+            throws Exception {
         if (a == null || a.privateMode || a.configStore == null || mergedSubs == null) {
             return false;
         }
@@ -365,8 +375,7 @@ final class CloudSyncDialog {
         }
         try {
             for (ConfigLibrary.Entry existing : library.entries()) {
-                if (existing.origin != null
-                        && existing.origin.toLowerCase(Locale.ROOT).startsWith("file:")) {
+                if (ConfigLibrary.isLocalFileOrigin(existing.origin)) {
                     continue;
                 }
                 if (!keepIds.contains(existing.id)
@@ -406,35 +415,54 @@ final class CloudSyncDialog {
         final String finalOrigin = targetOrigin == null ? "" : targetOrigin;
         final String finalSelected = targetSelected == null ? "" : targetSelected;
         final boolean finalRemovedActive = removedActive;
+        final Cms.Config parsedConfig;
+        final String resolvedPickSite;
+        if (finalRaw != null && !finalRaw.isEmpty()) {
+            parsedConfig = Cms.parseConfig(finalRaw, finalOrigin);
+            String candidateSite = "";
+            for (Cms.Site s : parsedConfig.sites) {
+                if (SourceController.available(a, s)) {
+                    if (candidateSite.isEmpty()) candidateSite = s.key;
+                    if (!finalSelected.isEmpty() && s.key.equals(finalSelected)) {
+                        candidateSite = s.key;
+                        break;
+                    }
+                }
+            }
+            resolvedPickSite = candidateSite;
+            a.configStore.writeSequenced(
+                    parsedConfig.raw,
+                    new ConfigStore.PointerSnapshot(
+                            finalOrigin,
+                            resolvedPickSite.isEmpty() ? null : resolvedPickSite,
+                            new SourceController.SavedState(parsedConfig, finalOrigin)));
+        } else {
+            parsedConfig = null;
+            resolvedPickSite = "";
+            if (finalRemovedActive) {
+                a.configStore.deleteSequenced();
+            }
+        }
         CountDownLatch uiLatch = new CountDownLatch(1);
         final AtomicReference<Throwable> uiError = new AtomicReference<>();
         a.ui.post(
                 () -> {
                     try {
                         if (a.isFinishing() || a.isDestroyed() || a.privateMode) return;
-                        if (finalRaw != null && !finalRaw.isEmpty()) {
-                            Cms.Config parsed = Cms.parseConfig(finalRaw, finalOrigin);
-                            a.configStore.write(parsed.raw);
-                            SourcePicker.applyEdits(a, parsed, finalOrigin);
+                        if (parsedConfig != null) {
+                            SourcePicker.applyEdits(a, parsedConfig, finalOrigin);
                             a.closeEngines();
-                            a.config = parsed;
+                            a.config = parsedConfig;
                             a.configOrigin = finalOrigin;
                             SharedPreferences.Editor ed =
                                     a.prefs.edit().putString(Prefs.ORIGIN, finalOrigin);
-                            String pickSite = "";
-                            for (Cms.Site s : parsed.sites) {
-                                if (SourceController.available(a, s)) {
-                                    if (pickSite.isEmpty()) pickSite = s.key;
-                                    if (!finalSelected.isEmpty() && s.key.equals(finalSelected)) {
-                                        pickSite = s.key;
-                                        break;
-                                    }
-                                }
+                            if (!resolvedPickSite.isEmpty()) {
+                                ed.putString(Prefs.SELECTED_SITE, resolvedPickSite);
+                            } else {
+                                ed.remove(Prefs.SELECTED_SITE);
                             }
-                            if (!pickSite.isEmpty()) ed.putString(Prefs.SELECTED_SITE, pickSite);
                             ed.apply();
                         } else if (finalRemovedActive) {
-                            new File(a.getFilesDir(), "config.json").delete();
                             a.closeEngines();
                             a.config = null;
                             a.configOrigin = "";
@@ -495,43 +523,46 @@ final class CloudSyncDialog {
     }
 
     private static CloudSync.MergeResult mergeAndPersistLocal(
-            MainActivity a, String remoteJson, long now) throws Exception {
-        final String[] snap = new String[3];
+            final MainActivity a, final String remoteJson, final long now) throws Exception {
         final boolean[] syncSubsHolder = new boolean[1];
-        runOnMainSync(
-                a,
-                () -> {
-                    snap[0] = a.prefs.getString(Prefs.WATCH_HISTORY, "[]");
-                    snap[1] = a.prefs.getString(Prefs.FAVORITES, "[]");
-                    snap[2] = a.prefs.getString(Prefs.SYNC_TOMBSTONES, "");
-                    syncSubsHolder[0] = isSyncSubscriptionsEnabled(a);
-                });
-        boolean syncSubs = syncSubsHolder[0];
-        List<CloudSync.SubscriptionItem> localSubs =
+        runOnMainSync(a, () -> syncSubsHolder[0] = isSyncSubscriptionsEnabled(a));
+        final boolean syncSubs = syncSubsHolder[0];
+        final List<CloudSync.SubscriptionItem> localSubs =
                 syncSubs ? collectPublicSubscriptions(a) : null;
-
+        final SharedPreferences prefs = a.prefs;
         CloudSync.MergeResult res =
-                CloudSync.merge(snap[0], snap[1], snap[2], localSubs, syncSubs, remoteJson, now);
-
-        final boolean isHistCorrupt =
-                WatchHistory.isCorrupted()
-                        || a.prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
-        runOnMainSync(
-                a,
-                () -> {
-                    SharedPreferences.Editor ed = a.prefs.edit();
-                    if (!isHistCorrupt) {
-                        WatchHistory.overwrite(
-                                res.historyJson,
-                                (json, corrupted) ->
-                                        ed.putString(Prefs.WATCH_HISTORY, json)
-                                                .putBoolean(
-                                                        WatchHistory.CORRUPTED_PREF, corrupted));
-                    }
-                    ed.putString(Prefs.FAVORITES, res.favoritesJson)
-                            .putString(Prefs.SYNC_TOMBSTONES, res.tombstonesJson)
-                            .apply();
-                });
+                WatchHistory.callOnStorageExecutor(
+                        () -> {
+                            String localHistory = prefs.getString(Prefs.WATCH_HISTORY, "[]");
+                            String localFavs = prefs.getString(Prefs.FAVORITES, "[]");
+                            String localTombs = prefs.getString(Prefs.SYNC_TOMBSTONES, "");
+                            CloudSync.MergeResult merged =
+                                    CloudSync.merge(
+                                            localHistory,
+                                            localFavs,
+                                            localTombs,
+                                            localSubs,
+                                            syncSubs,
+                                            remoteJson,
+                                            now);
+                            boolean isHistCorrupt =
+                                    WatchHistory.isCorrupted()
+                                            || prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
+                            final SharedPreferences.Editor ed = prefs.edit();
+                            if (!isHistCorrupt) {
+                                WatchHistory.overwrite(
+                                        merged.historyJson,
+                                        (json, corrupted) ->
+                                                ed.putString(Prefs.WATCH_HISTORY, json)
+                                                        .putBoolean(
+                                                                WatchHistory.CORRUPTED_PREF,
+                                                                corrupted));
+                            }
+                            ed.putString(Prefs.FAVORITES, merged.favoritesJson)
+                                    .putString(Prefs.SYNC_TOMBSTONES, merged.tombstonesJson)
+                                    .apply();
+                            return merged;
+                        });
 
         if (syncSubs && res.subscriptions != null) {
             applyMergedSubscriptions(a, res.subscriptions, res.tombstonesJson);
@@ -539,20 +570,22 @@ final class CloudSyncDialog {
         return res;
     }
 
-    private static String exportCurrentPayload(MainActivity a, long now) throws Exception {
-        final String[] snap = new String[3];
+    private static String exportCurrentPayload(final MainActivity a, final long now)
+            throws Exception {
         final boolean[] syncSubsHolder = new boolean[1];
-        runOnMainSync(
-                a,
-                () -> {
-                    snap[0] = a.prefs.getString(Prefs.WATCH_HISTORY, "[]");
-                    snap[1] = a.prefs.getString(Prefs.FAVORITES, "[]");
-                    snap[2] = a.prefs.getString(Prefs.SYNC_TOMBSTONES, "");
-                    syncSubsHolder[0] = isSyncSubscriptionsEnabled(a);
-                });
-        boolean syncSubs = syncSubsHolder[0];
-        List<CloudSync.SubscriptionItem> localSubs =
+        runOnMainSync(a, () -> syncSubsHolder[0] = isSyncSubscriptionsEnabled(a));
+        final boolean syncSubs = syncSubsHolder[0];
+        final List<CloudSync.SubscriptionItem> localSubs =
                 syncSubs ? collectPublicSubscriptions(a) : null;
+        final SharedPreferences prefs = a.prefs;
+        final String[] snap =
+                WatchHistory.callOnStorageExecutor(
+                        () ->
+                                new String[] {
+                                    prefs.getString(Prefs.WATCH_HISTORY, "[]"),
+                                    prefs.getString(Prefs.FAVORITES, "[]"),
+                                    prefs.getString(Prefs.SYNC_TOMBSTONES, "")
+                                });
         return CloudSync.exportPayload(snap[0], snap[1], snap[2], localSubs, syncSubs, now);
     }
 

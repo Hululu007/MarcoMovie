@@ -112,10 +112,18 @@ public final class LiteCatalog {
             if (isExtTooLarge()) {
                 return STATUS_EXT_TOO_LARGE;
             }
-            if (isNetdiskSite()) {
+            if ("mydrive".equals(key)) {
+                return STATUS_UNSUPPORTED_TYPE;
+            }
+            if (api != null && api.startsWith("emby://account/")) {
+                return STATUS_OK;
+            }
+            if ((type == 3 || isScriptOrJarApi(api)) && isNetdiskSite()) {
                 return STATUS_ADAPTER_MISSING;
             }
-            if (type == 3 || isScriptOrJarApi(api) || (jar != null && jar.length() > 0)) {
+            if (type == 3
+                    || isScriptOrJarApi(api)
+                    || (type != 0 && type != 1 && jar != null && jar.length() > 0)) {
                 return STATUS_NEEDS_JAR;
             }
             if (type != 0 && type != 1) {
@@ -126,10 +134,14 @@ public final class LiteCatalog {
             } catch (Exception invalid) {
                 return STATUS_CUSTOM_SITE_URL;
             }
-            if (requiresParser && (playUrl == null || playUrl.length() == 0)) {
-                return STATUS_PARSER_REQUIRED;
-            }
             return STATUS_OK;
+        }
+
+        public String playbackHint() {
+            if (requiresParser && (playUrl == null || playUrl.trim().length() == 0)) {
+                return capabilityReason(STATUS_PARSER_REQUIRED);
+            }
+            return "";
         }
 
         public static String capabilityReason(String status) {
@@ -812,14 +824,7 @@ public final class LiteCatalog {
                     s.playUrl.length() == 0
                             || s.playUrl.startsWith("http://")
                             || s.playUrl.startsWith("https://");
-            s.supported = (s.type == 1 || s.type == 0) && directPlayUrl;
-            try {
-                http(s.api);
-            } catch (Exception invalid) {
-                s.supported = false;
-            }
-            if (s.api.startsWith("emby://account/")) s.supported = true;
-            if (s.isExtTooLarge()) s.supported = false;
+            s.supported = Site.STATUS_OK.equals(s.capabilityStatus()) && directPlayUrl;
             String ua = Json.str(row, "ua", "");
             if (ua.length() > 0 && ua.indexOf('\r') < 0 && ua.indexOf('\n') < 0) {
                 s.headers.put("User-Agent", ua);

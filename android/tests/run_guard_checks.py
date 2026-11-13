@@ -17,12 +17,30 @@ with tempfile.TemporaryDirectory(prefix='guard-native-check-') as folder:
     shims = {
         'android/content/Context.java': '''package android.content;
 public class Context { public static final int MODE_PRIVATE=0; private final java.io.File files,assets;
+private final java.util.Map<String,SharedPreferences> prefs=new java.util.concurrent.ConcurrentHashMap<>();
 public Context(java.io.File f,java.io.File a){files=f;assets=a;}
 public Context getApplicationContext(){return this;} public java.io.File getFilesDir(){return files;}
-public android.content.res.AssetManager getAssets(){return new android.content.res.AssetManager(assets);} }''',
+public android.content.res.AssetManager getAssets(){return new android.content.res.AssetManager(assets);}
+public SharedPreferences getSharedPreferences(String name,int mode){return prefs.computeIfAbsent(name,k->new PlainPrefs());}
+private static final class PlainPrefs implements SharedPreferences {
+public java.util.Map<String,?> getAll(){return java.util.Collections.emptyMap();}
+public String getString(String k,String d){return d;}
+public java.util.Set<String> getStringSet(String k,java.util.Set<String> d){return d;}
+public int getInt(String k,int d){return d;}
+public long getLong(String k,long d){return d;}
+public float getFloat(String k,float d){return d;}
+public boolean getBoolean(String k,boolean d){return d;}
+public boolean contains(String k){return false;}
+public Editor edit(){return null;}
+public void registerOnSharedPreferenceChangeListener(OnSharedPreferenceChangeListener l){}
+public void unregisterOnSharedPreferenceChangeListener(OnSharedPreferenceChangeListener l){} } }''',
         'android/content/res/AssetManager.java': '''package android.content.res;
 public class AssetManager { private final java.io.File root; public AssetManager(java.io.File r){root=r;}
 public java.io.InputStream open(String name)throws java.io.IOException{return new java.io.FileInputStream(new java.io.File(root,name));} }''',
+        'android/os/Looper.java': '''package android.os;
+public final class Looper { private static final Looper MAIN=new Looper(); public static Looper getMainLooper(){return MAIN;} }''',
+        'android/os/Handler.java': '''package android.os;
+public class Handler { public Handler(){} public Handler(Looper l){} public boolean post(Runnable r){return false;} public boolean postDelayed(Runnable r,long d){return false;} }''',
         'com/pilipala/catpaw/NodeRuntime.java': '''package com.pilipala.catpaw;
 public final class NodeRuntime {
 public static final class RuntimeUnavailableException extends java.io.IOException { public RuntimeUnavailableException(){super("fixture unavailable");} }

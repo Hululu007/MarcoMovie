@@ -44,12 +44,15 @@ public final class LaneEChecks {
 
         testE1CloneBookmarkSnapshot();
         testE1StorageExecutorThreading();
+        testE1WatchHistoryUnifiedSerialization();
         testE1PlaybackProgressThrottling();
         testE1CommitAuditZeroOnUIThread();
 
         testE2ConfigStoreSynchronized();
         testE2ConfigStoreAtomicWrite();
+        testE2ConfigStoreSequencedWritesAndRollback();
         testE2SourceControllerBackgroundDispatch();
+        testM_A3ContentUriImportAndConfigLibrary();
 
         testE3ZipImportRedirects();
         testE3ZipImportMaxHopsLimit();
@@ -87,10 +90,10 @@ public final class LaneEChecks {
         original.duration = 120000;
         original.updated = 1700000000000L;
 
-        // Verify clone logic creates a detached snapshot
-        WatchHistory.Entry cloned = cloneBookmarkHelper(original);
-        check(cloned != null, "E1: cloneBookmark creates non-null instance");
-        check(cloned != original, "E1: cloneBookmark produces detached instance");
+        // Verify production WatchHistory.cloneEntry creates a detached snapshot
+        WatchHistory.Entry cloned = WatchHistory.cloneEntry(original);
+        check(cloned != null, "E1: WatchHistory.cloneEntry creates non-null instance");
+        check(cloned != original, "E1: WatchHistory.cloneEntry produces detached instance");
         check(
                 original.site.equals(cloned.site)
                         && original.id.equals(cloned.id)
@@ -102,7 +105,7 @@ public final class LaneEChecks {
                         && original.position == cloned.position
                         && original.duration == cloned.duration
                         && original.updated == cloned.updated,
-                "E1: cloneBookmark copies all 10 fields accurately");
+                "E1: WatchHistory.cloneEntry copies all 10 fields accurately");
 
         // Mutate original and assert clone is untouched (isolation guarantee)
         original.position = 99999;
@@ -111,47 +114,107 @@ public final class LaneEChecks {
                 cloned.position == 45000 && "Sample Movie".equals(cloned.title),
                 "E1: mutating original bookmark does not affect snapshot");
 
-        check(cloneBookmarkHelper(null) == null, "E1: cloneBookmark handles null input gracefully");
-    }
-
-    private static WatchHistory.Entry cloneBookmarkHelper(WatchHistory.Entry src) {
-        if (src == null) return null;
-        WatchHistory.Entry e = new WatchHistory.Entry();
-        e.site = src.site;
-        e.id = src.id;
-        e.title = src.title;
-        e.poster = src.poster;
-        e.line = src.line;
-        e.episode = src.episode;
-        e.index = src.index;
-        e.position = src.position;
-        e.duration = src.duration;
-        e.updated = src.updated;
-        return e;
+        check(
+                WatchHistory.cloneEntry(null) == null,
+                "E1: WatchHistory.cloneEntry handles null input gracefully");
     }
 
     private static void testE1StorageExecutorThreading() throws Exception {
-        ExecutorService executor =
-                Executors.newSingleThreadExecutor(
-                        r -> {
-                            Thread t = new Thread(r, "playback-storage");
-                            t.setDaemon(true);
-                            return t;
-                        });
-
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<String> threadName = new AtomicReference<>("");
-        executor.execute(
+        AtomicBoolean isDaemon = new AtomicBoolean(false);
+        WatchHistory.STORAGE_EXECUTOR.execute(
                 () -> {
-                    threadName.set(Thread.currentThread().getName());
+                    Thread cur = Thread.currentThread();
+                    threadName.set(cur.getName());
+                    isDaemon.set(cur.isDaemon());
                     latch.countDown();
                 });
 
-        check(latch.await(2, TimeUnit.SECONDS), "E1: playback-storage executor executes task");
         check(
-                "playback-storage".equals(threadName.get()),
-                "E1: playback-storage executor runs on dedicated daemon thread");
-        executor.shutdown();
+                latch.await(2, TimeUnit.SECONDS),
+                "E1: production WatchHistory.STORAGE_EXECUTOR executes task");
+        check(
+                "playback-storage".equals(threadName.get()) && isDaemon.get(),
+                "E1: production WatchHistory.STORAGE_EXECUTOR runs on dedicated daemon thread");
+    }
+
+    private static void testE1WatchHistoryUnifiedSerialization() throws Exception {
+        WatchHistory.setCorrupted(false);
+        final AtomicReference<String> rawJson = new AtomicReference<>("[]");
+        final AtomicBoolean corruptedPref = new AtomicBoolean(false);
+        final Set<String> storageThreads = Collections.synchronizedSet(new HashSet<String>());
+        final WatchHistory.Persistence persistence =
+                new WatchHistory.Persistence() {
+                    @Override
+                    public String readRaw() {
+                        storageThreads.add(Thread.currentThread().getName());
+                        return rawJson.get();
+                    }
+
+                    @Override
+                    public boolean readCorruptedPref() {
+                        return corruptedPref.get();
+                    }
+
+                    @Override
+                    public void writeState(String historyJson, boolean corrupted) {
+                        storageThreads.add(Thread.currentThread().getName());
+                        rawJson.set(historyJson);
+                        corruptedPref.set(corrupted);
+                    }
+                };
+
+        // Enqueue early playback bookmarks, then clear, then enqueue fresh bookmarks & remove one
+        for (int i = 0; i < 5; i++) {
+            WatchHistory.Entry pre = new WatchHistory.Entry();
+            pre.site = "old_site";
+            pre.id = "old_" + i;
+            pre.title = "Old " + i;
+            pre.position = 5000;
+            pre.duration = 60000;
+            pre.updated = 100L + i;
+            WatchHistory.enqueueUpsert(persistence, pre);
+        }
+        AtomicBoolean clearCallbackRan = new AtomicBoolean(false);
+        WatchHistory.enqueueClear(persistence, () -> clearCallbackRan.set(true));
+
+        List<Future<?>> afterClearFutures = new ArrayList<>();
+        for (int i = 0; i < 8; i++) {
+            WatchHistory.Entry post = new WatchHistory.Entry();
+            post.site = "live_site";
+            post.id = "ep_" + i;
+            post.title = "Episode " + i;
+            post.position = (i + 1) * 2000;
+            post.duration = 90000;
+            post.updated = 5000L + i;
+            afterClearFutures.add(WatchHistory.enqueueUpsert(persistence, post));
+        }
+        AtomicBoolean removeCallbackRan = new AtomicBoolean(false);
+        afterClearFutures.add(
+                WatchHistory.enqueueRemove(
+                        persistence, "live_site\nep_2", () -> removeCallbackRan.set(true)));
+        for (Future<?> f : afterClearFutures) {
+            f.get(5, TimeUnit.SECONDS);
+        }
+
+        List<WatchHistory.Entry> finalEntries = WatchHistory.read(rawJson.get());
+        boolean anyOld = false;
+        boolean hasEp2 = false;
+        for (WatchHistory.Entry e : finalEntries) {
+            if ("old_site".equals(e.site)) anyOld = true;
+            if ("ep_2".equals(e.id)) hasEp2 = true;
+        }
+        check(
+                clearCallbackRan.get()
+                        && removeCallbackRan.get()
+                        && !anyOld
+                        && !hasEp2
+                        && finalEntries.size() == 7,
+                "M-A5: enqueueUpsert/enqueueClear/enqueueRemove strictly serialize without losing or resurrecting entries");
+        check(
+                storageThreads.size() == 1 && storageThreads.contains("playback-storage"),
+                "M-A5: all WatchHistory mutations execute on single playback-storage thread");
     }
 
     private static void testE1PlaybackProgressThrottling() {
@@ -180,6 +243,213 @@ public final class LaneEChecks {
         check(immediateTrigger, "E1: force=true bypasses 15s throttle for immediate persistence");
     }
 
+    private static final Set<String> WHITELISTED_CRASH_MARKER_METHODS =
+            Collections.unmodifiableSet(
+                    new HashSet<>(
+                            Arrays.asList(
+                                    "MainActivity.installPluginCrashGuard",
+                                    "MainActivity.clearRecoveredCrashSite",
+                                    "HomeScreen.commitLoadingSite",
+                                    "MobileShell.commitLoadingSite",
+                                    "SourcePicker.commitSelectedSiteForCrashGuard")));
+
+    private static final Set<String> WHITELISTED_SECURE_STORAGE_METHODS =
+            Collections.unmodifiableSet(
+                    new HashSet<>(
+                            Arrays.asList(
+                                    "SecureStorage.consumeReenterPasswordRequired",
+                                    "SecureStorage.markKeyStoreUnavailable",
+                                    "SecureStorage.handleInvalidatedKey",
+                                    "SecureStorage.getWebdavPass",
+                                    "SecureStorage.setWebdavPass",
+                                    "SecureStorage.clearWebdavPass")));
+
+    private static final class CommitSite {
+        final String classAndMethod;
+        final String methodBody;
+        final int lineNumber;
+        final String lineText;
+
+        CommitSite(String classAndMethod, String methodBody, int lineNumber, String lineText) {
+            this.classAndMethod = classAndMethod;
+            this.methodBody = methodBody;
+            this.lineNumber = lineNumber;
+            this.lineText = lineText;
+        }
+    }
+
+    /**
+     * Parses a Java source file (ignoring comments and string/char literals) to map every
+     * {@code .commit()} invocation to its enclosing top-level/member method name without relying on
+     * hardcoded line numbers.
+     */
+    private static List<CommitSite> findCommitSitesByMethod(String fileName, String source) {
+        String topClass =
+                fileName.endsWith(".java")
+                        ? fileName.substring(0, fileName.length() - 5)
+                        : fileName;
+        int len = source.length();
+        char[] sanitized = new char[len];
+        int[] lineOfOffset = new int[len + 1];
+        int curLine = 1;
+        for (int i = 0; i < len; i++) {
+            lineOfOffset[i] = curLine;
+            if (source.charAt(i) == '\n') curLine++;
+        }
+        lineOfOffset[len] = curLine;
+
+        // Blank out comments and string/char literals while preserving braces & identifiers outside
+        for (int i = 0; i < len; ) {
+            char c = source.charAt(i);
+            if (c == '/' && i + 1 < len && source.charAt(i + 1) == '/') {
+                while (i < len && source.charAt(i) != '\n') sanitized[i++] = ' ';
+            } else if (c == '/' && i + 1 < len && source.charAt(i + 1) == '*') {
+                sanitized[i++] = ' ';
+                sanitized[i++] = ' ';
+                while (i < len
+                        && !(source.charAt(i) == '*'
+                                && i + 1 < len
+                                && source.charAt(i + 1) == '/')) {
+                    sanitized[i] = source.charAt(i) == '\n' ? '\n' : ' ';
+                    i++;
+                }
+                if (i + 1 < len) {
+                    sanitized[i++] = ' ';
+                    sanitized[i++] = ' ';
+                }
+            } else if (c == '"' || c == '\'') {
+                char quote = c;
+                sanitized[i++] = ' ';
+                while (i < len) {
+                    char qc = source.charAt(i);
+                    sanitized[i++] = qc == '\n' ? '\n' : ' ';
+                    if (qc == '\\' && i < len) {
+                        sanitized[i] = source.charAt(i) == '\n' ? '\n' : ' ';
+                        i++;
+                    } else if (qc == quote) {
+                        break;
+                    }
+                }
+            } else {
+                sanitized[i++] = c;
+            }
+        }
+        String clean = new String(sanitized);
+        String[] rawLines = source.split("\r?\n", -1);
+
+        // Track brace stack to identify class bodies vs method bodies
+        Deque<String> scopeStack = new ArrayDeque<>();
+        Deque<Integer> methodStartStack = new ArrayDeque<>();
+        List<int[]> methodRanges = new ArrayList<>();
+        List<String> methodNames = new ArrayList<>();
+
+        int parenDepth = 0;
+        int lastDeclBoundary = 0;
+        for (int i = 0; i < len; i++) {
+            char c = clean.charAt(i);
+            if (c == '(') {
+                parenDepth++;
+            } else if (c == ')') {
+                if (parenDepth > 0) parenDepth--;
+            } else if (c == ';' && parenDepth == 0) {
+                lastDeclBoundary = i + 1;
+            } else if (c == '{' && parenDepth == 0) {
+                String header = clean.substring(lastDeclBoundary, i).trim();
+                String openedMethod = extractMethodDeclarationName(header);
+                boolean insideMethod = false;
+                for (String s : scopeStack) {
+                    if (s.startsWith("M:")) {
+                        insideMethod = true;
+                        break;
+                    }
+                }
+                if (!insideMethod && openedMethod != null) {
+                    scopeStack.push("M:" + openedMethod);
+                    methodStartStack.push(i);
+                } else {
+                    scopeStack.push("B");
+                }
+                lastDeclBoundary = i + 1;
+            } else if (c == '}' && parenDepth == 0) {
+                if (!scopeStack.isEmpty()) {
+                    String popped = scopeStack.pop();
+                    if (popped.startsWith("M:")) {
+                        int start = methodStartStack.pop();
+                        methodRanges.add(new int[] {start, i + 1});
+                        methodNames.add(topClass + "." + popped.substring(2));
+                    }
+                }
+                lastDeclBoundary = i + 1;
+            }
+        }
+
+        List<CommitSite> sites = new ArrayList<>();
+        int idx = 0;
+        while ((idx = clean.indexOf(".commit()", idx)) >= 0) {
+            // Ensure previous non-space char is '.' and next char is not identifier part
+            String owner = topClass + ".<unknown>";
+            String body = "";
+            for (int m = 0; m < methodRanges.size(); m++) {
+                int[] r = methodRanges.get(m);
+                if (idx >= r[0] && idx < r[1]) {
+                    owner = methodNames.get(m);
+                    body = source.substring(r[0], r[1]);
+                    break;
+                }
+            }
+            int ln = lineOfOffset[idx];
+            String lineTxt = (ln >= 1 && ln <= rawLines.length) ? rawLines[ln - 1].trim() : "";
+            sites.add(new CommitSite(owner, body, ln, lineTxt));
+            idx += ".commit()".length();
+        }
+        return sites;
+    }
+
+    private static String extractMethodDeclarationName(String header) {
+        if (header.isEmpty()) return null;
+        if (header.contains("class ")
+                || header.contains("interface ")
+                || header.contains("enum ")
+                || header.contains("->")
+                || header.contains("=")) {
+            return null;
+        }
+        int openParen = header.indexOf('(');
+        int closeParen = header.lastIndexOf(')');
+        if (openParen <= 0 || closeParen < openParen) return null;
+        String beforeParen = header.substring(0, openParen).trim();
+        int idx = beforeParen.length() - 1;
+        while (idx >= 0 && Character.isJavaIdentifierPart(beforeParen.charAt(idx))) idx--;
+        String name = beforeParen.substring(idx + 1);
+        if (name.isEmpty() || !Character.isJavaIdentifierStart(name.charAt(0))) return null;
+        if ("if".equals(name)
+                || "for".equals(name)
+                || "while".equals(name)
+                || "switch".equals(name)
+                || "catch".equals(name)
+                || "synchronized".equals(name)
+                || "try".equals(name)
+                || "new".equals(name)) {
+            return null;
+        }
+        return name;
+    }
+
+    private static List<String> auditCommitSites(List<CommitSite> sites) {
+        List<String> violations = new ArrayList<>();
+        for (CommitSite site : sites) {
+            if (WHITELISTED_CRASH_MARKER_METHODS.contains(site.classAndMethod)
+                    && site.methodBody.contains("LOADING_SITE")) {
+                continue;
+            }
+            if (WHITELISTED_SECURE_STORAGE_METHODS.contains(site.classAndMethod)) {
+                continue;
+            }
+            violations.add(site.classAndMethod + ":" + site.lineNumber + " -> " + site.lineText);
+        }
+        return violations;
+    }
+
     private static void testE1CommitAuditZeroOnUIThread() throws IOException {
         Path root = Paths.get("android/src/main/java/com/pilipala/marcomovie");
         if (!Files.exists(root)) {
@@ -188,7 +458,8 @@ public final class LaneEChecks {
         check(Files.exists(root), "E1: Android source directory located for .commit() audit");
 
         List<String> violations = new ArrayList<>();
-        int allowedFatalCrashCount = 0;
+        Set<String> matchedCrashMethods = new HashSet<>();
+        int allowedCrashMarkerCount = 0;
         int allowedSecureStorageCount = 0;
 
         try (java.util.stream.Stream<Path> stream = Files.walk(root)) {
@@ -196,40 +467,68 @@ public final class LaneEChecks {
                     stream.filter(p -> p.toString().endsWith(".java")).iterator();
             while (it.hasNext()) {
                 Path path = it.next();
-                List<String> lines = Files.readAllLines(path, StandardCharsets.UTF_8);
-                for (int i = 0; i < lines.size(); i++) {
-                    String line = lines.get(i);
-                    if (line.contains(".commit()")
-                            && !line.trim().startsWith("//")
-                            && !line.trim().startsWith("*")) {
-                        String fileName = path.getFileName().toString();
-                        int lineNum = i + 1;
-                        if ("MainActivity.java".equals(fileName)
-                                && lineNum >= 270
-                                && lineNum <= 285) {
-                            allowedFatalCrashCount++;
-                        } else if ("SecureStorage.java".equals(fileName)) {
-                            // R2/B2: credential migration must observe commit() success before
-                            // deleting plaintext; every caller runs on CloudSyncDialog.SYNC_EXEC.
-                            allowedSecureStorageCount++;
-                        } else {
-                            violations.add(fileName + ":" + lineNum + " -> " + line.trim());
-                        }
+                String fileName = path.getFileName().toString();
+                String content = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+                List<CommitSite> sites = findCommitSitesByMethod(fileName, content);
+                for (CommitSite site : sites) {
+                    if (WHITELISTED_CRASH_MARKER_METHODS.contains(site.classAndMethod)
+                            && site.methodBody.contains("LOADING_SITE")) {
+                        allowedCrashMarkerCount++;
+                        matchedCrashMethods.add(site.classAndMethod);
+                    } else if (WHITELISTED_SECURE_STORAGE_METHODS.contains(site.classAndMethod)) {
+                        allowedSecureStorageCount++;
+                    } else {
+                        violations.add(
+                                fileName
+                                        + " ("
+                                        + site.classAndMethod
+                                        + ":"
+                                        + site.lineNumber
+                                        + ") -> "
+                                        + site.lineText);
                     }
                 }
             }
         }
 
         check(
-                allowedFatalCrashCount == 1,
-                "E1: Fatal crash handler retains exactly 1 guarded commit() before process kill");
+                matchedCrashMethods.equals(WHITELISTED_CRASH_MARKER_METHODS)
+                        && allowedCrashMarkerCount == 6,
+                "M-A6/6f: All 5 LOADING_SITE crash-guard methods restored to commit() and matched by method name: "
+                        + matchedCrashMethods);
         check(
                 allowedSecureStorageCount > 0,
-                "E1: SecureStorage keeps synchronous commit() for background credential migration");
+                "E1: SecureStorage keeps synchronous commit() matched by method name");
         check(
                 violations.isEmpty(),
-                "E1: Zero UI-thread .commit() violations across android/src/main/java (all converted to apply/async): "
+                "E1: Zero unwhitelisted .commit() violations across android/src/main/java: "
                         + violations);
+
+        // 6f verification: shifting line numbers by +250 lines still passes method-name check,
+        // while placing .commit() in an unwhitelisted method (e.g. MainActivity.onCreate) fails
+        StringBuilder shifted = new StringBuilder();
+        for (int i = 0; i < 250; i++) shifted.append("\n");
+        shifted.append(
+                "public final class MainActivity {\n"
+                        + "  static void installPluginCrashGuard() {\n"
+                        + "    prefs.edit().putString(Prefs.LOADING_SITE, s).commit();\n"
+                        + "  }\n"
+                        + "}\n");
+        check(
+                auditCommitSites(findCommitSitesByMethod("MainActivity.java", shifted.toString()))
+                        .isEmpty(),
+                "6f: commit() audit matches enclosing method name regardless of line numbers");
+
+        String unauthorized =
+                "public final class MainActivity {\n"
+                        + "  protected void onCreate() {\n"
+                        + "    prefs.edit().putString(\"foo\", \"bar\").commit();\n"
+                        + "  }\n"
+                        + "}\n";
+        check(
+                auditCommitSites(findCommitSitesByMethod("MainActivity.java", unauthorized)).size()
+                        == 1,
+                "6f: commit() inside unwhitelisted MainActivity.onCreate is flagged as a violation");
     }
 
     // =========================================================================
@@ -270,6 +569,152 @@ public final class LaneEChecks {
         }
     }
 
+    private static void deleteRecursively(File f) {
+        if (f == null || !f.exists()) return;
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File child : children) deleteRecursively(child);
+            }
+        }
+        f.delete();
+    }
+
+    private static void testE2ConfigStoreSequencedWritesAndRollback() throws Exception {
+        Path tempDir = Files.createTempDirectory("config-store-seq-");
+        try {
+            File dir = tempDir.toFile();
+            ConfigStore store = new ConfigStore(dir);
+            final AtomicReference<String> prefOrigin =
+                    new AtomicReference<>("https://initial.example/0.json");
+            final AtomicReference<String> prefSelected = new AtomicReference<>("site_0");
+            final Set<String> writerThreads = Collections.synchronizedSet(new HashSet<String>());
+
+            ConfigStore.PointerStore pointerStore =
+                    new ConfigStore.PointerStore() {
+                        @Override
+                        public ConfigStore.PointerSnapshot readCurrentPointers() {
+                            return new ConfigStore.PointerSnapshot(
+                                    prefOrigin.get(), prefSelected.get(), "tag_0");
+                        }
+
+                        @Override
+                        public void applyPointers(ConfigStore.PointerSnapshot snapshot) {
+                            prefOrigin.set(snapshot.origin);
+                            prefSelected.set(snapshot.selectedSite);
+                        }
+                    };
+
+            // 1. Rapid 15 back-to-back saveAsync calls: latest sequence must win on disk & pointers
+            List<Future<Boolean>> futures = new ArrayList<>();
+            for (int i = 1; i <= 15; i++) {
+                String payload = "{\"sites\":[{\"key\":\"site_" + i + "\"}]}";
+                ConfigStore.PointerSnapshot next =
+                        new ConfigStore.PointerSnapshot(
+                                "https://sub.example/" + i + ".json", "site_" + i, "tag_" + i);
+                futures.add(store.saveAsync(payload, next, pointerStore, null));
+            }
+            ConfigStore.WRITE_EXECUTOR
+                    .submit(() -> writerThreads.add(Thread.currentThread().getName()))
+                    .get(5, TimeUnit.SECONDS);
+            boolean lastSucceeded = futures.get(futures.size() - 1).get(5, TimeUnit.SECONDS);
+            String finalOnDisk =
+                    new String(
+                            Files.readAllBytes(new File(dir, "config.json").toPath()),
+                            StandardCharsets.UTF_8);
+            check(
+                    lastSucceeded
+                            && "{\"sites\":[{\"key\":\"site_15\"}]}".equals(finalOnDisk)
+                            && "https://sub.example/15.json".equals(prefOrigin.get())
+                            && "site_15".equals(prefSelected.get())
+                            && writerThreads.contains("config-store-writer"),
+                    "M-A4: single-thread sequenced ConfigStore.saveAsync ensures last write wins");
+
+            // 2. Simulate disk write failure by replacing config.json with a non-empty directory;
+            // verify prefs pointers roll back to last confirmed state and failure callback fires
+            File configPath = new File(dir, "config.json");
+            check(configPath.delete(), "M-A4 setup: remove config.json before directory fault");
+            File blocker = new File(configPath, "lockfile");
+            check(
+                    configPath.mkdirs() && blocker.createNewFile(),
+                    "M-A4 setup: inject non-empty directory at config.json to force rename failure");
+
+            AtomicInteger failureNotices = new AtomicInteger();
+            AtomicReference<ConfigStore.PointerSnapshot> rolledBackRef = new AtomicReference<>();
+            boolean fail1 =
+                    store.saveAsync(
+                                    "{\"sites\":[{\"key\":\"bad_1\"}]}",
+                                    new ConfigStore.PointerSnapshot(
+                                            "https://broken.example/1.json", "bad_1", "tag_bad_1"),
+                                    pointerStore,
+                                    (seq, err, rollback) -> {
+                                        failureNotices.incrementAndGet();
+                                        rolledBackRef.set(rollback);
+                                    })
+                            .get(5, TimeUnit.SECONDS);
+            check(
+                    !fail1
+                            && failureNotices.get() == 1
+                            && "https://sub.example/15.json".equals(prefOrigin.get())
+                            && "site_15".equals(prefSelected.get())
+                            && rolledBackRef.get() != null
+                            && "tag_15".equals(rolledBackRef.get().stateTag),
+                    "M-A4: write failure rolls back ORIGIN/SELECTED_SITE pointers and notifies user");
+
+            // Second consecutive failure must STILL roll back to confirmed #15, not failed #16
+            boolean fail2 =
+                    store.saveAsync(
+                                    "{\"sites\":[{\"key\":\"bad_2\"}]}",
+                                    new ConfigStore.PointerSnapshot(
+                                            "https://broken.example/2.json", "bad_2", "tag_bad_2"),
+                                    pointerStore,
+                                    (seq, err, rollback) -> {
+                                        failureNotices.incrementAndGet();
+                                        rolledBackRef.set(rollback);
+                                    })
+                            .get(5, TimeUnit.SECONDS);
+            check(
+                    !fail2
+                            && failureNotices.get() == 2
+                            && "https://sub.example/15.json".equals(prefOrigin.get())
+                            && "site_15".equals(prefSelected.get())
+                            && "tag_15".equals(rolledBackRef.get().stateTag),
+                    "M-A4: consecutive write failures preserve last confirmed persisted snapshot");
+        } finally {
+            deleteRecursively(tempDir.toFile());
+        }
+    }
+
+    private static void testM_A3ContentUriImportAndConfigLibrary() throws Exception {
+        Path tempDir = Files.createTempDirectory("config-lib-ma3-");
+        try {
+            String raw =
+                    "{\"sites\":[{\"key\":\"vod1\",\"name\":\"影视源\",\"type\":1,\"api\":\"https://vod.example/api.php/provide/vod/\",\"ext\":\"./token.txt\"}]}";
+            String contentOrigin =
+                    Cms.localImportOrigin(
+                            "content",
+                            "content://com.android.providers.downloads.documents/document/primary%3Atvbox.json");
+            Cms.Config parsed =
+                    Cms.parseConfig(raw, contentOrigin.isEmpty() ? null : contentOrigin);
+            check(
+                    contentOrigin.isEmpty()
+                            && parsed.origin.isEmpty()
+                            && "./token.txt".equals(parsed.sites.get(0).ext)
+                            && !ConfigLibrary.isLocalFileOrigin(contentOrigin),
+                    "M-A3: content:// import keeps origin empty and eligible for ConfigLibrary & CloudSync");
+
+            ConfigLibrary library = new ConfigLibrary(tempDir.toFile());
+            ConfigLibrary.Entry saved = library.remember(parsed.raw, contentOrigin, "影视源", "vod1");
+            check(
+                    saved.origin.isEmpty()
+                            && library.entries().size() == 1
+                            && !ConfigLibrary.isLocalFileOrigin(saved.origin),
+                    "M-A3: content:// imported config is saved to ConfigLibrary with empty origin for cloud sync");
+        } finally {
+            deleteRecursively(tempDir.toFile());
+        }
+    }
+
     private static void testE2SourceControllerBackgroundDispatch() throws IOException {
         Path scPath =
                 Paths.get("android/src/main/java/com/pilipala/marcomovie/SourceController.java");
@@ -282,11 +727,12 @@ public final class LaneEChecks {
         String content = Files.readString(scPath, StandardCharsets.UTF_8);
 
         check(
-                content.contains("a.worker.execute") && content.contains("store.write(rawConfig)"),
-                "E2: SourceController dispatches configStore.write to background worker executor");
+                content.contains("store.saveAsync(") && content.contains("配置保存失败，已回滚至原配置"),
+                "M-A4/E2: SourceController dispatches config writes via sequenced single-thread store.saveAsync with rollback notice");
         check(
-                !content.contains("a.configStore.write(c.raw);"),
-                "E2: Blocking direct configStore.write call removed from UI saveConfig path");
+                !content.contains("a.configStore.write(c.raw);")
+                        && !content.contains("store.write(rawConfig)"),
+                "M-A4/E2: Direct blocking and multi-thread worker configStore.write calls removed from saveConfig");
     }
 
     // =========================================================================

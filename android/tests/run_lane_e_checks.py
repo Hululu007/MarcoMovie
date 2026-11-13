@@ -21,6 +21,7 @@ SOURCES = [
     ROOT / 'android/src/main/java/com/pilipala/marcomovie/RequestScope.java',
     ROOT / 'android/src/main/java/com/pilipala/marcomovie/WatchHistory.java',
     ROOT / 'android/src/main/java/com/pilipala/marcomovie/ConfigStore.java',
+    ROOT / 'android/src/main/java/com/pilipala/marcomovie/ConfigLibrary.java',
     ROOT / 'android/tests/LaneEChecks.java',
 ]
 

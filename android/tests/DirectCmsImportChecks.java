@@ -524,9 +524,58 @@ public final class DirectCmsImportChecks {
         sParse.requiresParser = true;
         sParse.playUrl = "";
         check(
-                Cms.Site.STATUS_PARSER_REQUIRED.equals(sParse.capabilityStatus())
-                        && "需要解析器，当前环境缺少可用解析配置".equals(sParse.limitation()),
-                "capability status parser-required");
+                Cms.Site.STATUS_OK.equals(sParse.capabilityStatus())
+                        && sParse.supported()
+                        && "需要解析器，当前环境缺少可用解析配置".equals(sParse.playbackHint()),
+                "capability status parser-required remains browseable with playbackHint");
+
+        Cms.Config explicitJarCms =
+                Cms.parseConfig(
+                        "{\"sites\":["
+                                + "{\"key\":\"cms1\",\"name\":\"CMS1\",\"type\":1,\"api\":\"http://cms.test/api.php/provide/vod/\",\"jar\":\"./custom_spider.jar;md5;deadbeef\"},"
+                                + "{\"key\":\"cms0\",\"name\":\"CMS0\",\"type\":0,\"api\":\"http://cms.test/api.php/provide/vod/at/xml/\",\"jar\":\"./custom_spider.jar\"},"
+                                + "{\"key\":\"jar_implicit\",\"name\":\"JarImplicit\",\"api\":\"http://cms.test/api\",\"jar\":\"./custom_spider.jar\"}"
+                                + "]}",
+                        "http://cms.test/box.json");
+        check(
+                Cms.Site.STATUS_OK.equals(explicitJarCms.sites.get(0).capabilityStatus())
+                        && explicitJarCms.sites.get(0).supported()
+                        && Cms.Site.STATUS_OK.equals(explicitJarCms.sites.get(1).capabilityStatus())
+                        && explicitJarCms.sites.get(1).supported()
+                        && Cms.Site.STATUS_NEEDS_JAR.equals(
+                                explicitJarCms.sites.get(2).capabilityStatus())
+                        && !explicitJarCms.sites.get(2).supported(),
+                "explicit type 0/1 CMS sites with jar remain STATUS_OK while implicit jar-backed site requires jar");
+
+        String contentOrigin =
+                Cms.localImportOrigin(
+                        "content",
+                        "content://com.android.providers.downloads.documents/document/primary%3Atvbox.json");
+        Cms.Config contentImported =
+                Cms.parseConfig(
+                        "{\"sites\":[{\"key\":\"s1\",\"name\":\"S1\",\"type\":1,\"api\":\"https://cms.test/api\",\"ext\":\"./sub.json\"}]}",
+                        contentOrigin.isEmpty() ? null : contentOrigin);
+        java.nio.file.Path realCfgPath =
+                java.nio.file.Paths.get(
+                        System.getProperty("java.io.tmpdir"), "mm_pkg_test", "config.json");
+        java.nio.file.Path realSubPath =
+                java.nio.file.Paths.get(
+                        System.getProperty("java.io.tmpdir"), "mm_pkg_test", "sub.json");
+        String fileOrigin = Cms.localImportOrigin("file", realCfgPath.toUri().toASCIIString());
+        Cms.Config fileImported =
+                Cms.parseConfig(
+                        "{\"sites\":[{\"key\":\"s1\",\"name\":\"S1\",\"type\":1,\"api\":\"https://cms.test/api\",\"ext\":\"./sub.json\"}]}",
+                        fileOrigin);
+        check(
+                contentOrigin.isEmpty()
+                        && contentImported.origin.isEmpty()
+                        && "./sub.json".equals(contentImported.sites.get(0).ext)
+                        && realCfgPath.toUri().toASCIIString().equals(fileOrigin)
+                        && realSubPath
+                                .toUri()
+                                .toASCIIString()
+                                .equals(fileImported.sites.get(0).ext),
+                "content:// import keeps origin empty instead of fabricating file:///document/...");
 
         System.out.println("OK " + count + " direct CMS import checks");
     }
