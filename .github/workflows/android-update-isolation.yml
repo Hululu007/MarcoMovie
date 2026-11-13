@@ -2,7 +2,7 @@ name: Android phone and TV update isolation
 on:
   workflow_dispatch:
   push:
-    branches: ['fix/plugin-ports-16kb-20261107']
+    branches: ['main']
     paths:
       - '.github/workflows/android-update-isolation.yml'
       - 'android/src/main/java/com/pilipala/marcomovie/Update*.java'
