@@ -524,7 +524,10 @@ class StorageService {
         final expectedLen = int.tryParse(lenStr) ?? 0;
         if (trimmed.length != expectedLen) return false;
       }
-      final iterations = int.tryParse(pbMatch.group(2)!) ?? 100000;
+      final iterations = int.tryParse(pbMatch.group(2)!) ?? 0;
+      if (iterations < 100000 || iterations > 1000000) {
+        return false;
+      }
       final saltHex = pbMatch.group(3)!;
       final expectedHashHex = pbMatch.group(4)!;
       final derived = pbkdf2Sha256(
@@ -548,6 +551,12 @@ class StorageService {
         unawaited(setPrivacyPassword(trimmed));
         return true;
       }
+      return false;
+    }
+
+    if (saved.startsWith('pbkdf2:') ||
+        saved.startsWith('sha256:') ||
+        saved.contains(':')) {
       return false;
     }
 
@@ -2360,9 +2369,9 @@ class StorageService {
     required bool auto,
     bool? syncSubs,
   }) async {
+    _credentialCache[keyWebdavPass] = pass;
     await _prefs.setString(keyWebdavUrl, url.trim());
     await _prefs.setString(keyWebdavUser, user.trim());
-    _credentialCache[keyWebdavPass] = pass;
     await _secureStore.write(keyWebdavPass, pass);
     await _prefs.remove(keyWebdavPass);
     await _prefs.setBool(keyWebdavAuto, auto);
