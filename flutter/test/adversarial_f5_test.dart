@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -22,9 +23,18 @@ String toHex(Uint8List bytes) {
 
 void main() {
   group('Adversarial F5: Ed25519 Signature Verification & Manifest Tamper Resistance', () {
-    // Official public key from AppUpdate.defaultUpdatePublicKeyHex
-    final officialPubKeyHex = AppUpdate.defaultUpdatePublicKeyHex;
-    final officialPubKeyBytes = fromHex(officialPubKeyHex);
+    const configuredPubKeyHex =
+        'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+    final officialPubKeyBytes = fromHex(configuredPubKeyHex);
+
+    setUp(() {
+      expect(AppUpdate.defaultUpdatePublicKeyHex, isEmpty);
+      AppUpdate.debugPublicKeyHexOverride = configuredPubKeyHex;
+    });
+
+    tearDown(() {
+      AppUpdate.debugPublicKeyHexOverride = null;
+    });
 
     // Vector 1 valid pair for known reference
     final v1Msg = Uint8List(0);
@@ -175,7 +185,7 @@ void main() {
         'version': '0.5.25',
         'platform': 'windows',
         'windows': {
-          'url': 'https://evil-server.example.com/malware.exe',
+          'url': 'https://evil-server.example/malware.exe',
           'sha256': 'a' * 64,
           'size': 50000000,
         },
@@ -229,18 +239,19 @@ void main() {
       );
     });
 
-    test('Adversarial 8: AppUpdate.check rejects rogue-signed mirror update manifest', () async {
-      // Mock HTTP client serving an update manifest signed by a rogue key
+    test('Adversarial 8: AppUpdate.check skips rogue-signed mirror update manifest and tries fallback', () async {
       final rogueSigB64 = base64Encode(fromHex(
         '92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da'
         '085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00',
       ));
 
+      var calls = 0;
       final mockClient = MockClient((request) async {
+        calls++;
         if (request.url.path.contains('updates/windows.json')) {
           return http.Response(
             jsonEncode({
-              'version': '0.5.99',
+              'versionName': '0.5.99',
               'notes': 'Rogue update',
               'signature': rogueSigB64,
               'windows': {
@@ -255,14 +266,11 @@ void main() {
         return http.Response('Not found', 404);
       });
 
-      expect(
-        () async => await AppUpdate.check(client: mockClient, platform: 'windows'),
-        throwsA(isA<FormatException>().having(
-          (e) => e.message,
-          'message',
-          contains('Ed25519 signature missing or invalid'),
-        )),
+      await expectLater(
+        AppUpdate.check(client: mockClient, platform: 'windows'),
+        throwsA(isA<HttpException>()),
       );
+      expect(calls, 2);
     });
 
     test('Adversarial 9: Mismatched public key length or malformed point fails safely', () {

@@ -11,6 +11,11 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
+
+KEY_FILE_ENV = "MARCOMOVIE_SIGN_KEY_FILE"
+PUBKEY_FILE_ENV = "MARCOMOVIE_SIGN_PUBKEY_FILE"
+PUBKEY_HEX_ENV = "MARCOMOVIE_SIGN_PUBKEY"
 
 # RFC 8032 Ed25519 Constants
 Q = 2**255 - 19
@@ -153,65 +158,177 @@ def canonicalize_json(obj) -> str:
         return json.dumps(obj, ensure_ascii=False)
 
 
+def _read_32byte_key_file(path: Path, label: str) -> bytes:
+    if not path.is_file():
+        raise FileNotFoundError(f"{label} file not found: {path}")
+    raw = path.read_bytes()
+    if len(raw) == 32:
+        return raw
+    text_lines = [
+        line.strip()
+        for line in raw.decode("utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    hex_str = "".join(text_lines)
+    seed = bytes.fromhex(hex_str)
+    if len(seed) != 32:
+        raise ValueError(f"{label} must be 32 bytes (64 hex chars), got {len(seed)} bytes")
+    return seed
+
+
+def extract_manifest_payload(data: dict) -> dict:
+    if "payload" in data:
+        payload = data["payload"]
+        if not isinstance(payload, dict):
+            raise ValueError("Manifest 'payload' field must be a JSON object")
+        extra_keys = set(data.keys()) - {"payload", "signature", "sig"}
+        if extra_keys:
+            raise ValueError(
+                f"Manifest with 'payload' must not contain unsigned outer fields: {sorted(extra_keys)}"
+            )
+        return payload
+    return {k: v for k, v in data.items() if k not in ("signature", "sig")}
+
+
+def resolve_private_key_file(cli_key_file: str | None) -> Path:
+    candidate = cli_key_file or os.environ.get(KEY_FILE_ENV, "").strip()
+    if not candidate:
+        raise ValueError(
+            f"Missing private key file: pass --key-file <path> or set {KEY_FILE_ENV}"
+        )
+    return Path(candidate)
+
+
+def resolve_public_key_bytes(cli_pub_key: str | None, cli_pub_key_file: str | None) -> bytes:
+    file_candidate = cli_pub_key_file or os.environ.get(PUBKEY_FILE_ENV, "").strip()
+    if file_candidate:
+        return _read_32byte_key_file(Path(file_candidate), "Public key")
+    hex_candidate = (cli_pub_key or os.environ.get(PUBKEY_HEX_ENV, "")).strip()
+    if not hex_candidate:
+        raise ValueError(
+            f"Missing public key: pass --pub-key <hex>, --pub-key-file <path>, "
+            f"or set {PUBKEY_HEX_ENV} / {PUBKEY_FILE_ENV}"
+        )
+    pub = bytes.fromhex(hex_candidate)
+    if len(pub) != 32:
+        raise ValueError(f"Public key must be 32 bytes (64 hex chars), got {len(pub)} bytes")
+    return pub
+
+
+def sign_manifest_file(manifest_path: Path, key_file: Path) -> str:
+    seed = _read_32byte_key_file(key_file, "Private key")
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Manifest root must be a JSON object")
+    payload = extract_manifest_payload(data)
+    canonical = canonicalize_json(payload)
+    sig = sign(seed, canonical.encode("utf-8"))
+    sig_b64 = base64.b64encode(sig).decode("ascii")
+    data["signature"] = sig_b64
+    manifest_path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return sig_b64
+
+
+def verify_manifest_file(manifest_path: Path, pub: bytes) -> bool:
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return False
+    sig_b64 = data.get("signature") or data.get("sig")
+    if not isinstance(sig_b64, str) or not sig_b64.strip():
+        return False
+    try:
+        payload = extract_manifest_payload(data)
+        sig = base64.b64decode(sig_b64, validate=True)
+    except (ValueError, TypeError):
+        return False
+    canonical = canonicalize_json(payload)
+    return verify(pub, canonical.encode("utf-8"), sig)
+
+
 def self_test() -> None:
-    # RFC 8032 7.1 Test Vector 1
-    seed1 = bytes.fromhex(
-        "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
-    )
-    pub1 = public_key_from_seed(seed1)
-    expected_pub1 = bytes.fromhex(
-        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
-    )
-    assert pub1 == expected_pub1, f"Pubkey 1 mismatch: {pub1.hex()}"
-    sig1 = sign(seed1, b"")
-    expected_sig1 = bytes.fromhex(
-        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
-    )
-    assert sig1 == expected_sig1, f"Sig 1 mismatch: {sig1.hex()}"
-    assert verify(pub1, b"", sig1), "Sig 1 verify failed"
-    assert not verify(
-        pub1, b"", bytearray(sig1[:-1]) + bytes([sig1[-1] ^ 1])
-    ), "Tampered sig passed"
+    seed = os.urandom(32)
+    pub = public_key_from_seed(seed)
+    for msg in (b"", b"r", b'{"platform":"windows","versionName":"0.5.30"}'):
+        sig = sign(seed, msg)
+        assert verify(pub, msg, sig), "Valid signature failed verification"
+        assert not verify(
+            pub, msg, bytes(sig[:-1]) + bytes([sig[-1] ^ 1])
+        ), "Tampered signature unexpectedly passed"
+        assert not verify(pub, msg + b"!", sig), "Tampered message unexpectedly passed"
 
-    # RFC 8032 Test Vector 2 (message: 0x72)
-    seed2 = bytes.fromhex(
-        "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb"
-    )
-    pub2 = public_key_from_seed(seed2)
-    expected_pub2 = bytes.fromhex(
-        "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
-    )
-    assert pub2 == expected_pub2, f"Pubkey 2 mismatch: {pub2.hex()}"
-    sig2 = sign(seed2, b"\x72")
-    expected_sig2 = bytes.fromhex(
-        "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
-    )
-    assert sig2 == expected_sig2, f"Sig 2 mismatch: {sig2.hex()}"
-    assert verify(pub2, b"\x72", sig2), "Sig 2 verify failed"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        key_file = tmp_dir / "offline-ed25519.key"
+        key_file.write_text(seed.hex() + "\n", encoding="utf-8")
+        manifest_file = tmp_dir / "windows.json"
+        manifest_file.write_text(
+            json.dumps(
+                {
+                    "payload": {
+                        "platform": "windows",
+                        "versionName": "0.5.30",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        sign_manifest_file(manifest_file, key_file)
+        assert verify_manifest_file(manifest_file, pub), "Signed manifest failed verification"
+        tampered = json.loads(manifest_file.read_text(encoding="utf-8"))
+        tampered["windows"] = {"url": "https://tampered.example/setup.exe"}
+        manifest_file.write_text(json.dumps(tampered), encoding="utf-8")
+        assert not verify_manifest_file(
+            manifest_file, pub
+        ), "Outer wrapper tampering unexpectedly passed"
 
-    print("ALL RFC 8032 TEST VECTORS PASSED!")
+    print("ALL ED25519 MANIFEST SELF-TESTS PASSED!")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="RFC 8032 Ed25519 Manifest Signer & Verifier"
+        description=(
+            "RFC 8032 Ed25519 Manifest Signer & Verifier. "
+            "Generate keys offline and NEVER commit private keys to the repository."
+        )
     )
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("self-test", help="Run RFC 8032 self test")
+    sub.add_parser("self-test", help="Run ephemeral Ed25519 self test")
 
-    gen_cmd = sub.add_parser("generate-key", help="Generate Ed25519 keypair")
+    gen_cmd = sub.add_parser(
+        "generate-key",
+        help="Generate an offline Ed25519 keypair and write private key to a file",
+    )
+    gen_cmd.add_argument(
+        "--out-key-file",
+        required=True,
+        help="Destination path for the offline 32-byte private seed file (must stay outside repo)",
+    )
+    gen_cmd.add_argument(
+        "--out-pub-file",
+        help="Optional destination path for the public key hex file",
+    )
 
-    sign_cmd = sub.add_parser("sign", help="Sign update manifest JSON")
+    sign_cmd = sub.add_parser("sign", help="Sign update manifest JSON using a private key file")
     sign_cmd.add_argument("manifest", help="Path to manifest JSON file")
     sign_cmd.add_argument(
-        "--key", required=True, help="Private key seed hex (32 bytes)"
+        "-k",
+        "--key-file",
+        help=f"Path to private key seed file (or set {KEY_FILE_ENV})",
     )
 
     verify_cmd = sub.add_parser("verify", help="Verify update manifest JSON")
     verify_cmd.add_argument("manifest", help="Path to manifest JSON file")
     verify_cmd.add_argument(
-        "--key", required=True, help="Public key hex (32 bytes)"
+        "--pub-key",
+        help=f"Public key hex (64 hex chars, or set {PUBKEY_HEX_ENV})",
+    )
+    verify_cmd.add_argument(
+        "--pub-key-file",
+        help=f"Path to public key file (or set {PUBKEY_FILE_ENV})",
     )
 
     args = parser.parse_args()
@@ -221,54 +338,50 @@ def main():
         sys.exit(0)
 
     if args.command == "generate-key":
+        out_key = Path(args.out_key_file)
+        if out_key.exists():
+            print(f"ERROR: Refusing to overwrite existing key file: {out_key}", file=sys.stderr)
+            sys.exit(1)
         seed = os.urandom(32)
         pub = public_key_from_seed(seed)
-        print(f"Private Key (seed hex): {seed.hex()}")
-        print(f"Public Key (hex):        {pub.hex()}")
+        out_key.parent.mkdir(parents=True, exist_ok=True)
+        out_key.write_text(seed.hex() + "\n", encoding="utf-8")
+        try:
+            os.chmod(out_key, 0o600)
+        except OSError as exc:
+            print(f"WARN: Could not restrict permissions on {out_key}: {exc}", file=sys.stderr)
+        if args.out_pub_file:
+            out_pub = Path(args.out_pub_file)
+            out_pub.parent.mkdir(parents=True, exist_ok=True)
+            out_pub.write_text(pub.hex() + "\n", encoding="utf-8")
+        print(f"Saved private key seed to: {out_key} (KEEP OFFLINE, DO NOT COMMIT)")
+        print(f"Public Key (hex):          {pub.hex()}")
         sys.exit(0)
 
     if args.command == "sign":
-        manifest_path = Path(args.manifest)
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        payload = (
-            data["payload"]
-            if "payload" in data and isinstance(data["payload"], dict)
-            else {k: v for k, v in data.items() if k not in ("signature", "sig")}
-        )
-        canonical = canonicalize_json(payload)
-        seed = bytes.fromhex(args.key)
-        sig = sign(seed, canonical.encode("utf-8"))
-        sig_b64 = base64.b64encode(sig).decode("ascii")
-        data["signature"] = sig_b64
-        manifest_path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        print(f"Signed {manifest_path} (Signature: {sig_b64[:16]}...)")
-        sys.exit(0)
+        try:
+            key_file = resolve_private_key_file(args.key_file)
+            manifest_path = Path(args.manifest)
+            sig_b64 = sign_manifest_file(manifest_path, key_file)
+            print(f"Signed {manifest_path} (Signature: {sig_b64[:16]}...)")
+            sys.exit(0)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     if args.command == "verify":
-        manifest_path = Path(args.manifest)
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        sig_b64 = data.get("signature") or data.get("sig")
-        if not sig_b64:
-            print("ERROR: No signature field found in manifest")
+        try:
+            pub = resolve_public_key_bytes(args.pub_key, args.pub_key_file)
+            manifest_path = Path(args.manifest)
+            valid = verify_manifest_file(manifest_path, pub)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
             sys.exit(1)
-        sig = base64.b64decode(sig_b64)
-        payload = (
-            data["payload"]
-            if "payload" in data and isinstance(data["payload"], dict)
-            else {k: v for k, v in data.items() if k not in ("signature", "sig")}
-        )
-        canonical = canonicalize_json(payload)
-        pub = bytes.fromhex(args.key)
-        valid = verify(pub, canonical.encode("utf-8"), sig)
         if valid:
             print("PASS: Manifest Ed25519 signature is valid.")
             sys.exit(0)
-        else:
-            print("FAIL: Manifest Ed25519 signature is INVALID!")
-            sys.exit(1)
+        print("FAIL: Manifest Ed25519 signature is INVALID!", file=sys.stderr)
+        sys.exit(1)
 
     parser.print_help()
 

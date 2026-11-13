@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -74,24 +75,22 @@ void main() {
     });
 
     test('Manifest verification validates signed payload and rejects missing/invalid signature', () async {
-      final testPubKeyHex = 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+      const testPubKeyHex = '3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c';
       AppUpdate.debugPublicKeyHexOverride = testPubKeyHex;
+      addTearDown(() => AppUpdate.debugPublicKeyHexOverride = null);
 
-      // When message is empty dict {}, its canonical form is "{}"
-      // Let's test with empty message {}
-      // Or test with vector 1: message is empty bytes
       final rawEmptySig = base64Encode(fromHex(
         'e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155'
         '5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b',
       ));
 
-      // Missing signature returns false
-      expect(AppUpdate.verifyManifestSignature({'version': '1.0.0'}), isFalse);
+      // Missing signature returns false in verifyManifestSignature
+      expect(AppUpdate.verifyManifestSignature({'versionName': '1.0.0'}), isFalse);
 
       // Corrupt signature returns false
       expect(
         AppUpdate.verifyManifestSignature({
-          'version': '1.0.0',
+          'versionName': '1.0.0',
           'signature': 'not-a-valid-base64',
         }),
         isFalse,
@@ -100,22 +99,25 @@ void main() {
       // Invalid signature returns false
       expect(
         AppUpdate.verifyManifestSignature({
-          'version': '1.0.0',
+          'versionName': '1.0.0',
           'signature': rawEmptySig,
         }),
         isFalse,
       );
-
-      AppUpdate.debugPublicKeyHexOverride = null;
     });
 
-    test('AppUpdate.check enforces signature verification and rejects unsigned mirror update', () async {
-      final mockClient = MockClient((request) async {
+    test('AppUpdate.check allows unsigned mirror manifest and skips invalidly signed mirror manifest', () async {
+      expect(AppUpdate.defaultUpdatePublicKeyHex, isEmpty);
+
+      const testPubKeyHex = '3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c';
+      AppUpdate.debugPublicKeyHexOverride = testPubKeyHex;
+      addTearDown(() => AppUpdate.debugPublicKeyHexOverride = null);
+
+      final unsignedClient = MockClient((request) async {
         if (request.url.path.contains('updates/windows.json')) {
-          // Return mirror manifest missing signature
           return http.Response(
             jsonEncode({
-              'version': '0.5.30',
+              'versionName': '0.5.30',
               'notes': 'Unsigned update test',
               'windows': {
                 'url': 'https://github.com/Pilipala9919/MarcoMovie/releases/download/v0.5.30/MarcoMovie-0.5.30-windows-setup.exe',
@@ -129,14 +131,35 @@ void main() {
         return http.Response('Not found', 404);
       });
 
-      expect(
-        () async => await AppUpdate.check(client: mockClient, platform: 'windows'),
-        throwsA(isA<FormatException>().having(
-          (e) => e.message,
-          'message',
-          contains('Ed25519 signature missing or invalid'),
-        )),
+      final release = await AppUpdate.check(client: unsignedClient, platform: 'windows');
+      expect(release.version, '0.5.30');
+
+      var calls = 0;
+      final badSigClient = MockClient((request) async {
+        calls++;
+        if (request.url.path.contains('updates/windows.json')) {
+          return http.Response(
+            jsonEncode({
+              'versionName': '0.5.30',
+              'notes': 'Badly signed update',
+              'signature': base64Encode(Uint8List(64)),
+              'windows': {
+                'url': 'https://github.com/Pilipala9919/MarcoMovie/releases/download/v0.5.30/MarcoMovie-0.5.30-windows-setup.exe',
+                'sha256': '1111111111111111111111111111111111111111111111111111111111111111',
+                'size': 12345678,
+              },
+            }),
+            200,
+          );
+        }
+        return http.Response('Not found', 404);
+      });
+
+      await expectLater(
+        AppUpdate.check(client: badSigClient, platform: 'windows'),
+        throwsA(isA<HttpException>()),
       );
+      expect(calls, 2);
     });
   });
 }

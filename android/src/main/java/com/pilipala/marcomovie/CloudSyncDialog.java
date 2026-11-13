@@ -8,7 +8,9 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -594,7 +596,6 @@ final class CloudSyncDialog {
         }
         final String url = a.prefs.getString(Prefs.WEBDAV_URL, "").trim();
         final String user = a.prefs.getString(Prefs.WEBDAV_USER, "").trim();
-        final String pass = SecureStorage.getWebdavPass(a);
         final boolean syncSubs = isSyncSubscriptionsEnabled(a);
         if (url.isEmpty()) {
             if (!silent) a.toast("请先填写 WebDAV 服务器地址");
@@ -606,6 +607,7 @@ final class CloudSyncDialog {
         }
         if (!silent) a.toast("正在与 WebDAV 云端双向同步…");
 
+        final Context appCtx = a.getApplicationContext() != null ? a.getApplicationContext() : a;
         final WeakReference<MainActivity> weakAct = new WeakReference<>(a);
         SYNC_EXEC.execute(
                 () -> {
@@ -615,6 +617,38 @@ final class CloudSyncDialog {
                         return;
                     }
                     try {
+                        final String pass = SecureStorage.getWebdavPass(appCtx);
+                        if (SecureStorage.consumeReenterPasswordRequired(appCtx)) {
+                            MainActivity reauthAct = weakAct.get();
+                            if (reauthAct != null
+                                    && !reauthAct.isDestroyed()
+                                    && !reauthAct.isFinishing()) {
+                                reauthAct.ui.post(
+                                        () -> {
+                                            if (reauthAct.isDestroyed()
+                                                    || reauthAct.isFinishing()) {
+                                                return;
+                                            }
+                                            reauthAct
+                                                    .prefs
+                                                    .edit()
+                                                    .putString(
+                                                            Prefs.SYNC_LAST_STATUS,
+                                                            "失败: "
+                                                                    + SecureStorage
+                                                                            .REENTER_PASSWORD_MESSAGE)
+                                                    .apply();
+                                            if (!silent) {
+                                                reauthAct.notice(
+                                                        SecureStorage.REENTER_PASSWORD_MESSAGE);
+                                            } else {
+                                                reauthAct.toast(
+                                                        SecureStorage.REENTER_PASSWORD_MESSAGE);
+                                            }
+                                        });
+                            }
+                            return;
+                        }
                         final long now = System.currentTimeMillis();
                         final AtomicReference<CloudSync.MergeResult> resultRef =
                                 new AtomicReference<>();
@@ -802,11 +836,60 @@ final class CloudSyncDialog {
         panel.addView(userInput, new LinearLayout.LayoutParams(-1, -2));
         a.gap(panel, 8);
 
-        final EditText passInput =
-                styledInput(a, "WebDAV 密码 / 应用专用密码", SecureStorage.getWebdavPass(a), true);
+        final AtomicBoolean passLoaded = new AtomicBoolean(false);
+        final AtomicBoolean passEditedByUser = new AtomicBoolean(false);
+        final AtomicBoolean suppressPassWatcher = new AtomicBoolean(false);
+        final EditText passInput = styledInput(a, "WebDAV 密码 / 应用专用密码", "", true);
         passInput.setTag("cloud-sync-pass");
+        passInput.addTextChangedListener(
+                new TextWatcher() {
+                    @Override
+                    public void beforeTextChanged(
+                            CharSequence s, int start, int count, int after) {}
+
+                    @Override
+                    public void onTextChanged(CharSequence s, int start, int before, int count) {
+                        if (!suppressPassWatcher.get()) {
+                            passEditedByUser.set(true);
+                        }
+                    }
+
+                    @Override
+                    public void afterTextChanged(Editable s) {}
+                });
         panel.addView(passInput, new LinearLayout.LayoutParams(-1, -2));
         a.gap(panel, 8);
+
+        final Context dialogAppCtx =
+                a.getApplicationContext() != null ? a.getApplicationContext() : a;
+        final WeakReference<MainActivity> dialogActRef = new WeakReference<>(a);
+        SYNC_EXEC.execute(
+                () -> {
+                    final String loadedPass = SecureStorage.getWebdavPass(dialogAppCtx);
+                    final boolean reauth =
+                            SecureStorage.consumeReenterPasswordRequired(dialogAppCtx);
+                    MainActivity cur = dialogActRef.get();
+                    if (cur == null || cur.isDestroyed() || cur.isFinishing()) return;
+                    cur.ui.post(
+                            () -> {
+                                if (cur.isDestroyed() || cur.isFinishing()) return;
+                                if (!passEditedByUser.get()
+                                        && loadedPass != null
+                                        && !loadedPass.isEmpty()) {
+                                    suppressPassWatcher.set(true);
+                                    try {
+                                        passInput.setText(loadedPass);
+                                        passInput.setSelection(loadedPass.length());
+                                    } finally {
+                                        suppressPassWatcher.set(false);
+                                    }
+                                }
+                                passLoaded.set(true);
+                                if (reauth) {
+                                    cur.notice(SecureStorage.REENTER_PASSWORD_MESSAGE);
+                                }
+                            });
+                });
 
         final CheckBox autoCheck = new CheckBox(a);
         autoCheck.setText("开启后台自动云同步（启动自动拉取，播放进度、收藏与订阅变更自动推送）");
@@ -848,7 +931,13 @@ final class CloudSyncDialog {
                             Runnable proceed =
                                     () -> {
                                         saveWebdavPrefs(
-                                                a, urlInput, userInput, passInput, autoCheck,
+                                                a,
+                                                urlInput,
+                                                userInput,
+                                                passInput,
+                                                passLoaded.get() || passEditedByUser.get(),
+                                                false,
+                                                autoCheck,
                                                 subsCheck);
                                         if (holder[0] != null) holder[0].dismiss();
                                         runWebdavSync(
@@ -879,7 +968,13 @@ final class CloudSyncDialog {
                             Runnable proceed =
                                     () -> {
                                         saveWebdavPrefs(
-                                                a, urlInput, userInput, passInput, autoCheck,
+                                                a,
+                                                urlInput,
+                                                userInput,
+                                                passInput,
+                                                passLoaded.get() || passEditedByUser.get(),
+                                                true,
+                                                autoCheck,
                                                 subsCheck);
                                         a.toast("已保存多端同步配置");
                                         if (holder[0] != null) holder[0].dismiss();
@@ -901,14 +996,14 @@ final class CloudSyncDialog {
                             "清除云配置",
                             "cloud-sync-clear",
                             () -> {
-                                SecureStorage.clearWebdavPass(a);
                                 a.prefs
                                         .edit()
                                         .remove(Prefs.WEBDAV_URL)
                                         .remove(Prefs.WEBDAV_USER)
-                                        .remove(Prefs.WEBDAV_PASS)
                                         .remove(Prefs.SYNC_LAST_STATUS)
                                         .apply();
+                                SYNC_EXEC.execute(
+                                        () -> SecureStorage.clearWebdavPass(dialogAppCtx));
                                 a.toast("已清除本机 WebDAV 云同步配置");
                                 if (holder[0] != null) holder[0].dismiss();
                                 if (onUpdated != null) onUpdated.run();
@@ -1081,18 +1176,38 @@ final class CloudSyncDialog {
             EditText urlInput,
             EditText userInput,
             EditText passInput,
+            boolean shouldPersistPass,
+            boolean notifyReauth,
             CheckBox autoCheck,
             CheckBox subsCheck) {
-        String pass = passInput.getText().toString();
-        SecureStorage.setWebdavPass(a, pass);
+        final String pass = passInput.getText().toString();
         a.prefs
                 .edit()
                 .putString(Prefs.WEBDAV_URL, urlInput.getText().toString().trim())
                 .putString(Prefs.WEBDAV_USER, userInput.getText().toString().trim())
-                .remove(Prefs.WEBDAV_PASS)
                 .putBoolean(Prefs.WEBDAV_AUTO, autoCheck.isChecked())
                 .putBoolean(Prefs.WEBDAV_SYNC_SUBS, subsCheck.isChecked())
                 .apply();
+        if (shouldPersistPass) {
+            final Context appCtx =
+                    a.getApplicationContext() != null ? a.getApplicationContext() : a;
+            final WeakReference<MainActivity> weakAct = new WeakReference<>(a);
+            SYNC_EXEC.execute(
+                    () -> {
+                        SecureStorage.setWebdavPass(appCtx, pass);
+                        if (notifyReauth && SecureStorage.consumeReenterPasswordRequired(appCtx)) {
+                            MainActivity cur = weakAct.get();
+                            if (cur != null && !cur.isDestroyed() && !cur.isFinishing()) {
+                                cur.ui.post(
+                                        () -> {
+                                            if (!cur.isDestroyed() && !cur.isFinishing()) {
+                                                cur.notice(SecureStorage.REENTER_PASSWORD_MESSAGE);
+                                            }
+                                        });
+                            }
+                        }
+                    });
+        }
     }
 
     private static EditText styledInput(
