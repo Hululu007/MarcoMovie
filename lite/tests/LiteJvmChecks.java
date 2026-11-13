@@ -987,6 +987,65 @@ public final class LiteJvmChecks {
         }
     }
 
+    private static android.content.SharedPreferences createMemoryPrefs(
+            final Map<String, Object> backing,
+            final java.util.concurrent.atomic.AtomicInteger commitCalls,
+            final java.util.concurrent.atomic.AtomicInteger applyCalls) {
+        final android.content.SharedPreferences.Editor editor =
+                (android.content.SharedPreferences.Editor)
+                        java.lang.reflect.Proxy.newProxyInstance(
+                                LiteJvmChecks.class.getClassLoader(),
+                                new Class<?>[] {android.content.SharedPreferences.Editor.class},
+                                (proxy, method, args) -> {
+                                    String m = method.getName();
+                                    if ("putString".equals(m)
+                                            || "putBoolean".equals(m)
+                                            || "putInt".equals(m)
+                                            || "putLong".equals(m)
+                                            || "putFloat".equals(m)) {
+                                        if (args[1] == null) backing.remove((String) args[0]);
+                                        else backing.put((String) args[0], args[1]);
+                                        return proxy;
+                                    }
+                                    if ("remove".equals(m)) {
+                                        backing.remove((String) args[0]);
+                                        return proxy;
+                                    }
+                                    if ("clear".equals(m)) {
+                                        backing.clear();
+                                        return proxy;
+                                    }
+                                    if ("commit".equals(m)) {
+                                        commitCalls.incrementAndGet();
+                                        return Boolean.TRUE;
+                                    }
+                                    if ("apply".equals(m)) {
+                                        applyCalls.incrementAndGet();
+                                        return null;
+                                    }
+                                    return proxy;
+                                });
+        return (android.content.SharedPreferences)
+                java.lang.reflect.Proxy.newProxyInstance(
+                        LiteJvmChecks.class.getClassLoader(),
+                        new Class<?>[] {android.content.SharedPreferences.class},
+                        (proxy, method, args) -> {
+                            String m = method.getName();
+                            if ("edit".equals(m)) return editor;
+                            if ("getAll".equals(m)) return new HashMap<String, Object>(backing);
+                            if ("contains".equals(m)) return backing.containsKey(args[0]);
+                            if ("getString".equals(m)) {
+                                Object v = backing.get(args[0]);
+                                return v instanceof String ? (String) v : (String) args[1];
+                            }
+                            if ("getBoolean".equals(m)) {
+                                Object v = backing.get(args[0]);
+                                return v instanceof Boolean ? (Boolean) v : (Boolean) args[1];
+                            }
+                            return null;
+                        });
+    }
+
     private static void testStoreCorruptionProtection() {
         LiteStore.setHistoryCorrupted(false);
         String corrupt = "{malformed json...";
@@ -1000,21 +1059,74 @@ public final class LiteJvmChecks {
                 !LiteStore.isMalformedHistory("[{\"vodId\":\"1\"}]"),
                 "LiteStore isMalformedHistory returns false for valid array");
 
-        List<LiteStore.HistoryEntry> parsed = LiteStore.parseHistoryJson(corrupt);
-        check(parsed.isEmpty(), "LiteStore parseHistoryJson returns empty list on malformed JSON");
+        Map<String, Object> backing = new HashMap<String, Object>();
+        backing.put("watch_history_v1", corrupt);
+        java.util.concurrent.atomic.AtomicInteger commitCalls =
+                new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger applyCalls =
+                new java.util.concurrent.atomic.AtomicInteger();
+        android.content.SharedPreferences sp =
+                createMemoryPrefs(backing, commitCalls, applyCalls);
+
+        // 10 consecutive reads of corrupted history must produce ONLY ONE backup and avoid commit()
+        for (int i = 0; i < 10; i++) {
+            List<LiteStore.HistoryEntry> parsed = LiteStore.getHistory(sp);
+            check(
+                    parsed.isEmpty(),
+                    "LiteStore getHistory returns empty list on malformed JSON #" + i);
+        }
+        int backupKeys = 0;
+        for (String key : backing.keySet()) {
+            if (key.startsWith("watch_history_corrupt_")) backupKeys++;
+        }
         check(
-                LiteStore.isHistoryCorrupted(),
-                "LiteStore enters corruption lockout on parse failure");
+                backupKeys == 1,
+                "LiteStore 10 consecutive reads of corrupted history produce only 1 backup");
+        check(
+                commitCalls.get() == 0 && applyCalls.get() == 1,
+                "LiteStore corruption backup uses apply() instead of blocking commit()");
+        check(
+                LiteStore.isHistoryCorrupted(sp)
+                        && sp.getBoolean(LiteStore.KEY_HISTORY_CORRUPTED, false),
+                "LiteStore sets both memory flag and watch_history_corrupted pref");
 
         LiteStore.HistoryEntry entry = new LiteStore.HistoryEntry();
+        entry.siteKey = "cms1";
         entry.vodId = "v_new";
         entry.vodName = "新剧";
-        String saved = LiteStore.recordHistoryJson(corrupt, entry);
+        LiteStore.saveHistory(sp, entry);
         check(
-                corrupt.equals(saved),
-                "LiteStore recordHistoryJson refuses destructive overwrite when corrupted");
+                corrupt.equals(sp.getString("watch_history_v1", "")),
+                "LiteStore saveHistory refuses destructive overwrite when corrupted");
 
-        LiteStore.setHistoryCorrupted(false);
+        // Clearing history clears both flag and pref while preserving backup, then saveHistory works
+        LiteStore.clearHistory(sp);
+        int backupKeysAfterClear = 0;
+        for (String key : backing.keySet()) {
+            if (key.startsWith("watch_history_corrupt_")) backupKeysAfterClear++;
+        }
+        check(
+                !LiteStore.isHistoryCorrupted()
+                        && !sp.getBoolean(LiteStore.KEY_HISTORY_CORRUPTED, false)
+                        && backupKeysAfterClear == 1,
+                "LiteStore clearHistory clears flag and pref while preserving corrupt backup");
+
+        LiteStore.saveHistory(sp, entry);
+        List<LiteStore.HistoryEntry> afterClear = LiteStore.getHistory(sp);
+        check(
+                afterClear.size() == 1 && "v_new".equals(afterClear.get(0).vodId),
+                "LiteStore saveHistory succeeds after clearHistory");
+
+        // Full valid overwrite via setHistoryRaw also clears both flag and pref
+        backing.put("watch_history_v1", corrupt);
+        LiteStore.getHistory(sp);
+        check(LiteStore.isHistoryCorrupted(sp), "LiteStore re-enters corruption state");
+        LiteStore.setHistoryRaw(sp, "[{\"siteKey\":\"cms1\",\"vodId\":\"v_ok\",\"vodName\":\"恢复剧集\"}]");
+        check(
+                !LiteStore.isHistoryCorrupted()
+                        && !sp.getBoolean(LiteStore.KEY_HISTORY_CORRUPTED, false)
+                        && LiteStore.getHistory(sp).size() == 1,
+                "LiteStore setHistoryRaw with valid JSON clears flag and pref");
     }
 
     private static void testLiteSyncEtagAndConcurrency() throws Exception {
@@ -1347,9 +1459,12 @@ public final class LiteJvmChecks {
                     }
                 });
 
+        final java.util.concurrent.atomic.AtomicInteger dualUaHits =
+                new java.util.concurrent.atomic.AtomicInteger();
         server.createContext(
                 "/dual-ua",
                 exchange -> {
+                    dualUaHits.incrementAndGet();
                     String ua = exchange.getRequestHeaders().getFirst("User-Agent");
                     if (LiteCatalog.USER_AGENT.equals(ua)) {
                         byte[] resp =
@@ -1370,13 +1485,75 @@ public final class LiteJvmChecks {
                     }
                 });
 
+        final java.util.concurrent.atomic.AtomicInteger htmlBlockedHits =
+                new java.util.concurrent.atomic.AtomicInteger();
         server.createContext(
                 "/html-blocked",
                 exchange -> {
+                    htmlBlockedHits.incrementAndGet();
                     byte[] resp =
                             "<!DOCTYPE html><html><body>Captcha Required</body></html>"
                                     .getBytes(StandardCharsets.UTF_8);
                     exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+                    exchange.sendResponseHeaders(200, resp.length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(resp);
+                    }
+                });
+
+        server.createContext(
+                "/json-as-text-html",
+                exchange -> {
+                    byte[] resp =
+                            "{\"sites\":[{\"key\":\"html-ct\",\"name\":\"HtmlCT\",\"type\":1,\"api\":\"http://127.0.0.1:9/api\"}]}"
+                                    .getBytes(StandardCharsets.UTF_8);
+                    exchange.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+                    exchange.sendResponseHeaders(200, resp.length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(resp);
+                    }
+                });
+
+        final java.util.concurrent.atomic.AtomicInteger err500Hits =
+                new java.util.concurrent.atomic.AtomicInteger();
+        server.createContext(
+                "/err-500",
+                exchange -> {
+                    err500Hits.incrementAndGet();
+                    byte[] resp = "internal error".getBytes(StandardCharsets.UTF_8);
+                    exchange.sendResponseHeaders(500, resp.length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(resp);
+                    }
+                });
+
+        server.createContext(
+                "/echo-custom-header",
+                exchange -> {
+                    String custom = exchange.getRequestHeaders().getFirst("X-Custom-Token");
+                    byte[] resp = (custom == null ? "" : custom).getBytes(StandardCharsets.UTF_8);
+                    exchange.sendResponseHeaders(200, resp.length);
+                    try (OutputStream os = exchange.getResponseBody()) {
+                        os.write(resp);
+                    }
+                });
+
+        for (int hop = 1; hop <= 6; hop++) {
+            final int currentHop = hop;
+            server.createContext(
+                    "/hop-" + currentHop,
+                    exchange -> {
+                        String nextTarget =
+                                currentHop < 6 ? "/hop-" + (currentHop + 1) : "/hop-final";
+                        exchange.getResponseHeaders().set("Location", baseUrl + nextTarget);
+                        exchange.sendResponseHeaders(302, -1);
+                        exchange.close();
+                    });
+        }
+        server.createContext(
+                "/hop-final",
+                exchange -> {
+                    byte[] resp = "hop-ok".getBytes(StandardCharsets.UTF_8);
                     exchange.sendResponseHeaders(200, resp.length);
                     try (OutputStream os = exchange.getResponseBody()) {
                         os.write(resp);
@@ -1439,20 +1616,119 @@ public final class LiteJvmChecks {
             }
             check(httpBombCaught, "Lite fetch rejects gzip bomb exceeding MAX_BYTES");
 
-            String dualResult = LiteCatalog.fetch(baseUrl + "/dual-ua", null);
+            // Generic fetch() is single-request and accepts text/html responses
+            dualUaHits.set(0);
+            boolean singleReq403Failed = false;
+            try {
+                LiteCatalog.fetch(baseUrl + "/dual-ua", null);
+            } catch (java.io.IOException expected) {
+                singleReq403Failed = true;
+            }
             check(
-                    dualResult.contains("\"key\":\"dual-site\""),
-                    "Lite fetch retries with Safari UA on error/HTML");
+                    singleReq403Failed && dualUaHits.get() == 1,
+                    "Lite generic fetch makes only one request without Safari UA retry");
+
+            htmlBlockedHits.set(0);
+            String rawHtmlAllowed = LiteCatalog.fetch(baseUrl + "/html-blocked", null);
+            check(
+                    rawHtmlAllowed.contains("Captcha Required") && htmlBlockedHits.get() == 1,
+                    "Lite generic fetch accepts text/html responses in a single request");
+
+            // fetchConfig() handles Safari UA fallback on 403/HTML and rejects HTML body
+            dualUaHits.set(0);
+            String dualResult = LiteCatalog.fetchConfig(baseUrl + "/dual-ua");
+            check(
+                    dualResult.contains("\"key\":\"dual-site\"") && dualUaHits.get() == 2,
+                    "Lite fetchConfig retries with Safari UA on HTTP 403");
+
+            String htmlCtJson = LiteCatalog.fetchConfig(baseUrl + "/json-as-text-html");
+            check(
+                    htmlCtJson.contains("\"key\":\"html-ct\""),
+                    "Lite fetchConfig checks content prefix rather than Content-Type text/html");
+
+            err500Hits.set(0);
+            boolean err500Caught = false;
+            try {
+                LiteCatalog.fetchConfig(baseUrl + "/err-500");
+            } catch (java.io.IOException expected) {
+                err500Caught = true;
+            }
+            check(
+                    err500Caught && err500Hits.get() == 1,
+                    "Lite fetchConfig does not retry Safari UA on HTTP 500");
 
             boolean httpHtmlCaught = false;
             try {
-                LiteCatalog.fetch(baseUrl + "/html-blocked", null);
+                LiteCatalog.fetchConfig(baseUrl + "/html-blocked");
             } catch (java.io.IOException e) {
                 httpHtmlCaught =
                         e.getMessage() != null
                                 && e.getMessage().contains("地址返回的是网页而不是配置（可能需要登录或被拦截）");
             }
-            check(httpHtmlCaught, "Lite fetch throws diagnostic error on persistent HTML");
+            check(httpHtmlCaught, "Lite fetchConfig throws diagnostic error on persistent HTML");
+
+            // Redirect limit restored to 5 hops (hop-2 -> hop-3 -> hop-4 -> hop-5 -> hop-6 -> hop-final = 5 hops)
+            check(
+                    "hop-ok".equals(LiteCatalog.fetch(baseUrl + "/hop-2", null)),
+                    "Lite fetch allows 5 redirect hops");
+            boolean sixHopsRejected = false;
+            try {
+                LiteCatalog.fetch(baseUrl + "/hop-1", null);
+            } catch (java.io.IOException expected) {
+                sixHopsRejected = true;
+            }
+            check(sixHopsRejected, "Lite fetch rejects 6 redirect hops");
+
+            // Full site header pass-through (custom headers preserved and sent)
+            List<LiteCatalog.Site> customHeaderSites =
+                    LiteCatalog.parse(
+                            "{\"sites\":[{\"key\":\"ch\",\"name\":\"CH\",\"type\":1,\"api\":\""
+                                    + baseUrl
+                                    + "/echo-custom-header\",\"headers\":{\"X-Custom-Token\":\"alpha-99\"}}]}",
+                            baseUrl);
+            check(
+                    "alpha-99".equals(customHeaderSites.get(0).headers.get("X-Custom-Token"))
+                            && "alpha-99"
+                                    .equals(
+                                            LiteCatalog.fetch(
+                                                    customHeaderSites.get(0).api,
+                                                    customHeaderSites.get(0).headers)),
+                    "Lite preserves and transmits custom site request headers");
+
+            // C2 alignment in LiteCatalog.parse
+            List<LiteCatalog.Site> xmlHostSites =
+                    LiteCatalog.parse(
+                            "{\"sites\":[{\"key\":\"xm\",\"name\":\"XM\",\"api\":\"https://xmlcms.test/api.php/provide/vod\"}]}",
+                            "https://xmlcms.test/config.json");
+            check(
+                    xmlHostSites.get(0).type == 1 && xmlHostSites.get(0).supported,
+                    "Lite C2 checks URL path only and keeps xml host as type 1 JSON");
+
+            for (String scriptApi :
+                    new String[] {
+                        "https://site.example/a.js",
+                        "https://site.example/a.mjs",
+                        "https://site.example/a.py",
+                        "https://site.example/a.jar",
+                        "csp_Custom"
+                    }) {
+                List<LiteCatalog.Site> scriptSites =
+                        LiteCatalog.parse(
+                                "{\"sites\":[{\"key\":\"sc\",\"name\":\"SC\",\"api\":\""
+                                        + scriptApi
+                                        + "\"}]}",
+                                "https://site.example/config.json");
+                check(
+                        scriptSites.get(0).type == -1 && !scriptSites.get(0).supported,
+                        "Lite C2 does not treat script/jar api without type as CMS: " + scriptApi);
+            }
+            List<LiteCatalog.Site> withJarSites =
+                    LiteCatalog.parse(
+                            "{\"sites\":[{\"key\":\"wj\",\"name\":\"WJ\",\"api\":\"https://site.example/api/vod\",\"jar\":\"./custom.jar\"}]}",
+                            "https://site.example/config.json");
+            check(
+                    withJarSites.get(0).type == -1 && !withJarSites.get(0).supported,
+                    "Lite C2 does not treat missing-type site with jar field as CMS");
 
             String cookieFetch = LiteCatalog.fetch(baseUrl + "/redirect-step1", null);
             check(

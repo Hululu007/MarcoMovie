@@ -699,20 +699,30 @@ public final class CloudSyncChecks {
         String corruptJson = "{\"corrupt\": true, [invalid json...";
         final AtomicReference<String> backupKey = new AtomicReference<>();
         final AtomicReference<String> backupValue = new AtomicReference<>();
+        final java.util.concurrent.atomic.AtomicInteger backupCount =
+                new java.util.concurrent.atomic.AtomicInteger();
+        final AtomicReference<Boolean> prefCorrupted = new AtomicReference<>(Boolean.FALSE);
+        final AtomicReference<String> storedHistoryJson = new AtomicReference<>(corruptJson);
 
         WatchHistory.CorruptionRecorder recorder =
                 (key, raw) -> {
+                    backupCount.incrementAndGet();
                     backupKey.set(key);
                     backupValue.set(raw);
+                    prefCorrupted.set(Boolean.TRUE);
                 };
 
-        // 1. Reading corrupted JSON detects corruption, triggers recorder backup, sets
-        // isCorrupted()
-        List<WatchHistory.Entry> entries = WatchHistory.read(corruptJson, recorder);
-        check(entries.isEmpty(), "WatchHistory.read returns empty list on corrupt JSON");
+        // 1. Reading corrupted JSON 10 times consecutively produces ONLY ONE backup
+        for (int i = 0; i < 10; i++) {
+            List<WatchHistory.Entry> entries = WatchHistory.read(corruptJson, recorder);
+            check(entries.isEmpty(), "WatchHistory.read returns empty list on corrupt JSON #" + i);
+        }
         check(
-                WatchHistory.isCorrupted(),
-                "WatchHistory marks historyCorrupted = true on malformed JSON");
+                WatchHistory.isCorrupted() && Boolean.TRUE.equals(prefCorrupted.get()),
+                "WatchHistory marks historyCorrupted and pref on malformed JSON");
+        check(
+                backupCount.get() == 1,
+                "10 consecutive reads of corrupted history produce only one backup");
         check(
                 backupKey.get() != null
                         && backupKey.get().startsWith("watch_history_corrupt_")
@@ -730,7 +740,36 @@ public final class CloudSyncChecks {
         String removeResult = WatchHistory.remove(corruptJson, "site_a\nvod_a");
         check(corruptJson.equals(removeResult), "WatchHistory.remove is locked out when corrupted");
 
-        WatchHistory.setCorrupted(false);
+        // 3. Clearing history clears both in-memory flag and watch_history_corrupted pref,
+        // keeps backup intact, and subsequent upsert succeeds
+        WatchHistory.Store store =
+                (json, corrupted) -> {
+                    storedHistoryJson.set(json);
+                    prefCorrupted.set(corrupted);
+                };
+        String cleared = WatchHistory.clear(store);
+        check(
+                "[]".equals(cleared)
+                        && "[]".equals(storedHistoryJson.get())
+                        && !WatchHistory.isCorrupted()
+                        && Boolean.FALSE.equals(prefCorrupted.get())
+                        && corruptJson.equals(backupValue.get()),
+                "WatchHistory.clear clears flag and pref while preserving corrupt backup");
+        String afterClearUpsert = WatchHistory.upsert(storedHistoryJson.get(), e);
+        List<WatchHistory.Entry> afterClearEntries = WatchHistory.read(afterClearUpsert);
+        check(
+                afterClearEntries.size() == 1 && "vod_a".equals(afterClearEntries.get(0).id),
+                "WatchHistory.upsert succeeds after clearing corrupted history");
+
+        // 4. Full valid overwrite also clears both flag and watch_history_corrupted pref
+        WatchHistory.read(corruptJson, recorder);
+        check(WatchHistory.isCorrupted(), "re-triggered corruption sets flag");
+        String overwritten = WatchHistory.overwrite(afterClearUpsert, store);
+        check(
+                overwritten != null
+                        && !WatchHistory.isCorrupted()
+                        && Boolean.FALSE.equals(prefCorrupted.get()),
+                "WatchHistory.overwrite with valid JSON clears flag and pref");
     }
 
     private static void testUiLatchTimeoutAndErrorPropagation() {

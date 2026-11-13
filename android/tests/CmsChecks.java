@@ -146,6 +146,43 @@ public final class CmsChecks {
                 cJson.sites.get(0).type == 1 && cJson.sites.get(0).supported(),
                 "missing type non-xml defaults to type 1 JSON and is supported");
 
+        String missingTypeXmlHost =
+                "{\"sites\":[{\"key\":\"xmlhost\",\"name\":\"XmlHost\",\"api\":\"https://xmlcms.test/api.php/provide/vod\"}]}";
+        Cms.Config cXmlHost =
+                Cms.parseConfig(missingTypeXmlHost, "https://xmlcms.test/config.json");
+        check(
+                cXmlHost.sites.get(0).type == 1 && cXmlHost.sites.get(0).supported(),
+                "missing type checks URL path only and does not misclassify xml host as XML");
+
+        for (String scriptApi :
+                new String[] {
+                    "https://site.example/spider.js",
+                    "https://site.example/spider.mjs",
+                    "https://site.example/spider.py",
+                    "https://site.example/spider.jar",
+                    "csp_CustomSpider"
+                }) {
+            String rawNoType =
+                    "{\"sites\":[{\"key\":\"noType\",\"name\":\"NoType\",\"api\":\""
+                            + scriptApi
+                            + "\"}]}";
+            Cms.Site noTypeSite =
+                    Cms.parseConfig(rawNoType, "https://site.example/config.json").sites.get(0);
+            check(
+                    noTypeSite.type == -1 && !noTypeSite.supported(),
+                    "missing type script/jar api not treated as CMS: " + scriptApi);
+        }
+
+        String missingTypeWithJar =
+                "{\"sites\":[{\"key\":\"withJar\",\"name\":\"WithJar\",\"api\":\"https://site.example/api/vod\",\"jar\":\"./custom.jar\"}]}";
+        Cms.Site jarSite =
+                Cms.parseConfig(missingTypeWithJar, "https://site.example/config.json")
+                        .sites
+                        .get(0);
+        check(
+                jarSite.type == -1 && !jarSite.supported(),
+                "missing type site with jar field is not treated as CMS");
+
         // C4: Relative ext resolution with HTTP and file origins
         String httpOrigin = "https://example.com/sub/config.json";
         String httpRelCfg =

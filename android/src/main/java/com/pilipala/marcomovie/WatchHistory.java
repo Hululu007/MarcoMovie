@@ -6,10 +6,15 @@ import org.json.*;
 /** Device-local bookmarks. Resolve fresh media URLs; never persist signed playback URLs. */
 final class WatchHistory {
     static final int LIMIT = 60;
+    static final String CORRUPTED_PREF = "watch_history_corrupted";
     static volatile boolean historyCorrupted = false;
 
     interface CorruptionRecorder {
         void recordCorruption(String key, String rawCorrupted);
+    }
+
+    interface Store {
+        void writeHistoryState(String historyJson, boolean corrupted);
     }
 
     static boolean isCorrupted() {
@@ -18,6 +23,36 @@ final class WatchHistory {
 
     static void setCorrupted(boolean corrupted) {
         historyCorrupted = corrupted;
+    }
+
+    static String clear() {
+        return clear(null);
+    }
+
+    static String clear(Store store) {
+        historyCorrupted = false;
+        if (store != null) {
+            store.writeHistoryState("[]", false);
+        }
+        return "[]";
+    }
+
+    static String overwrite(String validJson, Store store) {
+        String normalized =
+                validJson == null || validJson.trim().isEmpty() ? "[]" : validJson.trim();
+        if (isMalformed(normalized)) {
+            boolean wasCorrupted = historyCorrupted;
+            historyCorrupted = true;
+            if (!wasCorrupted) {
+                AppLog.w("WatchHistory", "Rejected malformed full history overwrite", null);
+            }
+            return null;
+        }
+        historyCorrupted = false;
+        if (store != null) {
+            store.writeHistoryState(normalized, false);
+        }
+        return normalized;
     }
 
     static boolean isMalformed(String text) {
@@ -93,8 +128,9 @@ final class WatchHistory {
                 if (!e.site.isEmpty() && !e.id.isEmpty() && keys.add(e.key())) out.add(e);
             }
         } catch (Exception e) {
+            boolean wasCorrupted = historyCorrupted;
             historyCorrupted = true;
-            if (recorder != null) {
+            if (!wasCorrupted && recorder != null) {
                 long ts = System.currentTimeMillis();
                 recorder.recordCorruption("watch_history_corrupt_" + ts, text);
             }

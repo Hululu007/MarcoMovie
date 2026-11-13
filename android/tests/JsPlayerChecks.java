@@ -22,50 +22,65 @@ public final class JsPlayerChecks {
         jarScript.api = "https://x/a.jar";
         check(!JsEngine.eligible(jarScript), "jar endpoint is not eligible as script source");
 
-        Cms.Site cspScript = new Cms.Site();
-        cspScript.type = 3;
-        cspScript.api = "https://fixture.invalid/csp_custom";
-        check(!JsEngine.eligible(cspScript), "csp endpoint is not eligible as script source");
+        Cms.Site jarQueryScript = new Cms.Site();
+        jarQueryScript.type = 3;
+        jarQueryScript.api = "https://x/a.jar?token=1#frag";
+        check(
+                !JsEngine.eligible(jarQueryScript),
+                "jar endpoint with query/fragment is not eligible as script source");
+
+        Cms.Site cspPrefixScript = new Cms.Site();
+        cspPrefixScript.type = 3;
+        cspPrefixScript.api = "csp_CustomSpider";
+        check(
+                !JsEngine.eligible(cspPrefixScript),
+                "api starting with csp_ is not eligible as remote script source");
+
+        Cms.Site subpathCspJs = new Cms.Site();
+        subpathCspJs.type = 3;
+        subpathCspJs.api = "https://a.test/sub/csp_app.js";
+        check(
+                JsEngine.eligible(subpathCspJs),
+                "HTTP JS endpoint with /csp_ in path remains eligible");
 
         Cms.Site subpathCsp = new Cms.Site();
         subpathCsp.type = 3;
-        subpathCsp.api = "https://a.com/sub/csp_app";
-        check(
-                !JsEngine.eligible(subpathCsp),
-                "subpath csp endpoint is not eligible as script source");
+        subpathCsp.api = "https://a.test/sub/csp_app";
+        check(JsEngine.eligible(subpathCsp), "HTTP endpoint with /csp_ in path remains eligible");
 
         Cms.Site subpathCspQueryFrag = new Cms.Site();
         subpathCspQueryFrag.type = 3;
-        subpathCspQueryFrag.api = "https://a.com/sub/csp_app?token=123#frag";
+        subpathCspQueryFrag.api = "https://a.test/sub/csp_app?token=123#frag";
         check(
-                !JsEngine.eligible(subpathCspQueryFrag),
-                "subpath csp endpoint with query and fragment is not eligible");
+                JsEngine.eligible(subpathCspQueryFrag),
+                "HTTP endpoint with /csp_ in path and query/fragment remains eligible");
 
         Cms.Site spidersCsp = new Cms.Site();
         spidersCsp.type = 3;
-        spidersCsp.api = "http://box/spiders/csp_app";
+        spidersCsp.api = "http://box.test/spiders/csp_app";
         check(
-                !JsEngine.eligible(spidersCsp),
-                "http spiders csp endpoint is not eligible as script source");
-
-        Cms.Site deepCsp = new Cms.Site();
-        deepCsp.type = 3;
-        deepCsp.api = "https://example.com/a/b/c/csp_custom";
-        check(
-                !JsEngine.eligible(deepCsp),
-                "deeply nested csp endpoint is not eligible as script source");
-
-        Cms.Site trailingSlashCsp = new Cms.Site();
-        trailingSlashCsp.type = 3;
-        trailingSlashCsp.api = "https://a.com/a/b/csp_xyz/";
-        check(
-                !JsEngine.eligible(trailingSlashCsp),
-                "nested csp endpoint with trailing slash is rejected");
+                JsEngine.eligible(spidersCsp),
+                "HTTP spiders /csp_ endpoint remains eligible as script source");
 
         Cms.Site gatewayScript = new Cms.Site();
         gatewayScript.type = 3;
         gatewayScript.api = "https://x/api/drpy?id=1";
         check(JsEngine.eligible(gatewayScript), "extensionless type 3 remote script is eligible");
+
+        java.io.IOException unrecognizedErr =
+                JsEngine.wrapScriptLoadFailure(
+                        gatewayScript, false, false, new java.io.IOException("SyntaxError"));
+        check(
+                unrecognizedErr.getMessage() != null
+                        && unrecognizedErr.getMessage().contains("脚本类型无法识别"),
+                "extensionless type 3 failure reports unrecognized script type");
+
+        java.io.IOException explicitJsErr =
+                JsEngine.wrapScriptLoadFailure(
+                        subpathCspJs, false, false, new java.io.IOException("SyntaxError"));
+        check(
+                "SyntaxError".equals(explicitJsErr.getMessage()),
+                "explicit .js failure preserves original JS error message");
 
         Cms.Site queryTokenCsp = new Cms.Site();
         queryTokenCsp.type = 3;
@@ -76,7 +91,7 @@ public final class JsPlayerChecks {
 
         Cms.Site queryParamCsp = new Cms.Site();
         queryParamCsp.type = 3;
-        queryParamCsp.api = "https://server.com/api/drpy?csp_=1#csp_hash";
+        queryParamCsp.api = "https://server.test/api/drpy?csp_=1#csp_hash";
         check(
                 JsEngine.eligible(queryParamCsp),
                 "query key and fragment with csp_ remain eligible script source");
@@ -87,6 +102,19 @@ public final class JsPlayerChecks {
         check(
                 JsEngine.eligible(nonCspSubstr),
                 "non-segment csp substring remains eligible script source");
+
+        Cms.Site localPhpScript = new Cms.Site();
+        localPhpScript.type = 3;
+        localPhpScript.api = "file:///fixture.invalid/sub.php";
+        check(
+                !JsEngine.eligible(localPhpScript),
+                "non-HTTP PHP endpoint without _mm_entrySource is not assumed to be JavaScript");
+        localPhpScript.ext =
+                new JSONObject()
+                        .put("_mm_entrySource", "module.exports={home(){return {list:[]}}}");
+        check(
+                JsEngine.eligible(localPhpScript),
+                "content-identified _mm_entrySource JavaScript is eligible");
 
         Cms.Site contentScript = new Cms.Site();
         contentScript.type = 3;

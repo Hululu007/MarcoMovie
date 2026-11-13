@@ -115,9 +115,7 @@ public final class LiteCatalog {
             if (isNetdiskSite()) {
                 return STATUS_ADAPTER_MISSING;
             }
-            if (type == 3
-                    || (api != null && (api.startsWith("csp_") || api.endsWith(".js")))
-                    || (jar != null && jar.length() > 0)) {
+            if (type == 3 || isScriptOrJarApi(api) || (jar != null && jar.length() > 0)) {
                 return STATUS_NEEDS_JAR;
             }
             if (type != 0 && type != 1) {
@@ -251,8 +249,38 @@ public final class LiteCatalog {
 
     public static boolean isHtml(String s) {
         if (s == null) return false;
-        String t = s.trim().toLowerCase(Locale.ROOT);
+        String t = s.replaceFirst("^\\uFEFF", "").trim().toLowerCase(Locale.ROOT);
         return t.startsWith("<!doctype") || t.startsWith("<html");
+    }
+
+    static boolean isScriptOrJarApi(String api) {
+        if (api == null) return false;
+        String lower = api.trim().toLowerCase(Locale.ROOT).split("[?#]", 2)[0];
+        return lower.startsWith("csp_")
+                || lower.endsWith(".js")
+                || lower.endsWith(".mjs")
+                || lower.endsWith(".py")
+                || lower.endsWith(".jar");
+    }
+
+    static boolean hasXmlInUrlPath(String httpUrl) {
+        try {
+            String urlPath = new URL(http(httpUrl)).getPath();
+            if (urlPath == null) return false;
+            String lowerPath = urlPath.toLowerCase(Locale.ROOT);
+            return lowerPath.contains("xml") || lowerPath.endsWith(".xml");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    static final class HttpStatusException extends IOException {
+        final int status;
+
+        HttpStatusException(int status) {
+            super("服务器返回 HTTP " + status);
+            this.status = status;
+        }
     }
 
     static final class RedirectCookie {
@@ -406,7 +434,7 @@ public final class LiteCatalog {
         Map<String, String> headers = new LinkedHashMap<String, String>();
         if (requestHeaders != null) headers.putAll(requestHeaders);
         Map<String, RedirectCookie> redirectCookies = new LinkedHashMap<String, RedirectCookie>();
-        for (int redirects = 0; redirects < 5; redirects++) {
+        for (int redirects = 0; redirects < 6; redirects++) {
             if (Thread.currentThread().isInterrupted() || System.nanoTime() > deadlineNs)
                 throw new InterruptedIOException();
             HttpURLConnection c = (HttpURLConnection) new URL(current).openConnection();
@@ -460,11 +488,7 @@ public final class LiteCatalog {
                     current = next;
                     continue;
                 }
-                if (status < 200 || status >= 300) throw new IOException("服务器返回 HTTP " + status);
-                String contentType = c.getContentType();
-                boolean isHtmlContentType =
-                        contentType != null
-                                && contentType.toLowerCase(Locale.ROOT).contains("text/html");
+                if (status < 200 || status >= 300) throw new HttpStatusException(status);
                 InputStream in = c.getInputStream();
                 if ("gzip".equalsIgnoreCase(c.getContentEncoding())) {
                     in = new java.util.zip.GZIPInputStream(in);
@@ -478,11 +502,7 @@ public final class LiteCatalog {
                     if (out.size() + n > MAX_BYTES) throw new IOException("配置或列表超过大小限制");
                     out.write(b, 0, n);
                 }
-                String result = decodeText(out.toByteArray());
-                if (isHtmlContentType || isHtml(result)) {
-                    throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
-                }
-                return result;
+                return decodeText(out.toByteArray());
             } finally {
                 IN_FLIGHT.remove(c);
                 c.disconnect();
@@ -501,27 +521,30 @@ public final class LiteCatalog {
                 }
             }
         }
-        if (customUa != null) {
-            return fetchOnce(address, headers, customUa);
-        }
-        Exception firstError = null;
-        boolean sawHtml = false;
-        String[] uas = new String[] {USER_AGENT, SAFARI_USER_AGENT};
-        for (int i = 0; i < uas.length; i++) {
-            String ua = uas[i];
-            try {
-                return fetchOnce(address, headers, ua);
-            } catch (Exception e) {
-                if (e.getMessage() != null && e.getMessage().contains("地址返回的是网页而不是配置")) {
-                    sawHtml = true;
-                }
-                firstError = e;
+        return fetchOnce(address, headers, customUa != null ? customUa : USER_AGENT);
+    }
+
+    public static String fetchConfig(String address) throws Exception {
+        Map<String, String> headers = new LinkedHashMap<String, String>();
+        headers.put("User-Agent", USER_AGENT);
+        String result;
+        try {
+            result = fetchOnce(address, headers, USER_AGENT);
+            if (!isHtml(result)) {
+                return result;
+            }
+        } catch (HttpStatusException e) {
+            if (e.status != 403) {
+                throw e;
             }
         }
-        if (sawHtml) {
+        Map<String, String> fallbackHeaders = new LinkedHashMap<String, String>();
+        fallbackHeaders.put("User-Agent", SAFARI_USER_AGENT);
+        result = fetchOnce(address, fallbackHeaders, SAFARI_USER_AGENT);
+        if (isHtml(result)) {
             throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
         }
-        throw firstError != null ? firstError : new IOException("无法连接配置地址");
+        return result;
     }
 
     public static String decodeText(byte[] bytes) throws IOException {
@@ -677,7 +700,7 @@ public final class LiteCatalog {
                 origin,
                 new com.pilipala.source.Warehouse.Reader() {
                     public String read(String url) throws Exception {
-                        return fetch(url, null);
+                        return fetchConfig(url);
                     }
                 },
                 new com.pilipala.source.Warehouse.Decoder() {
@@ -779,9 +802,11 @@ public final class LiteCatalog {
                 } catch (Exception ignored) {
                 }
             }
-            if (s.type == -1 && (s.api.startsWith("http://") || s.api.startsWith("https://"))) {
-                String path = s.api.split("[?#]", 2)[0].toLowerCase(Locale.ROOT);
-                s.type = (path.contains("xml") || path.endsWith(".xml")) ? 0 : 1;
+            if (s.type == -1
+                    && (s.api.startsWith("http://") || s.api.startsWith("https://"))
+                    && (s.jar == null || s.jar.length() == 0)
+                    && !isScriptOrJarApi(s.api)) {
+                s.type = hasXmlInUrlPath(s.api) ? 0 : 1;
             }
             boolean directPlayUrl =
                     s.playUrl.length() == 0
@@ -819,20 +844,24 @@ public final class LiteCatalog {
         if (hs == null) return;
         Iterator<String> keys = hs.keys();
         while (keys.hasNext()) {
-            String k = keys.next(), v = Json.str(hs, k, "");
+            String k = keys.next();
+            if (k == null || k.length() == 0 || hs.isNull(k)) continue;
+            String v = Json.str(hs, k, "");
             if (k.indexOf('\r') < 0
                     && k.indexOf('\n') < 0
                     && v.indexOf('\r') < 0
                     && v.indexOf('\n') < 0) {
-                for (String allowed :
-                        new String[] {
-                            "User-Agent", "Referer", "Cookie", "Origin", "Authorization"
-                        }) {
-                    if (k.equalsIgnoreCase(allowed)) {
-                        target.put(allowed, v);
-                        break;
+                for (Iterator<String> it = target.keySet().iterator(); it.hasNext(); ) {
+                    if (it.next().equalsIgnoreCase(k)) {
+                        it.remove();
                     }
                 }
+                if ("user-agent".equalsIgnoreCase(k)) k = "User-Agent";
+                else if ("referer".equalsIgnoreCase(k)) k = "Referer";
+                else if ("cookie".equalsIgnoreCase(k)) k = "Cookie";
+                else if ("origin".equalsIgnoreCase(k)) k = "Origin";
+                else if ("authorization".equalsIgnoreCase(k)) k = "Authorization";
+                target.put(k, v);
             }
         }
     }

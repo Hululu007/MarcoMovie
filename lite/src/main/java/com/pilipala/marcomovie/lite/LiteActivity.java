@@ -197,8 +197,7 @@ public final class LiteActivity extends Activity {
                     .commit();
         }
         home();
-        LiteStore.historyCorrupted = getPreferences(0).getBoolean("watch_history_corrupted", false);
-        if (LiteStore.historyCorrupted && status != null) {
+        if (LiteStore.isHistoryCorrupted(this) && status != null) {
             status.setText("观看历史数据损坏，已自动备份至本地。");
         } else if (crashedSite != null && crashedSite.length() > 0 && status != null) {
             status.setText("上次加载片源时异常退出，已自动重置片源选择。");
@@ -946,6 +945,15 @@ public final class LiteActivity extends Activity {
         }
     }
 
+    void resetWatchHistoryKeepBackups(List<LiteStore.HistoryEntry> currentEntries) {
+        if (currentEntries != null && !currentEntries.isEmpty()) {
+            recordHistoryClearTombstones(currentEntries);
+        }
+        LiteStore.clearHistory(this);
+        getPreferences(0).edit().remove("resume_address").remove("resume_ms").apply();
+        scheduleAutoPush(true);
+    }
+
     void historyPage() {
         base("观看历史");
         final List<LiteStore.HistoryEntry> list = LiteStore.getHistory(this);
@@ -957,7 +965,21 @@ public final class LiteActivity extends Activity {
                     }
                 });
         if (list.isEmpty()) {
-            status.setText("暂无观看历史记录。可点击上方“多端云同步”从其他设备拉取。");
+            boolean corrupted = LiteStore.isHistoryCorrupted(this);
+            status.setText(
+                    corrupted
+                            ? "观看历史数据异常，已暂停更新并保留本地损坏备份。可点击下方重置后恢复记录。"
+                            : "暂无观看历史记录。可点击上方“多端云同步”从其他设备拉取。");
+            if (corrupted) {
+                button(
+                        "重置观看历史（保留损坏备份）",
+                        new Runnable() {
+                            public void run() {
+                                resetWatchHistoryKeepBackups(list);
+                                historyPage();
+                            }
+                        });
+            }
             button(
                     "返回首页",
                     new Runnable() {
@@ -972,14 +994,7 @@ public final class LiteActivity extends Activity {
                 "清空全部观看历史",
                 new Runnable() {
                     public void run() {
-                        recordHistoryClearTombstones(list);
-                        LiteStore.clearHistory(LiteActivity.this);
-                        getPreferences(0)
-                                .edit()
-                                .remove("resume_address")
-                                .remove("resume_ms")
-                                .commit();
-                        scheduleAutoPush(true);
+                        resetWatchHistoryKeepBackups(list);
                         historyPage();
                     }
                 });
@@ -1463,7 +1478,7 @@ public final class LiteActivity extends Activity {
                                         final String normalized = LiteCatalog.http(addr);
                                         final String raw =
                                                 LiteCatalog.importConfig(
-                                                        LiteCatalog.fetch(normalized, null),
+                                                        LiteCatalog.fetchConfig(normalized),
                                                         normalized);
                                         LiteCatalog.parse(raw, normalized);
                                         synchronized (importLock) {
@@ -1518,8 +1533,8 @@ public final class LiteActivity extends Activity {
                                                     public void run() throws Exception {
                                                         String selectedRaw =
                                                                 LiteCatalog.importConfig(
-                                                                        LiteCatalog.fetch(
-                                                                                address, null),
+                                                                        LiteCatalog.fetchConfig(
+                                                                                address),
                                                                         address);
                                                         String combined =
                                                                 com.pilipala.source.Warehouse
@@ -1606,7 +1621,7 @@ public final class LiteActivity extends Activity {
                                 public void apply(String address) throws Exception {
                                     String raw =
                                             LiteCatalog.importConfig(
-                                                    LiteCatalog.fetch(address, null), address);
+                                                    LiteCatalog.fetchConfig(address), address);
                                     LiteCatalog.parse(raw, address);
                                     synchronized (importLock) {
                                         if (dead || pairing == null || epoch != session)
@@ -1671,6 +1686,14 @@ public final class LiteActivity extends Activity {
                 new Runnable() {
                     public void run() {
                         importUrlPage();
+                    }
+                });
+        button(
+                "重置观看历史（保留损坏备份）",
+                new Runnable() {
+                    public void run() {
+                        resetWatchHistoryKeepBackups(LiteStore.getHistory(LiteActivity.this));
+                        status.setText("已重置观看历史，本地损坏备份已继续保留。");
                     }
                 });
         button(
@@ -1794,14 +1817,17 @@ public final class LiteActivity extends Activity {
                 try {
                     fetchedRaw =
                             LiteCatalog.importConfig(
-                                    LiteCatalog.fetch(fetchedOrigin, null), fetchedOrigin);
-                } catch (Exception ignored) {
+                                    LiteCatalog.fetchConfig(fetchedOrigin), fetchedOrigin);
+                } catch (Exception fetchFailure) {
+                    fetchedRaw = null;
                 }
             }
         }
 
         synchronized (importLock) {
-            LiteStore.setHistoryRaw(this, res.historyJson);
+            if (!LiteStore.isHistoryCorrupted(this)) {
+                LiteStore.setHistoryRaw(this, res.historyJson);
+            }
             LiteStore.setFavoritesRaw(this, res.favoritesJson);
             LiteStore.setTombstonesRaw(this, res.tombstonesJson);
             if (syncSubs) {

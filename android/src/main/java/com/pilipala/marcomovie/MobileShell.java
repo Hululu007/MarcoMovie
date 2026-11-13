@@ -3630,7 +3630,9 @@ final class MobileShell {
                 });
         clearBtn.setOnClickListener(
                 v -> {
-                    if (a.watchHistory().isEmpty()) return;
+                    if (a.watchHistory().isEmpty()
+                            && !WatchHistory.isCorrupted()
+                            && !a.prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false)) return;
                     new AppDialog.Builder(a)
                             .setTitle("清空观看历史？")
                             .setMessage("清空后将移除所有影片的本地观看进度记录。")
@@ -3639,7 +3641,7 @@ final class MobileShell {
                                     "清空",
                                     (d, w) -> {
                                         List<WatchHistory.Entry> prev = a.watchHistory();
-                                        a.prefs.edit().putString(Prefs.WATCH_HISTORY, "[]").apply();
+                                        a.clearWatchHistory();
                                         CloudSyncDialog.onHistoryCleared(a, prev);
                                         renderSubTab.run();
                                     })

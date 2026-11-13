@@ -57,7 +57,16 @@ public final class DirectCmsImportChecks {
                                                 return false;
                                             }
 
-                                            public int getResponseCode() {
+                                            public int getResponseCode()
+                                                    throws java.io.IOException {
+                                                if ("timeout-no-retry.test".equals(host)) {
+                                                    throw new java.net.SocketTimeoutException(
+                                                            "connect timed out");
+                                                }
+                                                if ("dns-no-retry.test".equals(host)) {
+                                                    throw new java.net.UnknownHostException(
+                                                            "dns-no-retry.test");
+                                                }
                                                 if ("dual-ua.test".equals(host)) {
                                                     String ua = getRequestProperty("User-Agent");
                                                     if (Cms.USER_AGENT.equals(ua)) {
@@ -77,8 +86,64 @@ public final class DirectCmsImportChecks {
                                                     }
                                                 } else if ("html-error.test".equals(host)) {
                                                     responseCode = 200;
+                                                    headers.put(
+                                                            "Content-Type",
+                                                            Arrays.asList(
+                                                                    "text/html; charset=utf-8"));
                                                     responseBody =
                                                             "<!DOCTYPE html><html><body>Login Required</body></html>"
+                                                                    .getBytes(
+                                                                            StandardCharsets.UTF_8);
+                                                } else if ("cms-text-html.test".equals(host)) {
+                                                    responseCode = 200;
+                                                    headers.put(
+                                                            "Content-Type",
+                                                            Arrays.asList(
+                                                                    "text/html; charset=utf-8"));
+                                                    responseBody =
+                                                            RESPONSE.getBytes(
+                                                                    StandardCharsets.UTF_8);
+                                                } else if ("share-page.test".equals(host)) {
+                                                    responseCode = 200;
+                                                    headers.put(
+                                                            "Content-Type",
+                                                            Arrays.asList(
+                                                                    "text/html; charset=utf-8"));
+                                                    responseBody =
+                                                            "<!doctype html><html><body><script>var play='https://cdn.test/live.m3u8';</script></body></html>"
+                                                                    .getBytes(
+                                                                            StandardCharsets.UTF_8);
+                                                } else if ("html-ua-fallback.test".equals(host)) {
+                                                    String ua = getRequestProperty("User-Agent");
+                                                    headers.put(
+                                                            "Content-Type",
+                                                            Arrays.asList(
+                                                                    "text/html; charset=utf-8"));
+                                                    if (Cms.USER_AGENT.equals(ua)) {
+                                                        responseCode = 200;
+                                                        responseBody =
+                                                                "<html><body>WAF challenge</body></html>"
+                                                                        .getBytes(
+                                                                                StandardCharsets
+                                                                                        .UTF_8);
+                                                    } else if (Cms.SAFARI_USER_AGENT.equals(ua)) {
+                                                        responseCode = 200;
+                                                        responseBody =
+                                                                "{\"sites\":[{\"key\":\"safari-ok\",\"name\":\"SafariOK\",\"api\":\"http://cms.test/api\"}]}"
+                                                                        .getBytes(
+                                                                                StandardCharsets
+                                                                                        .UTF_8);
+                                                    }
+                                                } else if ("timeout-no-retry.test".equals(host)) {
+                                                    throw new java.net.SocketTimeoutException(
+                                                            "connect timed out");
+                                                } else if ("dns-no-retry.test".equals(host)) {
+                                                    throw new java.net.UnknownHostException(
+                                                            "dns-no-retry.test");
+                                                } else if ("http500-no-retry.test".equals(host)) {
+                                                    responseCode = 500;
+                                                    responseBody =
+                                                            "server error"
                                                                     .getBytes(
                                                                             StandardCharsets.UTF_8);
                                                 } else if ("cookie-redirect.test".equals(host)) {
@@ -299,11 +364,65 @@ public final class DirectCmsImportChecks {
                 "API error response rejected");
         rejects("<html><body>Login required</body></html>", base, "HTML response rejected");
 
-        // Dual-UA retry
+        // Dual-UA retry on 403 and HTML, and Content-Type text/html acceptance
         String dualResult = Cms.fetchImport("http://dual-ua.test/config.json");
         check(
                 dualResult.contains("\"key\":\"dual\""),
-                "dual-UA retries with Safari UA on HTTP error/HTML");
+                "dual-UA retries with Safari UA on HTTP 403");
+
+        String htmlFallbackResult = Cms.fetchImport("http://html-ua-fallback.test/config.json");
+        check(
+                htmlFallbackResult.contains("\"key\":\"safari-ok\""),
+                "dual-UA retries with Safari UA on HTML body and accepts text/html JSON");
+
+        String textHtmlJson = Cms.fetch("http://cms-text-html.test/api.php", null);
+        check(
+                textHtmlJson.contains("\"vod_id\":\"42\""),
+                "generic Cms.fetch accepts JSON served with Content-Type text/html");
+        String textHtmlImport = Cms.fetchImport("http://cms-text-html.test/api.php");
+        check(
+                textHtmlImport.contains("\"vod_id\":\"42\""),
+                "Cms.fetchImport inspects body prefix rather than Content-Type text/html");
+
+        int beforeShareFetch = requests.size();
+        String shareHtml = Cms.fetch("http://share-page.test/watch/1", null);
+        check(
+                shareHtml.contains("https://cdn.test/live.m3u8")
+                        && requests.size() - beforeShareFetch == 1,
+                "generic Cms.fetch accepts HTML pages in a single request without UA retry");
+
+        int beforeTimeout = requests.size();
+        boolean timeoutCaught = false;
+        try {
+            Cms.fetchImport("http://timeout-no-retry.test/config.json");
+        } catch (java.net.SocketTimeoutException expected) {
+            timeoutCaught = true;
+        }
+        check(
+                timeoutCaught && requests.size() - beforeTimeout == 1,
+                "Cms.fetchImport does not retry Safari UA on timeout");
+
+        int beforeDns = requests.size();
+        boolean dnsCaught = false;
+        try {
+            Cms.fetchImport("http://dns-no-retry.test/config.json");
+        } catch (java.net.UnknownHostException expected) {
+            dnsCaught = true;
+        }
+        check(
+                dnsCaught && requests.size() - beforeDns == 1,
+                "Cms.fetchImport does not retry Safari UA on DNS failure");
+
+        int before500 = requests.size();
+        boolean err500Caught = false;
+        try {
+            Cms.fetchImport("http://http500-no-retry.test/config.json");
+        } catch (java.io.IOException expected) {
+            err500Caught = true;
+        }
+        check(
+                err500Caught && requests.size() - before500 == 1,
+                "Cms.fetchImport does not retry Safari UA on HTTP 500");
 
         // HTML diagnostic error
         boolean htmlDiagnosticCaught = false;
