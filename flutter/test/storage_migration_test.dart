@@ -21,7 +21,10 @@ void main() {
     if (await tempDir.exists()) {
       try {
         await tempDir.delete(recursive: true);
-      } catch (_) {}
+      } on Object catch (e) {
+        // Ignore transient Windows temp cleanup lock in teardown.
+        assert(e.toString().isNotEmpty);
+      }
     }
   });
 
@@ -54,7 +57,7 @@ void main() {
       expect(tmpFiles, isEmpty);
     });
 
-    test('startup migration moves subscriptions from SharedPreferences to subscriptions.json', () async {
+    test('startup migration copies subscriptions from SharedPreferences to subscriptions.json while retaining prefs mirror', () async {
       const rawSubs = [
         {
           'id': 'legacy_sub_1',
@@ -79,11 +82,12 @@ void main() {
       expect(await subFile.exists(), isTrue);
       expect(storage.getSubscriptions().first.id, 'legacy_sub_1');
 
-      // SharedPreferences key was removed upon migration
-      expect(prefs.containsKey(StorageService.keySubscriptions), isFalse);
+      // SharedPreferences mirror is retained for safe downgrade (M-F3)
+      expect(prefs.containsKey(StorageService.keySubscriptions), isTrue);
+      expect(prefs.getString(StorageService.keySubscriptions), jsonEncode(rawSubs));
     });
 
-    test('startup migration synthesizes legacy_primary from config_raw_json', () async {
+    test('legacy config_raw_json stays intact for downgrade until subscriptions are upserted', () async {
       const legacyRaw = '{"sites":[{"key":"legacy","name":"旧版源","type":1,"api":"https://legacy.example/api"}]}';
       SharedPreferences.setMockInitialValues({
         StorageService.keyRawConfig: legacyRaw,
@@ -95,18 +99,27 @@ void main() {
 
       final storage = await StorageService.init();
 
+      // Legacy config loads seamlessly without eagerly wiping config_raw_json
+      expect(storage.rawConfig, legacyRaw);
+      expect(storage.loadSavedConfig()?.sites.single.key, 'legacy');
+
+      // On first upsertSubscriptions, legacy_primary is synthesized into subscriptions.json
+      await storage.upsertSubscriptions([
+        const SubscriptionEntry(
+          id: 'added_sub',
+          name: '新增源',
+          rawContent: '{"sites":[{"key":"added","name":"新增站","type":1,"api":"https://added.example/api"}]}',
+        ),
+      ]);
+
       final subFile = File('${tempDir.path}/subscriptions.json');
       expect(await subFile.exists(), isTrue);
-
       final subs = storage.getSubscriptions();
-      expect(subs.length, 1);
-      expect(subs.first.id, 'legacy_primary');
-      expect(subs.first.url, 'https://legacy.example/index.json');
-
-      expect(prefs.containsKey(StorageService.keyRawConfig), isFalse);
+      expect(subs.map((s) => s.id), containsAll(['legacy_primary', 'added_sub']));
+      expect(prefs.containsKey(StorageService.keySubscriptions), isTrue);
     });
 
-    test('startup migration moves watch_history from SharedPreferences to watch_history.json', () async {
+    test('startup migration copies watch_history from SharedPreferences to watch_history.json while retaining prefs mirror', () async {
       final rawHist = [
         {
           'site': 'site1',
@@ -134,7 +147,9 @@ void main() {
       expect(hist.length, 1);
       expect(hist.first.id, 'vid1');
 
-      expect(prefs.containsKey(StorageService.keyWatchHistory), isFalse);
+      // SharedPreferences mirror is retained for safe downgrade (M-F3)
+      expect(prefs.containsKey(StorageService.keyWatchHistory), isTrue);
+      expect(prefs.getString(StorageService.keyWatchHistory), jsonEncode(rawHist));
     });
 
     test('corrupted watch_history.json is quarantined to watch_history_corrupt_<ts>.json and write-locked', () async {

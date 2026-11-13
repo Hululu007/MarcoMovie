@@ -6,9 +6,8 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:marco_movie/core/cms_client.dart';
 import 'package:marco_movie/core/models.dart';
-import 'package:marco_movie/core/storage_service.dart';
 import 'package:marco_movie/ui/adaptive_shell.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'test_storage_helper.dart';
 
 void main() {
   for (final size in [const Size(390, 844), const Size(1280, 800)]) {
@@ -19,8 +18,7 @@ void main() {
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.resetPhysicalSize);
         addTearDown(tester.view.resetDevicePixelRatio);
-        SharedPreferences.setMockInitialValues({});
-        final storage = await StorageService.init();
+        final storage = await initTestStorage();
         await storage.saveConfig(
           '{"sites":[{"key":"fixture","name":"测试源","type":1,"api":"https://source.example/api"}]}',
         );
@@ -103,8 +101,9 @@ void main() {
   testWidgets('history shelf honors the existing preference key', (
     tester,
   ) async {
-    SharedPreferences.setMockInitialValues({'show_continue_watching': false});
-    final storage = await StorageService.init();
+    final storage = await initTestStorage(
+      initialPrefs: const {'show_continue_watching': false},
+    );
     await storage.saveConfig(
       '{"sites":[{"key":"fixture","name":"测试源","type":1,"api":"https://source.example/api"}]}',
     );

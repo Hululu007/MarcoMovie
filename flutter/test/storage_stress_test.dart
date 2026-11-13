@@ -21,7 +21,9 @@ void main() {
     if (await tempDir.exists()) {
       try {
         await tempDir.delete(recursive: true);
-      } catch (_) {}
+      } on Object catch (e) {
+        assert(e.toString().isNotEmpty);
+      }
     }
   });
 
@@ -259,7 +261,7 @@ void main() {
   });
 
   group('Stress 3: Startup Migration & Fallback', () {
-    test('clean migration from SharedPreferences to JSON files removes legacy keys', () async {
+    test('clean migration from SharedPreferences to JSON files retains downgrade mirrors', () async {
       final rawSubs = [
         {
           'id': 'sub_mig_1',
@@ -298,9 +300,9 @@ void main() {
       expect(storage.getSubscriptions().first.id, 'sub_mig_1');
       expect(storage.getWatchHistory().first.id, 'v_mig_1');
 
-      // SharedPreferences keys removed
-      expect(prefs.containsKey(StorageService.keySubscriptions), isFalse);
-      expect(prefs.containsKey(StorageService.keyWatchHistory), isFalse);
+      // SharedPreferences mirrors retained for downgrade safety (M-F3)
+      expect(prefs.containsKey(StorageService.keySubscriptions), isTrue);
+      expect(prefs.containsKey(StorageService.keyWatchHistory), isTrue);
     });
 
     test('fallback reading from SharedPreferences when JSON files are missing', () async {

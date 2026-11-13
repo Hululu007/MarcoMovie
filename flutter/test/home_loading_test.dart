@@ -3,9 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/cms_client.dart';
 import 'package:marco_movie/core/models.dart';
-import 'package:marco_movie/core/storage_service.dart';
 import 'package:marco_movie/ui/adaptive_shell.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'test_storage_helper.dart';
 
 class HomeLoadingClient extends CmsClient {
   final home = Completer<(List<CmsCategory>, CmsListing)>();
@@ -60,8 +59,7 @@ Future<void> mount(WidgetTester tester, HomeLoadingClient client) async {
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
-  SharedPreferences.setMockInitialValues({});
-  final storage = await StorageService.init();
+  final storage = await initTestStorage();
   await storage.saveConfig(
     '''{"sites":[{"key":"owned","name":"Owned","type":1,"api":"https://owned.invalid/api"}],"lives":[{"name":"Owned live","url":"https://owned.invalid/live.m3u"}]}''',
   );
