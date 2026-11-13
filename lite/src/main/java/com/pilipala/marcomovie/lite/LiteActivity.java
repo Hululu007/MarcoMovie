@@ -1915,7 +1915,7 @@ public final class LiteActivity extends Activity {
         if (dead || syncInFlight || !isWebdavConfigured()) return;
         final String url = getPreferences(0).getString("webdav_url", "").trim();
         final String user = getPreferences(0).getString("webdav_user", "").trim();
-        final String pass = getPreferences(0).getString("webdav_pass", "");
+        final String pass = SecureStorage.getWebdavPass(this);
         if (url.length() == 0) return;
         syncInFlight = true;
         lastAutoPushMs = SystemClock.uptimeMillis();
@@ -2101,14 +2101,16 @@ public final class LiteActivity extends Activity {
                         | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
         passInput.setTextColor(0xffffffff);
         passInput.setHint("应用专用密码");
-        passInput.setText(getPreferences(0).getString("webdav_pass", ""));
+        passInput.setText(SecureStorage.getWebdavPass(this));
         page.addView(passInput);
 
         button(
                 "保存并立即同步",
                 new Runnable() {
                     public void run() {
-                        String u = urlInput.getText().toString().trim();
+                        final String u = urlInput.getText().toString().trim();
+                        final String user = userInput.getText().toString().trim();
+                        final String pass = passInput.getText().toString();
                         if (u.length() > 0) {
                             try {
                                 LiteSync.resolveWebdavFileUrl(u);
@@ -2117,17 +2119,42 @@ public final class LiteActivity extends Activity {
                                 return;
                             }
                         }
-                        getPreferences(0)
-                                .edit()
-                                .putString("webdav_url", u)
-                                .putString("webdav_user", userInput.getText().toString().trim())
-                                .putString("webdav_pass", passInput.getText().toString())
-                                .commit();
-                        if (u.length() > 0) {
-                            runBackgroundWebdavSync(false);
-                        } else {
-                            syncPage();
+                        final Runnable saveAction =
+                                new Runnable() {
+                                    public void run() {
+                                        SecureStorage.setWebdavPass(LiteActivity.this, pass);
+                                        getPreferences(0)
+                                                .edit()
+                                                .putString("webdav_url", u)
+                                                .putString("webdav_user", user)
+                                                .remove("webdav_pass")
+                                                .commit();
+                                        if (u.length() > 0) {
+                                            runBackgroundWebdavSync(false);
+                                        } else {
+                                            syncPage();
+                                        }
+                                    }
+                                };
+                        if (u.toLowerCase(Locale.ROOT).startsWith("http://")
+                                && pass.length() > 0) {
+                            new AlertDialog.Builder(LiteActivity.this)
+                                    .setTitle("明文传输风险提示")
+                                    .setMessage(
+                                            "您配置的 WebDAV 服务使用未加密的 HTTP 协议（http://），账号与应用密码将以明文在网络中传输，可能存在凭据泄露风险。建议使用 HTTPS 协议。\n\n是否确认继续保存？")
+                                    .setPositiveButton(
+                                            "继续保存",
+                                            new DialogInterface.OnClickListener() {
+                                                public void onClick(
+                                                        DialogInterface dialog, int which) {
+                                                    saveAction.run();
+                                                }
+                                            })
+                                    .setNegativeButton("取消", null)
+                                    .show();
+                            return;
                         }
+                        saveAction.run();
                     }
                 });
         button(

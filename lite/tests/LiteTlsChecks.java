@@ -48,6 +48,19 @@ public final class LiteTlsChecks {
             if (!unsupported.closed || !expected.getMessage().contains("TLS 1.2"))
                 throw new AssertionError("Unsupported socket must close with an actionable error");
         }
-        System.out.println("PASS 3 Lite TLS capability checks");
+        TrustManager[] tms = NetworkTls.getDefaultTrustManagers();
+        if (tms == null || tms.length == 0 || !(tms[0] instanceof X509TrustManager))
+            throw new AssertionError("Default trust managers must include X509TrustManager");
+        X509TrustManager tm = (X509TrustManager) tms[0];
+        boolean hasIsrg = false;
+        for (java.security.cert.X509Certificate cert : tm.getAcceptedIssuers()) {
+            if (cert.getSubjectDN().getName().contains("ISRG Root X1")) {
+                hasIsrg = true;
+                break;
+            }
+        }
+        if (!hasIsrg)
+            throw new AssertionError("Composite TrustManager must include embedded ISRG Root X1");
+        System.out.println("PASS 4 Lite TLS capability checks");
     }
 }

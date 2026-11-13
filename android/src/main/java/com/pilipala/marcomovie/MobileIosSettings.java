@@ -1116,6 +1116,25 @@ final class MobileIosSettings {
                                         }
                                     });
 
+                            a.gap(body, 6);
+                            boolean onlyHttps =
+                                    a.prefs.getBoolean(Prefs.ONLY_ALLOW_HTTPS_PLUGINS, false);
+                            addChoices(
+                                    a,
+                                    body,
+                                    "仅允许 HTTPS 插件",
+                                    new String[] {"停用", "启用"},
+                                    onlyHttps ? 1 : 0,
+                                    idx -> {
+                                        final boolean next = (idx == 1);
+                                        a.prefs
+                                                .edit()
+                                                .putBoolean(Prefs.ONLY_ALLOW_HTTPS_PLUGINS, next)
+                                                .apply();
+                                        a.closeEngines();
+                                        ctl.rerenderInPlace();
+                                    });
+
                             int threads = a.prefs.getInt(Prefs.SEARCH_THREADS, 6);
                             final int[] threadVals = {2, 4, 6};
                             int threadIdx = threads <= 2 ? 0 : (threads <= 4 ? 1 : 2);

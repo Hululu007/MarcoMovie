@@ -3790,6 +3790,18 @@ final class MobileShell {
                             a.prefs.edit().putBoolean(Prefs.EXPERIMENTAL_CSP, next).apply();
                             a.closeEngines();
                         });
+                final boolean onlyHttps = a.prefs.getBoolean(Prefs.ONLY_ALLOW_HTTPS_PLUGINS, false);
+                addSettingToggleCard(
+                        body,
+                        SettingIconView.ICON_PLUGIN_EXT,
+                        "仅允许 HTTPS 插件",
+                        "已开启 · 仅允许从 HTTPS 加载 Spider 插件",
+                        "已关闭 · 允许从 HTTP 镜像加载兼容插件",
+                        onlyHttps,
+                        next -> {
+                            a.prefs.edit().putBoolean(Prefs.ONLY_ALLOW_HTTPS_PLUGINS, next).apply();
+                            a.closeEngines();
+                        });
             } else if (settingsSubPage == 2) {
                 addSectionHeader(body, "播放器与解码器");
                 final int engine = a.prefs.getInt(Prefs.PLAYER_ENGINE, 0);

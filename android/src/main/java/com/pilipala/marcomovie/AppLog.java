@@ -39,6 +39,10 @@ final class AppLog {
         }
     }
 
+    static void w(String tag, String message) {
+        w(tag, message, null);
+    }
+
     static void w(String tag, String message, Throwable error) {
         record("W", tag, message, error);
         if (ANDROID_WARN != null) {

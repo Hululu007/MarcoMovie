@@ -594,7 +594,7 @@ final class CloudSyncDialog {
         }
         final String url = a.prefs.getString(Prefs.WEBDAV_URL, "").trim();
         final String user = a.prefs.getString(Prefs.WEBDAV_USER, "").trim();
-        final String pass = a.prefs.getString(Prefs.WEBDAV_PASS, "");
+        final String pass = SecureStorage.getWebdavPass(a);
         final boolean syncSubs = isSyncSubscriptionsEnabled(a);
         if (url.isEmpty()) {
             if (!silent) a.toast("请先填写 WebDAV 服务器地址");
@@ -803,8 +803,7 @@ final class CloudSyncDialog {
         a.gap(panel, 8);
 
         final EditText passInput =
-                styledInput(
-                        a, "WebDAV 密码 / 应用专用密码", a.prefs.getString(Prefs.WEBDAV_PASS, ""), true);
+                styledInput(a, "WebDAV 密码 / 应用专用密码", SecureStorage.getWebdavPass(a), true);
         passInput.setTag("cloud-sync-pass");
         panel.addView(passInput, new LinearLayout.LayoutParams(-1, -2));
         a.gap(panel, 8);
@@ -846,16 +845,25 @@ final class CloudSyncDialog {
                                 a.toast(ex.getMessage());
                                 return;
                             }
-                            saveWebdavPrefs(
-                                    a, urlInput, userInput, passInput, autoCheck, subsCheck);
-                            if (holder[0] != null) holder[0].dismiss();
-                            runWebdavSync(
-                                    a,
-                                    false,
+                            Runnable proceed =
                                     () -> {
-                                        if (onUpdated != null) onUpdated.run();
-                                        else a.refresh();
-                                    });
+                                        saveWebdavPrefs(
+                                                a, urlInput, userInput, passInput, autoCheck,
+                                                subsCheck);
+                                        if (holder[0] != null) holder[0].dismiss();
+                                        runWebdavSync(
+                                                a,
+                                                false,
+                                                () -> {
+                                                    if (onUpdated != null) onUpdated.run();
+                                                    else a.refresh();
+                                                });
+                                    };
+                            if (isCleartextHttpWithPassword(u, passInput.getText().toString())) {
+                                confirmCleartextHttpWarning(a, proceed);
+                            } else {
+                                proceed.run();
+                            }
                         });
         syncNowBtn.setBackground(a.bg(0xff0a84ff, 12));
         syncNowBtn.setTextColor(Color.WHITE);
@@ -868,11 +876,22 @@ final class CloudSyncDialog {
                         "仅保存配置",
                         "cloud-sync-save",
                         () -> {
-                            saveWebdavPrefs(
-                                    a, urlInput, userInput, passInput, autoCheck, subsCheck);
-                            a.toast("已保存多端同步配置");
-                            if (holder[0] != null) holder[0].dismiss();
-                            if (onUpdated != null) onUpdated.run();
+                            Runnable proceed =
+                                    () -> {
+                                        saveWebdavPrefs(
+                                                a, urlInput, userInput, passInput, autoCheck,
+                                                subsCheck);
+                                        a.toast("已保存多端同步配置");
+                                        if (holder[0] != null) holder[0].dismiss();
+                                        if (onUpdated != null) onUpdated.run();
+                                    };
+                            if (isCleartextHttpWithPassword(
+                                    urlInput.getText().toString().trim(),
+                                    passInput.getText().toString())) {
+                                confirmCleartextHttpWarning(a, proceed);
+                            } else {
+                                proceed.run();
+                            }
                         });
         subActions.addView(saveOnlyBtn, new LinearLayout.LayoutParams(0, a.dp(40), 1f));
         if (isConfigured(a)) {
@@ -882,6 +901,7 @@ final class CloudSyncDialog {
                             "清除云配置",
                             "cloud-sync-clear",
                             () -> {
+                                SecureStorage.clearWebdavPass(a);
                                 a.prefs
                                         .edit()
                                         .remove(Prefs.WEBDAV_URL)
@@ -1039,6 +1059,23 @@ final class CloudSyncDialog {
                 .apply();
     }
 
+    static boolean isCleartextHttpWithPassword(String url, String password) {
+        return url != null
+                && url.trim().toLowerCase(Locale.ROOT).startsWith("http://")
+                && password != null
+                && !password.isEmpty();
+    }
+
+    private static void confirmCleartextHttpWarning(MainActivity a, Runnable onConfirm) {
+        new AppDialog.Builder(a)
+                .setTitle("明文传输风险提示")
+                .setMessage(
+                        "您配置的 WebDAV 服务使用未加密的 HTTP 协议（http://），账号与应用密码将以明文在网络中传输，可能存在凭据泄露风险。建议使用 HTTPS 协议。\n\n是否确认继续保存？")
+                .setPositiveButton("继续保存", (dialog, which) -> onConfirm.run())
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     private static void saveWebdavPrefs(
             MainActivity a,
             EditText urlInput,
@@ -1046,11 +1083,13 @@ final class CloudSyncDialog {
             EditText passInput,
             CheckBox autoCheck,
             CheckBox subsCheck) {
+        String pass = passInput.getText().toString();
+        SecureStorage.setWebdavPass(a, pass);
         a.prefs
                 .edit()
                 .putString(Prefs.WEBDAV_URL, urlInput.getText().toString().trim())
                 .putString(Prefs.WEBDAV_USER, userInput.getText().toString().trim())
-                .putString(Prefs.WEBDAV_PASS, passInput.getText().toString())
+                .remove(Prefs.WEBDAV_PASS)
                 .putBoolean(Prefs.WEBDAV_AUTO, autoCheck.isChecked())
                 .putBoolean(Prefs.WEBDAV_SYNC_SUBS, subsCheck.isChecked())
                 .apply();

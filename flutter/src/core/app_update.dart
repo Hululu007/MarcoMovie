@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'ed25519.dart';
 
 class UpdateCancelled implements Exception {
   const UpdateCancelled();
@@ -28,6 +31,69 @@ class UpdateCancellation {
 }
 
 class AppUpdate {
+  /// Production Ed25519 public key (hex) for verifying update manifests.
+  static const String defaultUpdatePublicKeyHex =
+      'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+
+  /// Optional testing override for unit tests.
+  @visibleForTesting
+  static String? debugPublicKeyHexOverride;
+
+  static String canonicalizeJson(dynamic obj) {
+    if (obj is Map) {
+      final sortedKeys = obj.keys.map((k) => k.toString()).toList()..sort();
+      final parts = <String>[];
+      for (final k in sortedKeys) {
+        parts.add('${jsonEncode(k)}:${canonicalizeJson(obj[k])}');
+      }
+      return '{${parts.join(',')}}';
+    } else if (obj is List) {
+      return '[${obj.map(canonicalizeJson).join(',')}]';
+    } else if (obj is String) {
+      return jsonEncode(obj);
+    } else if (obj is bool) {
+      return obj ? 'true' : 'false';
+    } else if (obj == null) {
+      return 'null';
+    } else if (obj is num) {
+      return obj.toString();
+    }
+    return jsonEncode(obj);
+  }
+
+  static bool verifyManifestSignature(
+    Map<String, dynamic> body, {
+    String? publicKeyHex,
+  }) {
+    final sigB64 = body['signature'] as String? ?? body['sig'] as String?;
+    if (sigB64 == null || sigB64.isEmpty) {
+      return false;
+    }
+    final payload = body.containsKey('payload') && body['payload'] is Map
+        ? body['payload']
+        : (Map<String, dynamic>.from(body)
+          ..remove('signature')
+          ..remove('sig'));
+    final canonical = canonicalizeJson(payload);
+    final messageBytes = Uint8List.fromList(utf8.encode(canonical));
+    try {
+      final sigBytes = base64Decode(sigB64);
+      final pubHex =
+          publicKeyHex ?? debugPublicKeyHexOverride ?? defaultUpdatePublicKeyHex;
+      final pubBytes = Uint8List(pubHex.length ~/ 2);
+      for (var i = 0; i < pubBytes.length; i++) {
+        pubBytes[i] = int.parse(pubHex.substring(i * 2, i * 2 + 2), radix: 16);
+      }
+      return Ed25519.verify(
+        publicKey: pubBytes,
+        message: messageBytes,
+        signature: sigBytes,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
   final String version;
   final String notes;
   final Uri? windowsUrl;
@@ -270,6 +336,10 @@ class AppUpdate {
           if (body is! Map<String, dynamic> || body['prerelease'] == true) {
             continue;
           }
+          if (!verifyManifestSignature(body)) {
+            throw const FormatException(
+                '更新清单数字签名无效或缺失 (Ed25519 signature missing or invalid)');
+          }
           final release = parse(body, platform: platform);
           if (platform == 'windows' && release.windowsUrl == null ||
               platform == 'ios' && release.iosUrl == null) {
@@ -277,6 +347,8 @@ class AppUpdate {
           }
           return release;
         } on UpdateCancelled {
+          rethrow;
+        } on FormatException {
           rethrow;
         } catch (_) {/* Try the second release endpoint. */} finally {
           stop();

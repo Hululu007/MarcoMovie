@@ -2,6 +2,10 @@ package com.pilipala.marcomovie;
 
 import android.app.Application;
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.os.Handler;
+import android.os.Looper;
+import android.widget.Toast;
 import dalvik.system.DexClassLoader;
 import com.github.catvod.crawler.Spider;
 import java.io.*;
@@ -1141,6 +1145,28 @@ public final class CspEngine implements SourceEngine {
             return localFile;
         }
         if (!Cms.isHttp(address)) throw new IOException("spider 需要 HTTP(S) 插件地址");
+        SharedPreferences prefs = app.getSharedPreferences(Prefs.FILE, Context.MODE_PRIVATE);
+        boolean onlyHttps = prefs.getBoolean(Prefs.ONLY_ALLOW_HTTPS_PLUGINS, false);
+        boolean isCleartextHttp = address.toLowerCase(Locale.ROOT).startsWith("http://");
+        if (onlyHttps && isCleartextHttp) {
+            throw new IOException(
+                    "安全策略已阻止加载明文 HTTP 插件，请使用 HTTPS 链接或在设置中关闭「仅允许 HTTPS 插件」: " + address);
+        }
+        if (isCleartextHttp && expected.isEmpty()) {
+            AppLog.w("CspEngine", "安全警告：正在从明文 HTTP 地址加载未校验 MD5 的 Spider 插件: " + address);
+            new Handler(Looper.getMainLooper())
+                    .post(
+                            () -> {
+                                try {
+                                    Toast.makeText(
+                                                    app,
+                                                    "安全提示：正在从明文 HTTP 地址加载未校验的插件 (" + address + ")",
+                                                    Toast.LENGTH_LONG)
+                                            .show();
+                                } catch (Throwable ignored) {
+                                }
+                            });
+        }
         File folder = new File(app.getFilesDir(), "csp");
         if (!folder.exists() && !folder.mkdirs()) throw new IOException("插件目录不可用");
         String key = hex(declaration.getBytes("UTF-8"));
@@ -1200,6 +1226,9 @@ public final class CspEngine implements SourceEngine {
                             URL target = new URL(next, loc);
                             if (!Cms.isHttp(target.toString()))
                                 throw new IOException("插件重定向协议不受支持");
+                            if (onlyHttps && target.getProtocol().equalsIgnoreCase("http")) {
+                                throw new IOException("安全策略已阻止插件重定向至明文 HTTP 地址: " + target);
+                            }
                             if (target.getUserInfo() != null)
                                 throw new IOException("插件重定向不能注入登录凭据");
                             if (!Cms.sameOrigin(next.toString(), target.toString()))

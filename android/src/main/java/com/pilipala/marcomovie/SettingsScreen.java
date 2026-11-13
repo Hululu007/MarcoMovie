@@ -770,6 +770,7 @@ final class SettingsScreen {
                     () -> SourcePicker.showWarehouses(a));
         }
         toggle("启用来源扩展", Prefs.EXPERIMENTAL_CSP, true, a::closeEngines);
+        toggle("仅允许 HTTPS 插件", Prefs.ONLY_ALLOW_HTTPS_PLUGINS, false, a::closeEngines);
         link(
                 "网盘与账号",
                 "网盘扫码登录、凭据与网盘顺序（由配置提供）",
