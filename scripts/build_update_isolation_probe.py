@@ -28,22 +28,41 @@ def main():
     (OUT / 'dex').mkdir(exist_ok=True)
     attrs = ET.parse(ROOT / 'android/src/main/AndroidManifest.xml').getroot().attrib
     ns = '{http://schemas.android.com/apk/res/android}'
-    parts = attrs[ns + 'versionName'].split('.')
-    version = '.'.join(parts[:2] + [str(int(parts[2]) + 1)])
-    code = int(attrs[ns + 'versionCode']) + 1
-    for name, edition in [('tv', 'tv'), ('mobile', 'mobile'), ('missing', None), ('unknown', 'unknown')]:
-        metadata = '' if edition is None else f'<meta-data android:name="com.pilipala.marcomovie.EDITION" android:value="{edition}"/>'
-        manifest = OUT / (name + '.xml')
-        manifest.write_text(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.pilipala.marcomovie" android:versionCode="{code}" android:versionName="{version}"><uses-sdk android:minSdkVersion="23" android:targetSdkVersion="28"/><application android:label="Never install">{metadata}</application></manifest>', encoding='utf-8')
-        unsigned = OUT / (name + '-unsigned.apk')
-        run(exe(SDK, 'aapt2'), 'link', '-o', unsigned, '--manifest', manifest, '-I', ANDROID)
-        sign(unsigned, OUT / 'assets' / (name + '.apk'))
-        if name in ('tv', 'mobile'):
-            sign(unsigned, OUT / 'assets' / ('wrong-signer-' + name + '.apk'), wrong=True)
+    default_version = attrs[ns + 'versionName']
+    default_code = int(attrs[ns + 'versionCode'])
+    edition_versions_file = ROOT / 'android/edition-versions.json'
+    edition_versions = json.loads(edition_versions_file.read_text(encoding='utf-8')) if edition_versions_file.exists() else {}
+
+    def next_version(ver):
+        parts = ver.split('.')
+        return '.'.join(parts[:2] + [str(int(parts[2]) + 1)])
+
+    for target in ('tv', 'mobile'):
+        meta = edition_versions.get('android-' + target, {})
+        version = next_version(meta.get('versionName', default_version))
+        code = int(meta.get('versionCode', default_code)) + 1
+        opposite_edition = 'mobile' if target == 'tv' else 'tv'
+        variants = [
+            (target, target, False),
+            ('wrong-signer-' + target, target, True),
+            ('opposite-' + target, opposite_edition, False),
+            ('missing-' + target, None, False),
+            ('unknown-' + target, 'unknown', False),
+        ]
+        for name, edition, wrong in variants:
+            metadata = '' if edition is None else f'<meta-data android:name="com.pilipala.marcomovie.EDITION" android:value="{edition}"/>'
+            manifest = OUT / (name + '.xml')
+            manifest.write_text(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.pilipala.marcomovie" android:versionCode="{code}" android:versionName="{version}"><uses-sdk android:minSdkVersion="23" android:targetSdkVersion="28"/><application android:label="Never install">{metadata}</application></manifest>', encoding='utf-8')
+            unsigned = OUT / (name + '-unsigned.apk')
+            run(exe(SDK, 'aapt2'), 'link', '-o', unsigned, '--manifest', manifest, '-I', ANDROID)
+            sign(unsigned, OUT / 'assets' / (name + '.apk'), wrong=wrong)
     # Verify the mirror's binary manifest reader against real aapt2 output too.
     for edition in ('tv', 'mobile'):
+        meta = edition_versions.get('android-' + edition, {})
+        expected_version = next_version(meta.get('versionName', default_version))
+        expected_code = int(meta.get('versionCode', default_code)) + 1
         identity = apk_identity((OUT / 'assets' / (edition + '.apk')).read_bytes())
-        assert identity['edition'] == edition and identity['versionCode'] == code and identity['versionName'] == version
+        assert identity['edition'] == edition and identity['versionCode'] == expected_code and identity['versionName'] == expected_version
     manifest = OUT / 'AndroidManifest.xml'
     manifest.write_text('<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.pilipala.marcomovie.test"><uses-sdk android:minSdkVersion="23" android:targetSdkVersion="28"/><application/><instrumentation android:name="com.pilipala.marcomovie.UpdateIsolationProbe" android:targetPackage="com.pilipala.marcomovie"/></manifest>', encoding='utf-8')
     run(exe(SDK, 'aapt2'), 'link', '-o', OUT / 'probe-resources.apk', '--manifest', manifest, '-I', ANDROID, '-A', OUT / 'assets')

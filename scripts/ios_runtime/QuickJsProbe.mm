@@ -105,7 +105,8 @@ NSArray *runQuickJsProbe(NSString *assets) {
     NSDictionary *htmlExpected=htmlExpectedData?[NSJSONSerialization JSONObjectWithData:htmlExpectedData options:0 error:nil]:nil;
     NSUInteger expectedCount=[contract isEqualToString:@"html"]?21:[contract isEqualToString:@"json"]?28:[contract isEqualToString:@"io"]?29:65;
     if(!htmlSource||htmlExpected.count!=expectedCount) @throw [NSException exceptionWithName:@"QuickJsProbe" reason:[contract stringByAppendingString:@"_contract_fixture_missing"] userInfo:nil];
-    jsSetOperationTimeout(rt,8000);
+    int64_t oracleBudgetMs=[contract isEqualToString:@"package"]?30000:15000;
+    jsSetOperationTimeout(rt,oracleBudgetMs);
     // Keep the oracle's original UTF-8 text: Foundation's parsed string path
     // removes a leading U+FEFF inside an expected value on iOS. Re-serializing
     // that dictionary corrupts the BOM error case before the comparison.
@@ -116,11 +117,12 @@ NSArray *runQuickJsProbe(NSString *assets) {
       if(![packageFixture[@"modules"] isKindOfClass:NSDictionary.class]||![packageFixture[@"packageData"] isKindOfClass:NSDictionary.class])
         @throw [NSException exceptionWithName:@"QuickJsProbe" reason:@"python_package_fixture_missing" userInfo:nil];
     }
-    evaluate(ctx,[NSString stringWithFormat:@"globalThis.htmlDone=false;globalThis.htmlError='';globalThis.htmlSpider=createPythonSpider(%@,%@,null,%@);Promise.resolve(htmlSpider.init('')).then(()=>htmlSpider.home(true)).then(value=>{globalThis.htmlResult=value;htmlDone=true;}).catch(error=>{htmlError=String(error);htmlDone=true;});globalThis.htmlExpected=%@;",literal(htmlSource),literal(packageFixture[@"modules"]?:@{}),packageFixture[@"packageData"]?literal(packageFixture[@"packageData"]):@"null",htmlExpectedText],JS_EVAL_TYPE_GLOBAL,@"python-oracle.js");
-    until=[NSDate dateWithTimeIntervalSinceNow:8];
+    evaluate(ctx,[NSString stringWithFormat:@"globalThis.htmlDone=false;globalThis.htmlError='';globalThis.htmlSpider=createPythonSpider(%@,%@,null,%@);Sk.execLimit=%lld;Promise.resolve(htmlSpider.init('')).then(()=>htmlSpider.home(true)).then(value=>{globalThis.htmlResult=value;htmlDone=true;}).catch(error=>{htmlError=String(error);htmlDone=true;});globalThis.htmlExpected=%@;",literal(htmlSource),literal(packageFixture[@"modules"]?:@{}),packageFixture[@"packageData"]?literal(packageFixture[@"packageData"]):@"null",(long long)oracleBudgetMs,htmlExpectedText],JS_EVAL_TYPE_GLOBAL,@"python-oracle.js");
+    until=[NSDate dateWithTimeIntervalSinceNow:(oracleBudgetMs/1000.0)];
     while(!boolean(ctx,@"htmlDone")&&until.timeIntervalSinceNow>0){
       while(jsExecutePendingJob(rt)>0){} [NSThread sleepForTimeInterval:.001];
     }
+    jsSetOperationTimeout(rt,15000);
     if([contract isEqualToString:@"json"]) [checks addObject:@{@"name":@"python_json_oracle_utf8_preserved",@"passed":@(boolean(ctx,@"htmlExpected.errors[11][0]==='\\ufeff{}'"))}];
     for(NSString *key in htmlExpected){
       NSString *condition=[NSString stringWithFormat:@"htmlDone&&!htmlError&&((actual,expected)=>typeof expected==='object'&&!Array.isArray(expected)&&expected!==null?Object.keys(expected).every(k=>JSON.stringify(actual[k])===JSON.stringify(expected[k])):JSON.stringify(actual)===JSON.stringify(expected))(htmlResult[%@],htmlExpected[%@])",literal(key),literal(key)];
@@ -130,6 +132,8 @@ NSArray *runQuickJsProbe(NSString *assets) {
       [checks addObject:check];
     }
     }
+    jsSetOperationTimeout(rt,8000);
+    evaluate(ctx,@"Sk.execLimit=8000;",JS_EVAL_TYPE_GLOBAL,@"python-restore-exec-limit.js");
     // Start this separate operation with its own budget, as the production host does.
     jsSetOperationTimeout(rt,8000);
     NSString *proxySource=@"from base.spider import Spider as Base\nclass Spider(Base):\n def init(self, ext): self.ticket='retained'\n def homeContent(self, filter): return [self.getProxyUrl({'ticket':'a b'}), self.proxyUrl({'ticket':'new'})]\n def localProxy(self, params):\n  assert self.ticket == 'retained' and params['range'] == 'bytes=1-2'\n  return [200,'application/octet-stream',bytes([0,255,128,65]),{'X-State':self.ticket}]\n";

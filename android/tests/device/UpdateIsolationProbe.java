@@ -149,6 +149,7 @@ public final class UpdateIsolationProbe extends Instrumentation {
             boolean mobile = UpdatePolicy.mobileEdition(actual);
             File own = fixture(mobile ? "mobile" : "tv");
             File other = fixture(mobile ? "tv" : "mobile");
+            File opposite = fixture("opposite-" + actual);
             JSONObject ownFeed = feed(own, mobile), otherFeed = feed(other, !mobile);
             UpdateManager.verifyApk(c, own, new UpdateManager.Release(ownFeed, "stable", mobile));
             check("same_edition_same_signer_apk_accepted", true);
@@ -157,11 +158,11 @@ public final class UpdateIsolationProbe extends Instrumentation {
                     () ->
                             UpdateManager.verifyApk(
                                     c,
-                                    other,
+                                    opposite,
                                     new UpdateManager.Release(
-                                            feed(other, mobile), "stable", mobile)));
+                                            feed(opposite, mobile), "stable", mobile)));
             for (String name : new String[] {"missing", "unknown", "wrong-signer"}) {
-                File bad = fixture(name.equals("wrong-signer") ? name + "-" + actual : name);
+                File bad = fixture(name + "-" + actual);
                 rejected(
                         name + "_apk_rejected",
                         () ->

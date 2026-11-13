@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,8 +9,7 @@ import 'package:marco_movie/ui/player_screen.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const String kTestMpvPath =
-    r'D:\Marco Movie\verification\private\fixes-20261107\build\flutter\build\windows\x64\runner\Release\libmpv-2.dll';
+final String? testMpvLibrary = Platform.environment['MARCOMOVIE_TEST_MPV'];
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -21,7 +21,6 @@ void main() {
       if (call.method == 'isFullScreen') return false;
       return null;
     });
-    MediaKit.ensureInitialized(libmpv: kTestMpvPath);
   });
 
   tearDownAll(() {
@@ -31,6 +30,9 @@ void main() {
 
   group('PlayerScreen Subscription Lifecycle', () {
     late StorageService storage;
+    setUpAll(() {
+      MediaKit.ensureInitialized(libmpv: testMpvLibrary);
+    });
     const site = CmsSite(
       key: 'test_site',
       name: '测试源',
@@ -115,5 +117,8 @@ void main() {
         debugDefaultTargetPlatformOverride = null;
       }
     });
-  });
+  },
+      skip: testMpvLibrary == null
+          ? 'Set MARCOMOVIE_TEST_MPV to the built desktop library'
+          : false);
 }

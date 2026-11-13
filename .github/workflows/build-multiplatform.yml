@@ -212,7 +212,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $releaseDir = "build/windows/x64/runner/Release"
           $env:MARCOMOVIE_TEST_MPV = "$PWD/$releaseDir/libmpv-2.dll"
-          flutter test test/native_cloud_playback_test.dart
+          flutter test test/native_cloud_playback_test.dart test/challenger_empirical_m2_test.dart test/player_stream_cleanup_test.dart
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Remove-Item Env:MARCOMOVIE_TEST_MPV
           python ../scripts/prepare_catpaw_runtime.py --platform windows --destination "$releaseDir/data/node"

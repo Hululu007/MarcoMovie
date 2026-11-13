@@ -54,7 +54,8 @@ jobs:
           target: android-tv
           arch: x86
           profile: tv_1080p
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -skin 1920x1080
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot -cores 2 -memory 2048 -skin 1920x1080
           disable-animations: true
           script: python scripts/run_api23_probes.py
       - uses: actions/upload-artifact@v4
