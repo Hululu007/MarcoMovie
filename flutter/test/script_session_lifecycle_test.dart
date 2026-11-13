@@ -223,8 +223,19 @@ export default {
         arguments: [],
         sessionKey: 'closing',
       );
-      final active = expectLater(call(), throwsA(isA<StateError>()));
-      await arrived.future;
+      final rawActive = call();
+      final active = expectLater(rawActive, throwsA(isA<StateError>()));
+      await Future.any([
+        arrived.future,
+        rawActive.then<void>(
+          (_) {},
+          onError: (Object error, StackTrace stackTrace) {
+            if (!arrived.isCompleted) {
+              Error.throwWithStackTrace(error, stackTrace);
+            }
+          },
+        ),
+      ]);
       final queued = expectLater(call(), throwsA(isA<StateError>()));
       await CmsClient.closeScriptSessions().timeout(const Duration(seconds: 3));
       await Future.wait([active, queued]).timeout(const Duration(seconds: 3));
@@ -293,7 +304,18 @@ export default {
           sessionKey: 'busy-$i',
         ),
       );
-      await full.future;
+      await Future.any([
+        full.future,
+        for (final callFuture in active)
+          callFuture.then<void>(
+            (_) {},
+            onError: (Object error, StackTrace stackTrace) {
+              if (!full.isCompleted) {
+                Error.throwWithStackTrace(error, stackTrace);
+              }
+            },
+          ),
+      ]);
       bool extraFinished = false;
       final extra =
           JsSourceHost.invoke(

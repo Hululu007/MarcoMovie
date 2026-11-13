@@ -356,8 +356,20 @@ void main() {
       final pending = call('home', [
         {'path': '/slow', 'options': {}},
       ], cancellation: cancel);
-      while (requests.isEmpty) {
+      var failedBeforeRequest = false;
+      unawaited(
+        pending.then<void>(
+          (_) {},
+          onError: (Object _) {
+            failedBeforeRequest = true;
+          },
+        ),
+      );
+      while (requests.isEmpty && !failedBeforeRequest) {
         await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      if (failedBeforeRequest && requests.isEmpty) {
+        await pending;
       }
       cancel.complete();
       await expectLater(pending, throwsA(anything));

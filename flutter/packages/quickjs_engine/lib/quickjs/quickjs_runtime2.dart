@@ -53,7 +53,12 @@ class QuickJsRuntime2 extends JavascriptRuntime {
     this.memoryLimit,
     this.hostPromiseRejectionHandler,
   }) {
-    this.init();
+    try {
+      this.init();
+    } on Object {
+      port.close();
+      rethrow;
+    }
   }
 
   _ensureEngine() {

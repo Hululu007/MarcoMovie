@@ -4,9 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/cms_client.dart';
 import 'package:marco_movie/core/models.dart';
-import 'package:marco_movie/core/storage_service.dart';
 import 'package:marco_movie/ui/detail_screen.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'test_storage_helper.dart';
 
 class DetailLoadingClient extends CmsClient {
   final detail = Completer<(CmsSite, CmsVideo)>();
@@ -49,8 +48,7 @@ void main() {
   testWidgets('episode loading takes priority over related-season discovery', (
     tester,
   ) async {
-    SharedPreferences.setMockInitialValues({});
-    final storage = await StorageService.init();
+    final storage = await initTestStorage();
     final client = DetailLoadingClient();
     await tester.pumpWidget(
       MaterialApp(
@@ -82,8 +80,7 @@ void main() {
   testWidgets(
     'leaving details suppresses delayed season searches and late detail results',
     (tester) async {
-      SharedPreferences.setMockInitialValues({});
-      final storage = await StorageService.init();
+      final storage = await initTestStorage();
       final client = DetailLoadingClient();
       await tester.pumpWidget(
         MaterialApp(

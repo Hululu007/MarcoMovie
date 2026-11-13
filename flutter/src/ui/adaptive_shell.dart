@@ -167,9 +167,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     GlassworkBackdrop.intensity.value = widget.storage.glassBlurStrength;
     widget.storage.watchHistoryRevision.addListener(_onWatchHistoryRevision);
     widget.storage.historyCorruptionNotifier.addListener(_onHistoryCorruption);
+    widget.storage.subscriptionsCorruptionNotifier.addListener(
+      _onSubscriptionsCorruption,
+    );
     if (widget.storage.isHistoryCorrupted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _onHistoryCorruption();
+      });
+    }
+    if (widget.storage.isSubscriptionsCorrupted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _onSubscriptionsCorruption();
       });
     }
     _reloadSavedConfig();
@@ -280,6 +288,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
 
+  void _onSubscriptionsCorruption() {
+    if (!mounted || !widget.storage.isSubscriptionsCorrupted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !widget.storage.consumeSubscriptionsCorruptionNotice()) {
+        return;
+      }
+      _showAppleNotice(
+        '订阅数据异常',
+        '检测到本地订阅文件读取或解析异常，已自动隔离备份并开启写保护以防止覆盖原数据。',
+      );
+    });
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
@@ -303,16 +324,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (widget.storage != oldWidget.storage) {
       oldWidget.storage.watchHistoryRevision.removeListener(_onWatchHistoryRevision);
       oldWidget.storage.historyCorruptionNotifier.removeListener(_onHistoryCorruption);
+      oldWidget.storage.subscriptionsCorruptionNotifier.removeListener(
+        _onSubscriptionsCorruption,
+      );
       widget.storage.watchHistoryRevision.addListener(_onWatchHistoryRevision);
       widget.storage.historyCorruptionNotifier.addListener(_onHistoryCorruption);
+      widget.storage.subscriptionsCorruptionNotifier.addListener(
+        _onSubscriptionsCorruption,
+      );
       _cachedWatchHistory = widget.storage.getWatchHistory();
+      if (widget.storage.isSubscriptionsCorrupted) {
+        _onSubscriptionsCorruption();
+      }
     }
   }
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.storage.subscriptionsCorruptionNotifier.removeListener(
+      _onSubscriptionsCorruption,
+    );
     widget.storage.historyCorruptionNotifier.removeListener(_onHistoryCorruption);
     widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryRevision);
+    unawaited(widget.storage.flushPendingHistory());
     widget.storage.cancelPendingAutoSync();
     if (_windowListenerAttached) {
       windowManager.removeListener(this);

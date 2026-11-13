@@ -3,19 +3,17 @@ import 'package:http/testing.dart';
 import 'package:marco_movie/ui/source_choice_sliver.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:marco_movie/core/cms_client.dart';
-import 'package:marco_movie/core/storage_service.dart';
 import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:marco_movie/ui/apple_theme.dart';
+import 'test_storage_helper.dart';
 
 Future<void> openPrivacyUnlock(WidgetTester tester) async {
   tester.view.physicalSize = const Size(390, 844);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
-  SharedPreferences.setMockInitialValues({});
-  final storage = await StorageService.init();
+  final storage = await initTestStorage();
   await storage.setPrivacyPassword('1234');
   await storage.saveConfig(
     '{"sites":[{"key":"test","name":"测试源","type":1,"api":"https://source.example/api"}]}',
@@ -107,8 +105,7 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    SharedPreferences.setMockInitialValues({});
-    final storage = await StorageService.init();
+    final storage = await initTestStorage();
     await tester.pumpWidget(
       MaterialApp(
         home: AdaptiveShell(storage: storage, client: CmsClient()),
@@ -148,8 +145,7 @@ void main() {
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
-      SharedPreferences.setMockInitialValues({});
-      final storage = await StorageService.init();
+      final storage = await initTestStorage();
       await storage.saveConfig(
         '{"sites":[{"key":"long","name":"很长的线路名称高清影视完整显示","type":1,"api":"https://source.example/api"},{"key":"pending","name":"未移植测试线路","type":3,"api":"csp_TestPendingGuard","group":"扩展分组"}]}',
       );
@@ -195,7 +191,7 @@ void main() {
       await tester.enterText(find.byType(EditableText).first, '未移植');
       await tester.pumpAndSettle();
       expect(find.text('未移植测试线路'), findsOneWidget);
-      expect(find.text('当前设备未适配 (1)'), findsOneWidget);
+      expect(find.text('未适配'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     });
@@ -205,8 +201,7 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    SharedPreferences.setMockInitialValues({});
-    final storage = await StorageService.init();
+    final storage = await initTestStorage();
     await storage.saveConfig(
       '{"sites":[{"key":"test","name":"测试源","type":1,"api":"https://source.example/api"}]}',
     );
