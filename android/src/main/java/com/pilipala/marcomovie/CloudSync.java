@@ -4,21 +4,31 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.ref.WeakReference;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
+import okhttp3.ResponseBody;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -40,6 +50,15 @@ final class CloudSync {
     static final int MAX_SYNC_BYTES = 8 * 1024 * 1024;
     private static final char[] BASE64_ALPHABET =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".toCharArray();
+    static final OkHttpClient MKCOL_CLIENT =
+            new OkHttpClient.Builder()
+                    .connectTimeout(10, TimeUnit.SECONDS)
+                    .readTimeout(10, TimeUnit.SECONDS)
+                    .followRedirects(false)
+                    .build();
+    private static final Set<String> NO_CONDITIONAL_WRITE_HOSTS =
+            Collections.synchronizedSet(new HashSet<>());
+    private static final ThreadLocal<ExecutorService> ACTIVE_SERIAL_EXECUTOR = new ThreadLocal<>();
 
     private CloudSync() {}
 
@@ -51,6 +70,231 @@ final class CloudSync {
         String exportLocalPayload() throws Exception;
 
         MergeResult applyMergedPayload(String remoteMergedPayloadJson) throws Exception;
+    }
+
+    interface LocalStore {
+        String readHistoryJson();
+
+        String readFavoritesJson();
+
+        String readTombstonesJson();
+
+        void writeMerged(
+                String historyJson,
+                String favoritesJson,
+                String tombstonesJson,
+                MergeResult result);
+    }
+
+    interface DelayScheduler {
+        void postDelayed(Runnable task, long delayMs);
+
+        void removeCallbacks(Runnable task);
+    }
+
+    interface CredentialLoader {
+        String loadPassword() throws Exception;
+    }
+
+    /** Tracks auto-push attempt timestamps and exponential failure backoff (1, 2, 4, 8 -> 15m). */
+    static final class AutoPushTracker {
+        static final long NORMAL_MIN_INTERVAL_MS = 5 * 60 * 1000L;
+        static final long IMMEDIATE_DEBOUNCE_MS = 2500L;
+        static final long READY_DEBOUNCE_MS = 3000L;
+        static final long BASE_BACKOFF_MS = 60 * 1000L;
+        static final long MAX_BACKOFF_MS = 15 * 60 * 1000L;
+
+        private long lastAutoPushMs;
+        private int consecutiveFailures;
+
+        static long backoffMsForFailures(int failures) {
+            if (failures <= 0) return 0L;
+            int shift = Math.min(failures - 1, 4);
+            return Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS << shift);
+        }
+
+        synchronized void onAttemptStart(long nowMs) {
+            lastAutoPushMs = nowMs;
+        }
+
+        synchronized void onSuccess(long nowMs) {
+            lastAutoPushMs = nowMs;
+            consecutiveFailures = 0;
+        }
+
+        synchronized void onFailure(long nowMs) {
+            if (lastAutoPushMs <= 0L || nowMs > lastAutoPushMs) {
+                lastAutoPushMs = nowMs;
+            }
+            consecutiveFailures++;
+        }
+
+        synchronized void resetBackoff() {
+            consecutiveFailures = 0;
+        }
+
+        synchronized void resetAllForTest() {
+            lastAutoPushMs = 0L;
+            consecutiveFailures = 0;
+        }
+
+        synchronized long lastAutoPushMs() {
+            return lastAutoPushMs;
+        }
+
+        synchronized int consecutiveFailures() {
+            return consecutiveFailures;
+        }
+
+        synchronized long computeDelayMs(long nowMs, boolean immediate) {
+            if (consecutiveFailures > 0) {
+                long backoff = backoffMsForFailures(consecutiveFailures);
+                long elapsed = lastAutoPushMs > 0L ? Math.max(0L, nowMs - lastAutoPushMs) : backoff;
+                if (elapsed < backoff) {
+                    return backoff - elapsed;
+                }
+                return immediate ? IMMEDIATE_DEBOUNCE_MS : READY_DEBOUNCE_MS;
+            }
+            if (immediate) {
+                return IMMEDIATE_DEBOUNCE_MS;
+            }
+            if (lastAutoPushMs > 0L) {
+                long elapsed = Math.max(0L, nowMs - lastAutoPushMs);
+                if (elapsed < NORMAL_MIN_INTERVAL_MS) {
+                    return NORMAL_MIN_INTERVAL_MS - elapsed;
+                }
+            }
+            return READY_DEBOUNCE_MS;
+        }
+    }
+
+    /**
+     * Coordinates single-threaded background sync execution, owner-scoped UI auto-push cancellation,
+     * and un-cancellable exit pushes.
+     */
+    static final class SyncRuntime {
+        final ExecutorService syncExec =
+                Executors.newSingleThreadExecutor(
+                        r -> {
+                            Thread t = new Thread(r, "marco-cloud-sync");
+                            t.setDaemon(true);
+                            return t;
+                        });
+        final AutoPushTracker tracker = new AutoPushTracker();
+        private DelayScheduler pendingScheduler;
+        private Runnable pendingCallback;
+        private WeakReference<Object> pendingOwnerRef;
+
+        synchronized void scheduleOwned(
+                Object owner, DelayScheduler scheduler, long delayMs, final Runnable action) {
+            if (pendingCallback != null && pendingScheduler != null) {
+                pendingScheduler.removeCallbacks(pendingCallback);
+            }
+            final WeakReference<Object> ownerRef = new WeakReference<>(owner);
+            pendingOwnerRef = ownerRef;
+            pendingScheduler = scheduler;
+            Runnable wrapper =
+                    new Runnable() {
+                        @Override
+                        public void run() {
+                            synchronized (SyncRuntime.this) {
+                                if (pendingCallback == this) {
+                                    pendingCallback = null;
+                                    pendingOwnerRef = null;
+                                    pendingScheduler = null;
+                                }
+                            }
+                            action.run();
+                        }
+                    };
+            pendingCallback = wrapper;
+            scheduler.postDelayed(wrapper, delayMs);
+        }
+
+        synchronized boolean cancelOwned(Object owner) {
+            if (pendingCallback == null) return false;
+            Object currentOwner = pendingOwnerRef == null ? null : pendingOwnerRef.get();
+            if (owner != null && currentOwner != null && currentOwner != owner) {
+                return false;
+            }
+            if (pendingScheduler != null) {
+                pendingScheduler.removeCallbacks(pendingCallback);
+            }
+            pendingCallback = null;
+            pendingOwnerRef = null;
+            pendingScheduler = null;
+            return true;
+        }
+
+        Future<MergeResult> submitExitPush(
+                final String rawUrl,
+                final String username,
+                final CredentialLoader passwordLoader,
+                final MergeCallback merger) {
+            return syncExec.submit(
+                    () -> {
+                        tracker.onAttemptStart(System.currentTimeMillis());
+                        try {
+                            String pass =
+                                    passwordLoader != null ? passwordLoader.loadPassword() : "";
+                            MergeResult res = syncWebdav(rawUrl, username, pass, merger);
+                            tracker.onSuccess(System.currentTimeMillis());
+                            return res;
+                        } catch (Exception e) {
+                            tracker.onFailure(System.currentTimeMillis());
+                            throw e;
+                        }
+                    });
+        }
+    }
+
+    static MergeResult mergeSerial(
+            final ExecutorService serialExecutor,
+            final LocalStore store,
+            final List<SubscriptionItem> localSubscriptions,
+            final boolean syncSubscriptions,
+            final String remotePayloadJson,
+            final long now)
+            throws Exception {
+        Callable<MergeResult> task =
+                () -> {
+                    ExecutorService prev = ACTIVE_SERIAL_EXECUTOR.get();
+                    ACTIVE_SERIAL_EXECUTOR.set(serialExecutor);
+                    try {
+                        String localHist = store.readHistoryJson();
+                        String localFav = store.readFavoritesJson();
+                        String localTomb = store.readTombstonesJson();
+                        MergeResult res =
+                                merge(
+                                        localHist,
+                                        localFav,
+                                        localTomb,
+                                        localSubscriptions,
+                                        syncSubscriptions,
+                                        remotePayloadJson,
+                                        now);
+                        store.writeMerged(
+                                res.historyJson, res.favoritesJson, res.tombstonesJson, res);
+                        return res;
+                    } finally {
+                        ACTIVE_SERIAL_EXECUTOR.set(prev);
+                    }
+                };
+        if (serialExecutor == null || ACTIVE_SERIAL_EXECUTOR.get() == serialExecutor) {
+            return task.call();
+        }
+        try {
+            return serialExecutor.submit(task).get(15, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception) throw (Exception) cause;
+            throw new IOException("串行合并写入失败", cause);
+        } catch (TimeoutException e) {
+            throw new IOException("串行合并写入超时 (15s)", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("串行合并写入中断", e);
+        }
     }
 
     /** Public subscription item synchronized across devices in {@code marco-movie-sync} v2. */
@@ -305,7 +549,8 @@ final class CloudSync {
                     long ts = obj.optLong(k, 0L);
                     if (!k.isEmpty() && ts > 0L) t.stamps.put(k, ts);
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                AppLog.w("CloudSync", "Failed to parse tombstones JSON", e);
             }
             return t;
         }
@@ -323,7 +568,8 @@ final class CloudSync {
                 if (e.getValue() != null && e.getValue() > 0L) {
                     try {
                         out.put(e.getKey(), e.getValue().longValue());
-                    } catch (JSONException ignored) {
+                    } catch (JSONException ex) {
+                        AppLog.w("CloudSync", "Failed to serialize tombstone key", ex);
                     }
                 }
             }
@@ -433,7 +679,8 @@ final class CloudSync {
         for (WatchHistory.Entry e : history) {
             try {
                 histArr.put(e.json());
-            } catch (JSONException ignored) {
+            } catch (JSONException ex) {
+                AppLog.w("CloudSync", "Failed to serialize history entry", ex);
             }
         }
         JSONArray favArr = new JSONArray();
@@ -441,7 +688,8 @@ final class CloudSync {
             try {
                 long favTs = Math.max(1L, tombs.get("add:" + f.key()));
                 favArr.put(f.json().put("updated", favTs).put("addedAt", favTs));
-            } catch (JSONException ignored) {
+            } catch (JSONException ex) {
+                AppLog.w("CloudSync", "Failed to serialize favorite entry", ex);
             }
         }
         try {
@@ -689,14 +937,16 @@ final class CloudSync {
         for (WatchHistory.Entry e : mergedHist) {
             try {
                 outHistArr.put(e.json());
-            } catch (JSONException ignored) {
+            } catch (JSONException ex) {
+                AppLog.w("CloudSync", "Failed to serialize merged history entry", ex);
             }
         }
         JSONArray outFavArr = new JSONArray();
         for (Favorites.Entry f : mergedFavs) {
             try {
                 outFavArr.put(f.json());
-            } catch (JSONException ignored) {
+            } catch (JSONException ex) {
+                AppLog.w("CloudSync", "Failed to serialize merged favorite entry", ex);
             }
         }
 
@@ -826,6 +1076,7 @@ final class CloudSync {
                 && !trimmed.regionMatches(true, 0, "https://", 0, 8)) {
             trimmed = "https://" + trimmed;
         }
+        trimmed = trimmed.replace(" ", "%20");
         URI uri = URI.create(trimmed);
         String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(Locale.ROOT);
         if (!"http".equals(scheme) && !"https".equals(scheme)) {
@@ -839,15 +1090,73 @@ final class CloudSync {
             return trimmed;
         }
         String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.ROOT);
-        boolean isJianguoyun = "jianguoyun.com".equals(host) || host.endsWith(".jianguoyun.com");
-        boolean isRootPath =
-                path.isEmpty() || "/".equals(path) || "/dav".equals(path) || "/dav/".equals(path);
-        String folderPrefix = (isJianguoyun && isRootPath) ? "MarcoMovie/" : "";
+        boolean isJianguoyun = isJianguoyunHost(host);
+        String folderPrefix = "";
+        if (isJianguoyun) {
+            if (path.isEmpty() || "/".equals(path)) {
+                folderPrefix = "dav/MarcoMovie/";
+            } else if ("/dav".equals(path) || "/dav/".equals(path)) {
+                folderPrefix = "MarcoMovie/";
+            }
+        }
         if (trimmed.endsWith("/")) {
             return trimmed + folderPrefix + DEFAULT_FILE;
         } else {
             return trimmed + "/" + folderPrefix + DEFAULT_FILE;
         }
+    }
+
+    static boolean isJianguoyunHost(String host) {
+        if (host == null) return false;
+        String h = host.toLowerCase(Locale.ROOT);
+        return "jianguoyun.com".equals(h) || h.endsWith(".jianguoyun.com");
+    }
+
+    static boolean isWeakEtag(String etag) {
+        if (etag == null) return false;
+        String t = etag.trim();
+        return t.startsWith("W/") || t.startsWith("w/");
+    }
+
+    static String extractHostKey(String rawOrFileUrl) {
+        if (rawOrFileUrl == null) return "";
+        String t = rawOrFileUrl.trim().replace(" ", "%20");
+        if (t.isEmpty()) return "";
+        if (!t.regionMatches(true, 0, "http://", 0, 7)
+                && !t.regionMatches(true, 0, "https://", 0, 8)) {
+            t = "https://" + t;
+        }
+        try {
+            URI u = URI.create(t);
+            String host = u.getHost();
+            if (host == null || host.isEmpty()) return "";
+            int port = u.getPort();
+            return port > 0
+                    ? host.toLowerCase(Locale.ROOT) + ":" + port
+                    : host.toLowerCase(Locale.ROOT);
+        } catch (Exception e) {
+            AppLog.w("CloudSync", "Failed to extract WebDAV host key from URL", e);
+            return "";
+        }
+    }
+
+    static boolean isHostMarkedNoConditionalWrite(String rawOrFileUrl) {
+        String key = extractHostKey(rawOrFileUrl);
+        return !key.isEmpty() && NO_CONDITIONAL_WRITE_HOSTS.contains(key);
+    }
+
+    static void clearNoConditionalWriteHostsForTest() {
+        NO_CONDITIONAL_WRITE_HOSTS.clear();
+    }
+
+    private static boolean isIfNoneMatchRejectedStatus(int code) {
+        return code == 400
+                || code == 405
+                || code == 406
+                || code == 417
+                || code == 428
+                || code == 500
+                || code == 501;
     }
 
     /** Normalizes a LAN QR pairing URL or sync URL to the {@code /sync} JSON endpoint. */
@@ -859,6 +1168,7 @@ final class CloudSync {
                 && !trimmed.regionMatches(true, 0, "https://", 0, 8)) {
             trimmed = "http://" + trimmed;
         }
+        trimmed = trimmed.replace(" ", "%20");
         while (trimmed.endsWith("/")) {
             trimmed = trimmed.substring(0, trimmed.length() - 1);
         }
@@ -908,10 +1218,12 @@ final class CloudSync {
             String rawUrl, String username, String password, MergeCallback merger)
             throws Exception {
         String fileUrl = resolveWebdavFileUrl(rawUrl);
+        String hostKey = extractHostKey(fileUrl);
         String auth = basicAuthHeader(username, password);
 
         int maxRetries = 2;
         int attempt = 0;
+        boolean sawAbsent412 = false;
         java.util.Random rand = new java.util.Random();
 
         while (true) {
@@ -926,13 +1238,19 @@ final class CloudSync {
                     remoteJson = readBody(getConn.getInputStream(), MAX_SYNC_BYTES);
                     String h = getConn.getHeaderField("ETag");
                     if (h != null && !h.trim().isEmpty()) {
-                        etag = h.trim();
+                        String trimmedEtag = h.trim();
+                        if (!isWeakEtag(trimmedEtag)) {
+                            etag = trimmedEtag;
+                        }
                     }
                 } else if (code == 401 || code == 403) {
+                    drainConnectionStreams(getConn);
                     throw new IOException("WebDAV 认证失败 (HTTP " + code + ")，请检查账号或应用专用密码");
                 } else if (code == 404) {
+                    drainConnectionStreams(getConn);
                     fileAbsent = true;
                 } else {
+                    drainConnectionStreams(getConn);
                     throw new IOException("WebDAV 读取失败 (HTTP " + code + ")");
                 }
             } finally {
@@ -945,34 +1263,81 @@ final class CloudSync {
                 throw new IOException("同步数据超出 8 MB 大小限制");
             }
 
-            int putCode = putBytes(fileUrl, auth, payloadBytes, etag, fileAbsent);
+            boolean skipCond = !hostKey.isEmpty() && NO_CONDITIONAL_WRITE_HOSTS.contains(hostKey);
+            boolean absent412Fallback = fileAbsent && sawAbsent412;
+            String condIfMatch =
+                    (!skipCond && !fileAbsent && etag != null && !etag.isEmpty()) ? etag : null;
+            boolean condIfNoneMatch = !skipCond && fileAbsent && !absent412Fallback;
+            boolean usedConditional = (condIfMatch != null) || condIfNoneMatch;
+
+            int putCode = putBytes(fileUrl, auth, payloadBytes, condIfMatch, condIfNoneMatch);
             if (putCode == 404 || putCode == 409) {
-                ensureParentCollections(fileUrl, auth);
-                putCode = putBytes(fileUrl, auth, payloadBytes, etag, fileAbsent);
+                ensureParentCollections(rawUrl, fileUrl, auth);
+                putCode = putBytes(fileUrl, auth, payloadBytes, condIfMatch, condIfNoneMatch);
             }
-            if (putCode == 412 && attempt < maxRetries) {
-                attempt++;
-                AppLog.w(
-                        "CloudSync",
-                        "WebDAV 412 Precondition Failed, retrying merge ("
-                                + attempt
-                                + "/"
-                                + maxRetries
-                                + ")",
-                        null);
-                int jitterMs = 50 + rand.nextInt(100);
-                try {
-                    Thread.sleep(jitterMs);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
+
+            if (condIfNoneMatch && isIfNoneMatchRejectedStatus(putCode)) {
+                int retryCode = putBytes(fileUrl, auth, payloadBytes, null, false);
+                if (retryCode == 404 || retryCode == 409) {
+                    ensureParentCollections(rawUrl, fileUrl, auth);
+                    retryCode = putBytes(fileUrl, auth, payloadBytes, null, false);
                 }
-                continue;
+                if (retryCode >= 200 && retryCode < 300) {
+                    if (!hostKey.isEmpty()) NO_CONDITIONAL_WRITE_HOSTS.add(hostKey);
+                    return merged;
+                }
+                putCode = retryCode;
             }
+
+            if (putCode == 412) {
+                if (attempt < maxRetries && !(fileAbsent && sawAbsent412)) {
+                    if (condIfNoneMatch) {
+                        sawAbsent412 = true;
+                    }
+                    attempt++;
+                    AppLog.w(
+                            "CloudSync",
+                            "WebDAV 412 Precondition Failed, retrying merge ("
+                                    + attempt
+                                    + "/"
+                                    + maxRetries
+                                    + ")",
+                            null);
+                    int jitterMs = 50 + rand.nextInt(100);
+                    try {
+                        Thread.sleep(jitterMs);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("WebDAV 412 重试等待中断", ie);
+                    }
+                    continue;
+                }
+                if (usedConditional) {
+                    AppLog.w(
+                            "CloudSync",
+                            "WebDAV 412 retries exhausted; falling back to unconditional PUT",
+                            null);
+                    int fallbackCode = putBytes(fileUrl, auth, payloadBytes, null, false);
+                    if (fallbackCode == 404 || fallbackCode == 409) {
+                        ensureParentCollections(rawUrl, fileUrl, auth);
+                        fallbackCode = putBytes(fileUrl, auth, payloadBytes, null, false);
+                    }
+                    if (fallbackCode >= 200 && fallbackCode < 300) {
+                        if (!hostKey.isEmpty()) NO_CONDITIONAL_WRITE_HOSTS.add(hostKey);
+                        return merged;
+                    }
+                    putCode = fallbackCode;
+                }
+            }
+
             if (putCode == 401 || putCode == 403) {
                 throw new IOException("WebDAV 写入被拒绝 (HTTP " + putCode + ")，请检查读写权限");
             }
             if (putCode < 200 || putCode >= 300) {
                 throw new IOException(formatWebdavWriteError(putCode));
+            }
+            if (absent412Fallback && !hostKey.isEmpty()) {
+                NO_CONDITIONAL_WRITE_HOSTS.add(hostKey);
             }
             return merged;
         }
@@ -1023,9 +1388,11 @@ final class CloudSync {
             }
             int code = postConn.getResponseCode();
             if (code == 410) {
+                drainConnectionStreams(postConn);
                 throw new IOException("对方设备的局域网同步会话已过期，请重新打开二维码");
             }
             if (code < 200 || code >= 300) {
+                drainConnectionStreams(postConn);
                 throw new IOException("局域网同步未成功 (HTTP " + code + ")");
             }
             responseJson = readBody(postConn.getInputStream(), MAX_SYNC_BYTES);
@@ -1060,41 +1427,139 @@ final class CloudSync {
             try (OutputStream out = conn.getOutputStream()) {
                 out.write(payloadBytes);
             }
-            return conn.getResponseCode();
+            int code = conn.getResponseCode();
+            drainConnectionStreams(conn);
+            return code;
         } finally {
             conn.disconnect();
         }
     }
 
-    /**
-     * Creates missing ancestor WebDAV collections sequentially via {@code MKCOL} using OkHttp,
-     * because standard {@link HttpURLConnection#setRequestMethod(String)} rejects {@code MKCOL}.
-     */
-    private static void ensureParentCollections(String fileUrl, String auth) {
+    static int baseCollectionDepth(String rawBaseUrl, URI fileUri) {
+        if (fileUri == null) return 0;
+        List<String> parentSegs = extractParentSegments(fileUri);
+        if (parentSegs.isEmpty()) return 0;
+
+        String host = fileUri.getHost() == null ? "" : fileUri.getHost().toLowerCase(Locale.ROOT);
+        if (isJianguoyunHost(host) && "dav".equalsIgnoreCase(parentSegs.get(0))) {
+            int skip = 1;
+            List<String> baseSegs = extractDirectorySegmentsFromRawBase(rawBaseUrl);
+            if (!baseSegs.isEmpty()
+                    && baseSegs.size() < parentSegs.size()
+                    && isSegmentPrefix(baseSegs, parentSegs)) {
+                skip = Math.max(skip, baseSegs.size());
+            }
+            return skip;
+        }
+        if (parentSegs.size() >= 4
+                && "remote.php".equalsIgnoreCase(parentSegs.get(0))
+                && "dav".equalsIgnoreCase(parentSegs.get(1))
+                && "files".equalsIgnoreCase(parentSegs.get(2))) {
+            int skip = 4;
+            List<String> baseSegs = extractDirectorySegmentsFromRawBase(rawBaseUrl);
+            if (!baseSegs.isEmpty()
+                    && baseSegs.size() < parentSegs.size()
+                    && isSegmentPrefix(baseSegs, parentSegs)) {
+                skip = Math.max(skip, baseSegs.size());
+            }
+            return skip;
+        }
+        if (parentSegs.size() >= 2
+                && "remote.php".equalsIgnoreCase(parentSegs.get(0))
+                && "webdav".equalsIgnoreCase(parentSegs.get(1))) {
+            int skip = 2;
+            List<String> baseSegs = extractDirectorySegmentsFromRawBase(rawBaseUrl);
+            if (!baseSegs.isEmpty()
+                    && baseSegs.size() < parentSegs.size()
+                    && isSegmentPrefix(baseSegs, parentSegs)) {
+                skip = Math.max(skip, baseSegs.size());
+            }
+            return skip;
+        }
+
+        List<String> baseSegs = extractDirectorySegmentsFromRawBase(rawBaseUrl);
+        if (!baseSegs.isEmpty()
+                && baseSegs.size() < parentSegs.size()
+                && isSegmentPrefix(baseSegs, parentSegs)) {
+            return baseSegs.size();
+        }
+        return 0;
+    }
+
+    private static List<String> extractParentSegments(URI fileUri) {
+        List<String> out = new ArrayList<>();
+        String rawPath = fileUri.getRawPath();
+        if (rawPath == null || rawPath.isEmpty()) return out;
+        int lastSlash = rawPath.lastIndexOf('/');
+        if (lastSlash <= 0) return out;
+        String parentPath = rawPath.substring(0, lastSlash + 1);
+        for (String part : parentPath.split("/")) {
+            if (part != null && !part.isEmpty()) {
+                out.add(part);
+            }
+        }
+        return out;
+    }
+
+    private static List<String> extractDirectorySegmentsFromRawBase(String rawBaseUrl) {
+        List<String> out = new ArrayList<>();
+        if (rawBaseUrl == null) return out;
+        String t = rawBaseUrl.trim();
+        if (t.isEmpty()) return out;
+        if (!t.regionMatches(true, 0, "http://", 0, 7)
+                && !t.regionMatches(true, 0, "https://", 0, 8)) {
+            t = "https://" + t;
+        }
+        t = t.replace(" ", "%20");
         try {
-            URI rawUri = URI.create(fileUrl);
+            URI u = URI.create(URI.create(t).toASCIIString());
+            String rawPath = u.getRawPath();
+            if (rawPath == null || rawPath.isEmpty()) return out;
+            if (rawPath.toLowerCase(Locale.ROOT).endsWith(".json")) return out;
+            for (String part : rawPath.split("/")) {
+                if (part != null && !part.isEmpty()) {
+                    out.add(part);
+                }
+            }
+        } catch (Exception e) {
+            AppLog.w("CloudSync", "Failed to parse base URL segments", e);
+        }
+        return out;
+    }
+
+    private static boolean isSegmentPrefix(List<String> prefix, List<String> full) {
+        if (prefix.size() > full.size()) return false;
+        for (int i = 0; i < prefix.size(); i++) {
+            if (!prefix.get(i).equalsIgnoreCase(full.get(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Creates missing ancestor WebDAV collections below the base address sequentially via {@code
+     * MKCOL} using a shared {@link OkHttpClient}, because standard {@link
+     * HttpURLConnection#setRequestMethod(String)} rejects {@code MKCOL}.
+     */
+    static void ensureParentCollections(String rawBaseUrl, String fileUrl, String auth) {
+        try {
+            URI rawUri = URI.create(fileUrl.replace(" ", "%20"));
             URI uri = URI.create(rawUri.toASCIIString());
-            String rawPath = uri.getRawPath();
-            if (rawPath == null || rawPath.isEmpty()) return;
-            int lastSlash = rawPath.lastIndexOf('/');
-            if (lastSlash <= 0) return;
-            String parentPath = rawPath.substring(0, lastSlash + 1);
-            String[] parts = parentPath.split("/");
+            List<String> parts = extractParentSegments(uri);
+            if (parts.isEmpty()) return;
+            int skipSegments = baseCollectionDepth(rawBaseUrl, uri);
             StringBuilder current = new StringBuilder("/");
             String authority = uri.getRawAuthority();
             String scheme = uri.getScheme() == null ? "https" : uri.getScheme();
             String base = scheme + "://" + authority;
 
-            OkHttpClient client =
-                    new OkHttpClient.Builder()
-                            .connectTimeout(10, TimeUnit.SECONDS)
-                            .readTimeout(10, TimeUnit.SECONDS)
-                            .followRedirects(false)
-                            .build();
-
-            for (String part : parts) {
-                if (part == null || part.isEmpty()) continue;
+            for (int i = 0; i < parts.size(); i++) {
+                String part = parts.get(i);
                 current.append(part).append('/');
+                if (i < skipSegments) {
+                    continue;
+                }
                 String collUrl = base + current.toString();
                 Request.Builder reqBuilder =
                         new Request.Builder()
@@ -1104,13 +1569,14 @@ final class CloudSync {
                 if (auth != null && !auth.isEmpty()) {
                     reqBuilder.header("Authorization", auth);
                 }
-                try (Response resp = client.newCall(reqBuilder.build()).execute()) {
+                try (Response resp = MKCOL_CLIENT.newCall(reqBuilder.build()).execute()) {
+                    ResponseBody body = resp.body();
+                    if (body != null) {
+                        drainStreamQuietly(body.byteStream());
+                    }
                     int code = resp.code();
-                    if (code == 401 || code == 403) {
-                        AppLog.w(
-                                "CloudSync",
-                                "WebDAV 权限验证失败 (HTTP " + code + ") for " + collUrl,
-                                null);
+                    if (code == 401) {
+                        AppLog.w("CloudSync", "WebDAV 认证失败 (HTTP 401) for " + collUrl, null);
                         break;
                     }
                 } catch (Exception e) {
@@ -1119,6 +1585,29 @@ final class CloudSync {
             }
         } catch (Exception e) {
             AppLog.w("CloudSync", "递归创建 WebDAV 父目录失败: " + fileUrl, e);
+        }
+    }
+
+    private static void drainConnectionStreams(HttpURLConnection conn) {
+        if (conn == null) return;
+        try {
+            InputStream in = conn.getInputStream();
+            if (in != null) drainStreamQuietly(in);
+        } catch (IOException ioErr) {
+            InputStream err = conn.getErrorStream();
+            if (err != null) drainStreamQuietly(err);
+        }
+    }
+
+    private static void drainStreamQuietly(InputStream in) {
+        if (in == null) return;
+        try (InputStream src = in) {
+            byte[] buf = new byte[1024];
+            while (src.read(buf) != -1) {
+                // Drain remaining response bytes so pooled connections stay reusable.
+            }
+        } catch (IOException e) {
+            AppLog.w("CloudSync", "Draining HTTP response stream ended early", e);
         }
     }
 

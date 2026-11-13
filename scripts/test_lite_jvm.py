@@ -65,6 +65,16 @@ public final class Log {
 }
 """
 
+ANDROID_SHIM_CONTEXT = """package android.content;
+public abstract class Context {
+    public static final int MODE_PRIVATE = 0;
+    public Context() {}
+    public abstract Context getApplicationContext();
+    public abstract String getPackageName();
+    public abstract SharedPreferences getSharedPreferences(String name, int mode);
+}
+"""
+
 ANDROID_SHIM_XML = """package android.util;
 import java.io.InputStream;
 import java.io.Reader;
@@ -218,6 +228,9 @@ def main():
         (shim_src / 'Base64.java').write_text(ANDROID_SHIM_BASE64, encoding='utf-8')
         (shim_src / 'Xml.java').write_text(ANDROID_SHIM_XML, encoding='utf-8')
         (shim_src / 'Log.java').write_text(ANDROID_SHIM_LOG, encoding='utf-8')
+        shim_ctx = tmp_dir / 'shim_src/android/content'
+        shim_ctx.mkdir(parents=True)
+        (shim_ctx / 'Context.java').write_text(ANDROID_SHIM_CONTEXT, encoding='utf-8')
 
         jvm_classes = tmp_dir / 'jvm_classes'
         jvm_classes.mkdir()
@@ -233,6 +246,7 @@ def main():
             shim_src / 'Base64.java',
             shim_src / 'Xml.java',
             shim_src / 'Log.java',
+            shim_ctx / 'Context.java',
             ROOT / 'lite/tests/LiteJvmChecks.java',
             ROOT / 'lite/tests/LiteCredentialProbe.java',
             ROOT / 'lite/tests/LiteTlsChecks.java',
@@ -242,7 +256,7 @@ def main():
         print(out.strip())
         # Pin the exact check count so accidentally skipped or deleted checks fail CI;
         # update this number in lockstep whenever checks are added to or removed from LiteJvmChecks.java.
-        assert 'PASS 161 TV Lite JVM checks' in out, f'Expected 161 TV Lite JVM checks, got: {out.strip()}'
+        assert 'PASS 179 TV Lite JVM checks' in out, f'Expected 179 TV Lite JVM checks, got: {out.strip()}'
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteCredentialProbe', capture=True).strip())
         print(run(exe(JDK / 'bin', 'java'), '-cp', run_cp, 'com.pilipala.marcomovie.lite.LiteTlsChecks', capture=True).strip())
 

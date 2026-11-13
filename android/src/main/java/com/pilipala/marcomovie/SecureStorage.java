@@ -2,19 +2,20 @@ package com.pilipala.marcomovie;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.os.Handler;
-import android.os.Looper;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.security.keystore.KeyProperties;
-import android.widget.Toast;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.Key;
 import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.NoSuchProviderException;
 import java.security.UnrecoverableKeyException;
 import java.security.spec.AlgorithmParameterSpec;
 import java.util.Arrays;
+import java.util.Locale;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
@@ -139,50 +140,45 @@ public final class SecureStorage {
                 }
             };
 
+    interface Clock {
+        long nowMs();
+    }
+
+    static final long KEYSTORE_UNAVAILABLE_TTL_MS = 5 * 60 * 1000L;
+
     private static final PromptListener DEFAULT_PROMPT_LISTENER =
-            (context, message) -> {
-                if (context == null) return;
-                try {
-                    Looper mainLooper = Looper.getMainLooper();
-                    if (mainLooper != null) {
-                        final Context appCtx =
-                                context.getApplicationContext() != null
-                                        ? context.getApplicationContext()
-                                        : context;
-                        new Handler(mainLooper)
-                                .post(
-                                        () -> {
-                                            try {
-                                                Toast.makeText(appCtx, message, Toast.LENGTH_LONG)
-                                                        .show();
-                                            } catch (Throwable toastErr) {
-                                                AppLog.w(
-                                                        TAG,
-                                                        "Unable to show re-auth Toast",
-                                                        toastErr);
-                                            }
-                                        });
-                    }
-                } catch (Throwable loopErr) {
-                    AppLog.i(TAG, "Recorded password re-entry prompt for UI: " + message);
+            new PromptListener() {
+                @Override
+                public void onReenterPasswordRequired(Context context, String message) {
+                    AppLog.w(TAG, "WebDAV credential re-authentication required: " + message, null);
                 }
             };
 
     private static volatile CryptoBackend backendOverride;
     private static volatile PromptListener promptListenerOverride;
-    private static volatile boolean keystoreUnavailable;
+    private static volatile Clock clockOverride;
+    private static volatile long keystoreUnavailableUntilMs;
     private static volatile boolean passwordReentryRequired;
 
     private SecureStorage() {}
 
     static void setBackendForTest(CryptoBackend backend) {
         backendOverride = backend;
-        keystoreUnavailable = false;
+        keystoreUnavailableUntilMs = 0L;
         passwordReentryRequired = false;
     }
 
     static void setPromptListenerForTest(PromptListener listener) {
         promptListenerOverride = listener;
+    }
+
+    static void setClockForTest(Clock clock) {
+        clockOverride = clock;
+    }
+
+    private static long nowMs() {
+        Clock override = clockOverride;
+        return override != null ? override.nowMs() : System.currentTimeMillis();
     }
 
     private static CryptoBackend activeBackend() {
@@ -196,11 +192,22 @@ public final class SecureStorage {
     }
 
     static boolean isKeyStoreUnavailableMarked(Context context) {
-        if (keystoreUnavailable) return true;
-        if (context == null) return false;
-        SharedPreferences securePrefs =
-                context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
-        return securePrefs.getBoolean(KEY_KEYSTORE_UNAVAILABLE, false);
+        if (context != null) {
+            SharedPreferences securePrefs =
+                    context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
+            if (securePrefs.contains(KEY_KEYSTORE_UNAVAILABLE)) {
+                if (!securePrefs.edit().remove(KEY_KEYSTORE_UNAVAILABLE).commit()) {
+                    AppLog.w(TAG, "Failed to clear legacy keystore_unavailable marker");
+                }
+            }
+        }
+        long until = keystoreUnavailableUntilMs;
+        if (until <= 0L) return false;
+        if (nowMs() >= until) {
+            keystoreUnavailableUntilMs = 0L;
+            return false;
+        }
+        return true;
     }
 
     static synchronized boolean consumeReenterPasswordRequired(Context context) {
@@ -222,14 +229,45 @@ public final class SecureStorage {
 
     private static synchronized SecretKey obtainKey() throws Exception {
         try {
-            return activeBackend().getOrCreateKey();
+            SecretKey key = activeBackend().getOrCreateKey();
+            keystoreUnavailableUntilMs = 0L;
+            return key;
         } catch (Throwable t) {
             if (isKeyInvalidatedOrUnrecoverable(t)) {
                 if (t instanceof Exception) throw (Exception) t;
                 throw new GeneralSecurityException("Key invalidated or unrecoverable", t);
             }
-            throw new KeyStoreUnavailableException(t);
+            if (isProviderMissing(t)) {
+                throw new KeyStoreUnavailableException(t);
+            }
+            if (t instanceof Exception) throw (Exception) t;
+            throw new GeneralSecurityException("Transient KeyStore failure", t);
         }
+    }
+
+    static boolean isProviderMissing(Throwable t) {
+        Throwable cur = t;
+        while (cur != null) {
+            if (cur instanceof NoSuchProviderException) {
+                return true;
+            }
+            if (cur instanceof KeyStoreException || cur instanceof NoSuchAlgorithmException) {
+                String rawMsg = cur.getMessage();
+                if (rawMsg != null) {
+                    String msg = rawMsg.toLowerCase(Locale.ROOT);
+                    if (msg.contains("no such provider")
+                            || msg.contains("not found")
+                            || msg.contains("not available")
+                            || (msg.contains("provider")
+                                    && (msg.contains("missing") || msg.contains("unavailable")))
+                            || (msg.contains("keystore") && msg.contains("missing"))) {
+                        return true;
+                    }
+                }
+            }
+            cur = cur.getCause();
+        }
+        return false;
     }
 
     static boolean isKeyInvalidatedOrUnrecoverable(Throwable t) {
@@ -247,16 +285,39 @@ public final class SecureStorage {
     }
 
     private static void markKeyStoreUnavailable(SharedPreferences securePrefs, Throwable cause) {
-        keystoreUnavailable = true;
+        keystoreUnavailableUntilMs = nowMs() + KEYSTORE_UNAVAILABLE_TTL_MS;
         AppLog.w(
                 TAG,
-                "AndroidKeyStore unavailable; continuing with legacy plaintext storage",
+                "AndroidKeyStore unavailable (retryable TTL); continuing with legacy plaintext storage",
                 cause);
-        if (securePrefs != null) {
-            if (!securePrefs.edit().putBoolean(KEY_KEYSTORE_UNAVAILABLE, true).commit()) {
-                AppLog.w(TAG, "Failed to commit keystore_unavailable marker");
+        if (securePrefs != null && securePrefs.contains(KEY_KEYSTORE_UNAVAILABLE)) {
+            if (!securePrefs.edit().remove(KEY_KEYSTORE_UNAVAILABLE).commit()) {
+                AppLog.w(TAG, "Failed to clear legacy keystore_unavailable marker");
             }
         }
+    }
+
+    private static void savePlaintextFallback(
+            SharedPreferences legacyPrefs, SharedPreferences securePrefs, String pass) {
+        if (!legacyPrefs.edit().putString(Prefs.WEBDAV_PASS, pass).commit()) {
+            AppLog.w(TAG, "Failed to commit plaintext WebDAV password in fallback mode");
+        }
+        if (securePrefs != null
+                && (securePrefs.contains(KEY_WEBDAV_PASS_ENC)
+                        || securePrefs.contains(KEY_REAUTH_REQUIRED)
+                        || securePrefs.contains(KEY_KEYSTORE_UNAVAILABLE))) {
+            boolean cleared =
+                    securePrefs
+                            .edit()
+                            .remove(KEY_WEBDAV_PASS_ENC)
+                            .remove(KEY_REAUTH_REQUIRED)
+                            .remove(KEY_KEYSTORE_UNAVAILABLE)
+                            .commit();
+            if (!cleared) {
+                AppLog.w(TAG, "Failed to clear stale encrypted WebDAV password after fallback");
+            }
+        }
+        passwordReentryRequired = false;
     }
 
     private static void handleInvalidatedKey(
@@ -327,12 +388,16 @@ public final class SecureStorage {
         SharedPreferences securePrefs =
                 context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE);
 
-        if (isKeyStoreUnavailableMarked(context)) {
+        boolean degraded = isKeyStoreUnavailableMarked(context);
+        String enc = securePrefs.getString(KEY_WEBDAV_PASS_ENC, "");
+        boolean hasEnc = enc != null && !enc.isEmpty();
+
+        if (degraded && !hasEnc) {
             String plain = legacyPrefs.getString(Prefs.WEBDAV_PASS, "");
             return plain != null ? plain : "";
         }
 
-        if (legacyPrefs.contains(Prefs.WEBDAV_PASS)) {
+        if (!degraded && legacyPrefs.contains(Prefs.WEBDAV_PASS)) {
             String legacyPass = legacyPrefs.getString(Prefs.WEBDAV_PASS, "");
             if (legacyPass == null || legacyPass.isEmpty()) {
                 if (securePrefs.edit().remove(KEY_WEBDAV_PASS_ENC).commit()) {
@@ -345,16 +410,17 @@ public final class SecureStorage {
                 return "";
             }
             try {
-                String enc = encrypt(legacyPass);
+                String migratedEnc = encrypt(legacyPass);
                 boolean committed =
                         securePrefs
                                 .edit()
-                                .putString(KEY_WEBDAV_PASS_ENC, enc)
+                                .putString(KEY_WEBDAV_PASS_ENC, migratedEnc)
                                 .remove(KEY_KEYSTORE_UNAVAILABLE)
                                 .remove(KEY_REAUTH_REQUIRED)
                                 .commit();
                 if (committed) {
                     passwordReentryRequired = false;
+                    keystoreUnavailableUntilMs = 0L;
                     if (!legacyPrefs.edit().remove(Prefs.WEBDAV_PASS).commit()) {
                         AppLog.w(
                                 TAG,
@@ -380,21 +446,27 @@ public final class SecureStorage {
             return legacyPass;
         }
 
-        String enc = securePrefs.getString(KEY_WEBDAV_PASS_ENC, "");
-        if (enc == null || enc.isEmpty()) return "";
-        try {
-            return decrypt(enc);
-        } catch (KeyStoreUnavailableException e) {
-            markKeyStoreUnavailable(securePrefs, e);
-            return "";
-        } catch (Throwable t) {
-            if (isKeyInvalidatedOrUnrecoverable(t)) {
-                handleInvalidatedKey(context, securePrefs, t);
-            } else {
-                AppLog.w(TAG, "Failed to decrypt WebDAV password", t);
+        if (hasEnc) {
+            try {
+                String decrypted = decrypt(enc);
+                keystoreUnavailableUntilMs = 0L;
+                return decrypted;
+            } catch (KeyStoreUnavailableException e) {
+                markKeyStoreUnavailable(securePrefs, e);
+            } catch (Throwable t) {
+                if (isKeyInvalidatedOrUnrecoverable(t)) {
+                    handleInvalidatedKey(context, securePrefs, t);
+                } else {
+                    AppLog.w(TAG, "Failed to decrypt WebDAV password", t);
+                }
             }
-            return "";
         }
+
+        if (legacyPrefs.contains(Prefs.WEBDAV_PASS)) {
+            String plain = legacyPrefs.getString(Prefs.WEBDAV_PASS, "");
+            return plain != null ? plain : "";
+        }
+        return "";
     }
 
     public static synchronized void setWebdavPass(Context context, String pass) {
@@ -410,46 +482,71 @@ public final class SecureStorage {
         }
 
         if (isKeyStoreUnavailableMarked(context)) {
-            if (!legacyPrefs.edit().putString(Prefs.WEBDAV_PASS, pass).commit()) {
-                AppLog.w(TAG, "Failed to commit plaintext WebDAV password in fallback mode");
-            }
+            savePlaintextFallback(legacyPrefs, securePrefs, pass);
             return;
         }
 
+        String enc = null;
+        Throwable encryptError = null;
         try {
-            String enc = encrypt(pass);
-            boolean committed =
-                    securePrefs
-                            .edit()
-                            .putString(KEY_WEBDAV_PASS_ENC, enc)
-                            .remove(KEY_KEYSTORE_UNAVAILABLE)
-                            .remove(KEY_REAUTH_REQUIRED)
-                            .commit();
-            if (committed) {
-                passwordReentryRequired = false;
-                if (legacyPrefs.contains(Prefs.WEBDAV_PASS)) {
-                    if (!legacyPrefs.edit().remove(Prefs.WEBDAV_PASS).commit()) {
-                        AppLog.w(
-                                TAG,
-                                "Committed encrypted WebDAV password, but failed to delete legacy plaintext");
-                    }
+            enc = encrypt(pass);
+        } catch (KeyStoreUnavailableException e) {
+            markKeyStoreUnavailable(securePrefs, e);
+            savePlaintextFallback(legacyPrefs, securePrefs, pass);
+            return;
+        } catch (Throwable t) {
+            if (isKeyInvalidatedOrUnrecoverable(t)) {
+                AppLog.w(
+                        TAG,
+                        "KeyStore key invalidated during setWebdavPass; deleting alias "
+                                + KEY_ALIAS
+                                + " and retrying with a fresh key",
+                        t);
+                try {
+                    activeBackend().deleteKey();
+                    enc = encrypt(pass);
+                } catch (Throwable retryErr) {
+                    encryptError = retryErr;
                 }
+            } else {
+                encryptError = t;
+            }
+        }
+
+        if (encryptError != null || enc == null) {
+            if (encryptError instanceof KeyStoreUnavailableException) {
+                markKeyStoreUnavailable(securePrefs, encryptError);
             } else {
                 AppLog.w(
                         TAG,
-                        "commit() returned false while saving WebDAV password; keeping existing plaintext");
+                        "Failed to encrypt WebDAV password; writing to legacy plaintext pref",
+                        encryptError);
             }
-        } catch (KeyStoreUnavailableException e) {
-            markKeyStoreUnavailable(securePrefs, e);
-            if (!legacyPrefs.edit().putString(Prefs.WEBDAV_PASS, pass).commit()) {
-                AppLog.w(TAG, "Failed to commit plaintext WebDAV password after KeyStore fallback");
+            savePlaintextFallback(legacyPrefs, securePrefs, pass);
+            return;
+        }
+
+        boolean committed =
+                securePrefs
+                        .edit()
+                        .putString(KEY_WEBDAV_PASS_ENC, enc)
+                        .remove(KEY_KEYSTORE_UNAVAILABLE)
+                        .remove(KEY_REAUTH_REQUIRED)
+                        .commit();
+        if (committed) {
+            passwordReentryRequired = false;
+            keystoreUnavailableUntilMs = 0L;
+            if (legacyPrefs.contains(Prefs.WEBDAV_PASS)) {
+                if (!legacyPrefs.edit().remove(Prefs.WEBDAV_PASS).commit()) {
+                    AppLog.w(
+                            TAG,
+                            "Committed encrypted WebDAV password, but failed to delete legacy plaintext");
+                }
             }
-        } catch (Throwable t) {
-            if (isKeyInvalidatedOrUnrecoverable(t)) {
-                handleInvalidatedKey(context, securePrefs, t);
-            } else {
-                AppLog.w(TAG, "Failed to encrypt WebDAV password; keeping existing plaintext", t);
-            }
+        } else {
+            AppLog.w(
+                    TAG,
+                    "commit() returned false while saving WebDAV password; keeping existing plaintext");
         }
     }
 

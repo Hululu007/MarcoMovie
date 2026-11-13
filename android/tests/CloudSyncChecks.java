@@ -47,10 +47,19 @@ public final class CloudSyncChecks {
         testWebdavEtagAndConcurrency();
         testWatchHistoryCorruptionBackupAndLockout();
         testUiLatchTimeoutAndErrorPropagation();
+        testRound2WebdavRobustness();
         System.out.println("ALL PASS (" + checks + " checks)");
     }
 
     private static void testResolveWebdavFileUrlMatrix() {
+        check(
+                "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
+                        .equals(CloudSync.resolveWebdavFileUrl("dav.jianguoyun.com")),
+                "Jianguoyun bare host resolves to /dav/MarcoMovie/marco-movie-sync.json");
+        check(
+                "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
+                        .equals(CloudSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/")),
+                "Jianguoyun root slash URL resolves to /dav/MarcoMovie/marco-movie-sync.json");
         check(
                 "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
                         .equals(CloudSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/dav/")),
@@ -793,5 +802,560 @@ public final class CloudSyncChecks {
         check(
                 errRef.get() != null && "simulated UI exception".equals(errRef.get().getMessage()),
                 "AtomicReference propagates background UI failure throwable to sync caller");
+    }
+
+    private static void testRound2WebdavRobustness() throws Exception {
+        CloudSync.clearNoConditionalWriteHostsForTest();
+
+        // 1. M-W2 baseCollectionDepth checks (Jianguoyun & Nextcloud & custom base prefix)
+        String jgyFile = CloudSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/dav/");
+        check(
+                CloudSync.baseCollectionDepth(
+                                "https://dav.jianguoyun.com/dav/", java.net.URI.create(jgyFile))
+                        == 1,
+                "M-W2 Jianguoyun /dav/ base skips /dav/ and only creates MarcoMovie/ below base");
+        check(
+                CloudSync.baseCollectionDepth("dav.jianguoyun.com", java.net.URI.create(jgyFile))
+                        == 1,
+                "M-W2 Jianguoyun host-only input skips /dav/ and creates MarcoMovie/ below base");
+        String ncFile =
+                CloudSync.resolveWebdavFileUrl(
+                        "https://nc.example.com/remote.php/dav/files/alice/MarcoMovie/");
+        check(
+                CloudSync.baseCollectionDepth(
+                                "https://nc.example.com/remote.php/dav/files/alice/",
+                                java.net.URI.create(ncFile))
+                        == 4,
+                "M-W2 Nextcloud base skips /remote.php/dav/files/<user>/");
+
+        // 2. M-W1 (weak ETag, If-None-Match rejection, 412 unconditional PUT + host memory)
+        //    & M-W2 (/dav/ returns 403, 401 stops, MKCOL body drained) & URL with spaces
+        HttpServer r2Server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final AtomicReference<String> lastPutIfMatch = new AtomicReference<>();
+        final AtomicReference<String> lastPutIfNoneMatch = new AtomicReference<>();
+        final List<String> putHistory = Collections.synchronizedList(new ArrayList<>());
+        final AtomicReference<byte[]> weakStore =
+                new AtomicReference<>(
+                        "{\"schema\":\"marco-movie-sync\",\"version\":2,\"updated\":100,\"watch_history\":[]}"
+                                .getBytes(StandardCharsets.UTF_8));
+        final AtomicReference<byte[]> noInmStore = new AtomicReference<>(null);
+        final AtomicReference<byte[]> cond412Store =
+                new AtomicReference<>(
+                        "{\"schema\":\"marco-movie-sync\",\"version\":2,\"updated\":200,\"watch_history\":[]}"
+                                .getBytes(StandardCharsets.UTF_8));
+        final List<String> dav403MkcolPaths = Collections.synchronizedList(new ArrayList<>());
+        final Set<String> dav403Created = Collections.synchronizedSet(new HashSet<>());
+        final AtomicReference<byte[]> dav403Store = new AtomicReference<>(null);
+        final List<String> auth401MkcolPaths = Collections.synchronizedList(new ArrayList<>());
+        final AtomicReference<byte[]> spaceStore = new AtomicReference<>(null);
+
+        r2Server.createContext(
+                "/weak/",
+                ex -> {
+                    try {
+                        if ("GET".equals(ex.getRequestMethod())) {
+                            byte[] b = weakStore.get();
+                            ex.getResponseHeaders().set("ETag", "W/\"weak-etag-1\"");
+                            ex.sendResponseHeaders(200, b.length);
+                            try (OutputStream os = ex.getResponseBody()) {
+                                os.write(b);
+                            }
+                            return;
+                        }
+                        if ("PUT".equals(ex.getRequestMethod())) {
+                            lastPutIfMatch.set(ex.getRequestHeaders().getFirst("If-Match"));
+                            lastPutIfNoneMatch.set(
+                                    ex.getRequestHeaders().getFirst("If-None-Match"));
+                            weakStore.set(readAll(ex.getRequestBody()));
+                            ex.sendResponseHeaders(204, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        r2Server.createContext(
+                "/reject-inm/",
+                ex -> {
+                    try {
+                        if ("GET".equals(ex.getRequestMethod())) {
+                            byte[] b = noInmStore.get();
+                            if (b == null) {
+                                ex.sendResponseHeaders(404, -1);
+                            } else {
+                                ex.sendResponseHeaders(200, b.length);
+                                try (OutputStream os = ex.getResponseBody()) {
+                                    os.write(b);
+                                }
+                            }
+                            return;
+                        }
+                        if ("PUT".equals(ex.getRequestMethod())) {
+                            String inm = ex.getRequestHeaders().getFirst("If-None-Match");
+                            byte[] body = readAll(ex.getRequestBody());
+                            putHistory.add("inm=" + inm);
+                            if (inm != null) {
+                                ex.sendResponseHeaders(501, -1);
+                                return;
+                            }
+                            noInmStore.set(body);
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        HttpServer cond412Server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final List<String> cond412Headers = Collections.synchronizedList(new ArrayList<>());
+        cond412Server.createContext(
+                "/gzip-etag/",
+                ex -> {
+                    try {
+                        if ("GET".equals(ex.getRequestMethod())) {
+                            byte[] b = cond412Store.get();
+                            ex.getResponseHeaders().set("ETag", "\"etag-apache-gzip\"");
+                            ex.sendResponseHeaders(200, b.length);
+                            try (OutputStream os = ex.getResponseBody()) {
+                                os.write(b);
+                            }
+                            return;
+                        }
+                        if ("PUT".equals(ex.getRequestMethod())) {
+                            String im = ex.getRequestHeaders().getFirst("If-Match");
+                            String inm = ex.getRequestHeaders().getFirst("If-None-Match");
+                            byte[] body = readAll(ex.getRequestBody());
+                            cond412Headers.add("im=" + im + ",inm=" + inm);
+                            if (im != null || inm != null) {
+                                ex.sendResponseHeaders(412, -1);
+                                return;
+                            }
+                            cond412Store.set(body);
+                            ex.sendResponseHeaders(204, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        r2Server.createContext(
+                "/dav/",
+                ex -> {
+                    try {
+                        String p = ex.getRequestURI().getPath();
+                        String m = ex.getRequestMethod();
+                        if ("MKCOL".equalsIgnoreCase(m)) {
+                            String norm = p.endsWith("/") ? p : p + "/";
+                            dav403MkcolPaths.add(norm);
+                            byte[] respBody =
+                                    ("mkcol-response-payload-" + norm)
+                                            .getBytes(StandardCharsets.UTF_8);
+                            if ("/dav/".equals(norm)) {
+                                ex.sendResponseHeaders(403, respBody.length);
+                                try (OutputStream os = ex.getResponseBody()) {
+                                    os.write(respBody);
+                                }
+                                return;
+                            }
+                            dav403Created.add(norm);
+                            ex.sendResponseHeaders(201, respBody.length);
+                            try (OutputStream os = ex.getResponseBody()) {
+                                os.write(respBody);
+                            }
+                            return;
+                        }
+                        if ("GET".equalsIgnoreCase(m)) {
+                            byte[] b = dav403Store.get();
+                            if (b == null) {
+                                ex.sendResponseHeaders(404, -1);
+                            } else {
+                                ex.sendResponseHeaders(200, b.length);
+                                try (OutputStream os = ex.getResponseBody()) {
+                                    os.write(b);
+                                }
+                            }
+                            return;
+                        }
+                        if ("PUT".equalsIgnoreCase(m)) {
+                            byte[] body = readAll(ex.getRequestBody());
+                            if (!dav403Created.contains("/dav/MarcoMovie/")) {
+                                ex.sendResponseHeaders(409, -1);
+                                return;
+                            }
+                            dav403Store.set(body);
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        r2Server.createContext(
+                "/auth401/",
+                ex -> {
+                    try {
+                        String p = ex.getRequestURI().getPath();
+                        String m = ex.getRequestMethod();
+                        if ("MKCOL".equalsIgnoreCase(m)) {
+                            String norm = p.endsWith("/") ? p : p + "/";
+                            auth401MkcolPaths.add(norm);
+                            ex.sendResponseHeaders(401, -1);
+                            return;
+                        }
+                        if ("GET".equalsIgnoreCase(m)) {
+                            ex.sendResponseHeaders(404, -1);
+                            return;
+                        }
+                        if ("PUT".equalsIgnoreCase(m)) {
+                            readAll(ex.getRequestBody());
+                            ex.sendResponseHeaders(409, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        r2Server.createContext(
+                "/space dir/",
+                ex -> {
+                    try {
+                        String m = ex.getRequestMethod();
+                        if ("MKCOL".equalsIgnoreCase(m)) {
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        if ("GET".equalsIgnoreCase(m)) {
+                            byte[] b = spaceStore.get();
+                            if (b == null) {
+                                ex.sendResponseHeaders(404, -1);
+                            } else {
+                                ex.sendResponseHeaders(200, b.length);
+                                try (OutputStream os = ex.getResponseBody()) {
+                                    os.write(b);
+                                }
+                            }
+                            return;
+                        }
+                        if ("PUT".equalsIgnoreCase(m)) {
+                            spaceStore.set(readAll(ex.getRequestBody()));
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        r2Server.start();
+        cond412Server.start();
+        try {
+            int port = r2Server.getAddress().getPort();
+            int port412 = cond412Server.getAddress().getPort();
+
+            // M-W1a: Weak ETag W/"..." omits If-Match
+            CloudSync.clearNoConditionalWriteHostsForTest();
+            CloudSync.syncWebdav(
+                    "http://127.0.0.1:" + port + "/weak/",
+                    "alice",
+                    "pass",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 1100L));
+            check(
+                    lastPutIfMatch.get() == null && lastPutIfNoneMatch.get() == null,
+                    "M-W1 weak ETag (W/\"...\") does not send If-Match header");
+
+            // M-W1b: Server rejecting If-None-Match: * retries without header and remembers host
+            CloudSync.clearNoConditionalWriteHostsForTest();
+            putHistory.clear();
+            String rejectInmUrl = "http://127.0.0.1:" + port + "/reject-inm/";
+            CloudSync.syncWebdav(
+                    rejectInmUrl,
+                    "alice",
+                    "pass",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 1200L));
+            check(
+                    putHistory.size() == 2
+                            && "inm=*".equals(putHistory.get(0))
+                            && "inm=null".equals(putHistory.get(1))
+                            && noInmStore.get() != null,
+                    "M-W1 server rejecting If-None-Match:* retries without header and succeeds");
+            check(
+                    CloudSync.isHostMarkedNoConditionalWrite(
+                            CloudSync.resolveWebdavFileUrl(rejectInmUrl)),
+                    "M-W1 host is remembered as not supporting conditional writes after If-None-Match fallback");
+
+            // M-W1c: 412 retries exhausted -> 1 unconditional PUT + per-host memory on next sync
+            CloudSync.clearNoConditionalWriteHostsForTest();
+            cond412Headers.clear();
+            String cond412Url = "http://127.0.0.1:" + port412 + "/gzip-etag/";
+            CloudSync.syncWebdav(
+                    cond412Url,
+                    "alice",
+                    "pass",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 1300L));
+            check(
+                    cond412Headers.size() == 4 && "im=null,inm=null".equals(cond412Headers.get(3)),
+                    "M-W1 412 retries exhausted performs one unconditional PUT");
+            check(
+                    CloudSync.isHostMarkedNoConditionalWrite(
+                            CloudSync.resolveWebdavFileUrl(cond412Url)),
+                    "M-W1 host remembered after 412 unconditional PUT succeeds");
+            cond412Headers.clear();
+            CloudSync.syncWebdav(
+                    cond412Url,
+                    "alice",
+                    "pass",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 1400L));
+            check(
+                    cond412Headers.size() == 1 && "im=null,inm=null".equals(cond412Headers.get(0)),
+                    "M-W1 subsequent sync to remembered host skips conditional headers immediately");
+
+            // M-W2a: /dav/ returns 403 on MKCOL -> continues to /dav/MarcoMovie/ (201) and succeeds
+            CloudSync.clearNoConditionalWriteHostsForTest();
+            CloudSync.syncWebdav(
+                    "http://127.0.0.1:" + port + "/dav/MarcoMovie/",
+                    "alice",
+                    "pass",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 1500L));
+            check(
+                    dav403MkcolPaths.contains("/dav/")
+                            && dav403MkcolPaths.contains("/dav/MarcoMovie/")
+                            && dav403Store.get() != null,
+                    "M-W2 MKCOL continues past /dav/ returning 403 and creates /dav/MarcoMovie/");
+
+            // M-W2b: MKCOL stops immediately on 401 without requesting child collections
+            try {
+                CloudSync.syncWebdav(
+                        "http://127.0.0.1:" + port + "/auth401/child1/child2/",
+                        "alice",
+                        "pass",
+                        remote ->
+                                CloudSync.merge(
+                                        "[]",
+                                        "[]",
+                                        "",
+                                        Collections.emptyList(),
+                                        false,
+                                        remote,
+                                        1600L));
+                check(false, "401 MKCOL with 409 PUT must throw");
+            } catch (java.io.IOException expected) {
+                check(
+                        auth401MkcolPaths.size() == 1
+                                && "/auth401/".equals(auth401MkcolPaths.get(0)),
+                        "M-W2 MKCOL stops immediately on HTTP 401");
+            }
+
+            // Minor fix: URL containing spaces encodes cleanly and syncs
+            CloudSync.syncWebdav(
+                    "http://127.0.0.1:" + port + "/space dir/",
+                    "alice",
+                    "pass",
+                    remote ->
+                            CloudSync.merge(
+                                    "[]", "[]", "", Collections.emptyList(), false, remote, 1700L));
+            check(spaceStore.get() != null, "WebDAV URL containing spaces syncs cleanly");
+
+            // M-W3: AutoPushTracker updates lastAutoPushMs on every attempt and applies 1,2,4,8,15m
+            // backoff
+            CloudSync.AutoPushTracker tracker = new CloudSync.AutoPushTracker();
+            tracker.onAttemptStart(10_000L);
+            check(
+                    tracker.lastAutoPushMs() == 10_000L,
+                    "M-W3 lastAutoPushMs updated at attempt start before result is known");
+            tracker.onFailure(10_500L);
+            check(
+                    tracker.lastAutoPushMs() == 10_500L
+                            && tracker.consecutiveFailures() == 1
+                            && tracker.computeDelayMs(11_000L, true) == 60_000L - 500L,
+                    "M-W3 first failure schedules 1-minute backoff even for immediate trigger");
+            check(
+                    CloudSync.AutoPushTracker.backoffMsForFailures(1) == 60_000L
+                            && CloudSync.AutoPushTracker.backoffMsForFailures(2) == 120_000L
+                            && CloudSync.AutoPushTracker.backoffMsForFailures(3) == 240_000L
+                            && CloudSync.AutoPushTracker.backoffMsForFailures(4) == 480_000L
+                            && CloudSync.AutoPushTracker.backoffMsForFailures(5) == 900_000L
+                            && CloudSync.AutoPushTracker.backoffMsForFailures(8) == 900_000L,
+                    "M-W3 exponential backoff follows 1, 2, 4, 8 minutes capped at 15 minutes");
+            tracker.onAttemptStart(80_000L);
+            tracker.onSuccess(80_200L);
+            check(
+                    tracker.lastAutoPushMs() == 80_200L
+                            && tracker.consecutiveFailures() == 0
+                            && tracker.computeDelayMs(80_500L, true) == 2_500L,
+                    "M-W3 success resets failure backoff");
+
+            // M-W4 & Scoped cancel: cancelOwned only cancels matching Activity, and submitExitPush
+            // cannot be cancelled
+            CloudSync.SyncRuntime runtime = new CloudSync.SyncRuntime();
+            final List<Runnable> scheduledQueue = new ArrayList<>();
+            CloudSync.DelayScheduler fakeScheduler =
+                    new CloudSync.DelayScheduler() {
+                        @Override
+                        public void postDelayed(Runnable r, long delayMs) {
+                            scheduledQueue.add(r);
+                        }
+
+                        @Override
+                        public void removeCallbacks(Runnable r) {
+                            scheduledQueue.remove(r);
+                        }
+                    };
+            Object activityA = new Object();
+            Object activityB = new Object();
+            runtime.scheduleOwned(activityB, fakeScheduler, 2500L, () -> {});
+            check(
+                    !runtime.cancelOwned(activityA) && scheduledQueue.size() == 1,
+                    "CloudSyncDialog.cancel(activityA) does not cancel activityB's pending task");
+            check(
+                    runtime.cancelOwned(activityB) && scheduledQueue.isEmpty(),
+                    "CloudSyncDialog.cancel(activityB) cancels activityB's pending task");
+
+            spaceStore.set(null);
+            final java.util.concurrent.atomic.AtomicBoolean appCtxCredentialLoaded =
+                    new java.util.concurrent.atomic.AtomicBoolean(false);
+            java.util.concurrent.Future<CloudSync.MergeResult> exitFuture =
+                    runtime.submitExitPush(
+                            "http://127.0.0.1:" + port + "/space dir/",
+                            "alice",
+                            () -> {
+                                appCtxCredentialLoaded.set(true);
+                                return "pass";
+                            },
+                            remote ->
+                                    CloudSync.merge(
+                                            "[]",
+                                            "[]",
+                                            "",
+                                            Collections.emptyList(),
+                                            false,
+                                            remote,
+                                            1800L));
+            runtime.cancelOwned(activityA);
+            runtime.cancelOwned(null);
+            CloudSync.MergeResult exitRes =
+                    exitFuture.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            check(
+                    exitRes != null && appCtxCredentialLoaded.get() && spaceStore.get() != null,
+                    "M-W4 submitExitPush completes on background executor and cannot be cancelled by cancel()");
+
+            // M-W6: mergeSerial re-reads -> merges -> writes on same serial thread so deleted item
+            // never resurrects
+            java.util.concurrent.ExecutorService serialExec =
+                    java.util.concurrent.Executors.newSingleThreadExecutor();
+            try {
+                WatchHistory.Entry zombieCandidate = new WatchHistory.Entry();
+                zombieCandidate.site = "site_m";
+                zombieCandidate.id = "vod_deleted";
+                zombieCandidate.title = "待删除条目";
+                zombieCandidate.position = 30_000;
+                zombieCandidate.duration = 90_000;
+                zombieCandidate.updated = 1_000L;
+                final AtomicReference<String> diskHist =
+                        new AtomicReference<>(WatchHistory.upsert("[]", zombieCandidate));
+                final AtomicReference<String> diskFav = new AtomicReference<>("[]");
+                final AtomicReference<String> diskTomb = new AtomicReference<>("");
+
+                String remoteWithDeletedItem =
+                        CloudSync.exportPayload(
+                                diskHist.get(), "[]", "", Collections.emptyList(), false, 1_500L);
+
+                // Queue a user deletion on serialExec BEFORE mergeSerial executes on serialExec
+                final java.util.concurrent.CountDownLatch holdSerial =
+                        new java.util.concurrent.CountDownLatch(1);
+                serialExec.execute(
+                        () -> {
+                            try {
+                                holdSerial.await(5, java.util.concurrent.TimeUnit.SECONDS);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                            diskHist.set(
+                                    WatchHistory.remove(diskHist.get(), "site_m\nvod_deleted"));
+                            CloudSync.Tombstones t = CloudSync.Tombstones.read(diskTomb.get());
+                            t.putMax("hist:site_m\nvod_deleted", 2_000L);
+                            diskTomb.set(t.json());
+                        });
+
+                final CloudSync.LocalStore store =
+                        new CloudSync.LocalStore() {
+                            @Override
+                            public String readHistoryJson() {
+                                return diskHist.get();
+                            }
+
+                            @Override
+                            public String readFavoritesJson() {
+                                return diskFav.get();
+                            }
+
+                            @Override
+                            public String readTombstonesJson() {
+                                return diskTomb.get();
+                            }
+
+                            @Override
+                            public void writeMerged(
+                                    String historyJson,
+                                    String favoritesJson,
+                                    String tombstonesJson,
+                                    CloudSync.MergeResult result) {
+                                diskHist.set(historyJson);
+                                diskFav.set(favoritesJson);
+                                diskTomb.set(tombstonesJson);
+                            }
+                        };
+
+                java.util.concurrent.ExecutorService callerExec =
+                        java.util.concurrent.Executors.newSingleThreadExecutor();
+                try {
+                    java.util.concurrent.Future<CloudSync.MergeResult> mergeFuture =
+                            callerExec.submit(
+                                    () ->
+                                            CloudSync.mergeSerial(
+                                                    serialExec,
+                                                    store,
+                                                    Collections.emptyList(),
+                                                    false,
+                                                    remoteWithDeletedItem,
+                                                    2_100L));
+                    holdSerial.countDown();
+                    CloudSync.MergeResult serialMerged =
+                            mergeFuture.get(10, java.util.concurrent.TimeUnit.SECONDS);
+                    check(
+                            serialMerged.historyCount == 0
+                                    && WatchHistory.read(diskHist.get()).isEmpty(),
+                            "M-W6 mergeSerial re-reads latest history & tombstones on serial thread so deleted item never resurrects");
+                } finally {
+                    callerExec.shutdownNow();
+                }
+            } finally {
+                serialExec.shutdownNow();
+                CloudSync.clearNoConditionalWriteHostsForTest();
+            }
+        } finally {
+            r2Server.stop(0);
+            cond412Server.stop(0);
+        }
     }
 }

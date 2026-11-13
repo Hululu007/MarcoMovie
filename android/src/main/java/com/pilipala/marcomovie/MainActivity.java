@@ -1875,6 +1875,9 @@ public final class MainActivity extends Activity {
         if (startupIntro != null) startupIntro.cancel();
         introSkipKey = false;
         savePlaybackHistory(true);
+        if (isFinishing() && !privateMode && !switchingPrivacy) {
+            CloudSyncDialog.pushOnExit(this);
+        }
         foreground = false;
         super.onStop();
         if (player != null)
@@ -1883,13 +1886,14 @@ public final class MainActivity extends Activity {
                 playing = false;
                 if (embyReporter != null) embyReporter.update(player.getCurrentPosition(), true);
                 if (playStatus != null) playStatus.setText("已暂停 · 按确认继续");
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                AppLog.w("MainActivity", "pause player onStop failed", e);
             }
     }
 
     @Override
     protected void onDestroy() {
-        CloudSyncDialog.cancel();
+        CloudSyncDialog.cancel(this);
         if (privateMode && isFinishing() && !switchingPrivacy) {
             MobileShell.clearSearchSession();
             VideoSkipStore.clearPrivateRecords();
@@ -1904,6 +1908,9 @@ public final class MainActivity extends Activity {
         stopMagnet();
         generation++;
         releasePlayer();
+        if (!privateMode && !switchingPrivacy && (isFinishing() || activeActivity == null)) {
+            CloudSyncDialog.pushOnExit(this);
+        }
         closeEngines();
         cancelArtwork();
         cancelPageRequests();

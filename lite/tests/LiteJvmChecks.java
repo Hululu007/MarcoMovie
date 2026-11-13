@@ -107,6 +107,7 @@ public final class LiteJvmChecks {
         testLiteSyncV2AndLanServer();
         testLiteSyncEtagAndConcurrency();
         testConfigPullAndCapabilityStatus();
+        testRound2LiteWebdavRobustness();
         System.out.println(
                 "PASS " + checks + " TV Lite JVM checks ("
                         + checks
@@ -114,6 +115,18 @@ public final class LiteJvmChecks {
     }
 
     private static void testResolveWebdavFileUrlMatrix() throws Exception {
+        check(
+                "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
+                        .equals(LiteSync.resolveWebdavFileUrl("dav.jianguoyun.com")),
+                "LiteSync Jianguoyun bare host resolves to /dav/MarcoMovie/marco-movie-sync.json");
+        check(
+                "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
+                        .equals(LiteSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/")),
+                "LiteSync Jianguoyun root slash resolves to /dav/MarcoMovie/marco-movie-sync.json");
+        check(
+                "http://nas.local:5006/My%20Movies/marco-movie-sync.json"
+                        .equals(LiteSync.resolveWebdavFileUrl("http://nas.local:5006/My Movies/")),
+                "LiteSync URL with spaces encodes space as %20");
         check(
                 "https://dav.jianguoyun.com/dav/MarcoMovie/marco-movie-sync.json"
                         .equals(LiteSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/dav/")),
@@ -942,7 +955,7 @@ public final class LiteJvmChecks {
                         });
                 check(false, "LiteSync MKCOL 401 failure must throw IOException on PUT");
             } catch (java.io.IOException expected) {
-                // Expected PUT failure
+                check(expected.getMessage() != null, "LiteSync MKCOL 401 PUT failure includes message");
             }
             check(
                     auth401Mkcol.size() == 1 && "/auth401/".equals(auth401Mkcol.get(0)),
@@ -952,7 +965,7 @@ public final class LiteJvmChecks {
                             && !auth401Mkcol.contains("/auth401/sub1/sub2/"),
                     "LiteSync does not issue child MKCOL requests on 401");
 
-            // 6. MKCOL halts recursion immediately on HTTP 403
+            // 6. MKCOL continues past HTTP 403 to child collections (only 401 stops per M-W2)
             try {
                 LiteSync.syncWebdav(
                         "http://127.0.0.1:" + port + "/auth403/sub1/sub2/",
@@ -971,17 +984,17 @@ public final class LiteJvmChecks {
                                         7000L);
                             }
                         });
-                check(false, "LiteSync MKCOL 403 failure must throw IOException on PUT");
+                check(false, "LiteSync persistent PUT 404 failure must throw IOException");
             } catch (java.io.IOException expected) {
-                // Expected PUT failure
+                check(expected.getMessage() != null, "LiteSync /auth403/ PUT failure includes message");
             }
             check(
-                    auth403Mkcol.size() == 1 && "/auth403/".equals(auth403Mkcol.get(0)),
-                    "LiteSync MKCOL halts recursion immediately on HTTP 403 without requesting child directories");
+                    auth403Mkcol.size() == 3 && "/auth403/".equals(auth403Mkcol.get(0)),
+                    "LiteSync MKCOL continues past HTTP 403 on parent collection");
             check(
-                    !auth403Mkcol.contains("/auth403/sub1/")
-                            && !auth403Mkcol.contains("/auth403/sub1/sub2/"),
-                    "LiteSync does not issue child MKCOL requests on 403");
+                    auth403Mkcol.contains("/auth403/sub1/")
+                            && auth403Mkcol.contains("/auth403/sub1/sub2/"),
+                    "LiteSync issues child MKCOL requests when parent returns 403");
         } finally {
             dav.stop(0);
         }
@@ -1739,6 +1752,560 @@ public final class LiteJvmChecks {
             check(status201Result.contains("\"key\":\"created-site\""), "Lite fetch accepts 201 status code");
         } finally {
             server.stop(0);
+        }
+    }
+
+    private static final class FakeLiteContext extends android.content.Context {
+        private final FakeLiteContext appContext;
+        private final Map<String, Map<String, Object>> prefFiles;
+        final java.util.concurrent.atomic.AtomicBoolean appContextRequested =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        final java.util.concurrent.atomic.AtomicBoolean prefsReadOnThis =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        FakeLiteContext(
+                FakeLiteContext appContext, Map<String, Map<String, Object>> sharedPrefFiles) {
+            this.appContext = appContext;
+            this.prefFiles = sharedPrefFiles;
+        }
+
+        @Override
+        public android.content.Context getApplicationContext() {
+            appContextRequested.set(true);
+            return appContext != null ? appContext : this;
+        }
+
+        @Override
+        public String getPackageName() {
+            return "com.pilipala.marcomovie.lite.test";
+        }
+
+        @Override
+        public synchronized android.content.SharedPreferences getSharedPreferences(
+                String name, int mode) {
+            prefsReadOnThis.set(true);
+            Map<String, Object> backing = prefFiles.get(name);
+            if (backing == null) {
+                backing =
+                        java.util.Collections.synchronizedMap(
+                                new java.util.HashMap<String, Object>());
+                prefFiles.put(name, backing);
+            }
+            return createMemoryPrefs(
+                    backing,
+                    new java.util.concurrent.atomic.AtomicInteger(),
+                    new java.util.concurrent.atomic.AtomicInteger());
+        }
+    }
+
+    private static void testRound2LiteWebdavRobustness() throws Exception {
+        LiteSync.clearNoConditionalWriteHostsForTest();
+
+        // 1-3: M-W2 baseCollectionDepth checks
+        String jgyFile = LiteSync.resolveWebdavFileUrl("https://dav.jianguoyun.com/dav/");
+        check(
+                LiteSync.baseCollectionDepth(
+                                "https://dav.jianguoyun.com/dav/", java.net.URI.create(jgyFile))
+                        == 1,
+                "M-W2 Lite Jianguoyun /dav/ base skips /dav/");
+        check(
+                LiteSync.baseCollectionDepth("dav.jianguoyun.com", java.net.URI.create(jgyFile))
+                        == 1,
+                "M-W2 Lite Jianguoyun host-only skips /dav/");
+        String ncFile =
+                LiteSync.resolveWebdavFileUrl(
+                        "https://nc.example.com/remote.php/dav/files/alice/MarcoMovie/");
+        check(
+                LiteSync.baseCollectionDepth(
+                                "https://nc.example.com/remote.php/dav/files/alice/",
+                                java.net.URI.create(ncFile))
+                        == 4,
+                "M-W2 Lite Nextcloud base skips /remote.php/dav/files/<user>/");
+
+        HttpServer r2Server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        HttpServer cond412Server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final java.util.concurrent.atomic.AtomicReference<String> weakIfMatch =
+                new java.util.concurrent.atomic.AtomicReference<String>();
+        final java.util.concurrent.atomic.AtomicReference<String> weakIfNoneMatch =
+                new java.util.concurrent.atomic.AtomicReference<String>();
+        final java.util.concurrent.atomic.AtomicReference<byte[]> weakStore =
+                new java.util.concurrent.atomic.AtomicReference<byte[]>(
+                        "{\"schema\":\"marco-movie-sync\",\"version\":2,\"updated\":100,\"watch_history\":[]}"
+                                .getBytes(StandardCharsets.UTF_8));
+        final java.util.List<String> rejectInmLog =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+        final java.util.concurrent.atomic.AtomicReference<byte[]> rejectInmStore =
+                new java.util.concurrent.atomic.AtomicReference<byte[]>(null);
+        final java.util.List<String> cond412Log =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+        final java.util.concurrent.atomic.AtomicReference<byte[]> cond412Store =
+                new java.util.concurrent.atomic.AtomicReference<byte[]>(
+                        "{\"schema\":\"marco-movie-sync\",\"version\":2,\"updated\":200,\"watch_history\":[]}"
+                                .getBytes(StandardCharsets.UTF_8));
+        final java.util.List<String> dav403Mkcols =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+        final java.util.Set<String> dav403Created =
+                java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+        final java.util.concurrent.atomic.AtomicReference<byte[]> dav403Store =
+                new java.util.concurrent.atomic.AtomicReference<byte[]>(null);
+        final java.util.concurrent.atomic.AtomicReference<byte[]> spaceStore =
+                new java.util.concurrent.atomic.AtomicReference<byte[]>(null);
+        final java.util.concurrent.atomic.AtomicReference<byte[]> exitStore =
+                new java.util.concurrent.atomic.AtomicReference<byte[]>(null);
+
+        r2Server.createContext(
+                "/weak/",
+                ex -> {
+                    try {
+                        if ("GET".equals(ex.getRequestMethod())) {
+                            byte[] b = weakStore.get();
+                            ex.getResponseHeaders().set("ETag", "W/\"lite-weak-1\"");
+                            ex.sendResponseHeaders(200, b.length);
+                            OutputStream os = ex.getResponseBody();
+                            os.write(b);
+                            os.close();
+                            return;
+                        }
+                        if ("PUT".equals(ex.getRequestMethod())) {
+                            weakIfMatch.set(ex.getRequestHeaders().getFirst("If-Match"));
+                            weakIfNoneMatch.set(ex.getRequestHeaders().getFirst("If-None-Match"));
+                            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                            InputStream is = ex.getRequestBody();
+                            byte[] buf = new byte[1024];
+                            int n;
+                            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+                            weakStore.set(bos.toByteArray());
+                            ex.sendResponseHeaders(204, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        r2Server.createContext(
+                "/reject-inm/",
+                ex -> {
+                    try {
+                        if ("GET".equals(ex.getRequestMethod())) {
+                            byte[] b = rejectInmStore.get();
+                            if (b == null) {
+                                ex.sendResponseHeaders(404, -1);
+                            } else {
+                                ex.sendResponseHeaders(200, b.length);
+                                OutputStream os = ex.getResponseBody();
+                                os.write(b);
+                                os.close();
+                            }
+                            return;
+                        }
+                        if ("PUT".equals(ex.getRequestMethod())) {
+                            String inm = ex.getRequestHeaders().getFirst("If-None-Match");
+                            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                            InputStream is = ex.getRequestBody();
+                            byte[] buf = new byte[1024];
+                            int n;
+                            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+                            rejectInmLog.add("inm=" + inm);
+                            if (inm != null) {
+                                ex.sendResponseHeaders(501, -1);
+                                return;
+                            }
+                            rejectInmStore.set(bos.toByteArray());
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        cond412Server.createContext(
+                "/gzip-etag/",
+                ex -> {
+                    try {
+                        if ("GET".equals(ex.getRequestMethod())) {
+                            byte[] b = cond412Store.get();
+                            ex.getResponseHeaders().set("ETag", "\"lite-gzip\"");
+                            ex.sendResponseHeaders(200, b.length);
+                            OutputStream os = ex.getResponseBody();
+                            os.write(b);
+                            os.close();
+                            return;
+                        }
+                        if ("PUT".equals(ex.getRequestMethod())) {
+                            String im = ex.getRequestHeaders().getFirst("If-Match");
+                            String inm = ex.getRequestHeaders().getFirst("If-None-Match");
+                            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                            InputStream is = ex.getRequestBody();
+                            byte[] buf = new byte[1024];
+                            int n;
+                            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+                            cond412Log.add("im=" + im + ",inm=" + inm);
+                            if (im != null || inm != null) {
+                                ex.sendResponseHeaders(412, -1);
+                                return;
+                            }
+                            cond412Store.set(bos.toByteArray());
+                            ex.sendResponseHeaders(204, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        r2Server.createContext(
+                "/dav/",
+                ex -> {
+                    try {
+                        String p = ex.getRequestURI().getPath();
+                        String m = ex.getRequestMethod();
+                        if ("MKCOL".equalsIgnoreCase(m)) {
+                            String norm = p.endsWith("/") ? p : (p + "/");
+                            dav403Mkcols.add(norm);
+                            byte[] resp =
+                                    ("mkcol-body-" + norm).getBytes(StandardCharsets.UTF_8);
+                            if ("/dav/".equals(norm)) {
+                                ex.sendResponseHeaders(403, resp.length);
+                                OutputStream os = ex.getResponseBody();
+                                os.write(resp);
+                                os.close();
+                                return;
+                            }
+                            dav403Created.add(norm);
+                            ex.sendResponseHeaders(201, resp.length);
+                            OutputStream os = ex.getResponseBody();
+                            os.write(resp);
+                            os.close();
+                            return;
+                        }
+                        if ("GET".equalsIgnoreCase(m)) {
+                            byte[] b = dav403Store.get();
+                            if (b == null) {
+                                ex.sendResponseHeaders(404, -1);
+                            } else {
+                                ex.sendResponseHeaders(200, b.length);
+                                OutputStream os = ex.getResponseBody();
+                                os.write(b);
+                                os.close();
+                            }
+                            return;
+                        }
+                        if ("PUT".equalsIgnoreCase(m)) {
+                            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                            InputStream is = ex.getRequestBody();
+                            byte[] buf = new byte[1024];
+                            int n;
+                            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+                            if (!dav403Created.contains("/dav/MarcoMovie/")) {
+                                ex.sendResponseHeaders(409, -1);
+                                return;
+                            }
+                            dav403Store.set(bos.toByteArray());
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        r2Server.createContext(
+                "/lite space/",
+                ex -> {
+                    try {
+                        String m = ex.getRequestMethod();
+                        if ("MKCOL".equalsIgnoreCase(m)) {
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        if ("GET".equalsIgnoreCase(m)) {
+                            byte[] b = spaceStore.get();
+                            if (b == null) {
+                                ex.sendResponseHeaders(404, -1);
+                            } else {
+                                ex.sendResponseHeaders(200, b.length);
+                                OutputStream os = ex.getResponseBody();
+                                os.write(b);
+                                os.close();
+                            }
+                            return;
+                        }
+                        if ("PUT".equalsIgnoreCase(m)) {
+                            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                            InputStream is = ex.getRequestBody();
+                            byte[] buf = new byte[1024];
+                            int n;
+                            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+                            spaceStore.set(bos.toByteArray());
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        r2Server.createContext(
+                "/exit-push/",
+                ex -> {
+                    try {
+                        String m = ex.getRequestMethod();
+                        if ("GET".equalsIgnoreCase(m)) {
+                            ex.sendResponseHeaders(404, -1);
+                            return;
+                        }
+                        if ("PUT".equalsIgnoreCase(m)) {
+                            String auth = ex.getRequestHeaders().getFirst("Authorization");
+                            if (!LiteSync.basicAuthHeader("exituser", "exitpass").equals(auth)) {
+                                ex.sendResponseHeaders(401, -1);
+                                return;
+                            }
+                            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                            InputStream is = ex.getRequestBody();
+                            byte[] buf = new byte[1024];
+                            int n;
+                            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+                            exitStore.set(bos.toByteArray());
+                            ex.sendResponseHeaders(201, -1);
+                            return;
+                        }
+                        ex.sendResponseHeaders(405, -1);
+                    } finally {
+                        ex.close();
+                    }
+                });
+
+        r2Server.start();
+        cond412Server.start();
+        try {
+            int port = r2Server.getAddress().getPort();
+            int port412 = cond412Server.getAddress().getPort();
+
+            // 4. Weak ETag
+            LiteSync.clearNoConditionalWriteHostsForTest();
+            LiteSync.syncWebdav(
+                    "http://127.0.0.1:" + port + "/weak/",
+                    "u",
+                    "p",
+                    remote -> LiteSync.merge("[]", "[]", "", null, false, remote, 1100L));
+            check(
+                    weakIfMatch.get() == null && weakIfNoneMatch.get() == null,
+                    "M-W1 Lite weak ETag does not send If-Match");
+
+            // 5-6. Reject If-None-Match:*
+            LiteSync.clearNoConditionalWriteHostsForTest();
+            String rejectUrl = "http://127.0.0.1:" + port + "/reject-inm/";
+            LiteSync.syncWebdav(
+                    rejectUrl,
+                    "u",
+                    "p",
+                    remote -> LiteSync.merge("[]", "[]", "", null, false, remote, 1200L));
+            check(
+                    rejectInmLog.size() == 2
+                            && "inm=*".equals(rejectInmLog.get(0))
+                            && "inm=null".equals(rejectInmLog.get(1))
+                            && rejectInmStore.get() != null,
+                    "M-W1 Lite server rejecting If-None-Match:* retries without header");
+            check(
+                    LiteSync.isHostMarkedNoConditionalWrite(
+                            LiteSync.resolveWebdavFileUrl(rejectUrl)),
+                    "M-W1 Lite remembers host after If-None-Match fallback");
+
+            // 7-9. 412 unconditional PUT + host memory
+            LiteSync.clearNoConditionalWriteHostsForTest();
+            String cond412Url = "http://127.0.0.1:" + port412 + "/gzip-etag/";
+            LiteSync.syncWebdav(
+                    cond412Url,
+                    "u",
+                    "p",
+                    remote -> LiteSync.merge("[]", "[]", "", null, false, remote, 1300L));
+            check(
+                    cond412Log.size() == 4 && "im=null,inm=null".equals(cond412Log.get(3)),
+                    "M-W1 Lite 412 retries exhausted performs one unconditional PUT");
+            check(
+                    LiteSync.isHostMarkedNoConditionalWrite(
+                            LiteSync.resolveWebdavFileUrl(cond412Url)),
+                    "M-W1 Lite remembers host after 412 unconditional PUT");
+            cond412Log.clear();
+            LiteSync.syncWebdav(
+                    cond412Url,
+                    "u",
+                    "p",
+                    remote -> LiteSync.merge("[]", "[]", "", null, false, remote, 1400L));
+            check(
+                    cond412Log.size() == 1 && "im=null,inm=null".equals(cond412Log.get(0)),
+                    "M-W1 Lite subsequent sync skips conditional headers immediately");
+
+            // 10. Mock /dav/ returns 403 -> continues to /dav/MarcoMovie/ (201) and uploads
+            LiteSync.clearNoConditionalWriteHostsForTest();
+            LiteSync.syncWebdav(
+                    "http://127.0.0.1:" + port + "/dav/MarcoMovie/",
+                    "u",
+                    "p",
+                    remote -> LiteSync.merge("[]", "[]", "", null, false, remote, 1500L));
+            check(
+                    dav403Mkcols.contains("/dav/")
+                            && dav403Mkcols.contains("/dav/MarcoMovie/")
+                            && dav403Store.get() != null,
+                    "M-W2 Lite MKCOL continues past /dav/ returning 403 and creates /dav/MarcoMovie/");
+
+            // 11. URL with spaces syncs end-to-end
+            LiteSync.syncWebdav(
+                    "http://127.0.0.1:" + port + "/lite space/",
+                    "u",
+                    "p",
+                    remote -> LiteSync.merge("[]", "[]", "", null, false, remote, 1600L));
+            check(spaceStore.get() != null, "Lite URL with spaces syncs end-to-end");
+
+            // 12. TLS handshake failure closes raw TCP socket
+            final java.net.ServerSocket tlsTrap = new java.net.ServerSocket();
+            tlsTrap.bind(new InetSocketAddress("127.0.0.1", 0));
+            final java.util.concurrent.atomic.AtomicBoolean peerClosedCleanly =
+                    new java.util.concurrent.atomic.AtomicBoolean(false);
+            Thread acceptThread =
+                    new Thread(
+                            () -> {
+                                try {
+                                    java.net.Socket accepted = tlsTrap.accept();
+                                    try {
+                                        accepted.setSoTimeout(3000);
+                                        int b = accepted.getInputStream().read();
+                                        if (b == -1) {
+                                            peerClosedCleanly.set(true);
+                                        }
+                                    } finally {
+                                        accepted.close();
+                                    }
+                                } catch (Exception err) {
+                                    System.err.println("TLS trap accept helper closed: " + err);
+                                }
+                            });
+            acceptThread.setDaemon(true);
+            acceptThread.start();
+            try {
+                javax.net.ssl.SSLSocketFactory failingFactory =
+                        new javax.net.ssl.SSLSocketFactory() {
+                            @Override
+                            public String[] getDefaultCipherSuites() {
+                                return new String[0];
+                            }
+
+                            @Override
+                            public String[] getSupportedCipherSuites() {
+                                return new String[0];
+                            }
+
+                            @Override
+                            public java.net.Socket createSocket(
+                                    java.net.Socket s, String host, int p, boolean autoClose)
+                                    throws java.io.IOException {
+                                throw new javax.net.ssl.SSLHandshakeException(
+                                        "Simulated handshake failure before SSLSocket wrap");
+                            }
+
+                            @Override
+                            public java.net.Socket createSocket(String host, int p) {
+                                return null;
+                            }
+
+                            @Override
+                            public java.net.Socket createSocket(
+                                    String host, int p, java.net.InetAddress lh, int lp) {
+                                return null;
+                            }
+
+                            @Override
+                            public java.net.Socket createSocket(java.net.InetAddress host, int p) {
+                                return null;
+                            }
+
+                            @Override
+                            public java.net.Socket createSocket(
+                                    java.net.InetAddress addr,
+                                    int p,
+                                    java.net.InetAddress la,
+                                    int lp) {
+                                return null;
+                            }
+                        };
+                int mkcolErr =
+                        LiteSync.sendRawMkcolWithFactory(
+                                java.net.URI.create(
+                                        "https://127.0.0.1:"
+                                                + tlsTrap.getLocalPort()
+                                                + "/dav/MarcoMovie/"),
+                                "/dav/MarcoMovie/",
+                                "",
+                                failingFactory);
+                acceptThread.join(3000);
+                check(
+                        mkcolErr == -1 && peerClosedCleanly.get(),
+                        "Lite sendRawMkcol closes raw TCP socket when TLS handshake fails");
+            } finally {
+                tlsTrap.close();
+            }
+
+            // 13. M-W4 LiteSync.submitExitPush uses ApplicationContext and survives Activity executor shutdown
+            LiteSync.clearNoConditionalWriteHostsForTest();
+            Map<String, Map<String, Object>> sharedFiles =
+                    java.util.Collections.synchronizedMap(
+                            new java.util.HashMap<String, Map<String, Object>>());
+            FakeLiteContext appCtx = new FakeLiteContext(null, sharedFiles);
+            FakeLiteContext activityCtx = new FakeLiteContext(appCtx, sharedFiles);
+            SecureStorage.setWebdavPass(appCtx, "exitpass");
+            LiteStore.HistoryEntry he = new LiteStore.HistoryEntry();
+            he.siteKey = "s_exit";
+            he.siteName = "ExitSite";
+            he.vodId = "v_exit";
+            he.vodName = "退出推送影片";
+            he.positionMs = 45000;
+            he.durationMs = 90000;
+            he.updatedAt = 9000L;
+            LiteStore.saveHistory(appCtx, he);
+
+            Map<String, Object> statusBacking =
+                    java.util.Collections.synchronizedMap(new java.util.HashMap<String, Object>());
+            android.content.SharedPreferences statusPrefs =
+                    createMemoryPrefs(
+                            statusBacking,
+                            new java.util.concurrent.atomic.AtomicInteger(),
+                            new java.util.concurrent.atomic.AtomicInteger());
+
+            java.util.concurrent.ExecutorService simulatedActivityIo =
+                    java.util.concurrent.Executors.newSingleThreadExecutor();
+            java.util.concurrent.Future<LiteSync.MergeResult> exitFuture =
+                    LiteSync.submitExitPush(
+                            activityCtx,
+                            "http://127.0.0.1:" + port + "/exit-push/",
+                            "exituser",
+                            false,
+                            null,
+                            statusPrefs);
+            // Simulate LiteActivity.onDestroy() calling io.shutdownNow() immediately
+            simulatedActivityIo.shutdownNow();
+            LiteSync.MergeResult exitMerged =
+                    exitFuture.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            check(
+                    exitMerged != null
+                            && exitMerged.historyCount == 1
+                            && activityCtx.appContextRequested.get()
+                            && appCtx.prefsReadOnThis.get()
+                            && !activityCtx.prefsReadOnThis.get()
+                            && exitStore.get() != null
+                            && new String(exitStore.get(), StandardCharsets.UTF_8)
+                                    .contains("v_exit"),
+                    "M-W4 Lite submitExitPush uses ApplicationContext and completes after Activity executor shutdown");
+        } finally {
+            LiteSync.clearNoConditionalWriteHostsForTest();
+            r2Server.stop(0);
+            cond412Server.stop(0);
         }
     }
 }

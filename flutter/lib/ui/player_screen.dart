@@ -347,7 +347,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           pos.inSeconds > 10 &&
           (effectiveDur - pos).inSeconds <= _skipOutroSec) {
         _outroSkippedForSession = true;
-        unawaited(_saveProgress(immediate: true));
+        unawaited(_saveProgress(immediate: true, syncImmediate: false));
         _showHud('已自动跳过片尾 ${_skipOutroSec}s');
         _handleEpisodeEnd();
       }
@@ -427,8 +427,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         });
         PlaybackWakelock.setEnabled(playing);
         if (!playing) {
-          _saveProgress(immediate: true);
-          widget.storage.scheduleAutoWebdavSync(immediate: true);
+          _saveProgress(immediate: true, syncImmediate: false);
         } else if (!_loading && !_buffering) {
           _scheduleHide();
         }
@@ -480,7 +479,13 @@ class _PlayerScreenState extends State<PlayerScreen>
           !_outroSkippedForSession) {
         _embySession?.stop(_position.inMilliseconds);
         _embySession = null;
-        unawaited(_saveProgress(completed: true, immediate: true));
+        unawaited(
+          _saveProgress(
+            completed: true,
+            immediate: true,
+            syncImmediate: false,
+          ),
+        );
         _handleEpisodeEnd();
       }
     }));
@@ -507,7 +512,6 @@ class _PlayerScreenState extends State<PlayerScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive ||
         state == AppLifecycleState.hidden) {
       _saveProgress(immediate: true);
       widget.storage.flushPendingHistory();
@@ -554,7 +558,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (_episodeIndex < _currentLine.episodes.length - 1) {
         _stepEpisode(1);
       } else if (_repeatMode == 'all' && _currentLine.episodes.isNotEmpty) {
-        _saveProgress(immediate: true);
+        _saveProgress(immediate: true, syncImmediate: false);
         setState(() => _episodeIndex = 0);
         _openCurrentEpisode(resumeMs: 0);
       }
@@ -1079,7 +1083,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     return '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
   }
 
-  Future<void> _saveProgress({bool completed = false, bool immediate = false}) async {
+  Future<void> _saveProgress({
+    bool completed = false,
+    bool immediate = false,
+    bool triggerSync = true,
+    bool? syncImmediate,
+  }) async {
     if (!_allowHistory ||
         _isLiveStream ||
         widget.site.key == 'live' ||
@@ -1128,6 +1137,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         updated: DateTime.now().millisecondsSinceEpoch,
       ),
       immediate: immediate,
+      triggerSync: triggerSync,
+      syncImmediate: syncImmediate,
     );
   }
 
@@ -1217,7 +1228,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _stepEpisode(int delta) {
     final next = _episodeIndex + delta;
     if (next < 0 || next >= _currentLine.episodes.length) return;
-    _saveProgress(immediate: true);
+    _saveProgress(immediate: true, syncImmediate: false);
     _failedLinesForEpisode.clear();
     _failedLiveEpisodes.clear();
     setState(() => _episodeIndex = next);
@@ -1232,7 +1243,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
     setState(() => _position = Duration(milliseconds: targetMs));
     _player.seek(Duration(milliseconds: targetMs));
-    _saveProgress(immediate: true);
+    _saveProgress(immediate: true, triggerSync: false);
     _showHud(
       '${seconds >= 0 ? "快进" : "快退"} ${_formatDuration(Duration(milliseconds: targetMs))}',
     );
@@ -1909,7 +1920,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               _hudText = '';
             });
             _player.seek(Duration(milliseconds: targetMs));
-            _saveProgress(immediate: true);
+            _saveProgress(immediate: true, triggerSync: false);
             _scheduleHide();
           },
           onHorizontalDragCancel: () {
@@ -2451,6 +2462,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                             _position = Duration(milliseconds: targetMs);
                           });
                           _player.seek(Duration(milliseconds: targetMs));
+                          unawaited(
+                            _saveProgress(immediate: true, triggerSync: false),
+                          );
                           _scheduleHide();
                         }
                       : null,
@@ -3454,7 +3468,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   final keepPos = _position.inMilliseconds >= 1000
                       ? _position.inMilliseconds
                       : _lastKnownPositionMs;
-                  _saveProgress(immediate: true);
+                  _saveProgress(immediate: true, syncImmediate: false);
                   setState(() {
                     _lineIndex = i;
                     _episodeIndex = CspBridge.matchEpisodeIndexInLine(
@@ -3500,7 +3514,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     ? _position.inMilliseconds
                     : _lastKnownPositionMs)
               : 0;
-          _saveProgress(immediate: true);
+          _saveProgress(immediate: true, syncImmediate: false);
           setState(() {
             _lineIndex = lineIdx;
             _episodeIndex = epIdx;

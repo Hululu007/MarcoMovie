@@ -40,17 +40,123 @@ import 'source_verification_dialog.dart';
 class AdaptiveShell extends StatefulWidget {
   final StorageService storage;
   final CmsClient client;
+  @visibleForTesting
+  final Future<void> Function(bool value)? onSetPreventCloseForTest;
+  @visibleForTesting
+  final Future<void> Function()? onDestroyWindowForTest;
+  @visibleForTesting
+  final Future<void> Function()? onCloseHostForTest;
+  @visibleForTesting
+  final Future<void> Function()? onCloseScriptsForTest;
+  @visibleForTesting
+  final Future<void> Function()? onFlushHistoryForTest;
+  @visibleForTesting
+  final Future<void> Function(Duration timeout)? onFlushSyncForTest;
+  @visibleForTesting
+  final Duration? windowCloseTotalBudgetForTest;
+
   const AdaptiveShell({
     super.key,
     required this.storage,
     required this.client,
+    this.onSetPreventCloseForTest,
+    this.onDestroyWindowForTest,
+    this.onCloseHostForTest,
+    this.onCloseScriptsForTest,
+    this.onFlushHistoryForTest,
+    this.onFlushSyncForTest,
+    this.windowCloseTotalBudgetForTest,
   });
+
+  static const Duration defaultWindowCloseBudget =
+      Duration(milliseconds: 3800);
+
+  @visibleForTesting
+  static Future<void> runWindowCloseSequence({
+    required Future<void> Function(bool prevent) setPreventClose,
+    required Future<void> Function() flushHistory,
+    required Future<void> Function(Duration timeout) flushSync,
+    required Future<void> Function() closeHost,
+    required Future<void> Function() closeScripts,
+    required Future<void> Function() destroyWindow,
+    Duration totalBudget = defaultWindowCloseBudget,
+  }) async {
+    final sw = Stopwatch()..start();
+
+    Duration stepBudget(Duration maxStep) {
+      final remMs = totalBudget.inMilliseconds - sw.elapsedMilliseconds;
+      if (remMs <= 0) return Duration.zero;
+      return remMs < maxStep.inMilliseconds
+          ? Duration(milliseconds: remMs)
+          : maxStep;
+    }
+
+    Future<void> runBounded(
+      String stepName,
+      Duration maxStep,
+      Future<void> Function(Duration budget) fn,
+    ) async {
+      final b = stepBudget(maxStep);
+      if (b <= Duration.zero) return;
+      try {
+        await fn(b).timeout(b);
+      } on Object catch (e) {
+        debugPrint('AdaptiveShell: onWindowClose $stepName skipped/timed out: $e');
+      }
+    }
+
+    try {
+      await (() async {
+        await runBounded(
+          'setPreventClose(true)',
+          const Duration(milliseconds: 250),
+          (_) => setPreventClose(true),
+        );
+        await runBounded(
+          'flushPendingHistory',
+          const Duration(milliseconds: 1000),
+          (_) => flushHistory(),
+        );
+        await runBounded(
+          'flushPendingSync',
+          const Duration(milliseconds: 1900),
+          (budget) => flushSync(budget),
+        );
+        await runBounded(
+          'CatPawHost.close',
+          const Duration(milliseconds: 450),
+          (_) => closeHost(),
+        );
+        await runBounded(
+          'CmsClient.closeScriptSessions',
+          const Duration(milliseconds: 450),
+          (_) => closeScripts(),
+        );
+      })().timeout(totalBudget);
+    } on Object catch (e) {
+      debugPrint('AdaptiveShell: onWindowClose total budget reached: $e');
+    } finally {
+      try {
+        await setPreventClose(false)
+            .timeout(const Duration(milliseconds: 150));
+      } on Object catch (e) {
+        debugPrint('AdaptiveShell: setPreventClose(false) failed: $e');
+      }
+      try {
+        await destroyWindow().timeout(const Duration(milliseconds: 150));
+      } on Object catch (e) {
+        debugPrint('AdaptiveShell: windowManager.destroy failed: $e');
+      }
+    }
+  }
+
   @override
   State<AdaptiveShell> createState() => _AdaptiveShellState();
 }
 class _AdaptiveShellState extends State<AdaptiveShell>
     with WindowListener, WidgetsBindingObserver {
   bool _windowListenerAttached = false;
+  Future<void>? _closingHistoryFlush;
   int _tabIndex = 0;
   CmsConfig? _config;
   CmsSite? _activeSite;
@@ -273,21 +379,34 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _runGlobalSearch(kw);
     _showGlobalSearchSheet();
   }
+  Future<void> _flushPendingHistoryForCloseOrDispose() {
+    return _closingHistoryFlush ??= (widget.onFlushHistoryForTest != null
+        ? widget.onFlushHistoryForTest!()
+        : widget.storage.flushPendingHistory());
+  }
+
   @override
   Future<void> onWindowClose() async {
-    try {
-      await windowManager.setPreventClose(true);
-    } catch (_) {}
-    try {
-      await widget.storage.flushPendingSync(timeout: const Duration(seconds: 3));
-    } catch (_) {}
-    try {
-      await CatPawHost.instance.close();
-      await CmsClient.closeScriptSessions();
-    } catch (_) {}
-    try {
-      await windowManager.destroy();
-    } catch (_) {}
+    await AdaptiveShell.runWindowCloseSequence(
+      setPreventClose: (prevent) => widget.onSetPreventCloseForTest != null
+          ? widget.onSetPreventCloseForTest!(prevent)
+          : windowManager.setPreventClose(prevent),
+      flushHistory: _flushPendingHistoryForCloseOrDispose,
+      flushSync: (timeout) => widget.onFlushSyncForTest != null
+          ? widget.onFlushSyncForTest!(timeout)
+          : widget.storage.flushPendingSync(timeout: timeout),
+      closeHost: () => widget.onCloseHostForTest != null
+          ? widget.onCloseHostForTest!()
+          : CatPawHost.instance.close(),
+      closeScripts: () => widget.onCloseScriptsForTest != null
+          ? widget.onCloseScriptsForTest!()
+          : CmsClient.closeScriptSessions(),
+      destroyWindow: () => widget.onDestroyWindowForTest != null
+          ? widget.onDestroyWindowForTest!()
+          : windowManager.destroy(),
+      totalBudget: widget.windowCloseTotalBudgetForTest ??
+          AdaptiveShell.defaultWindowCloseBudget,
+    );
   }
 
   void _onHistoryCorruption() {
@@ -314,9 +433,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.hidden ||
-        state == AppLifecycleState.inactive) {
-      widget.storage.flushPendingHistory();
+        state == AppLifecycleState.hidden) {
+      unawaited(widget.storage.flushPendingHistory());
       widget.storage.scheduleAutoWebdavSync(immediate: true);
     }
   }
@@ -356,10 +474,25 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
     widget.storage.historyCorruptionNotifier.removeListener(_onHistoryCorruption);
     widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryRevision);
-    unawaited(widget.storage.flushPendingHistory());
+    unawaited(_flushPendingHistoryForCloseOrDispose());
     widget.storage.cancelPendingAutoSync();
     if (_windowListenerAttached) {
       windowManager.removeListener(this);
+      _windowListenerAttached = false;
+    }
+    if (!kIsWeb &&
+        (Platform.isWindows ||
+            Platform.isMacOS ||
+            Platform.isLinux ||
+            widget.onSetPreventCloseForTest != null)) {
+      unawaited(
+        (widget.onSetPreventCloseForTest != null
+                ? widget.onSetPreventCloseForTest!(false)
+                : windowManager.setPreventClose(false))
+            .catchError((Object e) {
+              debugPrint('AdaptiveShell: setPreventClose(false) on dispose skipped: $e');
+            }),
+      );
     }
     _installedVersionTimer?.cancel();
     _cancelCatalogue();
