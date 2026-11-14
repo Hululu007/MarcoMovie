@@ -91,6 +91,9 @@ final class Prefs {
     static final String MOBILE_SHOW_HISTORY = "mobile_show_history";
     static final String VIDEO_SKIP_RECORDS = "video_skip_records";
     static final String PLAYER_ALWAYS_SHOW_CLOCK = "player_always_show_clock";
+    static final String CAST_ENABLED = "cast_enabled";
+    static final String CAST_DEVICE_UUID = "cast_device_uuid";
+    static final String CAST_DEVICE_NAME = "cast_device_name";
 
     // Appearance & playback settings exported/restored in backups; update the Prefs.KEYS.length
     // assertion in ReviewFixChecks.java whenever keys are added or removed.

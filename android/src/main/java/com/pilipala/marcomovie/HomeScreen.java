@@ -1612,7 +1612,8 @@ final class HomeScreen {
                     stackedHistory
                             ? (i == 0 ? allHistory : historyCards.get(i - 1)).getId()
                             : a.useTopDock() && a.homeDock != null
-                                    ? a.homeDock.items[Math.min(i, 5)].getId()
+                                    ? a.homeDock.items[Math.min(i, a.homeDock.items.length - 1)]
+                                            .getId()
                                     : card.getId());
             card.setNextFocusDownId(
                     stackedHistory && i + 1 < historyCards.size()
@@ -1631,7 +1632,7 @@ final class HomeScreen {
             allHistory.setNextFocusDownId(
                     stackedHistory ? historyCards.get(0).getId() : source.getId());
             if (a.useTopDock() && a.homeDock != null)
-                allHistory.setNextFocusUpId(a.homeDock.items[5].getId());
+                allHistory.setNextFocusUpId(a.homeDock.items[a.homeDock.items.length - 1].getId());
         }
         source.setNextFocusUpId(
                 historyCards.isEmpty()

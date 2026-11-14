@@ -1,10 +1,14 @@
 package com.pilipala.marcomovie;
 
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.*;
 import android.widget.*;
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.common.BitMatrix;
+import com.google.zxing.qrcode.QRCodeWriter;
 import org.json.*;
 import java.util.*;
 
@@ -42,6 +46,9 @@ public final class GlobalSearchScreen implements AutoCloseable {
     final LinkedHashMap<String, SourceResult> results = new LinkedHashMap<>();
     final Map<String, LinearLayout> posterCards = new HashMap<>();
     final Map<PinyinKeyboardModel.Mode, Button> modeButtons = new LinkedHashMap<>();
+    SearchInputServer qrServer;
+    String qrAddress = "";
+    AppDialog qrDialog;
 
     static String staticSubmitted = "";
     static Cms.Config staticConfig;
@@ -135,9 +142,19 @@ public final class GlobalSearchScreen implements AutoCloseable {
         columns =
                 TvLayoutPolicy.searchColumns(
                         a.windowWidth() / a.getResources().getDisplayMetrics().density - 346);
-        TextView heading = a.text("搜索所有片源", 24, MainActivity.WHITE);
+        LinearLayout headingRow = a.row();
+        headingRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView heading = a.text("搜索所有片源", 22, MainActivity.WHITE);
         heading.setTypeface(null, Typeface.BOLD);
-        left.addView(heading);
+        heading.setSingleLine(true);
+        headingRow.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        Button qrBtn = a.navButton("扫码输入", "search-qr-button", () -> showQrDialog(false));
+        qrBtn.setTextSize(12);
+        qrBtn.setMinHeight(a.dp(30));
+        qrBtn.setMinimumHeight(a.dp(30));
+        qrBtn.setPadding(a.dp(10), a.dp(3), a.dp(10), a.dp(3));
+        headingRow.addView(qrBtn, new LinearLayout.LayoutParams(-2, a.dp(30)));
+        left.addView(headingRow, new LinearLayout.LayoutParams(-1, -2));
         a.gap(left, 12);
         input =
                 new EditText(a) {
@@ -1163,14 +1180,168 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 : title.replaceAll("[\\p{So}\\p{Cs}]", "").replace('┃', ' ').trim();
     }
 
+    String ensureQrServer(boolean forceRefresh) throws Exception {
+        if (!forceRefresh
+                && qrServer != null
+                && !qrServer.expired()
+                && qrAddress != null
+                && !qrAddress.isEmpty()) {
+            return qrAddress;
+        }
+        closeQrServer();
+        String ip = PhoneConfigDialog.lanAddress();
+        qrServer =
+                new SearchInputServer(
+                        new SearchInputServer.Listener() {
+                            @Override
+                            public void onKeyword(String keyword, boolean submitNow) {
+                                a.ui.post(
+                                        () -> {
+                                            if (!current() || keyboard == null) return;
+                                            if (submitNow
+                                                    && qrDialog != null
+                                                    && qrDialog.isShowing()) {
+                                                qrDialog.dismiss();
+                                            }
+                                            keyboard.set(keyword == null ? "" : keyword);
+                                            changed();
+                                            if (submitNow
+                                                    && keyword != null
+                                                    && !keyword.isEmpty()) {
+                                                submit(true);
+                                                a.toast("已接收手机输入：" + keyword);
+                                            } else if (keyword == null || keyword.isEmpty()) {
+                                                a.toast("已清空电视搜索框");
+                                            } else {
+                                                a.toast("已同步文字：" + keyword);
+                                            }
+                                        });
+                            }
+
+                            @Override
+                            public List<String> recentKeywords() {
+                                return a.privateMode ? Collections.emptyList() : history();
+                            }
+
+                            @Override
+                            public String currentKeyword() {
+                                return keyboard == null ? "" : keyboard.query().trim();
+                            }
+                        });
+        qrAddress = qrServer.address(ip);
+        return qrAddress;
+    }
+
+    Bitmap createQrBitmap(String content, int sizePx) throws Exception {
+        int px = Math.max(96, sizePx);
+        BitMatrix matrix = new QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, px, px);
+        int[] pixels = new int[px * px];
+        for (int y = 0; y < px; y++) {
+            for (int x = 0; x < px; x++) {
+                pixels[y * px + x] = matrix.get(x, y) ? Color.BLACK : Color.WHITE;
+            }
+        }
+        return Bitmap.createBitmap(pixels, px, px, Bitmap.Config.ARGB_8888);
+    }
+
+    void showQrDialog(boolean forceRefresh) {
+        if (qrDialog != null && qrDialog.isShowing()) {
+            qrDialog.dismiss();
+            qrDialog = null;
+        }
+        try {
+            String address = ensureQrServer(forceRefresh);
+            LinearLayout panel = a.vertical();
+            panel.setGravity(Gravity.CENTER_HORIZONTAL);
+            TextView note =
+                    a.text(
+                            "手机与电视连接同一局域网，用手机相机或浏览器扫码即可直接输入中文、英文或拼音并推送到电视全站搜索。",
+                            14,
+                            MainActivity.MUTED);
+            note.setLineSpacing(a.dp(4), 1f);
+            panel.addView(note);
+            a.gap(panel, 12);
+            int qrSize = a.dp(186);
+            ImageView qr = new ImageView(a);
+            qr.setTag("search-qr-dialog-image");
+            qr.setContentDescription("手机扫码输入搜索词二维码");
+            qr.setImageBitmap(createQrBitmap(address, qrSize));
+            qr.setPadding(a.dp(8), a.dp(8), a.dp(8), a.dp(8));
+            qr.setBackground(a.bg(Color.WHITE, 12));
+            panel.addView(qr, new LinearLayout.LayoutParams(qrSize + a.dp(16), qrSize + a.dp(16)));
+            TextView url = a.text(address, 12, 0xff7cb8ff);
+            url.setTag("search-qr-dialog-address");
+            url.setGravity(Gravity.CENTER);
+            url.setPadding(0, a.dp(10), 0, a.dp(4));
+            panel.addView(url);
+            panel.addView(a.text("二维码 10 分钟内有效 · 退出搜索页后自动停止监听", 12, MainActivity.MUTED));
+            qrDialog =
+                    new AppDialog.Builder(a)
+                            .setTitle("手机扫码输入搜索词")
+                            .setView(panel)
+                            .setPositiveButton("刷新二维码", (d, w) -> showQrDialog(true))
+                            .setNegativeButton("关闭", null)
+                            .create();
+            qrDialog.show();
+            if (qrDialog.getButton(-2) != null) qrDialog.getButton(-2).requestFocus();
+        } catch (Exception error) {
+            a.toast("未检测到局域网连接，请确认电视已连接 Wi-Fi 或有线网络");
+        }
+    }
+
+    void closeQrServer() {
+        if (qrServer != null) {
+            qrServer.close();
+            qrServer = null;
+        }
+        qrAddress = "";
+    }
+
     void showHistory() {
         resultBody.removeAllViews();
+        try {
+            String address = ensureQrServer(false);
+            LinearLayout card = a.row();
+            card.setTag("search-inline-qr-card");
+            card.setGravity(Gravity.CENTER_VERTICAL);
+            card.setPadding(a.dp(14), a.dp(12), a.dp(16), a.dp(12));
+            GradientDrawable cardBg = a.bg(0xff1b1d25, 14);
+            cardBg.setStroke(Math.max(1, a.dp(1)), 0x22ffffff);
+            card.setBackground(cardBg);
+            int qrSize = a.dp(104);
+            ImageView qr = new ImageView(a);
+            qr.setTag("search-inline-qr");
+            qr.setContentDescription("手机扫码输入二维码");
+            qr.setImageBitmap(createQrBitmap(address, qrSize));
+            qr.setPadding(a.dp(5), a.dp(5), a.dp(5), a.dp(5));
+            qr.setBackground(a.bg(Color.WHITE, 9));
+            card.addView(qr, new LinearLayout.LayoutParams(qrSize + a.dp(10), qrSize + a.dp(10)));
+            LinearLayout info = a.vertical();
+            info.setPadding(a.dp(16), 0, 0, 0);
+            TextView title = a.text("手机扫码打字输入", 16, MainActivity.WHITE);
+            title.setTypeface(null, Typeface.BOLD);
+            info.addView(title);
+            TextView desc =
+                    a.text("手机与电视连接同一 Wi-Fi / 局域网，扫码即可在手机上输入片名并直接在电视搜索。", 13, MainActivity.MUTED);
+            desc.setLineSpacing(a.dp(3), 1f);
+            desc.setPadding(0, a.dp(4), 0, a.dp(6));
+            info.addView(desc);
+            TextView addrView = a.text(address, 11.5f, 0xff7cb8ff);
+            addrView.setSingleLine(true);
+            addrView.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+            info.addView(addrView);
+            card.addView(info, new LinearLayout.LayoutParams(0, -2, 1));
+            LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(-1, -2);
+            cardLp.bottomMargin = a.dp(16);
+            resultBody.addView(card, cardLp);
+        } catch (Exception ignored) {
+        }
         resultBody.addView(a.text("最近搜索", 17, MainActivity.WHITE));
         List<String> history = history();
         if (history.isEmpty()) {
             TextView hint =
                     a.text(
-                            "支持中文、首拼和全拼，例如 st / santi。\n也可以输入字母、数字或选择拼音候选字。",
+                            "支持中文、首拼和全拼，例如 st / santi。\n也可以输入字母、数字、选择拼音候选字，或使用手机扫码直接打字。",
                             15,
                             MainActivity.MUTED);
             hint.setLineSpacing(a.dp(6), 1);
@@ -1227,6 +1398,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
     @Override
     public void close() {
         closed = true;
+        if (qrDialog != null && qrDialog.isShowing()) {
+            qrDialog.dismiss();
+        }
+        qrDialog = null;
+        closeQrServer();
         if (resultScroll != null) savedResultScroll = resultScroll.getScrollY();
         if (pendingInputClick != null) {
             a.ui.removeCallbacks(pendingInputClick);

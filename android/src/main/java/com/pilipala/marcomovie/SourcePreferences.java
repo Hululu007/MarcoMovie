@@ -5,12 +5,18 @@ import java.util.List;
 
 /** Explicit defaults remain separate from a one-time manual source switch. */
 final class SourcePreferences {
-    private static String identity(Cms.Site site) {
-        return site.key + "\n" + site.api;
+    static String identity(Cms.Site site) {
+        String baseApi =
+                site.originalApi != null && !site.originalApi.isEmpty()
+                        ? site.originalApi
+                        : site.api;
+        return site.key + "\n" + baseApi;
     }
 
     static boolean isPreferred(MainActivity a, Cms.Site site) {
-        return identity(site).equals(a.prefs.getString(Prefs.PREFERRED_SITE, ""));
+        String pref = a.prefs.getString(Prefs.PREFERRED_SITE, "");
+        if (pref.isEmpty()) return false;
+        return pref.equals(identity(site)) || pref.equals(site.key + "\n" + site.api);
     }
 
     static void restoreDefault(MainActivity a) {

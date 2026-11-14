@@ -5,7 +5,7 @@ import re, subprocess, sys, hashlib, json
 ROOT=Path(__file__).resolve().parents[1]
 EXCLUDED={'.git','private','tools','dist','build','__pycache__','lib','classes'}
 ALLOWED_HOSTS={'nodejs.org','api.github.com','release-assets.githubusercontent.com','marcotv.wlj9919.top','github.com','raw.githubusercontent.com','chromium.googlesource.com','android.googlesource.com','ffmpeg.org','trac.ffmpeg.org','dl.google.com','repo.maven.apache.org',
- 'dl.frostwire.com','schemas.android.com','maven.apache.org','www.apache.org','www.boost.org',
+ 'dl.frostwire.com','schemas.android.com','schemas.xmlsoap.org','apache.org','xml.org','maven.apache.org','www.apache.org','www.boost.org',
  'www.unicode.org','unicode.org','opensource.org','jsoup.org','developer.mozilla.org',
  'perfectionkills.com','www.engr.mun.ca','android.git.kernel.org','fsf.org','www.gnu.org',
  'gnu.org','www.fsf.org','barcode4j.sourceforge.net','maven.aliyun.com','10.0.2.2','127.0.0.1','localhost','…','x',

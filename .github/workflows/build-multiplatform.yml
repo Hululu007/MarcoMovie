@@ -102,6 +102,7 @@ jobs:
           python android/tests/run_glasswork_checks.py
           python android/tests/run_js_player_checks.py
           python android/tests/run_lane_e_checks.py
+          python android/tests/run_cast_search_picker_checks.py
           python android/tests/run_conformance_checks.py
           python scripts/test_lite_conformance.py
           python -m unittest discover -s flutter -p "test_*.py"

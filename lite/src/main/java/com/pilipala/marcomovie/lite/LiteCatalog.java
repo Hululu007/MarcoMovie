@@ -55,6 +55,7 @@ public final class LiteCatalog {
         public static final int MAX_EXT_SIZE = 128 * 1024;
 
         public String key, name, api, playUrl = "";
+        public String originalKey = "", originalApi = "", group = "默认分组";
         public int type;
         public boolean supported;
         public boolean searchable = true;
@@ -63,6 +64,18 @@ public final class LiteCatalog {
         public Object ext;
         public boolean extTooLarge;
         public boolean requiresParser;
+
+        public String siteId() {
+            String k =
+                    originalKey != null && originalKey.length() > 0
+                            ? originalKey
+                            : (key == null ? "" : key);
+            String a =
+                    originalApi != null && originalApi.length() > 0
+                            ? originalApi
+                            : (api == null ? "" : api);
+            return k + "\n" + a;
+        }
 
         public boolean isExtTooLarge() {
             if (extTooLarge) return true;
@@ -756,6 +769,9 @@ public final class LiteCatalog {
             Site s = new Site();
             s.name = Json.str(row, "name", "未命名");
             s.key = Json.str(row, "key", s.name + "_" + i);
+            s.originalKey = s.key;
+            String parsedGroup = Json.str(row, "group", "").trim();
+            s.group = parsedGroup.length() > 0 ? parsedGroup : "默认分组";
             s.type = Json.integer(row, "type", -1);
             s.api = Json.str(row, "api", "");
             s.playUrl = Json.str(row, "playUrl", "");
@@ -814,6 +830,7 @@ public final class LiteCatalog {
                 } catch (Exception ignored) {
                 }
             }
+            s.originalApi = s.api;
             if (s.type == -1
                     && (s.api.startsWith("http://") || s.api.startsWith("https://"))
                     && (s.jar == null || s.jar.length() == 0)
@@ -843,6 +860,97 @@ public final class LiteCatalog {
             sites.add(s);
         }
         return sites;
+    }
+
+    public static void applySiteOverride(Site s, JSONObject ov) {
+        if (s == null || ov == null) return;
+        if (s.originalKey == null || s.originalKey.length() == 0) s.originalKey = s.key;
+        if (s.originalApi == null || s.originalApi.length() == 0) s.originalApi = s.api;
+        if (ov.has("name")) {
+            String n = ov.optString("name", "").trim();
+            if (n.length() > 0) s.name = n;
+        }
+        if (ov.has("group")) {
+            String g = ov.optString("group", "").trim();
+            s.group = g.length() > 0 ? g : "默认分组";
+        }
+        if (ov.has("api")) {
+            String a = ov.optString("api", "").trim();
+            if (a.length() > 0) {
+                s.api = a;
+                if ((a.startsWith("http://") || a.startsWith("https://"))
+                        && !isScriptOrJarApi(a)) {
+                    s.jar = "";
+                    s.type = hasXmlInUrlPath(a) ? 0 : 1;
+                }
+            }
+        }
+        if (ov.has("playUrl")) {
+            s.playUrl = ov.optString("playUrl", "").trim();
+        }
+        if (ov.has("ext")) {
+            String e = ov.optString("ext", "").trim();
+            if (e.length() == 0) {
+                s.ext = null;
+                s.extTooLarge = false;
+            } else {
+                s.ext = e;
+                s.extTooLarge = e.length() > Site.MAX_EXT_SIZE;
+            }
+        }
+        if (ov.has("searchable")) {
+            s.searchable = ov.optBoolean("searchable", s.searchable);
+        }
+        boolean directPlayUrl =
+                s.playUrl == null
+                        || s.playUrl.length() == 0
+                        || s.playUrl.startsWith("http://")
+                        || s.playUrl.startsWith("https://");
+        s.supported = Site.STATUS_OK.equals(s.capabilityStatus()) && directPlayUrl;
+    }
+
+    public static List<Site> applySiteEditsToList(List<Site> rawSites, JSONObject saved) {
+        if (rawSites == null) return new ArrayList<Site>();
+        if (saved == null) return new ArrayList<Site>(rawSites);
+        JSONObject overrides = saved.optJSONObject("overrides");
+        Set<String> hiddenSet = new HashSet<String>();
+        JSONArray hidden = saved.optJSONArray("hidden");
+        if (hidden != null) {
+            for (int i = 0; i < hidden.length(); i++) {
+                String k = hidden.optString(i, "");
+                if (k.length() > 0) hiddenSet.add(k);
+            }
+        }
+        Map<String, Site> pending = new LinkedHashMap<String, Site>();
+        Map<String, String> keyToId = new LinkedHashMap<String, String>();
+        for (int i = 0; i < rawSites.size(); i++) {
+            Site site = rawSites.get(i);
+            String id = site.siteId();
+            if (hiddenSet.contains(id) || hiddenSet.contains(site.key)) continue;
+            if (overrides != null) {
+                JSONObject ov = overrides.optJSONObject(id);
+                if (ov == null) ov = overrides.optJSONObject(site.key);
+                if (ov != null) applySiteOverride(site, ov);
+            }
+            if (site.group == null || site.group.trim().length() == 0) site.group = "默认分组";
+            pending.put(id, site);
+            if (!keyToId.containsKey(site.key)) keyToId.put(site.key, id);
+        }
+        List<Site> result = new ArrayList<Site>();
+        JSONArray order = saved.optJSONArray("order");
+        if (order != null) {
+            for (int i = 0; i < order.length(); i++) {
+                String tok = order.optString(i);
+                Site site = pending.remove(tok);
+                if (site == null) {
+                    String mappedId = keyToId.get(tok);
+                    if (mappedId != null) site = pending.remove(mappedId);
+                }
+                if (site != null) result.add(site);
+            }
+        }
+        result.addAll(pending.values());
+        return result;
     }
 
     private static void putSafeHeaders(Map<String, String> target, JSONObject hs) {

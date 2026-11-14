@@ -10,6 +10,8 @@ import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.media.AudioManager;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.SystemClock;
@@ -35,6 +37,7 @@ import com.google.zxing.MultiFormatWriter;
 import com.google.zxing.common.BitMatrix;
 import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -43,6 +46,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -111,7 +115,13 @@ public final class LiteActivity extends Activity {
     int playingLiveUrlIndex = 0;
     Map<String, String> playingLiveSourceHeaders = Collections.emptyMap();
     final Object importLock = new Object();
-    boolean homeVisible, inPlayback, backgrounded, inDetail;
+    boolean homeVisible, inPlayback, backgrounded, inDetail, inCastPlayback;
+    LiteCast castServer;
+    WifiManager.MulticastLock castMulticastLock;
+    boolean castMuted;
+    int castSavedVolume = -1;
+    TextView castStatusView;
+    String selectedSiteGroup = "";
     String lastQuery = "", lastCategory = "";
     int lastPage = 1;
     SeekBar timeline;
@@ -198,6 +208,7 @@ public final class LiteActivity extends Activity {
                     .commit();
         }
         home();
+        syncCastServer();
         if (LiteStore.isHistoryCorrupted(this) && status != null) {
             status.setText("观看历史数据损坏，已自动备份至本地。");
         } else if (crashedSite != null && crashedSite.length() > 0 && status != null) {
@@ -348,6 +359,8 @@ public final class LiteActivity extends Activity {
     void base(String title) {
         homeVisible = false;
         inPlayback = false;
+        inCastPlayback = false;
+        castStatusView = null;
         playingLiveGroup = null;
         playingLiveSourceHeaders = Collections.emptyMap();
         ui.removeCallbacks(clockTick);
@@ -420,6 +433,14 @@ public final class LiteActivity extends Activity {
                 new Runnable() {
                     public void run() {
                         livePage();
+                    }
+                });
+        addNavPill(
+                navRow,
+                "投屏",
+                new Runnable() {
+                    public void run() {
+                        castPage();
                     }
                 });
         addNavPill(
@@ -650,12 +671,12 @@ public final class LiteActivity extends Activity {
                         });
     }
 
-    void loadConfiguredSites() {
+    List<LiteCatalog.Site> loadRawConfiguredSites() {
         String raw = getPreferences(0).getString("config", "");
-        sites = new ArrayList<LiteCatalog.Site>();
+        List<LiteCatalog.Site> rawSites = new ArrayList<LiteCatalog.Site>();
         try {
             if (raw.length() > 0)
-                sites = LiteCatalog.parse(raw, getPreferences(0).getString("address", ""));
+                rawSites = LiteCatalog.parse(raw, getPreferences(0).getString("address", ""));
         } catch (Throwable ignored) {
         }
         try {
@@ -664,18 +685,25 @@ public final class LiteActivity extends Activity {
             java.util.Iterator<String> it = libraries.keys();
             while (it.hasNext()) {
                 JSONObject item = libraries.getJSONObject(it.next());
-                sites.addAll(
+                rawSites.addAll(
                         LiteCatalog.parse(
                                 new JSONObject().put("sites", new JSONArray().put(item)).toString(),
                                 ""));
             }
         } catch (Exception ignored) {
         }
+        return rawSites;
+    }
+
+    void loadConfiguredSites() {
+        sites = loadRawConfiguredSites();
         applySiteEdits();
         String preferred = getPreferences(0).getString("preferred_site_identity", "");
         for (int i = 0; i < sites.size(); i++) {
             LiteCatalog.Site site = sites.get(i);
-            if (site.supported && (site.key + "\n" + site.api).equals(preferred)) {
+            if (site.supported
+                    && ((site.key + "\n" + site.api).equals(preferred)
+                            || site.siteId().equals(preferred))) {
                 sites.remove(i);
                 sites.add(0, site);
                 break;
@@ -729,6 +757,15 @@ public final class LiteActivity extends Activity {
                         new Runnable() {
                             public void run() {
                                 syncPage();
+                            }
+                        }));
+        quickBtns.add(
+                makeActionButton(
+                        "无线投屏",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                castPage();
                             }
                         }));
         quickBtns.add(
@@ -857,19 +894,62 @@ public final class LiteActivity extends Activity {
         String preferred = getPreferences(0).getString("preferred_site_identity", "");
         if (!sites.isEmpty()) {
             int supportedCount = 0;
+            Map<String, Integer> groupCounts = new LinkedHashMap<String, Integer>();
             for (int i = 0; i < sites.size(); i++) {
-                if (sites.get(i).supported) supportedCount++;
+                LiteCatalog.Site item = sites.get(i);
+                if (item.supported) supportedCount++;
+                String g = item.group == null || item.group.length() == 0 ? "默认分组" : item.group;
+                Integer prev = groupCounts.get(g);
+                groupCounts.put(g, Integer.valueOf(prev == null ? 1 : prev.intValue() + 1));
+            }
+            if (selectedSiteGroup.length() > 0 && !groupCounts.containsKey(selectedSiteGroup)) {
+                selectedSiteGroup = "";
             }
             addSectionHeader(
                     "选择片源（共 "
                             + sites.size()
                             + " 个，可直接浏览 "
                             + supportedCount
-                            + " 个）");
+                            + " 个 · 长按确认键编辑/分组/删除）");
+            if (groupCounts.size() > 1
+                    || (groupCounts.size() == 1 && !groupCounts.containsKey("默认分组"))) {
+                HorizontalScrollView grpScroll = new HorizontalScrollView(this);
+                grpScroll.setHorizontalScrollBarEnabled(false);
+                LinearLayout grpRow = new LinearLayout(this);
+                grpRow.setOrientation(LinearLayout.HORIZONTAL);
+                grpScroll.addView(grpRow);
+                page.addView(grpScroll);
+                addInteractiveChip(
+                        grpRow,
+                        "全部 (" + sites.size() + ")",
+                        selectedSiteGroup.length() == 0,
+                        new Runnable() {
+                            public void run() {
+                                selectedSiteGroup = "";
+                                home();
+                            }
+                        });
+                for (Map.Entry<String, Integer> entry : groupCounts.entrySet()) {
+                    final String grpName = entry.getKey();
+                    addInteractiveChip(
+                            grpRow,
+                            grpName + " (" + entry.getValue().intValue() + ")",
+                            grpName.equals(selectedSiteGroup),
+                            new Runnable() {
+                                public void run() {
+                                    selectedSiteGroup = grpName;
+                                    home();
+                                }
+                            });
+                }
+            }
             List<View> siteButtons = new ArrayList<View>();
             for (int i = 0; i < sites.size(); i++) {
                 final LiteCatalog.Site s = sites.get(i);
-                boolean isPref = (s.key + "\n" + s.api).equals(preferred);
+                String g = s.group == null || s.group.length() == 0 ? "默认分组" : s.group;
+                if (selectedSiteGroup.length() > 0 && !selectedSiteGroup.equals(g)) continue;
+                boolean isPref =
+                        (s.key + "\n" + s.api).equals(preferred) || s.siteId().equals(preferred);
                 String limitation = s.limitation();
                 String limitationSuffix =
                         (!s.supported
@@ -878,13 +958,17 @@ public final class LiteActivity extends Activity {
                                         && !"正常可用".equals(limitation))
                                 ? "（" + limitation + "）"
                                 : "";
+                String groupBadge =
+                        (selectedSiteGroup.length() == 0 && !"默认分组".equals(g))
+                                ? " [" + g + "]"
+                                : "";
                 String tag =
                         s.api.startsWith("emby://")
                                 ? " [Emby]"
                                 : s.type == 0
                                         ? " [XML]"
                                         : s.supported ? "" : " · 尚未兼容" + limitationSuffix;
-                String title = (isPref ? "★ 默认 · " : "") + s.name + tag;
+                String title = (isPref ? "★ 默认 · " : "") + s.name + groupBadge + tag;
                 final TextView b =
                         makeActionButton(
                                 title,
@@ -902,18 +986,27 @@ public final class LiteActivity extends Activity {
                                             catalog("", 1);
                                         } else {
                                             String lim = s.limitation();
-                                            status.setText(
+                                            String msg =
                                                     (lim != null
                                                                     && lim.length() > 0
                                                                     && !"正常可用".equals(lim))
                                                             ? lim
-                                                            : "此来源需要插件、JS 或网页解析，Android 4.0 轻量版仅支持标准 JSON/XML CMS 与 Emby 片源。");
+                                                            : "此来源需要插件、JS 或网页解析，Android 4.0 轻量版仅支持标准 JSON/XML CMS 与 Emby 片源。";
+                                            status.setText(msg + "（长按确认键或点击上方“管理线路”可手动编辑/分组/删除）");
                                         }
                                     }
                                 });
+                b.setLongClickable(true);
+                b.setOnLongClickListener(
+                        new View.OnLongClickListener() {
+                            public boolean onLongClick(View v) {
+                                editSite(s);
+                                return true;
+                            }
+                        });
                 siteButtons.add(b);
             }
-            addGridViews(page, siteButtons, sites.size() <= 3 ? 1 : siteColumns(), 48);
+            addGridViews(page, siteButtons, siteButtons.size() <= 3 ? 1 : siteColumns(), 48);
         }
     }
 
@@ -1345,31 +1438,144 @@ public final class LiteActivity extends Activity {
     void applySiteEdits() {
         try {
             JSONObject saved = new JSONObject(getPreferences(0).getString(sitePrefsKey(), "{}"));
-            Map<String, LiteCatalog.Site> pending = new LinkedHashMap<String, LiteCatalog.Site>();
-            for (LiteCatalog.Site site : sites) pending.put(site.key, site);
-            JSONArray hidden = saved.optJSONArray("hidden"), order = saved.optJSONArray("order");
-            if (hidden != null)
-                for (int i = 0; i < hidden.length(); i++) pending.remove(hidden.optString(i));
-            List<LiteCatalog.Site> result = new ArrayList<LiteCatalog.Site>();
-            if (order != null)
-                for (int i = 0; i < order.length(); i++) {
-                    LiteCatalog.Site site = pending.remove(order.optString(i));
-                    if (site != null) result.add(site);
-                }
-            result.addAll(pending.values());
-            sites = result;
+            sites = LiteCatalog.applySiteEditsToList(sites, saved);
         } catch (JSONException ignored) {
         }
     }
 
+    JSONObject readSiteEditsJson() {
+        try {
+            return new JSONObject(getPreferences(0).getString(sitePrefsKey(), "{}"));
+        } catch (JSONException ignored) {
+            return new JSONObject();
+        }
+    }
+
+    boolean writeSiteEditsJson(JSONObject data) {
+        return getPreferences(0).edit().putString(sitePrefsKey(), data.toString()).commit();
+    }
+
+    List<String> collectExistingSiteGroups() {
+        List<String> groups = new ArrayList<String>();
+        groups.add("默认分组");
+        groups.add("常用推荐");
+        groups.add("高清影视");
+        groups.add("动漫二次元");
+        for (int i = 0; i < sites.size(); i++) {
+            String g = sites.get(i).group;
+            if (g != null && g.trim().length() > 0 && !groups.contains(g.trim())) {
+                groups.add(g.trim());
+            }
+        }
+        return groups;
+    }
+
     void manageSites() {
+        loadConfiguredSites();
         base("管理线路");
-        status.setText("选择片源可设为默认偏好源、调整顺序或隐藏不需要的线路：");
+        status.setText("支持单条或批量手动分组、手动编辑线路参数、删除及恢复已删线路：");
+
+        JSONObject saved = readSiteEditsJson();
+        JSONArray hiddenArr = saved.optJSONArray("hidden");
+        int hiddenCount = hiddenArr == null ? 0 : hiddenArr.length();
+
+        List<View> topActions = new ArrayList<View>();
+        topActions.add(
+                makeActionButton(
+                        "批量移动分组",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                batchGroupSitesPage();
+                            }
+                        }));
+        topActions.add(
+                makeActionButton(
+                        "批量删除线路",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                batchDeleteSitesPage();
+                            }
+                        }));
+        if (hiddenCount > 0) {
+            topActions.add(
+                    makeActionButton(
+                            "恢复已删线路 (" + hiddenCount + ")",
+                            false,
+                            new Runnable() {
+                                public void run() {
+                                    restoreHiddenSitesPage();
+                                }
+                            }));
+        }
+        topActions.add(
+                makeActionButton(
+                        "返回首页",
+                        true,
+                        new Runnable() {
+                            public void run() {
+                                home();
+                            }
+                        }));
+        addGridViews(page, topActions, isTvOrLandscape() ? 4 : 2, 44);
+
+        Map<String, Integer> groupCounts = new LinkedHashMap<String, Integer>();
+        for (int i = 0; i < sites.size(); i++) {
+            String g = sites.get(i).group;
+            if (g == null || g.length() == 0) g = "默认分组";
+            Integer prev = groupCounts.get(g);
+            groupCounts.put(g, Integer.valueOf(prev == null ? 1 : prev.intValue() + 1));
+        }
+        if (selectedSiteGroup.length() > 0 && !groupCounts.containsKey(selectedSiteGroup)) {
+            selectedSiteGroup = "";
+        }
+        if (!groupCounts.isEmpty()) {
+            HorizontalScrollView grpScroll = new HorizontalScrollView(this);
+            grpScroll.setHorizontalScrollBarEnabled(false);
+            LinearLayout grpRow = new LinearLayout(this);
+            grpRow.setOrientation(LinearLayout.HORIZONTAL);
+            grpScroll.addView(grpRow);
+            page.addView(grpScroll);
+            addInteractiveChip(
+                    grpRow,
+                    "全部 (" + sites.size() + ")",
+                    selectedSiteGroup.length() == 0,
+                    new Runnable() {
+                        public void run() {
+                            selectedSiteGroup = "";
+                            manageSites();
+                        }
+                    });
+            for (Map.Entry<String, Integer> entry : groupCounts.entrySet()) {
+                final String grpName = entry.getKey();
+                addInteractiveChip(
+                        grpRow,
+                        grpName + " (" + entry.getValue().intValue() + ")",
+                        grpName.equals(selectedSiteGroup),
+                        new Runnable() {
+                            public void run() {
+                                selectedSiteGroup = grpName;
+                                manageSites();
+                            }
+                        });
+            }
+        }
+
         List<View> btns = new ArrayList<View>();
-        for (final LiteCatalog.Site site : sites) {
+        for (int i = 0; i < sites.size(); i++) {
+            final LiteCatalog.Site site = sites.get(i);
+            String g = site.group == null || site.group.length() == 0 ? "默认分组" : site.group;
+            if (selectedSiteGroup.length() > 0 && !selectedSiteGroup.equals(g)) continue;
+            String label =
+                    site.name
+                            + " ["
+                            + g
+                            + "]"
+                            + (site.supported ? "" : " · 未兼容");
             btns.add(
                     makeActionButton(
-                            site.name,
+                            label,
                             false,
                             new Runnable() {
                                 public void run() {
@@ -1378,49 +1584,79 @@ public final class LiteActivity extends Activity {
                             }));
         }
         addGridViews(page, btns, siteColumns(), 46);
-        button(
-                "完成",
-                new Runnable() {
-                    public void run() {
-                        home();
-                    }
-                });
     }
 
     void editSite(final LiteCatalog.Site site) {
         base(site.name);
-        if (site.supported)
+        String g = site.group == null || site.group.length() == 0 ? "默认分组" : site.group;
+        status.setText(
+                "分组："
+                        + g
+                        + " · 状态："
+                        + (site.supported ? "可直接浏览" : "尚未兼容")
+                        + (site.api != null && site.api.length() > 0 ? " · " + site.api : ""));
+        if (site.supported) {
             button(
                     "设为默认偏好源 / 取消",
                     new Runnable() {
                         public void run() {
                             String identity = site.key + "\n" + site.api;
+                            String prev = getPreferences(0).getString("preferred_site_identity", "");
+                            boolean same = identity.equals(prev) || site.siteId().equals(prev);
                             getPreferences(0)
                                     .edit()
-                                    .putString(
-                                            "preferred_site_identity",
-                                            identity.equals(
-                                                            getPreferences(0)
-                                                                    .getString(
-                                                                            "preferred_site_identity",
-                                                                            ""))
-                                                    ? ""
-                                                    : identity)
+                                    .putString("preferred_site_identity", same ? "" : identity)
                                     .commit();
                             home();
                         }
                     });
-        String[] titles = {"上移", "下移", "移到首位", "删除这条线路"};
+        }
+        button(
+                "修改所属分组（当前：" + g + "）",
+                new Runnable() {
+                    public void run() {
+                        changeSiteGroupPage(site);
+                    }
+                });
+        button(
+                "手动编辑线路参数（名称 / 分组 / 接口 / 解析 / 扩展）",
+                new Runnable() {
+                    public void run() {
+                        editSiteFieldsPage(site);
+                    }
+                });
+        JSONObject overrides = readSiteEditsJson().optJSONObject("overrides");
+        if (overrides != null
+                && (overrides.has(site.siteId()) || overrides.has(site.originalKey))) {
+            button(
+                    "恢复该线路原始配置",
+                    new Runnable() {
+                        public void run() {
+                            JSONObject data = readSiteEditsJson();
+                            JSONObject ov = data.optJSONObject("overrides");
+                            if (ov != null) {
+                                ov.remove(site.siteId());
+                                ov.remove(site.originalKey);
+                            }
+                            writeSiteEditsJson(data);
+                            loadConfiguredSites();
+                            manageSites();
+                        }
+                    });
+        }
+        String[] titles = {"移到首位", "上移", "下移", "删除这条线路"};
+        final int[] actionCodes = {2, 0, 1, 3};
         for (int i = 0; i < titles.length; i++) {
-            final int action = i;
+            final int action = actionCodes[i];
             button(
                     titles[i],
                     new Runnable() {
                         public void run() {
                             if (action == 3) {
                                 base("删除「" + site.name + "」？");
+                                status.setText("删除后可在“管理线路 → 恢复已删线路”中随时找回。");
                                 button(
-                                        "删除",
+                                        "确认删除该线路",
                                         new Runnable() {
                                             public void run() {
                                                 saveSiteEdit(site, 3);
@@ -1430,27 +1666,558 @@ public final class LiteActivity extends Activity {
                                         "取消",
                                         new Runnable() {
                                             public void run() {
-                                                manageSites();
+                                                editSite(site);
                                             }
                                         });
-                            } else saveSiteEdit(site, action);
+                            } else {
+                                saveSiteEdit(site, action);
+                            }
                         }
                     });
         }
+        button(
+                "返回管理线路",
+                new Runnable() {
+                    public void run() {
+                        manageSites();
+                    }
+                });
+    }
+
+    void upsertSiteOverrideField(LiteCatalog.Site site, String field, Object value)
+            throws JSONException {
+        JSONObject data = readSiteEditsJson();
+        JSONObject overrides = data.optJSONObject("overrides");
+        if (overrides == null) {
+            overrides = new JSONObject();
+            data.put("overrides", overrides);
+        }
+        String id = site.siteId();
+        JSONObject item = overrides.optJSONObject(id);
+        if (item == null && site.originalKey != null) {
+            JSONObject legacy = overrides.optJSONObject(site.originalKey);
+            if (legacy != null) item = new JSONObject(legacy.toString());
+        }
+        if (item == null) item = new JSONObject();
+        item.put(field, value);
+        overrides.put(id, item);
+        writeSiteEditsJson(data);
+    }
+
+    void changeSiteGroupPage(final LiteCatalog.Site site) {
+        base("修改分组 · " + site.name);
+        status.setText("可一键选择常用分组，或在下方输入自定义分组名称：");
+        List<String> groups = collectExistingSiteGroups();
+        List<View> grpBtns = new ArrayList<View>();
+        for (int i = 0; i < groups.size(); i++) {
+            final String grp = groups.get(i);
+            grpBtns.add(
+                    makeActionButton(
+                            grp,
+                            grp.equals(site.group),
+                            new Runnable() {
+                                public void run() {
+                                    try {
+                                        upsertSiteOverrideField(site, "group", grp);
+                                        loadConfiguredSites();
+                                        manageSites();
+                                    } catch (JSONException ignored) {
+                                    }
+                                }
+                            }));
+        }
+        addGridViews(page, grpBtns, isTvOrLandscape() ? 4 : 2, 44);
+
+        final EditText customGroup = new EditText(this);
+        customGroup.setSingleLine();
+        customGroup.setTextColor(0xffffffff);
+        customGroup.setHint("输入新分组名称（最多 32 字）…");
+        customGroup.setText(site.group == null ? "默认分组" : site.group);
+        page.addView(customGroup);
+        button(
+                "保存自定义分组",
+                new Runnable() {
+                    public void run() {
+                        String grp = customGroup.getText().toString().trim();
+                        if (grp.length() == 0) grp = "默认分组";
+                        if (grp.length() > 32) grp = grp.substring(0, 32);
+                        try {
+                            upsertSiteOverrideField(site, "group", grp);
+                            loadConfiguredSites();
+                            manageSites();
+                        } catch (JSONException ignored) {
+                        }
+                    }
+                });
+        button(
+                "取消",
+                new Runnable() {
+                    public void run() {
+                        editSite(site);
+                    }
+                });
+    }
+
+    void editSiteFieldsPage(final LiteCatalog.Site site) {
+        base("编辑线路 · " + site.name);
+        status.setText("修改后仅保存在本机并自动覆盖原订阅对应线路，刷新订阅不会丢失：");
+
+        page.addView(text("线路名称", 13));
+        final EditText nameInput = new EditText(this);
+        nameInput.setSingleLine();
+        nameInput.setTextColor(0xffffffff);
+        nameInput.setText(site.name);
+        page.addView(nameInput);
+
+        page.addView(text("所属分组", 13));
+        final EditText groupInput = new EditText(this);
+        groupInput.setSingleLine();
+        groupInput.setTextColor(0xffffffff);
+        groupInput.setText(site.group == null ? "默认分组" : site.group);
+        page.addView(groupInput);
+
+        page.addView(text("接口地址 (API，填写 http(s):// 标准苹果 CMS JSON/XML 地址可直接启用)", 13));
+        final EditText apiInput = new EditText(this);
+        apiInput.setSingleLine();
+        apiInput.setTextColor(0xffffffff);
+        apiInput.setText(site.api == null ? "" : site.api);
+        page.addView(apiInput);
+
+        page.addView(text("解析前缀 (playUrl，可选 http(s)://)", 13));
+        final EditText playUrlInput = new EditText(this);
+        playUrlInput.setSingleLine();
+        playUrlInput.setTextColor(0xffffffff);
+        playUrlInput.setText(site.playUrl == null ? "" : site.playUrl);
+        page.addView(playUrlInput);
+
+        page.addView(text("扩展参数 (ext，可选)", 13));
+        final EditText extInput = new EditText(this);
+        extInput.setSingleLine();
+        extInput.setTextColor(0xffffffff);
+        extInput.setText(site.ext == null ? "" : String.valueOf(site.ext));
+        page.addView(extInput);
+
+        final boolean[] searchableState = new boolean[] {site.searchable};
+        final TextView searchableBtn =
+                makeActionButton(
+                        "参与全站聚合搜索：" + (searchableState[0] ? "开启" : "关闭"),
+                        searchableState[0],
+                        null);
+        searchableBtn.setOnClickListener(
+                new View.OnClickListener() {
+                    public void onClick(View v) {
+                        searchableState[0] = !searchableState[0];
+                        searchableBtn.setText(
+                                "参与全站聚合搜索：" + (searchableState[0] ? "开启" : "关闭"));
+                    }
+                });
+        page.addView(searchableBtn);
+
+        button(
+                "保存线路修改",
+                new Runnable() {
+                    public void run() {
+                        String newName = nameInput.getText().toString().trim();
+                        if (newName.length() == 0) {
+                            status.setText("线路名称不能为空");
+                            return;
+                        }
+                        String newGroup = groupInput.getText().toString().trim();
+                        if (newGroup.length() == 0) newGroup = "默认分组";
+                        if (newGroup.length() > 32) newGroup = newGroup.substring(0, 32);
+                        String newApi = apiInput.getText().toString().trim();
+                        String newPlayUrl = playUrlInput.getText().toString().trim();
+                        if (newPlayUrl.length() > 0) {
+                            try {
+                                newPlayUrl = LiteCatalog.http(newPlayUrl);
+                            } catch (Exception e) {
+                                status.setText("解析前缀须为合法的 HTTP(S) 地址或留空");
+                                return;
+                            }
+                        }
+                        String newExt = extInput.getText().toString().trim();
+                        try {
+                            JSONObject data = readSiteEditsJson();
+                            JSONObject overrides = data.optJSONObject("overrides");
+                            if (overrides == null) {
+                                overrides = new JSONObject();
+                                data.put("overrides", overrides);
+                            }
+                            JSONObject ov = new JSONObject();
+                            ov.put("name", newName);
+                            ov.put("group", newGroup);
+                            ov.put("api", newApi);
+                            ov.put("playUrl", newPlayUrl);
+                            ov.put("ext", newExt);
+                            ov.put("searchable", searchableState[0]);
+                            overrides.put(site.siteId(), ov);
+                            if (!writeSiteEditsJson(data)) {
+                                status.setText("保存失败，请重试");
+                                return;
+                            }
+                            if (selected != null && selected.siteId().equals(site.siteId())) {
+                                selected = null;
+                            }
+                            loadConfiguredSites();
+                            manageSites();
+                        } catch (JSONException e) {
+                            status.setText("保存线路参数失败");
+                        }
+                    }
+                });
+        button(
+                "取消",
+                new Runnable() {
+                    public void run() {
+                        editSite(site);
+                    }
+                });
+    }
+
+    void batchGroupSitesPage() {
+        loadConfiguredSites();
+        base("批量移动分组");
+        status.setText("点击下方线路切换勾选状态，随后选择或输入目标分组统一归类：");
+        final List<String> checkedIds = new ArrayList<String>();
+        final List<TextView> itemViews = new ArrayList<TextView>();
+
+        final EditText targetGroupInput = new EditText(this);
+        targetGroupInput.setSingleLine();
+        targetGroupInput.setTextColor(0xffffffff);
+        targetGroupInput.setHint("目标分组名称（如：高清主力 / 备用线路）");
+        targetGroupInput.setText(selectedSiteGroup.length() > 0 ? selectedSiteGroup : "常用推荐");
+        page.addView(targetGroupInput);
+
+        HorizontalScrollView presetScroll = new HorizontalScrollView(this);
+        presetScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout presetRow = new LinearLayout(this);
+        presetRow.setOrientation(LinearLayout.HORIZONTAL);
+        presetScroll.addView(presetRow);
+        page.addView(presetScroll);
+        List<String> presets = collectExistingSiteGroups();
+        for (int i = 0; i < presets.size(); i++) {
+            final String g = presets.get(i);
+            addInteractiveChip(
+                    presetRow,
+                    g,
+                    false,
+                    new Runnable() {
+                        public void run() {
+                            targetGroupInput.setText(g);
+                        }
+                    });
+        }
+
+        List<View> batchOps = new ArrayList<View>();
+        batchOps.add(
+                makeActionButton(
+                        "全选当前列表",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                checkedIds.clear();
+                                for (int i = 0; i < sites.size(); i++) {
+                                    LiteCatalog.Site s = sites.get(i);
+                                    checkedIds.add(s.siteId());
+                                    if (i < itemViews.size()) {
+                                        itemViews
+                                                .get(i)
+                                                .setText("☑ " + s.name + " [" + s.group + "]");
+                                    }
+                                }
+                            }
+                        }));
+        batchOps.add(
+                makeActionButton(
+                        "全选未兼容线路",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                checkedIds.clear();
+                                for (int i = 0; i < sites.size(); i++) {
+                                    LiteCatalog.Site s = sites.get(i);
+                                    boolean pick = !s.supported;
+                                    if (pick) checkedIds.add(s.siteId());
+                                    if (i < itemViews.size()) {
+                                        itemViews
+                                                .get(i)
+                                                .setText(
+                                                        (pick ? "☑ " : "☐ ")
+                                                                + s.name
+                                                                + " ["
+                                                                + s.group
+                                                                + "]");
+                                    }
+                                }
+                            }
+                        }));
+        batchOps.add(
+                makeActionButton(
+                        "移动已选线路到该分组",
+                        true,
+                        new Runnable() {
+                            public void run() {
+                                if (checkedIds.isEmpty()) {
+                                    status.setText("请至少勾选一条线路");
+                                    return;
+                                }
+                                String grp = targetGroupInput.getText().toString().trim();
+                                if (grp.length() == 0) grp = "默认分组";
+                                if (grp.length() > 32) grp = grp.substring(0, 32);
+                                try {
+                                    JSONObject data = readSiteEditsJson();
+                                    JSONObject overrides = data.optJSONObject("overrides");
+                                    if (overrides == null) {
+                                        overrides = new JSONObject();
+                                        data.put("overrides", overrides);
+                                    }
+                                    for (int i = 0; i < checkedIds.size(); i++) {
+                                        String id = checkedIds.get(i);
+                                        JSONObject ov = overrides.optJSONObject(id);
+                                        if (ov == null) ov = new JSONObject();
+                                        ov.put("group", grp);
+                                        overrides.put(id, ov);
+                                    }
+                                    writeSiteEditsJson(data);
+                                    selectedSiteGroup = grp;
+                                    loadConfiguredSites();
+                                    manageSites();
+                                } catch (JSONException ignored) {
+                                }
+                            }
+                        }));
+        batchOps.add(
+                makeActionButton(
+                        "取消",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                manageSites();
+                            }
+                        }));
+        addGridViews(page, batchOps, isTvOrLandscape() ? 4 : 2, 44);
+
+        List<View> cards = new ArrayList<View>();
+        for (int i = 0; i < sites.size(); i++) {
+            final LiteCatalog.Site s = sites.get(i);
+            final String id = s.siteId();
+            final TextView b =
+                    makeActionButton("☐ " + s.name + " [" + s.group + "]", false, null);
+            b.setOnClickListener(
+                    new View.OnClickListener() {
+                        public void onClick(View v) {
+                            if (checkedIds.contains(id)) {
+                                checkedIds.remove(id);
+                                b.setText("☐ " + s.name + " [" + s.group + "]");
+                            } else {
+                                checkedIds.add(id);
+                                b.setText("☑ " + s.name + " [" + s.group + "]");
+                            }
+                        }
+                    });
+            itemViews.add(b);
+            cards.add(b);
+        }
+        addGridViews(page, cards, siteColumns(), 46);
+    }
+
+    void batchDeleteSitesPage() {
+        loadConfiguredSites();
+        base("批量删除线路");
+        status.setText("勾选不需要的线路后点击“确认删除已选线路”（删除后可随时恢复）：");
+        final List<String> checkedIds = new ArrayList<String>();
+        final List<TextView> itemViews = new ArrayList<TextView>();
+
+        List<View> batchOps = new ArrayList<View>();
+        batchOps.add(
+                makeActionButton(
+                        "一键勾选全部未兼容线路",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                checkedIds.clear();
+                                for (int i = 0; i < sites.size(); i++) {
+                                    LiteCatalog.Site s = sites.get(i);
+                                    boolean pick = !s.supported;
+                                    if (pick) checkedIds.add(s.siteId());
+                                    if (i < itemViews.size()) {
+                                        itemViews
+                                                .get(i)
+                                                .setText(
+                                                        (pick ? "☑ " : "☐ ")
+                                                                + s.name
+                                                                + (s.supported ? "" : " · 未兼容"));
+                                    }
+                                }
+                            }
+                        }));
+        batchOps.add(
+                makeActionButton(
+                        "确认删除已选线路",
+                        true,
+                        new Runnable() {
+                            public void run() {
+                                if (checkedIds.isEmpty()) {
+                                    status.setText("请先勾选要删除的线路");
+                                    return;
+                                }
+                                try {
+                                    JSONObject data = readSiteEditsJson();
+                                    JSONArray hidden = data.optJSONArray("hidden");
+                                    if (hidden == null) hidden = new JSONArray();
+                                    List<String> existing = new ArrayList<String>();
+                                    for (int i = 0; i < hidden.length(); i++) {
+                                        existing.add(hidden.optString(i));
+                                    }
+                                    for (int i = 0; i < checkedIds.size(); i++) {
+                                        String id = checkedIds.get(i);
+                                        if (!existing.contains(id)) {
+                                            hidden.put(id);
+                                            existing.add(id);
+                                        }
+                                        if (selected != null && id.equals(selected.siteId())) {
+                                            selected = null;
+                                        }
+                                    }
+                                    data.put("hidden", hidden);
+                                    writeSiteEditsJson(data);
+                                    loadConfiguredSites();
+                                    manageSites();
+                                } catch (JSONException ignored) {
+                                }
+                            }
+                        }));
+        batchOps.add(
+                makeActionButton(
+                        "取消",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                manageSites();
+                            }
+                        }));
+        addGridViews(page, batchOps, isTvOrLandscape() ? 3 : 2, 44);
+
+        List<View> cards = new ArrayList<View>();
+        for (int i = 0; i < sites.size(); i++) {
+            final LiteCatalog.Site s = sites.get(i);
+            final String id = s.siteId();
+            final String suffix = s.supported ? "" : " · 未兼容";
+            final TextView b = makeActionButton("☐ " + s.name + suffix, false, null);
+            b.setOnClickListener(
+                    new View.OnClickListener() {
+                        public void onClick(View v) {
+                            if (checkedIds.contains(id)) {
+                                checkedIds.remove(id);
+                                b.setText("☐ " + s.name + suffix);
+                            } else {
+                                checkedIds.add(id);
+                                b.setText("☑ " + s.name + suffix);
+                            }
+                        }
+                    });
+            itemViews.add(b);
+            cards.add(b);
+        }
+        addGridViews(page, cards, siteColumns(), 46);
+    }
+
+    void restoreHiddenSitesPage() {
+        base("恢复已删线路");
+        final JSONObject data = readSiteEditsJson();
+        final JSONArray hidden = data.optJSONArray("hidden");
+        if (hidden == null || hidden.length() == 0) {
+            status.setText("当前没有已删除的线路。");
+            button(
+                    "返回管理线路",
+                    new Runnable() {
+                        public void run() {
+                            manageSites();
+                        }
+                    });
+            return;
+        }
+        status.setText("点击任意线路即可单独恢复，或点击“全部恢复”找回所有已删除线路：");
+        button(
+                "全部恢复 (" + hidden.length() + ")",
+                new Runnable() {
+                    public void run() {
+                        data.remove("hidden");
+                        writeSiteEditsJson(data);
+                        loadConfiguredSites();
+                        manageSites();
+                    }
+                });
+
+        List<LiteCatalog.Site> rawSites = loadRawConfiguredSites();
+        Map<String, String> idToName = new LinkedHashMap<String, String>();
+        for (int i = 0; i < rawSites.size(); i++) {
+            LiteCatalog.Site rs = rawSites.get(i);
+            idToName.put(rs.siteId(), rs.name);
+            idToName.put(rs.key, rs.name);
+        }
+
+        List<View> btns = new ArrayList<View>();
+        for (int i = 0; i < hidden.length(); i++) {
+            final String token = hidden.optString(i, "");
+            if (token.length() == 0) continue;
+            String display = idToName.get(token);
+            if (display == null || display.length() == 0) {
+                int nl = token.indexOf('\n');
+                display = nl > 0 ? token.substring(0, nl) : token;
+            }
+            btns.add(
+                    makeActionButton(
+                            "恢复：" + display,
+                            false,
+                            new Runnable() {
+                                public void run() {
+                                    JSONArray next = new JSONArray();
+                                    for (int j = 0; j < hidden.length(); j++) {
+                                        String item = hidden.optString(j, "");
+                                        if (!token.equals(item)) next.put(item);
+                                    }
+                                    try {
+                                        data.put("hidden", next);
+                                        writeSiteEditsJson(data);
+                                    } catch (JSONException ignored) {
+                                    }
+                                    restoreHiddenSitesPage();
+                                }
+                            }));
+        }
+        addGridViews(page, btns, siteColumns(), 46);
+        button(
+                "返回管理线路",
+                new Runnable() {
+                    public void run() {
+                        manageSites();
+                    }
+                });
     }
 
     void saveSiteEdit(LiteCatalog.Site site, int action) {
         try {
-            JSONObject data = new JSONObject(getPreferences(0).getString(sitePrefsKey(), "{}"));
+            JSONObject data = readSiteEditsJson();
             List<LiteCatalog.Site> nextSites = new ArrayList<LiteCatalog.Site>(sites);
-            int index = nextSites.indexOf(site);
+            int index = -1;
+            for (int i = 0; i < nextSites.size(); i++) {
+                if (nextSites.get(i).siteId().equals(site.siteId())) {
+                    index = i;
+                    break;
+                }
+            }
             if (index < 0) return;
             nextSites.remove(index);
             if (action == 3) {
                 JSONArray hidden = data.optJSONArray("hidden");
                 if (hidden == null) hidden = new JSONArray();
-                data.put("hidden", hidden.put(site.key));
-            } else
+                hidden.put(site.siteId());
+                data.put("hidden", hidden);
+                if (selected != null && selected.siteId().equals(site.siteId())) {
+                    selected = null;
+                }
+            } else {
                 nextSites.add(
                         action == 2
                                 ? 0
@@ -1458,10 +2225,13 @@ public final class LiteActivity extends Activity {
                                         0,
                                         Math.min(nextSites.size(), index + (action == 0 ? -1 : 1))),
                         site);
+            }
             JSONArray order = new JSONArray();
-            for (LiteCatalog.Site s : nextSites) order.put(s.key);
+            for (int i = 0; i < nextSites.size(); i++) {
+                order.put(nextSites.get(i).siteId());
+            }
             data.put("order", order);
-            if (!getPreferences(0).edit().putString(sitePrefsKey(), data.toString()).commit()) {
+            if (!writeSiteEditsJson(data)) {
                 status.setText("线路变更未能保存，请重试");
                 return;
             }
@@ -2731,7 +3501,8 @@ public final class LiteActivity extends Activity {
         loadConfiguredSites();
         String title = selected != null ? "搜索 · " + selected.name : "全站搜索";
         base(title);
-        status.setText("支持遥控器点击屏幕字母/数字键输入，或点击输入框调起系统输入法：");
+        final int searchSession = epoch;
+        status.setText("支持手机扫码打字输入、遥控器快捷键盘，或点击输入框调起系统输入法：");
 
         final EditText input = new EditText(this);
         input.setSingleLine();
@@ -2794,6 +3565,87 @@ public final class LiteActivity extends Activity {
                             }
                         }));
         addGridViews(page, searchActions, isTvOrLandscape() ? 4 : 2, 44);
+
+        try {
+            String host = detectLanHost();
+            if (host.length() > 0) {
+                pairing =
+                        new ConfigServer(
+                                null,
+                                null,
+                                new ConfigServer.SearchHandler() {
+                                    public void onKeyword(
+                                            final String keyword, final boolean submitNow) {
+                                        ui.post(
+                                                new Runnable() {
+                                                    public void run() {
+                                                        if (dead || epoch != searchSession) return;
+                                                        String kw =
+                                                                keyword == null
+                                                                        ? ""
+                                                                        : keyword.trim();
+                                                        if (kw.length() == 0) return;
+                                                        input.setText(kw);
+                                                        input.setSelection(
+                                                                input.getText().length());
+                                                        LiteStore.addSearchKeyword(
+                                                                LiteActivity.this, kw);
+                                                        if (submitNow) {
+                                                            if (selected != null
+                                                                    && selected.supported) {
+                                                                catalog(kw, 1);
+                                                            } else {
+                                                                globalSearch(kw);
+                                                            }
+                                                        } else {
+                                                            status.setText(
+                                                                    "已填入手机输入的关键词：「"
+                                                                            + kw
+                                                                            + "」，点击搜索按钮即可查找。");
+                                                        }
+                                                    }
+                                                });
+                                    }
+                                });
+                String qrUrl = "http://" + host + ":" + pairing.port() + "/" + pairing.token + "/search";
+                Bitmap qrBmp = buildQrBitmap(qrUrl, 240);
+                if (qrBmp != null) {
+                    LinearLayout qrCard = new LinearLayout(this);
+                    qrCard.setOrientation(LinearLayout.HORIZONTAL);
+                    qrCard.setGravity(Gravity.CENTER_VERTICAL);
+                    qrCard.setPadding(dp(12), dp(10), dp(12), dp(10));
+                    styleCard(qrCard, false);
+
+                    ImageView qrImg = new ImageView(this);
+                    qrImg.setImageBitmap(qrBmp);
+                    qrCard.addView(qrImg, new LinearLayout.LayoutParams(dp(108), dp(108)));
+
+                    LinearLayout qrInfo = new LinearLayout(this);
+                    qrInfo.setOrientation(LinearLayout.VERTICAL);
+                    qrInfo.setPadding(dp(12), 0, 0, 0);
+                    TextView qrTitle = text("手机扫码打字搜片", 16);
+                    qrTitle.setTypeface(null, Typeface.BOLD);
+                    qrTitle.setPadding(0, 0, 0, dp(4));
+                    qrInfo.addView(qrTitle);
+                    TextView qrSub =
+                            text("同一局域网下使用手机相机或浏览器扫码，输入中文片名提交后电视自动搜索", 13);
+                    qrSub.setTextColor(COLOR_MUTED);
+                    qrSub.setPadding(0, 0, 0, dp(2));
+                    qrInfo.addView(qrSub);
+                    TextView qrAddr = text(qrUrl, 12);
+                    qrAddr.setTextColor(COLOR_ACCENT);
+                    qrAddr.setPadding(0, 0, 0, 0);
+                    qrInfo.addView(qrAddr);
+                    qrCard.addView(qrInfo, new LinearLayout.LayoutParams(0, -2, 1f));
+
+                    LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(-1, -2);
+                    cardLp.setMargins(0, dp(6), 0, dp(6));
+                    page.addView(qrCard, cardLp);
+                }
+            }
+        } catch (Throwable ignored) {
+            closePairing();
+        }
 
         addSectionHeader("遥控器快捷键盘");
         String keys = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -4267,10 +5119,488 @@ public final class LiteActivity extends Activity {
         }
     }
 
+    String detectLanHost() {
+        String host = "";
+        try {
+            Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
+            while (nets != null && nets.hasMoreElements()) {
+                NetworkInterface nif = nets.nextElement();
+                if (!nif.isUp() || nif.isLoopback()) continue;
+                Enumeration<InetAddress> addresses = nif.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    InetAddress a = addresses.nextElement();
+                    if (a instanceof Inet4Address
+                            && !a.isLoopbackAddress()
+                            && a.isSiteLocalAddress()) {
+                        host = a.getHostAddress();
+                        if (nif.getName() != null
+                                && (nif.getName().startsWith("wlan")
+                                        || nif.getName().startsWith("eth"))) {
+                            return host;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return host == null ? "" : host;
+    }
+
+    Bitmap buildQrBitmap(String content, int sizePx) {
+        try {
+            BitMatrix matrix =
+                    new MultiFormatWriter()
+                            .encode(content, BarcodeFormat.QR_CODE, sizePx, sizePx);
+            Bitmap bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.RGB_565);
+            for (int y = 0; y < sizePx; y++) {
+                for (int x = 0; x < sizePx; x++) {
+                    bitmap.setPixel(x, y, matrix.get(x, y) ? 0xff000000 : 0xffffffff);
+                }
+            }
+            return bitmap;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    void syncCastServer() {
+        boolean enabled = getPreferences(0).getBoolean("cast_enabled", true);
+        if (!enabled || dead) {
+            stopCastServer();
+            return;
+        }
+        String uuid = getPreferences(0).getString("cast_device_uuid", "").trim();
+        if (uuid.length() == 0) {
+            uuid = UUID.randomUUID().toString();
+            getPreferences(0).edit().putString("cast_device_uuid", uuid).commit();
+        }
+        String friendlyName =
+                getPreferences(0).getString("cast_device_name", "Marco Movie Lite 电视端").trim();
+        if (friendlyName.length() == 0) friendlyName = "Marco Movie Lite 电视端";
+        String lanHost = detectLanHost();
+
+        if (castServer != null && !castServer.closed) {
+            if (lanHost.equals(castServer.lanIp)) {
+                castServer.updateFriendlyName(friendlyName);
+                return;
+            }
+            stopCastServer();
+        }
+
+        try {
+            Context appCtx = getApplicationContext() != null ? getApplicationContext() : this;
+            WifiManager wm = (WifiManager) appCtx.getSystemService(Context.WIFI_SERVICE);
+            if (wm != null) {
+                castMulticastLock = wm.createMulticastLock("marcomovie-lite-cast");
+                castMulticastLock.setReferenceCounted(false);
+                castMulticastLock.acquire();
+            }
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            castServer =
+                    new LiteCast(
+                            uuid,
+                            friendlyName,
+                            lanHost,
+                            createCastBridge(),
+                            lanHost.length() > 0,
+                            new InetSocketAddress(0));
+        } catch (Throwable ignored) {
+            stopCastServer();
+        }
+    }
+
+    void stopCastServer() {
+        if (castServer != null) {
+            try {
+                castServer.close();
+            } catch (Throwable ignored) {
+            }
+            castServer = null;
+        }
+        if (castMulticastLock != null) {
+            try {
+                if (castMulticastLock.isHeld()) castMulticastLock.release();
+            } catch (Throwable ignored) {
+            }
+            castMulticastLock = null;
+        }
+    }
+
+    LiteCast.Bridge createCastBridge() {
+        return new LiteCast.Bridge() {
+            public void openMedia(
+                    final String url,
+                    final String title,
+                    final Map<String, String> headers) {
+                ui.post(
+                        new Runnable() {
+                            public void run() {
+                                if (dead) return;
+                                playCastStream(url, title, headers);
+                            }
+                        });
+            }
+
+            public void resume() {
+                ui.post(
+                        new Runnable() {
+                            public void run() {
+                                if (inPlayback && player != null && ready && !player.isPlaying()) {
+                                    togglePlayPause();
+                                }
+                            }
+                        });
+            }
+
+            public void pause() {
+                ui.post(
+                        new Runnable() {
+                            public void run() {
+                                if (inPlayback && player != null && ready && player.isPlaying()) {
+                                    togglePlayPause();
+                                }
+                            }
+                        });
+            }
+
+            public void stop() {
+                ui.post(
+                        new Runnable() {
+                            public void run() {
+                                if (inPlayback && inCastPlayback) {
+                                    inCastPlayback = false;
+                                    castPage();
+                                }
+                            }
+                        });
+            }
+
+            public void seekTo(final int posMs) {
+                ui.post(
+                        new Runnable() {
+                            public void run() {
+                                if (inPlayback && player != null && ready) {
+                                    try {
+                                        lastUserSeekMs = posMs;
+                                        lastUserSeekAt = SystemClock.uptimeMillis();
+                                        player.seekTo(posMs);
+                                    } catch (Exception ignored) {
+                                    }
+                                }
+                            }
+                        });
+            }
+
+            public int positionMs() {
+                try {
+                    if (inPlayback && player != null && ready) {
+                        return Math.max(0, player.getCurrentPosition());
+                    }
+                } catch (Exception ignored) {
+                }
+                return 0;
+            }
+
+            public int durationMs() {
+                try {
+                    if (inPlayback && player != null && ready) {
+                        return Math.max(0, player.getDuration());
+                    }
+                } catch (Exception ignored) {
+                }
+                return 0;
+            }
+
+            public String transportState() {
+                try {
+                    if (inPlayback && player != null) {
+                        if (!ready) return "TRANSITIONING";
+                        return player.isPlaying() ? "PLAYING" : "PAUSED_PLAYBACK";
+                    }
+                } catch (Exception ignored) {
+                }
+                return "STOPPED";
+            }
+
+            public int getVolumePercent() {
+                try {
+                    AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                    if (am != null) {
+                        int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                        int cur = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+                        if (max > 0) return Math.max(0, Math.min(100, (cur * 100) / max));
+                    }
+                } catch (Throwable ignored) {
+                }
+                return 80;
+            }
+
+            public void setVolumePercent(int percent) {
+                try {
+                    AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                    if (am != null) {
+                        int max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+                        if (max > 0) {
+                            int target =
+                                    Math.round(
+                                            (Math.max(0, Math.min(100, percent)) * (float) max)
+                                                    / 100f);
+                            am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0);
+                            if (target > 0) castMuted = false;
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+
+            public boolean isMuted() {
+                return castMuted;
+            }
+
+            public void setMuted(boolean muted) {
+                try {
+                    AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                    if (am == null) return;
+                    if (muted && !castMuted) {
+                        castSavedVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC);
+                        am.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0);
+                        castMuted = true;
+                    } else if (!muted && castMuted) {
+                        int restore =
+                                castSavedVolume > 0
+                                        ? castSavedVolume
+                                        : Math.max(
+                                                1,
+                                                am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                                                        / 2);
+                        am.setStreamVolume(AudioManager.STREAM_MUSIC, restore, 0);
+                        castMuted = false;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+
+            public void onStatusChanged(final String statusText) {
+                ui.post(
+                        new Runnable() {
+                            public void run() {
+                                if (!dead && castStatusView != null) {
+                                    castStatusView.setText(statusText);
+                                }
+                            }
+                        });
+            }
+
+            public void onClosed() {}
+        };
+    }
+
+    void playCastStream(String url, String title, Map<String, String> headers) {
+        try {
+            String normalized = LiteCatalog.http(url);
+            currentDetail = null;
+            playingLiveGroup = null;
+            playingLiveSourceHeaders = Collections.emptyMap();
+            String displayTitle =
+                    title != null && title.trim().length() > 0 ? title.trim() : "无线投屏播放";
+            Map<String, String> safeHeaders =
+                    headers != null ? headers : Collections.<String, String>emptyMap();
+            playResolved(normalized, normalized, displayTitle, safeHeaders, null);
+            inCastPlayback = true;
+        } catch (Exception e) {
+            if (status != null) status.setText("投屏地址无效或不受支持");
+        }
+    }
+
+    void castPage() {
+        base("无线投屏接收");
+        syncCastServer();
+        final boolean enabled = getPreferences(0).getBoolean("cast_enabled", true);
+        final String devName =
+                getPreferences(0).getString("cast_device_name", "Marco Movie Lite 电视端");
+
+        if (!enabled) {
+            status.setText("无线投屏接收已关闭，开启后可接收手机视频 App (DLNA) 与扫码网页直链投屏。");
+        } else if (castServer != null && castServer.webCastUrl().length() > 0) {
+            status.setText(
+                    "已在局域网广播 DLNA 投屏设备「"
+                            + devName
+                            + "」· 同一 Wi-Fi 下可直接从手机视频 App 选择投屏，或扫码打开网页直投遥控器。");
+        } else {
+            status.setText("未检测到局域网 IPv4 连接，请先将电视连接至路由器 Wi-Fi 或有线网络后刷新。");
+        }
+
+        if (enabled && castServer != null && castServer.webCastUrl().length() > 0) {
+            String webUrl = castServer.webCastUrl();
+            Bitmap qrBmp = buildQrBitmap(webUrl, 280);
+            if (qrBmp != null) {
+                LinearLayout card = new LinearLayout(this);
+                card.setOrientation(LinearLayout.HORIZONTAL);
+                card.setGravity(Gravity.CENTER_VERTICAL);
+                card.setPadding(dp(14), dp(12), dp(14), dp(12));
+                styleCard(card, false);
+
+                ImageView qrImg = new ImageView(this);
+                qrImg.setImageBitmap(qrBmp);
+                card.addView(qrImg, new LinearLayout.LayoutParams(dp(150), dp(150)));
+
+                LinearLayout info = new LinearLayout(this);
+                info.setOrientation(LinearLayout.VERTICAL);
+                info.setPadding(dp(14), 0, 0, 0);
+                TextView nameTv = text("设备名称：" + devName, 17);
+                nameTv.setTypeface(null, Typeface.BOLD);
+                nameTv.setPadding(0, 0, 0, dp(4));
+                info.addView(nameTv);
+                TextView modeTv =
+                        text(
+                                "支持协议：① UPnP / DLNA 标准投屏（爱优腾哔哩等手机视频 App 点击 TV 投屏即可发现）\n"
+                                        + "② 扫码网页直投（支持粘贴 m3u8 / mp4 直链及手机端进度/音量遥控）",
+                                13);
+                modeTv.setTextColor(COLOR_MUTED);
+                modeTv.setPadding(0, 0, 0, dp(4));
+                info.addView(modeTv);
+                TextView urlTv = text("扫码或浏览器访问：" + webUrl, 13);
+                urlTv.setTextColor(COLOR_ACCENT);
+                urlTv.setPadding(0, 0, 0, dp(4));
+                info.addView(urlTv);
+                castStatusView = text("状态：" + castServer.lastClientInfo, 13);
+                castStatusView.setPadding(0, 0, 0, 0);
+                info.addView(castStatusView);
+                card.addView(info, new LinearLayout.LayoutParams(0, -2, 1f));
+
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+                lp.setMargins(0, dp(6), 0, dp(10));
+                page.addView(card, lp);
+            }
+        }
+
+        List<View> ops = new ArrayList<View>();
+        ops.add(
+                makeActionButton(
+                        enabled ? "投屏服务：已开启（点击关闭）" : "投屏服务：已关闭（点击开启）",
+                        enabled,
+                        new Runnable() {
+                            public void run() {
+                                getPreferences(0)
+                                        .edit()
+                                        .putBoolean("cast_enabled", !enabled)
+                                        .commit();
+                                syncCastServer();
+                                castPage();
+                            }
+                        }));
+        ops.add(
+                makeActionButton(
+                        "修改设备名称",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                renameCastDevicePage();
+                            }
+                        }));
+        ops.add(
+                makeActionButton(
+                        "刷新局域网状态",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                stopCastServer();
+                                syncCastServer();
+                                castPage();
+                            }
+                        }));
+        ops.add(
+                makeActionButton(
+                        "手动输入直链播放",
+                        false,
+                        new Runnable() {
+                            public void run() {
+                                manualCastUrlPage();
+                            }
+                        }));
+        addGridViews(page, ops, isTvOrLandscape() ? 4 : 2, 46);
+
+        button(
+                "返回首页",
+                new Runnable() {
+                    public void run() {
+                        home();
+                    }
+                });
+    }
+
+    void renameCastDevicePage() {
+        base("修改投屏设备名称");
+        status.setText("修改后同一局域网手机视频 App 搜索投屏设备时将显示此名称：");
+        final EditText nameInput = new EditText(this);
+        nameInput.setSingleLine();
+        nameInput.setTextColor(0xffffffff);
+        nameInput.setText(
+                getPreferences(0).getString("cast_device_name", "Marco Movie Lite 电视端"));
+        page.addView(nameInput);
+        button(
+                "保存设备名称",
+                new Runnable() {
+                    public void run() {
+                        String n = nameInput.getText().toString().trim();
+                        if (n.length() == 0) n = "Marco Movie Lite 电视端";
+                        if (n.length() > 40) n = n.substring(0, 40);
+                        getPreferences(0).edit().putString("cast_device_name", n).commit();
+                        syncCastServer();
+                        castPage();
+                    }
+                });
+        button(
+                "取消",
+                new Runnable() {
+                    public void run() {
+                        castPage();
+                    }
+                });
+    }
+
+    void manualCastUrlPage() {
+        base("手动输入直链播放");
+        status.setText("输入合法的 HTTP(S) m3u8 / mp4 视频流直链地址直接在大屏播放：");
+        final EditText urlInput = new EditText(this);
+        urlInput.setSingleLine();
+        urlInput.setTextColor(0xffffffff);
+        urlInput.setHint("https://media.example/video.m3u8");
+        page.addView(urlInput);
+        button(
+                "立即播放",
+                new Runnable() {
+                    public void run() {
+                        String u = urlInput.getText().toString().trim();
+                        if (u.length() == 0) {
+                            status.setText("请输入有效的 HTTP(S) 视频直链");
+                            return;
+                        }
+                        playCastStream(
+                                u, "直链播放", Collections.<String, String>emptyMap());
+                    }
+                });
+        button(
+                "返回无线投屏",
+                new Runnable() {
+                    public void run() {
+                        castPage();
+                    }
+                });
+    }
+
     @Override
     public void onBackPressed() {
         if (homeVisible) {
             finish();
+            return;
+        }
+        if (inPlayback && inCastPlayback) {
+            inCastPlayback = false;
+            castPage();
             return;
         }
         if (inPlayback && playingLiveGroup != null) {
@@ -4308,10 +5638,17 @@ public final class LiteActivity extends Activity {
     protected void onStart() {
         super.onStart();
         exitPushSubmitted = false;
+        syncCastServer();
         if (backgrounded) {
             backgrounded = false;
-            if (inPlayback && currentDetail != null) showDetail(currentDetail);
-            else home();
+            if (inPlayback && inCastPlayback) {
+                inCastPlayback = false;
+                castPage();
+            } else if (inPlayback && currentDetail != null) {
+                showDetail(currentDetail);
+            } else {
+                home();
+            }
         }
     }
 
@@ -4322,6 +5659,7 @@ public final class LiteActivity extends Activity {
         epoch++;
         cancelWork();
         closePairing();
+        stopCastServer();
         release();
         if (isFinishing()) {
             submitExitWebdavPushIfNeeded();
@@ -4335,6 +5673,7 @@ public final class LiteActivity extends Activity {
         ui.removeCallbacks(autoPushTask);
         cancelWork();
         closePairing();
+        stopCastServer();
         release();
         submitExitWebdavPushIfNeeded();
         io.shutdownNow();

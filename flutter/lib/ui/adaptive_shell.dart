@@ -8952,6 +8952,31 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             padding: const EdgeInsets.only(left: 6),
                             minSize: 28,
                             onPressed: () async {
+                              final nextGroup = await _promptGroupSelection(
+                                ctx,
+                                privateMode: sub.isEffectivelyPrivate,
+                                currentGroup: sub.group,
+                                title: '修改订阅分组 · ${sub.name}',
+                              );
+                              if (nextGroup == null || !mounted) return;
+                              await widget.storage.updateSubscriptionGroup(
+                                sub.id,
+                                nextGroup,
+                              );
+                              if (!mounted) return;
+                              _reloadSavedConfig();
+                              if (ctx.mounted) setSheetState(() {});
+                            },
+                            child: const Icon(
+                              CupertinoIcons.folder,
+                              color: AppleColors.systemBlue,
+                              size: 18,
+                            ),
+                          ),
+                          CupertinoButton(
+                            padding: const EdgeInsets.only(left: 6),
+                            minSize: 28,
+                            onPressed: () async {
                               try {
                                 await widget.storage.removeSubscription(sub.id);
                                 if (!mounted) return;
@@ -9102,62 +9127,1175 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       },
     );
   }
+  List<String> _collectExistingGroups(bool privateMode) {
+    final def = privateMode ? '隐私分组' : '默认分组';
+    final result = <String>[def];
+    for (final s in _config?.sites ?? const <CmsSite>[]) {
+      if (s.isEffectivelyPrivate != privateMode) continue;
+      final g = s.group.trim().isEmpty ? def : s.group.trim();
+      if (!result.contains(g)) result.add(g);
+    }
+    for (final sub in widget.storage.getSubscriptions()) {
+      if (sub.isEffectivelyPrivate != privateMode) continue;
+      final g = sub.group.trim().isEmpty ? def : sub.group.trim();
+      if (!result.contains(g)) result.add(g);
+    }
+    if (!privateMode) {
+      for (final preset in const ['常用秒播', '4K网盘', '备用线路']) {
+        if (!result.contains(preset)) result.add(preset);
+      }
+    }
+    return result;
+  }
+
+  Future<String?> _promptGroupSelection(
+    BuildContext hostContext, {
+    required bool privateMode,
+    String currentGroup = '',
+    String title = '修改分组',
+  }) async {
+    final def = privateMode ? '隐私分组' : '默认分组';
+    final groups = _collectExistingGroups(privateMode);
+    final ctrl = TextEditingController(
+      text: currentGroup.trim().isEmpty ? def : currentGroup.trim(),
+    );
+    String? errorMsg;
+    return await _openIosOrModalPage<String>(
+      hostContext: hostContext,
+      title: title,
+      backLabel: '返回',
+      maxWidth: 460,
+      builder: (sheetCtx) => StatefulBuilder(
+        builder: (sheetCtx, setModalState) {
+          final bottomInset = MediaQuery.viewInsetsOf(sheetCtx).bottom +
+              MediaQuery.paddingOf(sheetCtx).bottom;
+          void submitGroup(String candidate) {
+            final clean = candidate.trim();
+            if (clean.isEmpty) {
+              setModalState(() => errorMsg = '分组名称不能为空');
+              return;
+            }
+            if (!privateMode &&
+                (clean.contains('隐私') || clean.contains('私密'))) {
+              setModalState(() => errorMsg = '公开线路不能移入包含“隐私/私密”的分组');
+              return;
+            }
+            Navigator.of(sheetCtx).pop(clean);
+          }
+
+          return SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(18, 14, 18, 18 + bottomInset),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '选择已有分组或输入新分组名称：',
+                  style: TextStyle(
+                    color: AppleColors.labelSecondary,
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final g in groups)
+                      GestureDetector(
+                        onTap: () => submitGroup(g),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 7,
+                          ),
+                          decoration: BoxDecoration(
+                            color: g == ctrl.text.trim()
+                                ? const Color(0x400A84FF)
+                                : AppleColors.groupedSecondary,
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: g == ctrl.text.trim()
+                                  ? AppleColors.systemBlue
+                                  : const Color(0x2EFFFFFF),
+                              width: 0.8,
+                            ),
+                          ),
+                          child: Text(
+                            g,
+                            style: TextStyle(
+                              color: g == ctrl.text.trim()
+                                  ? Colors.white
+                                  : AppleColors.labelPrimary,
+                              fontSize: 13,
+                              fontWeight: g == ctrl.text.trim()
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                TextSelectionMouseGuard(
+                  child: CupertinoTextField(
+                    controller: ctrl,
+                    placeholder: '输入自定义分组名称…',
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppleColors.groupedSecondary,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    onChanged: (_) {
+                      if (errorMsg != null) {
+                        setModalState(() => errorMsg = null);
+                      } else {
+                        setModalState(() {});
+                      }
+                    },
+                    onSubmitted: submitGroup,
+                  ),
+                ),
+                if (errorMsg != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    errorMsg!,
+                    style: const TextStyle(
+                      color: AppleColors.systemRed,
+                      fontSize: 12.5,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: AppleCapsuleButton(
+                    label: '确定分组',
+                    primary: true,
+                    onPressed: () => submitGroup(ctrl.text),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<bool> _confirmAndDeleteSingleSite(
+    BuildContext hostContext,
+    CmsSite site,
+  ) async {
+    final confirmed = await showCupertinoDialog<bool>(
+      context: hostContext,
+      builder: (dialogCtx) => CupertinoAlertDialog(
+        title: Text('删除「${site.name}」？'),
+        content: const Padding(
+          padding: EdgeInsets.only(top: 8),
+          child: Text('删除后该线路将从片源列表移除，后续刷新订阅也不会重现；可在「管理线路 → 恢复已删」中恢复。'),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(dialogCtx).pop(false),
+            child: const Text('取消'),
+          ),
+          CupertinoDialogAction(
+            isDestructiveAction: true,
+            onPressed: () => Navigator.of(dialogCtx).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return false;
+    try {
+      await widget.storage.removeSite(widget.storage.siteIdentityOf(site));
+      if (!site.isEffectivelyPrivate &&
+          widget.storage.preferredSiteKey == site.key) {
+        await widget.storage.setPreferredSiteKey('');
+      }
+      if (mounted) _reloadSavedConfig();
+      return true;
+    } catch (e) {
+      if (mounted) _showAppleNotice('删除未保存', '$e');
+      return false;
+    }
+  }
+
+  Future<bool> _showEditSingleSiteDialog(
+    BuildContext hostContext,
+    CmsSite site,
+  ) async {
+    final privateMode = site.isEffectivelyPrivate;
+    final defGroup = privateMode ? '隐私分组' : '默认分组';
+    final existingGroups = _collectExistingGroups(privateMode);
+    final original = widget.storage.getOriginalSite(site) ?? site;
+    final existingOv = widget.storage.getSiteOverride(site);
+    final nameCtrl = TextEditingController(text: site.name);
+    final groupCtrl = TextEditingController(
+      text: site.group.trim().isEmpty ? defGroup : site.group.trim(),
+    );
+    final apiCtrl = TextEditingController(text: site.api);
+    final playUrlCtrl = TextEditingController(text: site.playUrl);
+    final extCtrl = TextEditingController(
+      text: site.rawExtension ?? site.ext,
+    );
+    bool searchable = site.searchable;
+    bool saving = false;
+    String? errorMsg;
+
+    final result = await _openIosOrModalPage<bool>(
+      hostContext: hostContext,
+      title: '编辑线路',
+      backLabel: '返回',
+      maxWidth: 540,
+      builder: (sheetCtx) => StatefulBuilder(
+        builder: (sheetCtx, setModalState) {
+          final bottomInset = MediaQuery.viewInsetsOf(sheetCtx).bottom +
+              MediaQuery.paddingOf(sheetCtx).bottom;
+          Widget fieldLabel(String label) => Padding(
+            padding: const EdgeInsets.only(bottom: 6, top: 10),
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: AppleColors.labelSecondary,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          );
+
+          Widget textInput(
+            TextEditingController ctrl,
+            String placeholder, {
+            int maxLines = 1,
+          }) => TextSelectionMouseGuard(
+            child: CupertinoTextField(
+              controller: ctrl,
+              placeholder: placeholder,
+              maxLines: maxLines,
+              autocorrect: false,
+              style: const TextStyle(color: Colors.white, fontSize: 13.5),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: AppleColors.groupedSecondary,
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+          );
+
+          return SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(18, 10, 18, 18 + bottomInset),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                fieldLabel('线路名称'),
+                textInput(nameCtrl, '输入线路显示名称'),
+                fieldLabel('所属分组'),
+                textInput(groupCtrl, defGroup),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    for (final g in existingGroups)
+                      GestureDetector(
+                        onTap: () => setModalState(() => groupCtrl.text = g),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: groupCtrl.text.trim() == g
+                                ? const Color(0x400A84FF)
+                                : AppleColors.groupedSecondary,
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: groupCtrl.text.trim() == g
+                                  ? AppleColors.systemBlue
+                                  : const Color(0x26FFFFFF),
+                              width: 0.7,
+                            ),
+                          ),
+                          child: Text(
+                            g,
+                            style: const TextStyle(
+                              color: AppleColors.labelPrimary,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                fieldLabel('接口地址 / Spider API'),
+                textInput(apiCtrl, 'https://… 或 csp_…'),
+                fieldLabel('解析地址 PlayUrl（可选）'),
+                textInput(playUrlCtrl, '留空使用直连或全局解析'),
+                fieldLabel('扩展参数 Ext（可选）'),
+                textInput(extCtrl, '自定义扩展配置或规则地址', maxLines: 2),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  decoration: BoxDecoration(
+                    color: AppleColors.groupedSecondary,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          '允许参与全站聚合搜索',
+                          style: TextStyle(
+                            color: AppleColors.labelPrimary,
+                            fontSize: 13.5,
+                          ),
+                        ),
+                      ),
+                      CupertinoSwitch(
+                        value: searchable,
+                        activeTrackColor: AppleColors.systemGreen,
+                        onChanged: (v) => setModalState(() => searchable = v),
+                      ),
+                    ],
+                  ),
+                ),
+                if (errorMsg != null) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    errorMsg!,
+                    style: const TextStyle(
+                      color: AppleColors.systemRed,
+                      fontSize: 12.5,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: AppleCapsuleButton(
+                        label: '保存修改',
+                        primary: true,
+                        onPressed: saving
+                            ? null
+                            : () async {
+                                final newName = nameCtrl.text.trim();
+                                final newGroup = groupCtrl.text.trim().isEmpty
+                                    ? defGroup
+                                    : groupCtrl.text.trim();
+                                final newApi = apiCtrl.text.trim();
+                                final newPlay = playUrlCtrl.text.trim();
+                                final newExt = extCtrl.text;
+                                if (newName.isEmpty || newApi.isEmpty) {
+                                  setModalState(
+                                    () => errorMsg = '线路名称与接口地址不能为空',
+                                  );
+                                  return;
+                                }
+                                if (!privateMode &&
+                                    (newGroup.contains('隐私') ||
+                                        newGroup.contains('私密'))) {
+                                  setModalState(
+                                    () => errorMsg = '公开线路不能移入包含“隐私/私密”的分组',
+                                  );
+                                  return;
+                                }
+                                setModalState(() {
+                                  saving = true;
+                                  errorMsg = null;
+                                });
+                                try {
+                                  final origGroup = original.group.trim().isEmpty
+                                      ? defGroup
+                                      : original.group.trim();
+                                  final origExt =
+                                      original.rawExtension ?? original.ext;
+                                  final nextOv = SiteOverride(
+                                    name: newName != original.name
+                                        ? newName
+                                        : null,
+                                    group: newGroup != origGroup
+                                        ? newGroup
+                                        : null,
+                                    api: newApi != original.api ? newApi : null,
+                                    playUrl: newPlay != original.playUrl
+                                        ? newPlay
+                                        : null,
+                                    ext: newExt != origExt ? newExt : null,
+                                    searchable:
+                                        searchable != original.searchable
+                                        ? searchable
+                                        : null,
+                                  );
+                                  await widget.storage.saveSiteOverride(
+                                    site,
+                                    nextOv.isEmpty ? null : nextOv,
+                                  );
+                                  if (mounted) _reloadSavedConfig();
+                                  if (sheetCtx.mounted) {
+                                    Navigator.of(sheetCtx).pop(true);
+                                  }
+                                } catch (e) {
+                                  if (sheetCtx.mounted) {
+                                    setModalState(() {
+                                      saving = false;
+                                      errorMsg = '$e';
+                                    });
+                                  }
+                                }
+                              },
+                      ),
+                    ),
+                    if (existingOv != null) ...[
+                      const SizedBox(width: 10),
+                      AppleCapsuleButton(
+                        label: '恢复原始',
+                        onPressed: saving
+                            ? null
+                            : () async {
+                                setModalState(() => saving = true);
+                                try {
+                                  await widget.storage.saveSiteOverride(
+                                    site,
+                                    null,
+                                  );
+                                  if (mounted) _reloadSavedConfig();
+                                  if (sheetCtx.mounted) {
+                                    Navigator.of(sheetCtx).pop(true);
+                                  }
+                                } catch (e) {
+                                  if (sheetCtx.mounted) {
+                                    setModalState(() {
+                                      saving = false;
+                                      errorMsg = '$e';
+                                    });
+                                  }
+                                }
+                              },
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Center(
+                  child: CupertinoButton(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    minimumSize: const Size(28, 28),
+                    onPressed: saving
+                        ? null
+                        : () async {
+                            final deleted = await _confirmAndDeleteSingleSite(
+                              sheetCtx,
+                              site,
+                            );
+                            if (deleted && sheetCtx.mounted) {
+                              Navigator.of(sheetCtx).pop(true);
+                            }
+                          },
+                    child: const Text(
+                      '删除这条线路',
+                      style: TextStyle(
+                        color: AppleColors.systemRed,
+                        fontSize: 13.5,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+    return result == true;
+  }
+
+  Future<void> _showSingleSiteActionSheet(
+    BuildContext hostContext,
+    CmsSite site, {
+    required bool privateMode,
+    VoidCallback? onChanged,
+  }) async {
+    final hasOv = widget.storage.hasSiteOverride(site);
+    final isPref = !privateMode && widget.storage.preferredSiteKey == site.key;
+    final curGroup = site.group.trim().isEmpty
+        ? (privateMode ? '隐私分组' : '默认分组')
+        : site.group.trim();
+    final choice = await showCupertinoModalPopup<String>(
+      context: hostContext,
+      builder: (popupCtx) => CupertinoActionSheet(
+        title: Text(site.name),
+        message: Text('当前分组：$curGroup · 接口：${site.api}'),
+        actions: [
+          CupertinoActionSheetAction(
+            onPressed: () => Navigator.of(popupCtx).pop('group'),
+            child: const Text('修改分组'),
+          ),
+          CupertinoActionSheetAction(
+            onPressed: () => Navigator.of(popupCtx).pop('edit'),
+            child: const Text('编辑线路信息'),
+          ),
+          if (!privateMode && site.supported)
+            CupertinoActionSheetAction(
+              onPressed: () => Navigator.of(popupCtx).pop('preferred'),
+              child: Text(isPref ? '取消默认偏好源' : '设为默认偏好源'),
+            ),
+          if (hasOv)
+            CupertinoActionSheetAction(
+              onPressed: () => Navigator.of(popupCtx).pop('reset'),
+              child: const Text('恢复原始配置'),
+            ),
+          CupertinoActionSheetAction(
+            isDestructiveAction: true,
+            onPressed: () => Navigator.of(popupCtx).pop('delete'),
+            child: const Text('删除这条线路'),
+          ),
+        ],
+        cancelButton: CupertinoActionSheetAction(
+          onPressed: () => Navigator.of(popupCtx).pop(),
+          child: const Text('取消'),
+        ),
+      ),
+    );
+    if (choice == null || !hostContext.mounted) return;
+    if (choice == 'group') {
+      final nextGroup = await _promptGroupSelection(
+        hostContext,
+        privateMode: privateMode,
+        currentGroup: curGroup,
+        title: '修改分组 · ${site.name}',
+      );
+      if (nextGroup != null && mounted) {
+        try {
+          await widget.storage.updateSitesGroupBatch([site], nextGroup);
+          _reloadSavedConfig();
+          onChanged?.call();
+        } catch (e) {
+          if (mounted) _showAppleNotice('分组未保存', '$e');
+        }
+      }
+    } else if (choice == 'edit') {
+      final changed = await _showEditSingleSiteDialog(hostContext, site);
+      if (changed) onChanged?.call();
+    } else if (choice == 'preferred') {
+      await widget.storage.setPreferredSiteKey(isPref ? '' : site.key);
+      onChanged?.call();
+    } else if (choice == 'reset') {
+      await widget.storage.saveSiteOverride(site, null);
+      if (mounted) _reloadSavedConfig();
+      onChanged?.call();
+    } else if (choice == 'delete') {
+      final deleted = await _confirmAndDeleteSingleSite(hostContext, site);
+      if (deleted) onChanged?.call();
+    }
+  }
+
+  Future<bool> _showRestoreRemovedSitesSheet(
+    BuildContext hostContext,
+    bool privateMode,
+  ) async {
+    bool changed = false;
+    await _openIosOrModalPage<void>(
+      hostContext: hostContext,
+      title: '已删线路恢复',
+      backLabel: '返回',
+      maxWidth: 520,
+      builder: (sheetCtx) => StatefulBuilder(
+        builder: (sheetCtx, setModalState) {
+          final entries = widget.storage.getRemovedSiteEntries(
+            privateMode: privateMode,
+          );
+          if (entries.isEmpty) {
+            return const Padding(
+              padding: EdgeInsets.all(28),
+              child: Center(
+                child: Text(
+                  '暂无已删除的线路',
+                  style: TextStyle(
+                    color: AppleColors.labelSecondary,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            );
+          }
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '共 ${entries.length} 条已删线路',
+                        style: const TextStyle(
+                          color: AppleColors.labelSecondary,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(28, 28),
+                      onPressed: () async {
+                        await widget.storage.resetRemovedSites(
+                          privateMode: privateMode,
+                        );
+                        changed = true;
+                        if (mounted) _reloadSavedConfig();
+                        if (sheetCtx.mounted) Navigator.of(sheetCtx).pop();
+                      },
+                      child: const Text(
+                        '全部恢复',
+                        style: TextStyle(
+                          color: AppleColors.systemBlue,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Flexible(
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.all(16),
+                  itemCount: entries.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (_, i) {
+                    final item = entries[i];
+                    return Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppleColors.groupedSecondary,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  item.site.name,
+                                  style: const TextStyle(
+                                    color: AppleColors.labelPrimary,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  '${item.site.group} · ${item.site.api}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: AppleColors.labelSecondary,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          AppleCapsuleButton(
+                            label: '恢复',
+                            compact: true,
+                            onPressed: () async {
+                              await widget.storage.restoreSite(item.identity);
+                              changed = true;
+                              if (mounted) _reloadSavedConfig();
+                              if (sheetCtx.mounted) setModalState(() {});
+                            },
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    return changed;
+  }
+
   Future<void> _managePickerSites(bool privateGroup) async {
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
-    final ordered = (_config?.sites ?? const <CmsSite>[])
-        .where((s) => s.isEffectivelyPrivate == privateGroup).toList();
+    final defGroup = privateGroup ? '隐私分组' : '默认分组';
+    List<CmsSite> ordered = (_config?.sites ?? const <CmsSite>[])
+        .where((s) => s.isEffectivelyPrivate == privateGroup)
+        .toList();
     final removed = <CmsSite>[];
+    final selectedKeys = <String>{};
+    bool batchMode = false;
+    String selectedGroup = '全部';
     bool saving = false;
+
+    void syncOrderedFromConfig() {
+      final freshById = <String, CmsSite>{
+        for (final s in (_config?.sites ?? const <CmsSite>[]))
+          if (s.isEffectivelyPrivate == privateGroup)
+            widget.storage.siteIdentityOf(s): s,
+      };
+      final removedIds = removed.map(widget.storage.siteIdentityOf).toSet();
+      final nextOrdered = <CmsSite>[];
+      for (final old in ordered) {
+        final id = widget.storage.siteIdentityOf(old);
+        final updated = freshById.remove(id);
+        if (updated != null && !removedIds.contains(id)) {
+          nextOrdered.add(updated);
+        }
+      }
+      for (final entry in freshById.entries) {
+        if (!removedIds.contains(entry.key)) {
+          nextOrdered.add(entry.value);
+        }
+      }
+      ordered = nextOrdered;
+      final validKeys = ordered.map((s) => s.key).toSet();
+      selectedKeys.retainAll(validKeys);
+    }
+
     await _openIosOrModalPage<void>(
       title: '管理线路',
       backLabel: '返回',
+      maxWidth: 640,
       builder: (ctx) => StatefulBuilder(builder: (ctx, update) {
         final safeBottom = MediaQuery.paddingOf(ctx).bottom;
-        final content = Column(children: [
-          Expanded(child: ScrollConfiguration(
-            behavior: ScrollConfiguration.of(ctx).copyWith(
-              dragDevices: const {PointerDeviceKind.touch, PointerDeviceKind.trackpad},
+        final groups = <String>['全部'];
+        final groupCounts = <String, int>{'全部': ordered.length};
+        for (final s in ordered) {
+          final g = s.group.trim().isEmpty ? defGroup : s.group.trim();
+          if (!groups.contains(g)) groups.add(g);
+          groupCounts[g] = (groupCounts[g] ?? 0) + 1;
+        }
+        if (!groups.contains(selectedGroup)) selectedGroup = '全部';
+        final visibleSites = selectedGroup == '全部'
+            ? ordered
+            : ordered
+                  .where(
+                    (s) =>
+                        (s.group.trim().isEmpty ? defGroup : s.group.trim()) ==
+                        selectedGroup,
+                  )
+                  .toList();
+        final persistedRemovedCount = widget.storage
+            .getRemovedSiteEntries(privateMode: privateGroup)
+            .length;
+
+        Widget buildRowTile(CmsSite site, {int? reorderIndex}) {
+          final g = site.group.trim().isEmpty ? defGroup : site.group.trim();
+          final checked = selectedKeys.contains(site.key);
+          return ListTile(
+            key: ValueKey(site.key),
+            dense: true,
+            title: Text(
+              site.name,
+              style: const TextStyle(color: AppleColors.labelPrimary),
             ),
-            child: ReorderableListView.builder(
-              buildDefaultDragHandles: false,
+            subtitle: Text(
+              '$g · ${site.supported ? "可用" : "未适配"}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: AppleColors.labelSecondary,
+                fontSize: 12,
+              ),
+            ),
+            onTap: batchMode
+                ? () => update(() {
+                    if (checked) {
+                      selectedKeys.remove(site.key);
+                    } else {
+                      selectedKeys.add(site.key);
+                    }
+                  })
+                : null,
+            leading: batchMode
+                ? Icon(
+                    checked
+                        ? CupertinoIcons.check_mark_circled_solid
+                        : CupertinoIcons.circle,
+                    color: checked
+                        ? AppleColors.systemBlue
+                        : AppleColors.labelSecondary,
+                    size: 21,
+                  )
+                : (reorderIndex != null
+                      ? ReorderableDragStartListener(
+                          index: reorderIndex,
+                          child: const Icon(Icons.drag_handle),
+                        )
+                      : const Icon(
+                          CupertinoIcons.line_horizontal_3,
+                          size: 18,
+                          color: AppleColors.labelTertiary,
+                        )),
+            trailing: batchMode
+                ? null
+                : Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      GestureDetector(
+                        onTap: saving
+                            ? null
+                            : () async {
+                                final nextGroup = await _promptGroupSelection(
+                                  ctx,
+                                  privateMode: privateGroup,
+                                  currentGroup: g,
+                                  title: '修改分组 · ${site.name}',
+                                );
+                                if (nextGroup == null || !mounted) return;
+                                await widget.storage.updateSitesGroupBatch(
+                                  [site],
+                                  nextGroup,
+                                );
+                                if (mounted) _reloadSavedConfig();
+                                if (ctx.mounted) {
+                                  update(syncOrderedFromConfig);
+                                }
+                              },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppleColors.groupedSecondary,
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: const Color(0x2EFFFFFF),
+                              width: 0.6,
+                            ),
+                          ),
+                          child: Text(
+                            g,
+                            style: const TextStyle(
+                              color: AppleColors.labelSecondary,
+                              fontSize: 11.5,
+                            ),
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '编辑这条线路',
+                        icon: const Icon(Icons.edit_outlined, size: 19),
+                        onPressed: saving
+                            ? null
+                            : () async {
+                                final changed = await _showEditSingleSiteDialog(
+                                  ctx,
+                                  site,
+                                );
+                                if (changed && ctx.mounted) {
+                                  update(syncOrderedFromConfig);
+                                }
+                              },
+                      ),
+                      IconButton(
+                        tooltip: '删除这条线路',
+                        icon: const Icon(Icons.remove_circle_outline),
+                        onPressed: saving
+                            ? null
+                            : () => update(() {
+                                ordered.removeWhere((s) => s.key == site.key);
+                                selectedKeys.remove(site.key);
+                                removed.add(site);
+                              }),
+                      ),
+                    ],
+                  ),
+          );
+        }
+
+        final canDragReorder = selectedGroup == '全部' && !batchMode;
+
+        final content = Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+              child: Row(
+                children: [
+                  CupertinoButton(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    minimumSize: const Size(28, 28),
+                    onPressed: saving
+                        ? null
+                        : () => update(() {
+                            batchMode = !batchMode;
+                            if (!batchMode) selectedKeys.clear();
+                          }),
+                    child: Text(
+                      batchMode ? '完成多选' : '批量分组/删除',
+                      style: const TextStyle(
+                        color: AppleColors.systemBlue,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  if (batchMode) ...[
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 4,
+                      ),
+                      minimumSize: const Size(28, 28),
+                      onPressed: () => update(() {
+                        final visibleKeys = visibleSites
+                            .map((s) => s.key)
+                            .toSet();
+                        if (visibleKeys.isNotEmpty &&
+                            visibleKeys.every(selectedKeys.contains)) {
+                          selectedKeys.removeAll(visibleKeys);
+                        } else {
+                          selectedKeys.addAll(visibleKeys);
+                        }
+                      }),
+                      child: const Text(
+                        '全选当前组',
+                        style: TextStyle(
+                          color: AppleColors.labelSecondary,
+                          fontSize: 12.5,
+                        ),
+                      ),
+                    ),
+                    if (selectedKeys.isNotEmpty) ...[
+                      CupertinoButton(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 4,
+                        ),
+                        minimumSize: const Size(28, 28),
+                        onPressed: () async {
+                          final chosen = ordered
+                              .where((s) => selectedKeys.contains(s.key))
+                              .toList();
+                          final nextGroup = await _promptGroupSelection(
+                            ctx,
+                            privateMode: privateGroup,
+                            title: '批量移动 ${chosen.length} 条线路到分组',
+                          );
+                          if (nextGroup == null || !mounted) return;
+                          await widget.storage.updateSitesGroupBatch(
+                            chosen,
+                            nextGroup,
+                          );
+                          if (mounted) _reloadSavedConfig();
+                          if (ctx.mounted) {
+                            update(() {
+                              syncOrderedFromConfig();
+                              selectedKeys.clear();
+                              batchMode = false;
+                            });
+                          }
+                        },
+                        child: Text(
+                          '移至分组 (${selectedKeys.length})',
+                          style: const TextStyle(
+                            color: AppleColors.systemGreen,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      CupertinoButton(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 4,
+                        ),
+                        minimumSize: const Size(28, 28),
+                        onPressed: () => update(() {
+                          final toRemove = ordered
+                              .where((s) => selectedKeys.contains(s.key))
+                              .toList();
+                          ordered.removeWhere(
+                            (s) => selectedKeys.contains(s.key),
+                          );
+                          removed.addAll(toRemove);
+                          selectedKeys.clear();
+                          batchMode = false;
+                        }),
+                        child: Text(
+                          '移除 (${selectedKeys.length})',
+                          style: const TextStyle(
+                            color: AppleColors.systemRed,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                  const Spacer(),
+                  if (persistedRemovedCount > 0)
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      minimumSize: const Size(28, 28),
+                      onPressed: saving
+                          ? null
+                          : () async {
+                              final restored =
+                                  await _showRestoreRemovedSitesSheet(
+                                    ctx,
+                                    privateGroup,
+                                  );
+                              if (restored && ctx.mounted) {
+                                update(syncOrderedFromConfig);
+                              }
+                            },
+                      child: Text(
+                        '恢复已删 ($persistedRemovedCount)',
+                        style: const TextStyle(
+                          color: AppleColors.systemOrange,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (groups.length > 1)
+              SizedBox(
+                height: 34,
+                child: ListView.separated(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  scrollDirection: Axis.horizontal,
+                  itemCount: groups.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 6),
+                  itemBuilder: (_, idx) {
+                    final g = groups[idx];
+                    final isSel = g == selectedGroup;
+                    return GestureDetector(
+                      onTap: () => update(() => selectedGroup = g),
+                      child: Container(
+                        alignment: Alignment.center,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        decoration: BoxDecoration(
+                          color: isSel
+                              ? AppleColors.systemBlue
+                              : AppleColors.groupedSecondary,
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Text(
+                          '$g ${groupCounts[g] ?? 0}',
+                          style: TextStyle(
+                            color: isSel
+                                ? Colors.white
+                                : AppleColors.labelPrimary,
+                            fontSize: 12,
+                            fontWeight: isSel
+                                ? FontWeight.w600
+                                : FontWeight.w400,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            const SizedBox(height: 4),
+            Expanded(
+              child: ScrollConfiguration(
+                behavior: ScrollConfiguration.of(ctx).copyWith(
+                  dragDevices: const {
+                    PointerDeviceKind.touch,
+                    PointerDeviceKind.trackpad,
+                  },
+                ),
+                child: canDragReorder
+                    ? ReorderableListView.builder(
+                        buildDefaultDragHandles: false,
+                        padding: isIos
+                            ? const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 8,
+                              )
+                            : null,
+                        itemCount: ordered.length,
+                        onReorder: (from, to) => update(() {
+                          if (to > from) to--;
+                          ordered.insert(to, ordered.removeAt(from));
+                        }),
+                        itemBuilder: (_, i) =>
+                            buildRowTile(ordered[i], reorderIndex: i),
+                      )
+                    : ListView.builder(
+                        padding: isIos
+                            ? const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 8,
+                              )
+                            : null,
+                        itemCount: visibleSites.length,
+                        itemBuilder: (_, i) => buildRowTile(visibleSites[i]),
+                      ),
+              ),
+            ),
+            Padding(
               padding: isIos
-                  ? const EdgeInsets.symmetric(horizontal: 8, vertical: 8)
-                  : null,
-              itemCount: ordered.length,
-              onReorder: (from, to) => update(() {
-                if (to > from) to--;
-                ordered.insert(to, ordered.removeAt(from));
-              }),
-              itemBuilder: (_, i) {
-                final site = ordered[i];
-                return ListTile(key: ValueKey(site.key), title: Text(site.name),
-                  leading: ReorderableDragStartListener(index: i, child: const Icon(Icons.drag_handle)),
-                  trailing: IconButton(tooltip: '删除这条线路', icon: const Icon(Icons.remove_circle_outline),
-                    onPressed: saving ? null : () => update(() => removed.add(ordered.removeAt(i)))));
-              },
+                  ? EdgeInsets.fromLTRB(16, 8, 16, safeBottom + 16)
+                  : const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              child: AppleCapsuleButton(
+                label: removed.isEmpty
+                    ? '保存顺序'
+                    : '保存并移除 ${removed.length} 条线路',
+                onPressed: saving
+                    ? null
+                    : () async {
+                        update(() => saving = true);
+                        try {
+                          await widget.storage.savePickerEdits(
+                            ordered,
+                            removed,
+                          );
+                          if (ctx.mounted) Navigator.of(ctx).pop();
+                          if (mounted) _reloadSavedConfig();
+                        } catch (_) {
+                          if (mounted) {
+                            _showAppleNotice('线路变更未保存', '保存未完成，请重试。');
+                          }
+                        } finally {
+                          if (ctx.mounted) update(() => saving = false);
+                        }
+                      },
+              ),
             ),
-          )),
-          Padding(
-            padding: isIos
-                ? EdgeInsets.fromLTRB(16, 8, 16, safeBottom + 16)
-                : EdgeInsets.zero,
-            child: AppleCapsuleButton(label: removed.isEmpty ? '保存顺序' : '保存并移除 ${removed.length} 条线路',
-              onPressed: saving ? null : () async {
-                update(() => saving = true);
-                try {
-                  await widget.storage.savePickerEdits(ordered, removed);
-                  if (ctx.mounted) Navigator.of(ctx).pop();
-                  if (mounted) _reloadSavedConfig();
-                } catch (_) {
-                  if (mounted) _showAppleNotice('线路变更未保存', '保存未完成，请重试。');
-                } finally {
-                  if (ctx.mounted) update(() => saving = false);
-                }
-              }),
-          ),
-        ]);
+          ],
+        );
         if (isIos) return content;
-        return SizedBox(height: MediaQuery.sizeOf(ctx).height * .62, child: content);
+        return SizedBox(
+          height: (MediaQuery.sizeOf(ctx).height * .68).clamp(380.0, 620.0),
+          child: content,
+        );
       }),
     );
   }
@@ -9166,37 +10304,33 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
     final inPrivacyMode = _privateSessionUnlocked;
     final defaultGroupName = inPrivacyMode ? '隐私分组' : '默认分组';
-    final rawSupported = inPrivacyMode
-        ? (_config?.privateSupportedSites ?? const <CmsSite>[])
-        : (_config?.publicSupportedSites ?? const <CmsSite>[]);
-    final hasRealSupported = rawSupported.any(
-      (s) => !CspBridge.isPickerHiddenUtilitySite(s),
-    );
-    final supported = hasRealSupported
-        ? rawSupported
-            .where((s) =>
-                !CspBridge.isPickerHiddenUtilitySite(s) ||
-                s.key == _activeSite?.key)
-            .toList()
-        : rawSupported;
-    final countSource = supported.isNotEmpty
-        ? supported
+    List<CmsSite> computeSupported() {
+      final rawSupported = inPrivacyMode
+          ? (_config?.privateSupportedSites ?? const <CmsSite>[])
+          : (_config?.publicSupportedSites ?? const <CmsSite>[]);
+      final hasRealSupported = rawSupported.any(
+        (s) => !CspBridge.isPickerHiddenUtilitySite(s),
+      );
+      return hasRealSupported
+          ? rawSupported
+              .where((s) =>
+                  !CspBridge.isPickerHiddenUtilitySite(s) ||
+                  s.key == _activeSite?.key)
+              .toList()
+          : rawSupported;
+    }
+
+    final initialSupported = computeSupported();
+    final initialCountSource = initialSupported.isNotEmpty
+        ? initialSupported
         : (_config?.sites ?? const <CmsSite>[])
             .where((s) =>
                 (inPrivacyMode ? s.isEffectivelyPrivate : !s.isEffectivelyPrivate) &&
                 !CspBridge.isPickerHiddenUtilitySite(s))
             .toList();
-    final totalCount = countSource.length;
-    final availableCount = countSource.where((s) => s.supported).length;
-    final groupCounts = <String, int>{'全部': totalCount};
-    final groups = <String>['全部'];
-    for (final s in countSource) {
-      if (!inPrivacyMode && s.isEffectivelyPrivate) continue;
-      if (inPrivacyMode && !s.isEffectivelyPrivate) continue;
-      final g = s.group.trim().isEmpty ? defaultGroupName : s.group.trim();
-      if (!groups.contains(g)) groups.add(g);
-      groupCounts[g] = (groupCounts[g] ?? 0) + 1;
-    }
+    final initialTotalCount = initialCountSource.length;
+    final initialAvailableCount =
+        initialCountSource.where((s) => s.supported).length;
     String selectedGroup = '全部';
     String searchQuery = '';
     final searchCtrl = TextEditingController();
@@ -9217,8 +10351,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
     _openIosOrModalPage<void>(
       title: inPrivacyMode
-          ? '切换隐私片源 (可用 $availableCount / 共 $totalCount)'
-          : '切换片源 (可用 $availableCount / 共 $totalCount)',
+          ? '切换隐私片源 (可用 $initialAvailableCount / 共 $initialTotalCount)'
+          : '切换片源 (可用 $initialAvailableCount / 共 $initialTotalCount)',
       backLabel: '返回',
       maxWidth: 680,
       ignoreKeyboardInsets: true,
@@ -9263,6 +10397,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         builder: (ctx, setPickerState) {
           final size = MediaQuery.sizeOf(ctx);
           final safeBottom = MediaQuery.paddingOf(ctx).bottom;
+          final supported = computeSupported();
+          final countSource = supported.isNotEmpty
+              ? supported
+              : (_config?.sites ?? const <CmsSite>[])
+                  .where((s) =>
+                      (inPrivacyMode
+                          ? s.isEffectivelyPrivate
+                          : !s.isEffectivelyPrivate) &&
+                      !CspBridge.isPickerHiddenUtilitySite(s))
+                  .toList();
+          final groupCounts = <String, int>{'全部': countSource.length};
+          final groups = <String>['全部'];
+          for (final s in countSource) {
+            if (!inPrivacyMode && s.isEffectivelyPrivate) continue;
+            if (inPrivacyMode && !s.isEffectivelyPrivate) continue;
+            final g =
+                s.group.trim().isEmpty ? defaultGroupName : s.group.trim();
+            if (!groups.contains(g)) groups.add(g);
+            groupCounts[g] = (groupCounts[g] ?? 0) + 1;
+          }
+          if (!groups.contains(selectedGroup)) {
+            selectedGroup = '全部';
+          }
           bool matchesFilter(CmsSite s) {
             final g =
                 s.group.trim().isEmpty ? defaultGroupName : s.group.trim();
@@ -9472,6 +10629,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       widget.storage.preferredSiteKey == s.key ? '' : s.key);
                     if (ctx.mounted) setPickerState(() {});
                   },
+                  onManageSite: (s) {
+                    _showSingleSiteActionSheet(
+                      ctx,
+                      s,
+                      privateMode: inPrivacyMode,
+                      onChanged: () {
+                        if (ctx.mounted) setPickerState(() {});
+                      },
+                    );
+                  },
                   badgeLabel: siteBadgeLabel,
                   badgeColor: siteBadgeColor,
                   onUnsupportedSelected: (s) {
@@ -9484,6 +10651,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           child: Text(s.unsupportedReason),
                         ),
                         actions: [
+                          CupertinoDialogAction(
+                            onPressed: () async {
+                              Navigator.of(dialogCtx).pop();
+                              final changed = await _showEditSingleSiteDialog(
+                                ctx,
+                                s,
+                              );
+                              if (changed && ctx.mounted) setPickerState(() {});
+                            },
+                            child: const Text('编辑线路'),
+                          ),
+                          CupertinoDialogAction(
+                            isDestructiveAction: true,
+                            onPressed: () async {
+                              Navigator.of(dialogCtx).pop();
+                              final deleted = await _confirmAndDeleteSingleSite(
+                                ctx,
+                                s,
+                              );
+                              if (deleted && ctx.mounted) setPickerState(() {});
+                            },
+                            child: const Text('删除线路'),
+                          ),
                           CupertinoDialogAction(
                             isDefaultAction: true,
                             onPressed: () => Navigator.of(dialogCtx).pop(),

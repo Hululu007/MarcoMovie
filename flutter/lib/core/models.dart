@@ -197,6 +197,8 @@ class CmsSite {
   final String name;
   final int type;
   final String api;
+  final String? originalApi;
+  String get sourceApi => originalApi ?? api;
   final String playUrl;
   final bool searchable;
   final String ext;
@@ -217,6 +219,7 @@ class CmsSite {
   const CmsSite({
     required this.key,
     this.originalKey,
+    this.originalApi,
     required this.name,
     required this.type,
     required this.api,
@@ -257,6 +260,7 @@ class CmsSite {
     return CmsSite(
       key: key ?? this.key,
       originalKey: originalKey ?? this.key,
+      originalApi: originalApi ?? this.api,
       name: name ?? this.name,
       type: type ?? this.type,
       api: api ?? this.api,
@@ -443,6 +447,147 @@ class CmsSite {
       return '该线路依赖 Android 原生加密组件（.so），iOS 与桌面端暂不支持';
     }
     return capabilityReason(capabilityStatus);
+  }
+}
+
+class SiteOverride {
+  final String? name;
+  final String? group;
+  final String? api;
+  final String? playUrl;
+  final String? ext;
+  final bool? searchable;
+
+  const SiteOverride({
+    this.name,
+    this.group,
+    this.api,
+    this.playUrl,
+    this.ext,
+    this.searchable,
+  });
+
+  bool get isEmpty =>
+      name == null &&
+      group == null &&
+      api == null &&
+      playUrl == null &&
+      ext == null &&
+      searchable == null;
+
+  SiteOverride copyWith({
+    String? name,
+    bool clearName = false,
+    String? group,
+    bool clearGroup = false,
+    String? api,
+    bool clearApi = false,
+    String? playUrl,
+    bool clearPlayUrl = false,
+    String? ext,
+    bool clearExt = false,
+    bool? searchable,
+    bool clearSearchable = false,
+  }) {
+    return SiteOverride(
+      name: clearName ? null : (name ?? this.name),
+      group: clearGroup ? null : (group ?? this.group),
+      api: clearApi ? null : (api ?? this.api),
+      playUrl: clearPlayUrl ? null : (playUrl ?? this.playUrl),
+      ext: clearExt ? null : (ext ?? this.ext),
+      searchable: clearSearchable ? null : (searchable ?? this.searchable),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    if (name != null) 'name': name,
+    if (group != null) 'group': group,
+    if (api != null) 'api': api,
+    if (playUrl != null) 'playUrl': playUrl,
+    if (ext != null) 'ext': ext,
+    if (searchable != null) 'searchable': searchable,
+  };
+
+  factory SiteOverride.fromJson(Map<String, dynamic> json) {
+    String? optStr(String key, {bool allowEmpty = false}) {
+      if (!json.containsKey(key) || json[key] == null) return null;
+      if (json[key] is! String) {
+        throw FormatException('线路覆盖字段 $key 类型无效');
+      }
+      final v = (json[key] as String).trim();
+      if (!allowEmpty && v.isEmpty) return null;
+      return v;
+    }
+
+    bool? optBool(String key) {
+      if (!json.containsKey(key) || json[key] == null) return null;
+      if (json[key] is! bool) {
+        throw FormatException('线路覆盖字段 $key 类型无效');
+      }
+      return json[key] as bool;
+    }
+
+    return SiteOverride(
+      name: optStr('name'),
+      group: optStr('group'),
+      api: optStr('api'),
+      playUrl: optStr('playUrl', allowEmpty: true),
+      ext: json.containsKey('ext') && json['ext'] is String
+          ? json['ext'] as String
+          : (json.containsKey('ext') && json['ext'] != null
+                ? throw const FormatException('线路覆盖字段 ext 类型无效')
+                : null),
+      searchable: optBool('searchable'),
+    );
+  }
+
+  CmsSite applyTo(CmsSite site) {
+    if (isEmpty) return site;
+    var nextType = site.type;
+    final nextApi = api?.trim();
+    if (nextApi != null && nextApi.isNotEmpty && nextApi != site.api) {
+      final lower = nextApi.toLowerCase();
+      if ((lower.startsWith('http://') || lower.startsWith('https://')) &&
+          !lower.endsWith('.js') &&
+          !lower.endsWith('.mjs') &&
+          !lower.endsWith('.py') &&
+          !lower.endsWith('.jar') &&
+          nextType != 0 &&
+          nextType != 1 &&
+          nextType != 4) {
+        nextType = lower.contains('xml') ? 0 : 1;
+      }
+    }
+    final nextPlayUrl = playUrl != null ? playUrl!.trim() : site.playUrl;
+    final nextExt = ext != null ? ext! : site.ext;
+    return CmsSite(
+      key: site.key,
+      originalKey: site.sourceKey,
+      originalApi: site.sourceApi,
+      name: (name != null && name!.trim().isNotEmpty) ? name!.trim() : site.name,
+      type: nextType,
+      api: (nextApi != null && nextApi.isNotEmpty) ? nextApi : site.api,
+      playUrl: nextPlayUrl,
+      searchable: searchable ?? site.searchable,
+      ext: nextExt,
+      extTooLarge: ext != null
+          ? nextExt.length > CmsSite.maxExtSize
+          : site.extTooLarge,
+      requiresParser: playUrl != null
+          ? nextPlayUrl.isNotEmpty
+          : site.requiresParser,
+      rawExtension: ext != null
+          ? (nextExt.isEmpty ? null : nextExt)
+          : site.rawExtension,
+      jar: site.jar,
+      spider: site.spider,
+      headers: site.headers,
+      group: (group != null && group!.trim().isNotEmpty)
+          ? group!.trim()
+          : site.group,
+      isPrivate: site.isPrivate,
+      subscriptionId: site.subscriptionId,
+    );
   }
 }
 

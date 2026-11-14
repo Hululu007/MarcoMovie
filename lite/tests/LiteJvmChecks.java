@@ -108,6 +108,7 @@ public final class LiteJvmChecks {
         testLiteSyncEtagAndConcurrency();
         testConfigPullAndCapabilityStatus();
         testRound2LiteWebdavRobustness();
+        testSiteOverridesSearchQrAndCast();
         System.out.println(
                 "PASS " + checks + " TV Lite JVM checks ("
                         + checks
@@ -2398,6 +2399,312 @@ public final class LiteJvmChecks {
             LiteSync.clearNoConditionalWriteHostsForTest();
             r2Server.stop(0);
             cond412Server.stop(0);
+        }
+    }
+
+    private static String rawLiteHttp(int port, String rawReq) throws Exception {
+        java.net.Socket s = new java.net.Socket("127.0.0.1", port);
+        try {
+            s.setSoTimeout(5000);
+            OutputStream out = s.getOutputStream();
+            out.write(rawReq.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            InputStream in = s.getInputStream();
+            ByteArrayOutputStream buf = new ByteArrayOutputStream();
+            byte[] b = new byte[2048];
+            int n;
+            while ((n = in.read(b)) != -1) buf.write(b, 0, n);
+            return new String(buf.toByteArray(), StandardCharsets.UTF_8);
+        } finally {
+            s.close();
+        }
+    }
+
+    private static void testSiteOverridesSearchQrAndCast() throws Exception {
+        // 1-5: LiteCatalog manual grouping, field overrides, deletion & refresh survival
+        String rawCfg =
+                "{\"sites\":["
+                        + "{\"key\":\"s_one\",\"name\":\"一线源\",\"type\":1,\"api\":\"https://one.example/api.php/provide/vod/\"},"
+                        + "{\"key\":\"s_two\",\"name\":\"二线源\",\"type\":1,\"api\":\"https://two.example/api.php/provide/vod/\"},"
+                        + "{\"key\":\"s_jar\",\"name\":\"插件源\",\"type\":3,\"api\":\"csp_DemoJar\"}"
+                        + "]}";
+        List<LiteCatalog.Site> parsed = LiteCatalog.parse(rawCfg, "https://sub.example/config.json");
+        String oneId = parsed.get(0).siteId();
+        String twoId = parsed.get(1).siteId();
+        String jarId = parsed.get(2).siteId();
+
+        JSONObject saved = new JSONObject();
+        JSONObject overrides = new JSONObject();
+        overrides.put(oneId, new JSONObject().put("group", "主力分组"));
+        overrides.put(
+                jarId,
+                new JSONObject()
+                        .put("name", "已修复CMS")
+                        .put("group", "备用分组")
+                        .put("api", "https://repaired.example/api.php/provide/vod/")
+                        .put("playUrl", "https://parse.example/?u=")
+                        .put("ext", "tok=1")
+                        .put("searchable", false));
+        saved.put("overrides", overrides);
+        saved.put("hidden", new JSONArray().put(twoId));
+        saved.put("order", new JSONArray().put(jarId).put(oneId));
+
+        List<LiteCatalog.Site> edited = LiteCatalog.applySiteEditsToList(parsed, saved);
+        check(edited.size() == 2, "Lite applySiteEditsToList hides deleted site");
+        LiteCatalog.Site first = edited.get(0);
+        check(
+                "已修复CMS".equals(first.name)
+                        && "备用分组".equals(first.group)
+                        && first.supported
+                        && first.type == 1
+                        && !first.searchable,
+                "Lite applySiteOverride upgrades unsupported JAR site to HTTP CMS");
+        check(
+                jarId.equals(first.siteId()) && "csp_DemoJar".equals(first.originalApi),
+                "Lite siteId remains stable after api override");
+        check("主力分组".equals(edited.get(1).group), "Lite custom group applied to remaining site");
+
+        List<LiteCatalog.Site> refreshed =
+                LiteCatalog.applySiteEditsToList(
+                        LiteCatalog.parse(rawCfg, "https://sub.example/config.json"), saved);
+        check(
+                refreshed.size() == 2 && "已修复CMS".equals(refreshed.get(0).name),
+                "Lite site overrides and deletions survive subscription re-parse");
+
+        // 6-8: ConfigServer /<token>/search mobile QR input + CSRF rejection
+        final String[] gotKw = new String[] {""};
+        final boolean[] gotSubmit = new boolean[] {false};
+        ConfigServer searchSrv =
+                new ConfigServer(
+                        null,
+                        null,
+                        new ConfigServer.SearchHandler() {
+                            public void onKeyword(String keyword, boolean submitNow) {
+                                gotKw[0] = keyword;
+                                gotSubmit[0] = submitNow;
+                            }
+                        });
+        try {
+            int sp = searchSrv.port();
+            String shost = "127.0.0.1:" + sp;
+            String spath = "/" + searchSrv.token + "/search";
+            String getHtml =
+                    rawLiteHttp(sp, "GET " + spath + " HTTP/1.1\r\nHost: " + shost + "\r\n\r\n");
+            check(
+                    getHtml.startsWith("HTTP/1.1 200 ") && getHtml.contains("手机输入"),
+                    "Lite ConfigServer /search renders mobile HTML");
+
+            String csrfBody = "keyword=test&mode=search";
+            byte[] csrfBytes = csrfBody.getBytes(StandardCharsets.UTF_8);
+            String csrfResp =
+                    rawLiteHttp(
+                            sp,
+                            "POST "
+                                    + spath
+                                    + " HTTP/1.1\r\nHost: "
+                                    + shost
+                                    + "\r\nOrigin: https://evil.example\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: "
+                                    + csrfBytes.length
+                                    + "\r\n\r\n"
+                                    + csrfBody);
+            check(
+                    csrfResp.startsWith("HTTP/1.1 403 "),
+                    "Lite ConfigServer /search blocks cross-origin POST");
+
+            String okForm =
+                    "keyword="
+                            + java.net.URLEncoder.encode("让子弹飞", "UTF-8")
+                            + "&mode=search";
+            byte[] okBytes = okForm.getBytes(StandardCharsets.UTF_8);
+            String okResp =
+                    rawLiteHttp(
+                            sp,
+                            "POST "
+                                    + spath
+                                    + " HTTP/1.1\r\nHost: "
+                                    + shost
+                                    + "\r\nOrigin: http://"
+                                    + shost
+                                    + "\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: "
+                                    + okBytes.length
+                                    + "\r\n\r\n"
+                                    + okForm);
+            check(
+                    okResp.startsWith("HTTP/1.1 200 ") && "让子弹飞".equals(gotKw[0]) && gotSubmit[0],
+                    "Lite ConfigServer /search delivers UTF-8 keyword and submit flag");
+        } finally {
+            searchSrv.close();
+        }
+
+        // 9-14: LiteCast UPnP/DLNA DMR + XXE/CSRF/SSRF guards + QR Web Cast
+        final String[] castUrl = new String[] {""};
+        final String[] castTitle = new String[] {""};
+        final Map<String, String> castHeaders = new HashMap<String, String>();
+        LiteCast.Bridge bridge =
+                new LiteCast.Bridge() {
+                    public void openMedia(String url, String title, Map<String, String> headers) {
+                        castUrl[0] = url;
+                        castTitle[0] = title;
+                        castHeaders.clear();
+                        if (headers != null) castHeaders.putAll(headers);
+                    }
+
+                    public void resume() {}
+
+                    public void pause() {}
+
+                    public void stop() {}
+
+                    public void seekTo(int posMs) {}
+
+                    public int positionMs() {
+                        return 5000;
+                    }
+
+                    public int durationMs() {
+                        return 120000;
+                    }
+
+                    public String transportState() {
+                        return "PLAYING";
+                    }
+
+                    public int getVolumePercent() {
+                        return 75;
+                    }
+
+                    public void setVolumePercent(int percent) {}
+
+                    public boolean isMuted() {
+                        return false;
+                    }
+
+                    public void setMuted(boolean muted) {}
+
+                    public void onStatusChanged(String statusText) {}
+
+                    public void onClosed() {}
+                };
+
+        LiteCast cast =
+                new LiteCast(
+                        "abcdef12-3456-7890-abcd-ef1234567890",
+                        "卧室Lite电视",
+                        "10.0.0.9",
+                        bridge,
+                        false,
+                        new InetSocketAddress("127.0.0.1", 0));
+        try {
+            int cp = cast.httpPort();
+            String chost = "127.0.0.1:" + cp;
+
+            String devXml =
+                    rawLiteHttp(cp, "GET /dlna/device.xml HTTP/1.1\r\nHost: " + chost + "\r\n\r\n");
+            check(
+                    devXml.startsWith("HTTP/1.1 200 ")
+                            && devXml.contains("卧室Lite电视")
+                            && devXml.contains("MediaRenderer:1"),
+                    "LiteCast serves DLNA device.xml");
+
+            String browserDlna =
+                    rawLiteHttp(
+                            cp,
+                            "GET /dlna/device.xml HTTP/1.1\r\nHost: "
+                                    + chost
+                                    + "\r\nOrigin: https://evil.example\r\n\r\n");
+            check(
+                    browserDlna.startsWith("HTTP/1.1 403 "),
+                    "LiteCast blocks browser Origin on /dlna/*");
+
+            String xxeBody =
+                    "<?xml version=\"1.0\"?><!DOCTYPE a [<!ENTITY e SYSTEM \"file:///etc/hosts\">]><a>&e;</a>";
+            byte[] xxeB = xxeBody.getBytes(StandardCharsets.UTF_8);
+            String xxeResp =
+                    rawLiteHttp(
+                            cp,
+                            "POST /dlna/control/AVTransport HTTP/1.1\r\nHost: "
+                                    + chost
+                                    + "\r\nSOAPAction: \"urn:schemas-upnp-org:service:AVTransport:1#Stop\""
+                                    + "\r\nContent-Type: text/xml\r\nContent-Length: "
+                                    + xxeB.length
+                                    + "\r\n\r\n"
+                                    + xxeBody);
+            check(xxeResp.startsWith("HTTP/1.1 400 "), "LiteCast rejects XXE DOCTYPE SOAP body");
+
+            String ssrfSoap =
+                    "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+                            + "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+                            + "<s:Body><u:SetAVTransportURI xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">"
+                            + "<InstanceID>0</InstanceID><CurrentURI>http://127.0.0.1:9999/local.mp4</CurrentURI>"
+                            + "<CurrentURIMetaData></CurrentURIMetaData></u:SetAVTransportURI></s:Body></s:Envelope>";
+            byte[] ssrfB = ssrfSoap.getBytes(StandardCharsets.UTF_8);
+            String ssrfResp =
+                    rawLiteHttp(
+                            cp,
+                            "POST /dlna/control/AVTransport HTTP/1.1\r\nHost: "
+                                    + chost
+                                    + "\r\nSOAPAction: \"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI\""
+                                    + "\r\nContent-Type: text/xml\r\nContent-Length: "
+                                    + ssrfB.length
+                                    + "\r\n\r\n"
+                                    + ssrfSoap);
+            check(
+                    ssrfResp.startsWith("HTTP/1.1 500 "),
+                    "LiteCast rejects loopback SSRF URI in SetAVTransportURI");
+
+            String okSoap =
+                    "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+                            + "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\">"
+                            + "<s:Body><u:SetAVTransportURI xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">"
+                            + "<InstanceID>0</InstanceID><CurrentURI>https://stream.example/movie.m3u8</CurrentURI>"
+                            + "<CurrentURIMetaData>&lt;DIDL-Lite&gt;&lt;item&gt;&lt;title&gt;大闹天宫&lt;/title&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;</CurrentURIMetaData>"
+                            + "</u:SetAVTransportURI></s:Body></s:Envelope>";
+            byte[] okSoapB = okSoap.getBytes(StandardCharsets.UTF_8);
+            String okSoapResp =
+                    rawLiteHttp(
+                            cp,
+                            "POST /dlna/control/AVTransport HTTP/1.1\r\nHost: "
+                                    + chost
+                                    + "\r\nSOAPAction: \"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI\""
+                                    + "\r\nContent-Type: text/xml\r\nContent-Length: "
+                                    + okSoapB.length
+                                    + "\r\n\r\n"
+                                    + okSoap);
+            check(
+                    okSoapResp.startsWith("HTTP/1.1 200 ")
+                            && "https://stream.example/movie.m3u8".equals(castUrl[0])
+                            && "大闹天宫".equals(castTitle[0]),
+                    "LiteCast SetAVTransportURI extracts DIDL title and opens media");
+
+            String webJson =
+                    new JSONObject()
+                            .put("action", "play")
+                            .put("url", "https://video.example/ep1.mp4")
+                            .put("title", "Lite直投剧集")
+                            .put("referer", "https://video.example/")
+                            .toString();
+            byte[] webB = webJson.getBytes(StandardCharsets.UTF_8);
+            String webResp =
+                    rawLiteHttp(
+                            cp,
+                            "POST "
+                                    + cast.webCastPath
+                                    + "/api HTTP/1.1\r\nHost: "
+                                    + chost
+                                    + "\r\nOrigin: http://"
+                                    + chost
+                                    + "\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\nContent-Length: "
+                                    + webB.length
+                                    + "\r\n\r\n"
+                                    + webJson);
+            check(
+                    webResp.startsWith("HTTP/1.1 200 ")
+                            && "https://video.example/ep1.mp4".equals(castUrl[0])
+                            && "Lite直投剧集".equals(castTitle[0])
+                            && "https://video.example/".equals(castHeaders.get("Referer")),
+                    "LiteCast QR web API pushes stream URL, title, and Referer");
+        } finally {
+            cast.close();
         }
     }
 }

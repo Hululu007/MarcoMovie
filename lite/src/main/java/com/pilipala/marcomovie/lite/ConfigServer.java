@@ -38,25 +38,40 @@ public final class ConfigServer {
         String sync(String remotePayloadJson) throws Exception;
     }
 
+    public interface SearchHandler {
+        void onKeyword(String keyword, boolean submitNow) throws Exception;
+    }
+
     private final ServerSocket server;
     private final Importer importer;
     private final SyncHandler syncHandler;
+    private final SearchHandler searchHandler;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private volatile boolean closed;
     private volatile Socket active;
     public final String token = UUID.randomUUID().toString();
 
     public ConfigServer(Importer sink) throws IOException {
-        this(sink, null);
+        this(sink, null, null, System.currentTimeMillis());
     }
 
     public ConfigServer(Importer sink, SyncHandler sync) throws IOException {
-        this(sink, sync, System.currentTimeMillis());
+        this(sink, sync, null, System.currentTimeMillis());
+    }
+
+    public ConfigServer(Importer sink, SyncHandler sync, SearchHandler search) throws IOException {
+        this(sink, sync, search, System.currentTimeMillis());
     }
 
     ConfigServer(Importer sink, SyncHandler sync, long createdAtMs) throws IOException {
+        this(sink, sync, null, createdAtMs);
+    }
+
+    ConfigServer(Importer sink, SyncHandler sync, SearchHandler search, long createdAtMs)
+            throws IOException {
         importer = sink;
         syncHandler = sync;
+        searchHandler = search;
         this.createdAtMs = createdAtMs;
         server = new ServerSocket(0, 4);
         worker.execute(
@@ -211,6 +226,12 @@ public final class ConfigServer {
             return;
         }
 
+        String searchPath = "/" + token + "/search";
+        if (pathOnly.equals(searchPath)) {
+            handleSearch(s, in, request[0], length, transfer, content, origin, referer, host);
+            return;
+        }
+
         if (!pathOnly.equals("/" + token)) {
             reply(s, 403, "text/html; charset=utf-8", "配对已失效，请重新扫码");
             return;
@@ -326,5 +347,149 @@ public final class ConfigServer {
         } catch (Exception e) {
             reply(s, 422, "application/json; charset=utf-8", "{\"error\":\"merge_failed\"}");
         }
+    }
+
+    private void replySearchHtml(Socket s, int code, String body) throws IOException {
+        byte[] b = body.getBytes("UTF-8");
+        OutputStream o = s.getOutputStream();
+        o.write(
+                ("HTTP/1.1 "
+                                + code
+                                + " Response\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\r\nConnection: close\r\nContent-Length: "
+                                + b.length
+                                + "\r\n\r\n")
+                        .getBytes("US-ASCII"));
+        o.write(b);
+        o.flush();
+    }
+
+    private static String escapeHtml(String s) {
+        if (s == null) return "";
+        StringBuilder out = new StringBuilder(s.length() + 16);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '&') out.append("&amp;");
+            else if (c == '<') out.append("&lt;");
+            else if (c == '>') out.append("&gt;");
+            else if (c == '"') out.append("&quot;");
+            else if (c == '\'') out.append("&#39;");
+            else out.append(c);
+        }
+        return out.toString();
+    }
+
+    static String sanitizeKeyword(String raw) {
+        if (raw == null) return "";
+        StringBuilder sb = new StringBuilder(raw.length());
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (c == '\r' || c == '\n' || c == '\t') sb.append(' ');
+            else if (c >= 0x20 && c != 0x7f) sb.append(c);
+        }
+        String trimmed = sb.toString().trim();
+        if (trimmed.length() > 80) trimmed = trimmed.substring(0, 80).trim();
+        return trimmed;
+    }
+
+    private String renderSearchPage(String notice, String val) {
+        String escVal = escapeHtml(val);
+        String escNotice = escapeHtml(notice);
+        return "<!doctype html><html lang='zh-CN'><meta charset='utf-8'>"
+                + "<meta name='viewport' content='width=device-width,initial-scale=1,maximum-scale=1'>"
+                + "<title>Marco Movie Lite · 电视扫码搜片</title>"
+                + "<style>body{margin:0;background:#101013;color:#f5f5f7;font:16px/1.5 -apple-system,sans-serif;padding:20px}"
+                + "main{max-width:460px;margin:2vh auto;background:#1c1d24;border:1px solid #343644;border-radius:16px;padding:20px}"
+                + "h1{margin:0 0 8px;font-size:21px}p{margin:0 0 14px;color:#9e9ea8;font-size:14px}"
+                + "input{width:100%;box-sizing:border-box;padding:12px 14px;font-size:16px;background:#262832;color:#fff;border:1px solid #44475a;border-radius:12px}"
+                + ".btns{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}"
+                + "button{flex:1;min-width:120px;padding:12px;font-size:15px;font-weight:600;border-radius:12px;border:0;background:#2b2e3b;color:#fff}"
+                + "button.pri{flex-basis:100%;background:#f5f5f7;color:#101013}"
+                + ".msg{margin-top:12px;padding:10px 12px;border-radius:10px;background:#1e3547;color:#bfe6ff;font-size:14px}</style>"
+                + "<main><h1>手机输入 · 电视搜片</h1><p>输入中文片名、演员或拼音，提交后自动在电视端搜索。</p>"
+                + "<form method='post'>"
+                + "<input name='keyword' type='text' maxlength='80' autocomplete='off' placeholder='输入片名，例如：三体…' value=\""
+                + escVal
+                + "\" autofocus>"
+                + "<div class='btns'>"
+                + "<button class='pri' name='mode' value='search' type='submit'>立即在电视上搜索</button>"
+                + "<button name='mode' value='sync' type='submit'>仅同步文字</button>"
+                + "<button name='mode' value='clear' type='submit'>清空输入</button>"
+                + "</div></form>"
+                + (escNotice.length() > 0 ? "<div class='msg'>" + escNotice + "</div>" : "")
+                + "</main></html>";
+    }
+
+    private void handleSearch(
+            Socket s,
+            InputStream in,
+            String method,
+            int length,
+            String transfer,
+            String content,
+            String origin,
+            String referer,
+            String host)
+            throws Exception {
+        if (searchHandler == null) {
+            reply(s, 404, "text/plain; charset=utf-8", "Search input unavailable");
+            return;
+        }
+        String expectedHost = s.getLocalAddress().getHostAddress() + ":" + server.getLocalPort();
+        if (host.length() == 0 || !host.equalsIgnoreCase(expectedHost)) {
+            reply(s, 403, "text/plain; charset=utf-8", "Forbidden host");
+            return;
+        }
+        if ("GET".equals(method)) {
+            replySearchHtml(s, 200, renderSearchPage("", ""));
+            return;
+        }
+        if (!"POST".equals(method)) {
+            reply(s, 405, "text/plain; charset=utf-8", "Method Not Allowed");
+            return;
+        }
+        if (origin.length() > 0 && !origin.equalsIgnoreCase("http://" + host)) {
+            reply(s, 403, "text/plain; charset=utf-8", "Cross-origin blocked");
+            return;
+        }
+        if (origin.length() == 0
+                && referer.length() > 0
+                && !referer.toLowerCase(Locale.US)
+                        .startsWith("http://" + host.toLowerCase(Locale.US) + "/")) {
+            reply(s, 403, "text/plain; charset=utf-8", "Cross-site referer blocked");
+            return;
+        }
+        if (length < 1
+                || length > 4096
+                || transfer.length() > 0
+                || !content.toLowerCase(Locale.US)
+                        .startsWith("application/x-www-form-urlencoded")) {
+            replySearchHtml(s, 400, renderSearchPage("提交格式无效，请重试", ""));
+            return;
+        }
+        byte[] b = readExact(in, length);
+        String kw = "";
+        String mode = "search";
+        for (String field : new String(b, "UTF-8").split("&")) {
+            String[] kv = field.split("=", 2);
+            if (kv.length == 2) {
+                String k = URLDecoder.decode(kv[0], "UTF-8");
+                String v = URLDecoder.decode(kv[1], "UTF-8");
+                if ("keyword".equals(k)) kw = sanitizeKeyword(v);
+                else if ("mode".equals(k)) mode = v.trim();
+            }
+        }
+        boolean clear = "clear".equalsIgnoreCase(mode);
+        if (clear) kw = "";
+        boolean submitNow = !clear && !"sync".equalsIgnoreCase(mode);
+        if (!clear && submitNow && kw.length() == 0) {
+            replySearchHtml(s, 400, renderSearchPage("请输入片名关键词后再点击搜索", ""));
+            return;
+        }
+        searchHandler.onKeyword(kw, submitNow);
+        String msg =
+                clear
+                        ? "已清空电视输入框"
+                        : (submitNow ? "已在电视发起搜索：「" + kw + "」" : "已同步文字：「" + kw + "」");
+        replySearchHtml(s, 200, renderSearchPage(msg, kw));
     }
 }

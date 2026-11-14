@@ -60,6 +60,8 @@ public final class MainActivity extends Activity {
     final CountDownLatch phoneticReady = new CountDownLatch(1);
     ConfigStore configStore;
     PhoneConfigDialog phoneConfig;
+    CastService castService;
+    CastScreen activeCastScreen;
     LiveSession liveSession;
     final Runnable tuneLiveNumber = this::commitLiveNumber;
     LocalProxy localProxy;
@@ -973,6 +975,7 @@ public final class MainActivity extends Activity {
         cancelArtwork();
         cancelPageRequests();
         if (current != null) current.home = navigation;
+        activeCastScreen = null;
         if (searchScreen != null) {
             searchScreen.close();
             searchScreen = null;
@@ -1203,7 +1206,7 @@ public final class MainActivity extends Activity {
         if (current != null && current.player) {
             if (!miniMode && playbackControls != null) {
                 if (controlsVisible) showControls(false);
-                else if (isLive() || !isTvDevice()) leavePlayback();
+                else if (isLive() || isCast() || !isTvDevice()) leavePlayback();
                 else minimizePlayback();
                 return;
             }
@@ -1559,6 +1562,54 @@ public final class MainActivity extends Activity {
         return LiveController.isLive(this);
     }
 
+    boolean isCast() {
+        return playbackControls != null
+                && playbackControls.site != null
+                && "cast".equals(playbackControls.site.key);
+    }
+
+    void castScreen() {
+        CastScreen screen = new CastScreen(this);
+        activeCastScreen = screen;
+        screen.show();
+    }
+
+    synchronized void syncCastService() {
+        if (!isTvDevice()
+                || privateMode
+                || prefs == null
+                || !prefs.getBoolean(Prefs.CAST_ENABLED, true)) {
+            stopCastService();
+            return;
+        }
+        if (castService != null && !castService.closed) return;
+        stopCastService();
+        try {
+            castService =
+                    CastService.startForActivity(
+                            this,
+                            () -> {
+                                if (activeCastScreen != null) {
+                                    activeCastScreen.refreshLiveStatus();
+                                }
+                            });
+        } catch (Exception ignored) {
+            castService = null;
+        }
+    }
+
+    synchronized void restartCastService() {
+        stopCastService();
+        syncCastService();
+    }
+
+    synchronized void stopCastService() {
+        if (castService != null) {
+            castService.close();
+            castService = null;
+        }
+    }
+
     boolean liveStep(int direction) {
         return LiveController.liveStep(this, direction);
     }
@@ -1878,6 +1929,7 @@ public final class MainActivity extends Activity {
         activeActivity = this;
         foreground = true;
         CspEngine.syncAllPluginActivities(this);
+        syncCastService();
         UpdateManager.get(this)
                 .listen(
                         () -> {
@@ -1899,6 +1951,7 @@ public final class MainActivity extends Activity {
         activeActivity = this;
         foreground = true;
         CspEngine.syncAllPluginActivities(this);
+        syncCastService();
     }
 
     @Override
@@ -1923,6 +1976,13 @@ public final class MainActivity extends Activity {
             session.close();
             if (session.dialog != null) session.dialog.dismiss();
         }
+        if (searchScreen != null) {
+            searchScreen.closeQrServer();
+            if (searchScreen.qrDialog != null && searchScreen.qrDialog.isShowing()) {
+                searchScreen.qrDialog.dismiss();
+            }
+        }
+        stopCastService();
         clearLiveNumber();
         if (startupIntro != null) startupIntro.cancel();
         introSkipKey = false;
@@ -1954,6 +2014,7 @@ public final class MainActivity extends Activity {
         if (activeActivity == this) activeActivity = null;
         clearPlaybackLoading();
         if (phoneConfig != null) phoneConfig.close();
+        stopCastService();
         if (startupIntro != null) startupIntro.cancel();
         if (searchScreen != null) searchScreen.close();
         stopWeb();

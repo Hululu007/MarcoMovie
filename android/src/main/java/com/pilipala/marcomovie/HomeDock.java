@@ -9,15 +9,21 @@ final class HomeDock {
     final MainActivity a;
     final LinearLayout rail;
     final TextView hint;
-    final View[] items = new View[6];
+    final View[] items = new View[7];
     final GlassSelection selection;
-    final String[] labels = {"首页", "搜索", "直播", "收藏", "网盘", "设置"};
+    final String[] labels = {"首页", "搜索", "直播", "收藏", "网盘", "投屏", "设置"};
     final String[] keys = {
-        "nav-home", "nav-search", "nav-live", "nav-favorites", "nav-accounts", "nav-settings"
+        "nav-home",
+        "nav-search",
+        "nav-live",
+        "nav-favorites",
+        "nav-accounts",
+        "nav-cast",
+        "nav-settings"
     };
 
     final boolean bottomMode, topMode, horizontal;
-    final float navScale;
+    final float navScale, fitScale;
     final int crossDp, mainDp, cellDp, hintHeightDp;
 
     HomeDock(MainActivity host) {
@@ -26,13 +32,21 @@ final class HomeDock {
         topMode = a.useTopDock();
         horizontal = bottomMode || topMode;
         navScale = Prefs.clampNavScale(a.prefs.getInt(Prefs.NAV_SCALE_PERCENT, 100)) / 100f;
-        cellDp = Math.round((a.isTvDevice() ? 42 : 38) * navScale);
-        crossDp = Math.round((a.isTvDevice() ? 56 : 50) * navScale);
-        mainDp =
-                Math.round(
-                        (a.isTvDevice() ? (horizontal ? 324 : 320) : (horizontal ? 296 : 292))
-                                * navScale);
-        hintHeightDp = Math.round(28 * navScale);
+        int rawMainBase = a.isTvDevice() ? (horizontal ? 374 : 368) : (horizontal ? 342 : 338);
+        float density = Math.max(0.5f, a.getResources().getDisplayMetrics().density);
+        int windowMainDp =
+                Math.max(
+                        260,
+                        Math.round((horizontal ? a.windowWidth() : a.windowHeight()) / density)
+                                - 32);
+        fitScale =
+                Math.round(rawMainBase * navScale) > windowMainDp
+                        ? Math.min(navScale, windowMainDp / (float) rawMainBase)
+                        : navScale;
+        cellDp = Math.round((a.isTvDevice() ? 42 : 38) * fitScale);
+        crossDp = Math.round((a.isTvDevice() ? 56 : 50) * fitScale);
+        mainDp = Math.round(rawMainBase * fitScale);
+        hintHeightDp = Math.round(28 * fitScale);
         rail =
                 new LinearLayout(a) {
                     @Override
@@ -48,17 +62,17 @@ final class HomeDock {
                     }
                 };
         rail.setOrientation(horizontal ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
-        selection = new GlassSelection(a, rail, 10.5f * navScale, true);
+        selection = new GlassSelection(a, rail, 10.5f * fitScale, true);
         rail.setTag("home-dock");
         rail.setGravity(Gravity.CENTER);
         rail.setClipChildren(false);
         rail.setClipToPadding(false);
         rail.setPadding(
-                a.dp(Math.round((horizontal ? 10 : 6) * navScale)),
-                a.dp(Math.round((horizontal ? 6 : 8) * navScale)),
-                a.dp(Math.round((horizontal ? 10 : 6) * navScale)),
-                a.dp(Math.round((horizontal ? 6 : 8) * navScale)));
-        a.glass(rail, Math.round(25 * navScale));
+                a.dp(Math.round((horizontal ? 10 : 6) * fitScale)),
+                a.dp(Math.round((horizontal ? 6 : 8) * fitScale)),
+                a.dp(Math.round((horizontal ? 10 : 6) * fitScale)),
+                a.dp(Math.round((horizontal ? 6 : 8) * fitScale)));
+        a.glass(rail, Math.round(25 * fitScale));
         rail.setElevation(a.dp(8));
         FrameLayout.LayoutParams size =
                 horizontal
@@ -81,11 +95,11 @@ final class HomeDock {
             viewport.topMargin = a.dp(crossDp + Math.max(34, hintHeightDp + 6));
             a.scroll.setLayoutParams(viewport);
         }
-        hint = a.text("", 12f * navScale, MainActivity.WHITE);
+        hint = a.text("", 12f * fitScale, MainActivity.WHITE);
         hint.setTag("home-dock-label");
         hint.setGravity(Gravity.CENTER);
         hint.setIncludeFontPadding(false);
-        hint.setPadding(a.dp(Math.round(12 * navScale)), 0, a.dp(Math.round(16 * navScale)), 0);
+        hint.setPadding(a.dp(Math.round(12 * fitScale)), 0, a.dp(Math.round(16 * fitScale)), 0);
         hint.setBackground(new LabelBubble());
         hint.setElevation(rail.getElevation() + a.dp(1));
         hint.setVisibility(View.INVISIBLE);
@@ -105,6 +119,7 @@ final class HomeDock {
             () -> a.open(new MainActivity.Screen(a::liveSources), true),
             () -> a.open(new MainActivity.Screen(() -> new FavoritesScreen(a).show()), true),
             () -> AccountPanel.show(a, items[4]),
+            () -> a.open(new MainActivity.Screen(a::castScreen), true),
             () -> a.open(new MainActivity.Screen(a::settings), true)
         };
         for (int i = 0; i < items.length; i++) {
@@ -119,7 +134,7 @@ final class HomeDock {
             icon.setClickable(true);
             icon.setSelected(i == 0);
             a.pressFeedback(icon);
-            int cellGap = a.dp(Math.max(3, Math.round(4 * navScale)));
+            int cellGap = a.dp(Math.max(3, Math.round(4 * fitScale)));
             LinearLayout.LayoutParams cell =
                     new LinearLayout.LayoutParams(a.dp(cellDp), a.dp(cellDp));
             if (horizontal) {
@@ -140,7 +155,7 @@ final class HomeDock {
                                 focused,
                                 Color.TRANSPARENT,
                                 Color.TRANSPARENT,
-                                Math.max(8, Math.round(10.5f * navScale)),
+                                Math.max(8, Math.round(10.5f * fitScale)),
                                 MainActivity.WHITE,
                                 MainActivity.WHITE,
                                 false,
@@ -165,10 +180,10 @@ final class HomeDock {
         for (int i = 0; i < items.length; i++) {
             if (horizontal) {
                 items[i].setNextFocusLeftId(items[Math.max(0, i - 1)].getId());
-                items[i].setNextFocusRightId(items[Math.min(5, i + 1)].getId());
+                items[i].setNextFocusRightId(items[Math.min(items.length - 1, i + 1)].getId());
             } else {
                 items[i].setNextFocusUpId(items[Math.max(0, i - 1)].getId());
-                items[i].setNextFocusDownId(items[Math.min(5, i + 1)].getId());
+                items[i].setNextFocusDownId(items[Math.min(items.length - 1, i + 1)].getId());
                 items[i].setNextFocusRightId(items[i].getId());
             }
         }
@@ -370,12 +385,12 @@ final class HomeDock {
             super.onDraw(c);
             int w = getWidth(), h = getHeight();
             if (w <= 0 || h <= 0) return;
-            float size = a.dp((a.isTvDevice() ? 25f : 22f) * navScale);
+            float size = a.dp((a.isTvDevice() ? 25f : 22f) * fitScale);
             float r = size * 0.5f;
             float cx = w * 0.5f + (!horizontal && isSelected() ? a.dp(1f) : 0f);
             float cy = h * 0.5f - (horizontal && isSelected() ? a.dp(1.2f) : 0f);
             int strokePx =
-                    Math.max(2, Math.round(a.dp((a.isTvDevice() ? 2.0f : 1.75f) * navScale)));
+                    Math.max(2, Math.round(a.dp((a.isTvDevice() ? 2.0f : 1.75f) * fitScale)));
             int fg = hasFocus() ? MainActivity.WHITE : 0xffedf2f8;
             p.reset();
             p.setAntiAlias(true);
@@ -522,6 +537,42 @@ final class HomeDock {
                     }
                 case 5:
                     {
+                        float left = snap(cx - r * 0.84f, strokePx);
+                        float top = snap(cy - r * 0.68f, strokePx);
+                        float right = snap(cx + r * 0.84f, strokePx);
+                        float bottom = snap(cy + r * 0.68f, strokePx);
+                        float cr = r * 0.22f;
+                        path.reset();
+                        path.moveTo(left, cy - r * 0.14f);
+                        path.lineTo(left, top + cr);
+                        box.set(left, top, left + cr * 2f, top + cr * 2f);
+                        path.arcTo(box, 180f, 90f, false);
+                        path.lineTo(right - cr, top);
+                        box.set(right - cr * 2f, top, right, top + cr * 2f);
+                        path.arcTo(box, 270f, 90f, false);
+                        path.lineTo(right, bottom - cr);
+                        box.set(right - cr * 2f, bottom - cr * 2f, right, bottom);
+                        path.arcTo(box, 0f, 90f, false);
+                        path.lineTo(cx + r * 0.08f, bottom);
+                        c.drawPath(path, p);
+
+                        float r1 = r * 0.42f;
+                        box.set(left - r1, bottom - r1, left + r1, bottom + r1);
+                        c.drawArc(box, 270f, 90f, false, p);
+                        float r2 = r * 0.78f;
+                        box.set(left - r2, bottom - r2, left + r2, bottom + r2);
+                        c.drawArc(box, 270f, 90f, false, p);
+
+                        p.setStyle(Paint.Style.FILL);
+                        c.drawCircle(
+                                left + r * 0.05f,
+                                bottom - r * 0.05f,
+                                Math.max(1.5f, strokePx * 0.75f),
+                                p);
+                        break;
+                    }
+                case 6:
+                    {
                         float xLeft = snap(cx - r * 0.82f, strokePx);
                         float xRight = snap(cx + r * 0.82f, strokePx);
                         float knobR = r * 0.20f;
@@ -548,11 +599,11 @@ final class HomeDock {
             if (isSelected()) {
                 p.setStyle(Paint.Style.FILL);
                 p.setColor(MainActivity.WHITE);
-                float dotRadius = Math.max(1.5f, a.dp(1.6f * navScale));
+                float dotRadius = Math.max(1.5f, a.dp(1.6f * fitScale));
                 if (horizontal) {
-                    c.drawCircle(w * 0.5f, h - a.dp(3.5f * navScale), dotRadius, p);
+                    c.drawCircle(w * 0.5f, h - a.dp(3.5f * fitScale), dotRadius, p);
                 } else {
-                    c.drawCircle(a.dp(3.5f * navScale), h * 0.5f, dotRadius, p);
+                    c.drawCircle(a.dp(3.5f * fitScale), h * 0.5f, dotRadius, p);
                 }
             }
         }

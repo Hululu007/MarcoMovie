@@ -1445,19 +1445,23 @@ class StorageService {
     return loadSavedConfig();
   });
 
-  String _siteIdentity(CmsSite s) => jsonEncode([s.subscriptionId, s.sourceKey, s.api]);
+  String siteIdentityOf(CmsSite s) => _siteIdentity(s);
+  String _siteIdentity(CmsSite s) => jsonEncode([s.subscriptionId, s.sourceKey, s.sourceApi]);
   Map<String, String> _pickerIdentities(Iterable<CmsSite> sites) {
     final identities = <String, String>{};
     for (final site in sites) {
       final canonical = _siteIdentity(site);
       identities[canonical] = canonical;
+      identities[jsonEncode([site.subscriptionId, site.key, site.sourceApi])] = canonical;
+      identities[jsonEncode([site.subscriptionId, '${site.sourceKey}_${site.subscriptionId}', site.sourceApi])] = canonical;
+      identities[jsonEncode([site.subscriptionId, site.sourceKey, site.api])] = canonical;
       identities[jsonEncode([site.subscriptionId, site.key, site.api])] = canonical;
-      identities[jsonEncode([site.subscriptionId, '${site.sourceKey}_${site.subscriptionId}', site.api])] = canonical;
     }
     return identities;
   }
   static const _siteOrder = 'picker_site_order';
   static const _removedSites = 'picker_removed_sites';
+  static const _siteOverrides = 'picker_site_overrides';
   static const _siteAliases = 'site_key_aliases';
   Map<String, String> _savedAliases() {
     try {
@@ -1468,6 +1472,169 @@ class StorageService {
       debugPrint('StorageService: _savedAliases parse failed: $e');
       return {};
     }
+  }
+
+  Map<String, SiteOverride> _readSiteOverrides() {
+    final raw = _prefs.getString(_siteOverrides);
+    if (raw == null || raw.trim().isEmpty) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return {};
+      final out = <String, SiteOverride>{};
+      for (final entry in decoded.entries) {
+        if (entry.key is! String || entry.value is! Map) continue;
+        try {
+          final ov = SiteOverride.fromJson(
+            Map<String, dynamic>.from(entry.value as Map),
+          );
+          if (!ov.isEmpty) {
+            out[entry.key as String] = ov;
+          }
+        } on Object catch (e) {
+          debugPrint('StorageService: skip invalid site override ${entry.key}: $e');
+        }
+      }
+      return out;
+    } on Object catch (e) {
+      debugPrint('StorageService: _readSiteOverrides parse failed: $e');
+      return {};
+    }
+  }
+
+  SiteOverride? getSiteOverride(CmsSite site) {
+    final raw = _readSiteOverrides();
+    if (raw.isEmpty) return null;
+    final id = _siteIdentity(site);
+    if (raw.containsKey(id)) return raw[id];
+    final config = _loadImportedConfig();
+    if (config == null) return null;
+    final identities = _pickerIdentities(config.sites);
+    for (final entry in raw.entries) {
+      if ((identities[entry.key] ?? entry.key) == id) return entry.value;
+    }
+    return null;
+  }
+
+  bool hasSiteOverride(CmsSite site) => getSiteOverride(site) != null;
+
+  CmsSite? getOriginalSite(CmsSite site) {
+    final targetId = _siteIdentity(site);
+    for (final s in _loadImportedConfig()?.sites ?? const <CmsSite>[]) {
+      if (_siteIdentity(s) == targetId) return s;
+    }
+    return null;
+  }
+
+  static void _validateOverrideGroup(CmsSite site, String? group) {
+    if (group == null) return;
+    final trimmed = group.trim();
+    if (!site.isEffectivelyPrivate &&
+        (trimmed.contains('隐私') || trimmed.contains('私密'))) {
+      throw const FormatException('公开片源不能移入包含“隐私/私密”的分组');
+    }
+  }
+
+  Future<void> saveSiteOverride(CmsSite site, SiteOverride? override) =>
+      _editSubscriptions(() async {
+        _validateOverrideGroup(site, override?.group);
+        _invalidateConfigCache();
+        final id = _siteIdentity(site);
+        final current = _readSiteOverrides();
+        final config = _loadImportedConfig();
+        if (config != null) {
+          final identities = _pickerIdentities(config.sites);
+          current.removeWhere((k, _) => (identities[k] ?? k) == id);
+        } else {
+          current.remove(id);
+        }
+        if (override != null && !override.isEmpty) {
+          current[id] = override;
+        }
+        final saved = await _prefs.setString(
+          _siteOverrides,
+          jsonEncode({for (final e in current.entries) e.key: e.value.toJson()}),
+        );
+        if (!saved) throw StateError('线路修改未能保存，请重试');
+        _invalidateConfigCache();
+      });
+
+  Future<void> updateSitesGroupBatch(Iterable<CmsSite> sites, String group) =>
+      _editSubscriptions(() async {
+        final cleanGroup = group.trim();
+        if (cleanGroup.isEmpty) {
+          throw const FormatException('分组名称不能为空');
+        }
+        final siteList = sites.toList();
+        if (siteList.isEmpty) return;
+        for (final s in siteList) {
+          _validateOverrideGroup(s, cleanGroup);
+        }
+        _invalidateConfigCache();
+        final current = _readSiteOverrides();
+        final config = _loadImportedConfig();
+        final identities = config != null
+            ? _pickerIdentities(config.sites)
+            : const <String, String>{};
+        for (final site in siteList) {
+          final id = _siteIdentity(site);
+          SiteOverride? existing = current[id];
+          if (existing == null && identities.isNotEmpty) {
+            for (final entry in current.entries.toList()) {
+              if ((identities[entry.key] ?? entry.key) == id) {
+                existing = entry.value;
+                current.remove(entry.key);
+              }
+            }
+          }
+          final nextOv = (existing ?? const SiteOverride()).copyWith(
+            group: cleanGroup,
+          );
+          current[id] = nextOv;
+        }
+        final saved = await _prefs.setString(
+          _siteOverrides,
+          jsonEncode({for (final e in current.entries) e.key: e.value.toJson()}),
+        );
+        if (!saved) throw StateError('分组变更未能保存，请重试');
+        _invalidateConfigCache();
+      });
+
+  Future<void> removeSitesBatch(Iterable<CmsSite> sites) =>
+      _editSubscriptions(() async {
+        final ids = sites.map(_siteIdentity).toSet();
+        if (ids.isEmpty) return;
+        _invalidateConfigCache();
+        final hidden = {...?_prefs.getStringList(_removedSites), ...ids};
+        final saved = await _prefs.setStringList(_removedSites, hidden.toList());
+        if (!saved) throw StateError('线路删除未能保存，请重试');
+        _invalidateConfigCache();
+      });
+
+  List<({String identity, CmsSite site})> getRemovedSiteEntries({
+    required bool privateMode,
+  }) {
+    final config = _loadImportedConfig();
+    if (config == null) return const [];
+    final identities = _pickerIdentities(config.sites);
+    final rawOverrides = _readSiteOverrides();
+    final canonicalOverrides = <String, SiteOverride>{
+      for (final entry in rawOverrides.entries)
+        (identities[entry.key] ?? entry.key): entry.value,
+    };
+    final hidden = (_prefs.getStringList(_removedSites) ?? [])
+        .map((id) => identities[id] ?? id)
+        .toSet();
+    final out = <({String identity, CmsSite site})>[];
+    for (final s in config.sites) {
+      final id = _siteIdentity(s);
+      if (!hidden.contains(id)) continue;
+      final ov = canonicalOverrides[id];
+      final effective = ov != null ? ov.applyTo(s) : s;
+      if (effective.isEffectivelyPrivate == privateMode) {
+        out.add((identity: id, site: effective));
+      }
+    }
+    return out;
   }
 
   Future<void> savePickerEdits(List<CmsSite> ordered, List<CmsSite> removed) => _editSubscriptions(() async {
@@ -1504,13 +1671,37 @@ class StorageService {
 
   Future<void> restoreSite(String siteIdentity) => _editSubscriptions(() async {
     _invalidateConfigCache();
-    final hidden = (_prefs.getStringList(_removedSites) ?? []).where((id) => id != siteIdentity).toList();
+    final config = _loadImportedConfig();
+    final identities = config != null
+        ? _pickerIdentities(config.sites)
+        : const <String, String>{};
+    final canonicalTarget = identities[siteIdentity] ?? siteIdentity;
+    final hidden = (_prefs.getStringList(_removedSites) ?? [])
+        .where((id) => (identities[id] ?? id) != canonicalTarget)
+        .toList();
     await _prefs.setStringList(_removedSites, hidden);
+    _invalidateConfigCache();
   });
 
-  Future<void> resetRemovedSites() => _editSubscriptions(() async {
+  Future<void> resetRemovedSites({bool? privateMode}) => _editSubscriptions(() async {
     _invalidateConfigCache();
-    await _prefs.remove(_removedSites);
+    if (privateMode == null) {
+      await _prefs.remove(_removedSites);
+    } else {
+      final config = _loadImportedConfig();
+      if (config != null) {
+        final identities = _pickerIdentities(config.sites);
+        final targetIds = config.sites
+            .where((s) => s.isEffectivelyPrivate == privateMode)
+            .map(_siteIdentity)
+            .toSet();
+        final remaining = (_prefs.getStringList(_removedSites) ?? [])
+            .where((id) => !targetIds.contains(identities[id] ?? id))
+            .toList();
+        await _prefs.setStringList(_removedSites, remaining);
+      }
+    }
+    _invalidateConfigCache();
   });
 
   CmsConfig? loadSavedConfig() {
@@ -1518,8 +1709,19 @@ class StorageService {
     final config = _loadImportedConfig();
     if (config == null) return null;
     final identities = _pickerIdentities(config.sites);
+    final rawOverrides = _readSiteOverrides();
+    final canonicalOverrides = <String, SiteOverride>{
+      for (final entry in rawOverrides.entries)
+        (identities[entry.key] ?? entry.key): entry.value,
+    };
     final hidden = (_prefs.getStringList(_removedSites) ?? []).map((id) => identities[id] ?? id).toSet();
-    final byId = {for (final s in config.sites) if (!hidden.contains(_siteIdentity(s))) _siteIdentity(s): s};
+    final byId = <String, CmsSite>{};
+    for (final s in config.sites) {
+      final id = _siteIdentity(s);
+      if (hidden.contains(id)) continue;
+      final ov = canonicalOverrides[id];
+      byId[id] = ov != null ? ov.applyTo(s) : s;
+    }
     final sites = <CmsSite>[];
     for (final id in _prefs.getStringList(_siteOrder) ?? const <String>[]) {
       final site = byId.remove(identities[id] ?? id);
@@ -2608,7 +2810,7 @@ class StorageService {
       final parsed = CmsParser.parseConfig(sub.rawContent, origin: sub.url, subscriptionId: sub.id);
       for (final site in parsed.sites) {
         final existingKey = _savedAliases()[jsonEncode([sub.id, site.key, site.api])] ?? site.key;
-        final matches = publicSites.where((s) => s.subscriptionId == sub.id && s.api == site.api &&
+        final matches = publicSites.where((s) => s.subscriptionId == sub.id && s.sourceApi == site.api &&
             (s.key == existingKey || s.key == '${site.key}_${sub.id}'));
         if (matches.isNotEmpty) aliases[jsonEncode([sub.id, site.key, site.api])] = matches.first.key;
       }
@@ -2619,6 +2821,13 @@ class StorageService {
       parts[0] = 'restored_primary';
       return jsonEncode(parts);
     }
+    final exportedOverrides = <String, Map<String, dynamic>>{};
+    for (final entry in _readSiteOverrides().entries) {
+      final canonical = identityAliases[entry.key] ?? entry.key;
+      if (publicIds.contains(canonical) && !entry.value.isEmpty) {
+        exportedOverrides[exportedIdentity(canonical)] = entry.value.toJson();
+      }
+    }
     final hasSubs = _hasAuthoritativeSubscriptions;
     return CmsParser.encodeBackupPayload(
       origin: !hasSubs ? configOrigin : primary?.url ?? '',
@@ -2626,6 +2835,7 @@ class StorageService {
       settings: <String, dynamic>{
         if (hasSubs) keySubscriptions: public.map((s) => s.toJson()).toList(),
         for (final key in [_siteOrder, _removedSites]) key: (_prefs.getStringList(key) ?? []).map((id) => identityAliases[id] ?? id).where(publicIds.contains).map(exportedIdentity).toList(),
+        if (exportedOverrides.isNotEmpty) _siteOverrides: exportedOverrides,
         _siteAliases: aliases,
         keyPreferredSite: preferredSiteKey,
         for (final key in _appearanceStrings) if (_prefs.containsKey(key)) key: _prefs.getString(key),
@@ -2706,6 +2916,35 @@ class StorageService {
       }
       pickerEdits[key] = value.cast<String>();
     }
+    Map<String, SiteOverride>? incomingOverrides;
+    if (settings.containsKey(_siteOverrides) && settings[_siteOverrides] != null) {
+      final rawOv = settings[_siteOverrides];
+      if (rawOv is! Map) throw const FormatException('线路覆盖记录无效');
+      incomingOverrides = <String, SiteOverride>{};
+      for (final entry in rawOv.entries) {
+        if (entry.key is! String || entry.value is! Map) {
+          throw const FormatException('线路覆盖条目无效');
+        }
+        final identity = entry.key as String;
+        final parts = jsonDecode(identity);
+        if (parts is! List ||
+            parts.length != 3 ||
+            parts.any((p) => p is! String) ||
+            privateIdentities.contains(identity)) {
+          throw const FormatException('线路覆盖标识无效');
+        }
+        final ov = SiteOverride.fromJson(
+          Map<String, dynamic>.from(entry.value as Map),
+        );
+        if (ov.group != null &&
+            (ov.group!.contains('隐私') || ov.group!.contains('私密'))) {
+          throw const FormatException('常规备份包含隐私分组覆盖');
+        }
+        if (!ov.isEmpty) {
+          incomingOverrides[identity] = ov;
+        }
+      }
+    }
     for (final key in _appearanceStrings) {
       if (settings.containsKey(key) && settings[key] is! String) throw const FormatException('外观设置格式无效');
     }
@@ -2741,7 +2980,10 @@ class StorageService {
     if (aliases.keys.any((identity) => !rawIdentities.contains(identity)) ||
         aliases.values.toSet().length != aliases.length ||
         pickerEdits.values.expand((v) => v).any((identity) =>
-            !incomingIds.contains((jsonDecode(identity) as List).first))) {
+            !incomingIds.contains((jsonDecode(identity) as List).first)) ||
+        (incomingOverrides != null &&
+            incomingOverrides.keys.any((identity) =>
+                !incomingIds.contains((jsonDecode(identity) as List).first)))) {
       throw const FormatException('线路管理记录与订阅不匹配');
     }
     if (updatedSubs != null || incoming.isNotEmpty) {
@@ -2768,6 +3010,18 @@ class StorageService {
     for (final entry in pickerEdits.entries) {
       final retainedPrivate = (_prefs.getStringList(entry.key) ?? []).where(privateIdentities.contains);
       await _prefs.setStringList(entry.key, [...entry.value, ...retainedPrivate]);
+    }
+    if (incomingOverrides != null) {
+      final retainedPrivateOverrides = <String, Map<String, dynamic>>{};
+      for (final entry in _readSiteOverrides().entries) {
+        if (privateIdentities.contains(entry.key)) {
+          retainedPrivateOverrides[entry.key] = entry.value.toJson();
+        }
+      }
+      for (final entry in incomingOverrides.entries) {
+        retainedPrivateOverrides[entry.key] = entry.value.toJson();
+      }
+      await _prefs.setString(_siteOverrides, jsonEncode(retainedPrivateOverrides));
     }
     for (final key in _appearanceStrings) {
       if (settings[key] is String) await _prefs.setString(key, settings[key] as String);

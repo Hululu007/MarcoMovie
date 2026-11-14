@@ -40,12 +40,17 @@ public final class Cms {
         public static final int MAX_EXT_SIZE = 128 * 1024;
 
         public String key, name, api, playUrl, jar = "";
+        public String originalKey = "", originalApi = "", group = "默认分组";
         public int type;
         public final Map<String, String> headers = new LinkedHashMap<>();
         public boolean requiresParser;
         public boolean searchable = true;
         public Object ext;
         public boolean extTooLarge;
+
+        public String siteId() {
+            return originalKey != null && !originalKey.isEmpty() ? originalKey : key;
+        }
 
         public boolean isExtTooLarge() {
             if (extTooLarge) return true;
@@ -825,8 +830,12 @@ public final class Cms {
             s.key = Json.str(j, "key", "site-" + i);
             s.name = Json.str(j, "name", s.key);
             if (!keys.add(s.key)) s.key = s.key + "-" + i;
+            s.originalKey = s.key;
+            String rawGroup = Json.str(j, "group", "").trim();
+            s.group = rawGroup.isEmpty() ? "默认分组" : rawGroup;
             s.type = Json.integer(j, "type", -1);
             s.api = resolve(origin, Json.str(j, "api", ""));
+            s.originalApi = s.api;
             String rawJar = Json.str(j, "jar", "");
             if (!rawJar.isEmpty()) {
                 String[] jarParts = rawJar.split(";md5;", 2);
