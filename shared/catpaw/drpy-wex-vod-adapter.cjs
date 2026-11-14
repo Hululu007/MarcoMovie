@@ -12,13 +12,24 @@ function installWexVod() {
       .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ')
       .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   }
-  function checkChallenge(body) {
+  var lastSoftChallenge = false;
+  function hasVodMarkup(t) {
+    return /(?:\/voddetail\/|\/vodplay\/|\/vod\/detail\/|module-item|vod-item|vodlist|myui-vodlist|stui-vodlist|video-info|"vod_id"\s*:|"vodId"\s*:|"source_list_source"\s*:)/i.test(t);
+  }
+  function isChallengeBody(body, statusCode) {
     var t = str(body);
-    if (!t) return;
-    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|验证码不正确|请完成滑块验证|verifySlider|challenges\.cloudflare\.com|<title>\s*Just a moment\.\.\.\s*<\/title>|Attention Required!\s*\|\s*Cloudflare|cf-turnstile)/i.test(t) ||
-        /<input[^>]+(?:name|id)=["']?(?:verify|validate|captcha)/i.test(t)) {
-      fail('drpy_verification_required');
+    if (!t) return false;
+    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|<title>\s*Just a moment\.\.\.\s*<\/title>|Attention Required!\s*\|\s*Cloudflare|Checking your browser|正在验证您的浏览器|系统安全验证|verify you are human|请完成滑块验证|verifySlider|验证码不正确)/i.test(t)) {
+      return true;
     }
+    var code = Number(statusCode) || 0;
+    var blockedStatus = code === 401 || code === 403 || code === 429 || code === 503;
+    if (!blockedStatus && (t.length >= 24000 || hasVodMarkup(t))) return false;
+    return /(?:challenges\.cloudflare\.com|cf-turnstile|人机验证)/i.test(t) ||
+      /<input[^>]+(?:name|id)=["']?(?:verify|validate|captcha)/i.test(t);
+  }
+  function checkChallenge(body, statusCode) {
+    if (isChallengeBody(body, statusCode)) fail('drpy_verification_required');
   }
   function address(value, base) {
     var v = str(value).trim();
@@ -122,20 +133,23 @@ function installWexVod() {
     try { r = req(target, o); }
     catch (e) { fail(/^drpy_[a-z_]+$/.test(e && e.message) ? e.message : 'drpy_source_unavailable'); }
     if (!r || typeof r.content !== 'string') fail('drpy_source_unavailable');
-    checkChallenge(r.content);
+    checkChallenge(r.content, r.code);
     return r;
   }
   function httpReqSoft(url, opts) {
+    lastSoftChallenge = false;
     try {
       var target = address(url).url;
       var o = Object.assign({ timeout: 6000 }, opts || {});
       if (o.headers) o.headers = cleanHeaders(o.headers);
       var r = req(target, o);
       if (!r || typeof r.content !== 'string') return null;
-      checkChallenge(r.content);
+      if (isChallengeBody(r.content, r.code)) {
+        lastSoftChallenge = true;
+        return null;
+      }
       return r;
-    } catch (e) {
-      if (e && e.message === 'drpy_verification_required') fail('drpy_verification_required');
+    } catch (_) {
       return null;
     }
   }
@@ -165,32 +179,37 @@ function installWexVod() {
       return { siteUrl: '', mySiteUrl: '', siteConfig: {}, exp: 0 };
     }
     memRemoteTriedAt = Date.now();
+    var startedAt = Date.now();
     var rHeaders = { 'User-Agent': str(cfg.remoteUa || cfg.userAgent || 'Mozilla/5.0'), Accept: 'application/json,text/plain,*/*' };
     var apiUrls = [cfg.apiTxt0, cfg.apiTxt1, cfg.apiTxt2, cfg.apiTxt3].map(str).filter(Boolean);
     var siteUrl = '';
     for (var i = 0; i < apiUrls.length; i++) {
-      var r = httpReqSoft(apiUrls[i], { headers: rHeaders, timeout: 2500 });
+      if (Date.now() - startedAt > 4500) break;
+      var r = httpReqSoft(apiUrls[i], { headers: rHeaders, timeout: 1800 });
       if (r && r.code >= 200 && r.code < 300) {
         var dec = decryptRemoteText(r.content).split(/[\r\n]+/)[0].trim().replace(/\/+$/, '');
         if (/^https?:\/\//i.test(dec)) { siteUrl = dec; break; }
       }
     }
-    var siteConfig = {};
-    var itemUrls = [cfg.itemTxt0, cfg.itemTxt1, cfg.itemTxt2].map(str).filter(Boolean);
-    for (var j = 0; j < itemUrls.length; j++) {
-      var ir = httpReqSoft(itemUrls[j], { headers: rHeaders, timeout: 2500 });
-      if (ir && ir.code >= 200 && ir.code < 300) {
-        var itemObj = parseJsonSafe(decryptRemoteText(ir.content));
-        if (isObj(itemObj)) {
-          var csUrl = str(itemObj.config_site).trim();
-          if (/^https?:\/\//i.test(csUrl)) {
-            var sr = httpReqSoft(csUrl, { headers: rHeaders, timeout: 2500 });
-            if (sr && sr.code >= 200 && sr.code < 300) {
-              var sc = parseJsonSafe(decryptRemoteText(sr.content));
-              if (isObj(sc)) siteConfig = sc;
+    var siteConfig = isObj(cached) && Number(cached.exp) > Date.now() && isObj(cached.siteConfig) ? cached.siteConfig : {};
+    if (!Object.keys(siteConfig).length) {
+      var itemUrls = [cfg.itemTxt0, cfg.itemTxt1, cfg.itemTxt2].map(str).filter(Boolean);
+      for (var j = 0; j < itemUrls.length; j++) {
+        if (Date.now() - startedAt > 5500) break;
+        var ir = httpReqSoft(itemUrls[j], { headers: rHeaders, timeout: 1800 });
+        if (ir && ir.code >= 200 && ir.code < 300) {
+          var itemObj = parseJsonSafe(decryptRemoteText(ir.content));
+          if (isObj(itemObj)) {
+            var csUrl = str(itemObj.config_site).trim();
+            if (/^https?:\/\//i.test(csUrl) && Date.now() - startedAt <= 5500) {
+              var sr = httpReqSoft(csUrl, { headers: rHeaders, timeout: 2200 });
+              if (sr && sr.code >= 200 && sr.code < 300) {
+                var sc = parseJsonSafe(decryptRemoteText(sr.content));
+                if (isObj(sc)) siteConfig = sc;
+              }
             }
+            break;
           }
-          break;
         }
       }
     }
@@ -561,8 +580,10 @@ function installWexVod() {
         'api-ver': str(cfg.version), PackageName: str(cfg.pkg), code: str(cfg.code),
         lang: 'zh_cn', Referer: str(cfg.defaultRef), 'Content-Type': 'application/x-www-form-urlencoded'
       };
+      var sawChallenge = false;
       for (var i = 0; i < gzHosts.length; i++) {
-        var r = httpReqSoft(gzHosts[i] + path, { method: 'POST', body: body, headers: hdrs, timeout: 10000 });
+        var r = httpReqSoft(gzHosts[i] + path, { method: 'POST', body: body, headers: hdrs, timeout: 6500 });
+        if (lastSoftChallenge) sawChallenge = true;
         if (r && r.code === 200) {
           var doc = parseJsonSafe(r.content);
           if (isObj(doc) && Number(doc.code) === 200) {
@@ -571,7 +592,7 @@ function installWexVod() {
           }
         }
       }
-      fail('drpy_source_unavailable');
+      fail(sawChallenge ? 'drpy_verification_required' : 'drpy_source_unavailable');
     }
     function gzLogin() {
       if (str(gzState.token)) return;
@@ -1008,14 +1029,16 @@ function installWexVod() {
     var fyHost = fyHosts[0];
     var fyHeaders = { 'User-Agent': str(cfg.userAgent), Referer: fyHost + '/' };
     function fyGet(path) {
+      var sawChallenge = false;
       for (var i = 0; i < fyHosts.length; i++) {
-        var r = httpReqSoft(fyHosts[i] + path, { headers: { 'User-Agent': str(cfg.userAgent), Referer: fyHosts[i] + '/' }, timeout: 9000 });
+        var r = httpReqSoft(fyHosts[i] + path, { headers: { 'User-Agent': str(cfg.userAgent), Referer: fyHosts[i] + '/' }, timeout: 6000 });
+        if (lastSoftChallenge) sawChallenge = true;
         if (r && r.code >= 200 && r.code < 400 && str(r.content)) {
           fyHost = fyHosts[i];
           return r.content;
         }
       }
-      fail('drpy_source_unavailable');
+      fail(sawChallenge ? 'drpy_verification_required' : 'drpy_source_unavailable');
     }
     function fyParseHtmlCards(html) {
       var out = [], seen = {};
@@ -1180,10 +1203,12 @@ function installWexVod() {
     }
     function jpGet(path) {
       var order = [jpHost].concat(jpCandidates.filter(function (c) { return c && c !== jpHost; }));
+      var sawChallenge = false;
       for (var ci = 0; ci < order.length; ci++) {
         var h = order[ci];
         if (!h) continue;
-        var r = httpReqSoft(h + path, { headers: jpHeadersFor(h), timeout: 6000 });
+        var r = httpReqSoft(h + path, { headers: jpHeadersFor(h), timeout: 5000 });
+        if (lastSoftChallenge) sawChallenge = true;
         if (r && r.code >= 200 && r.code < 300) {
           var doc = parseJsonSafe(r.content);
           if (isObj(doc)) {
@@ -1195,7 +1220,7 @@ function installWexVod() {
           }
         }
       }
-      fail('drpy_source_unavailable');
+      fail(sawChallenge ? 'drpy_verification_required' : 'drpy_source_unavailable');
     }
     function jpCard(it) {
       if (!isObj(it)) return null;
@@ -1337,18 +1362,23 @@ function installWexVod() {
         ? Object.keys(signed).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(str(signed[k])); }).join('&')
         : JSON.stringify(signed);
       var cType = asForm ? 'application/x-www-form-urlencoded' : 'application/json; charset=utf-8';
+      var sawChallenge = false;
+      var deadline = Date.now() + 9500;
       for (var i = 0; i < jxHosts.length; i++) {
+        var rem = deadline - Date.now();
+        if (rem < 900) break;
         var r = httpReqSoft(jxHosts[i] + path, {
           method: 'POST', body: body,
           headers: { 'User-Agent': str(cfg.userAgent), 'Content-Type': cType },
-          timeout: 8000
+          timeout: Math.min(3500, rem)
         });
+        if (lastSoftChallenge) sawChallenge = true;
         if (r && r.code >= 200 && r.code < 300) {
           var dec = jxDecodeBody(r.content);
           if (dec !== null) { jxHost = jxHosts[i]; return dec; }
         }
       }
-      fail('drpy_source_unavailable');
+      fail(sawChallenge ? 'drpy_verification_required' : 'drpy_source_unavailable');
     }
     function jxCard(it) {
       if (!isObj(it)) return null;

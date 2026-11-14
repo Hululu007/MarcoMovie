@@ -66,7 +66,8 @@ public static void start(android.content.Context c,String a,String b,String d)th
                     ROOT / 'shared/java/com/pilipala/source/Warehouse.java',
                     ROOT / 'shared/java/com/pilipala/catpaw/CatPawHost.java',
                     *(SRC / name for name in ('Cms.java', 'RequestScope.java', 'SourceEngine.java', 'CspEngine.java',
-                                               'GuardEngine.java', 'DrpyEngine.java', 'MediaOptions.java', 'ProxyAddress.java')),
+                                               'GuardEngine.java', 'DrpyEngine.java', 'MediaOptions.java', 'ProxyAddress.java',
+                                               'Prefs.java', 'AppLog.java')),
                     ROOT / 'android/tests/GuardChecks.java'], check=True)
     subprocess.run([JDK / 'bin/java', '-Dfile.encoding=UTF-8', '-cp', str(classes) + os.pathsep + dependencies,
                     'com.pilipala.marcomovie.GuardChecks', work], check=True)

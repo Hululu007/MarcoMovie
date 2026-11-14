@@ -737,7 +737,7 @@ public class MoviePlayer {
         long deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PROBE_BUDGET_MS);
         HttpURLConnection connection = null;
         try {
-            connection = (HttpURLConnection) new URL(address.toString()).openConnection();
+            connection = ProxyAddress.openHttpConnection(new URL(address.toString()));
             RequestScope.attach(connection);
             connection.setConnectTimeout(1200);
             connection.setReadTimeout(1200);

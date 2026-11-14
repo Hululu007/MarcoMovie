@@ -42,15 +42,34 @@ final class GuardEngine {
     }
 
     static String adapterFor(Cms.Site site) {
-        if (site.type != 3) return null;
+        if (site.type != 3 || site.api == null) return null;
         if ("csp_Dm84Guard".equalsIgnoreCase(site.api) || "csp_Dm84".equalsIgnoreCase(site.api))
             return "dm84-v1";
         if ("csp_AueteGuard".equalsIgnoreCase(site.api) || "csp_Auete".equalsIgnoreCase(site.api))
             return "auete-v1";
         if ("csp_BttwooGuard".equalsIgnoreCase(site.api) || "csp_Bttwoo".equalsIgnoreCase(site.api))
             return "bttwoo-v1";
+        if ("csp_AppGZGuard".equalsIgnoreCase(site.api) || "csp_AppGZ".equalsIgnoreCase(site.api))
+            return "appgz-v1";
         if ("csp_T4Guard".equalsIgnoreCase(site.api) || "csp_T4".equalsIgnoreCase(site.api))
             return "t4-v1";
+        if ("csp_AppTTGuard".equalsIgnoreCase(site.api) || "csp_AppTT".equalsIgnoreCase(site.api))
+            return "apptt-v1";
+        if ("csp_FYGuard".equalsIgnoreCase(site.api) || "csp_FY".equalsIgnoreCase(site.api))
+            return "fy-v1";
+        if ("csp_NewCzGuard".equalsIgnoreCase(site.api) || "csp_NewCz".equalsIgnoreCase(site.api))
+            return "newcz-v1";
+        return null;
+    }
+
+    private static String bootstrapExtensionFor(String adapter, Cms.Site site) {
+        if ("t4-v1".equals(adapter) || "apptt-v1".equals(adapter)) {
+            return site.ext != null ? site.ext.toString() : null;
+        }
+        if ("newcz-v1".equals(adapter) && site.ext != null) {
+            String raw = site.ext.toString();
+            return raw.trim().isEmpty() ? null : raw;
+        }
         return null;
     }
 
@@ -85,9 +104,7 @@ final class GuardEngine {
                             .bootstrapGuard(
                                     data,
                                     adapter,
-                                    "t4-v1".equals(adapter) && site.ext != null
-                                            ? site.ext.toString()
-                                            : null,
+                                    bootstrapExtensionFor(adapter, site),
                                     new CatPawHost.ConnectionObserver() {
                                         public void opened(HttpURLConnection connection)
                                                 throws IOException {

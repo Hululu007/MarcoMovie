@@ -84,5 +84,85 @@ public final class LiveNetworkChecks {
         } finally {
             executor.shutdownNow();
         }
+        java.util.concurrent.atomic.AtomicInteger proxyHits =
+                new java.util.concurrent.atomic.AtomicInteger();
+        com.sun.net.httpserver.HttpServer badProxy =
+                com.sun.net.httpserver.HttpServer.create(
+                        new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        com.sun.net.httpserver.HttpServer upstreamOnAltLoopback =
+                com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress(0), 0);
+        badProxy.createContext(
+                "/",
+                exchange -> {
+                    proxyHits.incrementAndGet();
+                    exchange.sendResponseHeaders(502, -1);
+                    exchange.close();
+                });
+        upstreamOnAltLoopback.createContext(
+                "/iptv.php",
+                exchange -> {
+                    byte[] body =
+                            "#EXTM3U\n#EXTINF:-1,测试频道\nhttp://127.0.0.2/live.m3u8\n"
+                                    .getBytes("UTF-8");
+                    exchange.getResponseHeaders()
+                            .set("Content-Type", "audio/x-mpegurl; charset=utf-8");
+                    exchange.sendResponseHeaders(200, body.length);
+                    exchange.getResponseBody().write(body);
+                    exchange.close();
+                });
+        badProxy.start();
+        upstreamOnAltLoopback.start();
+        java.net.ProxySelector origSelector = java.net.ProxySelector.getDefault();
+        try {
+            final java.net.Proxy proxy =
+                    new java.net.Proxy(
+                            java.net.Proxy.Type.HTTP,
+                            new java.net.InetSocketAddress(
+                                    "127.0.0.1", badProxy.getAddress().getPort()));
+            java.net.ProxySelector.setDefault(
+                    new java.net.ProxySelector() {
+                        @Override
+                        public java.util.List<java.net.Proxy> select(java.net.URI uri) {
+                            return java.util.Collections.singletonList(proxy);
+                        }
+
+                        @Override
+                        public void connectFailed(
+                                java.net.URI uri,
+                                java.net.SocketAddress sa,
+                                java.io.IOException ioe) {}
+                    });
+            ProxyAddress.ensureLoopbackDirectProxySelector();
+            LiveCatalog.Source localLoop = new LiveCatalog.Source();
+            localLoop.url = args[0] + "list.php";
+            if (LiveCatalog.load(localLoop).channelCount() != 1 || proxyHits.get() != 0)
+                throw new AssertionError("127.0.0.1 live load must bypass system proxy");
+            System.out.println("PASS loopback live source bypasses system HTTP proxy");
+
+            boolean altLoopbackReachable = false;
+            try (java.net.Socket probe = new java.net.Socket()) {
+                probe.connect(
+                        new java.net.InetSocketAddress(
+                                "127.0.0.2", upstreamOnAltLoopback.getAddress().getPort()),
+                        500);
+                altLoopbackReachable = true;
+            } catch (java.io.IOException ignored) {
+            }
+            if (altLoopbackReachable) {
+                LiveCatalog.Source proxiedUpstream = new LiveCatalog.Source();
+                proxiedUpstream.url =
+                        "http://127.0.0.2:"
+                                + upstreamOnAltLoopback.getAddress().getPort()
+                                + "/iptv.php";
+                if (LiveCatalog.load(proxiedUpstream).channelCount() != 1 || proxyHits.get() != 1)
+                    throw new AssertionError("upstream HTTP 502 from proxy must retry direct once");
+                System.out.println(
+                        "PASS upstream live source retries direct once after proxy HTTP 502");
+            }
+        } finally {
+            java.net.ProxySelector.setDefault(origSelector);
+            badProxy.stop(0);
+            upstreamOnAltLoopback.stop(0);
+        }
     }
 }

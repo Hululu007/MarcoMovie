@@ -271,7 +271,7 @@ final class ImageLoader {
             if (cached != null) return cached;
             HttpURLConnection connection = null;
             try {
-                connection = (HttpURLConnection) new URL(candidate).openConnection();
+                connection = ProxyAddress.openHttpConnection(new URL(candidate));
                 for (Map.Entry<String, String> header : source.headers.entrySet())
                     connection.setRequestProperty(header.getKey(), header.getValue());
                 String fragment = new URL(candidate).getRef();

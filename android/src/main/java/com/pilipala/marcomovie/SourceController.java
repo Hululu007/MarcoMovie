@@ -422,6 +422,9 @@ final class SourceController {
         if (e == null) return "连接超时、来源不可达或数据格式不受支持。请检查配置与网络后重试。";
         String s = e.getMessage();
         if (e instanceof CspEngine.EngineException) return s;
+        if (e instanceof com.pilipala.catpaw.CatPawHost.DrpySourceException
+                && s != null
+                && !s.isEmpty()) return s;
         if (e instanceof OutOfMemoryError) return "设备运行内存不足，已保护性中止加载。建议切换轻量片源。";
         if (e instanceof LinkageError) return "此片源扩展与当前电视系统版本不兼容，请切换其他片源。";
         if (e instanceof java.net.UnknownHostException) return "无法解析来源域名，请检查网络或切换其他来源。";

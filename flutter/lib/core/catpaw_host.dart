@@ -580,7 +580,9 @@ class CatPawHost {
     Completer<void>? cancellation,
   ) async {
     _checkCancellation(cancellation);
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    final client = HttpClient()
+      ..findProxy = ((_) => 'DIRECT')
+      ..connectionTimeout = const Duration(seconds: 8);
     var finished = false;
     cancellation?.future.then((_) {
       if (!finished) client.close(force: true);
@@ -898,7 +900,9 @@ class CatPawHost {
       cancellation,
     );
     _checkCancellation(cancellation);
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+    final client = HttpClient()
+      ..findProxy = ((_) => 'DIRECT')
+      ..connectionTimeout = const Duration(seconds: 8);
     var finished = false;
     cancellation?.future.then((_) {
       if (!finished) client.close(force: true);
@@ -1015,7 +1019,9 @@ class CatPawHost {
   }
 
   Future<void> _resetEmbedded(Uri base) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
+    final client = HttpClient()
+      ..findProxy = ((_) => 'DIRECT')
+      ..connectionTimeout = const Duration(seconds: 3);
     final timer = Timer(
       const Duration(seconds: 5),
       () => client.close(force: true),

@@ -24,8 +24,88 @@ public final class CatPawHost {
         }
     }
 
+    private static final java.util.Set<String> NO_EXT_GUARD_ADAPTERS =
+            new java.util.HashSet<>(
+                    java.util.Arrays.asList(
+                            "dm84-v1", "auete-v1", "bttwoo-v1", "appgz-v1", "fy-v1"));
+
+    private static final java.util.Set<String> REQUIRED_EXT_GUARD_ADAPTERS =
+            new java.util.HashSet<>(java.util.Arrays.asList("t4-v1", "apptt-v1"));
+
+    private static final java.util.Set<String> OPTIONAL_EXT_GUARD_ADAPTERS =
+            new java.util.HashSet<>(
+                    java.util.Arrays.asList(
+                            "jpys-v1",
+                            "jpj-v1",
+                            "nmyswv-v1",
+                            "hmys-v1",
+                            "app99-v1",
+                            "appsx-v1",
+                            "newcz-v1",
+                            "libvio-v1",
+                            "ygp-v1",
+                            "kanqiu-v1",
+                            "doubao-v1",
+                            "livegz-v1",
+                            "alllive-v1",
+                            "tingshu275-v1",
+                            "yueting-v1",
+                            "seedhub-v1",
+                            "szps-v1",
+                            "ypanso-v1",
+                            "bpanso-v1",
+                            "kkss-v1",
+                            "uuss-v1",
+                            "jumitv-v1",
+                            "wexappv7-v1",
+                            "wexguazi-v1",
+                            "wexduboku-v1",
+                            "wexwencai-v1",
+                            "wexfengye-v1",
+                            "wexjianpian-v1",
+                            "wexjuxiafan-v1",
+                            "wexrebo-v1",
+                            "wexbobo-v1",
+                            "wexikanbot-v1",
+                            "wexyiys-v1",
+                            "wexhanxiaoquan-v1",
+                            "wexduoduo-v1",
+                            "wexhuban-v1",
+                            "wexkuaiying-v1",
+                            "wexlabi-v1",
+                            "wexmuou-v1",
+                            "wexshandian-v1",
+                            "wexxiaopan-v1",
+                            "wexzhizhen-v1",
+                            "wexwogg-v1",
+                            "wexhuajuan-v1",
+                            "wexjutou-v1",
+                            "wexzhinan-v1",
+                            "wexwoniu-v1",
+                            "wexpianku-v1",
+                            "wexqiwei-v1",
+                            "wexyidong-v1",
+                            "wexaipanso-v1",
+                            "wexhaiyin-v1",
+                            "wexquanpan-v1",
+                            "wexkaka-v1",
+                            "wexmodu-v1",
+                            "wexhaokan-v1",
+                            "wexqimiao-v1",
+                            "wexkuwoa-v1",
+                            "wexqingting-v1",
+                            "wexsportguazi-v1",
+                            "wexkafei-v1",
+                            "wexkanqiutong-v1",
+                            "wexkanqiu-v1",
+                            "wexwwe-v1"));
+
     private static String drpyErrorMessage(String code) {
         if ("drpy_verification_required".equals(code)) return "此片源需要完成网站验证码，暂时无法加载";
+        if ("drpy_action_invalid".equals(code)) return "验证码已失效或格式不正确，请刷新后重试";
+        if ("drpy_verification_unavailable".equals(code)) return "暂时无法获取验证码图片，请稍后重试";
+        if ("drpy_unsupported_filter".equals(code)) return "此片源不支持当前筛选条件";
+        if ("drpy_invalid_id".equals(code)) return "此片源的影片标识无效，请重新打开影片";
         if ("drpy_local_proxy_not_supported".equals(code)) return "此片源需要的本地代理暂不支持";
         if ("drpy_media_protocol".equals(code)) return "此片源返回的播放地址协议暂不支持";
         if ("drpy_media_unresolved".equals(code)) return "此片源暂未解析出可播放地址";
@@ -35,6 +115,32 @@ public final class CatPawHost {
         if ("drpy_crypto_invalid".equals(code)) return "此片源的加密响应暂不兼容";
         if ("drpy_authentication_required".equals(code)) return "此片源的访问认证尚未通过";
         if ("drpy_filter_not_supported".equals(code)) return "此片源不支持当前筛选条件";
+        if ("drpy_local_module_missing".equals(code)) return "本地规则包缺少依赖文件，请导入完整的规则包";
+        if ("drpy_http_timeout".equals(code)) return "连接片源服务器超时，请稍后重试或切换其他片源";
+        if ("drpy_http_connection_failed".equals(code)) return "无法连接片源服务器，该站点可能暂时离线或受当前网络限制";
+        if ("drpy_http_response_failed".equals(code)) return "读取片源服务器响应失败，请稍后重试";
+        if ("drpy_http_response_too_large".equals(code)) return "片源返回的数据超过大小上限";
+        if ("drpy_http_encoding".equals(code)) return "片源响应编码异常，暂时无法解析";
+        if ("drpy_http_headers".equals(code)) return "片源请求头格式不受支持";
+        if ("drpy_http_method".equals(code)) return "片源请求方式不受支持";
+        if ("drpy_http_body_too_large".equals(code)) return "片源请求体超过大小上限";
+        if ("drpy_http_protocol".equals(code)) return "片源请求地址协议不受支持";
+        if ("drpy_redirect_credentials".equals(code)) return "片源重定向包含不安全的认证信息";
+        if ("drpy_http_redirect_limit".equals(code)) return "片源服务器重定向次数过多";
+        if ("drpy_http_redirect".equals(code)) return "片源服务器返回了无效的重定向地址";
+        if ("drpy_http_request".equals(code)) return "片源网络请求参数无效";
+        if ("drpy_http_response".equals(code)) return "片源服务器返回了异常响应";
+        if ("drpy_execution_timeout".equals(code)) return "片源脚本加载超时，请重试或切换其他片源";
+        if ("drpy_source_failed".equals(code)) return "片源线路暂时无法返回有效数据，请稍后重试或切换其他片源";
+        if ("drpy_host_error".equals(code)) return "片源本地运行环境处理失败，请重试";
+        if ("drpy_storage_key".equals(code)) return "片源本地缓存键无效";
+        if ("drpy_storage_action".equals(code)) return "片源本地缓存操作不受支持";
+        if ("drpy_storage_limit".equals(code)) return "片源本地缓存超出容量限制";
+        if ("drpy_random_size".equals(code)) return "片源随机参数长度无效";
+        if ("drpy_rule_missing".equals(code)) return "片源规则尚未初始化完成，请重试";
+        if ("drpy_async_result".equals(code)) return "片源异步响应格式异常";
+        if ("drpy_result".equals(code)) return "片源返回结果超过大小上限或格式无效";
+        if ("drpy_proxy_result".equals(code)) return "片源代理响应格式不受支持";
         return null;
     }
 
@@ -243,15 +349,21 @@ public final class CatPawHost {
             byte[] artifact, String adapter, String extension, ConnectionObserver observer)
             throws Exception {
         checkBootstrapInterrupted();
-        if (!("dm84-v1".equals(adapter)
-                || "auete-v1".equals(adapter)
-                || "bttwoo-v1".equals(adapter)
-                || "t4-v1".equals(adapter))) throw new IOException("未知插件移植适配器");
-        if ("t4-v1".equals(adapter)
-                ? extension == null
-                        || extension.trim().isEmpty()
-                        || extension.getBytes("UTF-8").length > 16 * 1024
-                : extension != null) throw new IOException("插件扩展配置无效");
+        boolean requiresExt = REQUIRED_EXT_GUARD_ADAPTERS.contains(adapter);
+        boolean optionalExt = OPTIONAL_EXT_GUARD_ADAPTERS.contains(adapter);
+        if (!requiresExt && !optionalExt && !NO_EXT_GUARD_ADAPTERS.contains(adapter))
+            throw new IOException("未知插件移植适配器");
+        if (requiresExt) {
+            if (extension == null
+                    || extension.trim().isEmpty()
+                    || extension.getBytes("UTF-8").length > 16 * 1024)
+                throw new IOException("插件扩展配置无效");
+        } else if (optionalExt) {
+            if (extension != null && extension.getBytes("UTF-8").length > 16 * 1024)
+                throw new IOException("插件扩展配置无效");
+        } else if (extension != null) {
+            throw new IOException("插件扩展配置无效");
+        }
         if (artifact.length == 0 || artifact.length > 16 * 1024 * 1024)
             throw new IOException("移植插件包超过大小限制");
         String artifactHash = hash(artifact);
@@ -306,7 +418,8 @@ public final class CatPawHost {
     private JSONObject requestBootstrap(String target, byte[] body, ConnectionObserver observer)
             throws Exception {
         checkBootstrapInterrupted();
-        HttpURLConnection connection = (HttpURLConnection) new URL(target).openConnection();
+        HttpURLConnection connection =
+                (HttpURLConnection) new URL(target).openConnection(Proxy.NO_PROXY);
         try {
             if (observer != null) observer.opened(connection);
             connection.setRequestMethod("POST");
@@ -378,7 +491,7 @@ public final class CatPawHost {
             throws Exception {
         URI logical = new URI(address);
         HttpURLConnection connection =
-                (HttpURLConnection) new URL(resolve(address)).openConnection();
+                (HttpURLConnection) new URL(resolve(address)).openConnection(Proxy.NO_PROXY);
         try {
             if (observer != null) observer.opened(connection);
             connection.setRequestMethod(method);

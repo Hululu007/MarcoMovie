@@ -476,22 +476,27 @@ public final class CspEngine implements SourceEngine {
     static void syncPluginProxyPort(ClassLoader loader, int port) {
         if (loader == null || port <= 0) return;
         for (ClassLoader cl : collectPluginLoaders(loader, null)) {
-            try {
-                Class<?> proxyClass = Class.forName("com.github.catvod.spider.Proxy", false, cl);
+            for (String proxyClassName :
+                    new String[] {
+                        "com.github.catvod.spider.Proxy", "com.github.catvod.spider.ProxyOrigin"
+                    }) {
                 try {
-                    proxyClass.getMethod("set", int.class).invoke(null, port);
-                    continue;
+                    Class<?> proxyClass = Class.forName(proxyClassName, false, cl);
+                    try {
+                        proxyClass.getMethod("set", int.class).invoke(null, port);
+                        continue;
+                    } catch (Throwable ignored) {
+                    }
+                    for (Field f : proxyClass.getDeclaredFields()) {
+                        if (Modifier.isStatic(f.getModifiers())
+                                && (f.getType() == int.class || f.getType() == Integer.class)
+                                && f.getName().toLowerCase(Locale.ROOT).contains("port")) {
+                            f.setAccessible(true);
+                            f.setInt(null, port);
+                        }
+                    }
                 } catch (Throwable ignored) {
                 }
-                for (Field f : proxyClass.getDeclaredFields()) {
-                    if (Modifier.isStatic(f.getModifiers())
-                            && (f.getType() == int.class || f.getType() == Integer.class)
-                            && f.getName().toLowerCase(Locale.ROOT).contains("port")) {
-                        f.setAccessible(true);
-                        f.setInt(null, port);
-                    }
-                }
-            } catch (Throwable ignored) {
             }
         }
     }
@@ -680,20 +685,25 @@ public final class CspEngine implements SourceEngine {
         Throwable last = null;
         Object[] fallbackResult = null;
         for (ClassLoader cl : collectPluginLoaders(rootLoader, null)) {
-            try {
-                Class<?> proxyCls = Class.forName("com.github.catvod.spider.Proxy", false, cl);
-                Method m = proxyCls.getMethod("proxy", Map.class);
-                Object raw = m.invoke(null, params);
-                if (raw instanceof Object[]) {
-                    Object[] arr = (Object[]) raw;
-                    if (isUsableProxyResult(arr)) return arr;
-                    if (fallbackResult == null) fallbackResult = arr;
+            for (String proxyClassName :
+                    new String[] {
+                        "com.github.catvod.spider.Proxy", "com.github.catvod.spider.ProxyOrigin"
+                    }) {
+                try {
+                    Class<?> proxyCls = Class.forName(proxyClassName, false, cl);
+                    Method m = proxyCls.getMethod("proxy", Map.class);
+                    Object raw = m.invoke(null, params);
+                    if (raw instanceof Object[]) {
+                        Object[] arr = (Object[]) raw;
+                        if (isUsableProxyResult(arr)) return arr;
+                        if (fallbackResult == null) fallbackResult = arr;
+                    }
+                } catch (ClassNotFoundException | NoSuchMethodException ignored) {
+                } catch (InvocationTargetException ite) {
+                    last = unwrap(ite);
+                } catch (Throwable t) {
+                    last = t;
                 }
-            } catch (ClassNotFoundException | NoSuchMethodException ignored) {
-            } catch (InvocationTargetException ite) {
-                last = unwrap(ite);
-            } catch (Throwable t) {
-                last = t;
             }
         }
         if (fallbackResult != null) return fallbackResult;
@@ -1205,9 +1215,12 @@ public final class CspEngine implements SourceEngine {
                                     next.getFile());
                 }
                 boolean done = false;
+                boolean forceDirect = false;
                 for (int redirect = 0; redirect < 5 && !done; redirect++) {
                     checkRequest();
-                    HttpURLConnection c = (HttpURLConnection) next.openConnection();
+                    boolean canFallbackDirect =
+                            !forceDirect && ProxyAddress.hasActiveHttpProxy(next);
+                    HttpURLConnection c = ProxyAddress.openHttpConnection(next, forceDirect);
                     c.setConnectTimeout(12000);
                     c.setReadTimeout(20000);
                     c.setInstanceFollowRedirects(false);
@@ -1215,7 +1228,22 @@ public final class CspEngine implements SourceEngine {
                     if (authorization != null) c.setRequestProperty("Authorization", authorization);
                     RequestScope.attach(c);
                     try {
-                        int code = c.getResponseCode();
+                        int code;
+                        try {
+                            code = c.getResponseCode();
+                        } catch (ConnectException | SocketTimeoutException proxyIo) {
+                            if (canFallbackDirect) {
+                                forceDirect = true;
+                                redirect--;
+                                continue;
+                            }
+                            throw proxyIo;
+                        }
+                        if (canFallbackDirect && ProxyAddress.shouldRetryDirectAfterStatus(code)) {
+                            forceDirect = true;
+                            redirect--;
+                            continue;
+                        }
                         if (code == 301
                                 || code == 302
                                 || code == 303

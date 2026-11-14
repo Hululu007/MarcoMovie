@@ -847,7 +847,7 @@ public final class JsEngine implements SourceEngine {
             checkBudget();
             if (catvod && System.nanoTime() >= requestDeadline)
                 throw new SocketTimeoutException("CatVod 请求超时");
-            HttpURLConnection connection = (HttpURLConnection) next.openConnection();
+            HttpURLConnection connection = ProxyAddress.openHttpConnection(next);
             connection.setInstanceFollowRedirects(false);
             int remaining =
                     (int)

@@ -34,6 +34,7 @@ public final class LocalProxy implements Closeable {
 
     LocalProxy(Application application, Cms.Config source, ScriptResolver scripts)
             throws IOException {
+        ProxyAddress.ensureLoopbackDirectProxySelector();
         app = application;
         config = source;
         this.scripts = scripts;

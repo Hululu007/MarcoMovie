@@ -275,7 +275,11 @@ public final class GuardChecks {
                         {"csp_Dm84", "dm84-v1"}, {"csp_Dm84Guard", "dm84-v1"},
                         {"csp_Auete", "auete-v1"}, {"csp_AueteGuard", "auete-v1"},
                         {"csp_Bttwoo", "bttwoo-v1"}, {"csp_BttwooGuard", "bttwoo-v1"},
-                        {"csp_T4", "t4-v1"}, {"csp_T4Guard", "t4-v1"}
+                        {"csp_AppGZ", "appgz-v1"}, {"csp_AppGZGuard", "appgz-v1"},
+                        {"csp_T4", "t4-v1"}, {"csp_T4Guard", "t4-v1"},
+                        {"csp_AppTT", "apptt-v1"}, {"csp_AppTTGuard", "apptt-v1"},
+                        {"csp_FY", "fy-v1"}, {"csp_FYGuard", "fy-v1"},
+                        {"csp_NewCz", "newcz-v1"}, {"csp_NewCzGuard", "newcz-v1"}
                     }) {
                 Cms.Site alias = new Cms.Site();
                 alias.api = selected[0];
@@ -605,6 +609,58 @@ public final class GuardChecks {
                         expected.code.equals("drpy_filter_not_supported")
                                 && expected.getMessage().equals("此片源不支持当前筛选条件"),
                         "unsupported filter is a fixed typed error, not an empty result");
+            }
+            drpyResponse[0] = "{\"error\":\"drpy_execution_timeout\"}";
+            try {
+                localHost.post(drpyAddress, new JSONObject());
+                throw new AssertionError("execution timeout must be explicit");
+            } catch (CatPawHost.DrpySourceException expected) {
+                check(
+                        expected.code.equals("drpy_execution_timeout")
+                                && expected.getMessage().equals("片源脚本加载超时，请重试或切换其他片源")
+                                && SourceController.message(expected).equals("片源脚本加载超时，请重试或切换其他片源"),
+                        "execution timeout surfaces exact message in SourceController");
+            }
+            AtomicInteger badProxyHits = new AtomicInteger();
+            HttpServer badProxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            badProxy.createContext(
+                    "/",
+                    exchange -> {
+                        badProxyHits.incrementAndGet();
+                        exchange.sendResponseHeaders(502, -1);
+                        exchange.close();
+                    });
+            badProxy.start();
+            ProxySelector previousSelector = ProxySelector.getDefault();
+            try {
+                Proxy proxy =
+                        new Proxy(
+                                Proxy.Type.HTTP,
+                                new InetSocketAddress(
+                                        "127.0.0.1", badProxy.getAddress().getPort()));
+                ProxySelector.setDefault(
+                        new ProxySelector() {
+                            @Override
+                            public List<Proxy> select(URI uri) {
+                                return Collections.singletonList(proxy);
+                            }
+
+                            @Override
+                            public void connectFailed(URI uri, SocketAddress sa, IOException ioe) {}
+                        });
+                status[0] = 200;
+                result[0] = dm84Result.toString();
+                Cms.Site newCz = new Cms.Site();
+                newCz.key = "cz_key";
+                newCz.api = "csp_NewCzGuard";
+                newCz.type = 3;
+                check(
+                        GuardEngine.open(context, config, newCz, fallback) instanceof DrpyEngine
+                                && badProxyHits.get() == 0,
+                        "CatPaw loopback bootstrap bypasses system HTTP proxy 502");
+            } finally {
+                ProxySelector.setDefault(previousSelector);
+                badProxy.stop(0);
             }
             for (String errorBody :
                     new String[] {"{\"error\":\"private-error-body\"}", "private-error-body"}) {

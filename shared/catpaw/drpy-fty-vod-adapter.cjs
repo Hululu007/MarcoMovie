@@ -14,13 +14,23 @@ function installFtyVod() {
       .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ')
       .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   }
-  function checkChallenge(body) {
+  function hasVodMarkup(t) {
+    return /(?:\/voddetail\/|\/vodplay\/|\/vod\/detail\/|module-item|vod-item|vodlist|myui-vodlist|stui-vodlist|video-info|"vod_id"\s*:|"vodId"\s*:)/i.test(t);
+  }
+  function isChallengeBody(body, statusCode) {
     var t = str(body);
-    if (!t) return;
-    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|验证码不正确|请完成滑块验证|verifySlider|challenges\.cloudflare\.com|<title>\s*Just a moment\.\.\.\s*<\/title>|Attention Required!\s*\|\s*Cloudflare|cf-turnstile)/i.test(t) ||
-        /<input[^>]+(?:name|id)=["']?(?:verify|validate|captcha)/i.test(t)) {
-      fail('drpy_verification_required');
+    if (!t) return false;
+    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|<title>\s*Just a moment\.\.\.\s*<\/title>|Attention Required!\s*\|\s*Cloudflare|Checking your browser|正在验证您的浏览器|系统安全验证|verify you are human|请完成滑块验证|verifySlider|验证码不正确)/i.test(t)) {
+      return true;
     }
+    var code = Number(statusCode) || 0;
+    var blockedStatus = code === 401 || code === 403 || code === 429 || code === 503;
+    if (!blockedStatus && (t.length >= 24000 || hasVodMarkup(t))) return false;
+    return /(?:challenges\.cloudflare\.com|cf-turnstile|人机验证)/i.test(t) ||
+      /<input[^>]+(?:name|id)=["']?(?:verify|validate|captcha)/i.test(t);
+  }
+  function checkChallenge(body, statusCode) {
+    if (isChallengeBody(body, statusCode)) fail('drpy_verification_required');
   }
   function address(value, base) {
     var v = str(value).trim();
@@ -82,15 +92,14 @@ function installFtyVod() {
     try { r = req(url, Object.assign({ timeout: 10000 }, opts || {})); }
     catch (e) { fail(/^drpy_[a-z_]+$/.test(e && e.message) ? e.message : 'drpy_source_unavailable'); }
     if (!r || typeof r.content !== 'string') fail('drpy_source_unavailable');
-    checkChallenge(r.content);
+    checkChallenge(r.content, r.code);
     return r;
   }
   function httpReqSoft(url, opts) {
     try {
       var r = req(url, Object.assign({ timeout: 4500 }, opts || {}));
       if (!r || typeof r.content !== 'string') return { ok: false, code: 0, content: '' };
-      if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|验证码不正确|请完成滑块验证|verifySlider|challenges\.cloudflare\.com|<title>\s*Just a moment\.\.\.\s*<\/title>|cf-turnstile)/i.test(r.content) ||
-          /<input[^>]+(?:name|id)=["']?(?:verify|validate|captcha)/i.test(r.content)) {
+      if (isChallengeBody(r.content, r.code)) {
         return { ok: false, code: 403, challenge: true, content: r.content };
       }
       return { ok: r.code >= 200 && r.code < 400, code: r.code, content: r.content, headers: r.headers };
@@ -1187,21 +1196,34 @@ function installFtyVod() {
       }
       for (var i = 0; i < raw.length; i++) {
         addH(raw[i]);
-        try {
-          var u = new URL(raw[i]);
-          if (u.hostname.indexOf('www.') === 0) addH(u.protocol + '//' + u.hostname.slice(4) + (u.port ? ':' + u.port : ''));
-          else addH(u.protocol + '//www.' + u.hostname + (u.port ? ':' + u.port : ''));
-        } catch (_) {}
+        var hm = /^(https?:)\/\/([^/?#:]+)(:\d+)?(?:[/?#]|$)/i.exec(str(raw[i]).trim());
+        if (hm) {
+          if (hm[2].indexOf('www.') === 0) addH(hm[1] + '//' + hm[2].slice(4) + (hm[3] || ''));
+          else if (!/^\d+\.\d+\.\d+\.\d+$/.test(hm[2]) && hm[2].split('.').length === 2) addH(hm[1] + '//www.' + hm[2] + (hm[3] || ''));
+        }
       }
       return out;
     }
     function czHtml(pathOrUrl) {
       var list = expandCzHosts();
+      var rawPath = str(pathOrUrl).trim();
+      var relPath = rawPath;
+      if (/^https?:\/\//i.test(rawPath)) {
+        relPath = rawPath.replace(/^https?:\/\/[^/?#]+/i, '').split('#')[0] || '/';
+      } else if (!relPath) {
+        relPath = '/';
+      } else if (relPath.charAt(0) !== '/') {
+        relPath = '/' + relPath;
+      }
       var sawChallenge = false;
       for (var i = 0; i < list.length; i++) {
         var hostBase = list[i];
-        var u = address(pathOrUrl, hostBase + '/').url;
-        var r = httpReqSoft(u, { timeout: 5000, headers: { 'User-Agent': cfg.userAgent, 'Accept-Language': 'zh-CN,zh;q=0.9', Referer: hostBase + '/' } });
+        var u = address(hostBase + relPath, hostBase + '/').url;
+        var reqOpts = { timeout: 4500, headers: { 'User-Agent': cfg.userAgent, 'Accept-Language': 'zh-CN,zh;q=0.9', Referer: hostBase + '/' } };
+        var r = httpReqSoft(u, reqOpts);
+        if (!r.ok && !r.challenge && r.code === 0) {
+          r = httpReqSoft(u, reqOpts);
+        }
         if (r.challenge) sawChallenge = true;
         if (r.ok) {
           czHost = hostBase;
@@ -1211,7 +1233,9 @@ function installFtyVod() {
       fail(sawChallenge ? 'drpy_verification_required' : 'drpy_source_unavailable');
     }
     function czList(html) {
-      return pdfa(html, 'div.bt_img.mi_ne_kd > ul > li').map(function (li) {
+      var items = pdfa(html, 'div.bt_img.mi_ne_kd > ul > li');
+      if (!items.length) items = pdfa(html, 'div.mi_ne_kd > ul > li');
+      return items.map(function (li) {
         var href = pdfh(li, 'a&&href');
         var name = pdfh(li, 'h3.dytit a&&Text') || pdfh(li, 'img&&alt');
         if (!href || !name) return null;
@@ -1238,7 +1262,7 @@ function installFtyVod() {
       };
     };
     __drpy.homeVod = function () {
-      return { list: czList(czHtml(czHost + '/')) };
+      return { list: czList(czHtml('/')) };
     };
     __drpy.category = function (tid, pg) {
       var page = Math.max(1, Number(pg) || 1);

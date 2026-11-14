@@ -215,10 +215,12 @@ public final class LiveCatalog {
         URL next = new URL(Cms.normalizeHttp(sourceUrl));
         long deadline = System.nanoTime() + source.timeoutMs * 1000000L;
         Map<String, String> requestHeaders = new LinkedHashMap<>(source.headers);
+        boolean forceDirect = false;
         for (int hop = 0; hop < 6; hop++) {
             long remaining = (deadline - System.nanoTime()) / 1000000L;
             if (remaining <= 0) throw new SocketTimeoutException("直播列表请求超时");
-            HttpURLConnection connection = (HttpURLConnection) next.openConnection();
+            boolean canFallbackDirect = !forceDirect && ProxyAddress.hasActiveHttpProxy(next);
+            HttpURLConnection connection = ProxyAddress.openHttpConnection(next, forceDirect);
             connection.setConnectTimeout((int) Math.min(remaining, 12000));
             connection.setReadTimeout((int) Math.min(remaining, 12000));
             connection.setInstanceFollowRedirects(false);
@@ -228,7 +230,22 @@ public final class LiveCatalog {
                 connection.setRequestProperty(h.getKey(), h.getValue());
             try {
                 RequestScope.attach(connection);
-                int status = connection.getResponseCode();
+                int status;
+                try {
+                    status = connection.getResponseCode();
+                } catch (ConnectException | SocketTimeoutException proxyIo) {
+                    if (canFallbackDirect) {
+                        forceDirect = true;
+                        hop--;
+                        continue;
+                    }
+                    throw proxyIo;
+                }
+                if (canFallbackDirect && ProxyAddress.shouldRetryDirectAfterStatus(status)) {
+                    forceDirect = true;
+                    hop--;
+                    continue;
+                }
                 if (status == 301
                         || status == 302
                         || status == 303

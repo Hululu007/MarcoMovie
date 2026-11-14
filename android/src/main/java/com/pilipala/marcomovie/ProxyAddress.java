@@ -1,8 +1,16 @@
 package com.pilipala.marcomovie;
 
+import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.Proxy;
+import java.net.ProxySelector;
+import java.net.SocketAddress;
 import java.net.URI;
+import java.net.URL;
 import java.net.URLDecoder;
+import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -148,6 +156,7 @@ final class ProxyAddress {
     static boolean isLoopbackHost(String host) {
         if (host == null || host.isEmpty()) return false;
         String bare = host.trim();
+        if ("::1".equals(bare)) return true;
         if (bare.startsWith("[")) {
             int close = bare.indexOf(']');
             if (close < 0) return false;
@@ -159,6 +168,69 @@ final class ProxyAddress {
         return "127.0.0.1".equals(bare)
                 || "localhost".equalsIgnoreCase(bare)
                 || "[::1]".equals(bare);
+    }
+
+    static boolean shouldRetryDirectAfterStatus(int status) {
+        return status == 502 || status == 503 || status == 504;
+    }
+
+    static boolean hasActiveHttpProxy(URL url) {
+        if (url == null || isLoopbackHost(url.getHost())) return false;
+        try {
+            ProxySelector selector = ProxySelector.getDefault();
+            if (selector == null) return false;
+            List<Proxy> proxies = selector.select(url.toURI());
+            if (proxies == null) return false;
+            for (Proxy p : proxies) {
+                if (p != null && p.type() != Proxy.Type.DIRECT) return true;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    static HttpURLConnection openHttpConnection(URL url) throws IOException {
+        return openHttpConnection(url, false);
+    }
+
+    static HttpURLConnection openHttpConnection(URL url, boolean forceDirect) throws IOException {
+        if (forceDirect || isLoopbackHost(url.getHost())) {
+            return (HttpURLConnection) url.openConnection(Proxy.NO_PROXY);
+        }
+        return (HttpURLConnection) url.openConnection();
+    }
+
+    static synchronized void ensureLoopbackDirectProxySelector() {
+        ProxySelector current = ProxySelector.getDefault();
+        if (current instanceof LoopbackDirectProxySelector) return;
+        ProxySelector.setDefault(new LoopbackDirectProxySelector(current));
+    }
+
+    private static final class LoopbackDirectProxySelector extends ProxySelector {
+        private final ProxySelector delegate;
+
+        LoopbackDirectProxySelector(ProxySelector delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public List<Proxy> select(URI uri) {
+            if (uri != null && isLoopbackHost(uri.getHost())) {
+                return Collections.singletonList(Proxy.NO_PROXY);
+            }
+            if (delegate != null) {
+                List<Proxy> selected = delegate.select(uri);
+                if (selected != null && !selected.isEmpty()) return selected;
+            }
+            return Collections.singletonList(Proxy.NO_PROXY);
+        }
+
+        @Override
+        public void connectFailed(URI uri, SocketAddress sa, IOException ioe) {
+            if (delegate != null && (uri == null || !isLoopbackHost(uri.getHost()))) {
+                delegate.connectFailed(uri, sa, ioe);
+            }
+        }
     }
 
     /**

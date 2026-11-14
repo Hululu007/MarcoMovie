@@ -208,6 +208,7 @@ public final class MainActivity extends Activity {
     private static volatile boolean crashGuardInstalled;
 
     static void installPluginCrashGuard() {
+        ProxyAddress.ensureLoopbackDirectProxySelector();
         if (crashGuardInstalled) return;
         crashGuardInstalled = true;
         final Thread.UncaughtExceptionHandler previous =

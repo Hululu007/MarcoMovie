@@ -533,7 +533,7 @@ final class MobileShell {
             if (Thread.currentThread().isInterrupted()) {
                 throw new java.io.InterruptedIOException();
             }
-            HttpURLConnection conn = (HttpURLConnection) current.openConnection();
+            HttpURLConnection conn = ProxyAddress.openHttpConnection(current);
             conn.setInstanceFollowRedirects(false);
             conn.setConnectTimeout(15000);
             conn.setReadTimeout(25000);

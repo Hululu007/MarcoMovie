@@ -133,7 +133,7 @@ final class DanmakuView extends View implements AutoCloseable {
                     connection.disconnect();
                 }
                 boolean isLoopback = LocalProxy.loopbackHost(currentUrl.getHost());
-                connection = (HttpURLConnection) currentUrl.openConnection();
+                connection = ProxyAddress.openHttpConnection(currentUrl);
                 connection.setInstanceFollowRedirects(false);
                 connection.setConnectTimeout(12000);
                 connection.setReadTimeout(25000);

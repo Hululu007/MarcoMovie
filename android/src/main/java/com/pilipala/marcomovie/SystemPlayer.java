@@ -565,7 +565,7 @@ public final class SystemPlayer extends MoviePlayer {
                     || (mediaUri != null && Objects.equals(mediaUri.getHost(), uri.getHost())))
                 request.put(item.getKey(), item.getValue());
         for (int i = 0; i < 6; i++) {
-            HttpURLConnection connection = (HttpURLConnection) next.openConnection();
+            HttpURLConnection connection = ProxyAddress.openHttpConnection(next);
             connection.setConnectTimeout(10000);
             connection.setReadTimeout(15000);
             connection.setInstanceFollowRedirects(false);

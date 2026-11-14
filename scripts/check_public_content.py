@@ -50,6 +50,7 @@ TEST_AUTHORITIES = {
     'flutter/lib/core/app_log.dart': {'user:password@host'},
     'flutter/test/app_log_test.dart': {'user:super_secret_pw@dav.jianguoyun.com', 'user:[REDACTED]@dav.jianguoyun.com'},
     'android/tests/LaneEChecks.java': {'user:secret@127.0.0.1:'},
+    'android/tests/LiveNetworkChecks.java': {'127.0.0.2', '127.0.0.2:'},
     'flutter/test/security_hardening_test.dart': {'192.168.1.10:5005'},
     'shared/conformance/case_01_bom/meta.json': {'example.com'},
     'shared/conformance/case_01_bom/expected.json': {'api.example.com'},

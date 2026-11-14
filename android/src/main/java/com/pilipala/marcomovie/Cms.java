@@ -1378,9 +1378,11 @@ public final class Cms {
             next = new URL(next.getProtocol(), next.getHost(), next.getPort(), next.getFile());
         }
         Map<String, RedirectCookie> redirectCookies = new LinkedHashMap<>();
+        boolean forceDirect = false;
         for (int hop = 0; hop < 5; hop++) {
             if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException();
-            HttpURLConnection c = (HttpURLConnection) next.openConnection();
+            boolean canFallbackDirect = !forceDirect && hasActiveHttpProxy(next);
+            HttpURLConnection c = openHttpConnection(next, forceDirect);
             c.setConnectTimeout(12000);
             c.setReadTimeout(18000);
             c.setInstanceFollowRedirects(false);
@@ -1389,17 +1391,32 @@ public final class Cms {
                 c.setRequestProperty(e.getKey(), e.getValue());
             try {
                 RequestScope.attach(c);
-                if (body != null) {
-                    c.setRequestMethod("POST");
-                    c.setDoOutput(true);
-                    c.setRequestProperty(
-                            "Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
-                    c.setFixedLengthStreamingMode(body.length);
-                    try (OutputStream output = c.getOutputStream()) {
-                        output.write(body);
+                int status;
+                try {
+                    if (body != null) {
+                        c.setRequestMethod("POST");
+                        c.setDoOutput(true);
+                        c.setRequestProperty(
+                                "Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+                        c.setFixedLengthStreamingMode(body.length);
+                        try (OutputStream output = c.getOutputStream()) {
+                            output.write(body);
+                        }
                     }
+                    status = c.getResponseCode();
+                } catch (ConnectException | SocketTimeoutException proxyIo) {
+                    if (canFallbackDirect) {
+                        forceDirect = true;
+                        hop--;
+                        continue;
+                    }
+                    throw proxyIo;
                 }
-                int status = c.getResponseCode();
+                if (canFallbackDirect && (status == 502 || status == 503 || status == 504)) {
+                    forceDirect = true;
+                    hop--;
+                    continue;
+                }
                 List<String> setCookies = c.getHeaderFields().get("Set-Cookie");
                 if (setCookies == null) {
                     for (Map.Entry<String, List<String>> entry : c.getHeaderFields().entrySet()) {
@@ -1795,9 +1812,49 @@ public final class Cms {
         return l;
     }
 
+    private static boolean isLoopbackUrlHost(String host) {
+        if (host == null || host.isEmpty()) return false;
+        String bare = host.trim();
+        if ("::1".equals(bare)) return true;
+        if (bare.startsWith("[")) {
+            int close = bare.indexOf(']');
+            if (close < 0) return false;
+            bare = bare.substring(0, close + 1);
+        } else {
+            int colon = bare.indexOf(':');
+            if (colon >= 0) bare = bare.substring(0, colon);
+        }
+        return "127.0.0.1".equals(bare)
+                || "localhost".equalsIgnoreCase(bare)
+                || "[::1]".equals(bare);
+    }
+
+    private static boolean hasActiveHttpProxy(URL url) {
+        if (url == null || isLoopbackUrlHost(url.getHost())) return false;
+        try {
+            ProxySelector selector = ProxySelector.getDefault();
+            if (selector == null) return false;
+            List<Proxy> proxies = selector.select(url.toURI());
+            if (proxies == null) return false;
+            for (Proxy p : proxies) {
+                if (p != null && p.type() != Proxy.Type.DIRECT) return true;
+            }
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    private static HttpURLConnection openHttpConnection(URL url, boolean forceDirect)
+            throws IOException {
+        if (forceDirect || isLoopbackUrlHost(url.getHost())) {
+            return (HttpURLConnection) url.openConnection(Proxy.NO_PROXY);
+        }
+        return (HttpURLConnection) url.openConnection();
+    }
+
     public static void assertMedia(String address, Map<String, String> headers) throws Exception {
         if (!isHttp(address)) throw new IOException("此剧集不是 HTTP(S) 直连媒体，基础版不能播放");
-        HttpURLConnection c = (HttpURLConnection) new URL(normalizeHttp(address)).openConnection();
+        HttpURLConnection c = openHttpConnection(new URL(normalizeHttp(address)), false);
         c.setRequestMethod("HEAD");
         c.setConnectTimeout(12000);
         c.setReadTimeout(12000);
