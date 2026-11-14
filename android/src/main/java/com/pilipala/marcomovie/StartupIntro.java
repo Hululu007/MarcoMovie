@@ -104,8 +104,7 @@ final class StartupIntro extends FrameLayout {
     final class BrandView extends View {
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
         final Bitmap logo = BitmapFactory.decodeResource(getResources(), R.drawable.logo_mark);
-        final RectF logoBounds = new RectF(-86, -86, 86, 86), plate = new RectF(-62, -59, 62, 60);
-        final Path badge = new Path();
+        final RectF logoBounds = new RectF(-86, -86, 86, 86);
         final Shader light =
                 new LinearGradient(
                         -45,
@@ -115,6 +114,7 @@ final class StartupIntro extends FrameLayout {
                         new int[] {0x00ffffff, 0x66ffffff, 0x00ffffff},
                         null,
                         Shader.TileMode.CLAMP);
+        final PorterDuffXfermode sweepMode = new PorterDuffXfermode(PorterDuff.Mode.SRC_ATOP);
         final Matrix sweep = new Matrix();
         float progress;
 
@@ -124,7 +124,6 @@ final class StartupIntro extends FrameLayout {
             setFocusable(false);
             paint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             paint.setFilterBitmap(true);
-            badge.addRoundRect(plate, 24, 24, Path.Direction.CW);
         }
 
         float reveal(float start, float duration) {
@@ -150,17 +149,20 @@ final class StartupIntro extends FrameLayout {
             paint.setStyle(Paint.Style.FILL);
             paint.setShader(null);
             paint.setAlpha(Math.round(255 * appear));
-            c.drawBitmap(logo, null, logoBounds, paint);
             if (progress > .24f && progress < .65f) {
-                c.save();
-                c.clipPath(badge);
+                int layer = c.saveLayer(logoBounds, null);
+                c.drawBitmap(logo, null, logoBounds, paint);
                 sweep.setTranslate(-180 + (progress - .24f) / .41f * 360, 0);
                 light.setLocalMatrix(sweep);
                 paint.setShader(light);
-                paint.setAlpha(Math.round(110 * appear));
-                c.drawRect(plate, paint);
+                paint.setXfermode(sweepMode);
+                paint.setAlpha(Math.round(130 * appear));
+                c.drawRect(logoBounds, paint);
+                paint.setXfermode(null);
                 paint.setShader(null);
-                c.restore();
+                c.restoreToCount(layer);
+            } else {
+                c.drawBitmap(logo, null, logoBounds, paint);
             }
             c.restore();
             paint.setColor(0xfff5f5f7);

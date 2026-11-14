@@ -114,14 +114,14 @@ final class UpdateScreen {
         LinearLayout headerRow = a.row();
         headerRow.setGravity(Gravity.CENTER_VERTICAL);
 
-        // iOS App Squircle Icon Badge
+        // App Squircle Icon Badge
         FrameLayout iconBox = new FrameLayout(a);
         GradientDrawable squircle =
                 new GradientDrawable(
                         GradientDrawable.Orientation.TL_BR,
-                        new int[] {0xff1f4739, 0xff0f241d, 0xff091512});
+                        new int[] {0xff262a31, 0xff1d2025, 0xff14161a});
         squircle.setCornerRadius(a.dp(16));
-        squircle.setStroke(Math.max(1, a.dp(1)), 0x485ac8fa);
+        squircle.setStroke(Math.max(1, a.dp(1)), 0x38ffffff);
         iconBox.setBackground(squircle);
         ImageView logo = new ImageView(a);
         logo.setImageResource(R.drawable.logo_mark);

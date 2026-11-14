@@ -8,7 +8,7 @@
   <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
   <uses-feature android:name="android.software.leanback" android:required="false" />
   <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
-  <application android:label="Marco Movie Lite" android:icon="@drawable/app_icon" android:theme="@style/LiteTheme" android:allowBackup="false" android:hardwareAccelerated="true" android:largeHeap="true">
+  <application android:label="Marco Movie Lite" android:icon="@mipmap/ic_launcher" android:theme="@style/LiteTheme" android:allowBackup="false" android:hardwareAccelerated="true" android:largeHeap="true">
     <activity android:name=".LiteActivity" android:exported="true" android:screenOrientation="unspecified" android:configChanges="keyboardHidden|orientation|screenSize|uiMode">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />

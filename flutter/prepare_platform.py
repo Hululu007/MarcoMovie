@@ -1,5 +1,6 @@
 """Bundle brand logo assets, and configure Apple/Windows native shells."""
 from pathlib import Path
+import json
 import re
 import plistlib
 import shutil
@@ -10,6 +11,8 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 LOGO_MARK = REPO_ROOT / "android" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png"
 OPAQUE_ICON = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
+MACOS_ICON_DIR = ROOT / "brand" / "macos"
+IOS_ICON = ROOT / "brand" / "ios" / "1024.png"
 
 IOS_NETDISK_AUTH_CHANNEL_SNIPPET = r'''
       let authChannel = FlutterMethodChannel(name: "marco_movie/netdisk_auth", binaryMessenger: controller.binaryMessenger)
@@ -952,13 +955,46 @@ def _png_dimensions(path: Path) -> tuple[int, int]:
             return w, h
     return 1024, 1024
 
-def _replace_xcassets_icons(appiconset_dir: Path, source_png: Path) -> None:
-    if not appiconset_dir.exists() or not source_png.exists():
+def _resolve_iconset_match(source_dir: Path, filename: str, w: int, h: int, contents_map: dict[str, str]) -> Path | None:
+    if filename in contents_map:
+        candidate = source_dir / contents_map[filename]
+        if candidate.exists() and _png_dimensions(candidate) == (w, h):
+            return candidate
+    for name in (f"icon_{w}x{h}.png", f"icon_{w // 2}x{h // 2}@2x.png" if w % 2 == 0 and h % 2 == 0 else ""):
+        if name:
+            candidate = source_dir / name
+            if candidate.exists() and _png_dimensions(candidate) == (w, h):
+                return candidate
+    return None
+
+def _replace_xcassets_icons(appiconset_dir: Path, source: Path) -> None:
+    if not appiconset_dir.exists() or not source.exists():
         return
+    contents_map: dict[str, str] = {}
+    contents_json = appiconset_dir / "Contents.json"
+    if source.is_dir() and contents_json.exists():
+        try:
+            meta = json.loads(contents_json.read_text(encoding="utf-8"))
+            for item in meta.get("images", []):
+                fname = item.get("filename")
+                size = item.get("size")
+                scale = item.get("scale")
+                if fname and size:
+                    contents_map[fname] = f"icon_{size}@{scale}.png" if scale == "2x" else f"icon_{size}.png"
+        except Exception:
+            contents_map = {}
+    fallback = (source / "icon_512x512@2x.png") if source.is_dir() else source
     sips = shutil.which("sips")
     for png_file in appiconset_dir.glob("*.png"):
         w, h = _png_dimensions(png_file)
-        shutil.copy2(source_png, png_file)
+        if source.is_dir():
+            matched = _resolve_iconset_match(source, png_file.name, w, h, contents_map)
+            if matched is not None:
+                shutil.copy2(matched, png_file)
+                continue
+        if not fallback.exists():
+            continue
+        shutil.copy2(fallback, png_file)
         if sips:
             subprocess.run(
                 [sips, "-z", str(h), str(w), str(png_file)],
@@ -1016,7 +1052,7 @@ def main() -> None:
     if macos_runner.exists():
         _replace_xcassets_icons(
             macos_runner / "Assets.xcassets" / "AppIcon.appiconset",
-            LOGO_MARK if LOGO_MARK.exists() else OPAQUE_ICON,
+            MACOS_ICON_DIR if MACOS_ICON_DIR.exists() else (OPAQUE_ICON if OPAQUE_ICON.exists() else LOGO_MARK),
         )
         for ent in macos_runner.glob("*.entitlements"):
             text = ent.read_text(encoding="utf-8")
@@ -1129,7 +1165,7 @@ def main() -> None:
     if ios_runner.exists():
         _replace_xcassets_icons(
             ios_runner / "Assets.xcassets" / "AppIcon.appiconset",
-            OPAQUE_ICON if OPAQUE_ICON.exists() else LOGO_MARK,
+            IOS_ICON if IOS_ICON.exists() else (OPAQUE_ICON if OPAQUE_ICON.exists() else LOGO_MARK),
         )
         ios_plist = ios_runner / "Info.plist"
         if ios_plist.exists():

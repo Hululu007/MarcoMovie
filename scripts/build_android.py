@@ -162,7 +162,7 @@ def main():
     (DIST/(apk.name+'.sha256')).write_text(digest+'  '+apk.name+'\n',encoding='ascii')
     compatibility_alias(apk, version, 'tv')
     mobile_manifest=BUILD/'AndroidManifest.mobile.xml'
-    mobile_xml=(SRC/'AndroidManifest.xml').read_text(encoding='utf-8').replace('android:value="tv"','android:value="mobile"').replace('<category android:name="android.intent.category.LEANBACK_LAUNCHER" />','')
+    mobile_xml=(SRC/'AndroidManifest.xml').read_text(encoding='utf-8').replace('android:value="tv"','android:value="mobile"').replace('android:icon="@mipmap/mm_tv_launcher"','android:icon="@mipmap/mm_launcher"').replace(' android:banner="@mipmap/mm_tv_banner"','').replace('<category android:name="android.intent.category.LEANBACK_LAUNCHER" />','')
     mobile_xml=re.sub(r'android:versionCode="[^"]+"', f'android:versionCode="{mobile_version_code}"', mobile_xml)
     mobile_xml=re.sub(r'android:versionName="[^"]+"', f'android:versionName="{mobile_version}"', mobile_xml)
     mobile_manifest.write_text(mobile_xml,encoding='utf-8')

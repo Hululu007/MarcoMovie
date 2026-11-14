@@ -1,5 +1,9 @@
 <div align="center">
-  <img src="docs/images/tv-banner-960x540.png" width="480" alt="Marco Movie — 银色场记板与播放标志" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand-horizontal-dark.png" />
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/brand-horizontal-light.png" />
+    <img src="docs/images/brand-horizontal-light.png" width="520" alt="Marco Movie — 金属胶片丝带 M 标志与品牌字标" />
+  </picture>
   <h1>Marco Movie</h1>
   <p>支持 Android 电视、手机、平板及 Windows / macOS / iOS 多端自适应的播放器。</p>
   <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.5.23 · Android 电视：0.5.23 · Android Lite：0.5.5 · Windows：0.5.19 · macOS：0.5.16 · iOS：0.5.26 · 各端独立更新</p>

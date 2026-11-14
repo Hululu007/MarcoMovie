@@ -116,7 +116,7 @@ class AppleColors {
   static const Color glassHighlight = Color(0x52FFFFFF);
 }
 
-/// Brand logo widget rendering the user's frosted-glass clapperboard squircle icon
+/// Brand logo widget rendering the metallic film-ribbon `M` mark
 /// (`assets/logo_mark.png`) and the signature two-tone `Marco Movie` wordmark.
 class MarcoBrandLogo extends StatelessWidget {
   final double iconSize;
@@ -140,6 +140,7 @@ class MarcoBrandLogo extends StatelessWidget {
         width: iconSize,
         height: iconSize,
         fit: BoxFit.contain,
+        filterQuality: FilterQuality.medium,
         errorBuilder: (_, __, ___) => _FallbackLogoMark(size: iconSize),
       ),
     );
@@ -206,24 +207,20 @@ class _FallbackLogoMark extends StatelessWidget {
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFFF4F5F7), Color(0xFFD6DAE0)],
+          colors: [Color(0xFF282C33), Color(0xFF1D2025)],
         ),
         borderRadius: BorderRadius.circular(size * 0.24),
-        border: Border.all(color: Colors.white54, width: 0.8),
+        border: Border.all(color: Colors.white24, width: 0.8),
       ),
       alignment: Alignment.center,
-      child: Container(
-        width: size * 0.62,
-        height: size * 0.54,
-        decoration: BoxDecoration(
-          color: const Color(0xFF2B3038),
-          borderRadius: BorderRadius.circular(size * 0.12),
-        ),
-        alignment: Alignment.center,
-        child: Icon(
-          CupertinoIcons.play_fill,
-          color: const Color(0xFFF4F5F7),
-          size: size * 0.3,
+      child: Text(
+        'M',
+        textScaler: TextScaler.noScaling,
+        style: TextStyle(
+          color: const Color(0xFFE5E7EB),
+          fontSize: size * 0.52,
+          fontWeight: FontWeight.w800,
+          height: 1,
         ),
       ),
     );
