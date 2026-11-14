@@ -240,6 +240,30 @@ function unwrapGuard(bytes) {
   for (let i = 0; i < result.length; i++) if ([1, 2, 5, 6].includes(result[i])) result[i] ^= 7;
   return result;
 }
+const FTY_NATIVE_MASKS = Object.freeze({
+  'd5d8adee01e1bdc4c18b445e19ce7c94fb296ca6dce6f18a08786504fc961f01': 0x15,
+  'fac9e3937d9928e437ebff79bc5164df418a6adb212494ef21c273579b045dcb': 0xb7
+});
+
+function readFtyGuardArtifact(bytes, needDex = true) {
+  const budget = { bytes: 0, entries: 0 };
+  let native;
+  try {
+    native = zipMember(bytes, 'assets/ftyguard_v8.so', budget);
+  } catch (_) {
+    throw Error('guard_artifact_unsupported');
+  }
+  const nativeSha = sha(native);
+  if (native.length !== 102440 || !Object.hasOwn(FTY_NATIVE_MASKS, nativeSha)) {
+    throw Error('guard_artifact_unsupported');
+  }
+  const result = { native, nativeSha, mask: FTY_NATIVE_MASKS[nativeSha] };
+  if (!needDex) return result;
+  const payload = zipMember(bytes, 'assets/ftyshinidie.guard', budget);
+  const dex = zipMember(unwrapGuard(payload), 'classes.dex', budget);
+  return { ...result, reader: new Dex(dex) };
+}
+
 class Dex {
   constructor(bytes) {
     this.bytes = bytes;
@@ -427,15 +451,209 @@ class Dex {
     }
     return fields;
   }
+  protoSig(proto) {
+    const [ret, off] = proto;
+    if (!off) return ret + '()';
+    const count = this.u32(off);
+    if (count > 256) fail();
+    bounds(this.bytes, off + 4, count * 2);
+    const params = [];
+    for (let i = 0; i < count; i++) params.push(this.at(this.types, this.u16(off + 4 + i * 2)));
+    return ret + '(' + params.join(',') + ')';
+  }
+  insnWidth(codeOffset, unit, size) {
+    if (!Number.isInteger(unit) || unit < 0 || unit >= size) fail();
+    const ins = codeOffset + 16 + unit * 2;
+    const w0 = this.u16(ins);
+    let width;
+    if (w0 === 0x0100) {
+      if (unit + 4 > size) fail();
+      width = 4 + this.u16(ins + 2) * 2;
+    } else if (w0 === 0x0200) {
+      if (unit + 2 > size) fail();
+      width = 2 + this.u16(ins + 2) * 4;
+    } else if (w0 === 0x0300) {
+      if (unit + 4 > size) fail();
+      const elemWidth = this.u16(ins + 2), elemCount = this.u32(ins + 4);
+      if (elemWidth > 16 || elemCount > 65536) fail();
+      width = 4 + Math.ceil((elemWidth * elemCount) / 2);
+    } else {
+      const op = w0 & 0xff;
+      if (op === 0x18) width = 5;
+      else if (op === 0x03 || op === 0x06 || op === 0x09 || op === 0x14 || op === 0x17 || op === 0x1b ||
+          (op >= 0x24 && op <= 0x26) || (op >= 0x2a && op <= 0x2c) ||
+          (op >= 0x6e && op <= 0x72) || (op >= 0x74 && op <= 0x78)) width = 3;
+      else if (op === 0x02 || op === 0x05 || op === 0x08 || op === 0x13 || op === 0x15 || op === 0x16 ||
+          op === 0x19 || op === 0x1a || op === 0x1c || op === 0x1f || op === 0x20 || op === 0x22 ||
+          op === 0x23 || op === 0x29 || (op >= 0x2d && op <= 0x3d) || (op >= 0x44 && op <= 0x6d) ||
+          (op >= 0x90 && op <= 0xaf) || (op >= 0xd0 && op <= 0xe2)) width = 2;
+      else width = 1;
+    }
+    if (!Number.isSafeInteger(width) || width < 1 || unit + width > size) fail();
+    return width;
+  }
+  classMethods(className) {
+    const classes = this.table(96, 32).filter(p => this.at(this.types, this.u32(p)) === className);
+    if (!classes.length) return null;
+    if (classes.length !== 1) fail();
+    let p = this.u32(classes[0] + 24);
+    if (!p) return [];
+    const counts = [];
+    for (let i = 0; i < 4; i++) { let n; [n, p] = this.uleb(p); if (n > 65536) fail(); counts.push(n); }
+    for (let i = 0; i < counts[0] + counts[1]; i++) { [, p] = this.uleb(p); [, p] = this.uleb(p); }
+    const out = [];
+    for (const count of counts.slice(2)) {
+      let index = 0;
+      for (let i = 0; i < count; i++) {
+        let delta, code; [delta, p] = this.uleb(p); [, p] = this.uleb(p); [code, p] = this.uleb(p);
+        index += delta;
+        const [owner, proto, name] = this.at(this.methods, index);
+        if (owner === className && code) {
+          const size = this.u32(code + 12);
+          if (!size || size > 65536) fail();
+          bounds(this.bytes, code, 16 + size * 2);
+          out.push({ name, proto, sig: this.protoSig(proto), offset: code, size });
+        }
+      }
+    }
+    return out;
+  }
+  extractXorConstants(className) {
+    const methods = this.classMethods(className);
+    if (!methods) return null;
+    const clinit = methods.find(m => m.name === '<clinit>' && m.sig === 'V()');
+    if (!clinit || clinit.size < 14 || this.u16(clinit.offset + 2) !== 0) return null;
+    const start = clinit.offset + 16;
+    if (this.u16(start) !== 0x0013 || this.u16(start + 4) !== 0x0023 ||
+        this.at(this.types, this.u16(start + 6)) !== '[S' || this.u16(start + 8) !== 0x0026 ||
+        this.u16(start + 14) !== 0x0069) return null;
+    const count = this.u16(start + 2);
+    const payloadUnit = 4 + this.u32(start + 10);
+    const field = this.at(this.fields, this.u16(start + 16));
+    if (!count || count > 8192 || payloadUnit < 10 || payloadUnit + 4 + count > clinit.size) return null;
+    if (field[0] !== className || field[1] !== '[S') return null;
+    const payload = start + payloadUnit * 2;
+    if (this.u16(payload) !== 0x0300 || this.u16(payload + 2) !== 2 || this.u32(payload + 4) !== count) return null;
+    const values = Array.from({ length: count }, (_, i) => this.u16(payload + 8 + i * 2));
+    const maskBySlice = new Map();
+    const calls = [];
+    const byMethod = new Map();
+    for (const m of methods) {
+      let headerRegs = null;
+      let regs = new Map();
+      const methodCalls = [];
+      for (let u = 0; u < m.size; ) {
+        const width = this.insnWidth(m.offset, u, m.size);
+        const ins = m.offset + 16 + u * 2;
+        const w0 = this.u16(ins), op = w0 & 0xff;
+        if (w0 !== 0x0100 && w0 !== 0x0200 && w0 !== 0x0300) {
+          if (op === 0x12) {
+            let v = (w0 >>> 12) & 0xf;
+            if (v >= 8) v -= 16;
+            regs.set((w0 >>> 8) & 0xf, v);
+          } else if (op === 0x13) {
+            const raw = this.u16(ins + 2);
+            regs.set(w0 >>> 8, raw >= 0x8000 ? raw - 0x10000 : raw);
+          } else if (op === 0x14) {
+            regs.set(w0 >>> 8, this.u32(ins + 2) | 0);
+          } else if (op === 0x15) {
+            regs.set(w0 >>> 8, (this.u16(ins + 2) << 16) | 0);
+          } else if (op === 0x01) {
+            const dst = (w0 >>> 8) & 0xf, src = (w0 >>> 12) & 0xf;
+            if (regs.has(src)) regs.set(dst, regs.get(src)); else regs.delete(dst);
+          } else if (op === 0x02) {
+            const dst = w0 >>> 8, src = this.u16(ins + 2);
+            if (regs.has(src)) regs.set(dst, regs.get(src)); else regs.delete(dst);
+          } else if (op === 0x03) {
+            const dst = this.u16(ins + 2), src = this.u16(ins + 4);
+            if (regs.has(src)) regs.set(dst, regs.get(src)); else regs.delete(dst);
+          } else if (op === 0x0a || op === 0x0c || op === 0x1a || op === 0x1b || op === 0x22) {
+            regs.delete(w0 >>> 8);
+          } else if (op === 0x2b || op === 0x2c) {
+            if (!headerRegs) headerRegs = new Map(regs);
+          } else if (op === 0x28 || op === 0x29 || op === 0x2a || (op >= 0x0e && op <= 0x11) || op === 0x27) {
+            if (headerRegs) regs = new Map(headerRegs);
+          } else if ((op === 0x71 || op === 0x77) && u + 2 < m.size) {
+            const [, mProto] = this.at(this.methods, this.u16(ins + 2));
+            if (this.protoSig(mProto) === 'Ljava/lang/String;([S,I,I,I)') {
+              let rStart, rLen, rMask;
+              if (op === 0x71 && ((w0 >>> 12) & 0xf) === 4) {
+                const w2 = this.u16(ins + 4);
+                rStart = (w2 >>> 4) & 0xf;
+                rLen = (w2 >>> 8) & 0xf;
+                rMask = (w2 >>> 12) & 0xf;
+              } else if (op === 0x77 && (w0 >>> 8) === 4) {
+                const base = this.u16(ins + 4);
+                rStart = base + 1;
+                rLen = base + 2;
+                rMask = base + 3;
+              }
+              if (rStart !== undefined && regs.has(rStart) && regs.has(rLen) && regs.has(rMask)) {
+                const st = regs.get(rStart), ln = regs.get(rLen), mk = regs.get(rMask) & 0xffff;
+                if (st >= 0 && ln >= 0 && st + ln <= values.length) {
+                  maskBySlice.set(st + ':' + ln, mk);
+                  let value = '';
+                  for (let i = 0; i < ln; i += 4096) {
+                    const chunk = [];
+                    for (let j = i; j < Math.min(ln, i + 4096); j++) chunk.push(values[st + j] ^ mk);
+                    value += String.fromCharCode(...chunk);
+                  }
+                  const entry = { method: m.name, sig: m.sig, start: st, len: ln, mask: mk, value };
+                  calls.push(entry);
+                  methodCalls.push(entry);
+                }
+              }
+            }
+          }
+        }
+        u += width;
+      }
+      if (methodCalls.length) {
+        if (!byMethod.has(m.name)) byMethod.set(m.name, []);
+        byMethod.get(m.name).push(...methodCalls);
+      }
+    }
+    return { count, payloadUnit, values, maskBySlice, calls, byMethod };
+  }
+  extractMethodLiterals(className, methodName) {
+    const methods = this.classMethods(className);
+    if (!methods) return null;
+    return methods.filter(m => m.name === methodName).map(m => {
+      const list = [];
+      const atUnit = new Map();
+      for (let u = 0; u < m.size; ) {
+        const width = this.insnWidth(m.offset, u, m.size);
+        const ins = m.offset + 16 + u * 2;
+        const w0 = this.u16(ins), op = w0 & 0xff;
+        if (w0 !== 0x0100 && w0 !== 0x0200 && w0 !== 0x0300) {
+          if (op === 0x1a && u + 1 < m.size) {
+            const value = this.at(this.strings, this.u16(ins + 2));
+            list.push({ unit: u, value });
+            atUnit.set(u, value);
+          } else if (op === 0x1b && u + 2 < m.size) {
+            const value = this.at(this.strings, this.u32(ins + 2));
+            list.push({ unit: u, value });
+            atUnit.set(u, value);
+          }
+        }
+        u += width;
+      }
+      return { name: m.name, sig: m.sig, size: m.size, list, atUnit };
+    });
+  }
 }
 function extractKnownPlugin(bytes, adapter = 'dm84-v1') {
   if (!Buffer.isBuffer(bytes) || bytes.length > MAX) fail();
   const profile = PROFILES[sha(bytes)];
-  if (!profile) throw Error('guard_artifact_unsupported');
-  const budget = { bytes: 0, entries: 0 };
-  const payload = zipMember(bytes, 'assets/ftyshinidie.guard', budget);
-  const dex = zipMember(unwrapGuard(payload), 'classes.dex', budget);
-  const reader = new Dex(dex);
+  let reader;
+  if (profile) {
+    const budget = { bytes: 0, entries: 0 };
+    const payload = zipMember(bytes, 'assets/ftyshinidie.guard', budget);
+    const dex = zipMember(unwrapGuard(payload), 'classes.dex', budget);
+    reader = new Dex(dex);
+  } else {
+    ({ reader } = readFtyGuardArtifact(bytes, true));
+  }
   function endpoint(value) {
     if (typeof value !== 'string' || value.length > 2048) fail();
     let url; try { url = new URL(value); } catch (_) { fail(); }
@@ -444,42 +662,143 @@ function extractKnownPlugin(bytes, adapter = 'dm84-v1') {
   }
   if (adapter === 'auete-v1') {
     const className = 'Lcom/github/catvod/spider/Auete;';
-    const origin = endpoint(reader.reviewedLiteral(className, '<init>',
-      profile.auete.init, 3, 'yq'));
-    const mediaBase = endpoint(reader.reviewedLiteral(className, 'playerContent',
-      profile.auete.player, 299));
+    let origin, mediaBase;
+    if (profile) {
+      origin = endpoint(reader.reviewedLiteral(className, '<init>',
+        profile.auete.init, 3, 'yq'));
+      mediaBase = endpoint(reader.reviewedLiteral(className, 'playerContent',
+        profile.auete.player, 299));
+    } else {
+      if (!reader.classMethods(className)) throw Error('guard_artifact_unsupported');
+      const initLits = reader.extractMethodLiterals(className, '<init>');
+      const playerLits = reader.extractMethodLiterals(className, 'playerContent');
+      if (!initLits || initLits.length !== 1 || !playerLits || playerLits.length !== 1) fail();
+      let rawOrigin = initLits[0].atUnit.get(3);
+      if (typeof rawOrigin !== 'string' || !/^https?:\/\//i.test(rawOrigin)) {
+        const cands = initLits[0].list.filter(x => /^https?:\/\/[^/?#]+\/?$/i.test(x.value));
+        if (cands.length !== 1) fail();
+        rawOrigin = cands[0].value;
+      }
+      let rawMedia = playerLits[0].atUnit.get(299);
+      if (typeof rawMedia !== 'string' || !/^https?:\/\//i.test(rawMedia)) {
+        const cands = playerLits[0].list.filter(x => /^https?:\/\/[^?#]+\/$/i.test(x.value));
+        if (cands.length !== 1) fail();
+        rawMedia = cands[0].value;
+      }
+      origin = endpoint(rawOrigin);
+      mediaBase = endpoint(rawMedia);
+    }
     if (origin.pathname !== '/' || origin.search || mediaBase.search || !mediaBase.pathname.endsWith('/')) fail();
     return { origin: origin.origin, mediaBase: mediaBase.href,
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36' };
   }
   if (adapter === 'appgz-v1') {
-    const className = 'Lcom/github/catvod/spider/Appgz;', g = profile.appgz;
-    for (const [method, hash] of Object.entries(g.methods)) reader.reviewedCode(className, method, hash);
-    const values = reader.reviewedShortArray(className, g.clinit, 'short', 38, g.count);
-    const decode = ([start, length, mask]) => String.fromCharCode(...values.slice(start, start + length).map(value => value ^ mask));
-    const origin = endpoint(decode(g.origin));
+    const className = 'Lcom/github/catvod/spider/Appgz;';
+    let decodePair;
+    let tpl;
+    if (profile) {
+      const g = profile.appgz;
+      for (const [method, hash] of Object.entries(g.methods)) reader.reviewedCode(className, method, hash);
+      const values = reader.reviewedShortArray(className, g.clinit, 'short', 38, g.count);
+      decodePair = ([start, length, mask]) => String.fromCharCode(...values.slice(start, start + length).map(value => value ^ mask));
+      tpl = g;
+    } else {
+      const info = reader.extractXorConstants(className);
+      if (!info) throw Error('guard_artifact_unsupported');
+      const sliceKeys = ['origin', 'privateKey', 'publicKey', 'signatureSuffix', 'utdidKey', 'ua', 'version', 'pkg', 'ver', 'code'];
+      const candidates = [
+        PROFILES['6f88b2001d45018aad4e7293566ef739be92dee85c123db4cc062539973fe799'].appgz,
+        PROFILES['da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096'].appgz,
+        PROFILES['88e67402129e7db92669fb351397ecd4d09709e6c70b577f22a19cfb0ad5f204'].appgz
+      ];
+      tpl = candidates.find(c => c.count === info.count && sliceKeys.every(k => info.maskBySlice.has(c[k][0] + ':' + c[k][1])))
+        || candidates.find(c => sliceKeys.every(k => info.maskBySlice.has(c[k][0] + ':' + c[k][1])));
+      if (!tpl) fail();
+      decodePair = ([start, length]) => {
+        const mask = info.maskBySlice.get(start + ':' + length);
+        if (mask === undefined) fail();
+        let s = '';
+        for (let i = 0; i < length; i++) s += String.fromCharCode(info.values[start + i] ^ mask);
+        return s;
+      };
+    }
+    const origin = endpoint(decodePair(tpl.origin));
     if (origin.pathname !== '/' || origin.search) fail();
-    const ver = decode(g.ver);
-    const config = {origin:origin.origin,privateKey:decode(g.privateKey),publicKey:decode(g.publicKey),
-      signatureSuffix:decode(g.signatureSuffix),utdidKey:decode(g.utdidKey),headers:{
-        'User-Agent':decode(g.ua),'Version':decode(g.version),'PackageName':decode(g.pkg),
-        'Ver':ver,'api-ver':ver,'code':decode(g.code)}};
+    const ver = decodePair(tpl.ver);
+    const config = {origin:origin.origin,privateKey:decodePair(tpl.privateKey),publicKey:decodePair(tpl.publicKey),
+      signatureSuffix:decodePair(tpl.signatureSuffix),utdidKey:decodePair(tpl.utdidKey),headers:{
+        'User-Agent':decodePair(tpl.ua),'Version':decodePair(tpl.version),'PackageName':decodePair(tpl.pkg),
+        'Ver':ver,'api-ver':ver,'code':decodePair(tpl.code)}};
     if (![config.privateKey,config.publicKey].every(v=>/^[A-Za-z0-9+/]+={0,2}$/.test(v)) ||
         Object.values(config.headers).some(v=>!v||/[\r\n\0]/.test(v))) fail();
     return config;
   }
   if (adapter === 'bttwoo-v1') {
-    const className = 'Lcom/github/catvod/spider/Bttwoo;', b = profile.bttwoo;
-    reader.reviewedCode(className, '<init>', b.init);
-    reader.reviewedCode(className, 'encodePlayKey', b.encodePlayKey);
-    const values = reader.reviewedShortArray(className, b.clinit, 'short', 10, 686);
-    const headerValues = reader.reviewedShortArray(b.headerClass, b.headerClinit, 'short', 316, b.headerCount ?? 1667);
-    const decode = (array, start, length, mask) => String.fromCharCode(...array.slice(start, start + length).map(value => value ^ mask));
-    const origin = endpoint(decode(values, 0, 23, b.originMask)), playKey = decode(values, 24, 20, b.playKeyMask), userAgent = decode(headerValues, 1048, 117, b.userAgentMask);
+    const className = 'Lcom/github/catvod/spider/Bttwoo;';
+    let originRaw, playKey, userAgent;
+    const decodeSlice = (array, start, length, mask) => {
+      let s = '';
+      for (let i = 0; i < length; i++) s += String.fromCharCode(array[start + i] ^ mask);
+      return s;
+    };
+    if (profile) {
+      const b = profile.bttwoo;
+      reader.reviewedCode(className, '<init>', b.init);
+      reader.reviewedCode(className, 'encodePlayKey', b.encodePlayKey);
+      const values = reader.reviewedShortArray(className, b.clinit, 'short', 10, 686);
+      const headerValues = reader.reviewedShortArray(b.headerClass, b.headerClinit, 'short', 316, b.headerCount ?? 1667);
+      originRaw = decodeSlice(values, 0, 23, b.originMask);
+      playKey = decodeSlice(values, 24, 20, b.playKeyMask);
+      userAgent = decodeSlice(headerValues, 1048, 117, b.userAgentMask);
+    } else {
+      const info = reader.extractXorConstants(className);
+      if (!info) throw Error('guard_artifact_unsupported');
+      const originMask = info.maskBySlice.get('0:23');
+      const playKeyMask = info.maskBySlice.get('24:20');
+      if (originMask === undefined || playKeyMask === undefined) fail();
+      originRaw = decodeSlice(info.values, 0, 23, originMask);
+      playKey = decodeSlice(info.values, 24, 20, playKeyMask);
+      const uaCandidates = [];
+      for (const clsOff of reader.table(96, 32)) {
+        const clsName = reader.at(reader.types, reader.u32(clsOff));
+        if (!clsName.startsWith('Lcom/github/catvod/spider/merge/')) continue;
+        let p = reader.u32(clsOff + 24);
+        if (!p) continue;
+        const counts = [];
+        for (let i = 0; i < 4; i++) { let n; [n, p] = reader.uleb(p); if (n > 65536) fail(); counts.push(n); }
+        for (let i = 0; i < counts[0] + counts[1]; i++) { [, p] = reader.uleb(p); [, p] = reader.uleb(p); }
+        let hasCandidateClinit = false;
+        for (const count of counts.slice(2)) {
+          let index = 0;
+          for (let i = 0; i < count; i++) {
+            let delta, code; [delta, p] = reader.uleb(p); [, p] = reader.uleb(p); [code, p] = reader.uleb(p); index += delta;
+            const [owner, , name] = reader.at(reader.methods, index);
+            if (owner === clsName && name === '<clinit>' && code) {
+              const sz = reader.u32(code + 12);
+              if (sz >= 14 && reader.u16(code + 16) === 0x0013) {
+                const cnt = reader.u16(code + 18);
+                if (cnt >= 1600 && cnt <= 1750) hasCandidateClinit = true;
+              }
+            }
+          }
+        }
+        if (hasCandidateClinit) {
+          const hdr = reader.extractXorConstants(clsName);
+          if (hdr && hdr.maskBySlice.has('1048:117')) {
+            const ua = decodeSlice(hdr.values, 1048, 117, hdr.maskBySlice.get('1048:117'));
+            if (/^Mozilla\/\d/.test(ua) && !/[\r\n\0]/.test(ua)) uaCandidates.push(ua);
+          }
+        }
+      }
+      if (uaCandidates.length !== 1) fail();
+      userAgent = uaCandidates[0];
+    }
+    const origin = endpoint(originRaw);
     if (origin.pathname !== '/' || origin.search || !/^[\x21-\x7e]{20}$/.test(playKey) || /[\r\n]/.test(userAgent)) fail();
     return { origin: origin.href, playKey, userAgent };
   }
   if (adapter !== 'dm84-v1') fail();
+  if (!profile && !reader.classMethods('Lcom/github/catvod/spider/Dm84;')) throw Error('guard_artifact_unsupported');
   const fields = reader.literalFields('Lcom/github/catvod/spider/Dm84;');
   if (Object.keys(fields).length !== 2) fail();
   const origin = endpoint(fields.yq), parser = endpoint(fields.SN);
@@ -487,4 +806,4 @@ function extractKnownPlugin(bytes, adapter = 'dm84-v1') {
   return { origin: origin.origin, parser: parser.href, parserOrigin: parser.origin,
     userAgent: 'Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36' };
 }
-module.exports = { extractKnownPlugin, zipMember, unwrapGuard, Dex, crc32, adler32, MAX };
+module.exports = { extractKnownPlugin, zipMember, unwrapGuard, Dex, crc32, adler32, MAX, FTY_NATIVE_MASKS, readFtyGuardArtifact };

@@ -2,7 +2,7 @@
 'use strict';
 // Data-only interoperability for reviewed FTY Guard plugins: no native, DEX, or imported script execution.
 const crypto = require('node:crypto');
-const { zipMember, unwrapGuard, Dex, MAX } = require('./drpy-guard-extractor.cjs');
+const { zipMember, unwrapGuard, Dex, readFtyGuardArtifact, MAX } = require('./drpy-guard-extractor.cjs');
 const { elfBytes, decodeShiftedExt, decodeUtf8Fatal } = require('./drpy-t4-extractor.cjs');
 
 const FTY_ADAPTERS = Object.freeze([
@@ -5151,49 +5151,141 @@ function resolveOrigin(adapter, extracted, extText, extObj) {
   fail();
 }
 
+const FALLBACK_PROFILE_ORDER = [
+  '6f88b2001d45018aad4e7293566ef739be92dee85c123db4cc062539973fe799',
+  'da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096',
+  '88e67402129e7db92669fb351397ecd4d09709e6c70b577f22a19cfb0ad5f204'
+];
+
 function extractFty(bytes, adapter, rawExtension) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX) fail();
   if (!FTY_ADAPTERS.includes(adapter)) fail();
   const profile = PROFILES[sha(bytes)];
-  if (!profile) throw Error('guard_artifact_unsupported');
-  const native = zipMember(bytes, 'assets/ftyguard_v8.so');
-  if (native.length !== 102440 || sha(native) !== profile.nativeSha) throw Error('guard_artifact_integrity');
-  const spec = profile.spiders[adapter];
-  if (!spec) throw Error('guard_artifact_unsupported');
-  const key = elfBytes(native, 0x19198, 13).map(v => v ^ profile.mask);
+  let native, mask, dex, spec;
+  if (profile) {
+    native = zipMember(bytes, 'assets/ftyguard_v8.so');
+    if (native.length !== 102440 || sha(native) !== profile.nativeSha) throw Error('guard_artifact_integrity');
+    mask = profile.mask;
+    spec = profile.spiders[adapter];
+    if (!spec) throw Error('guard_artifact_unsupported');
+    const budget = { bytes: 0, entries: 0 };
+    dex = new Dex(zipMember(unwrapGuard(zipMember(bytes, 'assets/ftyshinidie.guard', budget)), 'classes.dex', budget));
+    for (const [, [methodName, expectedHash]] of Object.entries(spec.methods)) {
+      dex.reviewedCodeByHash(spec.cls, methodName, expectedHash);
+    }
+  } else {
+    try {
+      ({ native, mask, reader: dex } = readFtyGuardArtifact(bytes, true));
+    } catch (error) {
+      if (error && error.message === 'invalid_artifact') fail();
+      throw error;
+    }
+  }
+  const key = elfBytes(native, 0x19198, 13).map(v => v ^ mask);
   const extText = decodeExtension(rawExtension, key);
   const extObj = parseExtObject(extText);
 
-  const budget = { bytes: 0, entries: 0 };
-  const dex = new Dex(zipMember(unwrapGuard(zipMember(bytes, 'assets/ftyshinidie.guard', budget)), 'classes.dex', budget));
-  for (const [, [methodName, expectedHash]] of Object.entries(spec.methods)) {
-    dex.reviewedCodeByHash(spec.cls, methodName, expectedHash);
-  }
-
   const extracted = {};
-  if (spec.shortArray) {
-    const [clinitHash, fieldName, payloadUnit, count] = spec.shortArray;
-    const values = dex.reviewedShortArray(spec.cls, clinitHash, fieldName, payloadUnit, count);
-    const decode = ([start, length, maskVal]) => String.fromCharCode(...values.slice(start, start + length).map(v => v ^ maskVal));
-    if (spec.triples) {
-      for (const [k, triple] of Object.entries(spec.triples)) {
-        extracted[k] = decode(triple);
+  if (profile) {
+    if (spec.shortArray) {
+      const [clinitHash, fieldName, payloadUnit, count] = spec.shortArray;
+      const values = dex.reviewedShortArray(spec.cls, clinitHash, fieldName, payloadUnit, count);
+      const decode = ([start, length, maskVal]) => String.fromCharCode(...values.slice(start, start + length).map(v => v ^ maskVal));
+      if (spec.triples) {
+        for (const [k, triple] of Object.entries(spec.triples)) {
+          extracted[k] = decode(triple);
+        }
+      }
+      if (spec.tripleLists) {
+        for (const [k, list] of Object.entries(spec.tripleLists)) {
+          extracted[k] = list.map(decode);
+        }
       }
     }
-    if (spec.tripleLists) {
-      for (const [k, list] of Object.entries(spec.tripleLists)) {
-        extracted[k] = list.map(decode);
+    if (spec.literals) {
+      for (const [k, [methodName, expectedHash, unit]] of Object.entries(spec.literals)) {
+        extracted[k] = dex.reviewedLiteralByHash(spec.cls, methodName, expectedHash, unit);
       }
     }
-  }
-  if (spec.literals) {
-    for (const [k, [methodName, expectedHash, unit]] of Object.entries(spec.literals)) {
-      extracted[k] = dex.reviewedLiteralByHash(spec.cls, methodName, expectedHash, unit);
+    if (spec.extraLiterals) {
+      for (const [k, [clsName, methodName, expectedHash, unit]] of Object.entries(spec.extraLiterals)) {
+        extracted[k] = dex.reviewedLiteralByHash(clsName, methodName, expectedHash, unit);
+      }
     }
-  }
-  if (spec.extraLiterals) {
-    for (const [k, [clsName, methodName, expectedHash, unit]] of Object.entries(spec.extraLiterals)) {
-      extracted[k] = dex.reviewedLiteralByHash(clsName, methodName, expectedHash, unit);
+  } else {
+    try {
+      const specs = [];
+      for (const pid of FALLBACK_PROFILE_ORDER) {
+        const candidate = PROFILES[pid] && PROFILES[pid].spiders && PROFILES[pid].spiders[adapter];
+        if (candidate && dex.classMethods(candidate.cls)) specs.push(candidate);
+      }
+      if (!specs.length) throw Error('guard_artifact_unsupported');
+      if (specs.some(s => s.shortArray)) {
+        const xorInfo = dex.extractXorConstants(specs[0].cls);
+        if (!xorInfo) fail();
+        const sliceMatches = candidate => {
+          if (!candidate.shortArray) return false;
+          for (const [, triple] of Object.entries(candidate.triples || {})) {
+            if (!xorInfo.maskBySlice.has(triple[0] + ':' + triple[1])) return false;
+          }
+          for (const [, list] of Object.entries(candidate.tripleLists || {})) {
+            for (const triple of list) {
+              if (!xorInfo.maskBySlice.has(triple[0] + ':' + triple[1])) return false;
+            }
+          }
+          return true;
+        };
+        spec = specs.find(c => c.shortArray && xorInfo.count === c.shortArray[3] && sliceMatches(c))
+          || specs.find(sliceMatches);
+        if (!spec) fail();
+        const decodePair = ([start, length]) => {
+          const m = xorInfo.maskBySlice.get(start + ':' + length);
+          if (m === undefined) fail();
+          let s = '';
+          for (let i = 0; i < length; i++) s += String.fromCharCode(xorInfo.values[start + i] ^ m);
+          return s;
+        };
+        if (spec.triples) {
+          for (const [k, triple] of Object.entries(spec.triples)) extracted[k] = decodePair(triple);
+        }
+        if (spec.tripleLists) {
+          for (const [k, list] of Object.entries(spec.tripleLists)) extracted[k] = list.map(decodePair);
+        }
+      } else {
+        spec = specs[0];
+      }
+      const resolveMethodLiteral = (clsName, keyName, methodName, unit) => {
+        const methodList = dex.extractMethodLiterals(clsName, methodName);
+        if (!methodList || !methodList.length) fail();
+        const exactHits = methodList.map(m => m.atUnit.get(unit)).filter(v => v !== undefined);
+        if (exactHits.length === 1 && exactHits[0].length > 0) return exactHits[0];
+        const allLits = methodList.flatMap(m => m.list.map(x => x.value)).filter(Boolean);
+        if (keyName === 'filtersJson') {
+          const hits = allLits.filter(v => v.startsWith('{') && v.includes('"key"') && v.includes('"value"'));
+          if (hits.length === 1) return hits[0];
+        } else if (keyName === 'keyHex') {
+          const hits = allLits.filter(v => /^[0-9a-f]{32,128}$/i.test(v));
+          if (hits.length === 1) return hits[0];
+        } else if (keyName.endsWith('Url') || keyName === 'origin' || keyName === 'referer' || keyName === 'jsonBase') {
+          const hits = allLits.filter(v => /^https?:\/\//i.test(v));
+          if (hits.length === 1) return hits[0];
+        }
+        fail();
+      };
+      if (spec.literals) {
+        for (const [k, [methodName, , unit]] of Object.entries(spec.literals)) {
+          extracted[k] = resolveMethodLiteral(spec.cls, k, methodName, unit);
+        }
+      }
+      if (spec.extraLiterals) {
+        for (const [k, [clsName, methodName, , unit]] of Object.entries(spec.extraLiterals)) {
+          if (!dex.classMethods(clsName)) fail();
+          extracted[k] = resolveMethodLiteral(clsName, k, methodName, unit);
+        }
+      }
+    } catch (error) {
+      if (error && error.message === 'invalid_artifact') fail();
+      throw error;
     }
   }
 

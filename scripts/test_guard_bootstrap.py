@@ -173,6 +173,163 @@ class ReaderChecks(unittest.TestCase):
         self.assertTrue(self.run_reader(bytes(range(256)), 'x.unwrapGuard(x.unwrapGuard(b)).equals(b)')['value'])
         self.assertEqual(self.run_reader(archive([('classes.dex', fixture_dex()[0])]), 'x.extractKnownPlugin(b)')['error'], 'guard_artifact_unsupported')
 
+    def test_read_fty_guard_rejects_non_fty_and_dex_extract_xor_constants(self):
+        dex_base = fixture_dex()[0]
+        self.assertEqual(
+            self.run_reader(archive([('classes.dex', dex_base)]), 'x.readFtyGuardArtifact(b, false)')['error'],
+            'guard_artifact_unsupported',
+        )
+        self.assertEqual(
+            self.run_reader(
+                archive([('classes.dex', dex_base), ('assets/ftyguard_v8.so', b'synthetic-non-fty')]),
+                'x.readFtyGuardArtifact(b, false)',
+            )['error'],
+            'guard_artifact_unsupported',
+        )
+
+        plain_a, mask_a = 'http://127.0.0.1:9/', 0x5a3c
+        plain_b, mask_b = 'tag', 0x1357
+        shorts = [ord(ch) ^ mask_a for ch in plain_a] + [ord(ch) ^ mask_b for ch in plain_b]
+
+        strings = sorted([
+            '<clinit>', 'I', 'LLIII', 'Lfixture/Dec;', 'Lfixture/Source;',
+            'Ljava/lang/Object;', 'Ljava/lang/String;', 'V', '[S',
+            'c', 'dec', 'getUrl',
+        ])
+        s_idx = {s: i for i, s in enumerate(strings)}
+        types = sorted([
+            'I', 'Lfixture/Dec;', 'Lfixture/Source;',
+            'Ljava/lang/Object;', 'Ljava/lang/String;', 'V', '[S',
+        ], key=lambda t: s_idx[t])
+        t_idx = {t: i for i, t in enumerate(types)}
+        protos = [
+            (s_idx['LLIII'], t_idx['Ljava/lang/String;'], [t_idx['[S'], t_idx['I'], t_idx['I'], t_idx['I']]),
+            (s_idx['V'], t_idx['V'], []),
+        ]
+        protos.sort(key=lambda p: (p[1], p[2]))
+        p_dec = next(i for i, p in enumerate(protos) if p[2])
+        p_void = next(i for i, p in enumerate(protos) if not p[2])
+
+        fields = [(t_idx['Lfixture/Source;'], t_idx['[S'], s_idx['c'])]
+        methods = sorted([
+            (t_idx['Lfixture/Dec;'], p_dec, s_idx['dec']),
+            (t_idx['Lfixture/Source;'], p_void, s_idx['<clinit>']),
+            (t_idx['Lfixture/Source;'], p_void, s_idx['getUrl']),
+        ], key=lambda m: (m[0], m[2], m[1]))
+        m_dec = methods.index((t_idx['Lfixture/Dec;'], p_dec, s_idx['dec']))
+        m_clinit = methods.index((t_idx['Lfixture/Source;'], p_void, s_idx['<clinit>']))
+        m_geturl = methods.index((t_idx['Lfixture/Source;'], p_void, s_idx['getUrl']))
+
+        clinit_units = [
+            0x0013, len(shorts),            # const/16 v0, 22
+            0x0023, t_idx['[S'],            # new-array v0, v0, [S
+            0x0026, 6, 0,                   # fill-array-data v0, +6 (unit 4 -> unit 10)
+            0x0069, 0,                      # sput-object v0, Lfixture/Source;->c:[S
+            0x000e,                         # return-void
+            0x0300, 2, len(shorts), 0,      # fill-array-data-payload (at unit 10)
+        ] + [v & 0xffff for v in shorts]
+
+        geturl_units = [
+            0x0062, 0,                      # 0..1: sget-object v0, field@0
+            0x0313, mask_a,                 # 2..3: const/16 v3, mask_a (header reg)
+            0x0412,                         # 4: const/4 v4, 0
+            0x042c, 23, 0,                  # 5..7: sparse-switch v4, +23 (unit 5 -> unit 28)
+            0x0113, len(plain_a),           # 8..9: const/16 v1, 19
+            0x0213, len(plain_b),           # 10..11: const/16 v2, 3
+            0x0313, mask_b,                 # 12..13: const/16 v3, mask_b (clobbers v3 before goto/16)
+            0x4071, m_dec, 0x3210,          # 14..16: invoke-static {v0,v1,v2,v3}, dec
+            0x0029, 2,                      # 17..18: goto/16 +2 (unit 17 -> unit 19, restores headerRegs)
+            0x0113, 0,                      # 19..20: const/16 v1, 0 (switch target; v3 restored from headerRegs)
+            0x0213, len(plain_a),           # 21..22: const/16 v2, 19
+            0x4071, m_dec, 0x3210,          # 23..25: invoke-static {v0,v1,v2,v3}, dec
+            0x000e,                         # 26: return-void
+            0x0000,                         # 27: nop padding -> 28 units (even, 4-byte aligned payload)
+            0x0200, 1, 1, 0, 14, 0,         # 28..33: sparse-switch-payload (key=1, rel=19-5=14)
+        ]
+
+        def encode_code(regs, outs, units):
+            return struct.pack('<HHHHI', regs, 0, outs, 0, 0) + struct.pack('<I', len(units)) + b''.join(
+                struct.pack('<H', u & 0xffff) for u in units
+            )
+
+        str_ids_off = 0x70
+        type_ids_off = str_ids_off + len(strings) * 4
+        proto_ids_off = type_ids_off + len(types) * 4
+        field_ids_off = proto_ids_off + len(protos) * 12
+        method_ids_off = field_ids_off + len(fields) * 8
+        class_defs_off = method_ids_off + len(methods) * 8
+        data_off = class_defs_off + 32
+
+        data = bytearray()
+        def pad4():
+            while (data_off + len(data)) % 4:
+                data.append(0)
+
+        str_data_offs = []
+        for s in strings:
+            str_data_offs.append(data_off + len(data))
+            data.extend(uleb(len(s)))
+            data.extend(s.encode('utf-8'))
+            data.append(0)
+
+        proto_param_offs = {}
+        for i, (_, _, params) in enumerate(protos):
+            if params:
+                pad4()
+                proto_param_offs[i] = data_off + len(data)
+                data.extend(struct.pack('<I', len(params)))
+                for pt in params:
+                    data.extend(struct.pack('<H', pt))
+
+        pad4()
+        clinit_code_off = data_off + len(data)
+        data.extend(encode_code(1, 0, clinit_units))
+        pad4()
+        geturl_code_off = data_off + len(data)
+        data.extend(encode_code(5, 4, geturl_units))
+
+        class_data_off = data_off + len(data)
+        data.extend(uleb(1) + uleb(0) + uleb(2) + uleb(0))
+        data.extend(uleb(0) + uleb(0x0008))
+        direct_sorted = sorted([(m_clinit, 0x10008, clinit_code_off), (m_geturl, 0x0009, geturl_code_off)])
+        prev_m = 0
+        for midx, flags, coff in direct_sorted:
+            data.extend(uleb(midx - prev_m) + uleb(flags) + uleb(coff))
+            prev_m = midx
+
+        dex = bytearray(data_off + len(data))
+        struct.pack_into('<8s24x18I', dex, 0, b'dex\n035\x00', len(dex), 0x70, 0x12345678,
+                         0, 0, 0, len(strings), str_ids_off, len(types), type_ids_off,
+                         len(protos), proto_ids_off, len(fields), field_ids_off,
+                         len(methods), method_ids_off, 1, class_defs_off)
+        struct.pack_into('<II', dex, 0x68, len(data), data_off)
+        for i, off in enumerate(str_data_offs):
+            struct.pack_into('<I', dex, str_ids_off + i * 4, off)
+        for i, t in enumerate(types):
+            struct.pack_into('<I', dex, type_ids_off + i * 4, s_idx[t])
+        for i, (shorty, ret, _) in enumerate(protos):
+            struct.pack_into('<III', dex, proto_ids_off + i * 12, shorty, ret, proto_param_offs.get(i, 0))
+        for i, (cls, typ, nam) in enumerate(fields):
+            struct.pack_into('<HHI', dex, field_ids_off + i * 8, cls, typ, nam)
+        for i, (cls, prt, nam) in enumerate(methods):
+            struct.pack_into('<HHI', dex, method_ids_off + i * 8, cls, prt, nam)
+        struct.pack_into('<8I', dex, class_defs_off,
+                         t_idx['Lfixture/Source;'], 1, t_idx['Ljava/lang/Object;'],
+                         0, 0xffffffff, 0, class_data_off, 0)
+        dex[data_off:] = data
+        dex_bytes = checksum(dex)
+
+        res = self.run_reader(
+            dex_bytes,
+            "(() => { const r = new x.Dex(b).extractXorConstants('Lfixture/Source;'); "
+            "return r ? { decoded: r.calls.map(c => c.value), masks: Object.fromEntries(r.maskBySlice) } : null; })()",
+        )['value']
+        self.assertIsNotNone(res)
+        self.assertIn(plain_a, res['decoded'])
+        self.assertIn(plain_b, res['decoded'])
+        self.assertEqual(res['masks'][f'0:{len(plain_a)}'], mask_a)
+        self.assertEqual(res['masks'][f'{len(plain_a)}:{len(plain_b)}'], mask_b)
+
 class HostChecks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

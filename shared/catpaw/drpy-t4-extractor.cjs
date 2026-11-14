@@ -2,7 +2,7 @@
 'use strict';
 // Data-only interoperability: no native, DEX, or imported script execution.
 const crypto = require('node:crypto');
-const { zipMember, MAX } = require('./drpy-guard-extractor.cjs');
+const { zipMember, readFtyGuardArtifact, MAX } = require('./drpy-guard-extractor.cjs');
 const PROFILES = {
   '88e67402129e7db92669fb351397ecd4d09709e6c70b577f22a19cfb0ad5f204': {
     nativeSha: 'fac9e3937d9928e437ebff79bc5164df418a6adb212494ef21c273579b045dcb',
@@ -143,11 +143,21 @@ function decodeT4Ext(ext, key) {
 function extractT4(bytes, ext) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX) fail();
   const profile = PROFILES[sha(bytes)];
-  if (!profile) throw Error('guard_artifact_unsupported');
-  const native = zipMember(bytes, 'assets/ftyguard_v8.so');
-  if (native.length !== 102440 || sha(native) !== profile.nativeSha) throw Error('guard_artifact_integrity');
+  let native, mask;
+  if (profile) {
+    native = zipMember(bytes, 'assets/ftyguard_v8.so');
+    if (native.length !== 102440 || sha(native) !== profile.nativeSha) throw Error('guard_artifact_integrity');
+    mask = profile.mask;
+  } else {
+    try {
+      ({ native, mask } = readFtyGuardArtifact(bytes, false));
+    } catch (error) {
+      if (error && error.message === 'invalid_artifact') fail();
+      throw error;
+    }
+  }
   // Reviewed ELF initializer decodes this region with the profile's XOR mask; it is data only.
-  const key = elfBytes(native, 0x19198, 13).map(value => value ^ profile.mask);
+  const key = elfBytes(native, 0x19198, 13).map(value => value ^ mask);
   return decodeT4Ext(ext, key);
 }
 module.exports = { extractT4, decodeT4Ext, decodeShiftedExt, decodeUtf8Fatal, normalizeConfig, elfBytes, rc4 };

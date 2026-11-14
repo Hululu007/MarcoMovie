@@ -6,6 +6,7 @@ import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 import 'package:html/dom.dart';
 import 'package:html/parser.dart' as html;
+import 'package:meta/meta.dart';
 
 import 'models.dart';
 import 'resilient_http_client.dart';
@@ -867,6 +868,14 @@ class WoggPluginConfiguration {
   const WoggPluginConfiguration(
       {required this.origins, required this.userAgent});
 
+  static const int _maxArchiveBytes = 16 * 1024 * 1024;
+  static const int _maxDexBytes = 16 * 1024 * 1024;
+  static const int _ftyNativeSize = 102440;
+  static const Set<String> _ftyNativeShas = {
+    'd5d8adee01e1bdc4c18b445e19ce7c94fb296ca6dce6f18a08786504fc961f01',
+    'fac9e3937d9928e437ebff79bc5164df418a6adb212494ef21c273579b045dcb',
+  };
+
   static WoggPluginConfiguration extract(Uint8List bytes) {
     const profiles = {
       'da3f3a7afcfcded4d58d9c3a574dfb5cb2ddcc3db4290b7d8b3a7346f9ee8096': (
@@ -879,47 +888,529 @@ class WoggPluginConfiguration {
         offset: 1724260, uaMask: 1947,
         originMasks: [2183, 731, 581, 1275, 1715],
       ),
+      '6f88b2001d45018aad4e7293566ef739be92dee85c123db4cc062539973fe799': (
+        dex: 'b28e57ec8b7e965572a374284c836650b1af753d52ef1d68c6e8f0a7af2ee0f9',
+        offset: 1585832, uaMask: 3081,
+        originMasks: [1908, 388, 2452, 1453, 2595],
+      ),
+      '805128011cf4e3b63fdbc998840c7b51ba1c07d8f53754d55541818aaada5781': (
+        dex: '2cbefde6313a5a65ad80dd8aeedb42339653de8810680e5ee2b2a0249598d6c9',
+        offset: 1596392, uaMask: 680,
+        originMasks: [1323, 432, 1310, 2725, 1625],
+      ),
     };
-    if (bytes.isEmpty || bytes.length > 16 * 1024 * 1024) {
+    if (bytes.isEmpty || bytes.length > _maxArchiveBytes) {
       throw const FormatException('玩偶插件包为空或超过大小限制');
     }
-    final profile = profiles[sha256.convert(bytes).toString()];
-    if (profile == null) {
+    if (bytes.length < 22 || bytes[0] != 0x50 || bytes[1] != 0x4b) {
       throw const FormatException('此版本玩偶插件尚未完成适配，请保留原订阅并更新应用');
     }
-    Uint8List member(Uint8List data, String name) {
-      final archive = ZipDecoder().decodeBytes(data, verify: true);
+    final profile = profiles[sha256.convert(bytes).toString()];
+    Uint8List member(Archive archive, String name, {String? onMissing}) {
       final matches =
           archive.files.where((f) => f.name == name && f.isFile).toList();
-      if (matches.length != 1 || matches.single.size > 16 * 1024 * 1024) {
-        throw const FormatException('玩偶插件结构无效');
+      if (matches.length != 1 || matches.single.size > _maxDexBytes) {
+        throw FormatException(onMissing ?? '玩偶插件结构无效');
       }
       return Uint8List.fromList(matches.single.content);
     }
 
-    final payload = member(bytes, 'assets/ftyshinidie.guard');
+    Archive outerArchive;
+    try {
+      outerArchive = ZipDecoder().decodeBytes(bytes, verify: true);
+    } catch (_) {
+      throw FormatException(
+        profile == null ? '此版本玩偶插件尚未完成适配，请保留原订阅并更新应用' : '玩偶插件结构无效',
+      );
+    }
+
+    if (profile == null) {
+      final native = member(
+        outerArchive,
+        'assets/ftyguard_v8.so',
+        onMissing: '此版本玩偶插件尚未完成适配，请保留原订阅并更新应用',
+      );
+      final nativeSha = sha256.convert(native).toString();
+      if (native.length != _ftyNativeSize ||
+          !_ftyNativeShas.contains(nativeSha)) {
+        throw const FormatException('此版本玩偶插件尚未完成适配，请保留原订阅并更新应用');
+      }
+    }
+
+    final payload = member(outerArchive, 'assets/ftyshinidie.guard');
     for (var i = 0; i < payload.length; i++) {
       if (const [1, 2, 5, 6].contains(payload[i])) payload[i] ^= 7;
     }
-    final dex = member(payload, 'classes.dex');
-    if (sha256.convert(dex).toString() != profile.dex) {
+    final Archive innerArchive;
+    try {
+      innerArchive = ZipDecoder().decodeBytes(payload, verify: true);
+    } catch (_) {
+      throw const FormatException('玩偶插件结构无效');
+    }
+    final dex = member(innerArchive, 'classes.dex');
+    if (profile != null) {
+      if (sha256.convert(dex).toString() != profile.dex) {
+        throw const FormatException('玩偶插件数据校验失败');
+      }
+      if (profile.offset < 0 || profile.offset + 1548 * 2 > dex.length) {
+        throw const FormatException('玩偶插件数据校验失败');
+      }
+      final data =
+          ByteData.sublistView(dex, profile.offset, profile.offset + 1548 * 2);
+      String decode(int start, int length, int mask) => String.fromCharCodes([
+            for (var i = start; i < start + length; i++)
+              data.getUint16(i * 2, Endian.little) ^ mask,
+          ]);
+      return _validatedConfiguration(
+        origins: [
+          decode(796, 26, profile.originMasks[0]),
+          decode(822, 31, profile.originMasks[1]),
+          decode(853, 21, profile.originMasks[2]),
+          decode(874, 26, profile.originMasks[3]),
+          decode(900, 20, profile.originMasks[4]),
+        ],
+        userAgent: decode(43, 111, profile.uaMask),
+      );
+    }
+    return extractFromDex(dex);
+  }
+
+  static WoggPluginConfiguration _validatedConfiguration({
+    required List<String> origins,
+    required String userAgent,
+  }) {
+    if (origins.isEmpty || origins.length > 16) {
       throw const FormatException('玩偶插件数据校验失败');
     }
-    final data = ByteData.sublistView(dex, profile.offset, profile.offset + 1548 * 2);
-    String decode(int start, int length, int mask) => String.fromCharCodes([
-          for (var i = start; i < start + length; i++)
-            data.getUint16(i * 2, Endian.little) ^ mask,
-        ]);
-    return WoggPluginConfiguration(
-      origins: [
-        decode(796, 26, profile.originMasks[0]),
-        decode(822, 31, profile.originMasks[1]),
-        decode(853, 21, profile.originMasks[2]),
-        decode(874, 26, profile.originMasks[3]),
-        decode(900, 20, profile.originMasks[4])
-      ],
-      userAgent: decode(43, 111, profile.uaMask),
-    );
+    final cleanOrigins = <String>[];
+    for (final raw in origins) {
+      if (raw.isEmpty ||
+          raw.length > 2048 ||
+          RegExp(r'[\s\x00-\x1f\x7f\\]').hasMatch(raw)) {
+        throw const FormatException('玩偶插件数据校验失败');
+      }
+      final uri = Uri.tryParse(raw);
+      if (uri == null ||
+          (uri.scheme != 'http' && uri.scheme != 'https') ||
+          uri.host.isEmpty ||
+          uri.userInfo.isNotEmpty ||
+          uri.hasQuery ||
+          uri.hasFragment ||
+          (uri.path.isNotEmpty && uri.path != '/')) {
+        throw const FormatException('玩偶插件数据校验失败');
+      }
+      cleanOrigins.add(raw);
+    }
+    if (userAgent.isEmpty ||
+        userAgent.length > 512 ||
+        RegExp(r'[\r\n\x00]').hasMatch(userAgent)) {
+      throw const FormatException('玩偶插件数据校验失败');
+    }
+    return WoggPluginConfiguration(origins: cleanOrigins, userAgent: userAgent);
+  }
+
+  /// Extracts `WoGG` origins and user-agent structurally from an unexecuted
+  /// DEX bytecode table + `<clinit>` XOR-masked short array.
+  @visibleForTesting
+  static WoggPluginConfiguration extractFromDex(Uint8List dex) {
+    Never failDex() => throw const FormatException('玩偶插件数据校验失败');
+    if (dex.length < 112 || dex.length > _maxDexBytes) failDex();
+    if (dex[0] != 0x64 ||
+        dex[1] != 0x65 ||
+        dex[2] != 0x78 ||
+        dex[3] != 0x0a ||
+        dex[4] != 0x30 ||
+        dex[5] != 0x33 ||
+        dex[7] != 0x00) {
+      failDex();
+    }
+    final bd = ByteData.sublistView(dex);
+    int u16(int off) {
+      if (off < 0 || off + 2 > dex.length) failDex();
+      return bd.getUint16(off, Endian.little);
+    }
+
+    int u32(int off) {
+      if (off < 0 || off + 4 > dex.length) failDex();
+      return bd.getUint32(off, Endian.little);
+    }
+
+    if (u32(32) != dex.length || u32(36) != 112 || u32(40) != 0x12345678) {
+      failDex();
+    }
+
+    ({int value, int next}) uleb(int off) {
+      var value = 0;
+      for (var i = 0; i < 5; i++) {
+        if (off + i >= dex.length) failDex();
+        final byte = dex[off + i];
+        if (i == 4 && byte > 15) failDex();
+        value += (byte & 0x7f) << (i * 7);
+        if ((byte & 0x80) == 0) return (value: value, next: off + i + 1);
+      }
+      failDex();
+    }
+
+    List<int> tableOffsets(int headerOff, int stride) {
+      final count = u32(headerOff);
+      final offset = u32(headerOff + 4);
+      if (count > 262144 || offset + count * stride > dex.length) failDex();
+      return List<int>.generate(count, (i) => offset + i * stride);
+    }
+
+    final stringPtrs = tableOffsets(56, 4);
+    final typePtrs = tableOffsets(64, 4);
+    final protoPtrs = tableOffsets(72, 12);
+    final fieldPtrs = tableOffsets(80, 8);
+    final methodPtrs = tableOffsets(88, 8);
+    final classPtrs = tableOffsets(96, 32);
+
+    final stringCache = List<String?>.filled(stringPtrs.length, null);
+    String readString(int index) {
+      if (index < 0 || index >= stringPtrs.length) failDex();
+      final cached = stringCache[index];
+      if (cached != null) return cached;
+      final strOff = u32(stringPtrs[index]);
+      final hdr = uleb(strOff);
+      final utf16Len = hdr.value;
+      if (utf16Len > 1048576) failDex();
+      var p = hdr.next;
+      final units = <int>[];
+      while (units.length < utf16Len) {
+        if (p >= dex.length) failDex();
+        final b0 = dex[p++];
+        if (b0 > 0 && b0 < 0x80) {
+          units.add(b0);
+        } else if ((b0 & 0xe0) == 0xc0) {
+          if (p >= dex.length) failDex();
+          final b1 = dex[p++];
+          if ((b1 & 0xc0) != 0x80) failDex();
+          final v = ((b0 & 0x1f) << 6) | (b1 & 0x3f);
+          if (v < 0x80 && v != 0) failDex();
+          units.add(v);
+        } else if ((b0 & 0xf0) == 0xe0) {
+          if (p + 1 >= dex.length) failDex();
+          final b1 = dex[p++];
+          final b2 = dex[p++];
+          if ((b1 & 0xc0) != 0x80 || (b2 & 0xc0) != 0x80) failDex();
+          final v = ((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f);
+          if (v < 0x800) failDex();
+          units.add(v);
+        } else {
+          failDex();
+        }
+      }
+      if (p >= dex.length || dex[p] != 0) failDex();
+      final decoded = String.fromCharCodes(units);
+      stringCache[index] = decoded;
+      return decoded;
+    }
+
+    String readType(int index) {
+      if (index < 0 || index >= typePtrs.length) failDex();
+      return readString(u32(typePtrs[index]));
+    }
+
+    String protoSig(int protoIdx) {
+      if (protoIdx < 0 || protoIdx >= protoPtrs.length) failDex();
+      final pOff = protoPtrs[protoIdx];
+      final ret = readType(u32(pOff + 4));
+      final paramsOff = u32(pOff + 8);
+      if (paramsOff == 0) return '$ret()';
+      final n = u32(paramsOff);
+      if (n > 256 || paramsOff + 4 + n * 2 > dex.length) failDex();
+      final params = <String>[
+        for (var i = 0; i < n; i++) readType(u16(paramsOff + 4 + i * 2)),
+      ];
+      return '$ret(${params.join(',')})';
+    }
+
+    int insnWidth(int codeOff, int unit, int size) {
+      if (unit < 0 || unit >= size) failDex();
+      final ins = codeOff + 16 + unit * 2;
+      final w0 = u16(ins);
+      final int width;
+      if (w0 == 0x0100) {
+        if (unit + 4 > size) failDex();
+        width = 4 + u16(ins + 2) * 2;
+      } else if (w0 == 0x0200) {
+        if (unit + 2 > size) failDex();
+        width = 2 + u16(ins + 2) * 4;
+      } else if (w0 == 0x0300) {
+        if (unit + 4 > size) failDex();
+        final elemWidth = u16(ins + 2);
+        final elemCount = u32(ins + 4);
+        if (elemWidth > 16 || elemCount > 65536) failDex();
+        width = 4 + ((elemWidth * elemCount + 1) ~/ 2);
+      } else {
+        final op = w0 & 0xff;
+        if (op == 0x18) {
+          width = 5;
+        } else if (op == 0x03 ||
+            op == 0x06 ||
+            op == 0x09 ||
+            op == 0x14 ||
+            op == 0x17 ||
+            op == 0x1b ||
+            (op >= 0x24 && op <= 0x26) ||
+            (op >= 0x2a && op <= 0x2c) ||
+            (op >= 0x6e && op <= 0x72) ||
+            (op >= 0x74 && op <= 0x78)) {
+          width = 3;
+        } else if (op == 0x02 ||
+            op == 0x05 ||
+            op == 0x08 ||
+            op == 0x13 ||
+            op == 0x15 ||
+            op == 0x16 ||
+            op == 0x19 ||
+            op == 0x1a ||
+            op == 0x1c ||
+            op == 0x1f ||
+            op == 0x20 ||
+            op == 0x22 ||
+            op == 0x23 ||
+            op == 0x29 ||
+            (op >= 0x2d && op <= 0x3d) ||
+            (op >= 0x44 && op <= 0x6d) ||
+            (op >= 0x90 && op <= 0xaf) ||
+            (op >= 0xd0 && op <= 0xe2)) {
+          width = 2;
+        } else {
+          width = 1;
+        }
+      }
+      if (width < 1 || unit + width > size) failDex();
+      return width;
+    }
+
+    const woggCls = 'Lcom/github/catvod/spider/WoGG;';
+    int? woggClassOff;
+    for (final cOff in classPtrs) {
+      if (readType(u32(cOff)) == woggCls) {
+        if (woggClassOff != null) failDex();
+        woggClassOff = cOff;
+      }
+    }
+    if (woggClassOff == null) failDex();
+    final classDataOff = u32(woggClassOff + 24);
+    if (classDataOff == 0) failDex();
+
+    var p = classDataOff;
+    final counts = <int>[];
+    for (var i = 0; i < 4; i++) {
+      final r = uleb(p);
+      if (r.value > 65536) failDex();
+      counts.add(r.value);
+      p = r.next;
+    }
+    for (var i = 0; i < counts[0] + counts[1]; i++) {
+      p = uleb(p).next;
+      p = uleb(p).next;
+    }
+    final methods = <({String name, String sig, int offset, int size})>[];
+    for (final count in counts.sublist(2)) {
+      var index = 0;
+      for (var i = 0; i < count; i++) {
+        final d = uleb(p);
+        p = uleb(d.next).next;
+        final c = uleb(p);
+        p = c.next;
+        index += d.value;
+        if (index < 0 || index >= methodPtrs.length) failDex();
+        final mPtr = methodPtrs[index];
+        final owner = readType(u16(mPtr));
+        final sig = protoSig(u16(mPtr + 2));
+        final name = readString(u32(mPtr + 4));
+        if (owner == woggCls && c.value != 0) {
+          final size = u32(c.value + 12);
+          if (size == 0 || size > 65536 || c.value + 16 + size * 2 > dex.length) {
+            failDex();
+          }
+          methods.add((name: name, sig: sig, offset: c.value, size: size));
+        }
+      }
+    }
+
+    final clinitIdx =
+        methods.indexWhere((m) => m.name == '<clinit>' && m.sig == 'V()');
+    if (clinitIdx < 0) failDex();
+    final clinit = methods[clinitIdx];
+    if (clinit.size < 14 || u16(clinit.offset + 2) != 0) failDex();
+    final start = clinit.offset + 16;
+    if (u16(start) != 0x0013 ||
+        u16(start + 4) != 0x0023 ||
+        readType(u16(start + 6)) != '[S' ||
+        u16(start + 8) != 0x0026 ||
+        u16(start + 14) != 0x0069) {
+      failDex();
+    }
+    final count = u16(start + 2);
+    final payloadUnit = 4 + u32(start + 10);
+    final fieldIdx = u16(start + 16);
+    if (fieldIdx < 0 || fieldIdx >= fieldPtrs.length) failDex();
+    final fPtr = fieldPtrs[fieldIdx];
+    if (readType(u16(fPtr)) != woggCls || readType(u16(fPtr + 2)) != '[S') {
+      failDex();
+    }
+    if (count == 0 ||
+        count > 8192 ||
+        payloadUnit < 10 ||
+        payloadUnit + 4 + count > clinit.size) {
+      failDex();
+    }
+    final payload = start + payloadUnit * 2;
+    if (u16(payload) != 0x0300 ||
+        u16(payload + 2) != 2 ||
+        u32(payload + 4) != count) {
+      failDex();
+    }
+    final values =
+        List<int>.generate(count, (i) => u16(payload + 8 + i * 2));
+
+    final maskBySlice = <String, int>{};
+    final byMethod = <String, List<String>>{};
+    for (final m in methods) {
+      Map<int, int>? headerRegs;
+      var regs = <int, int>{};
+      final decodedList = <String>[];
+      var u = 0;
+      while (u < m.size) {
+        final width = insnWidth(m.offset, u, m.size);
+        final ins = m.offset + 16 + u * 2;
+        final w0 = u16(ins);
+        final op = w0 & 0xff;
+        if (w0 != 0x0100 && w0 != 0x0200 && w0 != 0x0300) {
+          if (op == 0x12) {
+            var v = (w0 >> 12) & 0xf;
+            if (v >= 8) v -= 16;
+            regs[(w0 >> 8) & 0xf] = v;
+          } else if (op == 0x13) {
+            final raw = u16(ins + 2);
+            regs[w0 >> 8] = raw >= 0x8000 ? raw - 0x10000 : raw;
+          } else if (op == 0x14) {
+            regs[w0 >> 8] = u32(ins + 2).toSigned(32);
+          } else if (op == 0x15) {
+            regs[w0 >> 8] = (u16(ins + 2) << 16).toSigned(32);
+          } else if (op == 0x01) {
+            final dst = (w0 >> 8) & 0xf;
+            final src = (w0 >> 12) & 0xf;
+            final v = regs[src];
+            if (v != null) {
+              regs[dst] = v;
+            } else {
+              regs.remove(dst);
+            }
+          } else if (op == 0x02) {
+            final dst = w0 >> 8;
+            final v = regs[u16(ins + 2)];
+            if (v != null) {
+              regs[dst] = v;
+            } else {
+              regs.remove(dst);
+            }
+          } else if (op == 0x03) {
+            final dst = u16(ins + 2);
+            final v = regs[u16(ins + 4)];
+            if (v != null) {
+              regs[dst] = v;
+            } else {
+              regs.remove(dst);
+            }
+          } else if (op == 0x0a ||
+              op == 0x0c ||
+              op == 0x1a ||
+              op == 0x1b ||
+              op == 0x22) {
+            regs.remove(w0 >> 8);
+          } else if (op == 0x2b || op == 0x2c) {
+            headerRegs ??= Map<int, int>.from(regs);
+          } else if (op == 0x28 ||
+              op == 0x29 ||
+              op == 0x2a ||
+              (op >= 0x0e && op <= 0x11) ||
+              op == 0x27) {
+            if (headerRegs != null) regs = Map<int, int>.from(headerRegs);
+          } else if ((op == 0x71 || op == 0x77) && u + 2 < m.size) {
+            final mIdx = u16(ins + 2);
+            if (mIdx >= methodPtrs.length) failDex();
+            final targetSig = protoSig(u16(methodPtrs[mIdx] + 2));
+            if (targetSig == 'Ljava/lang/String;([S,I,I,I)') {
+              int? rS, rL, rM;
+              if (op == 0x71 && ((w0 >> 12) & 0xf) == 4) {
+                final w2 = u16(ins + 4);
+                rS = (w2 >> 4) & 0xf;
+                rL = (w2 >> 8) & 0xf;
+                rM = (w2 >> 12) & 0xf;
+              } else if (op == 0x77 && (w0 >> 8) == 4) {
+                final base = u16(ins + 4);
+                rS = base + 1;
+                rL = base + 2;
+                rM = base + 3;
+              }
+              if (rS != null && rL != null && rM != null) {
+                final st = regs[rS];
+                final ln = regs[rL];
+                final rawMk = regs[rM];
+                if (st != null &&
+                    ln != null &&
+                    rawMk != null &&
+                    st >= 0 &&
+                    ln >= 0 &&
+                    st + ln <= values.length) {
+                  final mk = rawMk & 0xffff;
+                  maskBySlice['$st:$ln'] = mk;
+                  decodedList.add(String.fromCharCodes([
+                    for (var i = st; i < st + ln; i++) values[i] ^ mk,
+                  ]));
+                }
+              }
+            }
+          }
+        }
+        u += width;
+      }
+      if (decodedList.isNotEmpty) {
+        (byMethod[m.name] ??= <String>[]).addAll(decodedList);
+      }
+    }
+
+    String decodeSlice(int st, int ln) {
+      final mk = maskBySlice['$st:$ln'];
+      if (mk == null || st + ln > values.length) failDex();
+      return String.fromCharCodes([
+        for (var i = st; i < st + ln; i++) values[i] ^ mk,
+      ]);
+    }
+
+    const originSlices = [
+      (796, 26),
+      (822, 31),
+      (853, 21),
+      (874, 26),
+      (900, 20),
+    ];
+    final List<String> origins;
+    if (originSlices.every((s) => maskBySlice.containsKey('${s.$1}:${s.$2}'))) {
+      origins = [for (final s in originSlices) decodeSlice(s.$1, s.$2)];
+    } else {
+      final keyStrings = byMethod['getKey'] ?? const <String>[];
+      origins = keyStrings
+          .where((s) => s.startsWith('http://') || s.startsWith('https://'))
+          .toList();
+    }
+
+    final String? userAgent;
+    if (maskBySlice.containsKey('43:111')) {
+      userAgent = decodeSlice(43, 111);
+    } else {
+      final initStrings = byMethod['<init>'] ?? const <String>[];
+      final uaCands =
+          initStrings.where((s) => s.startsWith('Mozilla/')).toList();
+      userAgent = uaCands.length == 1 ? uaCands.single : null;
+    }
+    if (userAgent == null) failDex();
+    return _validatedConfiguration(origins: origins, userAgent: userAgent);
   }
 }
 

@@ -3379,40 +3379,83 @@ function resolveOrigin(extracted, extText, extObj) {
   fail();
 }
 
+const WEX_NATIVE_SHAS = new Set([
+  '646f8bb4dda60536f8d71f537892f4631053e9cc2a21d458015bd0bb143a1fb5'
+]);
+const WEX_TEMPLATE_PROFILE = '9848e4d7b2d81b193ec458459d21f9cada92e0374a424a9ddaeaf440736af178';
+
 function extractWex(bytes, adapter, rawExtension) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX) fail();
   if (!WEX_ADAPTERS.includes(adapter)) fail();
   const profile = PROFILES[sha(bytes)];
-  if (!profile) throw Error('guard_artifact_unsupported');
-  const native = zipMember(bytes, 'assets/wexguard_v8.so');
-  if (native.length !== profile.nativeSize || sha(native) !== profile.nativeSha) {
-    throw Error('guard_artifact_integrity');
-  }
-  const spec = profile.spiders[adapter];
-  if (!spec) throw Error('guard_artifact_unsupported');
   const extText = decodeWexExtension(rawExtension);
   const extObj = parseExtObject(extText);
-
   const budget = { bytes: 0, entries: 0 };
-  const dex = new Dex(zipMember(unwrapWexGuard(zipMember(bytes, 'assets/wexshinidie.guard', budget)), 'classes.dex', budget));
-  for (const [, [methodName, expectedHash]] of Object.entries(spec.methods)) {
-    dex.reviewedCodeByHash(spec.cls, methodName, expectedHash);
-  }
-  if (Array.isArray(spec.extraMethods)) {
-    for (const [clsName, methodName, expectedHash] of spec.extraMethods) {
-      dex.reviewedCodeByHash(clsName, methodName, expectedHash);
-    }
-  }
-
   const extracted = {};
-  if (spec.literals) {
-    for (const [k, [methodName, expectedHash, unit]] of Object.entries(spec.literals)) {
-      extracted[k] = dex.reviewedLiteralByHash(spec.cls, methodName, expectedHash, unit);
+
+  if (profile) {
+    const native = zipMember(bytes, 'assets/wexguard_v8.so');
+    if (native.length !== profile.nativeSize || sha(native) !== profile.nativeSha) {
+      throw Error('guard_artifact_integrity');
     }
-  }
-  if (spec.extraLiterals) {
-    for (const [k, [clsName, methodName, expectedHash, unit]] of Object.entries(spec.extraLiterals)) {
-      extracted[k] = dex.reviewedLiteralByHash(clsName, methodName, expectedHash, unit);
+    const spec = profile.spiders[adapter];
+    if (!spec) throw Error('guard_artifact_unsupported');
+    const dex = new Dex(zipMember(unwrapWexGuard(zipMember(bytes, 'assets/wexshinidie.guard', budget)), 'classes.dex', budget));
+    for (const [, [methodName, expectedHash]] of Object.entries(spec.methods)) {
+      dex.reviewedCodeByHash(spec.cls, methodName, expectedHash);
+    }
+    if (Array.isArray(spec.extraMethods)) {
+      for (const [clsName, methodName, expectedHash] of spec.extraMethods) {
+        dex.reviewedCodeByHash(clsName, methodName, expectedHash);
+      }
+    }
+    if (spec.literals) {
+      for (const [k, [methodName, expectedHash, unit]] of Object.entries(spec.literals)) {
+        extracted[k] = dex.reviewedLiteralByHash(spec.cls, methodName, expectedHash, unit);
+      }
+    }
+    if (spec.extraLiterals) {
+      for (const [k, [clsName, methodName, expectedHash, unit]] of Object.entries(spec.extraLiterals)) {
+        extracted[k] = dex.reviewedLiteralByHash(clsName, methodName, expectedHash, unit);
+      }
+    }
+  } else {
+    let native;
+    try {
+      native = zipMember(bytes, 'assets/wexguard_v8.so', budget);
+    } catch (_) {
+      throw Error('guard_artifact_unsupported');
+    }
+    if (native.length !== 48680 || !WEX_NATIVE_SHAS.has(sha(native))) {
+      throw Error('guard_artifact_unsupported');
+    }
+    const tpl = PROFILES[WEX_TEMPLATE_PROFILE];
+    const spec = tpl && tpl.spiders && tpl.spiders[adapter];
+    if (!spec) throw Error('guard_artifact_unsupported');
+    try {
+      const dex = new Dex(zipMember(unwrapWexGuard(zipMember(bytes, 'assets/wexshinidie.guard', budget)), 'classes.dex', budget));
+      if (!dex.classMethods(spec.cls)) throw Error('guard_artifact_unsupported');
+      const extractUnique = (clsName, methodName, unit) => {
+        const list = dex.extractMethodLiterals(clsName, methodName);
+        if (!list || !list.length) fail();
+        const hits = list.map(m => m.atUnit.get(unit)).filter(v => v !== undefined);
+        if (hits.length !== 1) fail();
+        return hits[0];
+      };
+      if (spec.literals) {
+        for (const [k, [methodName, , unit]] of Object.entries(spec.literals)) {
+          extracted[k] = extractUnique(spec.cls, methodName, unit);
+        }
+      }
+      if (spec.extraLiterals) {
+        for (const [k, [clsName, methodName, , unit]] of Object.entries(spec.extraLiterals)) {
+          if (!dex.classMethods(clsName)) fail();
+          extracted[k] = extractUnique(clsName, methodName, unit);
+        }
+      }
+    } catch (error) {
+      if (error && error.message === 'invalid_artifact') fail();
+      throw error;
     }
   }
 

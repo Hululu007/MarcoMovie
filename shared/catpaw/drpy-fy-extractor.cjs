@@ -2,7 +2,7 @@
 'use strict';
 // The imported plugin is data only: never evaluate its Python, DEX or native code.
 const crypto = require('node:crypto');
-const {zipMember, unwrapGuard, Dex, MAX} = require('./drpy-guard-extractor.cjs');
+const {zipMember, unwrapGuard, Dex, readFtyGuardArtifact, MAX} = require('./drpy-guard-extractor.cjs');
 const ARTIFACTS = {
   '88e67402129e7db92669fb351397ecd4d09709e6c70b577f22a19cfb0ad5f204': '141dd6387f9c0334c070c12663b48281153e7e4a3138b423dbadb55aeb9c8247',
   'e7375830bcd065b264239e1f0e7da4c99d75abf71e1b6edf50e225ae8b0f4b7e': 'f68c170d1f12077550eb3ec912e7ae004a57624f314db0e6280a2b1cc319ba5c',
@@ -46,10 +46,83 @@ function normalizeConfig(config) {
 function extractFy(bytes) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX) fail();
   const profile = ARTIFACTS[sha(bytes)];
-  if (!profile) throw Error('guard_artifact_unsupported');
   const budget = {bytes:0, entries:0};
   const cls = 'Lcom/github/catvod/spider/Fy;';
   let dex;
+  if (!profile) {
+    try {
+      ({reader: dex} = readFtyGuardArtifact(bytes, true));
+    } catch (error) {
+      if (error && error.message === 'invalid_artifact') fail();
+      throw error;
+    }
+    const methods = dex.classMethods(cls);
+    if (!methods) throw Error('guard_artifact_unsupported');
+    let origin, userAgent, tag4k, defaultParser, jdParser, tag2k;
+    try {
+      const initLits = dex.extractMethodLiterals(cls, 'init');
+      if (!initLits || initLits.length !== 1) fail();
+      origin = initLits[0].atUnit.get(0);
+      if (typeof origin !== 'string' || !/^https?:\/\//i.test(origin)) {
+        const cands = initLits[0].list.filter(x => /^https?:\/\/[^/?#]+\/?$/i.test(x.value));
+        if (cands.length !== 1) fail();
+        origin = cands[0].value;
+      }
+      const headerMethods = methods.filter(m => m.sig === 'Ljava/util/Map;()');
+      let uaVal = null;
+      for (const hm of headerMethods) {
+        const lits = dex.extractMethodLiterals(cls, hm.name)?.find(x => x.sig === hm.sig && x.size === hm.size);
+        if (!lits) continue;
+        if (hm.name === 'KJ' && lits.atUnit.get(5) === 'User-Agent' && lits.atUnit.has(7)) {
+          uaVal = lits.atUnit.get(7);
+          break;
+        }
+        const idx = lits.list.findIndex(x => x.value === 'User-Agent');
+        if (idx >= 0 && idx + 1 < lits.list.length) {
+          uaVal = lits.list[idx + 1].value;
+          break;
+        }
+      }
+      if (!uaVal) fail();
+      userAgent = uaVal;
+
+      const resolveLits = dex.extractMethodLiterals(cls, 'Gd') || [];
+      const gd = resolveLits.find(l => l.atUnit.get(195) === 'JD4K' && l.atUnit.get(207) === 'JD2K' && l.atUnit.has(201) && l.atUnit.has(203));
+      if (gd) {
+        tag4k = gd.atUnit.get(195);
+        defaultParser = endpoint(gd.atUnit.get(201)).origin + '/player/mplayer.php';
+        jdParser = endpoint(gd.atUnit.get(203)).origin + '/player/mplayer.php';
+        tag2k = gd.atUnit.get(207);
+      } else {
+        let found = null;
+        for (const m of methods) {
+          if (m.sig !== 'Ljava/lang/String;(Ljava/lang/String;Ljava/lang/String;Ljava/util/List;)') continue;
+          const ml = dex.extractMethodLiterals(cls, m.name)?.find(x => x.size === m.size);
+          if (!ml) continue;
+          const i4k = ml.list.findIndex(x => x.value === 'JD4K');
+          const i2k = ml.list.findIndex(x => x.value === 'JD2K');
+          if (i4k >= 0 && i2k > i4k) {
+            const urls = ml.list.slice(i4k, i2k + 1).filter(x => /^https?:\/\/[^?#]+\/player\/mplayer\.php$/i.test(x.value));
+            if (urls.length === 2) {
+              found = ['JD4K', endpoint(urls[0].value).origin + '/player/mplayer.php', endpoint(urls[1].value).origin + '/player/mplayer.php', 'JD2K'];
+              break;
+            }
+          }
+        }
+        if (!found) fail();
+        [tag4k, defaultParser, jdParser, tag2k] = found;
+      }
+    } catch (error) {
+      if (error && error.message === 'invalid_artifact') fail();
+      throw error;
+    }
+    if (tag4k !== 'JD4K' || tag2k !== 'JD2K') fail();
+    const parserMap = Object.create(null);
+    for (const key of ['co', 'BBA', 'vwnet', 'YYNB', 'qiyi', 'bilibili', 'qq', 'youku']) parserMap[key] = defaultParser;
+    parserMap.JD4K = jdParser;
+    parserMap.JD2K = jdParser;
+    return normalizeConfig({origin, userAgent, parserMap, parsers:[defaultParser, jdParser]});
+  }
   try {
     dex = new Dex(zipMember(unwrapGuard(zipMember(bytes, 'assets/ftyshinidie.guard', budget)), 'classes.dex', budget));
   } catch (error) {

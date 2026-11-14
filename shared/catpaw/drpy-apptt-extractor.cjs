@@ -2,7 +2,7 @@
 'use strict';
 // Data-only interoperability: no native, DEX, or imported script execution.
 const crypto = require('node:crypto');
-const { zipMember, unwrapGuard, Dex, MAX } = require('./drpy-guard-extractor.cjs');
+const { zipMember, unwrapGuard, Dex, readFtyGuardArtifact, MAX } = require('./drpy-guard-extractor.cjs');
 const { elfBytes, decodeShiftedExt } = require('./drpy-t4-extractor.cjs');
 
 const PROFILES = {
@@ -87,23 +87,43 @@ function normalizeConfig(config) {
 function extractAppTT(bytes, ext) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX) fail();
   const profile = PROFILES[sha(bytes)];
-  if (!profile) throw Error('guard_artifact_unsupported');
-  const native = zipMember(bytes, 'assets/ftyguard_v8.so');
-  if (native.length !== 102440 || sha(native) !== profile.nativeSha) throw Error('guard_artifact_integrity');
-  const key = elfBytes(native, 0x19198, 13).map(value => value ^ profile.mask);
-  const api = decodeShiftedExt(ext, key).trim();
-  const budget = { bytes: 0, entries: 0 };
-  const dex = new Dex(zipMember(unwrapGuard(zipMember(bytes, 'assets/ftyshinidie.guard', budget)), 'classes.dex', budget));
   const className = 'Lcom/github/catvod/spider/AppTT;';
-  for (const [method, expectedHash] of Object.entries(profile.methods)) {
-    dex.reviewedCode(className, method, expectedHash);
+  let native, mask, dex, signKey, userAgent;
+  if (profile) {
+    native = zipMember(bytes, 'assets/ftyguard_v8.so');
+    if (native.length !== 102440 || sha(native) !== profile.nativeSha) throw Error('guard_artifact_integrity');
+    mask = profile.mask;
+    const budget = { bytes: 0, entries: 0 };
+    dex = new Dex(zipMember(unwrapGuard(zipMember(bytes, 'assets/ftyshinidie.guard', budget)), 'classes.dex', budget));
+    for (const [method, expectedHash] of Object.entries(profile.methods)) {
+      dex.reviewedCode(className, method, expectedHash);
+    }
+    const values = dex.reviewedShortArray(className, profile.clinit, 'short', 10, profile.count);
+    const decode = ([start, length, m]) => String.fromCharCode(...values.slice(start, start + length).map(v => v ^ m));
+    signKey = decode(profile.signKey);
+    userAgent = decode(profile.ua);
+  } else {
+    try {
+      ({ native, mask, reader: dex } = readFtyGuardArtifact(bytes, true));
+    } catch (error) {
+      if (error && error.message === 'invalid_artifact') fail();
+      throw error;
+    }
+    const info = dex.extractXorConstants(className);
+    if (!info) throw Error('guard_artifact_unsupported');
+    const uaMask = info.maskBySlice.get('0:21');
+    const signMask = info.maskBySlice.get('73:38');
+    if (uaMask === undefined || signMask === undefined) fail();
+    const decode = (start, length, m) => String.fromCharCode(...info.values.slice(start, start + length).map(v => v ^ m));
+    userAgent = decode(0, 21, uaMask);
+    signKey = decode(73, 38, signMask);
   }
-  const values = dex.reviewedShortArray(className, profile.clinit, 'short', 10, profile.count);
-  const decode = ([start, length, mask]) => String.fromCharCode(...values.slice(start, start + length).map(v => v ^ mask));
+  const key = elfBytes(native, 0x19198, 13).map(value => value ^ mask);
+  const api = decodeShiftedExt(ext, key).trim();
   return normalizeConfig({
     api,
-    signKey: decode(profile.signKey),
-    userAgent: decode(profile.ua)
+    signKey,
+    userAgent
   });
 }
 

@@ -839,4 +839,389 @@ void main() {
     expect(ep.url, 'https://catalogue.invalid/a.m3u8');
     expect(ep.variants.map((v) => v.name), ['原画', '高清']);
   });
+
+  test('WoggPluginConfiguration.extractFromDex decodes synthetic rotated DEX',
+      () {
+    final ua =
+        'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+            .padRight(111, '0');
+    expect(ua.length, 111);
+    const origins = [
+      'https://one.invalid/',
+      'https://two.invalid/',
+      'http://three.invalid/',
+      'https://four.invalid/',
+      'https://five.invalid/',
+    ];
+    const uaMask = 0x9b2d;
+    const originMasks = [0x3a1f, 0x7c21, 0x8d45, 0x5512, 0xe103];
+
+    final dex = _buildSyntheticWoggDex(
+      ua: ua,
+      uaMask: uaMask,
+      origins: origins,
+      originMasks: originMasks,
+    );
+    final config = WoggPluginConfiguration.extractFromDex(dex);
+    expect(config.origins, origins);
+    expect(config.userAgent, ua);
+
+    final badOriginDex = _buildSyntheticWoggDex(
+      ua: ua,
+      uaMask: uaMask,
+      origins: const [
+        'https://one.invalid/bad-path',
+        'https://two.invalid/',
+        'http://three.invalid/',
+        'https://four.invalid/',
+        'https://five.invalid/',
+      ],
+      originMasks: originMasks,
+    );
+    expect(
+      () => WoggPluginConfiguration.extractFromDex(badOriginDex),
+      throwsA(isA<FormatException>()),
+    );
+    expect(
+      () => WoggPluginConfiguration.extractFromDex(
+          Uint8List.fromList(List<int>.filled(128, 0))),
+      throwsA(isA<FormatException>()),
+    );
+    expect(
+      () => WoggPluginConfiguration.extract(_minimalStoredZip(const {
+        'classes.dex': [1, 2, 3],
+        'assets/ftyguard_v8.so': [4, 5, 6],
+      })),
+      throwsA(isA<FormatException>()
+          .having((e) => e.message, 'message', contains('尚未完成适配'))),
+    );
+  });
+}
+
+Uint8List _minimalStoredZip(Map<String, List<int>> files) {
+  final out = BytesBuilder();
+  final central = BytesBuilder();
+  for (final entry in files.entries) {
+    final name = utf8.encode(entry.key);
+    final data = entry.value;
+    final localOff = out.length;
+    final lh = ByteData(30)
+      ..setUint32(0, 0x04034b50, Endian.little)
+      ..setUint16(4, 20, Endian.little)
+      ..setUint32(14, _crc32(data), Endian.little)
+      ..setUint32(18, data.length, Endian.little)
+      ..setUint32(22, data.length, Endian.little)
+      ..setUint16(26, name.length, Endian.little);
+    out.add(lh.buffer.asUint8List());
+    out.add(name);
+    out.add(data);
+
+    final ch = ByteData(46)
+      ..setUint32(0, 0x02014b50, Endian.little)
+      ..setUint16(4, 20, Endian.little)
+      ..setUint16(6, 20, Endian.little)
+      ..setUint32(16, _crc32(data), Endian.little)
+      ..setUint32(20, data.length, Endian.little)
+      ..setUint32(24, data.length, Endian.little)
+      ..setUint16(28, name.length, Endian.little)
+      ..setUint32(42, localOff, Endian.little);
+    central.add(ch.buffer.asUint8List());
+    central.add(name);
+  }
+  final cdOff = out.length;
+  final cdBytes = central.toBytes();
+  out.add(cdBytes);
+  final eocd = ByteData(22)
+    ..setUint32(0, 0x06054b50, Endian.little)
+    ..setUint16(8, files.length, Endian.little)
+    ..setUint16(10, files.length, Endian.little)
+    ..setUint32(12, cdBytes.length, Endian.little)
+    ..setUint32(16, cdOff, Endian.little);
+  out.add(eocd.buffer.asUint8List());
+  return out.toBytes();
+}
+
+int _crc32(List<int> data) {
+  var crc = 0xffffffff;
+  for (final b in data) {
+    crc ^= b & 0xff;
+    for (var i = 0; i < 8; i++) {
+      crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xedb88320 : crc >> 1;
+    }
+  }
+  return crc ^ 0xffffffff;
+}
+
+Uint8List _buildSyntheticWoggDex({
+  required String ua,
+  required int uaMask,
+  required List<String> origins,
+  required List<int> originMasks,
+}) {
+  final shorts = List<int>.filled(43, 0, growable: true);
+  for (final cu in ua.codeUnits) {
+    shorts.add((cu ^ uaMask) & 0xffff);
+  }
+  final originSlices = <(int, int)>[];
+  for (var i = 0; i < origins.length; i++) {
+    final st = shorts.length;
+    final mask = originMasks[i];
+    for (final cu in origins[i].codeUnits) {
+      shorts.add((cu ^ mask) & 0xffff);
+    }
+    originSlices.add((st, origins[i].length));
+  }
+  final count = shorts.length;
+
+  final strings = <String>[
+    '<clinit>',
+    '<init>',
+    'I',
+    'LLIII',
+    'Lcom/github/catvod/spider/WoGG;',
+    'Lfixture/Dec;',
+    'Ljava/lang/Object;',
+    'Ljava/lang/String;',
+    'V',
+    '[S',
+    'c',
+    'd',
+    'getKey',
+  ]..sort();
+  final sIdx = {for (var i = 0; i < strings.length; i++) strings[i]: i};
+
+  final types = <String>[
+    'I',
+    'Lcom/github/catvod/spider/WoGG;',
+    'Lfixture/Dec;',
+    'Ljava/lang/Object;',
+    'Ljava/lang/String;',
+    'V',
+    '[S',
+  ]..sort((a, b) => sIdx[a]!.compareTo(sIdx[b]!));
+  final tIdx = {for (var i = 0; i < types.length; i++) types[i]: i};
+
+  final protos = <(int, int, List<int>)>[
+    (
+      sIdx['LLIII']!,
+      tIdx['Ljava/lang/String;']!,
+      [tIdx['[S']!, tIdx['I']!, tIdx['I']!, tIdx['I']!],
+    ),
+    (sIdx['V']!, tIdx['V']!, <int>[]),
+  ]..sort((a, b) => a.$2.compareTo(b.$2));
+  final pDec = protos.indexWhere((p) => p.$3.isNotEmpty);
+  final pVoid = protos.indexWhere((p) => p.$3.isEmpty);
+
+  final fields = <(int, int, int)>[
+    (tIdx['Lcom/github/catvod/spider/WoGG;']!, tIdx['[S']!, sIdx['c']!),
+  ];
+
+  final methods = <(int, int, int)>[
+    (tIdx['Lfixture/Dec;']!, pDec, sIdx['d']!),
+    (tIdx['Lcom/github/catvod/spider/WoGG;']!, pVoid, sIdx['<clinit>']!),
+    (tIdx['Lcom/github/catvod/spider/WoGG;']!, pVoid, sIdx['<init>']!),
+    (tIdx['Lcom/github/catvod/spider/WoGG;']!, pVoid, sIdx['getKey']!),
+  ]..sort((a, b) {
+      final c = a.$1.compareTo(b.$1);
+      if (c != 0) return c;
+      final n = a.$3.compareTo(b.$3);
+      return n != 0 ? n : a.$2.compareTo(b.$2);
+    });
+  int findMethod(String cls, String name) =>
+      methods.indexWhere((m) => m.$1 == tIdx[cls] && m.$3 == sIdx[name]);
+  final mDec = findMethod('Lfixture/Dec;', 'd');
+  final mClinit = findMethod('Lcom/github/catvod/spider/WoGG;', '<clinit>');
+  final mInit = findMethod('Lcom/github/catvod/spider/WoGG;', '<init>');
+  final mGetKey = findMethod('Lcom/github/catvod/spider/WoGG;', 'getKey');
+
+  final clinitUnits = <int>[
+    0x0013, count,
+    0x0023, tIdx['[S']!,
+    0x0026, 6, 0,
+    0x0069, 0,
+    0x000e,
+    0x0300, 2, count & 0xffff, (count >> 16) & 0xffff,
+    ...shorts,
+  ];
+  if (clinitUnits.length.isOdd) clinitUnits.add(0);
+  final initUnits = <int>[
+    0x0012,
+    0x0113, 43,
+    0x0213, 111,
+    0x0313, uaMask & 0xffff,
+    0x4071, mDec, 0x3210,
+    0x000e,
+  ];
+  final getKeyUnits = <int>[
+    0x0012,
+    0x0313, originMasks[4] & 0xffff,
+    0x0412,
+    0x042c, 0, 0, // sparse-switch at unit 4, patched below
+  ];
+  for (var i = 0; i < 4; i++) {
+    getKeyUnits.addAll([
+      0x0113, originSlices[i].$1,
+      0x0213, originSlices[i].$2,
+      0x0313, originMasks[i] & 0xffff,
+      0x4071, mDec, 0x3210,
+    ]);
+  }
+  getKeyUnits.addAll([0x0029, 2]); // goto/16 -> restores headerRegs mask[4]
+  final case4Start = getKeyUnits.length;
+  getKeyUnits.addAll([
+    0x0113, originSlices[4].$1,
+    0x0213, originSlices[4].$2,
+    0x4071, mDec, 0x3210,
+    0x000e,
+  ]);
+  if (getKeyUnits.length.isOdd) getKeyUnits.add(0x0000);
+  final swOff = getKeyUnits.length - 4;
+  getKeyUnits[5] = swOff & 0xffff;
+  getKeyUnits[6] = (swOff >> 16) & 0xffff;
+  getKeyUnits.addAll([0x0200, 1, 1, 0, (case4Start - 4) & 0xffff, 0]);
+
+  List<int> encodeCode(int regs, int outs, List<int> units) {
+    final bd = ByteData(16 + units.length * 2)
+      ..setUint16(0, regs, Endian.little)
+      ..setUint16(4, outs, Endian.little)
+      ..setUint32(12, units.length, Endian.little);
+    for (var i = 0; i < units.length; i++) {
+      bd.setUint16(16 + i * 2, units[i] & 0xffff, Endian.little);
+    }
+    return bd.buffer.asUint8List();
+  }
+
+  void addUleb(BytesBuilder b, int v) {
+    var x = v;
+    do {
+      var byte = x & 0x7f;
+      x >>= 7;
+      if (x != 0) byte |= 0x80;
+      b.addByte(byte);
+    } while (x != 0);
+  }
+
+  const strIdsOff = 0x70;
+  final typeIdsOff = strIdsOff + strings.length * 4;
+  final protoIdsOff = typeIdsOff + types.length * 4;
+  final fieldIdsOff = protoIdsOff + protos.length * 12;
+  final methodIdsOff = fieldIdsOff + fields.length * 8;
+  final classDefsOff = methodIdsOff + methods.length * 8;
+  final dataOff = classDefsOff + 32;
+
+  final data = BytesBuilder();
+  void pad4() {
+    while ((dataOff + data.length) % 4 != 0) {
+      data.addByte(0);
+    }
+  }
+
+  final strDataOffs = <int>[];
+  for (final s in strings) {
+    strDataOffs.add(dataOff + data.length);
+    addUleb(data, s.length);
+    data.add(utf8.encode(s));
+    data.addByte(0);
+  }
+  final protoParamOffs = <int, int>{};
+  for (var i = 0; i < protos.length; i++) {
+    final params = protos[i].$3;
+    if (params.isNotEmpty) {
+      pad4();
+      protoParamOffs[i] = dataOff + data.length;
+      final tl = ByteData(4 + params.length * 2)
+        ..setUint32(0, params.length, Endian.little);
+      for (var j = 0; j < params.length; j++) {
+        tl.setUint16(4 + j * 2, params[j], Endian.little);
+      }
+      data.add(tl.buffer.asUint8List());
+    }
+  }
+  pad4();
+  final clinitOff = dataOff + data.length;
+  data.add(encodeCode(1, 0, clinitUnits));
+  pad4();
+  final initOff = dataOff + data.length;
+  data.add(encodeCode(4, 4, initUnits));
+  pad4();
+  final getKeyOff = dataOff + data.length;
+  data.add(encodeCode(5, 4, getKeyUnits));
+
+  final classDataOff = dataOff + data.length;
+  addUleb(data, 1);
+  addUleb(data, 0);
+  addUleb(data, 3);
+  addUleb(data, 0);
+  addUleb(data, 0);
+  addUleb(data, 0x0008);
+  final direct = [
+    (mClinit, 0x10008, clinitOff),
+    (mInit, 0x10001, initOff),
+    (mGetKey, 0x0009, getKeyOff),
+  ]..sort((a, b) => a.$1.compareTo(b.$1));
+  var prevM = 0;
+  for (final m in direct) {
+    addUleb(data, m.$1 - prevM);
+    addUleb(data, m.$2);
+    addUleb(data, m.$3);
+    prevM = m.$1;
+  }
+
+  final dataBytes = data.toBytes();
+  final totalLen = dataOff + dataBytes.length;
+  final dex = Uint8List(totalLen);
+  dex.setRange(0, 8, utf8.encode('dex\n035\x00'));
+  final hdr = ByteData.sublistView(dex);
+  hdr
+    ..setUint32(0x20, totalLen, Endian.little)
+    ..setUint32(0x24, 0x70, Endian.little)
+    ..setUint32(0x28, 0x12345678, Endian.little)
+    ..setUint32(0x38, strings.length, Endian.little)
+    ..setUint32(0x3c, strIdsOff, Endian.little)
+    ..setUint32(0x40, types.length, Endian.little)
+    ..setUint32(0x44, typeIdsOff, Endian.little)
+    ..setUint32(0x48, protos.length, Endian.little)
+    ..setUint32(0x4c, protoIdsOff, Endian.little)
+    ..setUint32(0x50, fields.length, Endian.little)
+    ..setUint32(0x54, fieldIdsOff, Endian.little)
+    ..setUint32(0x58, methods.length, Endian.little)
+    ..setUint32(0x5c, methodIdsOff, Endian.little)
+    ..setUint32(0x60, 1, Endian.little)
+    ..setUint32(0x64, classDefsOff, Endian.little)
+    ..setUint32(0x68, dataBytes.length, Endian.little)
+    ..setUint32(0x6c, dataOff, Endian.little);
+  for (var i = 0; i < strDataOffs.length; i++) {
+    hdr.setUint32(strIdsOff + i * 4, strDataOffs[i], Endian.little);
+  }
+  for (var i = 0; i < types.length; i++) {
+    hdr.setUint32(typeIdsOff + i * 4, sIdx[types[i]]!, Endian.little);
+  }
+  for (var i = 0; i < protos.length; i++) {
+    hdr
+      ..setUint32(protoIdsOff + i * 12, protos[i].$1, Endian.little)
+      ..setUint32(protoIdsOff + i * 12 + 4, protos[i].$2, Endian.little)
+      ..setUint32(
+          protoIdsOff + i * 12 + 8, protoParamOffs[i] ?? 0, Endian.little);
+  }
+  for (var i = 0; i < fields.length; i++) {
+    hdr
+      ..setUint16(fieldIdsOff + i * 8, fields[i].$1, Endian.little)
+      ..setUint16(fieldIdsOff + i * 8 + 2, fields[i].$2, Endian.little)
+      ..setUint32(fieldIdsOff + i * 8 + 4, fields[i].$3, Endian.little);
+  }
+  for (var i = 0; i < methods.length; i++) {
+    hdr
+      ..setUint16(methodIdsOff + i * 8, methods[i].$1, Endian.little)
+      ..setUint16(methodIdsOff + i * 8 + 2, methods[i].$2, Endian.little)
+      ..setUint32(methodIdsOff + i * 8 + 4, methods[i].$3, Endian.little);
+  }
+  hdr
+    ..setUint32(classDefsOff, tIdx['Lcom/github/catvod/spider/WoGG;']!,
+        Endian.little)
+    ..setUint32(classDefsOff + 4, 1, Endian.little)
+    ..setUint32(classDefsOff + 8, tIdx['Ljava/lang/Object;']!, Endian.little)
+    ..setUint32(classDefsOff + 16, 0xffffffff, Endian.little)
+    ..setUint32(classDefsOff + 24, classDataOff, Endian.little);
+  dex.setRange(dataOff, totalLen, dataBytes);
+  return dex;
 }
