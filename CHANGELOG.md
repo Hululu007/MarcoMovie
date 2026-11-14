@@ -1,5 +1,6 @@
 ## 2026-11-14 全平台订阅线路分组编删、电视扫码搜索与 Dock 投屏升级（Android TV 0.5.23 · Android 手机/平板 0.5.23 · Android Lite 0.5.5 · iOS / iPadOS 0.5.26 · Windows 0.5.19 · macOS 0.5.16）
 
+- [Android 电视 / 盒子 0.5.23](docs/releases/android-tv-v0.5.23.md) · [Android 手机 / 平板 0.5.23](docs/releases/android-mobile-v0.5.23.md) · [Android Lite 0.5.5](docs/releases/android-lite-v0.5.5.md) · [iOS / iPadOS 0.5.26](docs/releases/ios-v0.5.26.md) · [Windows 0.5.19](docs/releases/windows-v0.5.19.md) · [macOS 0.5.16](docs/releases/macos-v0.5.16.md)
 - **订阅源各线路手动分组、单条编辑与单条/批量删除（全端）**：Windows、macOS、iOS / iPadOS、Android 电视、Android 手机/平板及 Android TV Lite 全版本「切换片源 / 线路管理」新增分组筛选胶囊栏与「管理分组 / 批量分组 / 批量删除 / 恢复已删线路」操作；支持对任意单条线路手动移动或新建分组、手动编辑线路名称/分组/API 地址/解析 `playUrl`/扩展 `ext`/可搜索开关、一键重置为订阅原始参数以及删除与恢复单条线路；修改按订阅原始站点标识持久化，刷新或重导订阅后自动保留用户自定义分组与编删设置。
 - **电视端搜索二维码手机扫码输入（Android TV / Android Lite）**：电视端全局搜索页与 Lite 搜索页新增「扫码输入 / 手机扫码输入」入口，生成带一次性随机令牌的局域网手机网页输入二维码；手机扫码后可直接打字或语音输入片名推送至电视并立即触发搜索，免除遥控器逐字母选词输入。
 - **电视端新增投屏接收功能并常驻 Dock 栏（Android TV / Android Lite）**：电视端右侧/顶部悬浮 Dock 栏（及 Lite 顶栏与首页快捷栏）新增「投屏」入口；同时内置 UPnP / DLNA 标准媒体渲染器（支持主流视频 App 在同一 Wi-Fi 下直接搜索「Marco Movie TV / Lite」投屏播放并同步进度与音量）与局域网扫码网页直投遥控器（支持直接推送 `.m3u8` / `.mp4` 直链、附带可选 `Referer` / `User-Agent` 及手机端播放/暂停/快进快退/音量控制）。
