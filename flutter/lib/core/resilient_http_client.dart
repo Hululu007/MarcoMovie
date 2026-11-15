@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
+import 'doh_resolver.dart';
+
 /// HTTP client wrapper that falls back to a direct socket (`DIRECT`) when the
 /// operating system's configured local proxy port is closed (`Connection refused`).
 class ResilientHttpClient extends http.BaseClient {
@@ -35,6 +37,9 @@ class ResilientHttpClient extends http.BaseClient {
       ..idleTimeout = idleTimeout;
     if (direct) {
       io.findProxy = (_) => 'DIRECT';
+    }
+    if (HttpOverrides.current == null) {
+      io.connectionFactory = CmsDohResolver.shared.connect;
     }
     return IOClient(io);
   }
@@ -75,7 +80,14 @@ class ResilientHttpClient extends http.BaseClient {
 
   static http.Request? _cloneRequest(http.BaseRequest original) {
     if (original is! http.Request) return null;
-    final copy = http.Request(original.method, original.url)
+    final copy = original is http.AbortableRequest
+        ? http.AbortableRequest(
+            original.method,
+            original.url,
+            abortTrigger: original.abortTrigger,
+          )
+        : http.Request(original.method, original.url);
+    copy
       ..followRedirects = original.followRedirects
       ..maxRedirects = original.maxRedirects
       ..persistentConnection = original.persistentConnection

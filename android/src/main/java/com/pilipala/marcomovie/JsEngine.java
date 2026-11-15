@@ -75,6 +75,164 @@ public final class JsEngine implements SourceEngine {
     private volatile boolean failedOperation;
     private volatile Exception lastHostCancellation;
 
+    static final class BytecodeProbe {
+        final boolean catopMagic;
+        final int rawLength;
+        final int originalVersionByte;
+        private final byte[] payload;
+
+        BytecodeProbe(boolean catopMagic, int rawLength, int originalVersionByte, byte[] payload) {
+            this.catopMagic = catopMagic;
+            this.rawLength = rawLength;
+            this.originalVersionByte = originalVersionByte;
+            this.payload = payload;
+        }
+
+        byte[] toQuickJsBytecode(byte runtimeBcVersion) {
+            if (catopMagic) {
+                byte[] adapted = new byte[payload.length - 4];
+                adapted[0] = runtimeBcVersion;
+                System.arraycopy(payload, 5, adapted, 1, payload.length - 5);
+                return adapted;
+            }
+            return payload.clone();
+        }
+    }
+
+    public static boolean isQuickJsBytecode(String source) {
+        if (source == null) return false;
+        String trimmed = source.trim().replaceFirst("^\\uFEFF", "").trim();
+        return trimmed.startsWith("//bb");
+    }
+
+    static BytecodeProbe probeQuickJsBytecode(String source) throws IOException {
+        if (!isQuickJsBytecode(source)) {
+            throw new IOException("不是有效的 QuickJS //bb 字节码脚本");
+        }
+        String trimmed = source.trim().replaceFirst("^\\uFEFF", "").trim();
+        String body = trimmed.substring(4);
+        StringBuilder b64 = new StringBuilder(body.length());
+        for (String line : body.split("\\r?\\n")) {
+            String cleanLine = line.trim();
+            if (cleanLine.isEmpty()) continue;
+            if (cleanLine.startsWith("//") || cleanLine.startsWith("/*")) break;
+            for (int i = 0; i < cleanLine.length(); i++) {
+                char ch = cleanLine.charAt(i);
+                if (!Character.isWhitespace(ch)) b64.append(ch);
+            }
+        }
+        if (b64.length() == 0) {
+            throw new IOException("QuickJS //bb 字节码内容为空");
+        }
+        byte[] raw = decodePureBase64(b64.toString(), 4 * 1024 * 1024);
+        boolean isCatop =
+                raw.length >= 6
+                        && raw[0] == 'C'
+                        && raw[1] == 'A'
+                        && raw[2] == 'T'
+                        && raw[3] == 'O'
+                        && raw[4] == 'P';
+        if (isCatop) {
+            return new BytecodeProbe(true, raw.length, -1, raw);
+        }
+        if (raw.length < 2) {
+            throw new IOException("QuickJS //bb 字节码载荷过短或已损坏");
+        }
+        return new BytecodeProbe(false, raw.length, raw[0] & 0xff, raw);
+    }
+
+    static byte[] decodeQuickJsBytecode(String source, byte runtimeBcVersion) throws IOException {
+        return probeQuickJsBytecode(source).toQuickJsBytecode(runtimeBcVersion);
+    }
+
+    private static byte[] decodePureBase64(String encoded, int maxBytes) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(encoded.length(), 65536));
+        int bits = 0;
+        int count = 0;
+        boolean seenPad = false;
+        String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < encoded.length(); i++) {
+            char ch = encoded.charAt(i);
+            if (ch == '=') {
+                seenPad = true;
+                continue;
+            }
+            if (seenPad) {
+                throw new IOException("QuickJS //bb 字节码 Base64 填充格式无效");
+            }
+            if (ch == '-') ch = '+';
+            else if (ch == '_') ch = '/';
+            int v = alphabet.indexOf(ch);
+            if (v < 0) {
+                throw new IOException("QuickJS //bb 字节码 Base64 包含非法字符");
+            }
+            bits = (bits << 6) | v;
+            count += 6;
+            if (count >= 8) {
+                count -= 8;
+                if (out.size() + 1 > maxBytes) {
+                    throw new IOException("QuickJS //bb 字节码超过大小限制");
+                }
+                out.write((bits >> count) & 0xff);
+            }
+        }
+        if (count >= 6 || (count > 0 && ((bits & ((1 << count) - 1)) != 0))) {
+            throw new IOException("QuickJS //bb 字节码 Base64 尾字节截断");
+        }
+        return out.toByteArray();
+    }
+
+    static String resolveAssetLibTarget(String moduleName) {
+        if (moduleName == null || !moduleName.startsWith("assets://js/lib/")) return null;
+        String rawRel = moduleName.substring("assets://js/lib/".length()).split("[?#]", 2)[0];
+        int slash = rawRel.lastIndexOf('/');
+        String file = (slash >= 0 ? rawRel.substring(slash + 1) : rawRel).toLowerCase(Locale.ROOT);
+        switch (file) {
+            case "cat.js":
+            case "cat.mjs":
+            case "cat.min.js":
+                return "asset:js-host/cat-lib.mjs";
+            case "utils.js":
+            case "utils.mjs":
+            case "util.js":
+            case "common.js":
+                return "asset:js-host/utils-lib.mjs";
+            case "lodash.min.js":
+            case "lodash.js":
+            case "underscore.min.js":
+            case "underscore.js":
+                return "asset:js-host/lodash-shim.mjs";
+            case "cheerio.min.js":
+            case "cheerio.js":
+                return "asset:js-host/cheerio-bridge.mjs";
+            case "jsonpath.min.js":
+            case "jsonpath.js":
+            case "jsonpath-plus.min.js":
+                return "asset:js-host/jsonpath.mjs";
+            case "http.js":
+            case "net.js":
+            case "request.js":
+                return "asset:js-host/http-shim.mjs";
+            case "crypto-js.js":
+            case "crypto-js.min.js":
+            case "crypto.js":
+                return "inline:export const CryptoJS = globalThis.CryptoJS;"
+                        + " export const Crypto = globalThis.CryptoJS;"
+                        + " export default globalThis.CryptoJS;";
+            case "uri.min.js":
+            case "uri.js":
+                return "inline:import {Uri} from 'assets://js-host/cat-lib.mjs';"
+                        + " export {Uri}; export default Uri;";
+            case "jinja.js":
+            case "jinja2.js":
+            case "jinja.min.js":
+                return "inline:import {jinja2} from 'assets://js-host/cheerio-bridge.mjs';"
+                        + " export {jinja2}; export default jinja2;";
+            default:
+                return null;
+        }
+    }
+
     static boolean isCommonJs(String source) {
         return java.util.regex.Pattern.compile(
                         "\\b(?:module\\s*\\.\\s*exports\\b|exports\\s*(?:\\.|\\[))")
@@ -95,8 +253,7 @@ public final class JsEngine implements SourceEngine {
         if (s.type == 3 && "csp_LocalPython".equals(s.api) && s.ext instanceof String) return true;
         boolean checkedScript =
                 s.ext instanceof JSONObject
-                        && ((JSONObject) s.ext).opt("_mm_entrySource") instanceof String
-                        && !((JSONObject) s.ext).optString("_mm_entrySource").isEmpty();
+                        && !Cms.optSafeString((JSONObject) s.ext, "_mm_entrySource", "").isEmpty();
         if (s.type != 3) return false;
         if (checkedScript) return true;
         if (s.api == null) return false;
@@ -416,16 +573,7 @@ public final class JsEngine implements SourceEngine {
         context.setModuleLoader(
                 new QuickJSContext.DefaultModuleLoader() {
                     public String moduleNormalizeName(String parent, String name) {
-                        if (name.equals("catvod") || name.equals("marco:catvod-crypto"))
-                            return name;
-                        if (name.startsWith("assets://")
-                                || Cms.isHttp(name)
-                                || name.startsWith("file://")) return name;
-                        try {
-                            return Cms.resolve(parent, name);
-                        } catch (Exception e) {
-                            return name;
-                        }
+                        return normalizeModuleName(parent, name);
                     }
 
                     public String getModuleStringCode(String name) {
@@ -444,7 +592,7 @@ public final class JsEngine implements SourceEngine {
         boolean checkedScript =
                 site.ext instanceof JSONObject && ((JSONObject) site.ext).has("_mm_entrySource");
         if (checkedScript)
-            modules.put(site.api, ((JSONObject) site.ext).getString("_mm_entrySource"));
+            modules.put(site.api, Cms.optSafeString((JSONObject) site.ext, "_mm_entrySource", ""));
         String spiderOptions =
                 new JSONObject()
                         .put(
@@ -463,8 +611,12 @@ public final class JsEngine implements SourceEngine {
                 pythonPackage != null
                         ? pythonPackage.source
                         : inlinePython ? (String) site.ext : module(site.api);
-        if (!inlinePython && Cms.looksLikeDrpyRule(source)) throw new DrpyRuleDetected(source);
-        catApi = source.contains("__jsEvalReturn") && !isEsModule(source);
+        if (!inlinePython && !isQuickJsBytecode(source) && Cms.looksLikeDrpyRule(source))
+            throw new DrpyRuleDetected(source);
+        catApi =
+                !isQuickJsBytecode(source)
+                        && source.contains("__jsEvalReturn")
+                        && !isEsModule(source);
         if (inlinePython || site.api.split("[?#]", 2)[0].toLowerCase(Locale.ROOT).endsWith(".py")) {
             catApi = false;
             pythonSource = true;
@@ -525,7 +677,9 @@ public final class JsEngine implements SourceEngine {
                             + ");void 0;");
         } else {
             try {
-                if (catApi) {
+                if (isQuickJsBytecode(source)) {
+                    initializeBytecodeSpider(source, spiderOptions);
+                } else if (catApi) {
                     context.evaluate(source, site.api);
                     context.evaluate(
                             "globalThis.__movieSpider=__movieSelectSpider(__jsEvalReturn(),{preserveInit:true});");
@@ -537,6 +691,9 @@ public final class JsEngine implements SourceEngine {
                                     + spiderOptions
                                     + ");",
                             site.api + ".host-entry.mjs");
+                    if (Boolean.TRUE.equals(global.getProperty("__movieCatApi"))) {
+                        catApi = true;
+                    }
                 } else if (isCommonJs(source)) {
                     bind(
                             global,
@@ -585,6 +742,92 @@ public final class JsEngine implements SourceEngine {
         }
         checkBudget();
         initialized = true;
+    }
+
+    private static String normalizeModuleName(String parent, String name) {
+        if (name.equals("catvod") || name.equals("marco:catvod-crypto")) return name;
+        if (name.startsWith("assets://") || Cms.isHttp(name) || name.startsWith("file://"))
+            return name;
+        try {
+            return Cms.resolve(parent, name);
+        } catch (Exception e) {
+            return name;
+        }
+    }
+
+    private void initializeBytecodeSpider(String source, String spiderOptions) throws Exception {
+        final BytecodeProbe probe = probeQuickJsBytecode(source);
+        byte[] probeCompiled = context.compile("0;", "bc-version-probe.js");
+        final byte runtimeBcVersion =
+                (probeCompiled != null && probeCompiled.length > 0) ? probeCompiled[0] : (byte) 2;
+        final byte[] entryBytecode = probe.toQuickJsBytecode(runtimeBcVersion);
+        context.setModuleLoader(
+                new QuickJSContext.BytecodeModuleLoader() {
+                    @Override
+                    public String moduleNormalizeName(String parent, String name) {
+                        return normalizeModuleName(parent, name);
+                    }
+
+                    @Override
+                    public byte[] getModuleBytecode(String name) {
+                        try {
+                            if (name.equals(site.api)) return entryBytecode;
+                            String modSource = module(name);
+                            if (isQuickJsBytecode(modSource)) {
+                                return decodeQuickJsBytecode(modSource, runtimeBcVersion);
+                            }
+                            return context.compileModule(modSource, name);
+                        } catch (Exception e) {
+                            if (isCancellationOrTimeout(e)) {
+                                lastHostCancellation = e;
+                            }
+                            throw new IllegalStateException(
+                                    "JS bytecode module load failed: "
+                                            + e.getClass().getSimpleName(),
+                                    e);
+                        }
+                    }
+                });
+        try {
+            try {
+                context.evaluateModule(
+                        "import * as spider from "
+                                + JSONObject.quote(site.api)
+                                + ";globalThis.__movieSpider=__movieSelectSpider(spider,"
+                                + spiderOptions
+                                + ");",
+                        site.api + ".host-entry.mjs");
+            } catch (Exception moduleErr) {
+                context.execute(entryBytecode);
+                context.evaluate(
+                        "if(typeof __jsEvalReturn==='function'){"
+                                + "globalThis.__movieCatApi=true;"
+                                + "globalThis.__movieSpider=__movieSelectSpider(__jsEvalReturn(),{preserveInit:true});"
+                                + "}else if(globalThis.__JS_SPIDER__){"
+                                + "if(globalThis.__JS_SPIDER__.is_cat)globalThis.__movieCatApi=true;"
+                                + "globalThis.__movieSpider=__movieSelectSpider(globalThis.__JS_SPIDER__,"
+                                + spiderOptions
+                                + ");"
+                                + "}else{throw new Error("
+                                + JSONObject.quote(String.valueOf(moduleErr.getMessage()))
+                                + ");}",
+                        "bytecode-global-entry.js");
+            }
+            if (Boolean.TRUE.equals(context.getGlobalObject().getProperty("__movieCatApi"))) {
+                catApi = true;
+            }
+        } catch (Exception e) {
+            if (lastHostCancellation != null) throw lastHostCancellation;
+            String tag = probe.catopMagic ? "//bb/CATOP" : ("//bb/v" + probe.originalVersionByte);
+            throw new IOException(
+                    "QuickJS 预编译字节码 ("
+                            + tag
+                            + ", runtime v"
+                            + (runtimeBcVersion & 0xff)
+                            + ") 与当前宿主引擎字节码格式不兼容: "
+                            + e.getMessage(),
+                    e);
+        }
     }
 
     private String commonJsModule(String reference, String parent) throws Exception {
@@ -662,10 +905,19 @@ public final class JsEngine implements SourceEngine {
         }
     }
 
+    private String tryAsset(String path) {
+        try {
+            return asset(path);
+        } catch (IOException ignored) {
+            return null;
+        }
+    }
+
     private String module(String name) throws Exception {
         String found = modules.get(name);
         if (found != null) return found;
         if (modules.size() >= 64) throw new IOException("JS 模块数量超过限制");
+        String libTarget = resolveAssetLibTarget(name);
         if (name.equals("catvod")) {
             catvodModule = true;
             found = asset("js-host/catvod.mjs");
@@ -674,17 +926,48 @@ public final class JsEngine implements SourceEngine {
                     "const module={exports:{}};let exports=module.exports;\n"
                             + asset("js-host/crypto-js.js")
                             + "\nexport default module.exports;";
-        else if (name.equals("assets://js/lib/cheerio.min.js"))
-            found = asset("js-host/cheerio-bridge.mjs");
-        else if (name.equals("assets://js/lib/crypto-js.js"))
-            found = "export default globalThis.CryptoJS;";
-        else if (name.startsWith("assets://js-host/")) found = asset(name.substring(9));
-        else if (name.startsWith("assets://js/lib/"))
+        else if (libTarget != null) {
             found =
-                    download(
-                            new URL(new URL(site.api), name.substring(name.lastIndexOf('/') + 1))
-                                    .toString());
-        else if (Cms.isHttp(name)) found = download(name);
+                    libTarget.startsWith("asset:")
+                            ? asset(libTarget.substring(6))
+                            : libTarget.substring(7);
+        } else if (name.startsWith("assets://js-host/")) found = asset(name.substring(9));
+        else if (name.startsWith("assets://js/lib/")) {
+            String rel = name.substring("assets://js/lib/".length()).split("[?#]", 2)[0];
+            while (rel.startsWith("/")) rel = rel.substring(1);
+            if (rel.isEmpty() || rel.contains("..")) {
+                throw new IOException("不支持的 JS 公共库路径");
+            }
+            found = tryAsset("js/lib/" + rel);
+            if (found == null && site.api != null && site.api.startsWith("file://")) {
+                File baseDir = new File(URI.create(site.api)).getCanonicalFile().getParentFile();
+                String allowedPrefix = app.getFilesDir().getCanonicalPath() + File.separator;
+                String baseName = rel.substring(rel.lastIndexOf('/') + 1);
+                for (String sub : new String[] {"lib/" + rel, baseName}) {
+                    File candidate = new File(baseDir, sub).getCanonicalFile();
+                    if (candidate.isFile() && candidate.getPath().startsWith(allowedPrefix)) {
+                        try (InputStream in = new FileInputStream(candidate)) {
+                            found = new String(read(in, 2 * 1024 * 1024), "UTF-8");
+                        }
+                        break;
+                    }
+                }
+            }
+            if (found == null && Cms.isHttp(site.api)) {
+                String baseName = rel.substring(rel.lastIndexOf('/') + 1);
+                String libUrl = new URL(new URL(site.api), "lib/" + rel).toString();
+                String flatUrl = new URL(new URL(site.api), baseName).toString();
+                try {
+                    found = download(libUrl);
+                } catch (FileNotFoundException notInLibDir) {
+                    if (flatUrl.equals(libUrl)) throw notInLibDir;
+                    found = download(flatUrl);
+                }
+            }
+            if (found == null) {
+                throw new FileNotFoundException("未找到 JS 公共依赖库：" + name);
+            }
+        } else if (Cms.isHttp(name)) found = download(name);
         else if (name.startsWith("file://")) {
             File localFile = new File(URI.create(name));
             String allowedPrefix = app.getFilesDir().getCanonicalPath() + File.separator;

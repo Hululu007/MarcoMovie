@@ -18,6 +18,8 @@ import org.json.*;
 
 /** Experimental ordinary CSP host. Never unwraps, patches, or bypasses plugin protection. */
 public final class CspEngine implements SourceEngine {
+    static final int MAX_PLUGIN_BYTES = 64 * 1024 * 1024;
+    private static final long MAX_NATIVE_EXTRACT_BYTES = 128L * 1024 * 1024;
     static final Map<String, DexClassLoader> LOADERS = new HashMap<>();
     static final Set<ClassLoader> ALL_PLUGIN_LOADERS =
             Collections.synchronizedSet(new LinkedHashSet<>());
@@ -185,6 +187,7 @@ public final class CspEngine implements SourceEngine {
             Object candidate = loader.loadClass(className).getDeclaredConstructor().newInstance();
             if (!(candidate instanceof Spider)) throw new IOException("插件父接口与当前宿主不兼容");
             spider = (Spider) candidate;
+            spider.siteKey = site.key == null ? "" : site.key;
             synchronized (pluginLock) {
                 try {
                     spider.initApi(new com.github.catvod.crawler.SpiderApi());
@@ -215,11 +218,17 @@ public final class CspEngine implements SourceEngine {
         }
         File optimized = new File(app.getCodeCacheDir(), "csp-opt");
         if (!optimized.exists() && !optimized.mkdirs()) throw new IOException("无法创建插件私有目录");
+        String librarySearchPath =
+                extractNativeLibraries(
+                        artifact,
+                        new File(app.getFilesDir(), "csp-lib/" + sha),
+                        android.os.Build.SUPPORTED_ABIS,
+                        isCurrentProcess64Bit());
         DexClassLoader loader =
                 new DexClassLoader(
                         artifact.getAbsolutePath(),
                         optimized.getAbsolutePath(),
-                        null,
+                        librarySearchPath,
                         app.getClassLoader());
         ALL_PLUGIN_LOADERS.add(loader);
         prepareHostStorage(app);
@@ -233,6 +242,164 @@ public final class CspEngine implements SourceEngine {
         syncPluginActivity(loader, MainActivity.activeActivity);
         LOADERS.put(sha, loader);
         return loader;
+    }
+
+    static boolean isCurrentProcess64Bit() {
+        try {
+            return android.os.Process.is64Bit();
+        } catch (Throwable ignored) {
+            String model = System.getProperty("sun.arch.data.model", "");
+            if ("64".equals(model)) return true;
+            if ("32".equals(model)) return false;
+            String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+            return arch.contains("64") || arch.contains("aarch64");
+        }
+    }
+
+    static List<String> selectCompatibleAbis(String[] supportedAbis, boolean is64Bit) {
+        if (supportedAbis == null || supportedAbis.length == 0) return Collections.emptyList();
+        List<String> result = new ArrayList<>();
+        for (String raw : supportedAbis) {
+            if (raw == null) continue;
+            String abi = raw.trim();
+            if (abi.isEmpty() || !abi.matches("[A-Za-z0-9_-]+")) continue;
+            boolean abi64 = abi.contains("64");
+            if (abi64 == is64Bit && !result.contains(abi)) {
+                result.add(abi);
+            }
+        }
+        return result;
+    }
+
+    static String extractNativeLibraries(
+            File artifact, File baseDir, String[] supportedAbis, boolean is64Bit)
+            throws IOException {
+        if (artifact == null || !artifact.isFile() || baseDir == null) return null;
+        List<String> candidateAbis = selectCompatibleAbis(supportedAbis, is64Bit);
+        if (candidateAbis.isEmpty()) return null;
+
+        try (ZipFile zip = new ZipFile(artifact)) {
+            Map<String, Map<String, ZipEntry>> byAbi = new LinkedHashMap<>();
+            Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                if (entry.isDirectory()) continue;
+                String name = entry.getName().replace('\\', '/');
+                boolean fromLib = name.startsWith("lib/");
+                boolean fromJni = !fromLib && name.startsWith("jni/");
+                if (!fromLib && !fromJni) continue;
+                String rest = name.substring(4);
+                int slash = rest.indexOf('/');
+                if (slash <= 0 || slash + 1 >= rest.length()) continue;
+                String abi = rest.substring(0, slash);
+                String soName = rest.substring(slash + 1);
+                if (abi.contains("..") || soName.contains("..")) {
+                    throw new IOException("插件原生库路径越界");
+                }
+                if (soName.indexOf('/') >= 0
+                        || !abi.matches("[A-Za-z0-9_-]+")
+                        || !soName.matches("[A-Za-z0-9._+-]+\\.so")) {
+                    continue;
+                }
+                Map<String, ZipEntry> abiMap = byAbi.get(abi);
+                if (abiMap == null) {
+                    abiMap = new LinkedHashMap<>();
+                    byAbi.put(abi, abiMap);
+                }
+                // Prefer standard lib/<abi>/*.so over jni/<abi>/*.so if both exist
+                if (fromLib || !abiMap.containsKey(soName)) {
+                    abiMap.put(soName, entry);
+                }
+            }
+
+            String selectedAbi = null;
+            Map<String, ZipEntry> selectedEntries = null;
+            for (String candidate : candidateAbis) {
+                Map<String, ZipEntry> found = byAbi.get(candidate);
+                if (found != null && !found.isEmpty()) {
+                    selectedAbi = candidate;
+                    selectedEntries = found;
+                    break;
+                }
+            }
+            if (selectedAbi == null || selectedEntries == null) return null;
+
+            File abiDir = new File(baseDir, selectedAbi);
+            if (abiDir.isDirectory() && allNativeLibrariesPresent(abiDir, selectedEntries)) {
+                for (String soName : selectedEntries.keySet()) {
+                    File existingSo = new File(abiDir, soName);
+                    existingSo.setReadable(true, true);
+                    existingSo.setExecutable(true, true);
+                    existingSo.setReadOnly();
+                }
+                abiDir.setReadable(true, true);
+                abiDir.setExecutable(true, true);
+                abiDir.setReadOnly();
+                return abiDir.getAbsolutePath();
+            }
+
+            if (baseDir.exists()) baseDir.setWritable(true, true);
+            if (abiDir.exists()) abiDir.setWritable(true, true);
+            if (!abiDir.exists() && !abiDir.mkdirs()) {
+                throw new IOException("无法创建插件原生库目录");
+            }
+
+            String canonicalPrefix = abiDir.getCanonicalPath() + File.separator;
+            long totalExtracted = 0L;
+            byte[] buf = new byte[8192];
+            for (Map.Entry<String, ZipEntry> item : selectedEntries.entrySet()) {
+                String soName = item.getKey();
+                ZipEntry zipEntry = item.getValue();
+                File target = new File(abiDir, soName);
+                if (!target.getCanonicalPath().startsWith(canonicalPrefix)) {
+                    throw new IOException("插件原生库路径越界");
+                }
+                if (target.exists()) {
+                    target.setWritable(true, true);
+                    if (!target.delete()) {
+                        throw new IOException("无法更新插件原生库：" + soName);
+                    }
+                }
+                File temp = File.createTempFile("native-", ".tmp", abiDir);
+                try {
+                    try (InputStream in = zip.getInputStream(zipEntry);
+                            OutputStream out = new FileOutputStream(temp)) {
+                        int n;
+                        while ((n = in.read(buf)) != -1) {
+                            checkRequest();
+                            totalExtracted += n;
+                            if (totalExtracted > MAX_NATIVE_EXTRACT_BYTES) {
+                                throw new IOException("插件原生库总大小超过限制");
+                            }
+                            out.write(buf, 0, n);
+                        }
+                    }
+                    if (!temp.renameTo(target)) {
+                        throw new IOException("无法写入插件原生库：" + soName);
+                    }
+                    target.setReadable(true, true);
+                    target.setExecutable(true, true);
+                    target.setReadOnly();
+                } finally {
+                    if (temp.exists()) temp.delete();
+                }
+            }
+
+            abiDir.setReadable(true, true);
+            abiDir.setExecutable(true, true);
+            abiDir.setReadOnly();
+            return abiDir.getAbsolutePath();
+        }
+    }
+
+    private static boolean allNativeLibrariesPresent(File abiDir, Map<String, ZipEntry> expected) {
+        for (Map.Entry<String, ZipEntry> entry : expected.entrySet()) {
+            File so = new File(abiDir, entry.getKey());
+            if (!so.isFile() || !so.canRead()) return false;
+            long expectedSize = entry.getValue().getSize();
+            if (expectedSize >= 0 && so.length() != expectedSize) return false;
+        }
+        return true;
     }
 
     static Set<ClassLoader> collectPluginLoaders(ClassLoader rootLoader, Object spiderInstance) {
@@ -1272,8 +1439,8 @@ public final class CspEngine implements SourceEngine {
                             while ((n = in.read(b)) != -1) {
                                 checkRequest();
                                 total += n;
-                                if (total > 20 * 1024 * 1024)
-                                    throw new IOException("插件超过 20 MB 限制");
+                                if (total > MAX_PLUGIN_BYTES)
+                                    throw new IOException("插件超过 64 MB 限制");
                                 out.write(b, 0, n);
                             }
                         }

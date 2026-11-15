@@ -21,8 +21,10 @@ import 'drpy_source.dart';
 import 'guard_source.dart';
 import 'trailer_source.dart';
 import 'wogg_source.dart';
+import 'cloud_media_proxy.dart';
 import 'cloud_share.dart';
 import 'ali_share.dart';
+import 'doh_resolver.dart';
 import 'source_playback.dart';
 import 'source_verification.dart';
 import 'models.dart';
@@ -31,10 +33,14 @@ import 'quark_account.dart';
 import 'resilient_http_client.dart';
 import 'storage_service.dart';
 import 'web_media_resolver.dart';
+
+export 'doh_resolver.dart';
+
 /// HTTP CMS client with TVBox `okhttp/3.15` User-Agent parity, system certificate validation for third-party
 /// CMS hosts, multi-depot (`urls`/`storeHouse`) resolution, and bounded concurrent search.
 class CmsClient {
-  static const int maxResponseBytes = 6 * 1024 * 1024;
+  static const int maxResponseBytes = 16 * 1024 * 1024;
+  static const int maxZipExpandedBytes = 6 * 1024 * 1024;
   static const int defaultSearchConcurrency = 6;
   static const String tvBoxUserAgent = 'okhttp/3.15';
   static const String safariUserAgent =
@@ -178,6 +184,9 @@ class CmsClient {
       ..maxConnectionsPerHost = 6;
     if (directOnly) {
       ioHttp.findProxy = (_) => 'DIRECT';
+    }
+    if (HttpOverrides.current == null) {
+      ioHttp.connectionFactory = CmsDohResolver.shared.connect;
     }
     return IOClient(ioHttp);
   }
@@ -472,14 +481,14 @@ class CmsClient {
         throw const FormatException('Python 本地包单个文件超过 2 MB');
       }
       total += item.value.size;
-      if (total > maxResponseBytes) throw const FormatException('Python 本地包内容超过 6 MB');
+      if (total > maxZipExpandedBytes) throw const FormatException('Python 本地包内容超过 6 MB');
       data[item.key] = base64Encode(item.value.content);
     }
     return {'entry': entry, 'files': data};
   }
 
   static String readSubscriptionFile(List<int> bytes, String name) {
-    if (bytes.length > maxResponseBytes) throw const FormatException('订阅文件超过 6 MB');
+    if (bytes.length > maxResponseBytes) throw const FormatException('订阅文件超过 16 MB');
     if (bytes.length >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b && bytes[2] == 3 && bytes[3] == 4) {
       final archive = ZipDecoder().decodeBytes(bytes);
       if (archive.files.length > 2048) throw const FormatException('ZIP 文件数量超过限制');
@@ -488,7 +497,7 @@ class CmsClient {
       for (final item in archive.files.where((f) => f.isFile)) {
         // Check before any .content access: archive entries decompress lazily.
         unpackedSize += item.size;
-        if (item.size < 0 || unpackedSize > maxResponseBytes) {
+        if (item.size < 0 || unpackedSize > maxZipExpandedBytes) {
           throw const FormatException('ZIP 解压后的内容超过 6 MB');
         }
         final path = _archivePath(item.name);
@@ -499,7 +508,7 @@ class CmsClient {
       }
       final configs = files.values.where((f) {
         if (!f.name.toLowerCase().endsWith('.json')) return false;
-        if (f.size > maxResponseBytes) return false;
+        if (f.size > maxZipExpandedBytes) return false;
         try {
           final doc = jsonDecode(CmsParser.stripJsonComments(CmsParser.decodeConfigDocument(f.content)));
           bool site(dynamic value) => value is Map && value['api'] is String &&
@@ -519,10 +528,10 @@ class CmsClient {
       }
       configs.sort((a, b) => rank(a).compareTo(rank(b)));
       final playlists = files.values.where((f) => RegExp(r'\.(m3u8?|txt)$', caseSensitive: false).hasMatch(f.name) &&
-          f.size <= maxResponseBytes && CmsParser.parseLivePlaylist(CmsParser.decodeTextDocument(f.content)).isNotEmpty).toList();
+          f.size <= maxZipExpandedBytes && CmsParser.parseLivePlaylist(CmsParser.decodeTextDocument(f.content)).isNotEmpty).toList();
       if (configs.isEmpty && playlists.length == 1) {
         final file = playlists.single;
-        if (file.size > maxResponseBytes) throw const FormatException('ZIP 中的播放列表过大');
+        if (file.size > maxZipExpandedBytes) throw const FormatException('ZIP 中的播放列表过大');
         final text = CmsParser.decodeTextDocument(file.content);
         if (CmsParser.parseLivePlaylist(text).isEmpty) throw const FormatException('播放列表没有可用频道');
         // Keep the playlist inline even after refreshing a remote ZIP subscription.
@@ -544,7 +553,7 @@ class CmsClient {
         for (final script in resources) {
           if (modules.length >= 32) throw const FormatException('ZIP 模块数量超过限制');
           size += script.value.size;
-          if (size > maxResponseBytes) throw const FormatException('ZIP 脚本总大小超过 6 MB');
+          if (size > maxZipExpandedBytes) throw const FormatException('ZIP 脚本总大小超过 6 MB');
           modules[Uri(scheme: 'pkg', host: 'archive', path: '/${script.key}').toString()] = CmsParser.decodeTextDocument(script.value.content);
         }
         final origin = Uri(scheme: 'pkg', host: 'archive', path: '/${entry.key}').toString();
@@ -556,14 +565,14 @@ class CmsClient {
           'api': python ? 'csp_LocalScript.py' : CmsParser.looksLikeDrpyRule(source) ? 'csp_LocalRule.js' : 'csp_LocalScript.js',
           'ext': {'script': source, 'origin': origin, 'modules': modules,
             if (python) 'package': _pythonPackageData(files, entry.key)}}]});
-        if (utf8.encode(result).length > maxResponseBytes) throw const FormatException('展开的订阅超过 6 MB');
+        if (utf8.encode(result).length > maxZipExpandedBytes) throw const FormatException('展开的订阅超过 6 MB');
         return result;
       }
       if (configs.length > 1 && rank(configs.first) == rank(configs[1])) {
         throw const FormatException('ZIP 需要一个明确的订阅入口，例如 config.json');
       }
       final file = configs.first;
-      if (file.size > maxResponseBytes) throw const FormatException('ZIP 中的配置过大');
+      if (file.size > maxZipExpandedBytes) throw const FormatException('ZIP 中的配置过大');
       var decoded = CmsParser.decodeConfigDocument(file.content);
       var doc = jsonDecode(CmsParser.stripJsonComments(decoded));
       if (doc is List) doc = <String, dynamic>{'sites': doc};
@@ -594,7 +603,7 @@ class CmsClient {
             if (scripts.isEmpty) {
               for (final f in files.entries.where((e) => e.key != entryPath &&
                   (scriptFile.hasMatch(e.key) || e.key.toLowerCase().endsWith('.json')))) {
-                if (scripts.length >= 32 || f.value.size > maxResponseBytes - total) {
+                if (scripts.length >= 32 || f.value.size > maxZipExpandedBytes - total) {
                   throw const FormatException('ZIP 脚本数量或总大小超过限制');
                 }
                 total += f.value.size;
@@ -605,7 +614,7 @@ class CmsClient {
             final source = scripts[origin];
             if (source == null) throw const FormatException('ZIP 中缺少入口脚本');
             expanded += total - file.size;
-            if (expanded > maxResponseBytes) throw const FormatException('展开的订阅超过 6 MB');
+            if (expanded > maxZipExpandedBytes) throw const FormatException('展开的订阅超过 6 MB');
             site['api'] = ref.path.toLowerCase().endsWith('.py') ? 'csp_LocalScript.py' : CmsParser.looksLikeDrpyRule(source) ? 'csp_LocalRule.js' : 'csp_LocalScript.js';
             site['ext'] = {'script': source, 'origin': origin,
               'modules': Map.of(scripts)..remove(origin), 'ext': explicitRule ? '' : site['ext'] ?? '',
@@ -622,7 +631,7 @@ class CmsClient {
           final ref = Uri.parse(url);
           if (ref.hasAuthority || ref.path.startsWith('/')) throw const FormatException('ZIP 播放列表路径无效');
           final target = files[base.resolveUri(ref).pathSegments.join('/')];
-          if (target == null || target.size > maxResponseBytes - total) {
+          if (target == null || target.size > maxZipExpandedBytes - total) {
             throw const FormatException('ZIP 内的播放列表不存在或过大');
           }
           total += target.size;
@@ -631,7 +640,7 @@ class CmsClient {
           live['url'] = Uri.dataFromString(text, mimeType: 'text/plain', encoding: utf8, base64: true).toString();
         }
         decoded = jsonEncode(doc);
-        if (utf8.encode(decoded).length > maxResponseBytes) throw const FormatException('展开的订阅超过 6 MB');
+        if (utf8.encode(decoded).length > maxZipExpandedBytes) throw const FormatException('展开的订阅超过 6 MB');
       }
       final config = CmsParser.parseConfig(decoded);
       if (config.sites.any((s) => !s.isHttpApi && !s.isM3uVodApi && !s.api.startsWith('csp_')) ||
@@ -1116,7 +1125,7 @@ class CmsClient {
       if (visited.length > 32) throw const FormatException('脚本模块过多');
       final text = modules[parent]!;
       total += utf8.encode(text).length;
-      if (total > maxResponseBytes) throw const FormatException('脚本模块总大小超过 6 MB');
+      if (total > maxResponseBytes) throw const FormatException('脚本模块总大小超过 16 MB');
       if (Uri.parse(parent).path.toLowerCase().endsWith('.json')) continue;
       final required = JsSourceHost.commonJsReferences(text).toSet();
       final references = {...JsSourceHost.esModuleReferences(text), ...required};
@@ -1494,7 +1503,7 @@ class CmsClient {
     final filtered = candidates.where((s) => s.key != source.key &&
         s.isEffectivelyPrivate == source.isEffectivelyPrivate && s.searchable &&
         s.canBrowse && !CspBridge.isDoubanSite(s) && !CspBridge.isMyDriveSite(s) &&
-        (_usesJs(s) || !CspBridge.canHandleSite(s) || CspBridge.backendsForSite(s).isNotEmpty ||
+        (_usesJs(s) || CspBridge.usesWoggNetdiskAdapter(s) || !CspBridge.canHandleSite(s) || CspBridge.backendsForSite(s).isNotEmpty ||
           CspRuleEngines.supports(s) || CspBridge.isBiliSite(s) ||
           CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s))).toList();
     int sitePriority(CmsSite s) {
@@ -1723,21 +1732,31 @@ class CmsClient {
     }
   }
 
+  static bool _isExpandableCloudShare(String epUrl) {
+    final trimmed = epUrl.trim();
+    return trimmed.startsWith('mmshare://') ||
+        ResilientHttpClient.cloudProviderForShare(trimmed) != null;
+  }
+
   Future<CmsVideo> _expandMmShareLines(CmsVideo video) async {
     final hasMmShare = video.lines.any(
-      (line) => line.episodes.any((ep) => ep.url.startsWith('mmshare://')),
+      (line) => line.episodes.any((ep) => _isExpandableCloudShare(ep.url)),
     );
     if (!hasMmShare) return video;
 
     String canonicalShareOf(String epUrl) {
-      final raw = epUrl.substring('mmshare://'.length).trim();
-      return ResilientHttpClient.normalizeCloudShareUrl(raw) ?? raw;
+      final trimmed = epUrl.trim();
+      if (trimmed.startsWith('mmshare://')) {
+        final raw = trimmed.substring('mmshare://'.length).trim();
+        return ResilientHttpClient.normalizeCloudShareUrl(raw) ?? raw;
+      }
+      return ResilientHttpClient.normalizeCloudShareUrl(trimmed) ?? trimmed;
     }
 
     final allUniqueShares = <String>[];
     for (final line in video.lines) {
       for (final ep in line.episodes) {
-        if (ep.url.startsWith('mmshare://')) {
+        if (_isExpandableCloudShare(ep.url)) {
           final norm = canonicalShareOf(ep.url);
           if (norm.isNotEmpty && !allUniqueShares.contains(norm)) {
             allUniqueShares.add(norm);
@@ -1834,13 +1853,13 @@ class CmsClient {
     final expandedLines = <CmsLine>[];
     final warnings = <String>[...video.sourceWarnings];
     for (final line in video.lines) {
-      if (!line.episodes.any((ep) => ep.url.startsWith('mmshare://'))) {
+      if (!line.episodes.any((ep) => _isExpandableCloudShare(ep.url))) {
         expandedLines.add(line);
         continue;
       }
       final eps = <CmsEpisode>[];
       for (final ep in line.episodes) {
-        if (!ep.url.startsWith('mmshare://')) {
+        if (!_isExpandableCloudShare(ep.url)) {
           eps.add(ep);
           continue;
         }
@@ -1856,6 +1875,29 @@ class CmsClient {
       if (eps.isNotEmpty) {
         expandedLines.add(CmsLine(name: line.name, episodes: eps));
       }
+    }
+
+    if (loggedInProviders.isNotEmpty && expandedLines.length > 1) {
+      int linePriority(CmsLine line) {
+        final providers =
+            line.episodes.map((ep) => ep.cloudProvider).whereType<String>().toSet();
+        if (providers.length == 1) {
+          final provider = providers.single;
+          final orderIdx = preferredOrder.indexOf(provider);
+          final rank = orderIdx < 0 ? 50 : orderIdx;
+          return loggedInProviders.contains(provider) ? rank : 20 + rank;
+        }
+        return 10;
+      }
+
+      final indexedLines = expandedLines.indexed.toList()
+        ..sort((a, b) {
+          final cmp = linePriority(a.$2).compareTo(linePriority(b.$2));
+          return cmp != 0 ? cmp : a.$1.compareTo(b.$1);
+        });
+      expandedLines
+        ..clear()
+        ..addAll(indexedLines.map((e) => e.$2));
     }
 
     return CmsVideo(
@@ -2243,11 +2285,98 @@ class CmsClient {
     if (items.isEmpty) {
       throw const FormatException('该网盘分享目录为空或已失效');
     }
-    final picked = items.firstWhere(
-      (item) => item.name.trim() == episode.name.trim(),
-      orElse: () => items.first,
-    );
+    final wanted = episode.name.trim();
+    const genericLabels = {
+      '',
+      '正片',
+      '分享',
+      '播放',
+      '立即播放',
+      '网盘',
+      '4k',
+      '原画',
+    };
+    CmsEpisode picked;
+    final exactIdx = items.indexWhere((item) => item.name.trim() == wanted);
+    if (exactIdx >= 0) {
+      picked = items[exactIdx];
+    } else if (items.length > 1 && !genericLabels.contains(wanted.toLowerCase())) {
+      final matchedIdx = CspBridge.matchEpisodeIndexInLine(
+        CmsLine(name: site.name, episodes: items),
+        wanted,
+        0,
+      );
+      picked = items[matchedIdx.clamp(0, items.length - 1)];
+    } else {
+      picked = items.first;
+    }
     return resolveEpisodeForPlayback(site, picked, parses: parses);
+  }
+
+  Future<CmsEpisode> _wrapAliMediaLease(CmsEpisode played) async {
+    if (_http != null && _http is! ResilientHttpClient) return played;
+    Uri? firstLeaseTarget;
+    for (final v in played.variants) {
+      final uri = Uri.tryParse(v.url);
+      if (uri != null &&
+          !uri.path.toLowerCase().endsWith('.m3u8') &&
+          !uri.query.toLowerCase().contains('m3u8') &&
+          CloudMediaLease.isTrustedAliMedia(uri)) {
+        firstLeaseTarget = uri;
+        break;
+      }
+    }
+    if (firstLeaseTarget == null) {
+      final mainUri = Uri.tryParse(played.url);
+      if (mainUri != null &&
+          !mainUri.path.toLowerCase().endsWith('.m3u8') &&
+          !mainUri.query.toLowerCase().contains('m3u8') &&
+          CloudMediaLease.isTrustedAliMedia(mainUri)) {
+        firstLeaseTarget = mainUri;
+      }
+    }
+    if (firstLeaseTarget == null) return played;
+    final lease = await CloudMediaLease.open(
+      target: firstLeaseTarget,
+      provider: CloudMediaProvider.ali,
+      headers: played.headers,
+      isCancelled: _sourceCancelled,
+      isCurrent: () async => true,
+      client: _http is ResilientHttpClient
+          ? CloudMediaLease.createDefaultMediaClient()
+          : null,
+    );
+    final session = <String, Object>{'cloudMediaLease': lease};
+    CmsEpisode mapVariant(CmsEpisode item) {
+      final uri = Uri.tryParse(item.url);
+      if (uri != null &&
+          !uri.path.toLowerCase().endsWith('.m3u8') &&
+          !uri.query.toLowerCase().contains('m3u8') &&
+          CloudMediaLease.isTrustedAliMedia(uri)) {
+        return CmsEpisode(
+          name: item.name,
+          url: lease.urlFor(uri).toString(),
+          headers: const {},
+          playbackSession: session,
+        );
+      }
+      return CmsEpisode(
+        name: item.name,
+        url: item.url,
+        headers: item.headers,
+        playbackSession: session,
+      );
+    }
+
+    final mappedVariants = played.variants.map(mapVariant).toList(growable: false);
+    final primary = mappedVariants.isNotEmpty ? mappedVariants.first : mapVariant(played);
+    return CmsEpisode(
+      name: played.name,
+      url: primary.url,
+      headers: primary.headers,
+      playbackSession: session,
+      variants: mappedVariants,
+    );
   }
 
   Future<CmsEpisode> resolveEpisodeForPlayback(
@@ -2256,7 +2385,8 @@ class CmsClient {
     List<CmsParse> parses = const [],
   }) async {
     if (episode.url.startsWith('mmshare://') ||
-        episode.url.toLowerCase().startsWith('push://')) {
+        episode.url.toLowerCase().startsWith('push://') ||
+        ResilientHttpClient.cloudProviderForShare(episode.url) != null) {
       final shareResolved = await _tryResolveCloudShareTarget(
         site,
         episode,
@@ -2273,7 +2403,9 @@ class CmsClient {
       final cloud = AliShareClient(client: _http, credentialReader: _cloudCredential, isCancelled: _sourceCancelled,
           credentialWriter: (provider, value) async =>
               (await StorageService.init()).setNetdiskCredential(provider, value));
-      try { return await cloud.resolve(episode); } finally { cloud.close(); }
+      late final CmsEpisode played;
+      try { played = await cloud.resolve(episode); } finally { cloud.close(); }
+      return _wrapAliMediaLease(played);
     }
     if (episode.url.startsWith('mmquark://')) {
       final drive = _quark ?? QuarkDriveClient(
@@ -2494,7 +2626,7 @@ class CmsClient {
       final b64Idx = u.indexOf('base64,');
       if (b64Idx < 0) throw const FormatException('内嵌直播列表格式无效');
       final b64 = u.substring(b64Idx + 7).trim();
-      if (b64.length > maxResponseBytes * 4 ~/ 3 + 4) throw const FormatException('直播列表超过 6 MB');
+      if (b64.length > maxResponseBytes * 4 ~/ 3 + 4) throw const FormatException('直播列表超过 16 MB');
       raw = utf8.decode(base64Decode(b64), allowMalformed: true);
     } else {
       final targetUrl =

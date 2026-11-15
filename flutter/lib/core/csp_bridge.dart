@@ -4,6 +4,7 @@ import 'cms_parser.dart';
 import 'csp_rule_engines.dart';
 import 'trailer_source.dart';
 import 'models.dart';
+import 'wogg_netdisk_adapter.dart';
 import 'wogg_source.dart';
 
 typedef CspHttpTextFetcher = Future<String> Function(
@@ -225,8 +226,13 @@ class CspBridge {
               isMyDriveSite(site) ||
               isBannerNoticeSite(site)));
 
+  static bool usesWoggNetdiskAdapter(CmsSite site) =>
+      !WoggSource.supports(site) &&
+      !(guardAdapterFor(site) != null && site.pluginReference.trim().isNotEmpty) &&
+      WoggNetdiskAdapter.supports(site);
+
   static bool hasBuiltinAdapter(CmsSite site) =>
-      !site.api.startsWith('csp_Local') && (CspRuleEngines.supports(site) || isDoubanSite(site) || isMyDriveSite(site) || isBiliSite(site) ||
+      !site.api.startsWith('csp_Local') && (usesWoggNetdiskAdapter(site) || CspRuleEngines.supports(site) || isDoubanSite(site) || isMyDriveSite(site) || isBiliSite(site) ||
       isTuxiaobeiSite(site) || isFirstAidSite(site) || isHuyaSite(site) ||
       isDouyuSite(site) || backendsForSite(site).isNotEmpty);
 
@@ -549,6 +555,9 @@ class CspBridge {
     CspHttpTextFetcher fetchText,
   ) async {
     if (TrailerSource.matches(site)) return ([TrailerSource.category], await TrailerSource.list(1, '', fetchText));
+    if (usesWoggNetdiskAdapter(site)) {
+      return WoggNetdiskAdapter(site, fetchText).home();
+    }
     if (CspRuleEngines.supports(site)) {
       return CspRuleEngines.fetchHome(site, fetchText);
     }
@@ -585,6 +594,9 @@ class CspBridge {
     CmsFilter? filter,
   }) async {
     if (TrailerSource.matches(site)) return TrailerSource.list(page, '', fetchText);
+    if (usesWoggNetdiskAdapter(site)) {
+      return WoggNetdiskAdapter(site, fetchText).category(categoryId, page);
+    }
     if (CspRuleEngines.supports(site)) {
       return CspRuleEngines.fetchCategory(site, categoryId, page, fetchText, filter: filter);
     }
@@ -645,6 +657,9 @@ class CspBridge {
     CspHttpTextFetcher fetchText,
   ) async {
     if (TrailerSource.matches(site)) return TrailerSource.list(page, keyword, fetchText);
+    if (usesWoggNetdiskAdapter(site)) {
+      return WoggNetdiskAdapter(site, fetchText).search(keyword, page);
+    }
     if (CspRuleEngines.supports(site)) {
       return CspRuleEngines.fetchSearch(site, keyword, page, fetchText);
     }
@@ -670,6 +685,9 @@ class CspBridge {
     CspHttpTextFetcher fetchText,
   ) async {
     if (TrailerSource.matches(site)) return TrailerSource.detail(fallback, fetchText);
+    if (usesWoggNetdiskAdapter(site)) {
+      return WoggNetdiskAdapter(site, fetchText).detail(fallback);
+    }
     if (CspRuleEngines.supports(site)) {
       return CspRuleEngines.fetchDetail(site, fallback, fetchText);
     }

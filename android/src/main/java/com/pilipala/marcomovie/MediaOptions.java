@@ -24,43 +24,24 @@ final class MediaOptions {
                 && Cms.isMedia(result.optString("playUrl"))) {
             out.url = ProxyAddress.rewrite(result.optString("playUrl").trim());
         }
-        // When a spider returns both a loopback `/proxy` multi-thread wrapper and a direct
-        // same-tier CDN URL (e.g. "原画" / "RAW-直连"), prefer the direct CDN URL first so
-        // ExoPlayer connects straight to the cloud CDN without waiting on local proxy chunk
-        // workers, while keeping `/proxy` right behind it in `qualities` as automatic fallback.
-        if (qualities.length() > 1
-                && (out.url.contains("127.0.0.1") || out.url.contains("localhost"))) {
-            JSONObject firstQ = qualities.optJSONObject(0);
-            String firstLabel = firstQ != null ? firstQ.optString("name", "") : "";
-            int directIdx = -1;
-            for (int i = 1; i < qualities.length(); i++) {
+        if (qualities.length() > 0) {
+            for (int i = 0; i < qualities.length(); i++) {
                 JSONObject q = qualities.optJSONObject(i);
                 if (q == null) continue;
-                String u = q.optString("url", "");
-                String uLower = u.toLowerCase(Locale.ROOT);
-                String qLabel = q.optString("name", "");
-                if (u.startsWith("http")
-                        && !u.contains("127.0.0.1")
-                        && !u.contains("localhost")
-                        && !uLower.contains("baidupcs")
-                        && !uLower.contains("baidu.com")
-                        && !isLowerTranscodeTier(firstLabel, qLabel)) {
-                    directIdx = i;
-                    break;
+                Map<String, String> inlineHeaders = new LinkedHashMap<>();
+                String cleanUrl = stripInlineHeaders(q.optString("url", ""), inlineHeaders);
+                if (!cleanUrl.isEmpty()) {
+                    q.put("url", cleanUrl);
+                }
+                if (!inlineHeaders.isEmpty()) {
+                    JSONObject qHeaders = q.optJSONObject("headers");
+                    if (qHeaders == null) qHeaders = new JSONObject();
+                    for (Map.Entry<String, String> entry : inlineHeaders.entrySet()) {
+                        qHeaders.put(entry.getKey(), entry.getValue());
+                    }
+                    q.put("headers", qHeaders);
                 }
             }
-            if (directIdx > 0) {
-                JSONArray reordered = new JSONArray();
-                JSONObject preferred = qualities.optJSONObject(directIdx);
-                reordered.put(preferred);
-                for (int i = 0; i < qualities.length(); i++) {
-                    if (i != directIdx) reordered.put(qualities.opt(i));
-                }
-                qualities = reordered;
-                out.url = preferred.optString("url", out.url);
-            }
-        }
-        if (qualities.length() > 0) {
             out.media.put("qualities", qualities);
         }
         out.headers.putAll(Cms.inheritedHeaders(site.api, out.url, site.headers));
@@ -365,35 +346,5 @@ final class MediaOptions {
             if (type.contains("/") && !type.equals("application/octet-stream")) return type;
         }
         return null;
-    }
-
-    static boolean isLowerTranscodeTier(String firstLabel, String candidateLabel) {
-        if (candidateLabel == null || candidateLabel.isEmpty()) return false;
-        String cand = candidateLabel.toLowerCase(Locale.ROOT);
-        if (cand.contains("原画")
-                || cand.contains("raw")
-                || cand.contains("源码")
-                || cand.contains("直连")
-                || cand.contains("原盘")) {
-            return false;
-        }
-        String first = firstLabel == null ? "" : firstLabel.toLowerCase(Locale.ROOT);
-        boolean firstIsRaw =
-                first.isEmpty()
-                        || first.contains("原画")
-                        || first.contains("raw")
-                        || first.contains("源码")
-                        || first.contains("4k")
-                        || first.contains("代理")
-                        || first.contains("多线程");
-        if (!firstIsRaw) return false;
-        return cand.contains("普画")
-                || cand.contains("流畅")
-                || cand.contains("标清")
-                || cand.contains("高清")
-                || cand.contains("超清")
-                || cand.contains("720")
-                || cand.contains("480")
-                || cand.contains("360");
     }
 }

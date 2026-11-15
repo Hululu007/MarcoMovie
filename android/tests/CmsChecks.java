@@ -1,6 +1,8 @@
 import com.pilipala.marcomovie.*;
 import com.pilipala.source.Json;
+import com.sun.net.httpserver.HttpServer;
 import java.io.*;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
@@ -68,7 +70,126 @@ public final class CmsChecks {
                         && picture.headers.get("User-Agent").equals("Mozilla/5.0"),
                 "actual poster header suffix separated from image URL");
         testLaneCAdditions();
+        testModuleBAdditions();
         System.out.println("OK " + count + " checks");
+    }
+
+    private static void testModuleBAdditions() throws Exception {
+        // Module B: 16 MB MAX_JSON limit check (> 4 MB config succeeds, > 16 MB rejected)
+        check(Cms.MAX_JSON == 16 * 1024 * 1024, "MAX_JSON raised to 16 MB");
+        char[] pad4m = new char[4 * 1024 * 1024 + 256 * 1024];
+        Arrays.fill(pad4m, 'x');
+        String largeCfg =
+                "{\"sites\":[{\"key\":\"big\",\"name\":\"Big4K\",\"type\":3,\"api\":\"csp_Wogg\",\"ext\":\""
+                        + new String(pad4m)
+                        + "\"}]}";
+        Cms.Config parsedLarge = Cms.parseConfig(largeCfg, "https://repo.test/sub.json");
+        check(
+                parsedLarge.sites.size() == 1 && "big".equals(parsedLarge.sites.get(0).key),
+                "subscription larger than 4 MB accepted within 16 MB limit");
+
+        // Module B: JSONObject.NULL and literal "null" non-pollution check
+        Object androidStyleNull =
+                new Object() {
+                    @Override
+                    public String toString() {
+                        return "null";
+                    }
+                };
+        JSONObject nullObj = new JSONObject();
+        nullObj.put("jar", JSONObject.NULL);
+        nullObj.put("ua", androidStyleNull);
+        nullObj.put("api", "null");
+        check(
+                Cms.optSafeString(nullObj, "jar").isEmpty()
+                        && Cms.optSafeString(nullObj, "ua").isEmpty()
+                        && Cms.optSafeString(nullObj, "api").isEmpty()
+                        && "fallback".equals(Cms.optSafeString(nullObj, "jar", "fallback")),
+                "optSafeString prevents JSONObject.NULL and literal null pollution");
+
+        String nullPollutedCfg =
+                "{\"spider\":null,\"jar\":\"null\",\"sites\":["
+                        + "{\"key\":\"s1\",\"name\":\"Wogg\",\"type\":3,\"api\":\"csp_Wogg\",\"jar\":null,\"ua\":null,\"playUrl\":null,\"ext\":null,\"header\":{\"User-Agent\":null,\"Referer\":\"null\"}},"
+                        + "{\"key\":\"s2\",\"name\":\"Quark\",\"type\":3,\"api\":\"csp_Quark\",\"jar\":\"null\",\"ua\":\"null\",\"playUrl\":\"null\",\"ext\":\"null\"}"
+                        + "]}";
+        Cms.Config cleanCfg = Cms.parseConfig(nullPollutedCfg, "https://repo.test/sub.json");
+        Cms.Site ns1 = cleanCfg.sites.get(0);
+        Cms.Site ns2 = cleanCfg.sites.get(1);
+        check(
+                cleanCfg.spider.isEmpty()
+                        && ns1.jar.isEmpty()
+                        && ns2.jar.isEmpty()
+                        && ns1.playUrl.isEmpty()
+                        && ns2.playUrl.isEmpty()
+                        && !ns1.requiresParser
+                        && ns1.ext == null
+                        && ns2.ext == null
+                        && Cms.USER_AGENT.equals(ns1.headers.get("User-Agent"))
+                        && Cms.USER_AGENT.equals(ns2.headers.get("User-Agent"))
+                        && !ns1.headers.containsKey("Referer"),
+                "null/\"null\" fields do not pollute spider, jar, ua, playUrl, ext, or headers");
+
+        // Module B: CatVod //bb QuickJS bytecode recognition
+        String bbScript = "//bbQ0FUT1AAAQIDBAUG";
+        check(
+                Cms.looksLikeJsSpider(bbScript, "")
+                        && Cms.looksLikeJsSpider("\uFEFF  " + bbScript, "https://pan.test/wogg"),
+                "looksLikeJsSpider recognizes //bb QuickJS bytecode scripts");
+        check(
+                bbScript.equals(Cms.document(bbScript.getBytes(StandardCharsets.UTF_8))),
+                "Cms.document preserves //bb QuickJS bytecode payload untouched");
+        Cms.Config bbCfg = Cms.parseConfig(bbScript, "https://pan.test/js/wogg_bc");
+        check(
+                bbCfg.sites.size() == 1
+                        && bbCfg.sites.get(0).type == 3
+                        && bbCfg.sites.get(0).ext instanceof JSONObject
+                        && bbScript.equals(
+                                ((JSONObject) bbCfg.sites.get(0).ext).optString("_mm_entrySource")),
+                "parseConfig imports //bb QuickJS bytecode URL as checked JS spider");
+
+        // Module B: Cms.fetch HTTP 403 -> Mobile / TVBox UA fallback
+        HttpServer uaServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try {
+            final String okPayload =
+                    "{\"sites\":[{\"key\":\"ok\",\"name\":\"OK\",\"type\":1,\"api\":\"https://cms.test/vod\"}]}";
+            uaServer.createContext(
+                    "/mobile-only",
+                    ex -> {
+                        String ua = ex.getRequestHeaders().getFirst("User-Agent");
+                        byte[] out =
+                                (ua != null && ua.contains("Mobile Safari"))
+                                        ? okPayload.getBytes(StandardCharsets.UTF_8)
+                                        : "Forbidden".getBytes(StandardCharsets.UTF_8);
+                        ex.sendResponseHeaders(
+                                (ua != null && ua.contains("Mobile Safari")) ? 200 : 403,
+                                out.length);
+                        ex.getResponseBody().write(out);
+                        ex.close();
+                    });
+            uaServer.createContext(
+                    "/tvbox-only",
+                    ex -> {
+                        String ua = ex.getRequestHeaders().getFirst("User-Agent");
+                        byte[] out =
+                                (ua != null && ua.contains("TVBox"))
+                                        ? okPayload.getBytes(StandardCharsets.UTF_8)
+                                        : "Forbidden".getBytes(StandardCharsets.UTF_8);
+                        ex.sendResponseHeaders(
+                                (ua != null && ua.contains("TVBox")) ? 200 : 403, out.length);
+                        ex.getResponseBody().write(out);
+                        ex.close();
+                    });
+            uaServer.start();
+            int uaPort = uaServer.getAddress().getPort();
+            String mobileRes = Cms.fetch("http://127.0.0.1:" + uaPort + "/mobile-only", null);
+            String tvboxRes = Cms.fetch("http://127.0.0.1:" + uaPort + "/tvbox-only", null);
+            check(
+                    Cms.parseConfig(mobileRes, "").sites.size() == 1
+                            && Cms.parseConfig(tvboxRes, "").sites.size() == 1,
+                    "Cms.fetch falls back from okhttp/3.15 to Mobile and TVBox UAs on HTTP 403");
+        } finally {
+            uaServer.stop(0);
+        }
     }
 
     private static void testLaneCAdditions() throws Exception {

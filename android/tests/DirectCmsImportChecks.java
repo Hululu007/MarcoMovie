@@ -444,7 +444,7 @@ public final class DirectCmsImportChecks {
         java.io.ByteArrayOutputStream bombOut = new java.io.ByteArrayOutputStream();
         try (java.util.zip.GZIPOutputStream gzos = new java.util.zip.GZIPOutputStream(bombOut)) {
             byte[] chunk = new byte[65536];
-            for (int i = 0; i < 70; i++) {
+            for (int i = 0; i < 270; i++) {
                 gzos.write(chunk);
             }
         }
@@ -455,7 +455,7 @@ public final class DirectCmsImportChecks {
         } catch (java.io.IOException e) {
             bombCaught = e.getMessage() != null && e.getMessage().contains("解压后内容超过大小限制");
         }
-        check(bombCaught, "gzip bomb exceeding 4MB is rejected");
+        check(bombCaught, "gzip bomb exceeding MAX_JSON is rejected");
 
         // Valid gzip payload decompression
         java.io.ByteArrayOutputStream validGzOut = new java.io.ByteArrayOutputStream();

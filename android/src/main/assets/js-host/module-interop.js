@@ -29,6 +29,11 @@ globalThis.__movieLoadCommonJS = function(entry, load) {
 };
 globalThis.__movieSelectSpider = function(module, options = {}) {
   let spider = module && module.default != null ? module.default : module;
+  if (module && module.default == null && typeof module.__jsEvalReturn === 'function') {
+    spider = module.__jsEvalReturn();
+    globalThis.__movieCatApi = true;
+    options = Object.assign({}, options, {preserveInit: true});
+  }
   if (!spider || (typeof spider !== 'object' && typeof spider !== 'function'))
     throw new Error('Script has no Spider export');
   const aliases = {

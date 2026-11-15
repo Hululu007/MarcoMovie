@@ -35,6 +35,7 @@ TEST_AUTHORITIES = {
     'flutter/test/quark_drive_test.dart': {'media.quark.cn'},
     'flutter/test/quark_media_proxy_test.dart': {'media.quark.cn', 'next.quark.cn', 'media.quark.cn:444', 'user@media.quark.cn', 'media.uc.cn'},
     'flutter/test/native_cloud_playback_test.dart': {'media.quark.cn'},
+    'flutter/test/netdisk_4k_ios_optimization_test.dart': {'cdn.aliyundrive.net', 'dl.quark.cn'},
     'flutter/test/wogg_client_test.dart': {'media.uc.cn'},
     'flutter/test/wogg_source_test.dart': {'user:password@catalogue.invalid', 'alipan.com', 'aliyundrive.com', 'fast.uc.cn'},
     'android/tests/JsHttpChecks.java': {'new:secret@', 'us%40er:pa%2Bss@'},
@@ -115,9 +116,12 @@ EXPERIMENT_HOSTS = {
 # and account. Keep review scoped to the adapter rather than permitting these
 # hosts in arbitrary public files. Synthetic media URLs stay test-scoped above.
 CLOUD_SHARE_HOSTS = {
+    'android/src/main/java/com/github/catvod/crawler/Spider.java': {'223.5.5.5', '1.12.12.12'},
+    'android/src/main/java/com/pilipala/marcomovie/Cms.java': {'223.5.5.5', '1.12.12.12'},
     'flutter/lib/core/ali_share.dart': {'api.aliyundrive.com', 'auth.aliyundrive.com', 'bj29.api.aliyunpds.com'},
     'flutter/lib/core/netdisk_service.dart': {'auth.aliyundrive.com'},
     'flutter/lib/core/cloud_share.dart': {'fast.uc.cn'},
+    'flutter/lib/core/doh_resolver.dart': {'dns.alidns.com', 'cloudflare-dns.com', 'dns.google'},
 }
 
 def paths():

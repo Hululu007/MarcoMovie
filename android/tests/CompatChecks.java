@@ -1,8 +1,15 @@
 package com.pilipala.marcomovie;
 
-import java.nio.file.*;
+import com.sun.net.httpserver.HttpServer;
 import java.io.*;
+import java.lang.reflect.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
 import java.util.*;
+import java.util.zip.*;
+import javax.tools.JavaCompiler;
+import javax.tools.ToolProvider;
 import org.json.*;
 
 public final class CompatChecks {
@@ -259,17 +266,27 @@ public final class CompatChecks {
                                         .put("多线程原画")
                                         .put("http://127.0.0.1:9978/proxy?do=quark&id=1")
                                         .put("原画")
-                                        .put("https://drive-pc.quark.cn/file/ep01"));
-        Cms.Episode preferredDirect = MediaOptions.episode(site, cloudEp, cloudSameTier);
+                                        .put(
+                                                "https://drive-pc.quark.example/file/ep01|Referer=https://pan.quark.example/"));
+        Cms.Episode preferredProxy = MediaOptions.episode(site, cloudEp, cloudSameTier);
         check(
-                "https://drive-pc.quark.cn/file/ep01".equals(preferredDirect.url)
-                        && preferredDirect
-                                .media
-                                .getJSONArray("qualities")
-                                .getJSONObject(1)
-                                .getString("url")
-                                .startsWith("http://127.0.0.1:9978/proxy"),
-                "direct cloud original stream is preferred over loopback proxy with proxy retained as fallback");
+                preferredProxy.url.startsWith("http://127.0.0.1:9978/proxy")
+                        && "https://drive-pc.quark.example/file/ep01"
+                                .equals(
+                                        preferredProxy
+                                                .media
+                                                .getJSONArray("qualities")
+                                                .getJSONObject(1)
+                                                .getString("url"))
+                        && "https://pan.quark.example/"
+                                .equals(
+                                        preferredProxy
+                                                .media
+                                                .getJSONArray("qualities")
+                                                .getJSONObject(1)
+                                                .getJSONObject("headers")
+                                                .getString("Referer")),
+                "multi-threaded loopback proxy stays primary while direct CDN remains in qualities with stripped headers");
         JSONObject cloudLowerTier =
                 new JSONObject()
                         .put(
@@ -278,7 +295,7 @@ public final class CompatChecks {
                                         .put("原画")
                                         .put("http://127.0.0.1:9978/proxy?do=quark&id=2")
                                         .put("普画")
-                                        .put("https://drive-pc.quark.cn/transcode/720.m3u8"));
+                                        .put("https://drive-pc.quark.example/transcode/720.m3u8"));
         Cms.Episode keptRaw = MediaOptions.episode(site, cloudEp, cloudLowerTier);
         check(
                 keptRaw.url.startsWith("http://127.0.0.1:9978/proxy"),
@@ -329,7 +346,8 @@ public final class CompatChecks {
         String decoderManifest =
                 new String(
                         java.nio.file.Files.readAllBytes(
-                                java.nio.file.Paths.get("android/decoder-dependencies.json")),
+                                java.nio.file.Paths.get(
+                                        args[0], "android/decoder-dependencies.json")),
                         "UTF-8");
         JSONArray decoderItems = new JSONArray(decoderManifest);
         boolean hasArmv7Decoders = false, hasArm64Decoders = false;
@@ -351,7 +369,633 @@ public final class CompatChecks {
         check(
                 hasArmv7Decoders && hasArm64Decoders,
                 "decoder manifest ships both armeabi-v7a and arm64-v8a Media3 native extensions");
+        runModuleBChecks(Paths.get(args[0]));
         System.out.println(
                 "OK " + count + " compatibility checks; network and playback not implied");
+    }
+
+    private static byte[] buildMockDnsAResponse(String host, byte[] ipv4, int ttl)
+            throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(96);
+        // Header: ID=0, Flags=0x8180 (QR=1, RD=1, RA=1, RCODE=0), QD=1, AN=1, NS=0, AR=0
+        out.write(new byte[] {0, 0, (byte) 0x81, (byte) 0x80, 0, 1, 0, 1, 0, 0, 0, 0});
+        for (String label : host.split("\\.")) {
+            byte[] b = label.getBytes(StandardCharsets.US_ASCII);
+            out.write(b.length);
+            out.write(b);
+        }
+        out.write(0);
+        out.write(new byte[] {0, 1, 0, 1}); // QTYPE=A, QCLASS=IN
+        // Answer: pointer 0xC00C -> QNAME, TYPE=A(1), CLASS=IN(1), TTL, RDLENGTH=4, RDATA
+        out.write(new byte[] {(byte) 0xc0, 0x0c, 0, 1, 0, 1});
+        out.write((ttl >> 24) & 0xff);
+        out.write((ttl >> 16) & 0xff);
+        out.write((ttl >> 8) & 0xff);
+        out.write(ttl & 0xff);
+        out.write(new byte[] {0, 4});
+        out.write(ipv4, 0, 4);
+        return out.toByteArray();
+    }
+
+    private static void deleteTree(Path dir) throws IOException {
+        if (dir == null || !Files.exists(dir)) return;
+        try (java.util.stream.Stream<Path> walk = Files.walk(dir)) {
+            List<Path> sorted = new ArrayList<>();
+            walk.forEach(sorted::add);
+            Collections.reverse(sorted);
+            for (Path p : sorted) {
+                p.toFile().setWritable(true);
+                Files.deleteIfExists(p);
+            }
+        }
+    }
+
+    private static void runModuleBChecks(Path root) throws Exception {
+        // 1. Cms DoH fallback against DNS pollution (RFC 8484 Wire Format) + null-safe extraction
+        HttpServer mockNet = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try {
+            mockNet.createContext(
+                    "/dns-wire",
+                    ex -> {
+                        byte[] wire =
+                                buildMockDnsAResponse(
+                                        "polluted-wogg.invalid", new byte[] {127, 0, 0, 1}, 120);
+                        ex.getResponseHeaders().set("Content-Type", "application/dns-message");
+                        ex.sendResponseHeaders(200, wire.length);
+                        ex.getResponseBody().write(wire);
+                        ex.close();
+                    });
+            mockNet.createContext(
+                    "/dns-poisoned",
+                    ex -> {
+                        byte[] wire =
+                                buildMockDnsAResponse(
+                                        "poisoned.invalid", new byte[] {0, 0, 0, 0}, 120);
+                        ex.getResponseHeaders().set("Content-Type", "application/dns-message");
+                        ex.sendResponseHeaders(200, wire.length);
+                        ex.getResponseBody().write(wire);
+                        ex.close();
+                    });
+            mockNet.createContext(
+                    "/tvbox/sub.json",
+                    ex -> {
+                        byte[] body =
+                                "{\"sites\":[{\"key\":\"wogg\",\"name\":\"玩偶4K\",\"type\":3,\"api\":\"csp_Wogg\"}]}"
+                                        .getBytes(StandardCharsets.UTF_8);
+                        ex.getResponseHeaders().set("Content-Type", "application/json");
+                        ex.sendResponseHeaders(200, body.length);
+                        ex.getResponseBody().write(body);
+                        ex.close();
+                    });
+            mockNet.createContext(
+                    "/api/echo",
+                    ex -> {
+                        ByteArrayOutputStream reqBody = new ByteArrayOutputStream();
+                        byte[] buf = new byte[1024];
+                        int n;
+                        while ((n = ex.getRequestBody().read(buf)) != -1) reqBody.write(buf, 0, n);
+                        JSONObject reply =
+                                new JSONObject()
+                                        .put("method", ex.getRequestMethod())
+                                        .put("query", String.valueOf(ex.getRequestURI().getQuery()))
+                                        .put(
+                                                "xTag",
+                                                String.valueOf(
+                                                        ex.getRequestHeaders().getFirst("X-Tag")))
+                                        .put(
+                                                "body",
+                                                new String(
+                                                        reqBody.toByteArray(),
+                                                        StandardCharsets.UTF_8));
+                        byte[] out = reply.toString().getBytes(StandardCharsets.UTF_8);
+                        ex.getResponseHeaders()
+                                .set("Content-Type", "application/json; charset=utf-8");
+                        ex.getResponseHeaders().set("X-Server", "module-b");
+                        ex.sendResponseHeaders(200, out.length);
+                        ex.getResponseBody().write(out);
+                        ex.close();
+                    });
+            mockNet.createContext(
+                    "/api/bin",
+                    ex -> {
+                        byte[] bin = new byte[] {0x43, 0x41, 0x54, (byte) 0xff};
+                        ex.getResponseHeaders().set("Content-Type", "application/octet-stream");
+                        ex.sendResponseHeaders(200, bin.length);
+                        ex.getResponseBody().write(bin);
+                        ex.close();
+                    });
+            mockNet.start();
+            int port = mockNet.getAddress().getPort();
+
+            try {
+                Cms.setDohEndpointsForTest(
+                        "http://127.0.0.1:1/dead-doh", "http://127.0.0.1:" + port + "/dns-wire");
+                String fetched =
+                        Cms.fetch("http://polluted-wogg.invalid:" + port + "/tvbox/sub.json", null);
+                Cms.Config dohCfg = Cms.parseConfig(fetched, "");
+                check(
+                        dohCfg.sites.size() == 1 && "wogg".equals(dohCfg.sites.get(0).key),
+                        "Cms.fetch recovers via concurrent RFC8484 DoH fallback when DNS is polluted");
+            } finally {
+                Cms.setDohEndpointsForTest();
+            }
+
+            // 2. Verify js-host bridge assets exist & are non-empty
+            Path jsHostDir = root.resolve("android/src/main/assets/js-host");
+            for (String requiredAsset :
+                    new String[] {
+                        "bootstrap.js",
+                        "module-interop.js",
+                        "catvod.mjs",
+                        "cat-lib.mjs",
+                        "utils-lib.mjs",
+                        "lodash-shim.mjs",
+                        "cheerio-bridge.mjs",
+                        "http-shim.mjs",
+                        "crypto-js.js",
+                        "jsonpath.mjs"
+                    }) {
+                Path p = jsHostDir.resolve(requiredAsset);
+                check(
+                        Files.isRegularFile(p) && Files.size(p) > 64,
+                        "js-host asset present: " + requiredAsset);
+            }
+
+            // 3. Compile & unit-test Spider, SpiderApi, CspEngine, and JsEngine in isolated
+            // temp dir
+            Path tempRoot = Files.createTempDirectory("mm-compat-modb-");
+            try {
+                Path classesDir = Files.createDirectories(tempRoot.resolve("classes"));
+                Path stubPkg =
+                        Files.createDirectories(tempRoot.resolve("stubs/com/pilipala/marcomovie"));
+                Path stubMain = stubPkg.resolve("MainActivity.java");
+                Files.write(
+                        stubMain,
+                        ("package com.pilipala.marcomovie;\n"
+                                        + "import android.app.Activity;\n"
+                                        + "import android.os.Handler;\n"
+                                        + "public class MainActivity extends Activity {\n"
+                                        + "    public static volatile MainActivity activeActivity;\n"
+                                        + "    public Handler ui;\n"
+                                        + "    public PlaybackControlsStub playbackControls;\n"
+                                        + "    public static class PlaybackControlsStub {\n"
+                                        + "        public void applyExternalDanmaku(String url) {}\n"
+                                        + "    }\n"
+                                        + "}\n")
+                                .getBytes(StandardCharsets.UTF_8));
+                Path stubSourceController = stubPkg.resolve("SourceController.java");
+                Files.write(
+                        stubSourceController,
+                        ("package com.pilipala.marcomovie;\n"
+                                        + "public final class SourceController {\n"
+                                        + "    public static boolean isConfigOrNetdiskSite(Cms.Site s) {\n"
+                                        + "        return s != null && s.isNetdiskSite();\n"
+                                        + "    }\n"
+                                        + "}\n")
+                                .getBytes(StandardCharsets.UTF_8));
+                Path aarClasses = tempRoot.resolve("wrapper-android-classes.jar");
+                try (ZipFile aar =
+                        new ZipFile(
+                                root.resolve("tools/java-dependencies/wrapper-android-3.2.3.aar")
+                                        .toFile())) {
+                    ZipEntry entry = aar.getEntry("classes.jar");
+                    try (InputStream in = aar.getInputStream(entry)) {
+                        Files.copy(in, aarClasses, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                }
+
+                Path deps = root.resolve("tools/java-dependencies");
+                Path jsonJar = root.resolve("android/tests/lib/json-20240303.jar");
+                List<Path> cpEntries =
+                        Arrays.asList(
+                                jsonJar,
+                                root.resolve("tools/android-35/android.jar"),
+                                deps.resolve("okhttp-3.14.9.jar"),
+                                deps.resolve("okio-1.17.2.jar"),
+                                deps.resolve("gson-2.10.1.jar"),
+                                deps.resolve("jsoup-1.18.3.jar"),
+                                deps.resolve("jlibtorrent-2.0.12.9.jar"),
+                                deps.resolve("wrapper-java-3.2.3.jar"),
+                                aarClasses);
+                StringBuilder cp = new StringBuilder();
+                for (Path entry : cpEntries) {
+                    if (cp.length() > 0) cp.append(File.pathSeparator);
+                    cp.append(entry.toString());
+                }
+
+                Path pkg = root.resolve("android/src/main/java/com/pilipala/marcomovie");
+                List<String> javacArgs =
+                        Arrays.asList(
+                                "-encoding",
+                                "UTF-8",
+                                "-source",
+                                "8",
+                                "-target",
+                                "8",
+                                "-cp",
+                                cp.toString(),
+                                "-d",
+                                classesDir.toString(),
+                                root.resolve("shared/java/com/pilipala/source/Json.java")
+                                        .toString(),
+                                root.resolve("shared/java/com/pilipala/source/Warehouse.java")
+                                        .toString(),
+                                root.resolve("shared/java/com/pilipala/catpaw/CatPawHost.java")
+                                        .toString(),
+                                root.resolve("shared/java/com/pilipala/catpaw/NodeRuntime.java")
+                                        .toString(),
+                                stubMain.toString(),
+                                stubSourceController.toString(),
+                                pkg.resolve("TvLayoutPolicy.java").toString(),
+                                pkg.resolve("Prefs.java").toString(),
+                                pkg.resolve("AppLog.java").toString(),
+                                pkg.resolve("LiveCatalog.java").toString(),
+                                pkg.resolve("VideoFilters.java").toString(),
+                                pkg.resolve("SourceEngine.java").toString(),
+                                pkg.resolve("RequestScope.java").toString(),
+                                pkg.resolve("ProxyAddress.java").toString(),
+                                pkg.resolve("QuickJsDeadline.java").toString(),
+                                pkg.resolve("LocalSourcePackage.java").toString(),
+                                pkg.resolve("DrpyEngine.java").toString(),
+                                pkg.resolve("LocalProxy.java").toString(),
+                                pkg.resolve("MagnetStream.java").toString(),
+                                root.resolve(
+                                                "android/src/main/java/com/github/catvod/crawler/Spider.java")
+                                        .toString(),
+                                root.resolve(
+                                                "android/src/main/java/com/github/catvod/crawler/SpiderApi.java")
+                                        .toString(),
+                                pkg.resolve("Cms.java").toString(),
+                                pkg.resolve("JsEngine.java").toString(),
+                                pkg.resolve("CspEngine.java").toString());
+                JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+                ByteArrayOutputStream compilerErr = new ByteArrayOutputStream();
+                int rc = compiler.run(null, null, compilerErr, javacArgs.toArray(new String[0]));
+                if (rc != 0) {
+                    throw new AssertionError(
+                            "Module B Android sources failed to compile:\n"
+                                    + new String(
+                                            compilerErr.toByteArray(), StandardCharsets.UTF_8));
+                }
+                check(true, "Spider, SpiderApi, CspEngine, Cms, and JsEngine compile at -target 8");
+
+                List<URL> loaderUrls = new ArrayList<>();
+                loaderUrls.add(classesDir.toUri().toURL());
+                for (Path entry : cpEntries) loaderUrls.add(entry.toUri().toURL());
+
+                try (URLClassLoader cl =
+                        new URLClassLoader(
+                                loaderUrls.toArray(new URL[0]),
+                                ClassLoader.getPlatformClassLoader())) {
+                    // 3a. Spider.client() & Spider.safeDns()
+                    Class<?> spiderCls = cl.loadClass("com.github.catvod.crawler.Spider");
+                    Object client1 = spiderCls.getMethod("client").invoke(null);
+                    Object client2 = spiderCls.getMethod("client").invoke(null);
+                    check(
+                            client1 != null && client1 == client2,
+                            "Spider.client() returns non-null global singleton OkHttpClient");
+                    int connTimeout =
+                            (Integer)
+                                    client1.getClass()
+                                            .getMethod("connectTimeoutMillis")
+                                            .invoke(client1);
+                    int readTimeout =
+                            (Integer)
+                                    client1.getClass()
+                                            .getMethod("readTimeoutMillis")
+                                            .invoke(client1);
+                    boolean followRedir =
+                            (Boolean)
+                                    client1.getClass().getMethod("followRedirects").invoke(client1);
+                    boolean followSslRedir =
+                            (Boolean)
+                                    client1.getClass()
+                                            .getMethod("followSslRedirects")
+                                            .invoke(client1);
+                    Object safeDns = spiderCls.getMethod("safeDns").invoke(null);
+                    Object clientDns = client1.getClass().getMethod("dns").invoke(client1);
+                    check(
+                            connTimeout == 15000
+                                    && readTimeout == 30000
+                                    && followRedir
+                                    && followSslRedir
+                                    && safeDns != null
+                                    && safeDns == clientDns,
+                            "Spider.client() configures 15s/30s timeouts, redirects, and safeDns()");
+
+                    Method setDoh =
+                            spiderCls.getDeclaredMethod("setDohEndpointsForTest", String[].class);
+                    setDoh.setAccessible(true);
+                    Class<?> dnsInterface = cl.loadClass("okhttp3.Dns");
+                    Method lookup = dnsInterface.getMethod("lookup", String.class);
+                    try {
+                        setDoh.invoke(
+                                null,
+                                (Object)
+                                        new String[] {
+                                            "http://127.0.0.1:1/unreachable",
+                                            "http://127.0.0.1:" + port + "/dns-wire"
+                                        });
+                        @SuppressWarnings("unchecked")
+                        List<InetAddress> resolved =
+                                (List<InetAddress>) lookup.invoke(safeDns, "polluted-wogg.invalid");
+                        check(
+                                resolved.size() == 1
+                                        && "127.0.0.1".equals(resolved.get(0).getHostAddress())
+                                        && "polluted-wogg.invalid"
+                                                .equals(resolved.get(0).getHostName()),
+                                "Spider.safeDns() races DoH endpoints and preserves original SNI host");
+
+                        // Re-query same host before clearing cache: already cached!
+                        @SuppressWarnings("unchecked")
+                        List<InetAddress> cachedHit =
+                                (List<InetAddress>) lookup.invoke(safeDns, "polluted-wogg.invalid");
+                        check(
+                                cachedHit.size() == 1
+                                        && "127.0.0.1".equals(cachedHit.get(0).getHostAddress()),
+                                "Spider.safeDns() serves valid DoH record from bounded TTL cache");
+
+                        // Poisoned 0.0.0.0 rejected -> falls back to Dns.SYSTEM (test with
+                        // localhost)
+                        setDoh.invoke(
+                                null,
+                                (Object)
+                                        new String[] {
+                                            "http://127.0.0.1:" + port + "/dns-poisoned"
+                                        });
+                        @SuppressWarnings("unchecked")
+                        List<InetAddress> sysFallback =
+                                (List<InetAddress>) lookup.invoke(safeDns, "localhost");
+                        check(
+                                !sysFallback.isEmpty(),
+                                "Spider.safeDns() bypasses/falls back to Dns.SYSTEM cleanly");
+                    } finally {
+                        setDoh.invoke(null, (Object) new String[0]);
+                    }
+
+                    // 3b. SpiderApi.multiReq(JsonArray)
+                    Class<?> spiderApiCls = cl.loadClass("com.github.catvod.crawler.SpiderApi");
+                    Class<?> jsonParserCls = cl.loadClass("com.google.gson.JsonParser");
+                    Class<?> jsonArrayCls = cl.loadClass("com.google.gson.JsonArray");
+                    Object spiderApi = spiderApiCls.getDeclaredConstructor().newInstance();
+                    String batchJson =
+                            new JSONArray()
+                                    .put(
+                                            new JSONObject()
+                                                    .put(
+                                                            "url",
+                                                            "http://127.0.0.1:"
+                                                                    + port
+                                                                    + "/api/echo")
+                                                    .put(
+                                                            "params",
+                                                            new JSONObject().put("page", "2"))
+                                                    .put(
+                                                            "headers",
+                                                            new JSONObject().put("X-Tag", "req0")))
+                                    .put(
+                                            new JSONObject()
+                                                    .put(
+                                                            "url",
+                                                            "http://127.0.0.1:"
+                                                                    + port
+                                                                    + "/api/echo")
+                                                    .put("method", "POST")
+                                                    .put("postType", "json")
+                                                    .put(
+                                                            "data",
+                                                            new JSONObject().put("pan", "quark4k")))
+                                    .put(
+                                            new JSONObject()
+                                                    .put(
+                                                            "url",
+                                                            "http://127.0.0.1:" + port + "/api/bin")
+                                                    .put("buffer", 2))
+                                    .put(
+                                            new JSONObject()
+                                                    .put("url", "http://127.0.0.1:1/dead")
+                                                    .put("timeout", 500))
+                                    .toString();
+                    Class<?> jsonElementCls = cl.loadClass("com.google.gson.JsonElement");
+                    Object gsonElement =
+                            jsonParserCls
+                                    .getMethod("parseString", String.class)
+                                    .invoke(null, batchJson);
+                    Object gsonArray =
+                            jsonElementCls.getMethod("getAsJsonArray").invoke(gsonElement);
+                    String multiOut =
+                            (String)
+                                    spiderApiCls
+                                            .getMethod("multiReq", jsonArrayCls)
+                                            .invoke(spiderApi, gsonArray);
+                    JSONArray multiArr = new JSONArray(multiOut);
+                    JSONObject r0 = multiArr.getJSONObject(0);
+                    JSONObject r0Body = new JSONObject(r0.getString("content"));
+                    JSONObject r1 = multiArr.getJSONObject(1);
+                    JSONObject r1Body = new JSONObject(r1.getString("content"));
+                    JSONObject r2 = multiArr.getJSONObject(2);
+                    JSONObject r3 = multiArr.getJSONObject(3);
+                    check(
+                            multiArr.length() == 4
+                                    && r0.getInt("code") == 200
+                                    && "page=2".equals(r0Body.getString("query"))
+                                    && "req0".equals(r0Body.getString("xTag"))
+                                    && r1.getInt("code") == 200
+                                    && "POST".equals(r1Body.getString("method"))
+                                    && r1Body.getString("body").contains("quark4k")
+                                    && r2.getInt("code") == 200
+                                    && "Q0FU/w==".equals(r2.getString("content"))
+                                    && r3.getInt("code") == 0
+                                    && !r3.optString("error").isEmpty(),
+                            "SpiderApi.multiReq executes concurrent GET/POST/binary requests in order and isolates failures");
+
+                    // 3c. CspEngine 64 MB cap + 64/32-bit ABI native library extraction & W^X
+                    // read-only
+                    Class<?> cspCls = cl.loadClass("com.pilipala.marcomovie.CspEngine");
+                    Field maxPluginField = cspCls.getDeclaredField("MAX_PLUGIN_BYTES");
+                    maxPluginField.setAccessible(true);
+                    check(
+                            maxPluginField.getInt(null) == 64 * 1024 * 1024,
+                            "CspEngine plugin download limit increased to 64 MB");
+
+                    Path mockJar = tempRoot.resolve("mock-spider.jar");
+                    try (ZipOutputStream zos =
+                            new ZipOutputStream(Files.newOutputStream(mockJar))) {
+                        Object[][] entries = {
+                            {"classes.dex", "dex".getBytes(StandardCharsets.UTF_8)},
+                            {
+                                "lib/armeabi-v7a/libgojni.so",
+                                "elf32-arm".getBytes(StandardCharsets.UTF_8)
+                            },
+                            {
+                                "lib/arm64-v8a/libgojni.so",
+                                "elf64-arm".getBytes(StandardCharsets.UTF_8)
+                            },
+                            {
+                                "jni/arm64-v8a/libpan.so",
+                                "elf64-jni".getBytes(StandardCharsets.UTF_8)
+                            },
+                            {"lib/x86_64/libgojni.so", "elf64-x86".getBytes(StandardCharsets.UTF_8)}
+                        };
+                        for (Object[] item : entries) {
+                            zos.putNextEntry(new ZipEntry((String) item[0]));
+                            zos.write((byte[]) item[1]);
+                            zos.closeEntry();
+                        }
+                    }
+                    Method extractLibs =
+                            cspCls.getDeclaredMethod(
+                                    "extractNativeLibraries",
+                                    File.class,
+                                    File.class,
+                                    String[].class,
+                                    boolean.class);
+                    extractLibs.setAccessible(true);
+
+                    Path libOut64 = tempRoot.resolve("csp-lib-64");
+                    String path64 =
+                            (String)
+                                    extractLibs.invoke(
+                                            null,
+                                            mockJar.toFile(),
+                                            libOut64.toFile(),
+                                            new String[] {"arm64-v8a", "armeabi-v7a"},
+                                            true);
+                    Path so64Main = Paths.get(path64, "libgojni.so");
+                    Path so64Jni = Paths.get(path64, "libpan.so");
+                    check(
+                            path64 != null
+                                    && path64.endsWith("arm64-v8a")
+                                    && "elf64-arm"
+                                            .equals(
+                                                    new String(
+                                                            Files.readAllBytes(so64Main),
+                                                            StandardCharsets.UTF_8))
+                                    && "elf64-jni"
+                                            .equals(
+                                                    new String(
+                                                            Files.readAllBytes(so64Jni),
+                                                            StandardCharsets.UTF_8))
+                                    && !so64Main.toFile().canWrite(),
+                            "CspEngine extracts matching 64-bit lib/<abi> and jni/<abi> .so files as read-only");
+
+                    Path libOut32 = tempRoot.resolve("csp-lib-32");
+                    String path32 =
+                            (String)
+                                    extractLibs.invoke(
+                                            null,
+                                            mockJar.toFile(),
+                                            libOut32.toFile(),
+                                            new String[] {"arm64-v8a", "armeabi-v7a"},
+                                            false);
+                    check(
+                            path32 != null
+                                    && path32.endsWith("armeabi-v7a")
+                                    && "elf32-arm"
+                                            .equals(
+                                                    new String(
+                                                            Files.readAllBytes(
+                                                                    Paths.get(
+                                                                            path32, "libgojni.so")),
+                                                            StandardCharsets.UTF_8)),
+                            "CspEngine filters out 64-bit ABIs when running in a 32-bit process");
+
+                    Path zipSlipJar = tempRoot.resolve("zipslip.jar");
+                    try (ZipOutputStream zos =
+                            new ZipOutputStream(Files.newOutputStream(zipSlipJar))) {
+                        zos.putNextEntry(new ZipEntry("lib/arm64-v8a/../../escape.so"));
+                        zos.write("bad".getBytes(StandardCharsets.UTF_8));
+                        zos.closeEntry();
+                    }
+                    boolean zipSlipRejected = false;
+                    try {
+                        extractLibs.invoke(
+                                null,
+                                zipSlipJar.toFile(),
+                                tempRoot.resolve("csp-slip").toFile(),
+                                new String[] {"arm64-v8a"},
+                                true);
+                    } catch (InvocationTargetException expected) {
+                        zipSlipRejected = expected.getCause() instanceof IOException;
+                    }
+                    check(zipSlipRejected, "CspEngine rejects Zip-Slip .so traversal entries");
+
+                    // 3d. JsEngine //bb (CATOP) QuickJS bytecode probe/decode & assets://js/lib/
+                    // mapping
+                    Class<?> jsCls = cl.loadClass("com.pilipala.marcomovie.JsEngine");
+                    Method isBb = jsCls.getMethod("isQuickJsBytecode", String.class);
+                    Method probeBb = jsCls.getDeclaredMethod("probeQuickJsBytecode", String.class);
+                    probeBb.setAccessible(true);
+                    Method decodeBb =
+                            jsCls.getDeclaredMethod(
+                                    "decodeQuickJsBytecode", String.class, byte.class);
+                    decodeBb.setAccessible(true);
+                    Method resolveLib =
+                            jsCls.getDeclaredMethod("resolveAssetLibTarget", String.class);
+                    resolveLib.setAccessible(true);
+
+                    // "CATOP" (0x43,0x41,0x54,0x4f,0x50) + [0x10, 0x20, 0x30, 0x40] =>
+                    // Base64 "Q0FUT1AQIDBA"
+                    String catopScript = "//bbQ0FUT1AQIDBA";
+                    check(
+                            (Boolean) isBb.invoke(null, catopScript)
+                                    && !(Boolean) isBb.invoke(null, "export default {}"),
+                            "JsEngine.isQuickJsBytecode detects //bb header");
+                    Object probeObj = probeBb.invoke(null, catopScript);
+                    Field catopField = probeObj.getClass().getDeclaredField("catopMagic");
+                    catopField.setAccessible(true);
+                    Field rawLenField = probeObj.getClass().getDeclaredField("rawLength");
+                    rawLenField.setAccessible(true);
+                    byte[] adapted = (byte[]) decodeBb.invoke(null, catopScript, (byte) 2);
+                    check(
+                            catopField.getBoolean(probeObj)
+                                    && rawLenField.getInt(probeObj) == 9
+                                    && Arrays.equals(
+                                            adapted, new byte[] {2, 0x10, 0x20, 0x30, 0x40}),
+                            "JsEngine probes CATOP magic and adapts //bb bytecode header to runtime BC_VERSION");
+
+                    boolean badBbRejected = false;
+                    try {
+                        decodeBb.invoke(null, "//bb@@@bad_base64@@@", (byte) 2);
+                    } catch (InvocationTargetException expected) {
+                        badBbRejected = expected.getCause() instanceof IOException;
+                    }
+                    check(badBbRejected, "JsEngine rejects corrupted //bb Base64 bytecode cleanly");
+
+                    check(
+                            "asset:js-host/cat-lib.mjs"
+                                            .equals(
+                                                    resolveLib.invoke(
+                                                            null, "assets://js/lib/cat.js"))
+                                    && "asset:js-host/utils-lib.mjs"
+                                            .equals(
+                                                    resolveLib.invoke(
+                                                            null, "assets://js/lib/utils.js"))
+                                    && "asset:js-host/lodash-shim.mjs"
+                                            .equals(
+                                                    resolveLib.invoke(
+                                                            null, "assets://js/lib/lodash.min.js"))
+                                    && "asset:js-host/cheerio-bridge.mjs"
+                                            .equals(
+                                                    resolveLib.invoke(
+                                                            null, "assets://js/lib/cheerio.min.js"))
+                                    && "asset:js-host/http-shim.mjs"
+                                            .equals(
+                                                    resolveLib.invoke(
+                                                            null, "assets://js/lib/http.js"))
+                                    && String.valueOf(
+                                                    resolveLib.invoke(
+                                                            null, "assets://js/lib/crypto-js.js"))
+                                            .startsWith("inline:")
+                                    && resolveLib.invoke(null, "assets://js/lib/unknown_custom.js")
+                                            == null,
+                            "JsEngine maps common assets://js/lib/ netdisk dependencies to local js-host shims");
+                }
+            } finally {
+                deleteTree(tempRoot);
+            }
+        } finally {
+            mockNet.stop(0);
+        }
     }
 }

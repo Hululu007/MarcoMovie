@@ -625,16 +625,7 @@ public class MoviePlayer {
                     boolean knownContainer =
                             !explicitHls
                                     && !explicitDash
-                                    && (epName.contains(".mkv")
-                                            || epName.contains(".mp4")
-                                            || epName.contains(".webm")
-                                            || epName.contains(".avi")
-                                            || epName.contains(".mov")
-                                            || epName.contains(".flv")
-                                            || fullLower.contains(".mkv")
-                                            || fullLower.contains(".mp4")
-                                            || fullLower.contains(".flv")
-                                            || fullLower.contains(".ts"));
+                                    && !detectKnownContainer(epName, address).isEmpty();
                     boolean cloudOrLocalProxy =
                             !isLive
                                     && !explicitHls
@@ -710,7 +701,9 @@ public class MoviePlayer {
                             .setAllowCrossProtocolRedirects(true)
                             .setConnectTimeoutMs(ijkMode ? 20000 : 15000)
                             .setReadTimeoutMs(ijkMode ? 45000 : 30000);
-            DefaultDataSource.Factory data = new DefaultDataSource.Factory(context, http);
+            DefaultDataSource.Factory data =
+                    new DefaultDataSource.Factory(
+                            context, new ChunkedProxyDataSource.Factory(http));
             mediaMime = resolvedMime;
             androidx.media3.extractor.DefaultExtractorsFactory extractors =
                     new androidx.media3.extractor.DefaultExtractorsFactory()
@@ -792,6 +785,9 @@ public class MoviePlayer {
             connection.setReadTimeout(1200);
             connection.setInstanceFollowRedirects(true);
             connection.setRequestProperty("User-Agent", defaultUserAgent(context));
+            if (ProxyAddress.isLoopbackHost(address.getHost())) {
+                connection.setRequestProperty(ChunkedProxyDataSource.HEADER_CHUNKED_CLIENT, "1");
+            }
             connection.setRequestProperty("Range", "bytes=0-" + (PROBE_MAX_BYTES - 1));
             for (Map.Entry<String, String> header : requestHeaders.entrySet())
                 connection.setRequestProperty(header.getKey(), header.getValue());
@@ -938,6 +934,53 @@ public class MoviePlayer {
         return "";
     }
 
+    private static final java.util.regex.Pattern CONTAINER_EXT_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "(?i)\\.(mkv|mp4|m4v|webm|avi|mov|flv|ts|m2ts)(?:$|[^a-z0-9])");
+
+    private static final java.util.regex.Pattern QUERY_CONTAINER_EXT_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "(?i)\\.(mkv|mp4|m4v|webm|avi|mov|flv|m2ts)(?:$|[^a-z0-9])");
+
+    static String detectKnownContainer(String epName, Uri address) {
+        String candidate = matchContainerToken(epName, CONTAINER_EXT_PATTERN);
+        if (!candidate.isEmpty()) return candidate;
+        if (address != null) {
+            candidate = matchContainerToken(address.getPath(), CONTAINER_EXT_PATTERN);
+            if (!candidate.isEmpty()) return candidate;
+            candidate = matchContainerToken(address.getQuery(), QUERY_CONTAINER_EXT_PATTERN);
+            if (!candidate.isEmpty()) return candidate;
+        }
+        return "";
+    }
+
+    private static String matchContainerToken(String input, java.util.regex.Pattern pattern) {
+        if (input == null || input.isEmpty()) return "";
+        java.util.regex.Matcher m = pattern.matcher(input);
+        if (!m.find()) return "";
+        String ext = m.group(1).toLowerCase(Locale.ROOT);
+        switch (ext) {
+            case "mkv":
+                return "MKV";
+            case "mp4":
+            case "m4v":
+                return "MP4";
+            case "webm":
+                return "WebM";
+            case "avi":
+                return "AVI";
+            case "mov":
+                return "MOV";
+            case "flv":
+                return "FLV";
+            case "ts":
+            case "m2ts":
+                return "TS";
+            default:
+                return "";
+        }
+    }
+
     private String shortContainerFormat() {
         String epName =
                 options != null
@@ -945,13 +988,11 @@ public class MoviePlayer {
                         : "";
         String u = uri != null ? uri.toString().toLowerCase(Locale.ROOT) : "";
         String m = mediaMime != null ? mediaMime.toLowerCase(Locale.ROOT) : "";
-        if (epName.contains(".mkv") || u.contains(".mkv") || m.contains("matroska")) return "MKV";
         if (m.contains("mpegurl") || u.contains(".m3u8")) return "HLS";
         if (m.contains("dash") || u.contains(".mpd")) return "DASH";
-        if (epName.contains(".mp4") || u.contains(".mp4")) return "MP4";
-        if (epName.contains(".flv") || u.contains(".flv")) return "FLV";
-        if (epName.contains(".ts") || u.contains(".ts")) return "TS";
-        if (epName.contains(".webm") || u.contains(".webm")) return "WebM";
+        if (m.contains("matroska")) return "MKV";
+        String detected = detectKnownContainer(epName, uri);
+        if (!detected.isEmpty()) return detected;
         return "";
     }
 
@@ -1401,6 +1442,273 @@ public class MoviePlayer {
         } catch (java.util.concurrent.TimeoutException e) {
             task.cancel(false);
             throw new IllegalStateException("Player UI thread timed out", e);
+        }
+    }
+
+    /**
+     * Bridges Media3 open-ended progressive reads ({@code length == C.LENGTH_UNSET}) with
+     * loopback {@code /proxy} spiders that serve large netdisk files in bounded {@code 206}
+     * slices (e.g. 1 MB {@code byte[]} chunks with {@code Content-Range: bytes a-b/total}).
+     *
+     * <p>Media3's {@code DefaultHttpDataSource} computes stream length from {@code (b - a + 1)}
+     * rather than {@code /total}, which would otherwise truncate multi-GB MKV/MP4 files at the
+     * first chunk. This wrapper exposes {@code total - position} to the extractor, chains
+     * subsequent chunks on demand, and closes each chunk cleanly in sub-millisecond time when
+     * {@code MatroskaExtractor} seeks to end-of-file {@code Cues}.
+     */
+    static final class ChunkedProxyDataSource implements androidx.media3.datasource.DataSource {
+        static final String HEADER_CHUNKED_CLIENT = "X-Movie-Chunked-Client";
+
+        static final class Factory implements androidx.media3.datasource.DataSource.Factory {
+            private final androidx.media3.datasource.DataSource.Factory innerFactory;
+
+            Factory(androidx.media3.datasource.DataSource.Factory innerFactory) {
+                this.innerFactory = innerFactory;
+            }
+
+            @Override
+            public androidx.media3.datasource.DataSource createDataSource() {
+                return new ChunkedProxyDataSource(innerFactory.createDataSource());
+            }
+        }
+
+        private final androidx.media3.datasource.DataSource inner;
+        private androidx.media3.datasource.DataSpec baseSpec;
+        private Uri lastUri;
+        private Map<String, java.util.List<String>> lastHeaders = Collections.emptyMap();
+        private boolean innerOpen;
+        private boolean chunkMode;
+        private long totalLength = C.LENGTH_UNSET;
+        private long currentPos;
+        private long chunkRemaining;
+
+        ChunkedProxyDataSource(androidx.media3.datasource.DataSource inner) {
+            this.inner = inner;
+        }
+
+        @Override
+        public void addTransferListener(androidx.media3.datasource.TransferListener listener) {
+            inner.addTransferListener(listener);
+        }
+
+        @Override
+        public long open(androidx.media3.datasource.DataSpec spec) throws java.io.IOException {
+            closeInnerQuietly();
+            baseSpec = spec;
+            chunkMode = false;
+            totalLength = C.LENGTH_UNSET;
+            currentPos = Math.max(0L, spec.position);
+            chunkRemaining = 0L;
+            lastUri = spec.uri;
+            lastHeaders = Collections.emptyMap();
+
+            boolean eligible =
+                    spec.uri != null
+                            && ProxyAddress.isLoopbackHost(spec.uri.getHost())
+                            && spec.length == C.LENGTH_UNSET;
+            if (!eligible) {
+                long len = inner.open(spec);
+                innerOpen = true;
+                if (inner.getUri() != null) lastUri = inner.getUri();
+                lastHeaders = inner.getResponseHeaders();
+                return len;
+            }
+
+            try {
+                long innerLen = inner.open(buildChunkSpec(spec, currentPos));
+                innerOpen = true;
+                if (inner.getUri() != null) lastUri = inner.getUri();
+                lastHeaders = inner.getResponseHeaders();
+                long[] cr = parseResponseContentRange(lastHeaders);
+                if (cr != null && (cr[2] == C.LENGTH_UNSET || cr[2] > currentPos)) {
+                    if (cr[0] > currentPos || cr[1] < currentPos) {
+                        throw new java.io.IOException(
+                                "Unexpected Content-Range "
+                                        + cr[0]
+                                        + "-"
+                                        + cr[1]
+                                        + " at offset "
+                                        + currentPos);
+                    }
+                    if (cr[0] < currentPos) {
+                        skipInnerFully(currentPos - cr[0]);
+                    }
+                    chunkMode = true;
+                    totalLength = cr[2];
+                    chunkRemaining = (cr[1] - currentPos) + 1L;
+                    return totalLength != C.LENGTH_UNSET
+                            ? (totalLength - currentPos)
+                            : C.LENGTH_UNSET;
+                }
+                return innerLen;
+            } catch (java.io.IOException | RuntimeException e) {
+                closeInnerQuietly();
+                throw e;
+            }
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws java.io.IOException {
+            if (length == 0) return 0;
+            if (!chunkMode) {
+                return inner.read(buffer, offset, length);
+            }
+            if (totalLength != C.LENGTH_UNSET && currentPos >= totalLength) {
+                return C.RESULT_END_OF_INPUT;
+            }
+            while (chunkRemaining <= 0L) {
+                if (totalLength != C.LENGTH_UNSET && currentPos >= totalLength) {
+                    return C.RESULT_END_OF_INPUT;
+                }
+                if (!openNextChunk()) {
+                    return C.RESULT_END_OF_INPUT;
+                }
+            }
+            int toRead = (int) Math.min((long) length, chunkRemaining);
+            int n = inner.read(buffer, offset, toRead);
+            if (n == C.RESULT_END_OF_INPUT) {
+                if (totalLength != C.LENGTH_UNSET && currentPos >= totalLength) {
+                    return C.RESULT_END_OF_INPUT;
+                }
+                throw new java.io.EOFException(
+                        "Chunk stream truncated at offset "
+                                + currentPos
+                                + " (missing "
+                                + chunkRemaining
+                                + " bytes)");
+            }
+            currentPos += n;
+            chunkRemaining -= n;
+            return n;
+        }
+
+        @Override
+        public Uri getUri() {
+            Uri active = innerOpen ? inner.getUri() : null;
+            return active != null ? active : lastUri;
+        }
+
+        @Override
+        public Map<String, java.util.List<String>> getResponseHeaders() {
+            return innerOpen ? inner.getResponseHeaders() : lastHeaders;
+        }
+
+        @Override
+        public void close() throws java.io.IOException {
+            chunkMode = false;
+            chunkRemaining = 0L;
+            closeInner();
+        }
+
+        private boolean openNextChunk() throws java.io.IOException {
+            closeInner();
+            long innerLen;
+            try {
+                innerLen = inner.open(buildChunkSpec(baseSpec, currentPos));
+                innerOpen = true;
+            } catch (androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException e) {
+                if (e.responseCode == 416
+                        && (totalLength == C.LENGTH_UNSET || currentPos >= totalLength)) {
+                    return false;
+                }
+                throw e;
+            }
+            try {
+                if (inner.getUri() != null) lastUri = inner.getUri();
+                lastHeaders = inner.getResponseHeaders();
+                long[] cr = parseResponseContentRange(lastHeaders);
+                if (cr != null) {
+                    if (cr[2] > 0) {
+                        totalLength = cr[2];
+                    }
+                    if (cr[0] > currentPos || cr[1] < currentPos) {
+                        throw new java.io.IOException(
+                                "Unexpected Content-Range "
+                                        + cr[0]
+                                        + "-"
+                                        + cr[1]
+                                        + " at offset "
+                                        + currentPos);
+                    }
+                    if (cr[0] < currentPos) {
+                        skipInnerFully(currentPos - cr[0]);
+                    }
+                    chunkRemaining = (cr[1] - currentPos) + 1L;
+                    return chunkRemaining > 0L;
+                }
+                if (innerLen == 0L) {
+                    return false;
+                }
+                chunkRemaining = innerLen != C.LENGTH_UNSET ? innerLen : Long.MAX_VALUE;
+                return true;
+            } catch (java.io.IOException | RuntimeException e) {
+                closeInnerQuietly();
+                throw e;
+            }
+        }
+
+        private void skipInnerFully(long bytesToSkip) throws java.io.IOException {
+            if (bytesToSkip <= 0L) return;
+            byte[] scratch = new byte[(int) Math.min(16384L, bytesToSkip)];
+            long remaining = bytesToSkip;
+            while (remaining > 0L) {
+                if (Thread.currentThread().isInterrupted()) {
+                    throw new java.io.InterruptedIOException();
+                }
+                int n = inner.read(scratch, 0, (int) Math.min((long) scratch.length, remaining));
+                if (n == C.RESULT_END_OF_INPUT) {
+                    throw new java.io.EOFException(
+                            "Unexpected EOF skipping " + bytesToSkip + " bytes");
+                }
+                remaining -= n;
+            }
+        }
+
+        private void closeInner() throws java.io.IOException {
+            if (innerOpen) {
+                innerOpen = false;
+                inner.close();
+            }
+        }
+
+        private void closeInnerQuietly() {
+            if (innerOpen) {
+                innerOpen = false;
+                try {
+                    inner.close();
+                } catch (java.io.IOException ignored) {
+                }
+            }
+        }
+
+        private static androidx.media3.datasource.DataSpec buildChunkSpec(
+                androidx.media3.datasource.DataSpec template, long offset) {
+            Map<String, String> reqHeaders = new LinkedHashMap<>(template.httpRequestHeaders);
+            reqHeaders.put(HEADER_CHUNKED_CLIENT, "1");
+            reqHeaders.put("Range", "bytes=" + offset + "-");
+            return template.buildUpon()
+                    .setPosition(offset)
+                    .setLength(C.LENGTH_UNSET)
+                    .setHttpRequestHeaders(reqHeaders)
+                    .build();
+        }
+
+        private static long[] parseResponseContentRange(
+                Map<String, java.util.List<String>> responseHeaders) {
+            if (responseHeaders == null) return null;
+            for (Map.Entry<String, java.util.List<String>> e : responseHeaders.entrySet()) {
+                if (e.getKey() != null
+                        && "Content-Range".equalsIgnoreCase(e.getKey())
+                        && e.getValue() != null
+                        && !e.getValue().isEmpty()) {
+                    long[] parsed = LocalProxy.parseContentRange(e.getValue().get(0));
+                    if (parsed != null) {
+                        if (parsed[2] < 0) parsed[2] = C.LENGTH_UNSET;
+                        return parsed;
+                    }
+                }
+            }
+            return null;
         }
     }
 }

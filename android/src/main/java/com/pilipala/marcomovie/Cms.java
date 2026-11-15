@@ -6,13 +6,81 @@ import com.pilipala.source.Warehouse;
 import java.io.*;
 import java.net.*;
 import java.util.*;
+import java.util.concurrent.*;
+import javax.net.ssl.*;
 
 /** A bounded, non-executing adapter for standard TVBox type-1 JSON CMS sites. */
 public final class Cms {
-    public static final int MAX_JSON = 4 * 1024 * 1024;
+    public static final int MAX_JSON = 16 * 1024 * 1024;
     public static final String USER_AGENT = "okhttp/3.15";
     public static final String SAFARI_USER_AGENT =
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+    public static final String MOBILE_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+                    + "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
+    public static final String TVBOX_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 11; TVBox) AppleWebKit/537.36 "
+                    + "(KHTML, like Gecko) Version/4.0 Chrome/114.0.0.0 Safari/537.36";
+
+    private static final String[] DEFAULT_DOH_ENDPOINTS = {
+        "https://223.5.5.5/dns-query", "https://1.12.12.12/dns-query"
+    };
+    private static volatile String[] dohEndpoints = DEFAULT_DOH_ENDPOINTS;
+    private static final int MAX_DOH_CACHE_ENTRIES = 256;
+    private static final long MIN_DOH_TTL_MS = 60_000L;
+    private static final long MAX_DOH_TTL_MS = 600_000L;
+    private static final ConcurrentHashMap<String, DohCacheEntry> DOH_CACHE =
+            new ConcurrentHashMap<>();
+    private static final ExecutorService DOH_EXECUTOR =
+            Executors.newFixedThreadPool(
+                    4,
+                    r -> {
+                        Thread t = new Thread(r, "cms-doh");
+                        t.setDaemon(true);
+                        return t;
+                    });
+
+    private static final class DohCacheEntry {
+        final List<InetAddress> addresses;
+        final long expireAtMs;
+
+        DohCacheEntry(List<InetAddress> addresses, long expireAtMs) {
+            this.addresses = addresses;
+            this.expireAtMs = expireAtMs;
+        }
+    }
+
+    static void setDohEndpointsForTest(String... endpoints) {
+        dohEndpoints =
+                (endpoints == null || endpoints.length == 0)
+                        ? DEFAULT_DOH_ENDPOINTS
+                        : endpoints.clone();
+        DOH_CACHE.clear();
+    }
+
+    static void clearDohCacheForTest() {
+        DOH_CACHE.clear();
+    }
+
+    /**
+     * Null-safe string reader for {@link JSONObject}. Android's built-in {@code
+     * JSONObject.optString} converts {@code JSONObject.NULL} into the literal string {@code
+     * "null"}, which otherwise pollutes {@code jar}, {@code ua}, {@code api}, and header fields.
+     */
+    public static String optSafeString(JSONObject obj, String key) {
+        return optSafeString(obj, key, "");
+    }
+
+    public static String optSafeString(JSONObject obj, String key, String fallback) {
+        if (obj == null || key == null || obj.isNull(key)) return fallback;
+        Object val = obj.opt(key);
+        if (val == null || val == JSONObject.NULL || JSONObject.NULL.equals(val)) {
+            return fallback;
+        }
+        String str = val instanceof String ? (String) val : String.valueOf(val);
+        if ("null".equalsIgnoreCase(str.trim())) return fallback;
+        return str;
+    }
 
     public static final class Parse {
         public String name = "", url = "";
@@ -415,7 +483,8 @@ public final class Cms {
     }
 
     public static boolean looksLikeJsSpider(String text, String origin) {
-        String content = text == null ? "" : text.trim().replaceFirst("^\\uFEFF", "");
+        String content = text == null ? "" : text.trim().replaceFirst("^\\uFEFF", "").trim();
+        if (content.startsWith("//bb")) return true;
         if (content.startsWith("{") || content.startsWith("[") || content.startsWith("<"))
             return false;
         String cleanOrigin =
@@ -567,7 +636,7 @@ public final class Cms {
             Iterator<String> it = o.keys();
             while (it.hasNext()) {
                 String k = it.next();
-                String v = Json.str(o, k, "");
+                String v = optSafeString(o, k, "");
                 if (k == null || v == null || v.isEmpty() || v.contains("\r") || v.contains("\n"))
                     continue;
                 for (String allowed :
@@ -598,8 +667,8 @@ public final class Cms {
             if (video != null
                     && !video.isNull("vod_id")
                     && !video.isNull("vod_name")
-                    && !video.optString("vod_id").trim().isEmpty()
-                    && !video.optString("vod_name").trim().isEmpty()) return true;
+                    && !optSafeString(video, "vod_id").trim().isEmpty()
+                    && !optSafeString(video, "vod_name").trim().isEmpty()) return true;
         }
         JSONArray categories = root.optJSONArray("class");
         if (categories != null) {
@@ -608,8 +677,8 @@ public final class Cms {
                 if (category != null
                         && !category.isNull("type_id")
                         && !category.isNull("type_name")
-                        && !category.optString("type_id").trim().isEmpty()
-                        && !category.optString("type_name").trim().isEmpty()) return true;
+                        && !optSafeString(category, "type_id").trim().isEmpty()
+                        && !optSafeString(category, "type_name").trim().isEmpty()) return true;
             }
         }
         return videos.length() == 0
@@ -678,7 +747,7 @@ public final class Cms {
     }
 
     public static Config parseConfig(String text, String origin) throws Exception {
-        if (text == null || text.length() > MAX_JSON) throw new IOException("配置超过 4 MB 限制");
+        if (text == null || text.length() > MAX_JSON) throw new IOException("配置超过 16 MB 限制");
         String trimmed = text.trim().replaceFirst("^\\uFEFF", "");
         if (isHtml(trimmed)) {
             throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
@@ -762,13 +831,14 @@ public final class Cms {
             root = new JSONObject(json);
         }
         if (isDirectCmsResponse(root)) {
-            root = directCmsConfig(root, Json.str(root, Warehouse.ORIGIN, origin));
+            String directOrigin = optSafeString(root, Warehouse.ORIGIN, "").trim();
+            root = directCmsConfig(root, directOrigin.isEmpty() ? origin : directOrigin);
             text = root.toString();
         }
         JSONArray sites = root.optJSONArray("sites");
         if ((sites == null || sites.length() == 0)
                 && root.has("api")
-                && !Json.str(root, "api", "").isEmpty()) {
+                && !optSafeString(root, "api", "").trim().isEmpty()) {
             sites = new JSONArray().put(root);
         }
         if (Warehouse.isCatalog(root)) {
@@ -792,17 +862,18 @@ public final class Cms {
                             .put("type", 3)
                             .put("api", "csp_LivePlaceholder"));
         }
-        origin = Json.str(root, Warehouse.ORIGIN, origin);
+        String taggedOrigin = optSafeString(root, Warehouse.ORIGIN, "").trim();
+        if (!taggedOrigin.isEmpty()) origin = taggedOrigin;
         if (sites == null || sites.length() == 0) throw new IOException("配置中没有 sites 来源列表");
         if (sites.length() > 500) throw new IOException("来源超过 500 个限制");
         Config out = new Config();
         out.raw = text;
         out.origin = origin == null ? "" : origin;
-        out.warehouse = Json.str(root, Warehouse.ROOT, "");
+        out.warehouse = optSafeString(root, Warehouse.ROOT, "").trim();
         JSONArray directory = root.optJSONArray(Warehouse.DEPOTS);
         if (directory != null) out.depots = directory;
-        String rawSpider = Json.str(root, "spider", "");
-        if (rawSpider.isEmpty()) rawSpider = Json.str(root, "jar", "");
+        String rawSpider = optSafeString(root, "spider", "").trim();
+        if (rawSpider.isEmpty()) rawSpider = optSafeString(root, "jar", "").trim();
         if (!rawSpider.isEmpty()) {
             String[] spParts = rawSpider.split(";md5;", 2);
             out.spider =
@@ -815,10 +886,11 @@ public final class Cms {
             for (int i = 0; i < Math.min(100, parses.length()); i++) {
                 JSONObject pj = parses.optJSONObject(i);
                 if (pj == null) continue;
-                String pUrl = Json.str(pj, "url", "");
+                String pUrl = optSafeString(pj, "url", "").trim();
                 if (!isHttp(pUrl)) continue;
                 Parse p = new Parse();
-                p.name = Json.str(pj, "name", "解析 " + (i + 1));
+                String pName = optSafeString(pj, "name", "").trim();
+                p.name = pName.isEmpty() ? "解析 " + (i + 1) : pName;
                 p.url = pUrl;
                 p.type = Json.integer(pj, "type", 0);
                 p.headers.put("User-Agent", USER_AGENT);
@@ -844,16 +916,18 @@ public final class Cms {
             JSONObject j = sites.optJSONObject(i);
             if (j == null) continue;
             Site s = new Site();
-            s.key = Json.str(j, "key", "site-" + i);
-            s.name = Json.str(j, "name", s.key);
+            String rawKey = optSafeString(j, "key", "").trim();
+            s.key = rawKey.isEmpty() ? "site-" + i : rawKey;
+            String rawName = optSafeString(j, "name", "").trim();
+            s.name = rawName.isEmpty() ? s.key : rawName;
             if (!keys.add(s.key)) s.key = s.key + "-" + i;
             s.originalKey = s.key;
-            String rawGroup = Json.str(j, "group", "").trim();
+            String rawGroup = optSafeString(j, "group", "").trim();
             s.group = rawGroup.isEmpty() ? "默认分组" : rawGroup;
             s.type = Json.integer(j, "type", -1);
-            s.api = resolve(origin, Json.str(j, "api", ""));
+            s.api = resolve(origin, optSafeString(j, "api", "").trim());
             s.originalApi = s.api;
-            String rawJar = Json.str(j, "jar", "");
+            String rawJar = optSafeString(j, "jar", "").trim();
             if (!rawJar.isEmpty()) {
                 String[] jarParts = rawJar.split(";md5;", 2);
                 s.jar =
@@ -866,13 +940,20 @@ public final class Cms {
                     && !isScriptOrJarApi(s.api)) {
                 s.type = hasXmlInUrlPath(s.api) ? 0 : 1;
             }
-            s.playUrl = Json.str(j, "playUrl", "");
+            s.playUrl = optSafeString(j, "playUrl", "").trim();
             if (s.playUrl.isEmpty()
                     && (Json.integer(j, "parse", 0) == 1 || Json.integer(j, "jx", 0) == 1)) {
                 s.playUrl = defaultJsonParseUrl;
             }
             s.searchable = Json.integer(j, "searchable", 1) != 0;
-            s.ext = j.opt("ext");
+            Object rawExt = j.isNull("ext") ? null : j.opt("ext");
+            if (rawExt == JSONObject.NULL
+                    || JSONObject.NULL.equals(rawExt)
+                    || (rawExt instanceof String
+                            && "null".equalsIgnoreCase(((String) rawExt).trim()))) {
+                rawExt = null;
+            }
+            s.ext = rawExt;
             if (origin != null && !origin.isEmpty()) {
                 if (s.ext instanceof String) {
                     String ext = (String) s.ext;
@@ -880,7 +961,8 @@ public final class Cms {
                 } else if (s.ext instanceof JSONObject) {
                     JSONObject extObj = (JSONObject) s.ext;
                     for (String field : new String[] {"json", "url", "rule"}) {
-                        String val = Json.str(extObj, field, null);
+                        String val = optSafeString(extObj, field, null);
+                        if (val != null) val = val.trim();
                         if (val != null && (val.startsWith("./") || val.startsWith("../"))) {
                             try {
                                 extObj.put(field, resolve(origin, val));
@@ -895,11 +977,13 @@ public final class Cms {
                             || Json.integer(j, "parse", 0) == 1
                             || Json.integer(j, "jx", 0) == 1;
             s.headers.put("User-Agent", USER_AGENT);
-            Object h = j.opt("headers");
-            if (h == null) h = j.opt("header");
+            Object h = j.isNull("headers") ? null : j.opt("headers");
+            if (h == null || h == JSONObject.NULL) {
+                h = j.isNull("header") ? null : j.opt("header");
+            }
             copySafeHeaders(s.headers, j.opt("header"));
             copySafeHeaders(s.headers, j.opt("headers"));
-            String ua = Json.str(j, "ua", "");
+            String ua = optSafeString(j, "ua", "").trim();
             if (!ua.isEmpty() && !ua.contains("\r") && !ua.contains("\n")) {
                 s.headers.put("User-Agent", ua);
             }
@@ -908,13 +992,12 @@ public final class Cms {
                 Iterator<String> it = o.keys();
                 while (it.hasNext()) {
                     String k = it.next();
-                    String val = Json.str(o, k, "");
+                    String val = optSafeString(o, k, "").trim();
+                    if (val.isEmpty() || val.contains("\r") || val.contains("\n")) continue;
                     if (k.equalsIgnoreCase("User-Agent")
                             || k.equalsIgnoreCase("Referer")
                             || (s.type == 4
                                     && k.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-                                    && !val.contains("\r")
-                                    && !val.contains("\n")
                                     && !Arrays.asList(
                                                     "content-length",
                                                     "transfer-encoding",
@@ -927,7 +1010,7 @@ public final class Cms {
                 JSONObject extObj = (JSONObject) s.ext;
                 copySafeHeaders(s.headers, extObj.opt("header"));
                 copySafeHeaders(s.headers, extObj.opt("headers"));
-                String extUa = Json.str(extObj, "ua", "");
+                String extUa = optSafeString(extObj, "ua", "").trim();
                 if (!extUa.isEmpty() && !extUa.contains("\r") && !extUa.contains("\n")) {
                     s.headers.put("User-Agent", extUa);
                 }
@@ -1212,14 +1295,14 @@ public final class Cms {
         return sb.substring(0, 16).getBytes("UTF-8");
     }
 
-    public static String fetch(String address, Map<String, String> headers) throws Exception {
-        return fetch(address, headers, null, USER_AGENT);
-    }
+    private static final class NonRetryableFetchException extends IOException {
+        NonRetryableFetchException(String message) {
+            super(message);
+        }
 
-    public static String fetch(
-            String address, Map<String, String> headers, Map<String, String> form)
-            throws Exception {
-        return fetch(address, headers, form, USER_AGENT);
+        NonRetryableFetchException(IOException cause) {
+            super(cause.getMessage(), cause);
+        }
     }
 
     static final class HttpStatusException extends IOException {
@@ -1231,27 +1314,169 @@ public final class Cms {
         }
     }
 
+    private static final class SniOverrideSocketFactory extends SSLSocketFactory {
+        private final SSLSocketFactory delegate;
+        private final String sniHost;
+
+        SniOverrideSocketFactory(SSLSocketFactory delegate, String sniHost) {
+            this.delegate = delegate;
+            this.sniHost = sniHost;
+        }
+
+        @Override
+        public String[] getDefaultCipherSuites() {
+            return delegate.getDefaultCipherSuites();
+        }
+
+        @Override
+        public String[] getSupportedCipherSuites() {
+            return delegate.getSupportedCipherSuites();
+        }
+
+        @Override
+        public Socket createSocket(Socket s, String host, int port, boolean autoClose)
+                throws IOException {
+            return enableModernTls(delegate.createSocket(s, sniHost, port, autoClose));
+        }
+
+        @Override
+        public Socket createSocket(String host, int port) throws IOException {
+            return enableModernTls(delegate.createSocket(host, port));
+        }
+
+        @Override
+        public Socket createSocket(String host, int port, InetAddress localHost, int localPort)
+                throws IOException {
+            return enableModernTls(delegate.createSocket(host, port, localHost, localPort));
+        }
+
+        @Override
+        public Socket createSocket(InetAddress host, int port) throws IOException {
+            return enableModernTls(delegate.createSocket(host, port));
+        }
+
+        @Override
+        public Socket createSocket(
+                InetAddress address, int port, InetAddress localAddress, int localPort)
+                throws IOException {
+            return enableModernTls(delegate.createSocket(address, port, localAddress, localPort));
+        }
+
+        private static Socket enableModernTls(Socket socket) {
+            if (socket instanceof SSLSocket) {
+                SSLSocket ssl = (SSLSocket) socket;
+                String[] supported = ssl.getSupportedProtocols();
+                if (supported != null) {
+                    List<String> enabled = new ArrayList<>();
+                    for (String p : supported) {
+                        if ("TLSv1.3".equals(p) || "TLSv1.2".equals(p)) enabled.add(p);
+                    }
+                    if (!enabled.isEmpty()) {
+                        ssl.setEnabledProtocols(enabled.toArray(new String[0]));
+                    }
+                }
+            }
+            return socket;
+        }
+    }
+
+    public static String fetch(String address, Map<String, String> headers) throws Exception {
+        return fetch(address, headers, null, USER_AGENT);
+    }
+
+    public static String fetch(
+            String address, Map<String, String> headers, Map<String, String> form)
+            throws Exception {
+        return fetch(address, headers, form, USER_AGENT);
+    }
+
     public static String fetchImport(String address) throws Exception {
+        if (!isHttp(address)) throw new IOException("只支持 HTTP(S) 地址");
+        URL initialUrl = new URL(normalizeHttp(address));
         Map<String, String> headers = new LinkedHashMap<>();
-        headers.put("User-Agent", USER_AGENT);
-        String result;
+        if (initialUrl.getUserInfo() != null) {
+            String credentials =
+                    URLDecoder.decode(initialUrl.getUserInfo().replace("+", "%2B"), "UTF-8");
+            headers.put("Authorization", basicAuthorization(credentials));
+            initialUrl =
+                    new URL(
+                            initialUrl.getProtocol(),
+                            initialUrl.getHost(),
+                            initialUrl.getPort(),
+                            initialUrl.getFile());
+        }
+        String result = null;
+        Exception firstErr = null;
         try {
-            result = fetch(address, headers, null, USER_AGENT);
+            result = fetchOnce(initialUrl, headers, null, USER_AGENT, true, false);
             if (!isHtml(result)) {
                 return result;
             }
+        } catch (NonRetryableFetchException fatal) {
+            if (fatal.getCause() instanceof IOException) throw (IOException) fatal.getCause();
+            throw new IOException(fatal.getMessage());
         } catch (HttpStatusException e) {
             if (e.status != 403) {
                 throw e;
             }
+            firstErr = e;
+        } catch (IOException transportErr) {
+            List<InetAddress> dohAddrs = resolveViaDoh(initialUrl.getHost());
+            if (dohAddrs.isEmpty()) {
+                throw transportErr;
+            }
+            firstErr = transportErr;
         }
-        Map<String, String> fallbackHeaders = new LinkedHashMap<>();
-        fallbackHeaders.put("User-Agent", SAFARI_USER_AGENT);
-        result = fetch(address, fallbackHeaders, null, SAFARI_USER_AGENT);
-        if (isHtml(result)) {
-            throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+        if (firstErr == null || firstErr instanceof HttpStatusException) {
+            for (String ua :
+                    new String[] {SAFARI_USER_AGENT, MOBILE_USER_AGENT, TVBOX_USER_AGENT}) {
+                try {
+                    result = fetchOnce(initialUrl, headers, null, ua, true, false);
+                    if (!isHtml(result)) {
+                        return result;
+                    }
+                    // Got 200 HTML with Safari UA as well -> surface HTML diagnostic below
+                    break;
+                } catch (NonRetryableFetchException fatal) {
+                    if (fatal.getCause() instanceof IOException)
+                        throw (IOException) fatal.getCause();
+                    throw new IOException(fatal.getMessage());
+                } catch (HttpStatusException e) {
+                    if (e.status != 403) throw e;
+                    firstErr = e;
+                }
+            }
+            if (result != null && isHtml(result)) {
+                throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+            }
         }
-        return result;
+        List<InetAddress> dohAddrs = resolveViaDoh(initialUrl.getHost());
+        if (!dohAddrs.isEmpty()) {
+            for (String ua :
+                    new String[] {
+                        USER_AGENT, SAFARI_USER_AGENT, MOBILE_USER_AGENT, TVBOX_USER_AGENT
+                    }) {
+                try {
+                    result = fetchOnce(initialUrl, headers, null, ua, true, true);
+                    if (!isHtml(result)) {
+                        return result;
+                    }
+                } catch (NonRetryableFetchException fatal) {
+                    if (fatal.getCause() instanceof IOException)
+                        throw (IOException) fatal.getCause();
+                    throw new IOException(fatal.getMessage());
+                } catch (HttpStatusException e) {
+                    if (e.status != 403) throw e;
+                    firstErr = e;
+                } catch (IOException ignored) {
+                }
+            }
+            if (result != null && isHtml(result)) {
+                throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
+            }
+        }
+        if (firstErr != null) throw firstErr;
+        throw new IOException("地址返回的是网页而不是配置（可能需要登录或被拦截）");
     }
 
     static final class RedirectCookie {
@@ -1379,8 +1604,8 @@ public final class Cms {
             String address, Map<String, String> headers, Map<String, String> form, String defaultUa)
             throws Exception {
         if (!isHttp(address)) throw new IOException("只支持 HTTP(S) 地址");
-        URL next = new URL(normalizeHttp(address));
-        Map<String, String> forwarded = new LinkedHashMap<>();
+        URL initialUrl = new URL(normalizeHttp(address));
+        Map<String, String> baseForwarded = new LinkedHashMap<>();
         byte[] body = null;
         if (form != null) {
             StringBuilder encoded = new StringBuilder();
@@ -1392,29 +1617,150 @@ public final class Cms {
             }
             body = encoded.toString().getBytes("UTF-8");
         }
-        if (headers != null) mergeHeaders(forwarded, headers);
-        if (next.getUserInfo() != null) {
+        if (headers != null) mergeHeaders(baseForwarded, headers);
+        if (initialUrl.getUserInfo() != null) {
             boolean explicit = false;
-            for (String key : forwarded.keySet()) explicit |= key.equalsIgnoreCase("Authorization");
+            for (String key : baseForwarded.keySet())
+                explicit |= key.equalsIgnoreCase("Authorization");
             if (!explicit) {
                 String credentials =
-                        URLDecoder.decode(next.getUserInfo().replace("+", "%2B"), "UTF-8");
-                forwarded.put("Authorization", basicAuthorization(credentials));
+                        URLDecoder.decode(initialUrl.getUserInfo().replace("+", "%2B"), "UTF-8");
+                baseForwarded.put("Authorization", basicAuthorization(credentials));
             }
-            next = new URL(next.getProtocol(), next.getHost(), next.getPort(), next.getFile());
+            initialUrl =
+                    new URL(
+                            initialUrl.getProtocol(),
+                            initialUrl.getHost(),
+                            initialUrl.getPort(),
+                            initialUrl.getFile());
         }
+
+        String callerUa = null;
+        for (Map.Entry<String, String> e : baseForwarded.entrySet()) {
+            if ("User-Agent".equalsIgnoreCase(e.getKey())
+                    && e.getValue() != null
+                    && !e.getValue().trim().isEmpty()) {
+                callerUa = e.getValue();
+                break;
+            }
+        }
+        String fallbackDefaultUa = defaultUa != null ? defaultUa : USER_AGENT;
+        String primaryUa = callerUa != null ? callerUa : fallbackDefaultUa;
+
+        Exception firstFailure;
+        try {
+            return fetchOnce(initialUrl, baseForwarded, body, primaryUa, false, false);
+        } catch (NonRetryableFetchException fatal) {
+            if (fatal.getCause() instanceof IOException) throw (IOException) fatal.getCause();
+            throw new IOException(fatal.getMessage());
+        } catch (HttpStatusException httpErr) {
+            if (httpErr.status != 403) throw httpErr;
+            firstFailure = httpErr;
+        } catch (InterruptedIOException interrupted) {
+            if (!(interrupted instanceof SocketTimeoutException)
+                    || Thread.currentThread().isInterrupted()) {
+                throw interrupted;
+            }
+            firstFailure = interrupted;
+        } catch (IOException transportErr) {
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+            firstFailure = transportErr;
+        }
+
+        // Phase A: UA fallback (okhttp/3.15 -> Mobile Chrome UA -> TVBox UA -> Safari UA) when
+        // blocked (403) or reset after TCP handshake (skip if host failed DNS or refused TCP).
+        boolean tryUaFallback =
+                !(firstFailure instanceof UnknownHostException)
+                        && !(firstFailure instanceof ConnectException)
+                        && !(firstFailure instanceof SocketTimeoutException);
+        String[] fallbackUas = {MOBILE_USER_AGENT, TVBOX_USER_AGENT, SAFARI_USER_AGENT, USER_AGENT};
+        if (tryUaFallback) {
+            for (String candidateUa : fallbackUas) {
+                if (candidateUa.equals(primaryUa)) continue;
+                if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+                try {
+                    return fetchOnce(initialUrl, baseForwarded, body, candidateUa, true, false);
+                } catch (NonRetryableFetchException fatal) {
+                    if (fatal.getCause() instanceof IOException)
+                        throw (IOException) fatal.getCause();
+                    throw new IOException(fatal.getMessage());
+                } catch (HttpStatusException httpErr) {
+                    if (httpErr.status != 403) throw httpErr;
+                    firstFailure = httpErr;
+                } catch (IOException ignored) {
+                    if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+                }
+            }
+        }
+
+        // Phase B: DoH resolution fallback against DNS pollution / blackhole / edge resets.
+        List<InetAddress> dohAddrs = resolveViaDoh(initialUrl.getHost());
+        if (!dohAddrs.isEmpty()) {
+            String[] dohUas =
+                    primaryUa.equals(MOBILE_USER_AGENT)
+                            ? new String[] {primaryUa, TVBOX_USER_AGENT, SAFARI_USER_AGENT}
+                            : new String[] {
+                                primaryUa, MOBILE_USER_AGENT, TVBOX_USER_AGENT, SAFARI_USER_AGENT
+                            };
+            for (String candidateUa : dohUas) {
+                if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+                try {
+                    return fetchOnce(
+                            initialUrl,
+                            baseForwarded,
+                            body,
+                            candidateUa,
+                            !candidateUa.equals(primaryUa),
+                            true);
+                } catch (NonRetryableFetchException fatal) {
+                    if (fatal.getCause() instanceof IOException)
+                        throw (IOException) fatal.getCause();
+                    throw new IOException(fatal.getMessage());
+                } catch (HttpStatusException httpErr) {
+                    if (httpErr.status != 403) throw httpErr;
+                    firstFailure = httpErr;
+                } catch (IOException dohErr) {
+                    if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+                }
+            }
+        }
+
+        throw firstFailure;
+    }
+
+    private static String fetchOnce(
+            URL startUrl,
+            Map<String, String> initialHeaders,
+            byte[] initialBody,
+            String effectiveUa,
+            boolean forceUaOverride,
+            boolean useDoh)
+            throws Exception {
+        URL next = startUrl;
+        Map<String, String> forwarded = new LinkedHashMap<>(initialHeaders);
+        byte[] body = initialBody;
         Map<String, RedirectCookie> redirectCookies = new LinkedHashMap<>();
         boolean forceDirect = false;
         for (int hop = 0; hop < 5; hop++) {
-            if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException();
-            boolean canFallbackDirect = !forceDirect && hasActiveHttpProxy(next);
-            HttpURLConnection c = openHttpConnection(next, forceDirect);
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException();
+            InetAddress dohOverride = null;
+            if (useDoh) {
+                List<InetAddress> addrs = resolveViaDoh(next.getHost());
+                if (!addrs.isEmpty()) dohOverride = addrs.get(0);
+            }
+            boolean canFallbackDirect =
+                    !forceDirect && dohOverride == null && hasActiveHttpProxy(next);
+            HttpURLConnection c = openConnectionWithOverride(next, dohOverride, forceDirect);
             c.setConnectTimeout(12000);
             c.setReadTimeout(18000);
             c.setInstanceFollowRedirects(false);
-            c.setRequestProperty("User-Agent", defaultUa != null ? defaultUa : USER_AGENT);
-            for (Map.Entry<String, String> e : forwarded.entrySet())
+            c.setRequestProperty("User-Agent", effectiveUa != null ? effectiveUa : USER_AGENT);
+            for (Map.Entry<String, String> e : forwarded.entrySet()) {
                 c.setRequestProperty(e.getKey(), e.getValue());
+            }
+            if (forceUaOverride && effectiveUa != null) {
+                c.setRequestProperty("User-Agent", effectiveUa);
+            }
             try {
                 RequestScope.attach(c);
                 int status;
@@ -1470,10 +1816,12 @@ public final class Cms {
                         || status == 307
                         || status == 308) {
                     String loc = c.getHeaderField("Location");
-                    if (loc == null) throw new IOException("重定向缺少地址");
+                    if (loc == null) throw new NonRetryableFetchException("重定向缺少地址");
                     URL target = new URL(next, loc);
-                    if (!isHttp(target.toString())) throw new IOException("不支持此重定向协议");
-                    if (target.getUserInfo() != null) throw new IOException("来源重定向不能注入登录凭据");
+                    if (!isHttp(target.toString()))
+                        throw new NonRetryableFetchException("不支持此重定向协议");
+                    if (target.getUserInfo() != null)
+                        throw new NonRetryableFetchException("来源重定向不能注入登录凭据");
                     forwarded = inheritedHeaders(next.toString(), target.toString(), forwarded);
                     mergeRedirectCookies(forwarded, redirectCookies.values(), target);
                     if (status == 301 || status == 302 || status == 303) body = null;
@@ -1486,14 +1834,347 @@ public final class Cms {
                     rawIn = new java.util.zip.GZIPInputStream(rawIn);
                 }
                 try (InputStream input = rawIn) {
-                    return read(input, MAX_JSON);
+                    try {
+                        return read(input, MAX_JSON);
+                    } catch (IOException payloadErr) {
+                        if (payloadErr.getMessage() != null
+                                && (payloadErr.getMessage().contains("大小限制")
+                                        || payloadErr.getMessage().contains("配置图片"))) {
+                            throw new NonRetryableFetchException(payloadErr);
+                        }
+                        throw payloadErr;
+                    }
                 }
             } finally {
                 RequestScope.detach(c);
                 c.disconnect();
             }
         }
-        throw new IOException("来源重定向次数过多");
+        throw new NonRetryableFetchException("来源重定向次数过多");
+    }
+
+    private static HttpURLConnection openConnectionWithOverride(
+            URL url, InetAddress overrideIp, boolean forceDirect) throws IOException {
+        if (overrideIp == null) {
+            return openHttpConnection(url, forceDirect);
+        }
+        final String originalHost = url.getHost();
+        int port = url.getPort();
+        String ipLiteral =
+                overrideIp instanceof Inet6Address
+                        ? "[" + overrideIp.getHostAddress() + "]"
+                        : overrideIp.getHostAddress();
+        String hostHeader =
+                port >= 0 && port != url.getDefaultPort()
+                        ? originalHost + ":" + port
+                        : originalHost;
+        if ("https".equalsIgnoreCase(url.getProtocol())) {
+            URL rewritten = new URL("https", ipLiteral, port, url.getFile());
+            HttpsURLConnection https =
+                    (HttpsURLConnection) openHttpConnection(rewritten, forceDirect);
+            https.setSSLSocketFactory(
+                    new SniOverrideSocketFactory(
+                            HttpsURLConnection.getDefaultSSLSocketFactory(), originalHost));
+            https.setHostnameVerifier(
+                    (h, session) ->
+                            HttpsURLConnection.getDefaultHostnameVerifier()
+                                    .verify(originalHost, session));
+            https.setRequestProperty("Host", hostHeader);
+            return https;
+        }
+        URL rewritten = new URL("http", ipLiteral, port, url.getFile());
+        HttpURLConnection http = openHttpConnection(rewritten, forceDirect);
+        http.setRequestProperty("Host", hostHeader);
+        return http;
+    }
+
+    static List<InetAddress> resolveViaDoh(String hostname) {
+        if (hostname == null) return Collections.emptyList();
+        String trimmed = hostname.trim();
+        if (trimmed.isEmpty() || shouldBypassDoh(trimmed)) return Collections.emptyList();
+        final String asciiHost;
+        try {
+            asciiHost = IDN.toASCII(trimmed).toLowerCase(Locale.ROOT);
+        } catch (IllegalArgumentException e) {
+            return Collections.emptyList();
+        }
+        long now = System.currentTimeMillis();
+        DohCacheEntry cached = DOH_CACHE.get(asciiHost);
+        if (cached != null && cached.expireAtMs > now) {
+            return cached.addresses;
+        }
+        String[] endpoints = dohEndpoints;
+        if (endpoints == null || endpoints.length == 0) return Collections.emptyList();
+        CompletionService<DohQueryResult> race = new ExecutorCompletionService<>(DOH_EXECUTOR);
+        List<Future<DohQueryResult>> futures = new ArrayList<>(endpoints.length);
+        for (final String endpoint : endpoints) {
+            futures.add(race.submit(() -> queryDohEndpoint(endpoint, asciiHost)));
+        }
+        long deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(4000);
+        try {
+            for (int i = 0; i < futures.size(); i++) {
+                long remainingNs = deadlineNs - System.nanoTime();
+                if (remainingNs <= 0) break;
+                Future<DohQueryResult> done = race.poll(remainingNs, TimeUnit.NANOSECONDS);
+                if (done == null) break;
+                try {
+                    DohQueryResult res = done.get();
+                    if (res != null && !res.addresses.isEmpty()) {
+                        long ttlMs =
+                                Math.max(
+                                        MIN_DOH_TTL_MS,
+                                        Math.min(MAX_DOH_TTL_MS, res.ttlSeconds * 1000L));
+                        if (DOH_CACHE.size() >= MAX_DOH_CACHE_ENTRIES) {
+                            evictDohCache(System.currentTimeMillis());
+                        }
+                        List<InetAddress> immutable =
+                                Collections.unmodifiableList(new ArrayList<>(res.addresses));
+                        DOH_CACHE.put(
+                                asciiHost,
+                                new DohCacheEntry(immutable, System.currentTimeMillis() + ttlMs));
+                        return immutable;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            for (Future<DohQueryResult> f : futures) f.cancel(true);
+        }
+        return Collections.emptyList();
+    }
+
+    private static final class DohQueryResult {
+        final List<InetAddress> addresses;
+        final long ttlSeconds;
+
+        DohQueryResult(List<InetAddress> addresses, long ttlSeconds) {
+            this.addresses = addresses;
+            this.ttlSeconds = ttlSeconds;
+        }
+    }
+
+    private static void evictDohCache(long now) {
+        for (Iterator<Map.Entry<String, DohCacheEntry>> it = DOH_CACHE.entrySet().iterator();
+                it.hasNext(); ) {
+            if (it.next().getValue().expireAtMs <= now) it.remove();
+        }
+        if (DOH_CACHE.size() >= MAX_DOH_CACHE_ENTRIES) {
+            Iterator<String> keys = DOH_CACHE.keySet().iterator();
+            if (keys.hasNext()) {
+                DOH_CACHE.remove(keys.next());
+            }
+        }
+    }
+
+    private static boolean shouldBypassDoh(String host) {
+        String lower = host.toLowerCase(Locale.ROOT);
+        if ("localhost".equals(lower)
+                || lower.endsWith(".localhost")
+                || lower.endsWith(".local")
+                || lower.contains(":")) {
+            return true;
+        }
+        if (dohEndpoints == DEFAULT_DOH_ENDPOINTS
+                && (lower.endsWith(".test")
+                        || lower.endsWith(".example")
+                        || lower.endsWith(".invalid"))) {
+            return true;
+        }
+        return lower.matches("\\d{1,3}(?:\\.\\d{1,3}){3}");
+    }
+
+    private static boolean isLoopbackEndpoint(String endpoint) {
+        try {
+            String h = new URL(endpoint).getHost().toLowerCase(Locale.ROOT);
+            return "127.0.0.1".equals(h)
+                    || "localhost".equals(h)
+                    || "[::1]".equals(h)
+                    || "::1".equals(h);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean isPoisonedAddress(InetAddress addr, boolean allowLoopback) {
+        if (addr == null || addr.isAnyLocalAddress() || addr.isMulticastAddress()) return true;
+        if (addr.isLoopbackAddress() && !allowLoopback) return true;
+        byte[] raw = addr.getAddress();
+        return raw.length == 4
+                && (raw[0] & 0xff) == 255
+                && (raw[1] & 0xff) == 255
+                && (raw[2] & 0xff) == 255
+                && (raw[3] & 0xff) == 255;
+    }
+
+    private static DohQueryResult queryDohEndpoint(String endpoint, String asciiHost)
+            throws Exception {
+        byte[] wireQuery = buildDnsWireQuery(asciiHost, 1);
+        String encoded = encodeBase64UrlNoPad(wireQuery);
+        String urlStr = endpoint + (endpoint.contains("?") ? "&dns=" : "?dns=") + encoded;
+        boolean allowLoopback = isLoopbackEndpoint(endpoint);
+        HttpURLConnection conn = openHttpConnection(new URL(urlStr), allowLoopback);
+        conn.setConnectTimeout(3500);
+        conn.setReadTimeout(3500);
+        conn.setInstanceFollowRedirects(true);
+        conn.setRequestProperty("Accept", "application/dns-message, application/dns-json;q=0.8");
+        conn.setRequestProperty("User-Agent", USER_AGENT);
+        try {
+            if (conn.getResponseCode() != 200) return null;
+            byte[] payload;
+            try (InputStream in = conn.getInputStream();
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+                byte[] buf = new byte[2048];
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    if (bos.size() + n > 65536) return null;
+                    bos.write(buf, 0, n);
+                }
+                payload = bos.toByteArray();
+            }
+            if (payload.length == 0) return null;
+            String contentType = conn.getContentType();
+            if ((contentType != null && contentType.toLowerCase(Locale.ROOT).contains("json"))
+                    || payload[0] == '{') {
+                return parseDohJsonResponse(new String(payload, "UTF-8"), asciiHost, allowLoopback);
+            }
+            return parseDnsWireResponse(payload, asciiHost, allowLoopback);
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private static byte[] buildDnsWireQuery(String asciiHost, int qtype) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream(64);
+        // Header: ID=0 (RFC 8484 §4.1), Flags=0x0100 (RD=1), QDCOUNT=1, AN/NS/AR=0
+        out.write(0);
+        out.write(0);
+        out.write(0x01);
+        out.write(0x00);
+        out.write(0);
+        out.write(1);
+        for (int i = 0; i < 6; i++) out.write(0);
+        for (String label : asciiHost.split("\\.")) {
+            if (label.isEmpty()) continue;
+            byte[] bytes = label.getBytes("US-ASCII");
+            if (bytes.length > 63) throw new IOException("DNS label too long");
+            out.write(bytes.length);
+            out.write(bytes);
+        }
+        out.write(0);
+        out.write((qtype >> 8) & 0xff);
+        out.write(qtype & 0xff);
+        out.write(0);
+        out.write(1); // QCLASS IN
+        return out.toByteArray();
+    }
+
+    private static String encodeBase64UrlNoPad(byte[] input) {
+        String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        StringBuilder sb = new StringBuilder((input.length * 4 + 2) / 3);
+        for (int i = 0; i < input.length; i += 3) {
+            int a = input[i] & 0xff;
+            int b = (i + 1 < input.length) ? (input[i + 1] & 0xff) : 0;
+            int c = (i + 2 < input.length) ? (input[i + 2] & 0xff) : 0;
+            sb.append(alphabet.charAt(a >> 2));
+            sb.append(alphabet.charAt(((a & 0x03) << 4) | (b >> 4)));
+            if (i + 1 < input.length) sb.append(alphabet.charAt(((b & 0x0f) << 2) | (c >> 6)));
+            if (i + 2 < input.length) sb.append(alphabet.charAt(c & 0x3f));
+        }
+        return sb.toString();
+    }
+
+    private static int skipDnsName(byte[] msg, int offset) {
+        int pos = offset;
+        int jumps = 0;
+        while (pos < msg.length) {
+            int len = msg[pos] & 0xff;
+            if (len == 0) return pos + 1;
+            if ((len & 0xc0) == 0xc0) {
+                return (pos + 2 <= msg.length) ? pos + 2 : -1;
+            }
+            if ((len & 0xc0) != 0) return -1;
+            pos += 1 + len;
+            if (++jumps > 128) return -1;
+        }
+        return -1;
+    }
+
+    private static DohQueryResult parseDnsWireResponse(
+            byte[] msg, String asciiHost, boolean allowLoopback) {
+        if (msg == null || msg.length < 12) return null;
+        int flags = ((msg[2] & 0xff) << 8) | (msg[3] & 0xff);
+        if ((flags & 0x8000) == 0 || (flags & 0x000f) != 0) return null;
+        int qdCount = ((msg[4] & 0xff) << 8) | (msg[5] & 0xff);
+        int anCount = ((msg[6] & 0xff) << 8) | (msg[7] & 0xff);
+        if (anCount <= 0) return null;
+        int pos = 12;
+        for (int i = 0; i < qdCount; i++) {
+            pos = skipDnsName(msg, pos);
+            if (pos < 0 || pos + 4 > msg.length) return null;
+            pos += 4;
+        }
+        List<InetAddress> out = new ArrayList<>();
+        long minTtl = 300;
+        for (int i = 0; i < anCount && pos < msg.length; i++) {
+            pos = skipDnsName(msg, pos);
+            if (pos < 0 || pos + 10 > msg.length) break;
+            int type = ((msg[pos] & 0xff) << 8) | (msg[pos + 1] & 0xff);
+            int cls = ((msg[pos] & 0xff) << 8) | (msg[pos + 3] & 0xff);
+            long ttl =
+                    ((long) (msg[pos + 4] & 0xff) << 24)
+                            | ((long) (msg[pos + 5] & 0xff) << 16)
+                            | ((long) (msg[pos + 6] & 0xff) << 8)
+                            | (msg[pos + 7] & 0xff);
+            int rdLength = ((msg[pos + 8] & 0xff) << 8) | (msg[pos + 9] & 0xff);
+            pos += 10;
+            if (pos + rdLength > msg.length) break;
+            if (cls == 1 && ((type == 1 && rdLength == 4) || (type == 28 && rdLength == 16))) {
+                byte[] rawIp = Arrays.copyOfRange(msg, pos, pos + rdLength);
+                try {
+                    InetAddress addr = InetAddress.getByAddress(asciiHost, rawIp);
+                    if (!isPoisonedAddress(addr, allowLoopback)) {
+                        out.add(addr);
+                        if (ttl > 0 && ttl < minTtl) minTtl = ttl;
+                    }
+                } catch (UnknownHostException ignored) {
+                }
+            }
+            pos += rdLength;
+        }
+        return out.isEmpty() ? null : new DohQueryResult(out, minTtl);
+    }
+
+    private static DohQueryResult parseDohJsonResponse(
+            String jsonText, String asciiHost, boolean allowLoopback) {
+        try {
+            JSONObject obj = new JSONObject(jsonText);
+            if (obj.optInt("Status", 0) != 0) return null;
+            JSONArray answers = obj.optJSONArray("Answer");
+            if (answers == null || answers.length() == 0) return null;
+            List<InetAddress> out = new ArrayList<>();
+            long minTtl = 300;
+            for (int i = 0; i < answers.length(); i++) {
+                JSONObject ans = answers.optJSONObject(i);
+                if (ans == null) continue;
+                int type = ans.optInt("type", 0);
+                String data = optSafeString(ans, "data", "").trim();
+                long ttl = ans.optLong("TTL", 300);
+                if ((type == 1 && data.matches("\\d{1,3}(?:\\.\\d{1,3}){3}"))
+                        || (type == 28 && data.contains(":"))) {
+                    InetAddress parsed = InetAddress.getByName(data);
+                    InetAddress bound = InetAddress.getByAddress(asciiHost, parsed.getAddress());
+                    if (!isPoisonedAddress(bound, allowLoopback)) {
+                        out.add(bound);
+                        if (ttl > 0 && ttl < minTtl) minTtl = ttl;
+                    }
+                }
+            }
+            return out.isEmpty() ? null : new DohQueryResult(out, minTtl);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     // Keep this parser usable in the JVM checks and on Android 23 (java.util.Base64 is API 26).
@@ -1592,8 +2273,9 @@ public final class Cms {
                 JSONObject j = a.optJSONObject(i);
                 if (j == null) continue;
                 Category c = new Category();
-                c.id = j.optString("type_id");
-                c.name = j.optString("type_name", c.id);
+                c.id = optSafeString(j, "type_id", "").trim();
+                String cname = optSafeString(j, "type_name", "");
+                c.name = cname.isEmpty() ? c.id : cname;
                 if (!c.id.isEmpty()) result.add(c);
             }
         return result;
@@ -1654,33 +2336,38 @@ public final class Cms {
 
     private static Video video(JSONObject j) {
         Video v = new Video();
-        v.id = j.optString("vod_id");
-        v.title = j.optString("vod_name", "未命名影片");
-        v.poster = j.optString("vod_pic");
-        v.remarks = j.optString("vod_remarks");
+        v.id = optSafeString(j, "vod_id", "");
+        String vTitle = optSafeString(j, "vod_name", "");
+        v.title = vTitle.isEmpty() ? "未命名影片" : vTitle;
+        v.poster = optSafeString(j, "vod_pic", "");
+        v.remarks = optSafeString(j, "vod_remarks", "");
         Object action = j.opt("action");
-        v.action = action == null || action == JSONObject.NULL ? "" : action.toString();
-        v.tag = j.optString("vod_tag");
+        v.action =
+                action == null || action == JSONObject.NULL ? "" : optSafeString(j, "action", "");
+        v.tag = optSafeString(j, "vod_tag", "");
         if (v.action.isEmpty()
                 && "action".equalsIgnoreCase(v.tag)
                 && v.id != null
                 && !v.id.isEmpty()) {
             v.action = v.id;
         }
-        v.year = j.optString("vod_year");
-        v.area = j.optString("vod_area");
-        v.genre = j.optString("vod_class", j.optString("type_name"));
-        v.actor = j.optString("vod_actor");
-        v.director = j.optString("vod_director");
-        double dbVal = parseValidDoubanScore(j.optString("vod_douban_score"));
+        v.year = optSafeString(j, "vod_year", "");
+        v.area = optSafeString(j, "vod_area", "");
+        v.genre = optSafeString(j, "vod_class", optSafeString(j, "type_name", ""));
+        v.actor = optSafeString(j, "vod_actor", "");
+        v.director = optSafeString(j, "vod_director", "");
+        double dbVal = parseValidDoubanScore(optSafeString(j, "vod_douban_score", ""));
         if (dbVal <= 0.0) {
-            dbVal = parseValidDoubanScore(j.optString("vod_score"));
+            dbVal = parseValidDoubanScore(optSafeString(j, "vod_score", ""));
         }
         v.doubanScore = dbVal >= 2.0 ? String.format(java.util.Locale.US, "%.1f", dbVal) : "";
         v.description =
-                j.optString("vod_content").replaceAll("<[^>]*>", " ").replace("&nbsp;", " ").trim();
-        String rawFrom = j.optString("vod_play_from");
-        String rawUrl = j.optString("vod_play_url");
+                optSafeString(j, "vod_content", "")
+                        .replaceAll("<[^>]*>", " ")
+                        .replace("&nbsp;", " ")
+                        .trim();
+        String rawFrom = optSafeString(j, "vod_play_from", "");
+        String rawUrl = optSafeString(j, "vod_play_url", "");
         if (rawUrl.isEmpty() && j.has("vod_play_list")) {
             JSONArray playList = j.optJSONArray("vod_play_list");
             if (playList != null) {
