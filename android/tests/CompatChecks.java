@@ -405,6 +405,8 @@ public final class CompatChecks {
             Collections.reverse(sorted);
             for (Path p : sorted) {
                 p.toFile().setWritable(true);
+            }
+            for (Path p : sorted) {
                 Files.deleteIfExists(p);
             }
         }
