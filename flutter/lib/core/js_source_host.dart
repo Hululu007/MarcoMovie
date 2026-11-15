@@ -118,6 +118,16 @@ class JsSourceHost {
     await server?.close();
   }
 
+  /// Recovers cached JS/Python proxy sessions if iOS XNU defuncted the local
+  /// proxy socket while the app was suspended in the background.
+  static Future<void> onAppResumed() async {
+    final server = _proxyServer;
+    if (server == null) return;
+    if (await server.isHealthy()) return;
+    if (_playbackPins.isNotEmpty) return;
+    await closeAll();
+  }
+
   static Future<String?> callCached({
     required String sessionKey,
     required String method,

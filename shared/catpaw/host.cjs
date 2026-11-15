@@ -48,22 +48,41 @@ if (!isMainThread) {
     });
     const endpoint = main?.address();
     if (!endpoint || endpoint.address !== '127.0.0.1') throw Error('listen');
+    main.on('error', () => {});
     parentPort.postMessage({ port: endpoint.port });
   })().catch(() => { parentPort.postMessage({ error: 'bundle_start_failed' }); });
 } else {
+  const net = require('node:net');
+  const embedded = process.argv.includes('--embedded');
+  process.on('uncaughtException', () => {});
+  process.on('unhandledRejection', () => {});
+  const MAX_RUNTIMES = 6;
   const root = path.resolve(process.argv[2]);
   const readyFile = path.resolve(process.argv[3]);
+  const rebindFile = path.join(root, 'rebind.json');
   const secret = crypto.randomBytes(32).toString('hex');
   const runtimes = new Map();
   const loading = new Map();
   const releases = new Map();
   let loadQueue = Promise.resolve();
+  let rebindQueue = Promise.resolve();
   let bootstrap = null;
+  let server = null;
+  let writeCounter = 0;
+  let lastRebindSeq = 0;
   let closing = false, resetting = false;
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  try { fs.unlinkSync(rebindFile); } catch (_) {}
   const respond = (res, status, body) => {
-    res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify(body));
+    if (res.destroyed || res.writableEnded) return;
+    try {
+      if (!res.headersSent) {
+        res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      }
+      res.end(JSON.stringify(body));
+    } catch (_) {
+      try { res.destroy(); } catch (_) {}
+    }
   };
   async function portBootstrap(req, res) {
     if (resetting || closing) { req.resume(); return respond(res, 409, { error: 'runtime_reset' }); }
@@ -122,7 +141,7 @@ if (!isMainThread) {
         const timer = setTimeout(() => done(Error('bootstrap_timeout')), 3800);
         task.cancel = () => done(Error('bootstrap_cancelled'));
         worker.once('message', value => done(null, value));
-        worker.once('error', () => done(Error('guard_artifact_invalid')));
+        worker.on('error', () => done(Error('guard_artifact_invalid')));
         worker.once('exit', () => done(Error('guard_artifact_invalid')));
       });
       if (result.error) throw Error(result.error);
@@ -133,22 +152,24 @@ if (!isMainThread) {
       payload = { error: code };
     } finally {
       res.off('close', cancelled);
-      await task.worker?.terminate();
+      try { await task.worker?.terminate(); } catch (_) {}
       if (bootstrap === task) bootstrap = null;
       finish();
     }
     if (!res.destroyed && !closing && payload) respond(res, status, payload);
   }
   async function stop(instance) {
-    instance.http?.close(); clearTimeout(instance.callTimer); instance.manager?.close();
-    await instance.worker.terminate();
+    try { instance.http?.close(); } catch (_) {}
+    clearTimeout(instance.callTimer);
+    try { instance.manager?.close(); } catch (_) {}
+    try { await instance.worker.terminate(); } catch (_) {}
   }
   function load(hash) {
     if (resetting || closing) return Promise.reject(Error('runtime_reset'));
     if (runtimes.has(hash)) return runtimes.get(hash).ready;
     if (loading.has(hash)) return loading.get(hash);
     // Serialize only creation/eviction, not worker startup or source requests.
-    // Otherwise simultaneous loads can each see a spare slot and exceed three.
+    // Otherwise simultaneous loads can each see a spare slot and exceed cap.
     const epoch = releases.get(hash) || 0;
     const queuedUntil = Date.now()+20000;
     const created = loadQueue.then(()=>createRuntime(hash,epoch,queuedUntil));
@@ -162,14 +183,24 @@ if (!isMainThread) {
     if ((releases.get(hash)||0)!==epoch || closing || resetting) throw Error('bundle_released');
     if (runtimes.has(hash)) return runtimes.get(hash);
     // Do not evict an active playback to make room for a background source search.
-    while (runtimes.size >= 3) {
-      const idle = [...runtimes.entries()].filter(([, r]) => r.port && !r.active && !r.manager &&
-        Date.now() - r.played > 15 * 60 * 1000).sort((a,b) => a[1].used - b[1].used)[0];
+    // Cap protected idle played runtimes to the 2 most recent so concurrent search
+    // batches never starve all slots.
+    while (runtimes.size >= MAX_RUNTIMES) {
+      const now = Date.now();
+      const protectedPlayed = new Set(
+        [...runtimes.entries()]
+          .filter(([, r]) => r.played > 0 && now - r.played <= 15 * 60 * 1000)
+          .sort((a, b) => b[1].played - a[1].played)
+          .slice(0, 2)
+          .map(([k]) => k)
+      );
+      const idle = [...runtimes.entries()].filter(([k, r]) => r.port && !r.active && !r.manager &&
+        !protectedPlayed.has(k)).sort((a,b) => a[1].used - b[1].used)[0];
       if (!idle) {
         if (closing || resetting || Date.now()>=queuedUntil || (releases.get(hash)||0)!==epoch) throw Error('runtime_limit');
         // Existing CatPaw playback remains protected. A running/starting DRPY
-        // query can free a slot; wait asynchronously instead of dropping half
-        // of the app's six-source concurrent search batch.
+        // query can free a slot; wait asynchronously instead of dropping
+        // the app's six-source concurrent search batch.
         if (![...runtimes.values()].some(r=>r.kind==='drpy'||!r.port)) throw Error('runtime_limit');
         await new Promise(resolve=>setTimeout(resolve,20));
         continue;
@@ -205,7 +236,7 @@ if (!isMainThread) {
     if (kind === 'catpaw') syncPanConfigToState(state);
     const worker = new Worker(kind === 'drpy' ? path.join(__dirname,'drpy-worker.cjs') : __filename, {
       workerData: kind === 'drpy' ? {manifest,state} : { script, state }, stdout: true, stderr: true,
-      resourceLimits: { maxOldGenerationSizeMb: 256 },
+      resourceLimits: { maxOldGenerationSizeMb: kind === 'drpy' ? 128 : 256 },
     });
     // Source logs can contain cookies, query strings and media tokens.
     worker.stdout.resume(); worker.stderr.resume();
@@ -230,10 +261,11 @@ if (!isMainThread) {
           instance.callTimer=setTimeout(()=>stop(instance),Math.max(1,Math.min(21000,value.deadline-Date.now()+500)));
         } else if(value.kind==='call-end'){clearTimeout(instance.callTimer);instance.callTimer=null;}
       });
-      worker.once('error', () => { clearTimeout(timer); reject(Error('bundle_start_failed')); });
+      worker.on('error', () => { clearTimeout(timer); reject(Error('bundle_start_failed')); });
       worker.once('exit', () => {
-        instance.http?.close(); clearTimeout(instance.callTimer);
-        instance.manager?.close();
+        try { instance.http?.close(); } catch (_) {}
+        clearTimeout(instance.callTimer);
+        try { instance.manager?.close(); } catch (_) {}
         clearTimeout(timer);
         if (runtimes.get(hash) === instance) runtimes.delete(hash);
         reject(Error('bundle_exited'));
@@ -254,8 +286,11 @@ if (!isMainThread) {
     let ticket = '', expires = Date.now() + 15 * 60 * 1000;
     const backend = `http://127.0.0.1:${instance.port}`;
     const manager = http.createServer((req, res) => {
-      const origin = `http://127.0.0.1:${manager.address().port}`;
-      if (req.headers.host !== `127.0.0.1:${manager.address().port}` ||
+      req.on('error', () => {}); res.on('error', () => {});
+      const addr = manager.address();
+      if (!addr || typeof addr !== 'object' || !addr.port) return respond(res,503,{error:'settings_unavailable'});
+      const origin = `http://127.0.0.1:${addr.port}`;
+      if (req.headers.host !== `127.0.0.1:${addr.port}` ||
           (req.headers.origin && req.headers.origin !== origin)) return respond(res,403,{error:'forbidden'});
       res.setHeader('Referrer-Policy','no-referrer');
       res.setHeader('X-Frame-Options','DENY');
@@ -291,13 +326,16 @@ if (!isMainThread) {
       upstream.on('error',()=>{if(!res.headersSent)respond(res,502,{error:'settings_request_failed'});else res.destroy();});
       res.on('close',()=>upstream.destroy());req.pipe(upstream);
     });
+    manager.on('error', () => {});
     await new Promise((resolve,reject)=>{manager.once('error',reject);manager.listen(0,'127.0.0.1',resolve);});
     const expiry = setInterval(()=>{if(Date.now()>expires) session.close();},60000);
     expiry.unref();
     const session = instance.manager = {
       open() {ticket=crypto.randomBytes(32).toString('hex');expires=Date.now()+15*60*1000;
-        return `http://127.0.0.1:${manager.address().port}/authorize/${ticket}`;},
-      close() {clearInterval(expiry);manager.close();manager.closeAllConnections();instance.manager=null;},
+        const addr=manager.address();
+        if(!addr||typeof addr!=='object'||!addr.port)throw Error('settings_unavailable');
+        return `http://127.0.0.1:${addr.port}/authorize/${ticket}`;},
+      close() {clearInterval(expiry);try{manager.close();manager.closeAllConnections?.();}catch(_){}instance.manager=null;},
     };
     return session.open();
   }
@@ -350,290 +388,460 @@ if (!isMainThread) {
         resp.on('error', reject);
       });
       r.setTimeout(35000, () => r.destroy(Error('timeout')));
-      r.on('error', reject);
+      r.on('error', err => {
+        if (err && ['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED'].includes(err.code)) {
+          err.deadBackend = true;
+        }
+        reject(err);
+      });
       if (payload) r.write(payload);
       r.end();
     });
   }
 
-  const server = http.createServer(async (req, res) => {
-    if (closing || req.headers.origin || !req.url.startsWith('/' + secret + '/')) {
-      return respond(res, 403, { error: 'forbidden' });
-    }
-    const route = req.url.slice(secret.length + 2);
-    if (route === 'health' && req.method === 'GET') return respond(res, 200, { version: 1, runtime:process.versions.node });
-    if (route === '_reset' && req.method === 'POST') {
-      if (resetting) return respond(res,409,{error:'runtime_reset'});
-      resetting=true;
-      try {
-        const pendingBootstrap=bootstrap;
-        pendingBootstrap?.cancel?.();
-        for(const hash of new Set([...runtimes.keys(),...loading.keys()]))releases.set(hash,(releases.get(hash)||0)+1);
-        const instances=[...runtimes.values()];runtimes.clear();
-        await Promise.all(instances.map(stop));
-        await loadQueue;
-        await Promise.allSettled([...loading.values()]);
-        await pendingBootstrap?.done;
-        return respond(res,200,{reset:true});
-      }finally{resetting=false;}
-    }
-    if (route === '_port-bootstrap' && req.method === 'POST') return portBootstrap(req, res);
-    const match = /^([a-f0-9]{64})(\/.*)$/.exec(route);
-    if (!match) return respond(res, 404, { error: 'route' });
-    const hash = match[1], resource = match[2];
-    if (resource === '/_release' && req.method === 'POST') {
-      releases.set(hash,(releases.get(hash)||0)+1);
-      const instance = runtimes.get(hash);
-      if (instance) { runtimes.delete(hash); await stop(instance); }
-      return respond(res, 200, { released: true });
-    }
-    if (resource === '/_manage' && req.method === 'POST') {
-      try { return respond(res,200,{url:await manage(await load(hash))}); }
-      catch (_) { return respond(res,503,{error:'settings_unavailable'}); }
-    }
-    // Only data/playback routes are exposed to the player, never the source's admin panel.
-    // CatPaw also returns signed HLS proxies under /spider/<site>/<version>/proxy/.
-    // Check the normalized path, so dot segments cannot turn this into an admin route.
-    const normalizedPath = new URL('http://127.0.0.1' + resource).pathname;
-    const spiderProxy = ['GET','HEAD'].includes(req.method) &&
-      /^\/spider\/[A-Za-z0-9_-]+\/[0-9]+\/proxy(?:\/[A-Za-z0-9._~/-]+)?$/.test(normalizedPath);
-    if (!spiderProxy && !/^\/(t4(?:\?|$)|api\/|proxy(?:\/|\?)|videos\/|stream\.)/.test(resource)) {
-      return respond(res, 403, { error: 'route_not_exposed' });
-    }
-    let instance;
-    try { instance = await load(hash); }
-    catch (_) { return respond(res, 503, { error: 'source_runtime_unavailable' }); }
-    if (res.destroyed) {
-      if (instance.kind==='drpy' && !instance.active) {
-        if(runtimes.get(hash)===instance)runtimes.delete(hash);
-        await stop(instance);
+  async function handleRequest(req, res) {
+    req.on('error', () => {}); res.on('error', () => {});
+    try {
+      if (closing || req.headers.origin || !req.url || !req.url.startsWith('/' + secret + '/')) {
+        return respond(res, 403, { error: 'forbidden' });
       }
-      return;
-    }
-    instance.active++; instance.used=Date.now();
-    if (spiderProxy||/[?&]play=/.test(resource)||/^\/proxy(?:\?|$)/.test(resource)) instance.played=Date.now();
-    res.once('close',()=>{
-      instance.active--;
-      if(instance.kind==='drpy' && resource==='/api/drpy' && !res.writableFinished && !instance.active) {
-        if(runtimes.get(hash)===instance)runtimes.delete(hash);
-        stop(instance);
+      const route = req.url.slice(secret.length + 2);
+      if (route === 'health' && req.method === 'GET') return respond(res, 200, { version: 1, runtime:process.versions.node });
+      if (route === '_reset' && req.method === 'POST') {
+        if (resetting) return respond(res,409,{error:'runtime_reset'});
+        resetting=true;
+        try {
+          const pendingBootstrap=bootstrap;
+          pendingBootstrap?.cancel?.();
+          for(const hash of new Set([...runtimes.keys(),...loading.keys()]))releases.set(hash,(releases.get(hash)||0)+1);
+          const instances=[...runtimes.values()];runtimes.clear();
+          await Promise.all(instances.map(stop));
+          await loadQueue;
+          await Promise.allSettled([...loading.values()]);
+          await pendingBootstrap?.done;
+          return respond(res,200,{reset:true});
+        }finally{resetting=false;}
       }
-    });
-    const backend = `http://127.0.0.1:${instance.port}`;
-    const publicBase = `http://127.0.0.1:${server.address().port}/${secret}/${hash}`;
-    const rewrite = text => text.split(backend).join(publicBase)
-      .split(`http://localhost:${instance.port}`).join(publicBase);
-    if (req.method === 'GET' && /^\/t4(?:\?|$)/.test(resource)) {
-      try {
-        const t4Resp = await requestBackend(backend, 'GET', resource);
-        if (t4Resp.status === 404) {
-          let cfgResp = await requestBackend(backend, 'GET', '/config');
-          if (cfgResp.status !== 200) cfgResp = await requestBackend(backend, 'GET', '/full-config');
-          if (cfgResp.status === 200) {
-            const cfg = JSON.parse(cfgResp.text);
-            const rawSites = Array.isArray(cfg?.video?.sites)
-              ? cfg.video.sites
-              : (Array.isArray(cfg?.sites) ? cfg.sites : null);
-            if (rawSites) {
-              const skipKeys = new Set(['nodejs_baseset', 'nodejs_gengxin', 'nodejs_mypan']);
-              const sites = rawSites
-                .filter(s => s && typeof s === 'object' && typeof s.api === 'string' && s.api.startsWith('/spider/') && !skipKeys.has(s.key))
-                .map(s => {
-                  const isDouban = s.key === 'nodejs_douban' || /\/douban\//i.test(s.api);
-                  return {
-                    ...s,
-                    type: 4,
-                    searchable: isDouban ? 0 : (s.searchable ?? 1),
-                    quickSearch: isDouban ? 0 : (s.quickSearch ?? 1),
-                    api: `${publicBase}/api${s.api}`,
-                  };
-                });
-              if (sites.length > 0 && !res.destroyed) {
-                return respond(res, 200, { sites });
+      if (route === '_port-bootstrap' && req.method === 'POST') return portBootstrap(req, res);
+      const match = /^([a-f0-9]{64})(\/.*)$/.exec(route);
+      if (!match) return respond(res, 404, { error: 'route' });
+      const hash = match[1], resource = match[2];
+      if (resource === '/_release' && req.method === 'POST') {
+        releases.set(hash,(releases.get(hash)||0)+1);
+        const instance = runtimes.get(hash);
+        if (instance) { runtimes.delete(hash); await stop(instance); }
+        return respond(res, 200, { released: true });
+      }
+      if (resource === '/_manage' && req.method === 'POST') {
+        try { return respond(res,200,{url:await manage(await load(hash))}); }
+        catch (_) { return respond(res,503,{error:'settings_unavailable'}); }
+      }
+      // Only data/playback routes are exposed to the player, never the source's admin panel.
+      // CatPaw also returns signed HLS proxies under /spider/<site>/<version>/proxy/.
+      // Check the normalized path, so dot segments cannot turn this into an admin route.
+      let normalizedPath;
+      try { normalizedPath = new URL('http://127.0.0.1' + resource).pathname; }
+      catch (_) { return respond(res, 400, { error: 'route' }); }
+      const spiderProxy = ['GET','HEAD'].includes(req.method) &&
+        /^\/spider\/[A-Za-z0-9_-]+\/[0-9]+\/proxy(?:\/[A-Za-z0-9._~/-]+)?$/.test(normalizedPath);
+      if (!spiderProxy && !/^\/(t4(?:\?|$)|api\/|proxy(?:\/|\?)|videos\/|stream\.)/.test(resource)) {
+        return respond(res, 403, { error: 'route_not_exposed' });
+      }
+      let instance;
+      try { instance = await load(hash); }
+      catch (_) { return respond(res, 503, { error: 'source_runtime_unavailable' }); }
+      if (res.destroyed) {
+        if (instance.kind==='drpy' && !instance.active) {
+          if(runtimes.get(hash)===instance)runtimes.delete(hash);
+          await stop(instance);
+        }
+        return;
+      }
+      const activeAddr = server?.address();
+      if (!activeAddr || typeof activeAddr !== 'object' || !activeAddr.port) {
+        return respond(res, 503, { error: 'source_runtime_unavailable' });
+      }
+      instance.active++; instance.used=Date.now();
+      if (spiderProxy||/[?&]play=/.test(resource)||/^\/proxy(?:\?|$)/.test(resource)) instance.played=Date.now();
+      res.once('close',()=>{
+        instance.active--;
+        if(instance.kind==='drpy' && resource==='/api/drpy' && !res.writableFinished && !instance.active) {
+          if(runtimes.get(hash)===instance)runtimes.delete(hash);
+          stop(instance);
+        }
+      });
+      const backend = `http://127.0.0.1:${instance.port}`;
+      const publicBase = `http://127.0.0.1:${activeAddr.port}/${secret}/${hash}`;
+      const rewrite = text => text.split(backend).join(publicBase)
+        .split(`http://localhost:${instance.port}`).join(publicBase);
+      if (req.method === 'GET' && /^\/t4(?:\?|$)/.test(resource)) {
+        try {
+          const t4Resp = await requestBackend(backend, 'GET', resource);
+          if (t4Resp.status === 404) {
+            let cfgResp = await requestBackend(backend, 'GET', '/config');
+            if (cfgResp.status !== 200) cfgResp = await requestBackend(backend, 'GET', '/full-config');
+            if (cfgResp.status === 200) {
+              const cfg = JSON.parse(cfgResp.text);
+              const rawSites = Array.isArray(cfg?.video?.sites)
+                ? cfg.video.sites
+                : (Array.isArray(cfg?.sites) ? cfg.sites : null);
+              if (rawSites) {
+                const skipKeys = new Set(['nodejs_baseset', 'nodejs_gengxin', 'nodejs_mypan']);
+                const sites = rawSites
+                  .filter(s => s && typeof s === 'object' && typeof s.api === 'string' && s.api.startsWith('/spider/') && !skipKeys.has(s.key))
+                  .map(s => {
+                    const isDouban = s.key === 'nodejs_douban' || /\/douban\//i.test(s.api);
+                    return {
+                      ...s,
+                      type: 4,
+                      searchable: isDouban ? 0 : (s.searchable ?? 1),
+                      quickSearch: isDouban ? 0 : (s.quickSearch ?? 1),
+                      api: `${publicBase}/api${s.api}`,
+                    };
+                  });
+                if (sites.length > 0 && !res.destroyed) {
+                  return respond(res, 200, { sites });
+                }
               }
             }
           }
+          if (!res.destroyed) {
+            res.writeHead(t4Resp.status, {
+              'Content-Type': t4Resp.headers['content-type'] || 'application/json; charset=utf-8',
+              'Cache-Control': 'no-store',
+            });
+            res.end(rewrite(t4Resp.text));
+          }
+        } catch (err) {
+          if (err?.deadBackend && runtimes.get(hash) === instance) {
+            runtimes.delete(hash); stop(instance);
+          }
+          if (!res.headersSent) respond(res, 502, { error: 'source_request_failed' });
+          else res.destroy();
         }
-        if (!res.destroyed) {
-          res.writeHead(t4Resp.status, {
-            'Content-Type': t4Resp.headers['content-type'] || 'application/json; charset=utf-8',
-            'Cache-Control': 'no-store',
-          });
-          res.end(rewrite(t4Resp.text));
-        }
-      } catch (_) {
-        if (!res.headersSent) respond(res, 502, { error: 'source_request_failed' });
-        else res.destroy();
+        return;
       }
-      return;
-    }
-    if (req.method === 'GET' && /^\/api\/spider\/[A-Za-z0-9_-]+\/[0-9]+(?:\?|$)/.test(resource)) {
-      const parsedUrl = new URL('http://127.0.0.1' + resource);
-      const spiderPath = parsedUrl.pathname.slice(4);
-      const params = parsedUrl.searchParams;
-      try {
-        const srcFile = path.join(root, 'wexfnwconfig.json');
-        const mtime = fs.existsSync(srcFile) ? fs.statSync(srcFile).mtimeMs : 0;
-        if (mtime > 0 && instance.syncedPanMtime !== mtime) {
-          instance.syncedPanMtime = mtime;
-          const pan = syncPanConfigToState(path.join(root, hash, 'state'));
-          if (pan) {
-            for (const p of ['quark', 'uc', 'baidu']) {
-              const ck = String(pan[p]?.cookie || '');
-              await requestBackend(backend, 'PUT', `/website/api/credential/${p}/cookie`, { value: ck }).catch(() => {});
+      if (req.method === 'GET' && /^\/api\/spider\/[A-Za-z0-9_-]+\/[0-9]+(?:\?|$)/.test(resource)) {
+        const parsedUrl = new URL('http://127.0.0.1' + resource);
+        const spiderPath = parsedUrl.pathname.slice(4);
+        const params = parsedUrl.searchParams;
+        try {
+          const srcFile = path.join(root, 'wexfnwconfig.json');
+          const mtime = fs.existsSync(srcFile) ? fs.statSync(srcFile).mtimeMs : 0;
+          if (mtime > 0 && instance.syncedPanMtime !== mtime) {
+            instance.syncedPanMtime = mtime;
+            const pan = syncPanConfigToState(path.join(root, hash, 'state'));
+            if (pan) {
+              for (const p of ['quark', 'uc', 'baidu']) {
+                const ck = String(pan[p]?.cookie || '');
+                await requestBackend(backend, 'PUT', `/website/api/credential/${p}/cookie`, { value: ck }).catch(() => {});
+              }
             }
           }
+        } catch (_) {}
+        if (!instance.initedSpiders) instance.initedSpiders = new Set();
+        if (!instance.initedSpiders.has(spiderPath)) {
+          instance.initedSpiders.add(spiderPath);
+          try { await requestBackend(backend, 'POST', spiderPath + '/init', {}); } catch (_) {}
         }
-      } catch (_) {}
-      if (!instance.initedSpiders) instance.initedSpiders = new Set();
-      if (!instance.initedSpiders.has(spiderPath)) {
-        instance.initedSpiders.add(spiderPath);
-        try { await requestBackend(backend, 'POST', spiderPath + '/init', {}); } catch (_) {}
-      }
-      try {
-        let resp;
-        if (params.has('play')) {
-          resp = await requestBackend(backend, 'POST', spiderPath + '/play', {
-            flag: params.get('flag') || '',
-            id: params.get('play') || '',
-            flags: [],
-          });
-        } else if (params.has('ids')) {
-          resp = await requestBackend(backend, 'POST', spiderPath + '/detail', {
-            id: params.get('ids') || '',
-          });
-        } else if (params.has('wd')) {
-          const pg = parseInt(params.get('pg') || '1', 10) || 1;
-          const wd = params.get('wd') || '';
-          resp = await requestBackend(backend, 'POST', spiderPath + '/search', {
-            wd, key: wd, quick: false, page: pg, pg,
-          });
-        } else if (params.has('t') || params.has('pg')) {
-          const tid = params.get('t') || '';
-          const pg = parseInt(params.get('pg') || '1', 10) || 1;
-          const extend = {};
-          const rawExt = params.get('ext') || '';
-          if (rawExt && rawExt.length <= 8192) {
-            let parsedExt = null;
-            try {
-              parsedExt = JSON.parse(rawExt);
-            } catch (_) {
+        try {
+          let resp;
+          if (params.has('play')) {
+            resp = await requestBackend(backend, 'POST', spiderPath + '/play', {
+              flag: params.get('flag') || '',
+              id: params.get('play') || '',
+              flags: [],
+            });
+          } else if (params.has('ids')) {
+            resp = await requestBackend(backend, 'POST', spiderPath + '/detail', {
+              id: params.get('ids') || '',
+            });
+          } else if (params.has('wd')) {
+            const pg = parseInt(params.get('pg') || '1', 10) || 1;
+            const wd = params.get('wd') || '';
+            resp = await requestBackend(backend, 'POST', spiderPath + '/search', {
+              wd, key: wd, quick: false, page: pg, pg,
+            });
+          } else if (params.has('t') || params.has('pg')) {
+            const tid = params.get('t') || '';
+            const pg = parseInt(params.get('pg') || '1', 10) || 1;
+            const extend = {};
+            const rawExt = params.get('ext') || '';
+            if (rawExt && rawExt.length <= 8192) {
+              let parsedExt = null;
               try {
-                const b64 = rawExt.replace(/-/g, '+').replace(/_/g, '/');
-                const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
-                parsedExt = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
-              } catch (_) {}
-            }
-            if (parsedExt && typeof parsedExt === 'object' && !Array.isArray(parsedExt)) {
-              for (const [ek, ev] of Object.entries(parsedExt)) {
-                if (!ek || ek.length > 64 || ek === '__proto__' || ek === 'constructor' || ek === 'prototype') continue;
-                if (typeof ev === 'string' || typeof ev === 'number' || typeof ev === 'boolean') {
-                  const sv = String(ev);
-                  if (sv) extend[ek] = sv;
+                parsedExt = JSON.parse(rawExt);
+              } catch (_) {
+                try {
+                  const b64 = rawExt.replace(/-/g, '+').replace(/_/g, '/');
+                  const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+                  parsedExt = JSON.parse(Buffer.from(padded, 'base64').toString('utf8'));
+                } catch (_) {}
+              }
+              if (parsedExt && typeof parsedExt === 'object' && !Array.isArray(parsedExt)) {
+                for (const [ek, ev] of Object.entries(parsedExt)) {
+                  if (!ek || ek.length > 64 || ek === '__proto__' || ek === 'constructor' || ek === 'prototype') continue;
+                  if (typeof ev === 'string' || typeof ev === 'number' || typeof ev === 'boolean') {
+                    const sv = String(ev);
+                    if (sv) extend[ek] = sv;
+                  }
                 }
               }
             }
+            for (const k of ['class', 'area', 'year', 'by', 'lang', 'cateId', 'type', 'tid']) {
+              if (params.get(k)) extend[k] = params.get(k);
+            }
+            resp = await requestBackend(backend, 'POST', spiderPath + '/category', {
+              id: tid, tid, page: pg, pg, filter: true, extend,
+            });
+          } else {
+            resp = await requestBackend(backend, 'POST', spiderPath + '/home', { filter: true });
+            try {
+              const homeObj = JSON.parse(resp.text);
+              if (homeObj && typeof homeObj === 'object' && (!Array.isArray(homeObj.list) || homeObj.list.length === 0)) {
+                const vodResp = await requestBackend(backend, 'POST', spiderPath + '/homeVod', {});
+                if (vodResp.status === 200) {
+                  const vodObj = JSON.parse(vodResp.text);
+                  if (Array.isArray(vodObj?.list) && vodObj.list.length > 0) {
+                    homeObj.list = vodObj.list;
+                    resp.text = JSON.stringify(homeObj);
+                  }
+                }
+              }
+            } catch (_) {}
           }
-          for (const k of ['class', 'area', 'year', 'by', 'lang', 'cateId', 'type', 'tid']) {
-            if (params.get(k)) extend[k] = params.get(k);
+          if (!res.destroyed) {
+            res.writeHead(resp.status, {
+              'Content-Type': 'application/json; charset=utf-8',
+              'Cache-Control': 'no-store',
+            });
+            res.end(rewrite(resp.text));
           }
-          resp = await requestBackend(backend, 'POST', spiderPath + '/category', {
-            id: tid, tid, page: pg, pg, filter: true, extend,
-          });
-        } else {
-          resp = await requestBackend(backend, 'POST', spiderPath + '/home', { filter: true });
+        } catch (err) {
+          if (err?.deadBackend && runtimes.get(hash) === instance) {
+            runtimes.delete(hash); stop(instance);
+          }
+          if (!res.headersSent) respond(res, 502, { error: 'source_request_failed' });
+          else res.destroy();
+        }
+        return;
+      }
+      const headers = { ...req.headers, host: `127.0.0.1:${instance.port}` };
+      delete headers.authorization; delete headers.cookie; delete headers.origin;
+      delete headers['accept-encoding'];
+      const upstream = http.request(backend + resource, { method: req.method, headers }, source => {
+        const type = String(source.headers['content-type'] || '');
+        const transformed = /json|mpegurl|text\//i.test(type);
+        const outputHeaders = { ...source.headers };
+        delete outputHeaders['set-cookie']; delete outputHeaders['access-control-allow-origin'];
+        if (outputHeaders.location) {
+          // Relative redirects must remain under this subscription's capability path.
           try {
-            const homeObj = JSON.parse(resp.text);
-            if (homeObj && typeof homeObj === 'object' && (!Array.isArray(homeObj.list) || homeObj.list.length === 0)) {
-              const vodResp = await requestBackend(backend, 'POST', spiderPath + '/homeVod', {});
-              if (vodResp.status === 200) {
-                const vodObj = JSON.parse(vodResp.text);
-                if (Array.isArray(vodObj?.list) && vodObj.list.length > 0) {
-                  homeObj.list = vodObj.list;
-                  resp.text = JSON.stringify(homeObj);
-                }
-              }
-            }
-          } catch (_) {}
+            const location = new URL(outputHeaders.location, backend + resource).href;
+            outputHeaders.location = rewrite(location);
+          } catch (_) {
+            delete outputHeaders.location;
+          }
         }
-        if (!res.destroyed) {
-          res.writeHead(resp.status, {
-            'Content-Type': 'application/json; charset=utf-8',
-            'Cache-Control': 'no-store',
+        if (transformed) {
+          delete outputHeaders['content-length']; delete outputHeaders['content-encoding'];
+          let size = 0; const chunks = [];
+          source.on('data', chunk => {
+            size += chunk.length;
+            if (size > 16 * 1024 * 1024) { source.destroy(); res.destroy(); }
+            else chunks.push(chunk);
           });
-          res.end(rewrite(resp.text));
+          source.on('end', () => {
+            if (res.destroyed) return;
+            let body = rewrite(Buffer.concat(chunks).toString('utf8'));
+            if (/mpegurl/i.test(type)) {
+              const absolute = value => {
+                if (!value || /^(data:|https?:)/i.test(value)) return rewrite(value);
+                try { return rewrite(new URL(value, backend + resource).href); }
+                catch (_) { return rewrite(value); }
+              };
+              body = body.split('\n').map(line => line.startsWith('#')
+                ? line.replace(/URI="([^"]+)"/g, (_, value) => `URI="${absolute(value)}"`)
+                : absolute(line.trim())).join('\n');
+            }
+            if (!res.headersSent) res.writeHead(source.statusCode, outputHeaders);
+            res.end(body);
+          });
+          source.on('error', () => res.destroy());
+        } else {
+          if (!res.headersSent) res.writeHead(source.statusCode, outputHeaders);
+          source.pipe(res);
+          source.on('error', () => res.destroy());
         }
-      } catch (_) {
+      });
+      if (!spiderProxy) upstream.setTimeout(30000, () => upstream.destroy());
+      upstream.on('error', err => {
+        if (err && ['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED'].includes(err.code) && runtimes.get(hash) === instance) {
+          runtimes.delete(hash); stop(instance);
+        }
         if (!res.headersSent) respond(res, 502, { error: 'source_request_failed' });
         else res.destroy();
-      }
+      });
+      res.on('close', () => upstream.destroy());
+      req.pipe(upstream);
+    } catch (_) {
+      if (!res.headersSent) respond(res, 500, { error: 'internal_error' });
+      else try { res.destroy(); } catch (_) {}
+    }
+  }
+
+  function writeReady(port, seq) {
+    const temporary = `${readyFile}.tmp.${process.pid}.${++writeCounter}`;
+    const payload = seq > 0
+      ? { version: 1, port, secret, seq }
+      : { version: 1, port, secret };
+    fs.writeFileSync(temporary, JSON.stringify(payload), { mode: 0o600 });
+    fs.renameSync(temporary, readyFile);
+  }
+
+  function createHostServer() {
+    const srv = http.createServer(handleRequest);
+    srv.requestTimeout = 0;
+    srv.headersTimeout = 10000;
+    srv.on('error', () => {
+      if (!closing && srv === server) triggerRebind(0);
+    });
+    return srv;
+  }
+
+  async function performRebind(seq) {
+    if (closing) return;
+    const nextServer = createHostServer();
+    try {
+      await new Promise((resolve, reject) => {
+        const onErr = err => { nextServer.off('listening', onListen); reject(err); };
+        const onListen = () => { nextServer.off('error', onErr); resolve(); };
+        nextServer.once('error', onErr);
+        nextServer.once('listening', onListen);
+        nextServer.listen(0, '127.0.0.1');
+      });
+    } catch (_) {
+      try { nextServer.close(); } catch (_) {}
       return;
     }
-    const headers = { ...req.headers, host: `127.0.0.1:${instance.port}` };
-    delete headers.authorization; delete headers.cookie; delete headers.origin;
-    delete headers['accept-encoding'];
-    const upstream = http.request(backend + resource, { method: req.method, headers }, source => {
-      const type = String(source.headers['content-type'] || '');
-      const transformed = /json|mpegurl|text\//i.test(type);
-      const outputHeaders = { ...source.headers };
-      delete outputHeaders['set-cookie']; delete outputHeaders['access-control-allow-origin'];
-      if (outputHeaders.location) {
-        // Relative redirects must remain under this subscription's capability path.
-        const location = new URL(outputHeaders.location, backend + resource).href;
-        outputHeaders.location = rewrite(location);
-      }
-      if (transformed) {
-        delete outputHeaders['content-length']; delete outputHeaders['content-encoding'];
-        let size = 0; const chunks = [];
-        source.on('data', chunk => {
-          size += chunk.length;
-          if (size > 16 * 1024 * 1024) { source.destroy(); res.destroy(); }
-          else chunks.push(chunk);
-        });
-        source.on('end', () => {
-          if (res.destroyed) return;
-          let body = rewrite(Buffer.concat(chunks).toString('utf8'));
-          if (/mpegurl/i.test(type)) {
-            const absolute = value => {
-              if (!value || /^(data:|https?:)/i.test(value)) return rewrite(value);
-              return rewrite(new URL(value, backend + resource).href);
-            };
-            body = body.split('\n').map(line => line.startsWith('#')
-              ? line.replace(/URI="([^"]+)"/g, (_, value) => `URI="${absolute(value)}"`)
-              : absolute(line.trim())).join('\n');
-          }
-          res.writeHead(source.statusCode, outputHeaders); res.end(body);
-        });
-        source.on('error', () => res.destroy());
-      } else {
-        res.writeHead(source.statusCode, outputHeaders); source.pipe(res);
-        source.on('error', () => res.destroy());
-      }
+    if (closing) {
+      try { nextServer.close(); } catch (_) {}
+      return;
+    }
+    const prevServer = server;
+    server = nextServer;
+    try { prevServer?.close(); prevServer?.closeAllConnections?.(); } catch (_) {}
+    const pendingBootstrap = bootstrap;
+    pendingBootstrap?.cancel?.();
+    for (const hash of new Set([...runtimes.keys(), ...loading.keys()])) {
+      releases.set(hash, (releases.get(hash) || 0) + 1);
+    }
+    const instances = [...runtimes.values()];
+    runtimes.clear();
+    await Promise.race([
+      Promise.allSettled(instances.map(stop)),
+      new Promise(resolve => setTimeout(resolve, 1500)),
+    ]);
+    if (seq > lastRebindSeq) lastRebindSeq = seq;
+    const addr = nextServer.address();
+    if (addr && typeof addr === 'object' && addr.port && !closing) {
+      try { writeReady(addr.port, lastRebindSeq); } catch (_) {}
+    }
+  }
+
+  function triggerRebind(seq = 0) {
+    rebindQueue = rebindQueue.then(() => performRebind(seq), () => performRebind(seq));
+    return rebindQueue;
+  }
+
+  function checkRebindFile() {
+    if (closing) return;
+    let raw;
+    try {
+      if (!fs.existsSync(rebindFile)) return;
+      raw = fs.readFileSync(rebindFile, 'utf8');
+    } catch (_) {
+      return;
+    }
+    try { fs.unlinkSync(rebindFile); } catch (_) {}
+    let seq = 0;
+    try {
+      const parsed = JSON.parse(raw);
+      if (Number.isSafeInteger(parsed?.seq) && parsed.seq > 0) seq = parsed.seq;
+    } catch (_) {}
+    triggerRebind(seq || (lastRebindSeq + 1));
+  }
+
+  function probeCurrentServer() {
+    return new Promise(resolve => {
+      const addr = server?.address();
+      if (!addr || typeof addr !== 'object' || !addr.port) return resolve(false);
+      let settled = false;
+      const finish = ok => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { sock.destroy(); } catch (_) {}
+        resolve(ok);
+      };
+      const sock = net.connect({ host: '127.0.0.1', port: addr.port });
+      const timer = setTimeout(() => finish(false), 400);
+      sock.once('connect', () => finish(true));
+      sock.once('error', () => finish(false));
     });
-    if (!spiderProxy) upstream.setTimeout(30000, () => upstream.destroy());
-    upstream.on('error', () => {
-      if (!res.headersSent) respond(res, 502, { error: 'source_request_failed' });
-      else res.destroy();
-    });
-    res.on('close', () => upstream.destroy());
-    req.pipe(upstream);
-  });
-  server.requestTimeout = 0;
-  server.headersTimeout = 10000;
+  }
+
+  server = createHostServer();
   server.listen(0, '127.0.0.1', () => {
-    const temporary = readyFile + '.tmp';
-    fs.writeFileSync(temporary, JSON.stringify({ version: 1, port: server.address().port, secret }), { mode: 0o600 });
-    fs.renameSync(temporary, readyFile);
+    const addr = server?.address();
+    if (addr && typeof addr === 'object' && addr.port) {
+      writeReady(addr.port, 0);
+    }
   });
+
+  let lastTick = Date.now();
+  let probing = false;
+  const monitor = setInterval(() => {
+    if (closing) return;
+    checkRebindFile();
+    const now = Date.now();
+    const elapsed = now - lastTick;
+    lastTick = now;
+    if (embedded && elapsed > 3000 && !probing) {
+      probing = true;
+      probeCurrentServer().then(ok => {
+        probing = false;
+        if (!ok && !closing) triggerRebind(0);
+      }, () => { probing = false; });
+    }
+  }, 400);
+  if (!embedded) monitor.unref();
+
+  let watcher = null;
+  try {
+    watcher = fs.watch(root, (_, filename) => {
+      if (!filename || filename === 'rebind.json') checkRebindFile();
+    });
+    watcher.on('error', () => {});
+    watcher.unref();
+  } catch (_) {}
+
   const close = async () => {
     if (closing) return;
     closing = true;
+    clearInterval(monitor);
+    try { watcher?.close(); } catch (_) {}
     bootstrap?.cancel?.();
-    server.close(); server.closeAllConnections();
-    await Promise.all([...runtimes.values()].map(stop));
+    try { server?.close(); server?.closeAllConnections?.(); } catch (_) {}
+    await Promise.allSettled([...runtimes.values()].map(stop));
     try { fs.unlinkSync(readyFile); } catch (_) { }
+    try { fs.unlinkSync(rebindFile); } catch (_) { }
     process.exit(0);
   };
-  process.on('SIGTERM', close); process.on('SIGINT', close);
-  if (!process.argv.includes('--embedded')) { process.stdin.resume(); process.stdin.on('end', close); }
+  if (!embedded) {
+    process.on('SIGTERM', close);
+    process.on('SIGINT', close);
+    process.stdin.resume();
+    process.stdin.on('end', close);
+  }
 }

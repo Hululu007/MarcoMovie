@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:http/testing.dart';
+import 'package:marco_movie/core/catpaw_host.dart';
 import 'package:marco_movie/core/cloud_media_proxy.dart';
 import 'package:marco_movie/core/cloud_share.dart';
 import 'package:marco_movie/core/cms_client.dart';
@@ -16,6 +17,7 @@ import 'package:marco_movie/core/csp_bridge.dart';
 import 'package:marco_movie/core/models.dart';
 import 'package:marco_movie/core/netdisk_range_proxy.dart';
 import 'package:marco_movie/core/quark_drive.dart';
+import 'package:marco_movie/core/script_proxy_server.dart';
 import 'package:marco_movie/core/wogg_netdisk_adapter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -973,6 +975,187 @@ console.log(JSON.stringify({ s1, sEmpty, dHeal }));
             contains('mmshare://https://pan.baidu.com/s/1livebaidu4k?pwd=8888'),
           );
         }
+      },
+    );
+  });
+
+  group('0.5.30 iOS CatPaw defunct loopback recovery & 6-worker search', () {
+    test(
+      'CatPawHost coalesces 6 concurrent DRPY searches across defunct loopback rebind and heals onAppResumed',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final tempDir = await Directory.systemTemp.createTemp(
+          'marco-catpaw-0530-',
+        );
+        addTearDown(() async {
+          if (await tempDir.exists()) {
+            await tempDir.delete(recursive: true);
+          }
+        });
+        final node =
+            (await Process.run('node', [
+              '-p',
+              'process.execPath',
+            ])).stdout.toString().trim();
+        final stateDir = Directory('${tempDir.path}/state');
+        final host = CatPawHost(
+          directory: () async => stateDir,
+          executable: node,
+          bootstrap: '${Directory.current.path}/assets/catpaw/host.cjs',
+        );
+        addTearDown(() => host.close());
+
+        final upstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => upstream.close(force: true));
+        final base = 'http://127.0.0.1:${upstream.port}';
+        upstream.listen((request) async {
+          final srcIdx = request.headers.value('x-source-idx') ?? 'unknown';
+          final wd = request.uri.queryParameters['wd'] ?? '';
+          await Future<void>.delayed(const Duration(milliseconds: 15));
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(
+            jsonEncode({
+              'list': [
+                {'vod_id': 'src-$srcIdx', 'vod_name': '影片-$srcIdx-$wd'},
+              ],
+            }),
+          );
+          await request.response.close();
+        });
+
+        final addresses = <String>[];
+        for (var i = 0; i < 6; i++) {
+          final rule = {
+            'title': '并发源-$i',
+            'host': base,
+            'homeUrl': '/home',
+            'url': '/category?type=fyclass&page=fypage',
+            'searchUrl': '/search?wd=**&pg=fypage',
+            'detailUrl': '/detail/fyid',
+            'class_name': '电影',
+            'class_url': '1',
+            '推荐': 'js:VODS=JSON.parse(request(input)).list;',
+            '一级': 'js:VODS=JSON.parse(request(input)).list;',
+            '搜索': 'js:VODS=JSON.parse(request(input)).list;',
+            '二级': 'js:VOD=JSON.parse(request(input)).list[0];',
+            'play_parse': true,
+            'play_json': <Object>[],
+            'lazy': 'js:input={parse:0,url:input};',
+          };
+          final addr = await host.installDrpy({
+            'version': 1,
+            'kind': 'drpy',
+            'runtime': CatPawHost.drpyRuntime,
+            'sourceId': sha256.convert(utf8.encode('source-0530-$i')).toString(),
+            'origin': '$base/rule-$i.js',
+            'rule': 'var rule = ${jsonEncode(rule)};',
+            'headers': <String, String>{'X-Source-Idx': '$i'},
+            'requestTimeoutMs': 5000,
+          });
+          addresses.add(addr);
+        }
+
+        final warmup =
+            jsonDecode(
+                  await host.callDrpy(addresses[0], 'search', ['热身', false, 1]),
+                )
+                as Map;
+        expect((warmup['list'] as List).single['vod_id'], 'src-0');
+
+        final readyFile = File('${stateDir.path}/ready.json');
+        final rebindFile = File('${stateDir.path}/rebind.json');
+
+        Future<int> defunctCurrentPort() async {
+          final before =
+              jsonDecode(await readyFile.readAsString()) as Map<String, dynamic>;
+          final oldPort = before['port'] as int;
+          final secret = before['secret'] as String;
+          final nextSeq = ((before['seq'] as int?) ?? 0) + 1;
+          await rebindFile.writeAsString(
+            jsonEncode({'version': 1, 'seq': nextSeq}),
+            flush: true,
+          );
+          final deadline = DateTime.now().add(const Duration(seconds: 5));
+          var moved = false;
+          while (DateTime.now().isBefore(deadline)) {
+            if (!await rebindFile.exists() && await readyFile.exists()) {
+              final cur =
+                  jsonDecode(await readyFile.readAsString())
+                      as Map<String, dynamic>;
+              if ((cur['port'] as int) != oldPort) {
+                moved = true;
+                break;
+              }
+            }
+            await Future<void>.delayed(const Duration(milliseconds: 25));
+          }
+          expect(moved, isTrue, reason: 'host.cjs should close oldPort');
+          // Restore ready.json to the now-closed oldPort so both _base and
+          // ready.json mimic an XNU-defuncted socket before wall-clock jump.
+          await readyFile.writeAsString(
+            jsonEncode({'port': oldPort, 'secret': secret, 'seq': nextSeq}),
+            flush: true,
+          );
+          return oldPort;
+        }
+
+        final portA = await defunctCurrentPort();
+        expect((await host.resolve(addresses[0])).port, portA);
+
+        final results = await Future.wait([
+          for (var i = 0; i < 6; i++)
+            host.callDrpy(addresses[i], 'search', ['谷雨', false, 1]),
+        ]);
+        for (var i = 0; i < 6; i++) {
+          final decoded = jsonDecode(results[i]) as Map<String, dynamic>;
+          final card = (decoded['list'] as List).single as Map<String, dynamic>;
+          expect(card['vod_id'], 'src-$i');
+          expect(card['vod_name'], '影片-$i-谷雨');
+        }
+        final portC = (await host.resolve(addresses[0])).port;
+        expect(portC, isNot(portA));
+
+        final defunctedAgain = await defunctCurrentPort();
+        expect(defunctedAgain, portC);
+        await host.onAppResumed();
+        final portD = (await host.resolve(addresses[0])).port;
+        expect(portD, isNot(portC));
+
+        final afterResume =
+            jsonDecode(
+                  await host.callDrpy(addresses[5], 'search', ['兰香如故', false, 1]),
+                )
+                as Map;
+        expect(
+          (afterResume['list'] as List).single['vod_name'],
+          '影片-5-兰香如故',
+        );
+      },
+    );
+
+    test(
+      'ScriptProxyServer reports health accurately before and after registration',
+      () async {
+        final proxy = ScriptProxyServer();
+        addTearDown(() => proxy.close());
+        expect(await proxy.isHealthy(), isTrue);
+        expect(await proxy.resetIfDefunct(), isFalse);
+
+        final reg = await proxy.register((req) async {
+          return ScriptProxyResponse(
+            statusCode: 200,
+            contentType: 'text/plain; charset=utf-8',
+            body: Uint8List.fromList(utf8.encode('ok:${req.path}')),
+          );
+        });
+        addTearDown(() => reg.close());
+
+        expect(await proxy.isHealthy(), isTrue);
+        expect(await proxy.resetIfDefunct(), isFalse);
+
+        final resp = await http.get(reg.url.replace(path: '${reg.url.path}/m3u8'));
+        expect(resp.statusCode, 200);
+        expect(resp.body, 'ok:/proxy/m3u8');
       },
     );
   });

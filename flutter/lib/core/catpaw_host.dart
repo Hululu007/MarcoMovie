@@ -19,6 +19,12 @@ class DrpySourceException extends FormatException {
   const DrpySourceException(this.code, String message) : super(message);
 }
 
+class _RecoverableLoopbackException implements Exception {
+  final Object cause;
+  final StackTrace stackTrace;
+  const _RecoverableLoopbackException(this.cause, this.stackTrace);
+}
+
 /// Stable subscriptions reference verified local bytes, never an ephemeral port.
 class CatPawHost {
   static CatPawHost instance = CatPawHost();
@@ -28,6 +34,7 @@ class CatPawHost {
   CatPawHost({this.directory, this.executable, this.bootstrap});
   Process? _process;
   Future<Uri>? _starting;
+  Future<Uri>? _recovering;
   Uri? _base;
   Future<void>? _closing;
   bool _needsReset = false;
@@ -38,12 +45,30 @@ class CatPawHost {
   final _releasingDrpy = <String, Future<void>>{};
   Future<void> _bootstrapQueue = Future<void>.value();
   static int _writeSeq = 0;
+  int _rebindSeq = 0;
   int _generation = 0;
   static const drpyRuntime = 'drpy2-ca23ffdb-1';
   static const _maxBundleBytes = 16 * 1024 * 1024;
   static bool matches(String value) => value.startsWith('catpaw://');
   static bool isBundle(String code) =>
       code.contains('catServerFactory') && code.contains('catDartServerPort');
+
+  static ({Uri base, int seq})? _parseReadyJson(String content) {
+    final state = jsonDecode(content);
+    if (state is! Map) return null;
+    final port = state['port'];
+    final secret = state['secret'];
+    final rawSeq = state['seq'];
+    final seq = rawSeq is int ? rawSeq : 0;
+    if (port is int &&
+        port > 0 &&
+        port < 65536 &&
+        secret is String &&
+        RegExp(r'^[a-f0-9]{64}$').hasMatch(secret)) {
+      return (base: Uri.parse('http://127.0.0.1:$port/$secret'), seq: seq);
+    }
+    return null;
+  }
 
   Future<Directory> _storage() async {
     if (_root != null) return _root!;
@@ -58,14 +83,164 @@ class CatPawHost {
   Future<Uri> _ensure() async {
     final closing = _closing;
     if (closing != null) await closing;
+    final recovering = _recovering;
+    if (recovering != null) return recovering;
     if (_needsReset) {
       final base =
           _base ??
           await (_starting ??= _start().whenComplete(() => _starting = null));
-      await _resetEmbedded(base);
+      try {
+        await _resetEmbedded(base);
+      } on Object {
+        final recovered = await _recoverLoopback(base);
+        if (_needsReset) await _resetEmbedded(recovered);
+      }
     }
     if (_base != null) return _base!;
     return _starting ??= _start().whenComplete(() => _starting = null);
+  }
+
+  Future<bool> _probeHealth(Uri base) async {
+    final client = HttpClient()
+      ..findProxy = ((_) => 'DIRECT')
+      ..connectionTimeout = const Duration(milliseconds: 900);
+    final timer = Timer(
+      const Duration(milliseconds: 1400),
+      () => client.close(force: true),
+    );
+    try {
+      final req = await client.getUrl(
+        base.replace(path: '${base.path}/health'),
+      );
+      req.followRedirects = false;
+      final resp = await req.close();
+      await resp.drain<void>();
+      return resp.statusCode == 200;
+    } catch (_) {
+      return false;
+    } finally {
+      timer.cancel();
+      client.close(force: true);
+    }
+  }
+
+  Future<Uri> _recoverLoopback(Uri? failedBase) {
+    final existing = _recovering;
+    if (existing != null) return existing;
+    late final Future<Uri> task;
+    task = _doRecoverLoopback(failedBase).whenComplete(() {
+      if (identical(_recovering, task)) _recovering = null;
+    });
+    return _recovering = task;
+  }
+
+  Future<Uri> _doRecoverLoopback(Uri? failedBase) async {
+    final closing = _closing;
+    if (closing != null) await closing;
+    final epoch = _generation;
+    if (_base != null && _base != failedBase && await _probeHealth(_base!)) {
+      return _base!;
+    }
+    if (failedBase != null && await _probeHealth(failedBase)) {
+      if (epoch == _generation) _base = failedBase;
+      return failedBase;
+    }
+    final root = await _storage();
+    final ready = File('${root.path}/ready.json');
+    if (await ready.exists()) {
+      try {
+        final parsed = _parseReadyJson(await ready.readAsString());
+        if (parsed != null) {
+          if (parsed.seq > _rebindSeq) _rebindSeq = parsed.seq;
+          if (parsed.base != failedBase && await _probeHealth(parsed.base)) {
+            if (epoch == _generation) {
+              _base = parsed.base;
+              _needsReset = false;
+            }
+            return parsed.base;
+          }
+        }
+      } catch (_) {}
+    }
+    if (!Platform.isIOS && _process == null) {
+      _base = null;
+      return _starting ??= _start().whenComplete(() => _starting = null);
+    }
+    if (Platform.isIOS) {
+      try {
+        final status = await const MethodChannel(
+          'marco_movie/catpaw',
+        ).invokeMethod<Object?>('status');
+        if (status is Map) {
+          if (status['exited'] == true) {
+            _base = null;
+            throw StateError('CatPaw 本机服务已退出，请彻底关闭并重新打开应用');
+          }
+          if (status['started'] == false) {
+            _base = null;
+            return await (_starting ??=
+                _start().whenComplete(() => _starting = null));
+          }
+        }
+      } on MissingPluginException {
+        // Ignore in non-plugin test harnesses.
+      } on PlatformException {
+        // Proceed with file-based rebind signal.
+      }
+    }
+    final targetSeq = ++_rebindSeq;
+    final rebindFile = File('${root.path}/rebind.json');
+    await _writeAtomic(
+      rebindFile,
+      utf8.encode(
+        jsonEncode({
+          'version': 1,
+          'seq': targetSeq,
+          if (failedBase != null) 'failedPort': failedBase.port,
+        }),
+      ),
+    );
+    final deadline = DateTime.now().add(const Duration(seconds: 6));
+    while (DateTime.now().isBefore(deadline) && epoch == _generation) {
+      if (!Platform.isIOS && _process == null) break;
+      if (await ready.exists()) {
+        try {
+          final parsed = _parseReadyJson(await ready.readAsString());
+          if (parsed != null &&
+              (parsed.seq >= targetSeq ||
+                  (failedBase != null && parsed.base != failedBase)) &&
+              await _probeHealth(parsed.base)) {
+            if (parsed.seq > _rebindSeq) _rebindSeq = parsed.seq;
+            if (epoch != _generation) break;
+            _base = parsed.base;
+            _needsReset = false;
+            return parsed.base;
+          }
+        } catch (_) {}
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+    }
+    if (!Platform.isIOS && epoch == _generation) {
+      final stale = _process;
+      _process = null;
+      _base = null;
+      stale?.kill();
+      return _starting ??= _start().whenComplete(() => _starting = null);
+    }
+    _base = null;
+    throw StateError('CatPaw 本机服务连接已中断，请重试或重新打开应用');
+  }
+
+  /// Proactively checks and recovers the local loopback listener after the app
+  /// resumes from background suspension (e.g. iOS XNU socket defuncting).
+  Future<void> onAppResumed() async {
+    if (_closing != null) return;
+    final current = _base;
+    if (current == null) return;
+    if (await _probeHealth(current)) return;
+    try {
+      await _recoverLoopback(current);
+    } catch (_) {}
   }
 
   Future<Uri> _start() async {
@@ -98,6 +273,8 @@ class CatPawHost {
       });
     } else {
       if (await ready.exists()) await ready.delete();
+      final rebind = File('${root.path}/rebind.json');
+      if (await rebind.exists()) await rebind.delete();
       final app = File(Platform.resolvedExecutable).parent;
       final node =
           executable ??
@@ -145,18 +322,15 @@ class CatPawHost {
     final deadline = DateTime.now().add(const Duration(seconds: 12));
     while (DateTime.now().isBefore(deadline) && epoch == _generation) {
       if (await ready.exists()) {
-        final state = jsonDecode(await ready.readAsString());
-        final port = state['port'], secret = state['secret'];
-        if (port is int &&
-            port > 0 &&
-            port < 65536 &&
-            secret is String &&
-            RegExp(r'^[a-f0-9]{64}$').hasMatch(secret)) {
-          final base = Uri.parse('http://127.0.0.1:$port/$secret');
-          if (epoch != _generation) break;
-          _base = base;
-          return base;
-        }
+        try {
+          final parsed = _parseReadyJson(await ready.readAsString());
+          if (parsed != null) {
+            if (epoch != _generation) break;
+            if (parsed.seq > _rebindSeq) _rebindSeq = parsed.seq;
+            _base = parsed.base;
+            return parsed.base;
+          }
+        } catch (_) {}
       }
       await Future<void>.delayed(const Duration(milliseconds: 40));
     }
@@ -203,6 +377,7 @@ class CatPawHost {
           name == 'host.cjs' ||
           name == 'fetch.cjs' ||
           name == 'ready.json' ||
+          name == 'rebind.json' ||
           name == 'drpy-assets.json' ||
           !seen.add(name) ||
           !RegExp(r'^[a-f0-9]{64}$').hasMatch(entry['sha256']) ||
@@ -536,10 +711,11 @@ class CatPawHost {
         await _withCancellation(_writeAtomic(file, artifact), cancellation);
       }
       _checkCancellation(cancellation);
-      final base = await _withCancellation(_ensure(), cancellation);
+      var base = await _withCancellation(_ensure(), cancellation);
       _checkCancellation(cancellation);
       final deadline = DateTime.now().add(const Duration(seconds: 2));
       var backoffMs = 80;
+      var recoveredOnce = false;
       while (true) {
         try {
           return await _requestGuardBootstrap(
@@ -549,6 +725,12 @@ class CatPawHost {
             extension,
             cancellation,
           );
+        } on _RecoverableLoopbackException catch (error) {
+          if (recoveredOnce) {
+            Error.throwWithStackTrace(error.cause, error.stackTrace);
+          }
+          recoveredOnce = true;
+          base = await _withCancellation(_recoverLoopback(base), cancellation);
         } on GuardBootstrapException catch (error) {
           if (error.code != 'bootstrap_busy' ||
               !DateTime.now().isBefore(deadline)) {
@@ -584,13 +766,15 @@ class CatPawHost {
       ..findProxy = ((_) => 'DIRECT')
       ..connectionTimeout = const Duration(seconds: 8);
     var finished = false;
+    var timedOut = false;
+    var gotResponse = false;
     cancellation?.future.then((_) {
       if (!finished) client.close(force: true);
     });
-    final timer = Timer(
-      const Duration(seconds: 10),
-      () => client.close(force: true),
-    );
+    final timer = Timer(const Duration(seconds: 10), () {
+      timedOut = true;
+      client.close(force: true);
+    });
     try {
       final request = await _withCancellation(
         client.postUrl(base.replace(path: '${base.path}/_port-bootstrap')),
@@ -610,6 +794,7 @@ class CatPawHost {
       request.contentLength = body.length;
       request.add(body);
       final response = await _withCancellation(request.close(), cancellation);
+      gotResponse = true;
       final output = BytesBuilder(copy: false);
       await for (final chunk in response) {
         _checkCancellation(cancellation);
@@ -660,8 +845,13 @@ class CatPawHost {
         throw const FormatException('插件解析规则或来源无效');
       }
       return decoded;
-    } catch (_) {
+    } catch (error, stackTrace) {
       _checkCancellation(cancellation);
+      if (!gotResponse &&
+          !timedOut &&
+          (error is SocketException || error is HttpException)) {
+        throw _RecoverableLoopbackException(error, stackTrace);
+      }
       rethrow;
     } finally {
       finished = true;
@@ -854,7 +1044,13 @@ class CatPawHost {
     }
     _checkCancellation(cancellation);
     if (generation != _generation) throw StateError('CatPaw 本机服务已关闭');
-    final base = await _withCancellation(_ensure(), cancellation);
+    var base = await _withCancellation(_ensure(), cancellation);
+    if (Platform.isIOS &&
+        (logical.path == '/proxy' || logical.path.contains('/proxy/'))) {
+      if (!await _withCancellation(_probeHealth(base), cancellation)) {
+        base = await _withCancellation(_recoverLoopback(base), cancellation);
+      }
+    }
     _checkCancellation(cancellation);
     if (generation != _generation) throw StateError('CatPaw 本机服务已关闭');
     return base.replace(
@@ -895,127 +1091,149 @@ class CatPawHost {
   }) async {
     _checkCancellation(cancellation);
     final logical = Uri.parse(address);
-    final url = await _withCancellation(
-      resolve(address, cancellation: cancellation),
-      cancellation,
-    );
-    _checkCancellation(cancellation);
-    final client = HttpClient()
-      ..findProxy = ((_) => 'DIRECT')
-      ..connectionTimeout = const Duration(seconds: 8);
-    var finished = false;
-    cancellation?.future.then((_) {
-      if (!finished) client.close(force: true);
-    });
-    final timer = Timer(requestTimeout, () => client.close(force: true));
-    try {
-      final request = await _withCancellation(
-        client.openUrl(method, url),
+    for (var attempt = 0; attempt < 2; attempt++) {
+      _checkCancellation(cancellation);
+      final url = await _withCancellation(
+        resolve(address, cancellation: cancellation),
         cancellation,
       );
       _checkCancellation(cancellation);
-      onRequestOpened?.call();
-      request.followRedirects = false;
-      if (body != null) {
-        request.headers.contentType = ContentType.json;
-        request.contentLength = body.length;
-        request.add(body);
-      }
-      final response = await request.close();
-      _checkCancellation(cancellation);
-      if (logical.path == '/api/drpy' && response.statusCode == 422) {
-        final errorBytes = BytesBuilder(copy: false);
+      final requestBase = Uri(
+        scheme: url.scheme,
+        host: url.host,
+        port: url.port,
+        pathSegments: [url.pathSegments.first],
+      );
+      final client = HttpClient()
+        ..findProxy = ((_) => 'DIRECT')
+        ..connectionTimeout = const Duration(seconds: 8);
+      var finished = false;
+      var timedOut = false;
+      var gotResponse = false;
+      cancellation?.future.then((_) {
+        if (!finished) client.close(force: true);
+      });
+      final timer = Timer(requestTimeout, () {
+        timedOut = true;
+        client.close(force: true);
+      });
+      try {
+        final request = await _withCancellation(
+          client.openUrl(method, url),
+          cancellation,
+        );
+        _checkCancellation(cancellation);
+        onRequestOpened?.call();
+        request.followRedirects = false;
+        if (body != null) {
+          request.headers.contentType = ContentType.json;
+          request.contentLength = body.length;
+          request.add(body);
+        }
+        final response = await request.close();
+        gotResponse = true;
+        _checkCancellation(cancellation);
+        if (logical.path == '/api/drpy' && response.statusCode == 422) {
+          final errorBytes = BytesBuilder(copy: false);
+          await for (final chunk in response) {
+            _checkCancellation(cancellation);
+            if (errorBytes.length + chunk.length > 16 * 1024) {
+              throw const FormatException('片源错误响应过大');
+            }
+            errorBytes.add(chunk);
+          }
+          _checkCancellation(cancellation);
+          Object? error;
+          try {
+            error = jsonDecode(utf8.decode(errorBytes.takeBytes()));
+          } catch (_) {}
+          const messages = {
+            'drpy_verification_required': '此片源需要完成网站验证码，暂时无法加载',
+            'drpy_action_invalid': '验证码已失效或格式不正确，请刷新后重试',
+            'drpy_verification_unavailable': '暂时无法获取验证码图片，请稍后重试',
+            'drpy_unsupported_filter': '此片源不支持当前筛选条件',
+            'drpy_invalid_id': '此片源的影片标识无效，请重新打开影片',
+            'drpy_local_proxy_not_supported': '此片源需要的本地代理暂不支持',
+            'drpy_media_protocol': '此片源返回的播放地址协议暂不支持',
+            'drpy_media_unresolved': '此片源暂未解析出可播放地址',
+            'drpy_source_origin': '此片源返回了不支持的跨站目录',
+            'drpy_source_unavailable': '此片源暂时无法访问',
+            'drpy_source_response': '此片源返回了无法识别的数据',
+            'drpy_crypto_invalid': '此片源的加密响应暂不兼容',
+            'drpy_authentication_required': '此站点需要登录账号后才能查看网盘或播放链接，请切换其他片源',
+            'drpy_filter_not_supported': '此片源不支持当前筛选条件',
+            'drpy_local_module_missing': '本地规则包缺少依赖文件，请导入完整的规则包',
+            'drpy_http_timeout': '连接片源服务器超时，请稍后重试或切换其他片源',
+            'drpy_http_connection_failed': '无法连接片源服务器，该站点可能暂时离线或受当前网络限制',
+            'drpy_http_response_failed': '读取片源服务器响应失败，请稍后重试',
+            'drpy_http_response_too_large': '片源返回的数据超过大小上限',
+            'drpy_http_encoding': '片源响应编码异常，暂时无法解析',
+            'drpy_http_headers': '片源请求头格式不受支持',
+            'drpy_http_method': '片源请求方式不受支持',
+            'drpy_http_body_too_large': '片源请求体超过大小上限',
+            'drpy_http_protocol': '片源请求地址协议不受支持',
+            'drpy_redirect_credentials': '片源重定向包含不安全的认证信息',
+            'drpy_http_redirect_limit': '片源服务器重定向次数过多',
+            'drpy_http_redirect': '片源服务器返回了无效的重定向地址',
+            'drpy_http_request': '片源网络请求参数无效',
+            'drpy_http_response': '片源服务器返回了异常响应',
+            'drpy_execution_timeout': '片源脚本加载超时，请重试或切换其他片源',
+            'drpy_source_failed': '片源线路暂时无法返回有效数据，请稍后重试或切换其他片源',
+            'drpy_host_error': '片源本地运行环境处理失败，请重试',
+            'drpy_storage_key': '片源本地缓存键无效',
+            'drpy_storage_action': '片源本地缓存操作不受支持',
+            'drpy_storage_limit': '片源本地缓存超出容量限制',
+            'drpy_random_size': '片源随机参数长度无效',
+            'drpy_rule_missing': '片源规则尚未初始化完成，请重试',
+            'drpy_async_result': '片源异步响应格式异常',
+            'drpy_result': '片源返回结果超过大小上限或格式无效',
+            'drpy_proxy_result': '片源代理响应格式不受支持',
+          };
+          final code = error is Map ? error['error'] : null;
+          if (code is String && messages.containsKey(code)) {
+            throw DrpySourceException(code, messages[code]!);
+          }
+          if (code is String && RegExp(r'^drpy_[a-z0-9_]+$').hasMatch(code)) {
+            throw DrpySourceException(
+              code,
+              '此片源暂时无法连接或返回异常，请稍后重试或切换其他片源',
+            );
+          }
+        }
+        if (response.statusCode != 200)
+          throw StateError('CatPaw 线路请求失败（HTTP ${response.statusCode}）');
+        final bytes = BytesBuilder(copy: false);
         await for (final chunk in response) {
           _checkCancellation(cancellation);
-          if (errorBytes.length + chunk.length > 16 * 1024) {
-            throw const FormatException('片源错误响应过大');
-          }
-          errorBytes.add(chunk);
+          if (bytes.length + chunk.length > 16 * 1024 * 1024)
+            throw const FormatException('CatPaw 响应过大');
+          bytes.add(chunk);
         }
+        final raw = utf8.decode(bytes.takeBytes());
         _checkCancellation(cancellation);
-        Object? error;
-        try {
-          error = jsonDecode(utf8.decode(errorBytes.takeBytes()));
-        } catch (_) {}
-        const messages = {
-          'drpy_verification_required': '此片源需要完成网站验证码，暂时无法加载',
-          'drpy_action_invalid': '验证码已失效或格式不正确，请刷新后重试',
-          'drpy_verification_unavailable': '暂时无法获取验证码图片，请稍后重试',
-          'drpy_unsupported_filter': '此片源不支持当前筛选条件',
-          'drpy_invalid_id': '此片源的影片标识无效，请重新打开影片',
-          'drpy_local_proxy_not_supported': '此片源需要的本地代理暂不支持',
-          'drpy_media_protocol': '此片源返回的播放地址协议暂不支持',
-          'drpy_media_unresolved': '此片源暂未解析出可播放地址',
-          'drpy_source_origin': '此片源返回了不支持的跨站目录',
-          'drpy_source_unavailable': '此片源暂时无法访问',
-          'drpy_source_response': '此片源返回了无法识别的数据',
-          'drpy_crypto_invalid': '此片源的加密响应暂不兼容',
-          'drpy_authentication_required': '此站点需要登录账号后才能查看网盘或播放链接，请切换其他片源',
-          'drpy_filter_not_supported': '此片源不支持当前筛选条件',
-          'drpy_local_module_missing': '本地规则包缺少依赖文件，请导入完整的规则包',
-          'drpy_http_timeout': '连接片源服务器超时，请稍后重试或切换其他片源',
-          'drpy_http_connection_failed': '无法连接片源服务器，该站点可能暂时离线或受当前网络限制',
-          'drpy_http_response_failed': '读取片源服务器响应失败，请稍后重试',
-          'drpy_http_response_too_large': '片源返回的数据超过大小上限',
-          'drpy_http_encoding': '片源响应编码异常，暂时无法解析',
-          'drpy_http_headers': '片源请求头格式不受支持',
-          'drpy_http_method': '片源请求方式不受支持',
-          'drpy_http_body_too_large': '片源请求体超过大小上限',
-          'drpy_http_protocol': '片源请求地址协议不受支持',
-          'drpy_redirect_credentials': '片源重定向包含不安全的认证信息',
-          'drpy_http_redirect_limit': '片源服务器重定向次数过多',
-          'drpy_http_redirect': '片源服务器返回了无效的重定向地址',
-          'drpy_http_request': '片源网络请求参数无效',
-          'drpy_http_response': '片源服务器返回了异常响应',
-          'drpy_execution_timeout': '片源脚本加载超时，请重试或切换其他片源',
-          'drpy_source_failed': '片源线路暂时无法返回有效数据，请稍后重试或切换其他片源',
-          'drpy_host_error': '片源本地运行环境处理失败，请重试',
-          'drpy_storage_key': '片源本地缓存键无效',
-          'drpy_storage_action': '片源本地缓存操作不受支持',
-          'drpy_storage_limit': '片源本地缓存超出容量限制',
-          'drpy_random_size': '片源随机参数长度无效',
-          'drpy_rule_missing': '片源规则尚未初始化完成，请重试',
-          'drpy_async_result': '片源异步响应格式异常',
-          'drpy_result': '片源返回结果超过大小上限或格式无效',
-          'drpy_proxy_result': '片源代理响应格式不受支持',
-        };
-        final code = error is Map ? error['error'] : null;
-        if (code is String && messages.containsKey(code)) {
-          throw DrpySourceException(code, messages[code]!);
-        }
-        if (code is String && RegExp(r'^drpy_[a-z0-9_]+$').hasMatch(code)) {
-          throw DrpySourceException(
-            code,
-            '此片源暂时无法连接或返回异常，请稍后重试或切换其他片源',
-          );
-        }
-      }
-      if (response.statusCode != 200)
-        throw StateError('CatPaw 线路请求失败（HTTP ${response.statusCode}）');
-      final bytes = BytesBuilder(copy: false);
-      await for (final chunk in response) {
+        return rewriteUrls
+            ? raw.replaceAll(
+                '${requestBase.toString()}/${logical.host}',
+                'catpaw://${logical.host}',
+              )
+            : raw;
+      } catch (error) {
         _checkCancellation(cancellation);
-        if (bytes.length + chunk.length > 16 * 1024 * 1024)
-          throw const FormatException('CatPaw 响应过大');
-        bytes.add(chunk);
+        if (attempt == 0 &&
+            !gotResponse &&
+            !timedOut &&
+            (error is SocketException || error is HttpException)) {
+          await _withCancellation(_recoverLoopback(requestBase), cancellation);
+          continue;
+        }
+        rethrow;
+      } finally {
+        finished = true;
+        timer.cancel();
+        client.close(force: true);
       }
-      final base = _base!;
-      final raw = utf8.decode(bytes.takeBytes());
-      _checkCancellation(cancellation);
-      return rewriteUrls
-          ? raw.replaceAll(
-              '${base.toString()}/${logical.host}',
-              'catpaw://${logical.host}',
-            )
-          : raw;
-    } catch (_) {
-      _checkCancellation(cancellation);
-      rethrow;
-    } finally {
-      finished = true;
-      timer.cancel();
-      client.close(force: true);
     }
+    throw StateError('CatPaw 线路请求失败');
   }
 
   Future<void> _resetEmbedded(Uri base) async {

@@ -4,13 +4,13 @@
   "files": [
     {
       "name": "drpy-worker.cjs",
-      "bytes": 15814,
-      "sha256": "0db22874e7deea0e98a665316cf10caef9220290fe807e7b0c3936ccfba70f0f"
+      "bytes": 16250,
+      "sha256": "6376d457bac33b9d59786411e789149e4d485af9a5c5e5405e153c102475b3b1"
     },
     {
       "name": "drpy-http.cjs",
-      "bytes": 7583,
-      "sha256": "f8c5a482b0ea5b215c60e08efb5229cca28fb6cb58b85a774edf25f350dbe8ce"
+      "bytes": 7678,
+      "sha256": "3dbf46c8422410ac3b1e9c9e03eafd9629e32ee30a1d2576af8e57e655b759df"
     },
     {
       "name": "drpy-schema.cjs",

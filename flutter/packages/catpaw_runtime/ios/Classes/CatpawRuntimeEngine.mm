@@ -23,6 +23,7 @@ static NSString *runtimeRoot;
         failure = @"restart_required";
       } else if (!started) {
         [[NSFileManager defaultManager] removeItemAtPath:ready error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:[root stringByAppendingPathComponent:@"rebind.json"] error:nil];
         runtimeRoot = [root copy]; started = YES;
         NSArray<NSString *> *arguments = @[@"node", @"--jitless", script, root, ready, @"--embedded"];
         NSThread *thread = [[NSThread alloc] initWithBlock:^{
@@ -52,5 +53,11 @@ static NSString *runtimeRoot;
       userInfo:@{NSLocalizedDescriptionKey:failure}];
   }
   return failure == nil;
+}
+
++ (NSDictionary<NSString *, NSNumber *> *)status {
+  @synchronized(self) {
+    return @{@"started": @(started), @"exited": @(exited)};
+  }
 }
 @end

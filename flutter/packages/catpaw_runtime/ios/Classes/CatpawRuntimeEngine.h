@@ -6,4 +6,5 @@
 @interface CatpawRuntimeEngine : NSObject
 + (BOOL)startWithRoot:(NSString *)root script:(NSString *)script
                ready:(NSString *)ready error:(NSError **)error;
++ (NSDictionary<NSString *, NSNumber *> *)status;
 @end

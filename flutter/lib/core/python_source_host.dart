@@ -118,6 +118,8 @@ class PythonSourceHost {
   }
 
   void retainSessions(Set<String> keys) => _sessions.retainSessions(keys);
+  Future<void> onAppResumed() =>
+      enabled ? _sessions.onAppResumed() : Future.value();
   void Function() pinForPlayback(String key) =>
       enabled ? _sessions.pinForPlayback(key) : () {};
   bool ownsProxyUrl(String key, Uri uri) =>

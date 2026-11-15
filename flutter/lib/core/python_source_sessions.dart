@@ -115,6 +115,13 @@ class PythonSourceSessions {
 
   void release(String key) => _sources[key]?.revoke();
 
+  Future<void> onAppResumed() async {
+    if (_closed || _pins.isNotEmpty) return;
+    if (await _proxy.resetIfDefunct()) {
+      retainSessions({});
+    }
+  }
+
   Future<void> close() async {
     if (_closed) return;
     _closed = true;

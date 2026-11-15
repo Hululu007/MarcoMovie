@@ -15,6 +15,7 @@ let storage=Object.create(null);
 try { const value=JSON.parse(fs.readFileSync(stateFile,'utf8')); if(value&&typeof value==='object'&&!Array.isArray(value))storage=value; } catch(_){}
 let sequence=0,deadline=0,initialized=false;
 let lastEncodingFailure=false;
+let sharedBuffer=new SharedArrayBuffer(MAX_RESULT+16);
 const pendingRequests=new Set();
 const bridge=fn=>Object.setPrototypeOf((...args)=>{try{return JSON.stringify({value:fn(...args)});}catch(error){return JSON.stringify({error:/^drpy_/.test(error.message)?error.message:'drpy_host_error'});}},null);
 const context=vm.createContext(Object.create(null),{name:'MarcoMovie DRPY',codeGeneration:{strings:true,wasm:false},microtaskMode:'afterEvaluate'});
@@ -34,12 +35,17 @@ context.__request=bridge((url,optionsText,sourceEncoding)=>{
   }
   const duration=Math.min(Math.max(Number(options.timeout)||manifest.requestTimeoutMs,100),15000,deadline-Date.now());
   if(duration<=0)throw Error('drpy_http_timeout');
-  const id=++sequence,buffer=new SharedArrayBuffer(MAX_RESULT+16),state=new Int32Array(buffer,0,4);
+  const id=++sequence,buffer=sharedBuffer,state=new Int32Array(buffer,0,4);
+  Atomics.store(state,0,0);Atomics.store(state,1,0);
   pendingRequests.add(id);
   parentPort.postMessage({kind:'http',id,url:String(url),options,sourceEncoding,buffer,deadline:Math.min(deadline,Date.now()+duration)});
   const waited=Atomics.wait(state,0,0,duration);
   pendingRequests.delete(id);
-  if(waited==='timed-out'&&Atomics.load(state,0)===0){parentPort.postMessage({kind:'cancel',id});throw Error('drpy_http_timeout');}
+  if(waited==='timed-out'&&Atomics.load(state,0)===0){
+    sharedBuffer=new SharedArrayBuffer(MAX_RESULT+16);
+    parentPort.postMessage({kind:'cancel',id});
+    throw Error('drpy_http_timeout');
+  }
   const length=Atomics.load(state,1);
   if(length<0||length>MAX_RESULT)throw Error('drpy_http_response');
   const value=JSON.parse(Buffer.from(buffer,16,length).toString('utf8'));
@@ -142,7 +148,13 @@ globalThis.pd=(html,expression,base)=>{const value=pdfh(html,expression);return 
 `;
 function run(code,filename,timeout=5000){return new vm.Script(code,{filename}).runInContext(context,{timeout,microtaskMode:'afterEvaluate'});}
 function cancelRequests(){for(const id of pendingRequests)parentPort.postMessage({kind:'cancel',id});pendingRequests.clear();}
-function respond(res,status,value){res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));}
+function respond(res,status,value){
+  if(res.destroyed||res.writableEnded)return;
+  try{
+    if(!res.headersSent)res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});
+    res.end(JSON.stringify(value));
+  }catch(_){try{res.destroy();}catch(_){}}
+}
 (async()=>{
   run(bootstrap,'drpy-host-bootstrap');
   run(fs.readFileSync(path.join(__dirname,'drpy-dependencies.js'),'utf8'),'drpy-dependencies');
@@ -213,8 +225,10 @@ function respond(res,status,value){res.writeHead(status,{'Content-Type':'applica
     }finally{cancelRequests();deadline=0;parentPort.postMessage({kind:'call-end'});}
   }
   const server=http.createServer((req,res)=>{
-    if(req.url.length>8192)return respond(res,414,{error:'drpy_route'});
-    const url=new URL(req.url,'http://127.0.0.1');
+    req.on('error',()=>{});res.on('error',()=>{});
+    if(!req.url||req.url.length>8192)return respond(res,414,{error:'drpy_route'});
+    let url;
+    try{url=new URL(req.url,'http://127.0.0.1');}catch(_){return respond(res,400,{error:'drpy_route'});}
     if(url.pathname==='/proxy'&&['GET','HEAD'].includes(req.method)){
       return execute(req,res,{method:'proxy',args:[Object.fromEntries(url.searchParams)]},true);
     }
@@ -228,6 +242,7 @@ function respond(res,status,value){res.writeHead(status,{'Content-Type':'applica
       execute(req,res,call);
     });
   });
+  server.on('error',()=>{});
   server.requestTimeout=25000;server.headersTimeout=5000;
   server.listen(0,'127.0.0.1',()=>{
     context.__drpyProxy='http://127.0.0.1:'+server.address().port+'/proxy?do=js';

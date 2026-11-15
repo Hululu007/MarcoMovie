@@ -9,6 +9,10 @@
   [registrar addMethodCallDelegate:[[CatpawRuntimePlugin alloc] init] channel:channel];
 }
 - (void)handleMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result {
+  if ([call.method isEqualToString:@"status"]) {
+    result([CatpawRuntimeEngine status]);
+    return;
+  }
   if (![call.method isEqualToString:@"start"]) { result(FlutterMethodNotImplemented); return; }
   NSDictionary *args = [call.arguments isKindOfClass:[NSDictionary class]] ? call.arguments : nil;
   NSError *error = nil;

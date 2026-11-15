@@ -989,6 +989,13 @@ class CmsClient {
     return JsSourceHost.closeAll();
   }
 
+  static Future<void> onAppResumed() async {
+    await Future.wait([
+      JsSourceHost.onAppResumed(),
+      PythonSourceHost.instance.onAppResumed(),
+    ]);
+  }
+
   void Function() pinPlaybackSource(CmsSite site) {
     if (!_usesJs(site)) return () {};
     final key = _scriptSessionKey(site);

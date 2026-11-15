@@ -483,6 +483,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         state == AppLifecycleState.hidden) {
       unawaited(widget.storage.flushPendingHistory());
       widget.storage.scheduleAutoWebdavSync(immediate: true);
+    } else if (state == AppLifecycleState.resumed) {
+      unawaited(CatPawHost.instance.onAppResumed());
+      unawaited(CmsClient.onAppResumed());
     }
   }
 

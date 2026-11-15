@@ -72,9 +72,12 @@ class SourceHttp {
       const request=(target,redirects)=>{
         if(!['http:','https:'].includes(target.protocol))return fail('drpy_http_protocol');
         if(target.username||target.password)return fail('drpy_redirect_credentials');
+        let redirected=false;
         const client=(target.protocol==='https:'?https:http).request(target,{method,headers},response=>{
           entry.response=response;
+          response.on('error',()=>{if(!redirected)fail('drpy_http_response_failed');});
           if([301,302,303,307,308].includes(response.statusCode)&&response.headers.location&&options.redirect!==0&&options.redirect!==false){
+            redirected=true;
             response.resume();
             if(redirects>=5)return fail('drpy_http_redirect_limit');
             let next;
@@ -94,7 +97,6 @@ class SourceHttp {
           let size=0;const chunks=[];
           source.on('data',chunk=>{size+=chunk.length;if(size>MAX_RESULT)fail('drpy_http_response_too_large');else chunks.push(chunk);});
           source.on('error',()=>fail('drpy_http_response_failed'));
-          response.on('error',()=>fail('drpy_http_response_failed'));
           source.on('end',()=>{
             try {
               const bytes=Buffer.concat(chunks);
@@ -107,7 +109,7 @@ class SourceHttp {
             }catch(_){fail('drpy_http_encoding');}
           });
         });
-        entry.request=client;client.on('error',()=>fail('drpy_http_connection_failed'));
+        entry.request=client;client.on('error',()=>{if(!redirected)fail('drpy_http_connection_failed');});
         if(bodyBuffer)client.write(bodyBuffer);
         client.end();
       };

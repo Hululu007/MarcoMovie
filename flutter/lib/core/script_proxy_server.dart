@@ -169,9 +169,61 @@ class ScriptProxyServer {
       server.listen(
         (request) => unawaited(_serve(request)),
         onError: (Object _) {},
+        onDone: () {
+          if (!_closed && identical(_server, server)) {
+            _server = null;
+            _starting = null;
+          }
+        },
       );
       return server;
-    }();
+    }().whenComplete(() {
+      if (_server == null) _starting = null;
+    });
+  }
+
+  /// Checks whether an already-bound loopback listener is still accepting TCP
+  /// connections (detects iOS XNU background socket defuncting).
+  Future<bool> isHealthy() async {
+    if (_closed) return false;
+    final server = _server;
+    if (server == null) return true;
+    final client = HttpClient()
+      ..findProxy = ((_) => 'DIRECT')
+      ..connectionTimeout = const Duration(milliseconds: 800);
+    final timer = Timer(
+      const Duration(milliseconds: 1200),
+      () => client.close(force: true),
+    );
+    try {
+      final req = await client.openUrl(
+        'HEAD',
+        Uri.parse('http://127.0.0.1:${server.port}/_health'),
+      );
+      req.followRedirects = false;
+      final resp = await req.close();
+      await resp.drain<void>();
+      return resp.statusCode == 404;
+    } catch (_) {
+      return false;
+    } finally {
+      timer.cancel();
+      client.close(force: true);
+    }
+  }
+
+  /// Resets an already-bound listener if it was defuncted by the OS (e.g. iOS
+  /// XNU on background suspend) so the next registration binds a fresh port.
+  Future<bool> resetIfDefunct() async {
+    if (_closed || _server == null) return false;
+    if (await isHealthy()) return false;
+    final stale = _server;
+    _server = null;
+    _starting = null;
+    try {
+      await stale?.close(force: true);
+    } catch (_) {}
+    return true;
   }
 
   Future<ScriptProxyRegistration> register(ScriptProxyHandler handler) async {
