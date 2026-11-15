@@ -350,6 +350,78 @@ class CspBridge {
         'wexkaka-v1',
       }.contains(guardAdapterFor(site));
 
+  static bool isPanOrNetdiskSite(CmsSite site) =>
+      isNetdiskSite(site) ||
+      WoggSource.supports(site) ||
+      const {
+        'seedhub-v1',
+        'szps-v1',
+        'ypanso-v1',
+        'bpanso-v1',
+        'kkss-v1',
+        'uuss-v1',
+        'push-v1',
+        'wexduoduo-v1',
+        'wexhuban-v1',
+        'wexkuaiying-v1',
+        'wexlabi-v1',
+        'wexmuou-v1',
+        'wexshandian-v1',
+        'wexxiaopan-v1',
+        'wexzhizhen-v1',
+        'wexwogg-v1',
+        'wexhuajuan-v1',
+        'wexjutou-v1',
+        'wexzhinan-v1',
+        'wexwoniu-v1',
+        'wexpianku-v1',
+        'wexqiwei-v1',
+        'wexyidong-v1',
+        'wexaipanso-v1',
+        'wexhaiyin-v1',
+        'wexquanpan-v1',
+        'wexkaka-v1',
+      }.contains(guardAdapterFor(site));
+
+  /// Strips netdisk release/edition suffixes such as `（臻彩）`, `(2026)【更26集】【4K.HDR】...`,
+  /// and leading channel tags while preserving core titles, sequel numbers (`斗罗大陆2`),
+  /// and distinct spin-offs (`兰香如故·花胜秋宴`).
+  static String cleanNetdiskSearchTitle(String raw) {
+    var s = raw.trim();
+    if (s.isEmpty) return '';
+    // Strip leading short channel/group prefix tags like `[小虎斑] ` or `【夸克4K】`
+    final strippedPrefix = s.replaceFirst(
+      RegExp(r'^(?:\s*(?:\[[^\]]{1,14}\]|【[^】]{1,14}】)\s*)+'),
+      '',
+    );
+    if (strippedPrefix.trim().isNotEmpty) {
+      s = strippedPrefix.trim();
+    }
+    // Strip trailing bracketed metadata runs like `【更26集】【4K.HDR】【高码率】【内嵌简中】...`
+    // or `[全47集][4K]`
+    var prev = '';
+    while (prev != s) {
+      prev = s;
+      final next = s
+          .replaceFirst(
+            RegExp(r'\s*(?:【[^】]*】|\[[^\]]*\])\s*$'),
+            '',
+          )
+          .replaceFirst(
+            RegExp(
+              r'[\s\-_]*[（(]\s*(?:臻彩(?:版|4K|HDR|MAX)?|杜比(?:视界|全景声|版)?|4K[^)）]*|2160[pP][^)）]*|1080[pP][^)）]*|HDR[^)）]*|SDR[^)）]*|高码[^)）]*|原盘[^)）]*|蓝光[^)）]*|国语[^)）]*|粤语[^)）]*|双语[^)）]*|中字[^)）]*|内封[^)）]*|内嵌[^)）]*|未删减[^)）]*|导演剪辑[^)）]*|完整版|纯享版|(?:19|20)\d{2}(?:\s*年)?|更(?:新)?[^)）]*|全\s*\d+\s*[集期话][^)）]*)\s*[)）]\s*$',
+              caseSensitive: false,
+            ),
+            '',
+          )
+          .trim();
+      if (next.isNotEmpty) {
+        s = next;
+      }
+    }
+    return s.isEmpty ? raw.trim() : s;
+  }
+
   /// Maps a playback line name (e.g. `夸父智1`, `夸克`, `优汐智1`, `嘟嘟无限2`, `百度`, `阿狸原画`)
   /// to its corresponding Netdisk drive key (`quark`, `uc`, `baidu`, `ali`), or `null` if it is a normal VOD line.
   static String? netdiskDriveKeyForLineName(String lineName) {

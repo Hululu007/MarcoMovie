@@ -275,52 +275,82 @@ function installWexPan() {
   function isSupportedCloudShare(u) {
     return /^https?:\/\/(?:pan\.quark\.cn|drive\.uc\.cn|fast\.uc\.cn|pan\.baidu\.com|(?:www\.)?(?:aliyundrive|alipan)\.com)\//i.test(str(u).trim());
   }
+  function isUnsupportedCloudShare(u) {
+    return /^https?:\/\/(?:(?:www\.)?(?:115\.com|115cdn\.com|anxia\.com)|(?:www\.)?(?:123pan\.com|123pan\.cn|123684\.com|123865\.com|123912\.com)|cloud\.189\.cn|caiyun\.139\.com|pan\.xunlei\.com)\//i.test(str(u).trim());
+  }
   function panProviderName(u) {
     var s = str(u).toLowerCase();
     if (s.indexOf('pan.quark.cn') >= 0) return '夸克网盘';
     if (s.indexOf('drive.uc.cn') >= 0 || s.indexOf('fast.uc.cn') >= 0) return 'UC网盘';
     if (s.indexOf('pan.baidu.com') >= 0) return '百度网盘';
     if (s.indexOf('aliyundrive.com') >= 0 || s.indexOf('alipan.com') >= 0) return '阿里云盘';
+    if (s.indexOf('115.com') >= 0 || s.indexOf('115cdn.com') >= 0 || s.indexOf('anxia.com') >= 0) return '115网盘';
+    if (s.indexOf('123pan') >= 0 || s.indexOf('123684') >= 0 || s.indexOf('123865') >= 0 || s.indexOf('123912') >= 0) return '123云盘';
+    if (s.indexOf('cloud.189.cn') >= 0) return '天翼云盘';
+    if (s.indexOf('caiyun.139.com') >= 0) return '移动云盘';
+    if (s.indexOf('pan.xunlei.com') >= 0) return '迅雷云盘';
     return '网盘分享';
   }
   function toMmShare(rawUrl, rawPwd) {
-    var u = str(rawUrl).trim().replace(/&amp;/g, '&');
-    if (/^https?%3A%2F%2F/i.test(u)) {
-      try { u = decodeURIComponent(u); } catch (_) {}
+    var raw = str(rawUrl).trim().replace(/\\\//g, '/').replace(/&amp;/g, '&');
+    if (/^https?%3A%2F%2F/i.test(raw)) {
+      try { raw = decodeURIComponent(raw); } catch (_) {}
     }
-    var m = /(https?:\/\/[^\s"'<>#]+)/i.exec(u);
-    if (m) u = m[1];
+    var fragSub = '';
+    var fm = /#(\/list\/share\/[^\s"'<>?&]+)/i.exec(raw);
+    if (fm) fragSub = fm[1];
+    var m = /(https?:\/\/[^\s"'<>#]+)/i.exec(raw);
+    var u = m ? m[1].replace(/[\\),.;]+$/, '') : raw;
     var pwd = str(rawPwd).trim();
     if (!pwd) {
-      var pm = /(?:提取码|访问码|密码|pwd|password|pass|code)[:：\s=]*([A-Za-z0-9]{4,8})/i.exec(str(rawUrl));
+      var pm = /(?:提取码|访问码|密码|pwd|password|pass|code)[:：\s=]*([A-Za-z0-9]{4,8})/i.exec(raw);
       if (pm) pwd = pm[1];
     }
     if (pwd && /^[A-Za-z0-9]{4,8}$/.test(pwd) && !/[?&](?:pwd|password|pass)=/i.test(u)) {
       u += (u.indexOf('?') >= 0 ? '&' : '?') + 'pwd=' + encodeURIComponent(pwd);
     }
+    if (fragSub && u.indexOf('#') < 0) u += '#' + fragSub;
     return 'mmshare://' + u;
   }
   function extractSharesFromHtml(html) {
-    var shares = [], seen = {};
+    var shares = [], seen = Object.create(null);
     function add(rawU, pwd, label) {
-      var u = str(rawU).trim().replace(/&amp;/g, '&');
-      if (/^https?%3A%2F%2F/i.test(u)) {
-        try { u = decodeURIComponent(u); } catch (_) {}
+      var raw = str(rawU).trim().replace(/\\\//g, '/').replace(/&amp;/g, '&');
+      if (/^https?%3A%2F%2F/i.test(raw)) {
+        try { raw = decodeURIComponent(raw); } catch (_) {}
       }
-      var m = /(https?:\/\/[^\s"'<>#]+)/i.exec(u);
+      var fragSub = '';
+      var fm = /#(\/list\/share\/[^\s"'<>?&]+)/i.exec(raw);
+      if (fm) fragSub = fm[1];
+      var m = /(https?:\/\/[^\s"'<>#]+)/i.exec(raw);
       if (!m) return;
       var clean = m[1].replace(/[\\),.;]+$/, '');
       if (!isSupportedCloudShare(clean)) return;
-      var key = clean.split('?')[0];
-      if (seen[key]) return;
-      seen[key] = true;
       var p = str(pwd).trim();
       if (!p) {
-        var pm = /(?:提取码|访问码|密码|pwd|password|pass|code)[:：\s=]*([A-Za-z0-9]{4,8})/i.exec(u);
+        var pm = /(?:提取码|访问码|密码|pwd|password|pass|code)[:：\s=]*([A-Za-z0-9]{4,8})/i.exec(raw);
         if (pm) p = pm[1];
       }
-      shares.push({ url: clean, pwd: p, label: stripHtml(label || '') });
+      var cleanLbl = stripHtml(label || '');
+      var fullClean = fragSub ? (clean + '#' + fragSub) : clean;
+      var key = clean.split('?')[0] + (fragSub ? ('#' + fragSub) : '');
+      if (seen[key]) {
+        if (p && !seen[key].pwd && !/[?&](?:pwd|password|pass)=/i.test(seen[key].url)) {
+          seen[key].pwd = p;
+        }
+        if (/[?&](?:pwd|password|pass)=/i.test(clean) && !/[?&](?:pwd|password|pass)=/i.test(seen[key].url)) {
+          seen[key].url = fullClean;
+        }
+        if (cleanLbl && (!seen[key].label || /^https?:\/\//i.test(seen[key].label))) {
+          seen[key].label = cleanLbl;
+        }
+        return;
+      }
+      var entry = { url: fullClean, pwd: p, label: cleanLbl };
+      seen[key] = entry;
+      shares.push(entry);
     }
+    var scanHtml = str(html).replace(/\\\//g, '/');
     var clipNodes = pdfa(html, '[data-clipboard-text], [data-copy]');
     for (var i = 0; i < clipNodes.length; i++) {
       var c = clipNodes[i];
@@ -336,23 +366,40 @@ function installWexPan() {
       if (href) add(href, '', stripHtml(a));
     }
     var encRe = /https?%3A%2F%2F(?:pan\.quark\.cn|drive\.uc\.cn|fast\.uc\.cn|pan\.baidu\.com|(?:www\.)?(?:aliyundrive|alipan)\.com)%2F[^\s"'<>&#]+/gi, em;
-    while ((em = encRe.exec(html)) !== null) {
+    while ((em = encRe.exec(scanHtml)) !== null) {
       try { add(decodeURIComponent(em[0]), '', ''); } catch (_) {}
     }
     var rawRe = /https?:\/\/(?:pan\.quark\.cn|drive\.uc\.cn|fast\.uc\.cn|pan\.baidu\.com|(?:www\.)?(?:aliyundrive|alipan)\.com)\/[^\s"'<>\\]+/gi, rm;
-    while ((rm = rawRe.exec(html)) !== null) {
-      var ctx = html.slice(rm.index, Math.min(html.length, rm.index + 240));
+    while ((rm = rawRe.exec(scanHtml)) !== null) {
+      var ctx = scanHtml.slice(rm.index, Math.min(scanHtml.length, rm.index + 240));
       var pm = /(?:提取码|访问码|密码|pwd|password)[:：\s=]*([A-Za-z0-9]{4,8})/i.exec(ctx);
       add(rm[0], pm ? pm[1] : '', '');
+    }
+    if (!shares.length) {
+      var unsupRe = /https?:\/\/(?:(?:www\.)?(?:115\.com|115cdn\.com|anxia\.com)|(?:www\.)?(?:123pan\.com|123pan\.cn|123684\.com|123865\.com|123912\.com)|cloud\.189\.cn|caiyun\.139\.com|pan\.xunlei\.com)\/s\/[^\s"'<>\\]+/gi, um;
+      var unsupSeen = Object.create(null);
+      while ((um = unsupRe.exec(scanHtml)) !== null && shares.length < 2) {
+        var uClean = um[0].replace(/[\\),.;]+$/, '');
+        var uKey = uClean.split('?')[0];
+        if (!unsupSeen[uKey]) {
+          unsupSeen[uKey] = 1;
+          shares.push({ url: uClean, pwd: '', label: '', unsupported: true });
+        }
+      }
     }
     return shares;
   }
   function groupShareTabs(shares) {
+    var hasSupported = false;
+    for (var s = 0; s < shares.length; s++) {
+      if (shares[s] && isSupportedCloudShare(shares[s].url)) { hasSupported = true; break; }
+    }
     var groups = {}, order = [], seen = {};
     for (var i = 0; i < shares.length; i++) {
       var item = shares[i];
       var u = str(item && item.url).trim();
-      if (!u || !isSupportedCloudShare(u)) continue;
+      if (!u) continue;
+      if (hasSupported ? !isSupportedCloudShare(u) : (!isSupportedCloudShare(u) && !isUnsupportedCloudShare(u))) continue;
       var mm = toMmShare(u, item.pwd);
       if (seen[mm]) continue;
       seen[mm] = true;
@@ -365,7 +412,16 @@ function installWexPan() {
     var froms = [], urls = [];
     for (var j = 0; j < order.length; j++) {
       var k = order[j];
-      if (groups[k].length) { froms.push(k); urls.push(groups[k].join('#')); }
+      var items = groups[k];
+      if (items.length === 1) {
+        froms.push(k);
+        urls.push(items[0]);
+      } else {
+        for (var idx = 0; idx < items.length; idx++) {
+          froms.push(k + ' ' + (idx + 1));
+          urls.push(items[idx]);
+        }
+      }
     }
     return { froms: froms, urls: urls };
   }
@@ -397,11 +453,14 @@ function installWexPan() {
   ];
   if (macPanAdapters.indexOf(cfg.adapter) >= 0) {
     var mpHostList = null;
+    var mpSiteKeys = cfg.adapter === 'wexzhizhen-v1'
+      ? [str(cfg.siteKey), 'shayang', 'kuaiying']
+      : (cfg.adapter === 'wexxiaopan-v1' ? [str(cfg.siteKey), 'shayang'] : [str(cfg.siteKey)]);
     var mpState = {
       current: '',
       getHosts: function () {
         if (!mpHostList) {
-          mpHostList = expandHostCandidates(pickSiteHosts(str(cfg.siteKey), [cfg.defaultHost]));
+          mpHostList = expandHostCandidates(pickSiteHosts(mpSiteKeys, [cfg.defaultHost]));
           if (!mpState.current && mpHostList.length) mpState.current = mpHostList[0];
         }
         return mpHostList;
@@ -1306,29 +1365,103 @@ function installWexPan() {
       }
       var list = [];
       if (isObj(merged)) {
-        var types = Object.keys(merged);
-        for (var t = 0; t < types.length; t++) {
-          var arr = Array.isArray(merged[types[t]]) ? merged[types[t]] : [];
+        var kwLower = kw.toLowerCase();
+        var isArchiveOnly = function (txt) {
+          var s = str(txt);
+          return /\.(?:zip|rar|7z|tar|gz)(?:\b|$)/i.test(s) && !/\.(?:mkv|mp4|ts|m3u8|mov|avi|flv|iso|m2ts)(?:\b|$)/i.test(s);
+        };
+        var buckets = {}, bucketOrder = ['quark', 'baidu', 'uc', 'aliyun'];
+        var allKeys = Object.keys(merged);
+        for (var bk = 0; bk < allKeys.length; bk++) {
+          if (bucketOrder.indexOf(allKeys[bk]) < 0) bucketOrder.push(allKeys[bk]);
+        }
+        var seenUrl = Object.create(null);
+        var anyKwMatch = false;
+        var rawItemsByBucket = {};
+        for (var t = 0; t < bucketOrder.length; t++) {
+          var bKey = bucketOrder[t];
+          var arr = Array.isArray(merged[bKey]) ? merged[bKey].slice() : [];
+          arr.sort(function (a, b) {
+            return str(b && (b.datetime || b.time || '')).localeCompare(str(a && (a.datetime || a.time || '')));
+          });
+          var cleaned = [];
           for (var k = 0; k < arr.length; k++) {
             var it = arr[k];
-            var u = str(it && it.url).trim();
+            var u = str(it && (it.url || it.link)).trim();
             if (!isSupportedCloudShare(u)) continue;
-            var title = stripHtml(it.note || it.title || kw);
-            var prov = panProviderName(u);
-            list.push({
-              vod_id: encodeShareId({ title: title, url: u, pwd: str(it.password || it.pwd) }),
-              vod_name: title,
-              vod_pic: '',
-              vod_remarks: prov
+            var uBase = u.split('?')[0];
+            if (seenUrl[uBase]) continue;
+            seenUrl[uBase] = 1;
+            var title = stripHtml(it.note || it.title || kw) || kw;
+            var matchesKw = title.toLowerCase().indexOf(kwLower) >= 0;
+            if (matchesKw) anyKwMatch = true;
+            cleaned.push({
+              title: title,
+              url: u,
+              pwd: str(it.password || it.pwd || ''),
+              prov: panProviderName(u),
+              matchesKw: matchesKw,
+              archiveOnly: isArchiveOnly(title + ' ' + str(it.files || ''))
             });
           }
+          rawItemsByBucket[bKey] = cleaned;
+        }
+        var flatInterleaved = [];
+        for (var bIdx = 0; bIdx < bucketOrder.length; bIdx++) {
+          var keyName = bucketOrder[bIdx];
+          var srcArr = (rawItemsByBucket[keyName] || []).filter(function (x) {
+            return !anyKwMatch || x.matchesKw;
+          });
+          srcArr.sort(function (a, b) {
+            if (a.archiveOnly !== b.archiveOnly) return a.archiveOnly ? 1 : -1;
+            return 0;
+          });
+          buckets[keyName] = srcArr;
+        }
+        var cursors = Object.create(null);
+        var progressed = true;
+        while (flatInterleaved.length < 60 && progressed) {
+          progressed = false;
+          for (var pIdx = 0; pIdx < bucketOrder.length && flatInterleaved.length < 60; pIdx++) {
+            var pk = bucketOrder[pIdx];
+            var cur = cursors[pk] || 0;
+            var bList = buckets[pk] || [];
+            if (cur < bList.length) {
+              flatInterleaved.push(bList[cur]);
+              cursors[pk] = cur + 1;
+              progressed = true;
+            }
+          }
+        }
+        for (var idx = 0; idx < flatInterleaved.length; idx++) {
+          var primary = flatInterleaved[idx];
+          var backups = [];
+          for (var bi = 0; bi < flatInterleaved.length && backups.length < 3; bi++) {
+            if (bi === idx) continue;
+            var cand = flatInterleaved[bi];
+            if (cand.url !== primary.url) {
+              backups.push({ url: cand.url, pwd: cand.pwd, label: cand.title });
+            }
+          }
+          list.push({
+            vod_id: encodeShareId({ title: primary.title, url: primary.url, pwd: primary.pwd, backups: backups }),
+            vod_name: primary.title,
+            vod_pic: '',
+            vod_remarks: primary.prov
+          });
         }
       }
-      return { page: 1, pagecount: 1, limit: 50, total: list.length, list: list };
+      return { page: 1, pagecount: 1, limit: 60, total: list.length, list: list };
     };
     __drpy.detail = function (vid) {
       var info = decodeShareId(vid);
-      var tabs = groupShareTabs([{ url: info.url, pwd: info.pwd, label: info.title }]);
+      var allShares = [{ url: info.url, pwd: info.pwd, label: info.title }];
+      if (Array.isArray(info.backups)) {
+        for (var b = 0; b < info.backups.length; b++) {
+          if (isObj(info.backups[b])) allShares.push(info.backups[b]);
+        }
+      }
+      var tabs = groupShareTabs(allShares);
       return {
         list: [{
           vod_id: str(vid),

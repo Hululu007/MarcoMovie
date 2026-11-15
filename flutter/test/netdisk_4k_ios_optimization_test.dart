@@ -1158,6 +1158,356 @@ console.log(JSON.stringify({ s1, sEmpty, dHeal }));
         expect(resp.body, 'ok:/proxy/m3u8');
       },
     );
+
+    test(
+      'cleanNetdiskSearchTitle strips edition and pan release tags without collapsing sequels or spin-offs',
+      () {
+        expect(CspBridge.cleanNetdiskSearchTitle('兰香如故（臻彩）'), '兰香如故');
+        expect(
+          CspBridge.cleanNetdiskSearchTitle(
+            '兰香如故(2026)【更26集】【4K.HDR】【高码率】【内嵌简中】【谭松韵/刘学义】',
+          ),
+          '兰香如故',
+        );
+        expect(CspBridge.cleanNetdiskSearchTitle('[小虎斑] 斗罗大陆2（4K臻彩）'), '斗罗大陆2');
+        expect(CspBridge.cleanNetdiskSearchTitle('兰香如故·花胜秋宴'), '兰香如故·花胜秋宴');
+        expect(CspBridge.cleanNetdiskSearchTitle('1917'), '1917');
+      },
+    );
+
+    test(
+      'playableDetail recovers live same-site 4K sibling when clicked edition card has all dead shares, without contacting foreign sites or spin-offs',
+      () async {
+        final contactedHosts = <String>[];
+        final transport = MockClient((request) async {
+          contactedHosts.add(request.url.host);
+          if (request.url.host == 'kuaiying.example') {
+            final ac = request.url.queryParameters['ac'];
+            final ids = request.url.queryParameters['ids'];
+            final wd = request.url.queryParameters['wd'];
+            if (ac == 'detail' && ids == '510011') {
+              return http.Response(
+                jsonEncode({
+                  'code': 1,
+                  'list': [
+                    {
+                      'vod_id': 510011,
+                      'vod_name': '兰香如故（臻彩）',
+                      'vod_play_from': '夸克网盘',
+                      'vod_play_url':
+                          '分享1\$mmshare://https://pan.quark.cn/s/deadqk510011',
+                    },
+                  ],
+                }),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+            if (wd == '兰香如故') {
+              return http.Response(
+                jsonEncode({
+                  'code': 1,
+                  'list': [
+                    {'vod_id': 510029, 'vod_name': '兰香如故·花胜秋宴'},
+                    {'vod_id': 510011, 'vod_name': '兰香如故（臻彩）'},
+                    {'vod_id': 510023, 'vod_name': '兰香如故'},
+                  ],
+                }),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+            if (ac == 'detail' && ids == '510023') {
+              return http.Response(
+                jsonEncode({
+                  'code': 1,
+                  'list': [
+                    {
+                      'vod_id': 510023,
+                      'vod_name': '兰香如故',
+                      'vod_play_from': '夸克网盘',
+                      'vod_play_url':
+                          '分享1\$mmshare://https://pan.quark.cn/s/liveqk510023',
+                    },
+                  ],
+                }),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+            if (ac == 'detail' && ids == '510029') {
+              fail('Spin-off card 兰香如故·花胜秋宴 must not be selected as sibling');
+            }
+          }
+          if (request.url.host == 'drive-pc.quark.cn') {
+            if (request.url.path.endsWith('/token')) {
+              final body = jsonDecode(request.body) as Map<String, dynamic>;
+              if (body['pwd_id'] == 'deadqk510011') {
+                return http.Response(
+                  jsonEncode({
+                    'status': 404,
+                    'code': 41011,
+                    'message': '分享已取消',
+                  }),
+                  404,
+                  headers: {'content-type': 'application/json; charset=utf-8'},
+                );
+              }
+              return http.Response(
+                jsonEncode({
+                  'status': 200,
+                  'code': 0,
+                  'data': {'stoken': 'live-stoken'},
+                }),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+            return http.Response(
+              jsonEncode({
+                'status': 200,
+                'code': 0,
+                'metadata': {'_total': 2},
+                'data': {
+                  'share': {'status': 1, 'audit_status': 4},
+                  'list': [
+                    {
+                      'fid': 'ep1fid',
+                      'file_name': 'LXRG.S01E01.2160p.DV.mkv',
+                      'file_type': 1,
+                      'category': 1,
+                    },
+                    {
+                      'fid': 'ep2fid',
+                      'file_name': 'LXRG.S01E02.2160p.DV.mkv',
+                      'file_type': 1,
+                      'category': 1,
+                    },
+                  ],
+                },
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          throw StateError('Unexpected request: ${request.url}');
+        });
+
+        const kuaiyingSite = CmsSite(
+          key: 'kuaiying_4k',
+          name: '💗快影 | 4K💗',
+          type: 1,
+          api: 'https://kuaiying.example/api.php/provide/vod/',
+        );
+        const foreignSite = CmsSite(
+          key: 'foreign_site',
+          name: '外部站点',
+          type: 1,
+          api: 'https://foreign.example/api.php/provide/vod/',
+        );
+
+        final cms = CmsClient(client: transport);
+        final (owner, recovered) = await cms.playableDetail(
+          kuaiyingSite,
+          const CmsVideo(
+            id: '510011',
+            title: '兰香如故（臻彩）',
+            doubanScore: 7.5,
+          ),
+          const [kuaiyingSite, foreignSite],
+        );
+
+        expect(owner.key, kuaiyingSite.key);
+        expect(recovered.id, '510023');
+        expect(recovered.doubanScore, 7.5);
+        expect(recovered.lines, hasLength(1));
+        expect(recovered.lines.single.episodes, hasLength(2));
+        expect(
+          recovered.sourceWarnings.first,
+          contains('已自动加载同站可用片源「兰香如故」'),
+        );
+        expect(contactedHosts, isNot(contains('foreign.example')));
+      },
+    );
+
+    test(
+      'CloudShareClient decodes percent-encoded Baidu randsk for subdirectory sekey and keeps visitor BAIDUID cookie',
+      () async {
+        String? capturedSubdirSekey;
+        String? capturedSubdirCookie;
+        final transport = MockClient((request) async {
+          if (request.url.path.startsWith('/s/')) {
+            return http.Response(
+              '',
+              302,
+              headers: {
+                'location': 'https://pan.baidu.com/share/init?surl=subtest123&pwd=wogg',
+                'set-cookie': 'BAIDUID=VISITOR123:FG=1; Path=/; Domain=.baidu.com',
+              },
+            );
+          }
+          if (request.url.path == '/share/verify') {
+            return http.Response(
+              jsonEncode({
+                'errno': 0,
+                'randsk': '6ZZ6CLeswJYd%2BZlu4lOQ%2Fb7E%3D',
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          if (request.url.path == '/share/list') {
+            if (request.url.queryParameters['root'] == '1') {
+              return http.Response(
+                jsonEncode({
+                  'errno': 0,
+                  'uk': 10001,
+                  'share_id': 20002,
+                  'list': [
+                    {
+                      'fs_id': 9001,
+                      'server_filename': 'Season01',
+                      'path': '/Season01',
+                      'isdir': 1,
+                    },
+                  ],
+                }),
+                200,
+                headers: {'content-type': 'application/json; charset=utf-8'},
+              );
+            }
+            capturedSubdirSekey = request.url.queryParameters['sekey'];
+            capturedSubdirCookie = request.headers['cookie'];
+            return http.Response(
+              jsonEncode({
+                'errno': 0,
+                'uk': 10001,
+                'share_id': 20002,
+                'list': [
+                  {
+                    'fs_id': 9002,
+                    'server_filename': 'S01E01.m2ts',
+                    'path': '/Season01/S01E01.m2ts',
+                    'isdir': 0,
+                    'category': 4,
+                    'size': 104857600,
+                  },
+                ],
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          throw StateError('Unexpected Baidu path: ${request.url}');
+        });
+
+        final cloud = CloudShareClient(
+          client: transport,
+          credentialReader: (_) async => '',
+        );
+        addTearDown(cloud.close);
+        final eps = await cloud.listShare(
+          'https://pan.baidu.com/s/1subtest123?pwd=wogg',
+        );
+        expect(eps, hasLength(1));
+        expect(eps.single.name, 'S01E01.m2ts');
+        expect(capturedSubdirSekey, '6ZZ6CLeswJYd+Zlu4lOQ/b7E=');
+        expect(capturedSubdirCookie, contains('BAIDUID=VISITOR123:FG=1'));
+        expect(capturedSubdirCookie, contains('BDCLND=6ZZ6CLeswJYd%2BZlu4lOQ%2Fb7E%3D'));
+      },
+    );
+
+    test(
+      'QuarkDriveClient distinguishes censored status=3 empty share from live status=1 share and walks subfolder fragments',
+      () async {
+        final seenParents = <String>[];
+        final transport = MockClient((request) async {
+          if (request.url.path.endsWith('/token')) {
+            return http.Response(
+              jsonEncode({
+                'status': 200,
+                'code': 0,
+                'data': {'stoken': 'qk-tok'},
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          final pwdId = request.url.queryParameters['pwd_id'];
+          final pdir = request.url.queryParameters['pdir_fid'] ?? '';
+          seenParents.add('$pwdId:$pdir');
+          if (pwdId == 'censored3') {
+            return http.Response(
+              jsonEncode({
+                'status': 200,
+                'code': 0,
+                'metadata': {'_total': 0},
+                'data': {
+                  'share': {'status': 3, 'audit_status': 2},
+                  'list': const <Object>[],
+                },
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          if (pwdId == 'subshare1' && pdir == 'folderabc123') {
+            return http.Response(
+              jsonEncode({
+                'status': 200,
+                'code': 0,
+                'metadata': {'_total': 1},
+                'data': {
+                  'share': {'status': 1, 'audit_status': 4},
+                  'list': [
+                    {
+                      'fid': 'vidfid99',
+                      'file_name': 'EP01.iso',
+                      'file_type': 1,
+                      'category': 4,
+                    },
+                  ],
+                },
+              }),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'},
+            );
+          }
+          return http.Response(
+            jsonEncode({
+              'status': 200,
+              'code': 0,
+              'metadata': {'_total': 0},
+              'data': {'list': const <Object>[]},
+            }),
+            200,
+            headers: {'content-type': 'application/json; charset=utf-8'},
+          );
+        });
+
+        await expectLater(
+          QuarkDriveClient.listPublicShareEpisodes(
+            'https://pan.quark.cn/s/censored3',
+            httpClient: transport,
+          ),
+          throwsA(
+            isA<QuarkDriveException>().having(
+              (e) => e.message,
+              'message',
+              '原夸克分享链接已取消或已失效',
+            ),
+          ),
+        );
+
+        final subEps = await QuarkDriveClient.listPublicShareEpisodes(
+          'https://pan.quark.cn/s/subshare1#/list/share/folderabc123-Season1',
+          httpClient: transport,
+        );
+        expect(subEps, hasLength(1));
+        expect(subEps.single.name, 'EP01.iso');
+        expect(seenParents, contains('subshare1:folderabc123'));
+      },
+    );
   });
 }
 

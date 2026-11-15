@@ -267,7 +267,9 @@ class ResilientHttpClient extends http.BaseClient {
         return null;
       }
     } else {
-      if (!RegExp(r'^/s/[A-Za-z0-9_-]{1,128}/?$').hasMatch(uri.path)) {
+      if (!RegExp(
+        r'^/s/[A-Za-z0-9_-]{1,128}(?:/folder/[A-Za-z0-9_-]{1,128})?/?$',
+      ).hasMatch(uri.path)) {
         if (strictClipboard) throw const FormatException('分享地址或提取码不明确');
         return null;
       }
@@ -298,6 +300,12 @@ class ResilientHttpClient extends http.BaseClient {
         extraPwd == null &&
         normalizedUri.path == uri.path) {
       return candidateLink;
+    }
+    final subFragMatch = RegExp(
+      r'^(/list/share/[A-Za-z0-9_-]{1,128})(?:-[^?&#]*)?$',
+    ).firstMatch(uri.fragment);
+    if (subFragMatch != null && (provider == 'quark' || provider == 'uc')) {
+      return normalizedUri.replace(fragment: subFragMatch.group(1)).toString();
     }
     return normalizedUri.removeFragment().toString();
   }

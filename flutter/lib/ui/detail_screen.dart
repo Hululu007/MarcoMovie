@@ -1270,10 +1270,12 @@ class _DetailScreenState extends State<DetailScreen> {
     final sites = widget.storage.loadSavedConfig()?.availableSites ?? const <CmsSite>[];
     final candidates = sites.where((s) => s.supported && s.key != _activeSite.key &&
         s.searchable && s.isEffectivelyPrivate == _activeSite.isEffectivelyPrivate).toList();
-    final results = widget.client.searchAcrossSites(widget.storage.prioritizeSites(candidates), _video.title);
+    final cleanedQuery = CspBridge.cleanNetdiskSearchTitle(_video.title);
+    final query = cleanedQuery.isNotEmpty ? cleanedQuery : _video.title;
+    final results = widget.client.searchAcrossSites(widget.storage.prioritizeSites(candidates), query);
     final pick = await showAppleModalSheet<(CmsSite, CmsVideo)>(
       context: context,
-      title: '在其他片源搜索《${_video.title}》',
+      title: '在其他片源搜索《$query》',
       builder: (_) => _OtherSourceResults(
         results: results,
       ),

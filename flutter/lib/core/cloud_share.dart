@@ -447,7 +447,7 @@ class CloudShareClient {
                 // The share-directory API uses a smaller parameter set than
                 // the root browser API. Mixing those contracts can return -9
                 // for an otherwise accessible original directory.
-                'sekey': sekey,
+                'sekey': _decodeSekeyForQuery(sekey),
                 'uk': uk,
                 'shareid': shareId,
                 'dir': dir['path']!,
@@ -758,13 +758,23 @@ class CloudShareClient {
     }
     final response = http.Response.bytes(chunks, streamed.statusCode,
         headers: streamed.headers, request: request);
-    // Only the share passcode cookie is needed for listing; account cookies are
-    // intentionally never replaced by a late share response.
+    // Only the share passcode / visitor session cookies are needed for listing;
+    // account cookies (BDUSS/STOKEN/PTOKEN) are intentionally never replaced.
     if (cookies != null && uri.host == 'pan.baidu.com') {
-      final value = RegExp(r'(?:^|,\s*)BDCLND=([^;,\s]+)')
-          .firstMatch(response.headers['set-cookie'] ?? '')
+      final setCookieHeader = response.headers['set-cookie'] ?? '';
+      final value = RegExp(r'(?:^|[,;]\s*)BDCLND=([^;,\s]+)')
+          .firstMatch(setCookieHeader)
           ?.group(1);
       if (value != null) cookies['BDCLND'] = value;
+      for (final visitorKey in const ['BAIDUID', 'BAIDUID_BFESS']) {
+        if (cookies.containsKey(visitorKey)) continue;
+        final v = RegExp('(?:^|[,;]\\s*)$visitorKey=([^;,\\s]+)')
+            .firstMatch(setCookieHeader)
+            ?.group(1);
+        if (v != null && !RegExp(r'[\r\n\x00]').hasMatch(v)) {
+          cookies[visitorKey] = v;
+        }
+      }
     }
     if (cookies != null &&
         uri.host == 'pc-api.uc.cn' &&
@@ -885,9 +895,10 @@ class CloudShareClient {
 
   static bool _video(Map row, String name) =>
       _integer(row['category']) == 1 ||
-      RegExp(r'\.(mp4|mkv|ts|m3u8|mov|avi|flv|wmv|webm|m4v)$',
-              caseSensitive: false)
-          .hasMatch(name);
+      RegExp(
+        r'\.(mp4|mkv|ts|m3u8|mov|avi|flv|wmv|webm|m4v|m2ts|mts|rmvb|mpg|mpeg|iso)$',
+        caseSensitive: false,
+      ).hasMatch(name);
   static Map _map(dynamic value) => value is Map ? value : const {};
   static String _string(dynamic value) => value?.toString() ?? '';
   static int _integer(dynamic value) =>

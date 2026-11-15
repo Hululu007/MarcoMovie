@@ -272,6 +272,18 @@ class QuarkDriveClient {
     ).firstMatch(cleaned);
     if (match == null) return const [];
     final pwdId = match.group(1)!;
+    final subFolderCandidate = RegExp(
+          r'/s/[A-Za-z0-9_-]{1,128}/folder/([A-Za-z0-9_-]{1,128})',
+          caseSensitive: false,
+        ).firstMatch(cleaned)?.group(1) ??
+        RegExp(
+          r'#/list/share/([A-Za-z0-9_-]{1,128}?)(?:-[^/?&#]*)?(?:[/?&#\s]|$)',
+          caseSensitive: false,
+        ).firstMatch(cleaned)?.group(1);
+    final initialRoot =
+        (subFolderCandidate != null && _identifier.hasMatch(subFolderCandidate))
+            ? subFolderCandidate
+            : '0';
     final passcode = RegExp(
           r'(?:pwd|passcode|password|code|提取码)[=:：\s]*([A-Za-z0-9]{4})',
           caseSensitive: false,
@@ -283,14 +295,31 @@ class QuarkDriveClient {
           await _shareToken(client, pwdId, passcode, isCancelled: isCancelled);
       var incomplete = false;
       var archiveOnly = false;
-      final files = await _walkShare(client, pwdId, token,
+      int? shareStatus;
+      var files = await _walkShare(client, pwdId, token,
+          root: initialRoot,
           isCancelled: isCancelled,
           onListingWarning: () => incomplete = true,
-          onArchiveSeen: () => archiveOnly = true);
+          onArchiveSeen: () => archiveOnly = true,
+          onShareStatus: (s) => shareStatus ??= s);
+      if (files.isEmpty && initialRoot != '0') {
+        files = await _walkShare(client, pwdId, token,
+            root: '0',
+            isCancelled: isCancelled,
+            onListingWarning: () => incomplete = true,
+            onArchiveSeen: () => archiveOnly = true,
+            onShareStatus: (s) => shareStatus ??= s);
+      }
       if (files.isEmpty && archiveOnly) {
         throw const QuarkDriveException(
           'archive_only',
           '原夸克分享内仅含压缩包（防和谐打包），暂无可直播视频',
+        );
+      }
+      if (files.isEmpty && shareStatus != null && shareStatus != 1) {
+        throw const QuarkDriveException(
+          'invalid_share',
+          '原夸克分享链接已取消或已失效',
         );
       }
       return [
@@ -340,6 +369,7 @@ class QuarkDriveClient {
     bool Function()? isCancelled,
     void Function()? onListingWarning,
     void Function()? onArchiveSeen,
+    void Function(int status)? onShareStatus,
   }) async {
     const pageSize = 200;
     final files = <({String parent, String folder, Map row})>[];
@@ -374,13 +404,18 @@ class QuarkDriveClient {
               '_page': '$page',
               '_size': '$pageSize',
               '_fetch_banner': '0',
-              '_fetch_share': '0',
+              '_fetch_share': (parent == root && page == 1) ? '1' : '0',
               '_fetch_total': '1',
               '_sort': 'file_type:asc,file_name:asc',
             });
         final data = payload['data'];
         if (data is! Map || data['list'] is! List) {
           throw const QuarkDriveException('invalid_response', '夸克未返回有效分享目录');
+        }
+        final shareMeta = data['share'];
+        if (shareMeta is Map) {
+          final st = _integer(shareMeta['status']);
+          if (st != null) onShareStatus?.call(st);
         }
         final rows = data['list'] as List;
         final metadata = payload['metadata'];
@@ -412,9 +447,10 @@ class QuarkDriveClient {
           if (row['dir'] == true || _integer(row['file_type']) == 0) {
             children.add(row);
           } else if (_integer(row['category']) == 1 ||
-              RegExp(r'\.(?:mp4|mkv|ts|m3u8|mov|avi|flv|wmv|webm)$',
-                      caseSensitive: false)
-                  .hasMatch(row['file_name'])) {
+              RegExp(
+                r'\.(?:mp4|mkv|ts|m3u8|mov|avi|flv|wmv|webm|m4v|m2ts|mts|rmvb|mpg|mpeg|iso)$',
+                caseSensitive: false,
+              ).hasMatch(row['file_name'])) {
             if (target != null && row['fid'] != target) continue;
             if (fileIds.add(row['fid'])) {
               if (files.length >= 5000) {

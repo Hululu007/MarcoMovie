@@ -1493,19 +1493,134 @@ class CmsClient {
     return CmsParser.parseListing(raw);
   }
   /// Match a catalogue-only item to a playable item from the user's visible
-  /// subscriptions. Keep the owning site so its resolver and headers follow it.
+  /// subscriptions, or recover a same-site sibling card on a netdisk source
+  /// when an edition card's shares have all been cancelled upstream.
   Future<(CmsSite, CmsVideo)> playableDetail(
     CmsSite source, CmsVideo item, Iterable<CmsSite> candidates,
   ) async {
-    final detail = await fetchDetail(source, item);
-    if (detail.lines.any((l) => l.episodes.isNotEmpty)) return (source, detail);
-    if (!CspBridge.isDoubanSite(source)) {
-      return (source, detail);
-    }
-    final title = CspBridge.searchTitleForVideo(detail);
-    if (title.isEmpty) return (source, detail);
     String normTitleOf(String raw) =>
         raw.trim().toLowerCase().replaceAll(RegExp(r'[\s·:：,，.。!！?？\-_—()（）\[\]【】《》]+'), '');
+
+    CmsVideo? fetchedDetail;
+    FormatException? deadShareError;
+    StackTrace? deadShareStack;
+    final canTrySameSiteSibling = !CspBridge.isDoubanSite(source) &&
+        CspBridge.isPanOrNetdiskSite(source) &&
+        source.searchable &&
+        !CspBridge.isSearchOnlySite(source) &&
+        !CspBridge.isMyDriveSite(source);
+
+    try {
+      fetchedDetail = await fetchDetail(source, item);
+      if (fetchedDetail.lines.any((l) => l.episodes.isNotEmpty)) {
+        return (source, fetchedDetail);
+      }
+    } on FormatException catch (e, st) {
+      final isDeadShareMsg = e.message.contains('分享链接已失效') ||
+          e.message.contains('原网盘分享暂不可用') ||
+          e.message.contains('网盘暂不支持');
+      if (canTrySameSiteSibling &&
+          isDeadShareMsg &&
+          !needsSourceVerification(source, e) &&
+          !_sourceCancelled()) {
+        deadShareError = e;
+        deadShareStack = st;
+      } else {
+        rethrow;
+      }
+    }
+
+    if (!CspBridge.isDoubanSite(source)) {
+      if (canTrySameSiteSibling &&
+          (deadShareError != null ||
+              (fetchedDetail != null && fetchedDetail.sourceWarnings.isNotEmpty))) {
+        final seedVideo = fetchedDetail ?? item;
+        final rawTitle = CspBridge.searchTitleForVideo(seedVideo);
+        final baseTitle = CspBridge.cleanNetdiskSearchTitle(rawTitle);
+        final normBase = normTitleOf(baseTitle);
+        if (baseTitle.isNotEmpty && normBase.isNotEmpty) {
+          try {
+            final searchListing = await fetchSearch(source, baseTitle);
+            final siblings = searchListing.videos.where((v) {
+              if (v.id.trim().isEmpty ||
+                  v.id == item.id ||
+                  (fetchedDetail != null && v.id == fetchedDetail.id)) {
+                return false;
+              }
+              if (seedVideo.year.isNotEmpty &&
+                  v.year.isNotEmpty &&
+                  seedVideo.year != v.year) {
+                return false;
+              }
+              final cleanedCand = CspBridge.cleanNetdiskSearchTitle(v.title);
+              // Prevent matching spin-offs with middle dot subtitle (`兰香如故·花胜秋宴`)
+              // when the user clicked `兰香如故（臻彩）` (`baseTitle == '兰香如故'`).
+              if (!baseTitle.contains('·') && cleanedCand.contains('·')) {
+                return false;
+              }
+              return normTitleOf(cleanedCand) == normBase;
+            }).take(3);
+
+            for (final sib in siblings) {
+              if (_sourceCancelled()) break;
+              try {
+                final sibDetail = await fetchDetail(source, sib);
+                if (sibDetail.lines.any((l) => l.episodes.isNotEmpty)) {
+                  final note =
+                      '当前版本原分享已失效，已自动加载同站可用片源「${sibDetail.title.isEmpty ? sib.title : sibDetail.title}」';
+                  final mergedWarnings = <String>[
+                    note,
+                    ...sibDetail.sourceWarnings,
+                  ];
+                  return (
+                    source,
+                    CmsVideo(
+                      id: sibDetail.id,
+                      title: sibDetail.title,
+                      poster: CmsParser.isBrokenPosterUrl(sibDetail.poster)
+                          ? seedVideo.poster
+                          : sibDetail.poster,
+                      remarks: sibDetail.remarks,
+                      year: sibDetail.year.isEmpty
+                          ? seedVideo.year
+                          : sibDetail.year,
+                      area: sibDetail.area.isEmpty
+                          ? seedVideo.area
+                          : sibDetail.area,
+                      actor: sibDetail.actor.isEmpty
+                          ? seedVideo.actor
+                          : sibDetail.actor,
+                      description: sibDetail.description.isEmpty
+                          ? seedVideo.description
+                          : sibDetail.description,
+                      tag: sibDetail.tag.isEmpty
+                          ? seedVideo.tag
+                          : sibDetail.tag,
+                      doubanScore:
+                          sibDetail.doubanScore ?? seedVideo.doubanScore,
+                      rtScore: sibDetail.rtScore ?? seedVideo.rtScore,
+                      lines: sibDetail.lines,
+                      sourceWarnings: mergedWarnings,
+                    ),
+                  );
+                }
+              } catch (_) {
+                // Continue checking remaining same-site sibling candidates.
+              }
+            }
+          } catch (_) {
+            // Same-site recovery failed; fall back to original detail/error.
+          }
+        }
+      }
+      if (deadShareError != null) {
+        Error.throwWithStackTrace(deadShareError, deadShareStack!);
+      }
+      return (source, fetchedDetail!);
+    }
+    final detail = fetchedDetail!;
+    final title = CspBridge.searchTitleForVideo(detail);
+    if (title.isEmpty) return (source, detail);
     final normTitle = normTitleOf(title);
     final filtered = candidates.where((s) => s.key != source.key &&
         s.isEffectivelyPrivate == source.isEffectivelyPrivate && s.searchable &&
@@ -1864,16 +1979,17 @@ class CmsClient {
         expandedLines.add(line);
         continue;
       }
-      final eps = <CmsEpisode>[];
+      final passthroughEps = <CmsEpisode>[];
+      final resolvedShareGroups = <List<CmsEpisode>>[];
       for (final ep in line.episodes) {
         if (!_isExpandableCloudShare(ep.url)) {
-          eps.add(ep);
+          passthroughEps.add(ep);
           continue;
         }
         final rawShare = canonicalShareOf(ep.url);
         final resolved = resolvedByShare[rawShare];
         if (resolved != null && resolved.isNotEmpty) {
-          eps.addAll(resolved);
+          resolvedShareGroups.add(resolved);
         } else if (errorsByShare.containsKey(rawShare)) {
           final msg = '${line.name}：${errorsByShare[rawShare]}';
           if (!warnings.contains(msg)) warnings.add(msg);
@@ -1882,8 +1998,27 @@ class CmsClient {
           if (!warnings.contains(msg)) warnings.add(msg);
         }
       }
-      if (eps.isNotEmpty) {
-        expandedLines.add(CmsLine(name: line.name, episodes: eps));
+      if (resolvedShareGroups.length == 1 && passthroughEps.isEmpty) {
+        expandedLines.add(
+          CmsLine(name: line.name, episodes: resolvedShareGroups.single),
+        );
+      } else if (resolvedShareGroups.length > 1 && passthroughEps.isEmpty) {
+        for (var idx = 0; idx < resolvedShareGroups.length; idx++) {
+          expandedLines.add(
+            CmsLine(
+              name: '${line.name} ${idx + 1}',
+              episodes: resolvedShareGroups[idx],
+            ),
+          );
+        }
+      } else {
+        final combined = <CmsEpisode>[
+          ...passthroughEps,
+          for (final g in resolvedShareGroups) ...g,
+        ];
+        if (combined.isNotEmpty) {
+          expandedLines.add(CmsLine(name: line.name, episodes: combined));
+        }
       }
     }
 

@@ -80,18 +80,62 @@ function installFtyPan() {
     return '网盘分享';
   }
   function toMmShare(rawUrl, rawPwd) {
-    var u = str(rawUrl).trim().replace(/&amp;/g, '&');
-    var m = /(https?:\/\/[^\s"'<>#]+)/i.exec(u);
-    if (m) u = m[1];
+    var raw = str(rawUrl).trim().replace(/\\\//g, '/').replace(/&amp;/g, '&');
+    if (/^https?%3A%2F%2F/i.test(raw)) {
+      try { raw = decodeURIComponent(raw); } catch (_) {}
+    }
+    var fragSub = '';
+    var fm = /#(\/list\/share\/[^\s"'<>?&]+)/i.exec(raw);
+    if (fm) fragSub = fm[1];
+    var m = /(https?:\/\/[^\s"'<>#]+)/i.exec(raw);
+    var u = m ? m[1].replace(/[\\),.;]+$/, '') : raw;
     var pwd = str(rawPwd).trim();
     if (!pwd) {
-      var pm = /(?:提取码|密码|pwd|pass|code)[:：\s=]*([A-Za-z0-9]{4,8})/i.exec(str(rawUrl));
+      var pm = /(?:提取码|访问码|密码|pwd|password|pass|code)[:：\s=]*([A-Za-z0-9]{4,8})/i.exec(raw);
       if (pm) pwd = pm[1];
     }
     if (pwd && /^[A-Za-z0-9]{4,8}$/.test(pwd) && !/[?&](?:pwd|password|pass)=/i.test(u)) {
       u += (u.indexOf('?') >= 0 ? '&' : '?') + 'pwd=' + encodeURIComponent(pwd);
     }
+    if (fragSub && u.indexOf('#') < 0) u += '#' + fragSub;
     return 'mmshare://' + u;
+  }
+  function pushMergedShare(shares, seenMap, rawUrl, rawPwd, rawLabel) {
+    var raw = str(rawUrl).trim().replace(/\\\//g, '/').replace(/&amp;/g, '&');
+    if (!raw) return;
+    if (/^https?%3A%2F%2F/i.test(raw)) {
+      try { raw = decodeURIComponent(raw); } catch (_) {}
+    }
+    var fragSub = '';
+    var fm = /#(\/list\/share\/[^\s"'<>?&]+)/i.exec(raw);
+    if (fm) fragSub = fm[1];
+    var m = /(https?:\/\/[^\s"'<>#]+)/i.exec(raw);
+    if (!m) return;
+    var clean = m[1].replace(/[\\),.;]+$/, '');
+    if (!isPanShare(clean)) return;
+    var p = str(rawPwd).trim();
+    if (!p) {
+      var pm = /(?:提取码|访问码|密码|pwd|password|pass|code)[:：\s=]*([A-Za-z0-9]{4,8})/i.exec(raw + ' ' + str(rawLabel || ''));
+      if (pm) p = pm[1];
+    }
+    var lbl = stripHtml(rawLabel || '');
+    var fullClean = fragSub ? (clean + '#' + fragSub) : clean;
+    var key = clean.split('?')[0] + (fragSub ? ('#' + fragSub) : '');
+    if (seenMap[key]) {
+      if (p && !seenMap[key].pwd && !/[?&](?:pwd|password|pass)=/i.test(seenMap[key].url)) {
+        seenMap[key].pwd = p;
+      }
+      if (/[?&](?:pwd|password|pass)=/i.test(clean) && !/[?&](?:pwd|password|pass)=/i.test(seenMap[key].url)) {
+        seenMap[key].url = fullClean;
+      }
+      if (lbl && (!seenMap[key].label || /^https?:\/\//i.test(seenMap[key].label))) {
+        seenMap[key].label = lbl;
+      }
+      return;
+    }
+    var entry = { url: fullClean, pwd: p, label: lbl };
+    seenMap[key] = entry;
+    shares.push(entry);
   }
   function encodeShareId(obj) {
     return 'pan1:' + utf8ToB64(JSON.stringify(obj));
@@ -107,13 +151,18 @@ function installFtyPan() {
     return { title: '网盘资源', url: s, pwd: '' };
   }
   function groupShareTabs(shares) {
+    var hasSupported = false;
+    for (var s = 0; s < shares.length; s++) {
+      if (shares[s] && isSupportedCloudShare(shares[s].url)) { hasSupported = true; break; }
+    }
     var groups = {};
     var order = [];
     var seen = {};
     for (var i = 0; i < shares.length; i++) {
       var item = shares[i];
       var u = str(item && item.url).trim();
-      if (!u || !isSupportedCloudShare(u)) continue;
+      if (!u) continue;
+      if (hasSupported ? !isSupportedCloudShare(u) : !isPanShare(u)) continue;
       var mm = toMmShare(u, item.pwd);
       if (seen[mm]) continue;
       seen[mm] = true;
@@ -123,16 +172,22 @@ function installFtyPan() {
         order.push(provider);
       }
       var label = stripHtml(item.label || '').replace(/[$#]/g, ' ').trim();
-      if (!label) label = '分享' + (groups[provider].length + 1);
+      if (!label || label.length > 60 || /^https?:\/\//i.test(label)) label = '分享' + (groups[provider].length + 1);
       groups[provider].push(label + '$' + mm);
     }
     var froms = [];
     var urls = [];
     for (var j = 0; j < order.length; j++) {
       var k = order[j];
-      if (groups[k].length) {
+      var items = groups[k];
+      if (items.length === 1) {
         froms.push(k);
-        urls.push(groups[k].join('#'));
+        urls.push(items[0]);
+      } else {
+        for (var idx = 0; idx < items.length; idx++) {
+          froms.push(k + ' ' + (idx + 1));
+          urls.push(items[idx]);
+        }
       }
     }
     return { froms: froms, urls: urls };
@@ -233,6 +288,7 @@ function installFtyPan() {
       if (!links.length) links = pdfa(html, 'div.pan-links a');
       if (!links.length) links = pdfa(html, 'a[href*=link_start]');
       var shares = [];
+      var seenMap = Object.create(null);
       var redirectCount = 0;
       for (var i = 0; i < links.length; i++) {
         var aHtml = links[i];
@@ -240,19 +296,20 @@ function installFtyPan() {
         var title = stripHtml(pdfh(aHtml, 'a&&title') || pdfh(aHtml, 'a&&Text'));
         if (!rawLink) continue;
         if (isPanShare(rawLink)) {
-          shares.push({ url: rawLink, pwd: '', label: title });
+          pushMergedShare(shares, seenMap, rawLink, '', title);
         } else if (redirectCount < 8) {
           redirectCount++;
           var resolved = shResolveRedirect(rawLink);
-          if (resolved) shares.push({ url: resolved, pwd: '', label: title });
+          if (resolved) pushMergedShare(shares, seenMap, resolved, '', title);
         }
       }
-      if (!shares.length) {
-        var directRe = /(https?:\/\/(?:pan\.quark\.cn|drive\.uc\.cn|pan\.baidu\.com|(?:www\.)?(?:aliyundrive|alipan)\.com)\/[^\s"'<>\\]+)/ig;
-        var dm;
-        while ((dm = directRe.exec(html)) !== null) {
-          shares.push({ url: dm[1], pwd: '', label: '' });
-        }
+      var scanHtml = str(html).replace(/\\\//g, '/');
+      var directRe = /(https?:\/\/(?:pan\.quark\.cn|drive\.uc\.cn|fast\.uc\.cn|pan\.baidu\.com|(?:www\.)?(?:aliyundrive|alipan)\.com)\/[^\s"'<>\\]+)/ig;
+      var dm;
+      while ((dm = directRe.exec(scanHtml)) !== null) {
+        var ctx = scanHtml.slice(dm.index, Math.min(scanHtml.length, dm.index + 240));
+        var pm = /(?:提取码|访问码|密码|pwd|password)[:：\s=]*([A-Za-z0-9]{4,8})/i.exec(ctx);
+        pushMergedShare(shares, seenMap, dm[1], pm ? pm[1] : '', '');
       }
       var grouped = groupShareTabs(shares);
       return {
@@ -320,23 +377,55 @@ function installFtyPan() {
       var rel = szSearchPath.indexOf('@') >= 0
         ? szSearchPath.replace('@', encodeURIComponent(kw))
         : (szSearchPath + encodeURIComponent(kw));
-      var resp = httpReq(szBase + rel, { headers: szEnsureHeaders(), timeout: 8000 });
+      if (rel.indexOf('api/search') >= 0 && rel.indexOf('cloud_types=') < 0) {
+        rel += (rel.indexOf('?') >= 0 ? '&' : '?') + 'cloud_types=baidu,quark,uc,aliyun&res=merge';
+      }
+      var resp = httpReq(szBase + rel, { headers: szEnsureHeaders(), timeout: 11500 });
       var j = parseJsonSafe(resp.body);
       if (!isObj(j)) return { list: [] };
       var dataObj = isObj(j.data) ? j.data : j;
-      var out = [];
-      var seen = {};
-      var pushShare = function (title, linkUrl, pwd) {
-        var u = str(linkUrl).trim();
-        if (!isSupportedCloudShare(u) || seen[u] || out.length >= 60) return;
-        seen[u] = true;
+      var kwLower = kw.toLowerCase();
+      var isArchiveOnly = function (txt) {
+        var s = str(txt);
+        return /\.(?:zip|rar|7z|tar|gz)(?:\b|$)/i.test(s) && !/\.(?:mkv|mp4|ts|m3u8|mov|avi|flv|iso|m2ts)(?:\b|$)/i.test(s);
+      };
+      var bucketOrder = ['quark', 'baidu', 'uc', 'aliyun'];
+      var rawBuckets = { quark: [], baidu: [], uc: [], aliyun: [], other: [] };
+      var seenBase = Object.create(null);
+      var anyKwMatch = false;
+      var bucketKeyForUrl = function (u) {
+        var s = str(u).toLowerCase();
+        if (s.indexOf('pan.quark.cn') >= 0) return 'quark';
+        if (s.indexOf('pan.baidu.com') >= 0) return 'baidu';
+        if (s.indexOf('drive.uc.cn') >= 0 || s.indexOf('fast.uc.cn') >= 0) return 'uc';
+        if (s.indexOf('aliyundrive.com') >= 0 || s.indexOf('alipan.com') >= 0) return 'aliyun';
+        return 'other';
+      };
+      var addCandidate = function (title, linkUrl, pwd, dt, extraFiles) {
+        var u = str(linkUrl).trim().replace(/\\\//g, '/');
+        if (!isSupportedCloudShare(u)) return;
+        var baseKey = u.split('?')[0];
+        if (seenBase[baseKey]) {
+          var prev = seenBase[baseKey];
+          var np = str(pwd || '').trim();
+          if (np && !prev.pwd) prev.pwd = np;
+          return;
+        }
         var cleanTitle = stripHtml(title) || kw;
-        out.push({
-          vod_id: encodeShareId({ title: cleanTitle, url: u, pwd: str(pwd || '') }),
-          vod_name: cleanTitle,
-          vod_pic: '',
-          vod_remarks: panProviderName(u)
-        });
+        var matchesKw = cleanTitle.toLowerCase().indexOf(kwLower) >= 0;
+        if (matchesKw) anyKwMatch = true;
+        var item = {
+          title: cleanTitle,
+          url: u,
+          pwd: str(pwd || '').trim(),
+          dt: str(dt || ''),
+          archiveOnly: isArchiveOnly(cleanTitle + ' ' + str(extraFiles || '')),
+          matchesKw: matchesKw
+        };
+        seenBase[baseKey] = item;
+        var bName = bucketKeyForUrl(u);
+        if (!rawBuckets[bName]) { rawBuckets[bName] = []; bucketOrder.push(bName); }
+        rawBuckets[bName].push(item);
       };
       if (isObj(dataObj.merged_by_type)) {
         var keys = Object.keys(dataObj.merged_by_type);
@@ -345,7 +434,7 @@ function installFtyPan() {
           if (!Array.isArray(arr)) continue;
           for (var m = 0; m < arr.length; m++) {
             var it = arr[m];
-            if (isObj(it)) pushShare(it.note || it.title || kw, it.url || it.link, it.password || it.pwd);
+            if (isObj(it)) addCandidate(it.note || it.title || kw, it.url || it.link, it.password || it.pwd, it.datetime || it.time, it.files);
           }
         }
       }
@@ -357,9 +446,56 @@ function installFtyPan() {
           var links = Array.isArray(row.links) ? row.links : [];
           for (var l = 0; l < links.length; l++) {
             var lk = links[l];
-            if (isObj(lk)) pushShare(rTitle, lk.url, lk.password || lk.pwd);
+            if (isObj(lk)) addCandidate(rTitle, lk.url, lk.password || lk.pwd, lk.datetime || row.datetime, row.content);
           }
         }
+      }
+      if (rawBuckets.other.length && bucketOrder.indexOf('other') < 0) bucketOrder.push('other');
+      var filteredBuckets = {};
+      for (var bi = 0; bi < bucketOrder.length; bi++) {
+        var bk = bucketOrder[bi];
+        var bArr = (rawBuckets[bk] || []).filter(function (x) {
+          return !anyKwMatch || x.matchesKw;
+        });
+        bArr.sort(function (a, b) {
+          if (a.archiveOnly !== b.archiveOnly) return a.archiveOnly ? 1 : -1;
+          return b.dt.localeCompare(a.dt);
+        });
+        filteredBuckets[bk] = bArr;
+      }
+      var interleaved = [];
+      var cursors = Object.create(null);
+      var progressed = true;
+      while (interleaved.length < 60 && progressed) {
+        progressed = false;
+        for (var pi = 0; pi < bucketOrder.length && interleaved.length < 60; pi++) {
+          var pk = bucketOrder[pi];
+          var cur = cursors[pk] || 0;
+          var listForPk = filteredBuckets[pk] || [];
+          if (cur < listForPk.length) {
+            interleaved.push(listForPk[cur]);
+            cursors[pk] = cur + 1;
+            progressed = true;
+          }
+        }
+      }
+      var out = [];
+      for (var oi = 0; oi < interleaved.length; oi++) {
+        var primary = interleaved[oi];
+        var backups = [];
+        for (var bj = 0; bj < interleaved.length && backups.length < 3; bj++) {
+          if (bj === oi) continue;
+          var cand = interleaved[bj];
+          if (cand.url !== primary.url && !cand.archiveOnly) {
+            backups.push({ url: cand.url, pwd: cand.pwd, label: cand.title });
+          }
+        }
+        out.push({
+          vod_id: encodeShareId({ title: primary.title, url: primary.url, pwd: primary.pwd, backups: backups }),
+          vod_name: primary.title,
+          vod_pic: '',
+          vod_remarks: panProviderName(primary.url)
+        });
       }
       return { list: out };
     };
@@ -367,16 +503,24 @@ function installFtyPan() {
       var info = decodeShareId(id);
       var u = str(info.url).trim();
       if (!isSupportedCloudShare(u)) fail('drpy_media_unresolved');
-      var provider = panProviderName(u);
       var title = stripHtml(info.title) || '网盘资源';
+      var allShares = [{ url: u, pwd: str(info.pwd || ''), label: title }];
+      if (Array.isArray(info.backups)) {
+        for (var b = 0; b < info.backups.length; b++) {
+          if (isObj(info.backups[b]) && isSupportedCloudShare(info.backups[b].url)) {
+            allShares.push(info.backups[b]);
+          }
+        }
+      }
+      var grouped = groupShareTabs(allShares);
       return {
         list: [{
           vod_id: str(id),
           vod_name: title,
           vod_pic: '',
           vod_content: title,
-          vod_play_from: provider,
-          vod_play_url: title.replace(/[$#]/g, ' ') + '$' + toMmShare(u, info.pwd)
+          vod_play_from: grouped.froms.join('$$$'),
+          vod_play_url: grouped.urls.join('$$$')
         }]
       };
     };
@@ -422,20 +566,52 @@ function installFtyPan() {
       var j = parseJsonSafe(resp.body);
       var rows = (j && j.data && (j.data.list || j.data.datas)) || (j && (j.datas || j.list)) || [];
       if (!Array.isArray(rows)) return { list: [] };
-      var out = [];
+      var parsedRows = [];
       for (var i = 0; i < rows.length; i++) {
         var r = rows[i];
         if (!isObj(r)) continue;
         var link = str(r.link || r.url).trim();
+        if (!link && str(r.disk_id).trim()) {
+          var did = str(r.disk_id).trim();
+          var dtype = str(r.disk_type || '').toUpperCase();
+          if (dtype === 'BDY' || cfg.adapter === 'bpanso-v1') {
+            link = 'https://pan.baidu.com/s/' + (did.indexOf('1') === 0 ? did : ('1' + did));
+          } else {
+            link = 'https://pan.quark.cn/s/' + did;
+          }
+        }
         if (!isSupportedCloudShare(link)) continue;
-        var title = stripHtml(r.disk_name || r.title || r.name) || kw;
+        var rawTitle = stripHtml(r.disk_name || r.title || r.name);
+        var title = !rawTitle
+          ? kw
+          : (rawTitle.toLowerCase().indexOf(kw.toLowerCase()) >= 0 ? rawTitle : (kw + ' [' + rawTitle + ']'));
         var pwd = str(r.disk_pass || r.pwd || r.password || '').trim();
         var rem = stripHtml(r.shared_time || r.up_time || '') || panProviderName(link);
+        var filesTxt = str(r.files || '') + ' ' + rawTitle;
+        var archiveOnly = (/(?:^|\s)zip\s*\n/i.test(str(r.files || '')) || /\.(?:zip|rar|7z|tar|gz)(?:\b|$)/i.test(filesTxt)) &&
+          !/\.(?:mkv|mp4|ts|m3u8|mov|avi|flv|iso|m2ts)(?:\b|$)/i.test(filesTxt);
+        parsedRows.push({ title: title, url: link, pwd: pwd, rem: rem, archiveOnly: archiveOnly, idx: i });
+      }
+      parsedRows.sort(function (a, b) {
+        if (a.archiveOnly !== b.archiveOnly) return a.archiveOnly ? 1 : -1;
+        return a.idx - b.idx;
+      });
+      var effectiveRows = parsedRows;
+      var out = [];
+      for (var idx = 0; idx < effectiveRows.length; idx++) {
+        var curRow = effectiveRows[idx];
+        var backups = [];
+        for (var bi = 0; bi < effectiveRows.length && backups.length < 3; bi++) {
+          if (bi === idx) continue;
+          if (effectiveRows[bi].url !== curRow.url) {
+            backups.push({ url: effectiveRows[bi].url, pwd: effectiveRows[bi].pwd, label: effectiveRows[bi].title });
+          }
+        }
         out.push({
-          vod_id: encodeShareId({ title: title, url: link, pwd: pwd }),
-          vod_name: title,
+          vod_id: encodeShareId({ title: curRow.title, url: curRow.url, pwd: curRow.pwd, backups: backups }),
+          vod_name: curRow.title,
           vod_pic: '',
-          vod_remarks: rem
+          vod_remarks: curRow.rem
         });
       }
       return { list: out };
@@ -444,16 +620,24 @@ function installFtyPan() {
       var info = decodeShareId(id);
       var u = str(info.url).trim();
       if (!isSupportedCloudShare(u)) fail('drpy_media_unresolved');
-      var provider = panProviderName(u);
       var title = stripHtml(info.title) || '网盘资源';
+      var allShares = [{ url: u, pwd: str(info.pwd || ''), label: title }];
+      if (Array.isArray(info.backups)) {
+        for (var b = 0; b < info.backups.length; b++) {
+          if (isObj(info.backups[b]) && isSupportedCloudShare(info.backups[b].url)) {
+            allShares.push(info.backups[b]);
+          }
+        }
+      }
+      var grouped = groupShareTabs(allShares);
       return {
         list: [{
           vod_id: str(id),
           vod_name: title,
           vod_pic: '',
           vod_content: title,
-          vod_play_from: provider,
-          vod_play_url: title.replace(/[$#]/g, ' ') + '$' + toMmShare(u, info.pwd)
+          vod_play_from: grouped.froms.join('$$$'),
+          vod_play_url: grouped.urls.join('$$$')
         }]
       };
     };
@@ -619,23 +803,25 @@ function installFtyPan() {
       var html = httpReq(detailUrl, { headers: { 'User-Agent': ua, Referer: site + '/' }, timeout: 7000 }).body;
 
       var shares = [];
+      var kuSeen = Object.create(null);
       var clipNodes = pdfa(html, '[data-clipboard-text]');
       for (var i = 0; i < clipNodes.length; i++) {
         var cm = /\bdata-clipboard-text=["']([^"']+)["']/i.exec(clipNodes[i]);
-        if (cm && isPanShare(cm[1])) shares.push({ url: cm[1], pwd: '', label: '' });
+        if (cm && isPanShare(cm[1])) pushMergedShare(shares, kuSeen, cm[1], '', stripHtml(clipNodes[i]));
       }
       var rowLinks = pdfa(html, 'div.module-row-info a, div.module-downlist a, #download-list a');
       for (var j = 0; j < rowLinks.length; j++) {
         var lk = pdfh(rowLinks[j], 'a&&href');
         var lb = stripHtml(pdfh(rowLinks[j], 'a&&title') || pdfh(rowLinks[j], 'a&&Text'));
-        if (isPanShare(lk)) shares.push({ url: lk, pwd: '', label: lb });
+        if (isPanShare(lk)) pushMergedShare(shares, kuSeen, lk, '', lb);
       }
-      if (!shares.length) {
-        var panRe = /(https?:\/\/(?:pan\.quark\.cn|drive\.uc\.cn|pan\.baidu\.com|(?:www\.)?(?:aliyundrive|alipan)\.com)\/[^\s"'<>\\]+)/ig;
-        var pm;
-        while ((pm = panRe.exec(html)) !== null) {
-          shares.push({ url: pm[1], pwd: '', label: '' });
-        }
+      var scanKuHtml = str(html).replace(/\\\//g, '/');
+      var panRe = /(https?:\/\/(?:pan\.quark\.cn|drive\.uc\.cn|fast\.uc\.cn|pan\.baidu\.com|(?:www\.)?(?:aliyundrive|alipan)\.com)\/[^\s"'<>\\]+)/ig;
+      var pm;
+      while ((pm = panRe.exec(scanKuHtml)) !== null) {
+        var kuCtx = scanKuHtml.slice(pm.index, Math.min(scanKuHtml.length, pm.index + 240));
+        var kpm = /(?:提取码|访问码|密码|pwd|password)[:：\s=]*([A-Za-z0-9]{4,8})/i.exec(kuCtx);
+        pushMergedShare(shares, kuSeen, pm[1], kpm ? kpm[1] : '', '');
       }
       var grouped = groupShareTabs(shares);
       var froms = grouped.froms.slice();
@@ -703,5 +889,5 @@ module.exports = function ftyPanRule(config) {
   if (!config || !PAN_ADAPTERS.includes(config.adapter) || !/^https?:\/\//.test(config.origin)) {
     throw Error('endpoint configuration required');
   }
-  return 'var cfg=' + JSON.stringify(config) + ';\nvar rule={title:' + JSON.stringify(config.adapter) + ',host:cfg.origin,homeUrl:"/",searchable:2,quickSearch:1,filterable:1,timeout:10000,预处理:"js:rule._install();",_install:' + installFtyPan.toString() + '};';
+  return 'var cfg=' + JSON.stringify(config) + ';\nvar rule={title:' + JSON.stringify(config.adapter) + ',host:cfg.origin,homeUrl:"/",searchable:2,quickSearch:1,filterable:1,timeout:15000,预处理:"js:rule._install();",_install:' + installFtyPan.toString() + '};';
 };
