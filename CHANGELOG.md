@@ -1,3 +1,10 @@
+## 2026-11-15 4K 网盘秒拉秒解析、6 路并发分片代理与同站死链回捞升级（Android TV 0.5.25 · Android 手机/平板 0.5.25 · iOS / iPadOS 0.5.31 · Windows 0.5.21 · macOS 0.5.18）
+
+- **4K 网盘原画 6 路并发分片回环代理与首尾秒拖（全端）**：Flutter 端（iOS / iPadOS / Windows / macOS）新增 `NetdiskRangeProxy`，Android 端（电视 / 手机与平板）升级 `LocalProxy` 分片预取引擎，默认启用 `6 路 × 1 MB` 滑动窗口并发分片拉流（最多缓存 `24 MB`），完整支持 `HEAD` 与 `HTTP 206 Partial Content` 字节区间请求、MKV/MP4 文件尾部索引秒跳（自动中止旧偏移预取，防止缓冲阻塞）及上游 `401` / `403` 签名过期实时刷新重连。
+- **MacCMS / 玩偶系 4K 网盘全站兼容与同站同名死链自动回捞（iOS / iPadOS / Windows / macOS）**：新增统一 `WoggNetdiskAdapter`（覆盖玩偶哥哥、木偶、蜡笔、剧透、快影、虎斑、蜗牛、多多、闪电、至臻、米粒、星剧社等 20+ 套 4K 弹幕/原盘站点）与 PanSou 四盘均衡聚合（易搜、米搜、盘搜、聚剧等，按网盘类型轮询配额防单一死链霸榜）；修复详情页真实下载容器提取避免抓偏推荐位，当主条目网盘分享全部取消或目录为空时，自动并发回捞同站其他画质/版本同名条目补齐可用剧集。
+- **夸克 / UC / 百度 / 阿里网盘分享解析加固与自愈能力提升（全端）**：补齐夸克与 UC 桌面/移动双 UA 自动切换及临时转存根目录空间清理兜底，修复百度网盘子目录原始 `sekey` 透传契约与直链解码兼容，对已取消分享、空目录及 RAR/7z/分卷压缩包资源给出精准中文诊断而非笼统报错。
+- **本机 CatPaw / DRPY 回环引擎防挂死自愈与抗 DNS 污染（全端）**：修复 iOS 前后台挂起后 Node / QuickJS 回环端口失活导致的 `Connection refused` 连锁报错，加入健康探活、退避重启与 6 Worker 并发搜索隔离；全端内置并发 RFC 8484 DoH（阿里 / 腾讯 DNSPod）清洁 IP 解析与 HTTPS SNI 保持重连，并补齐 Android 端 `Spider.client()` / `safeDns()` / `multiReq` 及 QuickJS `//bb`（`CATOP`）字节码与本地 `js-host` 公共库兜底。
+
 ## 2026-11-15 电视端 HDR10/HEVC 画质与交互焕新、全端播放器防误触锁屏及全新金属胶片 M 品牌图标（Android TV 0.5.24 · Android 手机/平板 0.5.24 · Android Lite 0.5.6 · iOS / iPadOS 0.5.27 · Windows 0.5.20 · macOS 0.5.17）
 
 - [Android 电视 / 盒子 0.5.24](docs/releases/android-tv-v0.5.24.md) · [Android 手机 / 平板 0.5.24](docs/releases/android-mobile-v0.5.24.md) · [Android Lite 0.5.6](docs/releases/android-lite-v0.5.6.md) · [iOS / iPadOS 0.5.27](docs/releases/ios-v0.5.27.md) · [Windows 0.5.20](docs/releases/windows-v0.5.20.md) · [macOS 0.5.17](docs/releases/macos-v0.5.17.md)
