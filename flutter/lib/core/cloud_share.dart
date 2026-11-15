@@ -447,7 +447,7 @@ class CloudShareClient {
                 // The share-directory API uses a smaller parameter set than
                 // the root browser API. Mixing those contracts can return -9
                 // for an otherwise accessible original directory.
-                'sekey': _decodeSekeyForQuery(sekey),
+                'sekey': sekey,
                 'uk': uk,
                 'shareid': shareId,
                 'dir': dir['path']!,

@@ -1331,7 +1331,7 @@ console.log(JSON.stringify({ s1, sEmpty, dHeal }));
     );
 
     test(
-      'CloudShareClient decodes percent-encoded Baidu randsk for subdirectory sekey and keeps visitor BAIDUID cookie',
+      'CloudShareClient preserves Baidu randsk for subdirectory sekey and keeps visitor BAIDUID cookie',
       () async {
         String? capturedSubdirSekey;
         String? capturedSubdirCookie;
@@ -1411,7 +1411,7 @@ console.log(JSON.stringify({ s1, sEmpty, dHeal }));
         );
         expect(eps, hasLength(1));
         expect(eps.single.name, 'S01E01.m2ts');
-        expect(capturedSubdirSekey, '6ZZ6CLeswJYd+Zlu4lOQ/b7E=');
+        expect(capturedSubdirSekey, '6ZZ6CLeswJYd%2BZlu4lOQ%2Fb7E%3D');
         expect(capturedSubdirCookie, contains('BAIDUID=VISITOR123:FG=1'));
         expect(capturedSubdirCookie, contains('BDCLND=6ZZ6CLeswJYd%2BZlu4lOQ%2Fb7E%3D'));
       },
