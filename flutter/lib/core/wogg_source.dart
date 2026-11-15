@@ -656,7 +656,9 @@ class WoggSource {
       final allDeadOrEmpty = errors.isNotEmpty &&
           errors.every((e) {
             final msg = e['message'] ?? '';
-            return msg.contains('目录为空') || msg.contains('已取消或已失效');
+            return msg.contains('目录为空') ||
+                msg.contains('已取消或已失效') ||
+                msg.contains('仅含压缩包');
           });
       if (isUpcoming && (index == 0 || allDeadOrEmpty)) {
         throw const FormatException('该影片暂未上线（敬请期待），原站暂无可用正片分享');
@@ -683,6 +685,9 @@ class WoggSource {
     if (error is _EmptyShareException) return '该网盘分享目录为空';
     if (error is TimeoutException) return '该备用分享响应超时，已跳过';
     final text = error.toString();
+    if (text.contains('仅含压缩包')) {
+      return '该网盘分享内仅含压缩包，暂无可直播视频';
+    }
     if (text.contains('已取消或已失效') || text.contains('网盘请求失败（404）')) {
       return '该网盘分享链接已取消或已失效';
     }

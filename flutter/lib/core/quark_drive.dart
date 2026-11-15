@@ -282,8 +282,17 @@ class QuarkDriveClient {
       final token =
           await _shareToken(client, pwdId, passcode, isCancelled: isCancelled);
       var incomplete = false;
+      var archiveOnly = false;
       final files = await _walkShare(client, pwdId, token,
-          isCancelled: isCancelled, onListingWarning: () => incomplete = true);
+          isCancelled: isCancelled,
+          onListingWarning: () => incomplete = true,
+          onArchiveSeen: () => archiveOnly = true);
+      if (files.isEmpty && archiveOnly) {
+        throw const QuarkDriveException(
+          'archive_only',
+          '原夸克分享内仅含压缩包（防和谐打包），暂无可直播视频',
+        );
+      }
       return [
         for (final entry in files)
           CmsEpisode(
@@ -330,6 +339,7 @@ class QuarkDriveClient {
     String? target,
     bool Function()? isCancelled,
     void Function()? onListingWarning,
+    void Function()? onArchiveSeen,
   }) async {
     const pageSize = 200;
     final files = <({String parent, String folder, Map row})>[];
@@ -414,6 +424,11 @@ class QuarkDriveClient {
               files.add((parent: parent, folder: folder, row: row));
             }
             if (target != null) return true;
+          } else if (RegExp(
+            r'\.(?:zip|rar|7z|tar|gz|001|z01)$',
+            caseSensitive: false,
+          ).hasMatch(row['file_name'])) {
+            onArchiveSeen?.call();
           }
         }
         if (advertisedTotal != null && fetched > advertisedTotal) {
@@ -481,10 +496,6 @@ class QuarkDriveClient {
         await response.stream.listen((_) {}).cancel();
         _checkCancelled(isCancelled);
       }
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        await response.stream.listen((_) {}).cancel();
-        throw const QuarkDriveException('unavailable', '夸克分享暂不可用，请检查分享状态');
-      }
       final bytes = <int>[];
       await for (final part in response.stream.timeout(_timeout)) {
         _checkCancelled(isCancelled);
@@ -493,14 +504,42 @@ class QuarkDriveClient {
         }
         bytes.addAll(part);
       }
-      final value = jsonDecode(utf8.decode(bytes));
-      if (value is! Map<String, dynamic> ||
-          _integer(value['code']) != 0 ||
-          (_integer(value['status']) != null &&
-              _integer(value['status']) != 200)) {
+      dynamic decoded;
+      if (bytes.isNotEmpty) {
+        try {
+          decoded = jsonDecode(utf8.decode(bytes));
+        } on FormatException {
+          if (response.statusCode >= 200 && response.statusCode < 300) rethrow;
+        }
+      }
+      if (decoded is Map) {
+        final code = _integer(decoded['code']);
+        final status = _integer(decoded['status']);
+        final msg = '${decoded['message'] ?? ''}';
+        if (const {41006, 41010, 41011, 41012}.contains(code) ||
+            status == 404 ||
+            RegExp(r'已失效|已取消|不存在|已删除').hasMatch(msg)) {
+          throw const QuarkDriveException('share_expired', '原夸克分享链接已取消或已失效');
+        }
+        if (const {41008, 41009}.contains(code) ||
+            RegExp(r'提取码').hasMatch(msg)) {
+          throw const QuarkDriveException(
+              'invalid_passcode', '原夸克分享需要提取码或提取码错误');
+        }
+      }
+      if (response.statusCode == 404) {
+        throw const QuarkDriveException('share_expired', '原夸克分享链接已取消或已失效');
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw const QuarkDriveException('unavailable', '夸克分享暂不可用，请检查分享状态');
+      }
+      if (decoded is! Map<String, dynamic> ||
+          _integer(decoded['code']) != 0 ||
+          (_integer(decoded['status']) != null &&
+              _integer(decoded['status']) != 200)) {
         throw const QuarkDriveException('unavailable', '夸克分享已失效或需要提取码');
       }
-      return value;
+      return decoded;
     } on TimeoutException {
       throw const QuarkDriveException('unavailable', '夸克分享读取超时，请稍后重试');
     } on http.ClientException {

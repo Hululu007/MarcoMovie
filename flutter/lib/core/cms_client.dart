@@ -1870,6 +1870,9 @@ class CmsClient {
         } else if (errorsByShare.containsKey(rawShare)) {
           final msg = '${line.name}：${errorsByShare[rawShare]}';
           if (!warnings.contains(msg)) warnings.add(msg);
+        } else if (resolved != null && resolved.isEmpty) {
+          final msg = '${line.name}：该网盘分享目录为空，暂无可播放视频';
+          if (!warnings.contains(msg)) warnings.add(msg);
         }
       }
       if (eps.isNotEmpty) {

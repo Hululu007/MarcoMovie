@@ -15,7 +15,7 @@ function installWexPan() {
   }
   var lastSoftChallenge = false;
   function hasVodMarkup(t) {
-    return /(?:\/voddetail\/|\/vodplay\/|\/vod\/detail\/|module-item|vod-item|vodlist|myui-vodlist|stui-vodlist|video-info|content-list|posts-item|"vod_id"\s*:|pan\.quark\.cn|drive\.uc\.cn|pan\.baidu\.com|aliyundrive\.com|alipan\.com)/i.test(t);
+    return /(?:\/voddetail\/|\/vodplay\/|\/vod\/detail\/|\/vod\/type\/id\/|\/vod\/show\/id\/|\/vodshow\/|module-item|module-search|vod-item|vodlist|myui-vodlist|stui-vodlist|video-info|content-list|posts-item|"vod_id"\s*:|<title>[^<]*搜索结果|pan\.quark\.cn|drive\.uc\.cn|pan\.baidu\.com|aliyundrive\.com|alipan\.com)/i.test(t);
   }
   function isChallengeBody(body, statusCode) {
     var t = str(body);
@@ -269,6 +269,7 @@ function installWexPan() {
         return { host: h, body: r.body, headers: r.headers, code: r.code };
       }
     }
+    if (opts && opts.softFail) return null;
     fail(sawChallenge ? 'drpy_verification_required' : 'drpy_source_unavailable');
   }
   function isSupportedCloudShare(u) {
@@ -323,7 +324,8 @@ function installWexPan() {
     var clipNodes = pdfa(html, '[data-clipboard-text], [data-copy]');
     for (var i = 0; i < clipNodes.length; i++) {
       var c = clipNodes[i];
-      var clip = pdfh(c, '[data-clipboard-text]&&data-clipboard-text') || pdfh(c, '[data-copy]&&data-copy');
+      var attrM = /\bdata-(?:clipboard-text|copy)=["']([^"']+)["']/i.exec(c);
+      var clip = (attrM && attrM[1]) || pdfh(c, '[data-clipboard-text]&&data-clipboard-text') || pdfh(c, '[data-copy]&&data-copy');
       var lbl = pdfh(c, 'h4&&Text') || pdfh(c, 'span&&Text') || stripHtml(c);
       add(clip, '', lbl);
     }
@@ -439,6 +441,18 @@ function installWexPan() {
       }
       return out;
     }
+    function mpNormalizeDetailHref(rawHref) {
+      var h = str(rawHref).trim();
+      if (!h) return '';
+      var m1 = /^(https?:\/\/[^/?#]+)?(\/index\.php)?\/vod\/play\/id\/(\d+)\b[^"'?#]*/i.exec(h);
+      if (m1) return (m1[1] || '') + (m1[2] || '/index.php') + '/vod/detail/id/' + m1[3] + '.html';
+      var m2 = /^(https?:\/\/[^/?#]+)?(\/index\.php)?\/vodplay\/(\d+)-\d+-\d+\.html\b/i.exec(h);
+      if (m2) return (m2[1] || '') + (m2[2] || '') + '/voddetail/' + m2[3] + '.html';
+      return h;
+    }
+    function mpCleanCardTitle(rawTitle) {
+      return stripHtml(rawTitle).replace(/^(?:立刻播放|立即播放)\s*/, '').trim();
+    }
     function mpParseCards(html) {
       var text = str(html);
       if (text.length > 150000) {
@@ -449,16 +463,32 @@ function installWexPan() {
       var out = [], seen = {};
       for (var i = 0; i < cards.length; i++) {
         var c = cards[i];
-        var href = pdfh(c, 'a&&href');
+        var rawHref = pdfh(c, 'a[href*="/vod/detail/"]&&href') ||
+          pdfh(c, 'a[href*="/voddetail/"]&&href') ||
+          pdfh(c, '.video-info-header h3 a&&href') ||
+          pdfh(c, 'h3 a&&href') ||
+          pdfh(c, '.module-item-pic a&&href') ||
+          pdfh(c, '.module-item-title a&&href') ||
+          pdfh(c, 'a&&href');
+        var href = mpNormalizeDetailHref(rawHref);
         if (!href || seen[href]) continue;
-        var name = stripHtml(pdfh(c, 'a&&title') || pdfh(c, 'img&&alt') || pdfh(c, 'h3 a&&Text') || pdfh(c, '.module-item-title&&Text'));
+        var name = mpCleanCardTitle(
+          pdfh(c, '.video-info-header h3 a&&Text') ||
+          pdfh(c, 'h3 a&&Text') ||
+          pdfh(c, '.module-item-title a&&Text') ||
+          pdfh(c, '.module-item-title&&Text') ||
+          pdfh(c, 'a[href*="/vod/detail/"]&&title') ||
+          pdfh(c, 'a[href*="/voddetail/"]&&title') ||
+          pdfh(c, 'img&&alt') ||
+          pdfh(c, 'a&&title')
+        );
         if (!name) continue;
         seen[href] = true;
         out.push({
           vod_id: href,
           vod_name: name,
           vod_pic: safePic(pdfh(c, 'img&&data-src') || pdfh(c, 'img&&data-original') || pdfh(c, 'img&&src'), mpState.current + '/'),
-          vod_remarks: stripHtml(pdfh(c, '.module-item-text&&Text') || pdfh(c, '.video-serial&&Text'))
+          vod_remarks: stripHtml(pdfh(c, '.video-serial&&Text') || pdfh(c, '.module-item-note&&Text') || pdfh(c, '.module-item-text&&Text'))
         });
       }
       return out;
@@ -549,20 +579,22 @@ function installWexPan() {
         : ['/index.php/vod/search/page/' + page + '/wd/' + encodeURIComponent(kw) + '.html', '/index.php/vodsearch/' + encodeURIComponent(kw) + '----------' + page + '---.html'];
       var list = [];
       for (var i = 0; i < paths.length && !list.length; i++) {
-        try {
-          var sr = reqFromHosts(mpState, paths[i], { timeout: 8500 });
-          if (sr && str(sr.body)) list = mpParseCards(sr.body);
-        } catch (_) {}
+        var sr = reqFromHosts(mpState, paths[i], { timeout: 8500, softFail: i > 0 });
+        if (sr && str(sr.body)) {
+          list = mpParseCards(sr.body);
+          if (list.length || /<title>[^<]*搜索/i.test(sr.body)) break;
+        }
       }
       return { page: page, pagecount: list.length >= 10 ? page + 1 : page, limit: 20, total: list.length, list: list };
     };
     __drpy.detail = function (vid) {
-      var vPath = /^\d+$/.test(str(vid).trim()) ? ('/index.php/vod/detail/id/' + str(vid).trim() + '.html') : str(vid);
+      var rawVid = str(vid).trim();
+      var vPath = /^\d+$/.test(rawVid) ? ('/index.php/vod/detail/id/' + rawVid + '.html') : mpNormalizeDetailHref(rawVid);
       var html = mpHtml(vPath);
       var tabs = groupShareTabs(extractSharesFromHtml(html));
       return {
         list: [{
-          vod_id: str(vid),
+          vod_id: vPath || rawVid,
           vod_name: stripHtml(pdfh(html, 'h1.page-title&&Text') || pdfh(html, '.video-info-header h1&&Text') || pdfh(html, 'h1&&Text')),
           vod_pic: safePic(pdfh(html, '.module-item-pic img&&data-src') || pdfh(html, '.lazyload&&data-src') || pdfh(html, 'img&&src'), mpState.current + '/'),
           vod_content: stripHtml(pdfh(html, '.video-info-content&&Text') || pdfh(html, '.vod_content&&Text')),
@@ -845,7 +877,7 @@ function installWexPan() {
         var it = items[i];
         var href = pdfh(it, 'a[href*="/voddetail/"]&&href') || pdfh(it, 'a&&href');
         if (!href || seen[href]) continue;
-        var name = stripHtml(pdfh(it, 'a&&title') || pdfh(it, 'img&&alt') || pdfh(it, '.vod-name&&Text'));
+        var name = stripHtml(pdfh(it, '.vod-name&&Text') || pdfh(it, 'a[href*="/voddetail/"]&&title') || pdfh(it, 'img&&alt') || pdfh(it, 'a&&title'));
         if (!name) continue;
         seen[href] = true;
         out.push({
@@ -1019,7 +1051,7 @@ function installWexPan() {
       for (var i = 0; i < rows.length; i++) {
         var r = rows[i];
         var href = pdfh(r, 'a&&href');
-        var name = stripHtml(pdfh(r, 'a&&title') || pdfh(r, 'img&&alt') || pdfh(r, 'h3&&Text'));
+        var name = stripHtml(pdfh(r, 'h3&&Text') || pdfh(r, 'img&&alt') || pdfh(r, 'a&&title'));
         if (!href || !name) continue;
         out.push({
           vod_id: href,

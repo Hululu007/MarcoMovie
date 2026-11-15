@@ -707,6 +707,7 @@ class WoggNetdiskAdapter {
             a,
             {
               'module-item',
+              'module-search-item',
               'stui-vodlist__box',
               'myui-vodlist__box',
               'hl-list-item',
@@ -734,7 +735,7 @@ class WoggNetdiskAdapter {
         poster: poster.isEmpty ? '' : base.resolve(poster).toString(),
         remarks: card
                 .querySelector(
-                  '.module-item-note, .pic-text, .remarks, .hl-lc-1',
+                  '.module-item-note, .video-serial, .pic-text, .remarks, .hl-lc-1',
                 )
                 ?.text
                 .trim() ??

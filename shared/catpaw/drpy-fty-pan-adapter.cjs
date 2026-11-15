@@ -506,18 +506,29 @@ function installFtyPan() {
       return kuActiveSite;
     };
 
+    var kuNormalizeDetailHref = function (rawHref) {
+      var h = str(rawHref).trim();
+      if (!h) return '';
+      var m1 = /^(https?:\/\/[^/?#]+)?(\/index\.php)?\/vod\/play\/id\/(\d+)\b[^"'?#]*/i.exec(h);
+      if (m1) return (m1[1] || '') + (m1[2] || '/index.php') + '/vod/detail/id/' + m1[3] + '.html';
+      var m2 = /^(https?:\/\/[^/?#]+)?(\/index\.php)?\/vodplay\/(\d+)-\d+-\d+\.html\b/i.exec(h);
+      if (m2) return (m2[1] || '') + (m2[2] || '') + '/voddetail/' + m2[3] + '.html';
+      return h;
+    };
+
     var kuParseModuleItems = function (html, site) {
       var out = [];
       var cards = pdfa(html, 'div.module-items a.module-poster-item');
       if (!cards.length) cards = pdfa(html, 'div.module-item');
       for (var i = 0; i < cards.length; i++) {
         var c = cards[i];
-        var href = pdfh(c, 'a&&href');
+        var href = pdfh(c, 'a[href*="/vod/detail/"]&&href') || pdfh(c, 'a[href*="/voddetail/"]&&href') || pdfh(c, 'a&&href');
         if (!href && /^\s*<a\b/i.test(c)) {
           var hm = /\bhref=["']([^"']+)["']/i.exec(c);
           if (hm) href = hm[1];
         }
-        var title = stripHtml(pdfh(c, 'a&&title') || pdfh(c, '.module-poster-item-title&&Text') || pdfh(c, 'img&&alt'));
+        href = kuNormalizeDetailHref(href);
+        var title = stripHtml(pdfh(c, '.module-poster-item-title&&Text') || pdfh(c, '.module-item-title&&Text') || pdfh(c, 'img&&alt') || pdfh(c, 'a&&title')).replace(/^(?:立刻播放|立即播放)\s*/, '').trim();
         if (!href || !title) continue;
         var pic = safePic(pdfh(c, 'img&&data-original') || pdfh(c, 'img&&data-src') || pdfh(c, 'img&&src'), site + '/');
         var rem = stripHtml(pdfh(c, '.module-item-note&&Text') || pdfh(c, '.module-item-caption&&Text'));
@@ -571,8 +582,15 @@ function installFtyPan() {
           var out = [];
           for (var i = 0; i < items.length; i++) {
             var it = items[i];
-            var href = pdfh(it, 'a.video-serial&&href') || pdfh(it, 'h3 a&&href') || pdfh(it, 'a.module-card-item-poster&&href') || pdfh(it, 'a&&href');
-            var title = stripHtml(pdfh(it, 'h3 a&&Text') || pdfh(it, '.module-card-item-title a&&Text') || pdfh(it, 'img&&alt') || pdfh(it, 'a&&title'));
+            var href = kuNormalizeDetailHref(
+              pdfh(it, 'a[href*="/vod/detail/"]&&href') ||
+              pdfh(it, 'a[href*="/voddetail/"]&&href') ||
+              pdfh(it, 'h3 a&&href') ||
+              pdfh(it, 'a.module-card-item-poster&&href') ||
+              pdfh(it, 'a.video-serial&&href') ||
+              pdfh(it, 'a&&href')
+            );
+            var title = stripHtml(pdfh(it, 'h3 a&&Text') || pdfh(it, '.module-card-item-title a&&Text') || pdfh(it, 'img&&alt') || pdfh(it, 'a&&title')).replace(/^(?:立刻播放|立即播放)\s*/, '').trim();
             if (!href || !title) continue;
             var pic = safePic(pdfh(it, 'img&&data-src') || pdfh(it, 'img&&data-original') || pdfh(it, 'img&&src'), site + '/');
             var rem = stripHtml(pdfh(it, 'a.video-serial&&Text') || pdfh(it, '.module-item-note&&Text'));
@@ -596,6 +614,7 @@ function installFtyPan() {
       var site = str(info.site || '') || kuPickSite();
       var href = str(info.href || info.url || id);
       if (/^\d+$/.test(href)) href = '/' + kuDetailPath + href + '.html';
+      else href = kuNormalizeDetailHref(href);
       var detailUrl = address(href, site + '/').url;
       var html = httpReq(detailUrl, { headers: { 'User-Agent': ua, Referer: site + '/' }, timeout: 7000 }).body;
 

@@ -158,12 +158,20 @@ class CloudShareClient {
   }
 
   Future<List<_CloudFile>> _ucFiles(_Share share) async {
-    final token = await _json(
-        Uri.https(
-            'pc-api.uc.cn', '/1/clouddrive/share/sharepage/token', _ucQuery),
-        provider: 'uc',
-        budget: share.budget,
-        body: {'pwd_id': share.id, 'passcode': share.passcode});
+    late final Map token;
+    try {
+      token = await _json(
+          Uri.https(
+              'pc-api.uc.cn', '/1/clouddrive/share/sharepage/token', _ucQuery),
+          provider: 'uc',
+          budget: share.budget,
+          body: {'pwd_id': share.id, 'passcode': share.passcode});
+    } on _CloudHttpException catch (error) {
+      if (error.statusCode == 404) {
+        throw const FormatException('原 UC 分享链接已取消或已失效');
+      }
+      rethrow;
+    }
     _checkUc(token);
     final stoken = _string(_map(token['data'])['stoken']);
     if (stoken.isEmpty) throw const FormatException('UC 分享未返回访问凭据');
@@ -805,8 +813,11 @@ class CloudShareClient {
     final status = _integer(result['status']);
     if ((result.containsKey('code') && code != 0) ||
         (result.containsKey('status') && status != 200)) {
-      if (code == 41011 || status == 404) {
+      if (const [41006, 41010, 41011, 41012].contains(code) || status == 404) {
         throw const FormatException('原 UC 分享链接已取消或已失效');
+      }
+      if (const [41008, 41009].contains(code)) {
+        throw const FormatException('原 UC 分享需要提取码或提取码错误');
       }
       throw const FormatException('UC 分享访问失败或已失效，请检查提取码和分享状态');
     }
