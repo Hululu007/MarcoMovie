@@ -17,10 +17,10 @@ void main() {
     });
 
     test('Adversarial 1: Server closes socket cleanly on expiration and port is immediately re-bindable', () async {
-      // 1. Start LanSyncServer with very short TTL (150ms)
+      // 1. Start LanSyncServer with short TTL (800ms) so cold VM HTTP init on CI never races expiry
       final server = await LanSyncServer.start(
         storage,
-        ttl: const Duration(milliseconds: 150),
+        ttl: const Duration(milliseconds: 800),
         bindAddress: InternetAddress.loopbackIPv4,
       );
       final assignedPort = server.port;
@@ -31,8 +31,8 @@ void main() {
       final liveResp = await http.get(Uri.parse(server.addressForHost('127.0.0.1')));
       expect(liveResp.statusCode, 200);
 
-      // Wait for expiration timer to trigger (250ms > 150ms)
-      await Future<void>.delayed(const Duration(milliseconds: 250));
+      // Wait for expiration timer to trigger (1000ms > 800ms)
+      await Future<void>.delayed(const Duration(milliseconds: 1000));
       expect(server.isClosed, isTrue);
       expect(server.isExpired, isTrue);
 
