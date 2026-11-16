@@ -240,16 +240,6 @@ jobs:
           Compress-Archive -Path "$releaseDir/*" -DestinationPath "dist/$zipName" -Force
           $hash = (Get-FileHash "dist/$zipName" -Algorithm SHA256).Hash.ToLower()
           [System.IO.File]::WriteAllText("$PWD/dist/$zipName.sha256", "$hash  $zipName`n", [System.Text.Encoding]::ASCII)
-          $setupBase = "MarcoMovie-$version-windows-setup"
-          $setupName = "$setupBase.exe"
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            choco install innosetup -y --no-progress
-          }
-          & $iscc "/DAppVersion=$version" "/DReleaseDir=$PWD/$releaseDir" "/DIconFile=$PWD/windows/runner/resources/app_icon.ico" "/DPackageDir=$PWD/dist" "../scripts/windows_installer.iss"
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          $setupHash = (Get-FileHash "dist/$setupName" -Algorithm SHA256).Hash.ToLower()
-          [System.IO.File]::WriteAllText("$PWD/dist/$setupName.sha256", "$setupHash  $setupName`n", [System.Text.Encoding]::ASCII)
           python ../scripts/platform_package_names.py --folder dist --platform windows --version "$version"
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - uses: actions/upload-artifact@v4

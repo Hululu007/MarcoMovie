@@ -248,7 +248,7 @@ class PackageTests(unittest.TestCase):
         self.assertNotIn('a' * 64, page.split('id="changelog"', 1)[1])
         self.assertNotIn('公共内容守卫', page)
 
-    def test_windows_chinese_installer_filters_isl_and_guards_duplicate_desktop_shortcut(self):
+    def test_windows_chinese_installer_preserves_scope_and_refreshes_existing_shortcut(self):
         import platform_package_names as ppn
         default_isl = (
             '[LangOptions]\nLanguageName=English\n\n'
@@ -268,10 +268,15 @@ class PackageTests(unittest.TestCase):
         iss = ppn.windows_installer_script('0.5.18', 'MarcoMovie-0.5.18-windows-setup')
         self.assertIn('AppId={{8E9A5D2B-4F31-4C19-9A62-7B8D1E3F4A50}', iss)
         self.assertIn('UsePreviousAppDir=yes', iss)
-        self.assertIn('UsePreviousTasks=no', iss)
+        self.assertIn('UsePreviousTasks=yes', iss)
+        self.assertIn('UsePreviousPrivileges=yes', iss)
         self.assertIn('ShowLanguageDialog=no', iss)
         self.assertIn('创建桌面快捷方式(&D)', iss)
-        self.assertIn('Check: ShouldOfferDesktopIcon', iss)
+        self.assertIn('Check: RefreshExistingDesktopShortcut', iss)
+        self.assertIn('IconFilename: "{app}\\MarcoMovie-0.5.18.ico"', iss)
+        self.assertIn("not WizardIsTaskSelected('desktopicon')", iss)
+        self.assertNotIn('DeleteFile(', iss)
+        self.assertNotIn('{#', iss)
         self.assertIn('CurStepChanged(CurStep: TSetupStep)', iss)
 
 

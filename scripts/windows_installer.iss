@@ -19,10 +19,14 @@ UninstallDisplayIcon={app}\MarcoMovie-{#AppVersion}.ico
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+ShowLanguageDialog=no
 CloseApplications=force
 CloseApplicationsFilter=*.exe,*.dll
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+
+[Languages]
+Name: "chinesesimplified"; MessagesFile: "compiler:Default.isl,{#ChineseMessagesFile}"
 
 [InstallDelete]
 Type: filesandordirs; Name: "{app}\data\flutter_assets"
@@ -31,7 +35,7 @@ Type: files; Name: "{app}\*.dll"
 Type: files; Name: "{app}\marco_movie.exe"
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"
+Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescription: "附加快捷方式："
 
 [Files]
 Source: "{#ReleaseDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -43,7 +47,7 @@ Name: "{autodesktop}\Marco Movie"; Filename: "{app}\marco_movie.exe"; WorkingDir
 Name: "{autodesktop}\Marco Movie"; Filename: "{app}\marco_movie.exe"; WorkingDir: "{app}"; IconFilename: "{app}\MarcoMovie-{#AppVersion}.ico"; Check: RefreshExistingDesktopShortcut
 
 [Run]
-Filename: "{app}\marco_movie.exe"; Description: "Launch Marco Movie"; WorkingDir: "{app}"; Flags: nowait postinstall
+Filename: "{app}\marco_movie.exe"; Description: "立即启动 Marco Movie"; WorkingDir: "{app}"; Flags: nowait postinstall
 
 [Code]
 function RefreshExistingDesktopShortcut: Boolean;

@@ -58,88 +58,22 @@ def filter_isl_messages(chinese_isl_text, default_isl_text):
 
 
 def windows_installer_script(version, setup_base, isl_rel_path=r'installer\ChineseSimplified.build.isl'):
-    return f"""[Setup]
-AppId={{{{8E9A5D2B-4F31-4C19-9A62-7B8D1E3F4A50}}
-AppName=Marco Movie
-AppVersion={version}
-AppPublisher=Pilipala
-DefaultDirName={{autopf}}\\Marco Movie
-DefaultGroupName=Marco Movie
-UsePreviousAppDir=yes
-UsePreviousTasks=no
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
-OutputDir=dist
-OutputBaseFilename={setup_base}
-SetupIconFile=windows\\runner\\resources\\app_icon.ico
-UninstallDisplayIcon={{app}}\\marco_movie.exe
-Compression=lzma2
-SolidCompression=yes
-WizardStyle=modern
-ShowLanguageDialog=no
-CloseApplications=force
-CloseApplicationsFilter=*.exe,*.dll
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
-
-[Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Default.isl,{isl_rel_path}"
-
-[InstallDelete]
-Type: filesandordirs; Name: "{{app}}\\data\\flutter_assets"
-Type: files; Name: "{{app}}\\data\\app.so"
-Type: files; Name: "{{app}}\\*.dll"
-Type: files; Name: "{{app}}\\marco_movie.exe"
-
-[Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescription: "附加快捷方式："; Check: ShouldOfferDesktopIcon
-
-[Files]
-Source: "build\\windows\\x64\\runner\\Release\\*"; DestDir: "{{app}}"; Flags: ignoreversion recursesubdirs createallsubdirs
-
-[Icons]
-Name: "{{group}}\\Marco Movie"; Filename: "{{app}}\\marco_movie.exe"; WorkingDir: "{{app}}"
-Name: "{{autodesktop}}\\Marco Movie"; Filename: "{{app}}\\marco_movie.exe"; WorkingDir: "{{app}}"; Tasks: desktopicon; Check: ShouldOfferDesktopIcon
-
-[Run]
-Filename: "{{app}}\\marco_movie.exe"; Description: "立即启动 Marco Movie"; WorkingDir: "{{app}}"; Flags: nowait postinstall
-
-[Code]
-function IsUpgradeInstall(): Boolean;
-var
-  UninstallKey: String;
-begin
-  UninstallKey := 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{{8E9A5D2B-4F31-4C19-9A62-7B8D1E3F4A50}}_is1';
-  Result := RegKeyExists(HKCU, UninstallKey) or RegKeyExists(HKLM, UninstallKey) or
-            FileExists(ExpandConstant('{{autopf}}\\Marco Movie\\marco_movie.exe'));
-end;
-
-function HasExistingDesktopIcon(): Boolean;
-begin
-  Result := FileExists(ExpandConstant('{{userdesktop}}\\Marco Movie.lnk')) or
-            FileExists(ExpandConstant('{{commondesktop}}\\Marco Movie.lnk'));
-end;
-
-function ShouldOfferDesktopIcon(): Boolean;
-begin
-  Result := (not IsUpgradeInstall()) and (not HasExistingDesktopIcon());
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-var
-  UserLnk, CommonLnk: String;
-begin
-  if CurStep = ssPostInstall then
-  begin
-    UserLnk := ExpandConstant('{{userdesktop}}\\Marco Movie.lnk');
-    CommonLnk := ExpandConstant('{{commondesktop}}\\Marco Movie.lnk');
-    if FileExists(UserLnk) and FileExists(CommonLnk) then
-    begin
-      DeleteFile(UserLnk);
-    end;
-  end;
-end;
-"""
+    """Render the single installer template used by packaging and its preflight."""
+    if not re.fullmatch(r'\d+\.\d+\.\d+(?:-[A-Za-z0-9.]+)?', version):
+        raise ValueError('Invalid package version')
+    if setup_base != f'MarcoMovie-{version}-windows-setup':
+        raise ValueError('Installer filename must match its version')
+    template = Path(__file__).with_name('windows_installer.iss').read_text(encoding='utf-8')
+    values = {
+        'AppVersion': version,
+        'ReleaseDir': r'build\windows\x64\runner\Release',
+        'IconFile': r'windows\runner\resources\app_icon.ico',
+        'PackageDir': 'dist',
+        'ChineseMessagesFile': isl_rel_path,
+    }
+    for name, value in values.items():
+        template = template.replace('{#' + name + '}', value)
+    return template
 
 
 def find_inno_setup_compiler():
