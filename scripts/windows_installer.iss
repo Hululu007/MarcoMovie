@@ -52,7 +52,9 @@ begin
     FileExists(ExpandConstant('{autodesktop}\Marco Movie.lnk'));
 end;
 
-procedure SHChangeNotify(wEventId: Integer; uFlags: Cardinal; dwItem1, dwItem2: NativeInt);
+; Inno Setup 6 uses a 32-bit setup process, including for x64 applications.
+; Both pointer arguments are null; Integer keeps this compatible with its Pascal runtime.
+procedure SHChangeNotify(wEventId: Integer; uFlags: Cardinal; dwItem1, dwItem2: Integer);
   external 'SHChangeNotify@shell32.dll stdcall';
 
 procedure CurStepChanged(CurStep: TSetupStep);
