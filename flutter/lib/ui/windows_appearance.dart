@@ -537,13 +537,13 @@ class WinPanel extends StatelessWidget {
                     ? (isDark
                         ? const Color(0xFF29364A)
                         : const Color(0xFFF0F1F5))
-                    : dark
-                        ? const Color(0xCC1C293E)
+                    : isDark
+                        ? const Color(0xFF1C293E).withValues(
+                            alpha:
+                                .80 + .08 * GlassworkBackdrop.intensity.value)
                         : Colors.white.withValues(
-                            alpha: isDark
-                                ? .16 + .12 * GlassworkBackdrop.intensity.value
-                                : .48 +
-                                    .12 * GlassworkBackdrop.intensity.value),
+                            alpha:
+                                .48 + .12 * GlassworkBackdrop.intensity.value),
                 borderRadius: BorderRadius.circular(radius),
                 border: Border.all(
                     color: Colors.white.withValues(alpha: isDark ? .18 : .57)),

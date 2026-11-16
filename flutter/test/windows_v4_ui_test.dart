@@ -255,6 +255,43 @@ void main() {
     }
   });
 
+  testWidgets('dark panels retain readable text over bright photographs',
+      (tester) async {
+    final a = WindowsAppearance(Directory.systemTemp)..preview(theme: 'dark');
+    final old = GlassworkBackdrop.reduceTransparency.value;
+    try {
+      GlassworkBackdrop.reduceTransparency.value = false;
+      late Color primary;
+      late Color secondary;
+      await tester.pumpWidget(MaterialApp(
+          home: WindowsAppearanceScope(
+              controller: a,
+              child: Builder(builder: (context) {
+                primary = winInk(context);
+                secondary = winMuted(context);
+                return const Scaffold(body: WinPanel(child: Text('Panel')));
+              }))));
+      final color = (tester
+              .widgetList<Container>(find.byType(Container))
+              .firstWhere((w) => w.decoration is BoxDecoration)
+              .decoration as BoxDecoration)
+          .color!;
+      for (final background in [Colors.white, Colors.black]) {
+        final surface = Color.alphaBlend(color, background);
+        for (final text in [primary, secondary]) {
+          final rendered = Color.alphaBlend(text, surface);
+          final ratio = (rendered.computeLuminance() + .05) /
+              (surface.computeLuminance() + .05);
+          expect(ratio, greaterThanOrEqualTo(4.5));
+        }
+      }
+      await tester.pumpWidget(const SizedBox.shrink());
+    } finally {
+      GlassworkBackdrop.reduceTransparency.value = old;
+      a.dispose();
+    }
+  });
+
   for (final size in [const Size(720, 520), const Size(1280, 800)]) {
     testWidgets('Windows navigation and all settings fit $size',
         (tester) async {

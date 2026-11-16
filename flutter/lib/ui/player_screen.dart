@@ -2401,8 +2401,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     showAppleModalSheet<void>(context: context, title: '音量', maxWidth: 420,
       builder: (_) => StreamBuilder<double>(stream: _player.stream.volume,
         initialData: _player.state.volume, builder: (context, snapshot) =>
-          Slider(value: (snapshot.data ?? 100).clamp(0, 100), max: 100,
-            label: '${(snapshot.data ?? 100).round()}%', onChanged: _player.setVolume)));
+          Padding(padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text('${(snapshot.data ?? 100).round()}%',
+                style: const TextStyle(color: Colors.white)),
+              Slider(value: (snapshot.data ?? 100).clamp(0, 100), max: 100,
+                label: '${(snapshot.data ?? 100).round()}%', onChanged: _player.setVolume),
+            ]))));
   }
 
   Widget _buildWindowsChrome(BuildContext context) {

@@ -6588,7 +6588,22 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null)
-          const WindowsAppearanceSettings()
+          AppleGroupedSection(
+            header: 'Windows 背景与外观',
+            children: [AppleGroupedTile(
+              icon: CupertinoIcons.photo,
+              iconBgColor: AppleColors.systemPurple,
+              title: '背景与外观',
+              subtitle: '选择柔光预设、导入照片或调整界面明暗',
+              onTap: () {
+                Navigator.of(context).pop();
+                _updateWindowsState(() {
+                  _windowsSettings = '背景与外观';
+                  _windowsPage = 'settings';
+                });
+              },
+            )],
+          )
         else AppleGroupedSection(
           header: '壁纸与动态流光氛围',
           footer: '开启呼吸式动态流光后，背景极光色块将以约 8 秒周期柔和呼吸律动，并透过液态玻璃产生实时折射。',

@@ -127,15 +127,20 @@ extension _WindowsShell on _AdaptiveShellState {
   Widget _windowsHeading(String title, {List<Widget> actions = const []}) =>
       Padding(
         padding: const EdgeInsets.only(bottom: 24),
-        child: Row(children: [
-          Expanded(
-              child: Text(title,
-                  style: TextStyle(
-                      color: winInk(context),
-                      fontSize: 30,
-                      fontWeight: FontWeight.w600))),
-          Flexible(child: Wrap(alignment: WrapAlignment.end, children: actions))
-        ]),
+        child: LayoutBuilder(
+            builder: (context, constraints) => Row(children: [
+                  Expanded(
+                      child: Text(title,
+                          style: TextStyle(
+                              color: winInk(context),
+                              fontSize: 30,
+                              fontWeight: FontWeight.w600))),
+                  ConstrainedBox(
+                      constraints:
+                          BoxConstraints(maxWidth: constraints.maxWidth * .58),
+                      child:
+                          Wrap(alignment: WrapAlignment.end, children: actions))
+                ])),
       );
 
   Widget _windowsEmpty(String title, String explanation,
