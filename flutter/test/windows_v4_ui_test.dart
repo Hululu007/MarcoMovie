@@ -666,6 +666,13 @@ void main() {
       expect(find.byType(WinSettingsRow), findsWidgets);
       await captureWindowsPage(tester, '$route-720');
       if (route == 'sync') {
+        final label = tester.widget<Text>(find.text('服务器目录或文件地址'));
+        final color = label.style!.color!;
+        // A pale inherited label was unreadable inside the light Windows panel.
+        final painted = Color.alphaBlend(color, const Color(0xffe8e6f0));
+        final contrast = (const Color(0xffe8e6f0).computeLuminance() + .05) /
+            (painted.computeLuminance() + .05);
+        expect(contrast, greaterThanOrEqualTo(4.5));
         final field = find.byKey(const ValueKey('sync-webdav-url'));
         if (field.evaluate().isNotEmpty) {
           await tester.ensureVisible(field);

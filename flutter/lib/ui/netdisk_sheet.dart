@@ -811,7 +811,9 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
             children: [
               Icon(
                 CupertinoIcons.qrcode_viewfinder,
-                color: Color(0xFF5AC8FA),
+                color: usesWindowsAppearance(context)
+                    ? winInk(context)
+                    : Color(0xFF5AC8FA),
                 size: 22,
               ),
               SizedBox(width: 8),
@@ -832,7 +834,9 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                 child: Text(
                   '收起',
                   style: TextStyle(
-                    color: Color(0xFF5AC8FA),
+                    color: usesWindowsAppearance(context)
+                        ? winInk(context)
+                        : Color(0xFF5AC8FA),
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
                   ),

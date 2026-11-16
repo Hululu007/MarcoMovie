@@ -378,8 +378,10 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         children: [
           Text(
             label,
-            style: const TextStyle(
-              color: Color(0x99EBEBF5),
+            style: TextStyle(
+              color: usesWindowsAppearance(context)
+                  ? settingsMuted(context)
+                  : const Color(0x99EBEBF5),
               fontSize: 12.5,
               fontWeight: FontWeight.w500,
             ),
