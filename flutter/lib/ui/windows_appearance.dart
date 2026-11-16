@@ -570,15 +570,16 @@ class WinButton extends StatelessWidget {
   final VoidCallback? onPressed;
   final IconData? icon;
   final bool selected;
+  final Color? foregroundColor;
   const WinButton(this.label,
-      {super.key, required this.onPressed, this.icon, this.selected = false});
+      {super.key, required this.onPressed, this.icon, this.selected = false, this.foregroundColor});
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<bool>(
       valueListenable: GlassworkBackdrop.reduceTransparency,
       builder: (context, opaque, _) => TextButton(
             onPressed: onPressed,
             style: TextButton.styleFrom(
-                foregroundColor: winInk(context),
+                foregroundColor: foregroundColor ?? winInk(context),
                 padding:
                     const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
                 backgroundColor: selected

@@ -1300,6 +1300,10 @@ class AppleCapsuleButton extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) {
+    if (usesWindowsSettings(context)) {
+      return WinButton(label, icon: icon, selected: primary, onPressed: onPressed,
+          foregroundColor: destructive ? AppleColors.systemRed : null);
+    }
     final fg = destructive
         ? AppleColors.systemRed
         : (primary ? const Color(0xFF0A0A0E) : AppleColors.labelPrimary);
