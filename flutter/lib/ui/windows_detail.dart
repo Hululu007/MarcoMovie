@@ -2,7 +2,13 @@ part of 'detail_screen.dart';
 
 extension _WindowsDetail on _DetailScreenState {
   Widget _buildWindowsDetail(BuildContext context) {
-    final bookmark = _findBookmark();
+    final savedBookmark = _findBookmark();
+    final bookmark = _video.lines.isNotEmpty &&
+            savedBookmark?.line ==
+                _video
+                    .lines[_selectedLine.clamp(0, _video.lines.length - 1)].name
+        ? savedBookmark
+        : null;
     final width = MediaQuery.sizeOf(context).width;
     final pad = width > 1000 ? 44.0 : 24.0;
     final hasLines = _video.lines.isNotEmpty;
@@ -19,9 +25,13 @@ extension _WindowsDetail on _DetailScreenState {
                             icon: CupertinoIcons.back,
                             onPressed: () => Navigator.of(context).pop()),
                         const Spacer(),
-                        WinButton(_activeSite.name,
-                            icon: CupertinoIcons.layers_alt,
-                            onPressed: _showSourcePickerSheet)
+                        ConstrainedBox(
+                            constraints: BoxConstraints(maxWidth: width * .45),
+                            child: Tooltip(
+                                message: _activeSite.name,
+                                child: WinButton(_activeSite.name,
+                                    icon: CupertinoIcons.layers_alt,
+                                    onPressed: _showSourcePickerSheet)))
                       ]),
                       const SizedBox(height: 19),
                       SizedBox(
@@ -74,7 +84,11 @@ extension _WindowsDetail on _DetailScreenState {
                                                           fontWeight:
                                                               FontWeight.w600,
                                                           height: 1.2)),
-                                                  const SizedBox(height: 16),
+                                                  const SizedBox(height: 12),
+                                                  _buildRatingsAndSiteWrap(
+                                                      alignment:
+                                                          WrapAlignment.start),
+                                                  const SizedBox(height: 12),
                                                   Text(
                                                       [
                                                         _video.year,

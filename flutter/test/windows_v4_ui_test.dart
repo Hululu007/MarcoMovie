@@ -1,10 +1,14 @@
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:marco_movie/ui/apple_theme.dart';
+import 'package:marco_movie/core/windows_appearance_preferences.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/cms_client.dart';
 import 'package:marco_movie/core/models.dart';
@@ -35,6 +39,21 @@ const fixtureVideo = CmsVideo(
 class WindowsFixtureClient extends CmsClient {
   final categoryRequests = <String>[];
   @override
+  Future<List<LiveGroup>> fetchLiveGroups(LiveSource source) async => const [
+        LiveGroup(name: '电影频道', channels: [
+          LiveChannel(
+              name: '经典电影',
+              group: '电影频道',
+              urls: ['https://owned.invalid/1.mp4'])
+        ]),
+        LiveGroup(name: '纪录频道', channels: [
+          LiveChannel(
+              name: '自然世界',
+              group: '纪录频道',
+              urls: ['https://owned.invalid/2.mp4'])
+        ]),
+      ];
+  @override
   Future<(List<CmsCategory>, CmsListing)> fetchHome(CmsSite site) async => (
         const [
           CmsCategory(id: '1', name: '电影'),
@@ -58,6 +77,21 @@ class WindowsFixtureClient extends CmsClient {
   Future<CmsListing> fetchSearch(CmsSite site, String keyword,
           {int page = 1}) async =>
       const CmsListing(videos: [fixtureVideo]);
+}
+
+class PrivacyFixtureClient extends WindowsFixtureClient {
+  final pendingPublic = Completer<(List<CmsCategory>, CmsListing)>();
+  var publicCalls = 0;
+  @override
+  Future<(List<CmsCategory>, CmsListing)> fetchHome(CmsSite site) async {
+    if (site.isEffectivelyPrivate)
+      return (
+        const <CmsCategory>[],
+        const CmsListing(videos: [CmsVideo(id: 'private', title: '仅隐私可见的影片')])
+      );
+    if (++publicCalls > 1) return pendingPublic.future;
+    return super.fetchHome(site);
+  }
 }
 
 void main() {
@@ -153,13 +187,75 @@ void main() {
       await a.selectPreset('midnight');
       expect(a.dark, isTrue);
       expect(await original.exists(), isTrue);
+      expect(await File(managed).exists(), isTrue);
+      await a.reset();
+      expect(a.hasImage, isFalse);
+      await a.useImportedImage();
+      expect(a.imagePath, managed);
+      await a.removeImage();
+      expect(await original.exists(), isTrue);
       expect(await File(managed).exists(), isFalse);
       a.dispose();
       await temp.delete(recursive: true);
     });
   });
 
-  for (final size in [const Size(720, 600), const Size(1280, 800)]) {
+  test('Windows appearance backup validates and restores portable preferences',
+      () async {
+    final storage = await initTestStorage(initialPrefs: {
+      'windows_v4_preset': 'sea',
+      'windows_v4_mode': 'dark',
+      'windows_v4_blur': 15.0,
+      'windows_v4_brightness': .8,
+      'windows_v4_image': 'C:/private/photo.png',
+      'windows_v4_imported_image': 'C:/private/photo.png',
+    });
+    final backup = storage.exportBackupJson();
+    expect(backup, isNot(contains('private/photo')));
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('windows_v4_preset', 'rose');
+    await storage.importBackupJson(backup);
+    expect(prefs.getString('windows_v4_preset'), 'sea');
+    expect(prefs.getString('windows_v4_image'), '');
+    expect(
+        prefs.getString('windows_v4_imported_image'), 'C:/private/photo.png');
+    expect(
+        () =>
+            WindowsAppearancePreferences.validate({'version': 1, 'blur': 900}),
+        throwsFormatException);
+    expect(() => WindowsAppearancePreferences.validate({'version': 8}),
+        throwsFormatException);
+  });
+
+  testWidgets('reduced transparency changes panels immediately',
+      (tester) async {
+    final a = WindowsAppearance(Directory.systemTemp);
+    final old = GlassworkBackdrop.reduceTransparency.value;
+    try {
+      GlassworkBackdrop.reduceTransparency.value = false;
+      await tester.pumpWidget(MaterialApp(
+          home: WindowsAppearanceScope(
+              controller: a,
+              child: const Scaffold(body: WinPanel(child: Text('Panel'))))));
+      Color panelColor() => (tester
+              .widgetList<Container>(find.byType(Container))
+              .firstWhere((w) => w.decoration is BoxDecoration)
+              .decoration as BoxDecoration)
+          .color!;
+      expect(panelColor().a, lessThan(1));
+      GlassworkBackdrop.reduceTransparency.value = true;
+      await tester.pump();
+      expect(panelColor().a, 1);
+      expect(tester.widget<BackdropFilter>(find.byType(BackdropFilter)).enabled,
+          isFalse);
+      await tester.pumpWidget(const SizedBox.shrink());
+    } finally {
+      GlassworkBackdrop.reduceTransparency.value = old;
+      a.dispose();
+    }
+  });
+
+  for (final size in [const Size(720, 520), const Size(1280, 800)]) {
     testWidgets('Windows navigation and all settings fit $size',
         (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
@@ -172,10 +268,13 @@ void main() {
       addTearDown(() => tester.binding.setSurfaceSize(null));
       final storage = await initTestStorage();
       await tester.runAsync(() => storage.saveConfig(jsonEncode({
+            'lives': [
+              {'name': '测试直播', 'url': 'https://owned.invalid/live.m3u'}
+            ],
             'sites': [
               {
                 'key': 'owned',
-                'name': '测试片源',
+                'name': List.filled(14, '超长片源名称').join(),
                 'type': 1,
                 'api': 'https://owned.invalid/api'
               }
@@ -204,6 +303,35 @@ void main() {
       await tester.tap(find.text('筛选'));
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
+      await tester.tap(find.text('首页').first);
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(find.text('山间来信'), 200,
+          scrollable: find.byType(Scrollable).last);
+      expect(find.text('山间来信'), findsOneWidget,
+          reason: 'Discover must not replace home recommendations');
+      await tester.tap(find.byTooltip('搜索影片 · Ctrl+K'));
+      await tester.pumpAndSettle();
+      expect(
+          find.byKey(const ValueKey('windows-search-input')), findsOneWidget);
+      await tester.enterText(
+          find.byKey(const ValueKey('windows-search-input')), '海边');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const PageStorageKey('windows-search-results')),
+          findsOneWidget);
+      final result = find.byWidgetPredicate(
+          (w) => w is InkWell && w.key.toString().contains('windows-search-'));
+      expect(result, findsOneWidget);
+      Focus.of(tester.element(
+              find.descendant(of: result, matching: find.text('海边的光'))))
+          .requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(find.byType(DetailScreen), findsOneWidget);
+      await tester.tap(find.text('返回'));
+      await tester.pumpAndSettle();
+      expect(find.text('海边'), findsOneWidget);
       await tester.tap(find.text('我的').first);
       await tester.pumpAndSettle();
       for (final segment in ['继续观看', '收藏', '下载']) {
@@ -213,6 +341,19 @@ void main() {
       }
       await tester.tap(find.text('直播').first);
       await tester.pumpAndSettle();
+      final liveSearch = find.widgetWithText(TextField, '搜索全部频道');
+      await tester.ensureVisible(liveSearch);
+      await tester.enterText(liveSearch, '纪录');
+      await tester.pumpAndSettle();
+      expect(find.text('自然世界'), findsOneWidget,
+          reason: 'Search includes other groups and group names');
+      await tester.enterText(liveSearch, '不存在的频道');
+      await tester.pumpAndSettle();
+      expect(find.text('没有匹配频道'), findsOneWidget);
+      await tester.tap(find.text('清除搜索'));
+      await tester.pumpAndSettle();
+      expect(find.text('经典电影'), findsOneWidget);
+      expect(find.text('自然世界'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.tap(find.byTooltip('设置'));
       await tester.pumpAndSettle();
@@ -242,6 +383,67 @@ void main() {
   }
 
   testWidgets(
+      'exiting privacy clears private catalogue before a delayed public request finishes',
+      (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final storage = await initTestStorage();
+    await storage.setPrivacyPassword('1234');
+    await tester.runAsync(() => storage.saveConfig(jsonEncode({
+          'sites': [
+            {
+              'key': 'public',
+              'name': '公开源',
+              'type': 1,
+              'api': 'https://owned.invalid/public'
+            },
+            {
+              'key': 'private',
+              'name': '隐私源',
+              'type': 1,
+              'api': 'https://owned.invalid/private',
+              'isPrivate': true
+            },
+          ]
+        })));
+    final appearance = WindowsAppearance(Directory.systemTemp);
+    addTearDown(appearance.dispose);
+    final client = PrivacyFixtureClient();
+    await tester.pumpWidget(MaterialApp(
+        builder: (_, child) =>
+            WindowsAppearanceScope(controller: appearance, child: child!),
+        home: AdaptiveShell(
+            storage: storage,
+            client: client,
+            onSetPreventCloseForTest: (_) async {})));
+    await tester.pumpAndSettle();
+    for (var i = 0; i < 5; i++) {
+      await tester.tap(find.byKey(const ValueKey('home-brand-logo')));
+      await tester.pump(const Duration(milliseconds: 80));
+    }
+    await tester.pumpAndSettle();
+    for (final digit in ['1', '2', '3', '4']) {
+      await tester.tap(find.text(digit));
+    }
+    await tester.pumpAndSettle();
+    expect(find.text('仅隐私可见的影片'), findsOneWidget);
+    await tester.tap(find.text('退出隐私空间'));
+    await tester.pump();
+    expect(find.text('仅隐私可见的影片'), findsNothing);
+    client.pendingPublic.completeError(const FormatException('公共片源失败'));
+    await tester.pumpAndSettle();
+    expect(find.text('仅隐私可见的影片'), findsNothing);
+    expect(find.text('重试'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets(
       'Windows details preserve favorites, line switching, episode ordering and all-episode picker',
       (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
@@ -255,6 +457,19 @@ void main() {
     final storage = await initTestStorage();
     final appearance = WindowsAppearance(Directory.systemTemp);
     addTearDown(appearance.dispose);
+    await storage.upsertWatchHistory(
+        const WatchHistoryEntry(
+            site: 'owned',
+            id: 'one',
+            title: '海边的光',
+            poster: '',
+            line: '主线路',
+            episode: '第 2 集',
+            index: 1,
+            position: 180000,
+            duration: 1200000,
+            updated: 1),
+        triggerSync: false);
     await tester.pumpWidget(MaterialApp(
         builder: (_, child) =>
             WindowsAppearanceScope(controller: appearance, child: child!),
@@ -265,12 +480,15 @@ void main() {
             client: WindowsFixtureClient())));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+    expect(find.text('继续观看'), findsOneWidget);
     await tester.tap(find.text('收藏'));
     await tester.pumpAndSettle();
     expect(storage.getFavorites().length, 1);
     await tester.tap(find.text('备用线路'));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('ep_card_1_0')), findsOneWidget);
+    expect(find.text('立即播放'), findsOneWidget,
+        reason: 'Switching line must not resume the old line');
     await tester.tap(find.text('主线路'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('正序'));

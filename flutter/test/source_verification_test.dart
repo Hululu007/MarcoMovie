@@ -1,5 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:marco_movie/ui/windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -28,11 +31,11 @@ const source = CmsSite(
 );
 final aueteSource = source.copyWith(key: 'auete', api: 'csp_AueteGuard');
 Map<String, dynamic> challenge(String id) => {
-  'type': 'image',
-  'id': id,
-  'mime': 'image/png',
-  'imageBase64': png,
-};
+      'type': 'image',
+      'id': id,
+      'mime': 'image/png',
+      'imageBase64': png,
+    };
 
 class ActionHost extends ports.PortHost {
   final actions = <Map<String, dynamic>>[];
@@ -164,8 +167,17 @@ Future<void> shell(
   WidgetTester tester,
   ShellClient client, {
   bool search = false,
+  bool windows = false,
   CmsSite guardedSource = source,
 }) async {
+  final appearance = windows ? WindowsAppearance(Directory.systemTemp) : null;
+  if (windows) {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() {
+      debugDefaultTargetPlatformOverride = null;
+      appearance!.dispose();
+    });
+  }
   tester.view.physicalSize = const Size(1200, 900);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
@@ -196,7 +208,14 @@ Future<void> shell(
   );
   await tester.pumpWidget(
     MaterialApp(
-      home: AdaptiveShell(storage: storage, client: client),
+      builder: windows
+          ? (_, child) =>
+              WindowsAppearanceScope(controller: appearance!, child: child!)
+          : null,
+      home: AdaptiveShell(
+          storage: storage,
+          client: client,
+          onSetPreventCloseForTest: (_) async {}),
     ),
   );
   await tester.pumpAndSettle();
@@ -451,42 +470,51 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets(
-    'homepage retries the blocked source after explicit verification',
-    (tester) async {
-      final client = ShellClient()..protectHome = true;
-      await shell(tester, client);
-      expect(client.homes, 1);
-      expect(find.byType(SourceVerificationDialog), findsNothing);
-      await verify(tester);
-      expect(client.homes, 2);
-      expect(find.text('完成验证'), findsNothing);
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox());
-    },
-  );
+  for (final windows in [false, true]) {
+    testWidgets(
+      'homepage retries the blocked source after explicit verification windows=$windows',
+      (tester) async {
+        final client = ShellClient()..protectHome = true;
+        await shell(tester, client, windows: windows);
+        expect(client.homes, 1);
+        expect(find.byType(SourceVerificationDialog), findsNothing);
+        await verify(tester);
+        expect(client.homes, 2);
+        expect(find.text('完成验证'), findsNothing);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
 
-  testWidgets(
-    'filter retry preserves the selected genre instead of reloading home',
-    (tester) async {
-      final client = ShellClient();
-      await shell(tester, client);
-      await tester.tap(find.text('电影').first);
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('home-filter-button')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('动作').first);
-      await tester.pumpAndSettle();
-      expect(client.filters.last, '动作');
-      await verify(tester);
-      expect(client.filters.sublist(client.filters.length - 2), ['动作', '动作']);
-      expect(client.homes, 1);
-      expect(find.text('验证后的影片'), findsWidgets);
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox());
-    },
-  );
-
+    testWidgets(
+      'filter retry preserves the selected genre instead of reloading home windows=$windows',
+      (tester) async {
+        final client = ShellClient();
+        await shell(tester, client, windows: windows);
+        if (windows) {
+          await tester.tap(find.text('发现'));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(find.text('电影').first);
+        await tester.pumpAndSettle();
+        await tester.tap(windows
+            ? find.text('筛选')
+            : find.byKey(const ValueKey('home-filter-button')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('动作').first);
+        await tester.pumpAndSettle();
+        expect(client.filters.last, '动作');
+        await verify(tester);
+        expect(client.filters.sublist(client.filters.length - 2), ['动作', '动作']);
+        expect(client.homes, 1);
+        expect(find.text('验证后的影片'), findsWidgets);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+  }
   for (final selected in [source, aueteSource]) {
     testWidgets(
       '${selected.key} search retry retains healthy results and the blocked query',

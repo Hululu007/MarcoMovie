@@ -42,6 +42,9 @@ class PlayerScreen extends StatefulWidget {
   final int initialPositionMs;
   final StorageService storage;
   final bool isLive;
+  final bool embedded;
+  final VoidCallback? onEmbeddedClose;
+  final VoidCallback? onEmbeddedExpand;
   @visibleForTesting
   final Player? debugPlayer;
   @visibleForTesting
@@ -56,6 +59,9 @@ class PlayerScreen extends StatefulWidget {
     required this.storage,
     this.initialPositionMs = 0,
     this.isLive = false,
+    this.embedded = false,
+    this.onEmbeddedClose,
+    this.onEmbeddedExpand,
     this.debugPlayer,
     this.debugVideoSurface,
   });
@@ -256,7 +262,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _ => BoxFit.contain,
     };
 
-    if (_desktop) {
+    if (_desktop && !widget.embedded) {
       _desktopWindow = DesktopPlayerWindow()..addListener(_windowChanged);
       _desktopWindow!.initialize().catchError(_windowError);
     }
@@ -1161,7 +1167,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _scheduleHide() {
     _hideTimer?.cancel();
-    if (_screenLocked) return;
+    if (_screenLocked || (isWindowsDesktopUi && _windowsMoreControls)) return;
     _hideTimer = Timer(const Duration(seconds: 4), () {
       if (mounted &&
           !_screenLocked &&
@@ -1216,7 +1222,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_screenLocked == locked) return;
     _hideTimer?.cancel();
     _lockHideTimer?.cancel();
-    WindowsImmersiveFrame.interactionLocked.value = locked;
+    if (!widget.embedded) WindowsImmersiveFrame.interactionLocked.value = locked;
     if (locked) {
       if (_speedBoosting) {
         _player.setRate(_normalSpeed);
@@ -1303,12 +1309,18 @@ class _PlayerScreenState extends State<PlayerScreen>
       ? (_desktopWindow?.fullscreen == true ? '退出全屏' : '全屏')
       : (isLandscape ? '竖屏' : '全屏');
 
+  void _exitPlayer() {
+    if (widget.embedded) { widget.onEmbeddedClose?.call(); }
+    else { Navigator.of(context).maybePop(); }
+  }
+
   Future<void> _desktopEscape() async {
+    if (widget.embedded) { _exitPlayer(); return; }
     try {
       final exited = await _desktopWindow!.exitFullscreen();
       if (!exited) {
         await _saveProgress(immediate: true);
-        if (mounted) Navigator.of(context).maybePop();
+        if (mounted) _exitPlayer();
       }
     } catch (error) {
       _windowError(error);
@@ -1316,6 +1328,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _toggleOrientation() async {
+    if (widget.embedded) { widget.onEmbeddedExpand?.call(); return; }
     if (_desktop) {
       try {
         await _desktopWindow!.toggle();
@@ -1632,7 +1645,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
-    WindowsImmersiveFrame.interactionLocked.value = false;
+    if (!widget.embedded) WindowsImmersiveFrame.interactionLocked.value = false;
     _lockHideTimer?.cancel();
     _hudTimer?.cancel();
     for (final sub in _playerSubscriptions) {
@@ -1717,7 +1730,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (isCtrlOrCmd && event.logicalKey == LogicalKeyboardKey.keyW) {
             unawaited(
               _saveProgress(immediate: true).whenComplete(() {
-                if (context.mounted) Navigator.of(context).maybePop();
+                if (context.mounted) _exitPlayer();
               }),
             );
             return KeyEventResult.handled;
@@ -1803,7 +1816,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             } else {
               unawaited(
                 _saveProgress(immediate: true).whenComplete(() {
-                  if (context.mounted) Navigator.of(context).maybePop();
+                  if (context.mounted) _exitPlayer();
                 }),
               );
             }
@@ -2384,7 +2397,34 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   bool _windowsMoreControls = false;
 
+  void _showWindowsVolume() {
+    showAppleModalSheet<void>(context: context, title: '音量', maxWidth: 420,
+      builder: (_) => StreamBuilder<double>(stream: _player.stream.volume,
+        initialData: _player.state.volume, builder: (context, snapshot) =>
+          Slider(value: (snapshot.data ?? 100).clamp(0, 100), max: 100,
+            label: '${(snapshot.data ?? 100).round()}%', onChanged: _player.setVolume)));
+  }
+
   Widget _buildWindowsChrome(BuildContext context) {
+    if (widget.embedded) return Stack(children: [
+      Positioned(left: 15, right: 15, top: 12, child: Row(children: [
+        Expanded(child: Text(widget.video.title, maxLines: 1, overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600))),
+        IconButton(tooltip: '停止播放', onPressed: _exitPlayer, icon: const Icon(CupertinoIcons.xmark, color: Colors.white)),
+      ])),
+      if (_windowsMoreControls) Positioned(left: 12, right: 12, bottom: 84,
+        child: _buildScrollableToolDock(isLandscape: false, scale: .8)),
+      Positioned(left: 12, right: 12, bottom: 12, child: WinPanel(dark: true, padding: const EdgeInsets.all(6),
+        child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+          IconButton(tooltip: _playing ? '暂停' : '播放', onPressed: _player.playOrPause,
+            icon: Icon(_playing ? CupertinoIcons.pause_fill : CupertinoIcons.play_fill, color: Colors.white)),
+          IconButton(tooltip: '音量', onPressed: _showWindowsVolume, icon: const Icon(CupertinoIcons.volume_up, color: Colors.white)),
+          IconButton(tooltip: '线路', onPressed: _showEpisodesSheet, icon: const Icon(CupertinoIcons.list_bullet, color: Colors.white)),
+          IconButton(tooltip: '更多', onPressed: () {setState(() => _windowsMoreControls = !_windowsMoreControls); _scheduleHide();}, icon: const Icon(CupertinoIcons.ellipsis, color: Colors.white)),
+          IconButton(tooltip: '展开播放', onPressed: _toggleOrientation, icon: const Icon(CupertinoIcons.arrow_up_left_arrow_down_right, color: Colors.white)),
+        ]))),
+    ]);
+
     final width = MediaQuery.sizeOf(context).width;
     final scale = (width / 1250).clamp(.76, 1.0);
     Widget control(String label, IconData icon, VoidCallback action) {
@@ -2414,6 +2454,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 if (!_isLiveStream && width >= 880) control('${_normalSpeed}×', CupertinoIcons.speedometer, _showSpeedSheet),
                 if (!_isLiveStream && width >= 1000) control('字幕', CupertinoIcons.captions_bubble, _showSubtitleTracksSheet),
                 control(_isLiveStream ? '信号' : '选集', CupertinoIcons.list_bullet, _showEpisodesSheet),
+                if (width >= 780) control('音量', CupertinoIcons.volume_up, _showWindowsVolume),
                 control('更多', CupertinoIcons.ellipsis, () {
                   setState(() => _windowsMoreControls = !_windowsMoreControls);
                   if (_windowsMoreControls) { _hideTimer?.cancel(); } else { _scheduleHide(); }
@@ -2440,7 +2481,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           onPressed: () async {
             await _saveProgress(immediate: true);
             if (context.mounted) {
-              Navigator.of(context).maybePop();
+              _exitPlayer();
             }
           },
           child: AppleGlassSurface(

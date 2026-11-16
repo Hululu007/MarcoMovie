@@ -9,6 +9,7 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'catpaw_host.dart';
+import 'windows_appearance_preferences.dart';
 import 'cms_parser.dart';
 import 'csp_bridge.dart';
 import 'models.dart';
@@ -2833,6 +2834,7 @@ class StorageService {
       origin: !hasSubs ? configOrigin : primary?.url ?? '',
       rawConfig: !hasSubs ? _publicRawConfig(rawConfig, configOrigin) : primary?.rawContent ?? '',
       settings: <String, dynamic>{
+        WindowsAppearancePreferences.key: WindowsAppearancePreferences.export(_prefs),
         if (hasSubs) keySubscriptions: public.map((s) => s.toJson()).toList(),
         for (final key in [_siteOrder, _removedSites]) key: (_prefs.getStringList(key) ?? []).map((id) => identityAliases[id] ?? id).where(publicIds.contains).map(exportedIdentity).toList(),
         if (exportedOverrides.isNotEmpty) _siteOverrides: exportedOverrides,
@@ -2881,6 +2883,8 @@ class StorageService {
   Future<CmsConfig?> _importBackupJson(String rawBackup) async {
     final decoded = CmsParser.decodeBackupPayload(rawBackup);
     final settings = decoded.settings;
+    final windowsAppearance = settings.containsKey(WindowsAppearancePreferences.key)
+      ? WindowsAppearancePreferences.validate(settings[WindowsAppearancePreferences.key]) : null;
     final nextHistory = settings.containsKey(keyWatchHistory)
         ? _normalizeJsonArraySetting(settings[keyWatchHistory])
         : null;
@@ -2945,6 +2949,7 @@ class StorageService {
         }
       }
     }
+    if (windowsAppearance != null) await WindowsAppearancePreferences.restore(_prefs, windowsAppearance);
     for (final key in _appearanceStrings) {
       if (settings.containsKey(key) && settings[key] is! String) throw const FormatException('外观设置格式无效');
     }

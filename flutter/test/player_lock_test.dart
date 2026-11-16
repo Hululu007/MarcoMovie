@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'package:marco_movie/ui/windows_appearance.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -303,6 +305,10 @@ void main() {
     required Size surfaceSize,
     required _FakePlayer player,
     bool wrapWindowsFrame = false,
+    bool windowsV4 = false,
+    bool embedded = false,
+    VoidCallback? onEmbeddedClose,
+    VoidCallback? onEmbeddedExpand,
   }) async {
     tester.view.devicePixelRatio = 1.0;
     tester.view.physicalSize = surfaceSize;
@@ -314,14 +320,19 @@ void main() {
     });
 
     final navKey = GlobalKey<NavigatorState>();
+    final appearance = WindowsAppearance(Directory.systemTemp);
+    addTearDown(appearance.dispose);
     final app = MaterialApp(
       navigatorKey: navKey,
-      builder: wrapWindowsFrame
-          ? (context, child) => WindowsImmersiveFrame(
-                attachWindowListener: false,
-                child: child ?? const SizedBox.shrink(),
-              )
-          : null,
+      builder: windowsV4
+          ? (_, child) =>
+              WindowsAppearanceScope(controller: appearance, child: child!)
+          : wrapWindowsFrame
+              ? (context, child) => WindowsImmersiveFrame(
+                    attachWindowListener: false,
+                    child: child ?? const SizedBox.shrink(),
+                  )
+              : null,
       home: Scaffold(
         body: Center(
           child: Builder(
@@ -337,6 +348,9 @@ void main() {
                       storage: storage,
                       debugPlayer: player,
                       debugVideoSurface: const ColoredBox(color: Colors.black),
+                      embedded: embedded,
+                      onEmbeddedClose: onEmbeddedClose,
+                      onEmbeddedExpand: onEmbeddedExpand,
                     ),
                   ),
                 );
@@ -355,6 +369,58 @@ void main() {
     player.resetCounters();
     return navKey;
   }
+
+  for (final width in [720.0, 880.0, 1000.0, 1280.0]) {
+    testWidgets(
+        'Windows V4 controls fit $width and more stays open during mouse use',
+        (tester) async {
+      await withPlatform(TargetPlatform.windows, () async {
+        final player = _FakePlayer();
+        await mountPlayer(tester,
+            surfaceSize: Size(width, 520), player: player, windowsV4: true);
+        expect(tester.takeException(), isNull);
+        await tester.tap(find.text('更多'));
+        await tester.pump();
+        final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+        await mouse.addPointer(location: const Offset(100, 100));
+        await mouse.moveTo(const Offset(150, 100));
+        await tester.pump(const Duration(seconds: 6));
+        expect(
+            find.byKey(const Key('player-tool-dock-portrait')), findsOneWidget);
+        expect(find.text('更多'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await mouse.removePointer();
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 100));
+      });
+    });
+  }
+  testWidgets(
+      'Embedded Windows player expands and stops without closing its parent route',
+      (tester) async {
+    await withPlatform(TargetPlatform.windows, () async {
+      final player = _FakePlayer();
+      var stopped = 0, expanded = 0;
+      final nav = await mountPlayer(tester,
+          surfaceSize: const Size(560, 340),
+          player: player,
+          windowsV4: true,
+          embedded: true,
+          onEmbeddedClose: () => stopped++,
+          onEmbeddedExpand: () => expanded++);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byTooltip('展开播放'));
+      await tester.pump();
+      expect(expanded, 1);
+      expect(setFullScreenCalls, 0);
+      await tester.tap(find.byTooltip('停止播放'));
+      await tester.pump();
+      expect(stopped, 1);
+      expect(nav.currentState!.canPop(), isTrue);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 100));
+    });
+  });
 
   testWidgets('iOS landscape screen lock blocks all touch gestures and pop', (
     tester,
@@ -484,7 +550,8 @@ void main() {
       );
 
       expect(find.byKey(const Key('player-lock-button')), findsOneWidget);
-      expect(find.byKey(const Key('player-tool-dock-portrait')), findsOneWidget);
+      expect(
+          find.byKey(const Key('player-tool-dock-portrait')), findsOneWidget);
 
       await tester.tap(
         find.byKey(const Key('player-lock-button')),
@@ -500,7 +567,8 @@ void main() {
         kind: PointerDeviceKind.touch,
       );
       await tester.pump(const Duration(milliseconds: 250));
-      expect(find.byKey(const Key('player-tool-dock-portrait')), findsOneWidget);
+      expect(
+          find.byKey(const Key('player-tool-dock-portrait')), findsOneWidget);
     });
   });
 
@@ -510,7 +578,8 @@ void main() {
   }
 
   Future<bool> sendMacCmdW(WidgetTester tester) async {
-    await simulateKeyDownEvent(LogicalKeyboardKey.metaLeft, platform: 'windows');
+    await simulateKeyDownEvent(LogicalKeyboardKey.metaLeft,
+        platform: 'windows');
     expect(HardwareKeyboard.instance.isMetaPressed, isTrue);
     final handled = await simulateKeyDownEvent(
       LogicalKeyboardKey.keyW,

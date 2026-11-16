@@ -5,6 +5,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'apple_theme.dart';
+import '../core/windows_appearance_preferences.dart';
 
 class WindowsBackdropPreset {
   final String id;
@@ -64,6 +65,7 @@ class WindowsAppearance extends ChangeNotifier {
   SharedPreferences? _preferences;
   String presetId = 'dusk';
   String imagePath = '';
+  String importedImagePath = '';
   String mode = 'auto';
   double brightness = 1;
   double blur = 0;
@@ -119,13 +121,24 @@ class WindowsAppearance extends ChangeNotifier {
     if (!['top', 'center', 'bottom'].contains(position)) position = 'center';
     imageLuminance = number('luminance', .5).clamp(0, 1);
     final saved = string('image', '');
-    if (saved.isNotEmpty && await File(saved).exists()) imagePath = saved;
+    imagePath = saved.isNotEmpty && await File(saved).exists() ? saved : '';
+    final imported = string('imported_image', imagePath);
+    importedImagePath =
+        imported.isNotEmpty && await File(imported).exists() ? imported : '';
     _changed();
   }
 
   Future<void> save() {
-    final values =
-        (presetId, mode, brightness, blur, position, imagePath, imageLuminance);
+    final values = (
+      presetId,
+      mode,
+      brightness,
+      blur,
+      position,
+      imagePath,
+      imageLuminance,
+      importedImagePath
+    );
     _writeQueue = _writeQueue.catchError((Object _) {}).then((_) async {
       final prefs = _preferences ??= await SharedPreferences.getInstance();
       final results = await Future.wait([
@@ -136,6 +149,7 @@ class WindowsAppearance extends ChangeNotifier {
         prefs.setString('${prefix}position', values.$5),
         prefs.setString('${prefix}image', values.$6),
         prefs.setDouble('${prefix}luminance', values.$7),
+        prefs.setString('${prefix}imported_image', values.$8),
       ]);
       if (results.contains(false)) throw const FileSystemException('背景设置无法保存');
     });
@@ -173,7 +187,19 @@ class WindowsAppearance extends ChangeNotifier {
       _changed();
       rethrow;
     }
-    await _deleteManagedImage(previous.$2);
+  }
+
+  Future<void> useImportedImage() async {
+    if (importing || importedImagePath.isEmpty) return;
+    final previous = imagePath;
+    imagePath = importedImagePath;
+    try {
+      await save();
+    } catch (_) {
+      imagePath = previous;
+      rethrow;
+    }
+    _changed();
   }
 
   Future<void> importImage(String path) async {
@@ -225,21 +251,25 @@ class WindowsAppearance extends ChangeNotifier {
           '${folder.path}/background-${DateTime.now().microsecondsSinceEpoch}.png');
       await target.writeAsBytes(png.buffer.asUint8List(), flush: true);
       final oldPath = imagePath;
+      final oldImported = importedImagePath;
       final oldLuminance = imageLuminance;
       final oldBlur = blur;
       imagePath = target.path;
+      importedImagePath = target.path;
       imageLuminance = samples == 0 ? .5 : luminance / samples;
       blur = 8;
       try {
         await save();
       } catch (_) {
         imagePath = oldPath;
+        importedImagePath = oldImported;
         imageLuminance = oldLuminance;
         blur = oldBlur;
         await target.delete();
         rethrow;
       }
       await _deleteManagedImage(oldPath);
+      if (oldImported != oldPath) await _deleteManagedImage(oldImported);
     } finally {
       decoded?.dispose();
       codec?.dispose();
@@ -272,21 +302,29 @@ class WindowsAppearance extends ChangeNotifier {
   }
 
   Future<void> removeImage() async {
+    if (importing) return;
     final oldPath = imagePath;
+    final oldImported = importedImagePath;
+    final oldBlur = blur;
     imagePath = '';
+    importedImagePath = '';
     blur = 0;
     try {
       await save();
     } catch (_) {
       imagePath = oldPath;
+      importedImagePath = oldImported;
+      blur = oldBlur;
       rethrow;
     }
     await _deleteManagedImage(oldPath);
+    if (oldImported != oldPath) await _deleteManagedImage(oldImported);
     _changed();
   }
 
   Future<void> reset() async {
-    await removeImage();
+    if (importing) return;
+    imagePath = '';
     presetId = 'dusk';
     mode = 'auto';
     brightness = 1;
@@ -321,13 +359,19 @@ class _WindowsAppearanceHostState extends State<WindowsAppearanceHost> {
   @override
   void initState() {
     super.initState();
+    WindowsAppearancePreferences.revision.addListener(_reload);
     controller.load().catchError((Object _) {
       // An unavailable preference store must not prevent the app from opening.
     });
   }
 
+  void _reload() {
+    controller.load().catchError((Object _) {});
+  }
+
   @override
   void dispose() {
+    WindowsAppearancePreferences.revision.removeListener(_reload);
     controller.dispose();
     super.dispose();
   }
@@ -366,7 +410,7 @@ Color winInk(BuildContext context) => WindowsAppearanceScope.of(context).dark
     : const Color(0xFF263649);
 Color winMuted(BuildContext context) => WindowsAppearanceScope.of(context).dark
     ? const Color(0xFFBFCDE1)
-    : const Color(0xFF52657C);
+    : const Color(0xFF39495F);
 
 class WindowsBackdrop extends StatelessWidget {
   final Widget child;
@@ -416,12 +460,11 @@ class WindowsBackdrop extends StatelessWidget {
                         SoftGradient(preset: a.preset))
                 : SoftGradient(preset: a.preset)),
       ))),
-      if (a.hasImage || a.mode != 'auto')
+      if (a.hasImage || a.mode != 'auto' || a.brightness < .85)
         ColoredBox(
             color: a.dark
-                ? Colors.black.withValues(
-                    alpha: a.mode == 'dark' && !a.preset.dark ? .52 : .26)
-                : Colors.white.withValues(alpha: .3)),
+                ? Colors.black.withValues(alpha: .68)
+                : Colors.white.withValues(alpha: .78)),
       child,
     ]);
   }
@@ -472,10 +515,16 @@ class WinPanel extends StatelessWidget {
       this.radius = 24,
       this.dark = false});
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => AnimatedBuilder(
+      animation: Listenable.merge(
+          [GlassworkBackdrop.reduceTransparency, GlassworkBackdrop.intensity]),
+      builder: (context, _) => _surface(context));
+
+  Widget _surface(BuildContext context) {
     final isDark = dark || WindowsAppearanceScope.of(context).dark;
     final opaque = GlassworkBackdrop.reduceTransparency.value ||
-        MediaQuery.highContrastOf(context);
+        MediaQuery.highContrastOf(context) ||
+        GlassworkBackdrop.intensity.value <= .02;
     return ClipRRect(
         borderRadius: BorderRadius.circular(radius),
         child: BackdropFilter(
@@ -490,7 +539,11 @@ class WinPanel extends StatelessWidget {
                         : const Color(0xFFF0F1F5))
                     : dark
                         ? const Color(0xCC1C293E)
-                        : Colors.white.withValues(alpha: isDark ? .16 : .48),
+                        : Colors.white.withValues(
+                            alpha: isDark
+                                ? .16 + .12 * GlassworkBackdrop.intensity.value
+                                : .48 +
+                                    .12 * GlassworkBackdrop.intensity.value),
                 borderRadius: BorderRadius.circular(radius),
                 border: Border.all(
                     color: Colors.white.withValues(alpha: isDark ? .18 : .57)),
@@ -508,22 +561,34 @@ class WinButton extends StatelessWidget {
   const WinButton(this.label,
       {super.key, required this.onPressed, this.icon, this.selected = false});
   @override
-  Widget build(BuildContext context) => TextButton(
-        onPressed: onPressed,
-        style: TextButton.styleFrom(
-            foregroundColor: winInk(context),
-            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
-            backgroundColor: selected
-                ? Colors.white.withValues(
-                    alpha: WindowsAppearanceScope.of(context).dark ? .2 : .65)
-                : Colors.transparent,
-            shape: const StadiumBorder(),
-            minimumSize: const Size(44, 44)),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          if (icon != null) ...[Icon(icon, size: 17), const SizedBox(width: 8)],
-          Flexible(child: Text(label, overflow: TextOverflow.ellipsis))
-        ]),
-      );
+  Widget build(BuildContext context) => ValueListenableBuilder<bool>(
+      valueListenable: GlassworkBackdrop.reduceTransparency,
+      builder: (context, opaque, _) => TextButton(
+            onPressed: onPressed,
+            style: TextButton.styleFrom(
+                foregroundColor: winInk(context),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
+                backgroundColor: selected
+                    ? opaque
+                        ? WindowsAppearanceScope.of(context).dark
+                            ? const Color(0xFF455166)
+                            : Colors.white
+                        : Colors.white.withValues(
+                            alpha: WindowsAppearanceScope.of(context).dark
+                                ? .2
+                                : .65)
+                    : Colors.transparent,
+                shape: const StadiumBorder(),
+                minimumSize: const Size(44, 44)),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              if (icon != null) ...[
+                Icon(icon, size: 17),
+                const SizedBox(width: 8)
+              ],
+              Flexible(child: Text(label, overflow: TextOverflow.ellipsis))
+            ]),
+          ));
 }
 
 class WindowsAppearanceSettings extends StatelessWidget {
@@ -685,8 +750,13 @@ class WindowsAppearanceSettings extends StatelessWidget {
               selected: true,
               icon: CupertinoIcons.photo,
               onPressed: a.importing ? null : () => _pick(context)),
-          if (a.hasImage)
+          if (a.importedImagePath.isNotEmpty && !a.hasImage)
+            WinButton('使用已导入图片',
+                onPressed: () => _save(context, a.useImportedImage)),
+          if (a.importedImagePath.isNotEmpty)
             WinButton('移除图片', onPressed: () => _save(context, a.removeImage)),
+          Text('外观参数可备份；照片保存在本机，换设备后请重新导入。',
+              style: TextStyle(color: winMuted(context), fontSize: 12)),
         ])),
         const SizedBox(height: 15),
         WinButton('恢复默认', onPressed: () => _save(context, a.reset))

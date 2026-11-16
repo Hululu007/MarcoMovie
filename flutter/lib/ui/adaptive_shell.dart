@@ -161,6 +161,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   Future<void>? _closingHistoryFlush;
   int _tabIndex = 0;
   String _windowsPage = 'home';
+  LiveChannel? _windowsLiveChannel;
+  int _windowsLiveLine = 0;
+  int _windowsLiveRevision = 0;
   String _windowsSettings = '背景与外观';
   CmsConfig? _config;
   CmsSite? _activeSite;
@@ -174,6 +177,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   String _filterYear = '';
   List<CmsVideo> _rawCategoryVideos = const [];
   List<CmsVideo> _homeVideos = const [];
+  List<CmsVideo> _windowsRecommendedVideos = const [];
   int _currentPage = 1;
   int _pageCount = 1;
   bool _homeLoading = false;
@@ -594,6 +598,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _searchVerificationSites.clear();
     _searchPerformed = false;
     _searching = false;
+    _windowsLiveChannel = null;
     final saved = widget.storage.loadSavedConfig();
     _config = saved;
     _cachedWatchHistory = widget.storage.getWatchHistory();
@@ -631,6 +636,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _categories = const [];
       _rawCategoryVideos = const [];
       _homeVideos = const [];
+      _windowsRecommendedVideos = const [];
       _homeError = null;
       _homeLoading = false;
       _loadingMore = false;
@@ -653,6 +659,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final epoch = ++_homeEpoch;
     ++_categoryEpoch;
     setState(() {
+      _homeVideos = const [];
+      _windowsRecommendedVideos = const [];
+      _rawCategoryVideos = const [];
+      _categories = const [];
       _homeLoading = true;
       _loadingMore = false;
       _homeError = null;
@@ -679,6 +689,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _homeVideos = listing.sourceFiltered
             ? listing.videos
             : CmsParser.filterVideos(listing.videos, _currentFilter);
+        _windowsRecommendedVideos = List.of(_homeVideos);
         _currentPage = listing.page;
         _pageCount = listing.pageCount;
         _homeLoading = false;
@@ -1047,6 +1058,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final source = lives[sourceIndex];
     setState(() {
       _selectedLiveSource = sourceIndex;
+      _windowsLiveChannel = null;
       _selectedLiveGroup = 0;
       _liveGroups = const [];
       _liveLoading = true;
@@ -3280,6 +3292,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
   void _showGlobalSearchSheet() {
+    if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null) {
+      _windowsNavigate('search');
+      return;
+    }
     final isPriv = _privateSessionUnlocked;
     showAppleModalSheet<void>(
       context: context,
@@ -3791,6 +3807,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _privacyPortalAnimating = true;
       _privacyPortalRunId++;
       _tabIndex = 0;
+      _windowsPage = 'home';
     });
     _reloadSavedConfig();
   }
@@ -4491,6 +4508,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           setState(() {
                             _privateSessionUnlocked = true;
                             _tabIndex = 1;
+                            _windowsPage = 'live';
                           });
                           final idx = _visibleLives.indexWhere(
                             (l) => l.url == privateLives[i].url,
@@ -6274,7 +6292,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       );
                     },
                   ),
-                  _buildSettingsQuickActionRow(
+                  if (!isWindowsDesktopUi) _buildSettingsQuickActionRow(
                     icon: CupertinoIcons.sparkles,
                     iconBgColor: AppleColors.systemIndigo,
                     title: '动态流光背景',
@@ -6569,7 +6587,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        AppleGroupedSection(
+        if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null)
+          const WindowsAppearanceSettings()
+        else AppleGroupedSection(
           header: '壁纸与动态流光氛围',
           footer: '开启呼吸式动态流光后，背景极光色块将以约 8 秒周期柔和呼吸律动，并透过液态玻璃产生实时折射。',
           children: [

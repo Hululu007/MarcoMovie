@@ -99,6 +99,7 @@ extension _WindowsShell on _AdaptiveShellState {
                             child: switch (_windowsPage) {
                           'discover' => _windowsDiscover(pad),
                           'live' => _windowsLive(pad),
+                          'search' => _windowsSearch(pad),
                           'library' => _windowsLibrary(pad),
                           'settings' => _windowsSettingsPage(pad),
                           _ => _windowsHome(pad),
@@ -133,14 +134,15 @@ extension _WindowsShell on _AdaptiveShellState {
                       color: winInk(context),
                       fontSize: 30,
                       fontWeight: FontWeight.w600))),
-          ...actions
+          Flexible(child: Wrap(alignment: WrapAlignment.end, children: actions))
         ]),
       );
 
   Widget _windowsEmpty(String title, String explanation,
           {VoidCallback? action, String button = '添加内容来源'}) =>
       Center(
-          child: Padding(
+          child: SingleChildScrollView(
+              child: Padding(
         padding: const EdgeInsets.all(32),
         child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 630),
@@ -164,13 +166,15 @@ extension _WindowsShell on _AdaptiveShellState {
                         WinButton(button, selected: true, onPressed: action)
                       ],
                     ]))),
-      ));
+      )));
 
   Widget _windowsHome(double pad) {
+    if (_homeError != null && _windowsRecommendedVideos.isEmpty)
+      return _windowsHomeError();
     if (_config == null && !_privateSessionUnlocked) return _windowsWelcome();
-    if (_homeLoading && _homeVideos.isEmpty)
+    if (_homeLoading && _windowsRecommendedVideos.isEmpty)
       return const Center(child: CircularProgressIndicator());
-    if (_homeVideos.isEmpty)
+    if (_windowsRecommendedVideos.isEmpty)
       return _windowsEmpty(
         _homeError == null ? '从一部影片开始' : '暂时无法加载影片',
         _homeError ?? '选择内容来源，或搜索想看的影片。',
@@ -179,12 +183,13 @@ extension _WindowsShell on _AdaptiveShellState {
             : _refreshCurrentHomeView,
         button: _homeError == null ? '选择片源' : '重新加载',
       );
-    final featured = _homeVideos.first;
-    final history = _privateSessionUnlocked
-        ? <WatchHistoryEntry>[]
-        : _cachedWatchHistory.take(4).toList();
+    final featured = _windowsRecommendedVideos.first;
+    final history =
+        _privateSessionUnlocked || !widget.storage.showContinueWatching
+            ? <WatchHistoryEntry>[]
+            : _cachedWatchHistory.take(4).toList();
     return ListView(padding: EdgeInsets.fromLTRB(pad, 0, pad, 20), children: [
-      _windowsHero(featured),
+      if (widget.storage.showHeroBanner) _windowsHero(featured),
       const SizedBox(height: 28),
       Row(children: [
         Expanded(
@@ -211,7 +216,9 @@ extension _WindowsShell on _AdaptiveShellState {
                   width: (box.maxWidth - (columns - 1) * 23) / columns,
                   child: _windowsHistoryCard(entry))
           else
-            for (final video in _homeVideos.skip(1).take(columns))
+            for (final video in _windowsRecommendedVideos
+                .skip(widget.storage.showHeroBanner ? 1 : 0)
+                .take(columns))
               SizedBox(
                   width: (box.maxWidth - (columns - 1) * 23) / columns,
                   child:
@@ -220,6 +227,27 @@ extension _WindowsShell on _AdaptiveShellState {
       }),
     ]);
   }
+
+  Widget _windowsHomeError() => Center(
+          child: WinPanel(
+              child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(_homeError ?? '加载失败', style: TextStyle(color: winInk(context))),
+          const SizedBox(height: 16),
+          Wrap(spacing: 10, children: [
+            WinButton('重试', onPressed: _retryHomeError ?? _loadSiteHome),
+            if (_activeSite != null &&
+                CmsClient.needsSourceVerification(
+                    _activeSite!, _homeErrorCause))
+              SourceVerificationButton(
+                  client: widget.client,
+                  site: _activeSite!,
+                  onVerified: _retryHomeError ?? _loadSiteHome),
+            WinButton('切换片源', onPressed: _showSitePickerDialog),
+          ]),
+        ],
+      )));
 
   Widget _windowsHero(CmsVideo video) {
     final compact = MediaQuery.sizeOf(context).width < 900;
@@ -257,6 +285,8 @@ extension _WindowsShell on _AdaptiveShellState {
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
                                 Text(_activeSite?.name ?? '',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
                                         color: Colors.white70, fontSize: 12)),
                                 const SizedBox(height: 18),
@@ -334,13 +364,18 @@ extension _WindowsShell on _AdaptiveShellState {
                   fontWeight: FontWeight.w600,
                   fontSize: 15)),
           const SizedBox(height: 5),
-          Text(
-              [video.year, video.remarks]
-                  .where((s) => s.isNotEmpty)
-                  .join(' · '),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(color: winMuted(context), fontSize: 11)),
+          if (widget.storage.cardSubtitleMode != 'none')
+            Text(
+                switch (widget.storage.cardSubtitleMode) {
+                  'site' => site.name,
+                  'year_area' => [video.year, video.area, video.tag]
+                      .where((s) => s.isNotEmpty)
+                      .join(' · '),
+                  _ => video.remarks.isEmpty ? site.name : video.remarks,
+                },
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: winMuted(context), fontSize: 11)),
         ]),
       );
 
@@ -396,9 +431,11 @@ extension _WindowsShell on _AdaptiveShellState {
   Widget _windowsDiscover(double pad) =>
       ListView(padding: EdgeInsets.fromLTRB(pad, 8, pad, 30), children: [
         _windowsHeading('发现', actions: [
-          WinButton(_activeSite?.name ?? '选择片源',
-              onPressed: _showSitePickerDialog,
-              icon: CupertinoIcons.chevron_down),
+          Tooltip(
+              message: _activeSite?.name ?? '选择片源',
+              child: WinButton(_activeSite?.name ?? '选择片源',
+                  onPressed: _showSitePickerDialog,
+                  icon: CupertinoIcons.chevron_down)),
           if ((_config?.depots ?? []).isNotEmpty)
             WinButton('切换仓库', onPressed: _showDepotPickerDialog)
         ]),
@@ -429,18 +466,37 @@ extension _WindowsShell on _AdaptiveShellState {
           const Padding(
               padding: EdgeInsets.all(35),
               child: Center(child: CircularProgressIndicator())),
-        if (_homeError != null)
-          _windowsEmpty('加载未完成', _homeError!,
-              action: _refreshCurrentHomeView, button: '重新加载'),
+        if (_homeError != null) _windowsHomeError(),
         if (_activeSite != null)
           LayoutBuilder(builder: (_, box) {
-            final count = (box.maxWidth / 195).floor().clamp(3, 7);
+            final extent = switch (widget.storage.gridDensity) {
+              'compact' => 150.0,
+              'comfortable' => 245.0,
+              _ => 195.0
+            };
+            final count = (box.maxWidth / extent).floor().clamp(2, 9);
             return Wrap(spacing: 23, runSpacing: 28, children: [
               for (final video in _homeVideos)
                 SizedBox(
                     width: (box.maxWidth - (count - 1) * 23) / count,
                     child: _windowsVideoCard(video, _activeSite!))
             ]);
+          }),
+        if (!_homeLoading &&
+            _homeError == null &&
+            _homeVideos.isEmpty &&
+            _config != null)
+          _windowsEmpty('没有符合筛选条件的影片', '试试其他分类或清除筛选。', button: '清除筛选',
+              action: () {
+            _updateWindowsState(() {
+              _primaryTab = 'recommend';
+              _filterSubCategoryId = '';
+              _filterGenreLabel = '';
+              _filterArea = '';
+              _filterYear = '';
+              _filterExpanded = false;
+            });
+            _reloadFilteredListing(page: 1);
           }),
         if (_currentPage < _pageCount)
           Padding(
@@ -582,158 +638,271 @@ extension _WindowsShell on _AdaptiveShellState {
       animation: DownloadService.instance,
       builder: (context, _) {
         final service = DownloadService.instance;
+        if (!service.isReady)
+          return _windowsEmpty('下载暂时不可用', '无法打开下载目录，请检查磁盘权限后重新启动应用。');
         if (service.tasks.isEmpty)
           return _windowsEmpty('还没有下载任务', '在影片详情中选择下载，完成后就可以离线观看。');
-        return ListView.separated(
-            itemCount: service.tasks.length,
-            separatorBuilder: (_, __) => Divider(
-                color: winMuted(context).withValues(alpha: .13), height: 32),
-            itemBuilder: (context, i) {
-              final t = service.tasks[i];
-              final done = t.status == DownloadStatus.completed;
-              final resume = t.status == DownloadStatus.paused ||
-                  t.status == DownloadStatus.failed;
-              return Row(children: [
-                ClipRRect(
-                    borderRadius: BorderRadius.circular(15),
-                    child: SizedBox(
-                        width: 140,
-                        height: 85,
-                        child: PosterImage(
-                            url: t.poster,
-                            title: t.title,
-                            placeholder: const SizedBox.shrink()))),
-                const SizedBox(width: 24),
-                Expanded(
-                    child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                      Text(t.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                              color: winInk(context),
-                              fontSize: 17,
-                              fontWeight: FontWeight.w600)),
-                      const SizedBox(height: 7),
-                      Text(
-                          '${t.episodeName} · ${DownloadService.statusLabel(t)}',
-                          style: TextStyle(
-                              color: winMuted(context), fontSize: 12)),
-                      const SizedBox(height: 16),
-                      LinearProgressIndicator(
-                          value: t.progress.clamp(0, 1), minHeight: 3)
-                    ])),
-                const SizedBox(width: 20),
-                WinButton(
-                    done
-                        ? '播放'
-                        : resume
-                            ? '继续'
-                            : '暂停',
-                    onPressed: done
-                        ? () => _playDownloaded(t)
-                        : resume
-                            ? () => service.resume(t.id)
-                            : () => service.pause(t.id)),
-                IconButton(
-                    tooltip: '删除下载',
-                    onPressed: () => _confirmDeleteDownload(t),
-                    icon: Icon(CupertinoIcons.trash,
-                        size: 18, color: winMuted(context)))
-              ]);
-            });
+        final active = service.activeCount;
+        final hasPaused =
+            service.tasks.any((t) => t.status == DownloadStatus.paused);
+        return Column(children: [
+          if (active > 0 || hasPaused)
+            Row(children: [
+              Expanded(
+                  child: Text(active > 0 ? '$active 个任务进行中' : '下载已暂停',
+                      style: TextStyle(color: winMuted(context)))),
+              WinButton(active > 0 ? '全部暂停' : '全部继续',
+                  onPressed: active > 0 ? service.pauseAll : service.resumeAll),
+            ]),
+          Expanded(
+              child: ListView.separated(
+                  itemCount: service.tasks.length,
+                  separatorBuilder: (_, __) => Divider(
+                      color: winMuted(context).withValues(alpha: .13),
+                      height: 32),
+                  itemBuilder: (context, i) {
+                    final t = service.tasks[i];
+                    final done = t.status == DownloadStatus.completed;
+                    final resume = t.status == DownloadStatus.paused ||
+                        t.status == DownloadStatus.failed;
+                    return Row(children: [
+                      ClipRRect(
+                          borderRadius: BorderRadius.circular(15),
+                          child: SizedBox(
+                              width: 140,
+                              height: 85,
+                              child: PosterImage(
+                                  url: t.poster,
+                                  title: t.title,
+                                  placeholder: const SizedBox.shrink()))),
+                      const SizedBox(width: 24),
+                      Expanded(
+                          child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                            Text(t.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                    color: winInk(context),
+                                    fontSize: 17,
+                                    fontWeight: FontWeight.w600)),
+                            const SizedBox(height: 7),
+                            Text(
+                                '${t.episodeName} · ${DownloadService.statusLabel(t)}',
+                                style: TextStyle(
+                                    color: winMuted(context), fontSize: 12)),
+                            const SizedBox(height: 16),
+                            LinearProgressIndicator(
+                                value: t.progress.clamp(0, 1), minHeight: 3)
+                          ])),
+                      const SizedBox(width: 20),
+                      WinButton(
+                          done
+                              ? '播放'
+                              : resume
+                                  ? '继续'
+                                  : '暂停',
+                          onPressed: done
+                              ? () => _playDownloaded(t)
+                              : resume
+                                  ? () => service.resume(t.id)
+                                  : () => service.pause(t.id)),
+                      IconButton(
+                          tooltip: '删除下载',
+                          onPressed: () => _confirmDeleteDownload(t),
+                          icon: Icon(CupertinoIcons.trash,
+                              size: 18, color: winMuted(context)))
+                    ]);
+                  })),
+          if (service.rootPath.isNotEmpty)
+            Text('保存位置：${service.rootPath}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: winMuted(context))),
+        ]);
       });
+
+  void _windowsPlayChannel(LiveChannel channel, [int line = 0]) {
+    if (channel.urls.isEmpty) return;
+    _updateWindowsState(() {
+      _windowsLiveChannel = channel;
+      _windowsLiveLine = line;
+      _windowsLiveRevision++;
+    });
+  }
 
   Widget _windowsLive(double pad) {
     final sources = _visibleLives;
     if (sources.isEmpty)
       return _windowsEmpty('添加你的直播频道', '导入直播来源后，可以在这里浏览频道、切换线路。',
-          action: () => _showImportConfigDialog());
-    final groupIndex = _liveGroups.isEmpty
-        ? 0
-        : _selectedLiveGroup.clamp(0, _liveGroups.length - 1);
-    final channels = _liveGroups.isEmpty
-        ? <LiveChannel>[]
-        : _liveGroups[groupIndex]
-            .channels
-            .where((c) =>
-                c.name.toLowerCase().contains(_liveSearchQuery.toLowerCase()))
-            .toList();
-    return ListView(padding: EdgeInsets.fromLTRB(pad, 8, pad, 30), children: [
-      _windowsHeading('直播', actions: [
-        WinButton('管理来源', onPressed: _showSubscriptionManagerSheet)
-      ]),
-      Wrap(spacing: 8, runSpacing: 8, children: [
-        for (int i = 0; i < sources.length; i++)
-          WinButton(sources[i].name,
-              selected: i == _selectedLiveSource,
-              onPressed: () => _loadLivePlaylist(i))
-      ]),
-      const SizedBox(height: 20),
-      Wrap(spacing: 6, runSpacing: 8, children: [
-        for (int i = 0; i < _liveGroups.length; i++)
-          WinButton(_liveGroups[i].name,
-              selected: i == groupIndex,
-              onPressed: () =>
-                  _updateWindowsState(() => _selectedLiveGroup = i))
-      ]),
-      const SizedBox(height: 20),
-      TextField(
-          controller: _liveSearchController,
-          style: TextStyle(color: winInk(context)),
-          decoration: const InputDecoration(
-              prefixIcon: Icon(CupertinoIcons.search),
-              hintText: '搜索当前分组的频道',
-              border: OutlineInputBorder(
-                  borderRadius: BorderRadius.all(Radius.circular(20)))),
-          onChanged: (v) => _updateWindowsState(() => _liveSearchQuery = v)),
-      const SizedBox(height: 20),
-      if (_liveLoading) const Center(child: CircularProgressIndicator()),
-      if (_liveError != null)
-        _windowsEmpty('频道加载失败', _liveError!,
-            action: () => _loadLivePlaylist(_selectedLiveSource),
-            button: '重新加载'),
-      LayoutBuilder(
-          builder: (_, box) => Wrap(spacing: 18, runSpacing: 18, children: [
-                for (final ch in channels)
+          action: _showImportConfigDialog);
+    final query = _liveSearchQuery.trim().toLowerCase();
+    final channels = <LiveChannel>[
+      for (var i = 0; i < _liveGroups.length; i++)
+        if (query.isNotEmpty ||
+            _selectedLiveGroup < 0 ||
+            i == _selectedLiveGroup)
+          for (final channel in _liveGroups[i].channels)
+            if (query.isEmpty ||
+                channel.name.toLowerCase().contains(query) ||
+                _liveGroups[i].name.toLowerCase().contains(query))
+              channel,
+    ];
+    final selected = _windowsLiveChannel;
+    final player = ClipRRect(
+        borderRadius: BorderRadius.circular(24),
+        child: ColoredBox(
+            color: const Color(0xFF172638),
+            child: selected == null
+                ? const Center(
+                    child: Text('选择右侧频道，开始观看',
+                        style: TextStyle(color: Colors.white70)))
+                : LayoutBuilder(
+                    builder: (context, box) => MediaQuery(
+                        data: MediaQuery.of(context).copyWith(
+                            size: box.biggest, padding: EdgeInsets.zero),
+                        child: PlayerScreen(
+                            key: ValueKey('live-$_windowsLiveRevision'),
+                            site: sources[_selectedLiveSource.clamp(
+                                    0, sources.length - 1)]
+                                .playbackSite,
+                            video: CmsVideo(
+                                id: selected.name,
+                                title: selected.name,
+                                lines: [
+                                  CmsLine(
+                                      name: selected.group,
+                                      episodes: selected.episodes)
+                                ]),
+                            initialLineIndex: 0,
+                            initialEpisodeIndex: _windowsLiveLine,
+                            storage: widget.storage,
+                            isLive: true,
+                            embedded: true,
+                            onEmbeddedClose: () => _updateWindowsState(
+                                () => _windowsLiveChannel = null),
+                            onEmbeddedExpand: () {
+                              _updateWindowsState(
+                                  () => _windowsLiveChannel = null);
+                              _openLiveChannelStream(
+                                  sources, selected, _windowsLiveLine);
+                            })))));
+    final list = WinPanel(
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          TextField(
+              controller: _liveSearchController,
+              style: TextStyle(color: winInk(context)),
+              decoration: const InputDecoration(
+                  hintText: '搜索全部频道', prefixIcon: Icon(CupertinoIcons.search)),
+              onChanged: (v) =>
+                  _updateWindowsState(() => _liveSearchQuery = v)),
+          const SizedBox(height: 12),
+          if (_liveLoading) const LinearProgressIndicator(minHeight: 2),
+          Expanded(
+              child: channels.isEmpty
+                  ? Center(
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      Text(_liveError ?? (_liveLoading ? '正在加载频道…' : '没有匹配频道'),
+                          style: TextStyle(color: winMuted(context))),
+                      WinButton(_liveError == null ? '清除搜索' : '重新加载',
+                          onPressed: () {
+                        if (_liveError != null) {
+                          _loadLivePlaylist(_selectedLiveSource);
+                        } else {
+                          _updateWindowsState(() {
+                            _liveSearchController.clear();
+                            _liveSearchQuery = '';
+                            _selectedLiveGroup = -1;
+                          });
+                        }
+                      }),
+                    ]))
+                  : ListView.builder(
+                      key: const PageStorageKey('windows-live-channels'),
+                      itemCount: channels.length,
+                      itemBuilder: (_, i) {
+                        final ch = channels[i];
+                        return ListTile(
+                            selected: ch == selected,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14)),
+                            title: Text(ch.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(color: winInk(context))),
+                            subtitle: Text(
+                                '${ch.group} · ${ch.urls.length} 条线路',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(color: winMuted(context))),
+                            onTap: () => _windowsPlayChannel(ch),
+                            trailing: ch.urls.length <= 1
+                                ? null
+                                : PopupMenuButton<int>(
+                                    tooltip: '选择线路',
+                                    onSelected: (line) =>
+                                        _windowsPlayChannel(ch, line),
+                                    itemBuilder: (_) => [
+                                          for (var line = 0;
+                                              line < ch.urls.length;
+                                              line++)
+                                            PopupMenuItem(
+                                                value: line,
+                                                child: Text('线路 ${line + 1}'))
+                                        ]));
+                      })),
+        ]));
+    return Padding(
+        padding: EdgeInsets.fromLTRB(pad, 8, pad, 20),
+        child: Column(children: [
+          _windowsHeading('直播', actions: [
+            WinButton('管理来源', onPressed: _showSubscriptionManagerSheet)
+          ]),
+          SizedBox(
+              height: 48,
+              child: ListView(scrollDirection: Axis.horizontal, children: [
+                for (int i = 0; i < sources.length; i++)
                   SizedBox(
-                      width: (box.maxWidth - 36) / 3,
-                      child: WinPanel(
-                          padding: const EdgeInsets.all(18),
-                          child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(ch.name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                        color: winInk(context),
-                                        fontSize: 17,
-                                        fontWeight: FontWeight.w600)),
-                                const SizedBox(height: 12),
-                                Text('${ch.urls.length} 条线路',
-                                    style: TextStyle(
-                                        color: winMuted(context),
-                                        fontSize: 12)),
-                                const SizedBox(height: 14),
-                                Wrap(children: [
-                                  WinButton('播放',
-                                      icon: CupertinoIcons.play_fill,
-                                      selected: true,
-                                      onPressed: ch.urls.isEmpty
-                                          ? null
-                                          : () => _openLiveChannelStream(
-                                              sources, ch, 0)),
-                                  if (ch.urls.length > 1)
-                                    WinButton('线路',
-                                        onPressed: () =>
-                                            _showLiveChannelLinesSheet(
-                                                sources, ch))
-                                ])
-                              ])))
+                      width: 180,
+                      child: WinButton(sources[i].name,
+                          selected: i == _selectedLiveSource,
+                          onPressed: () => _loadLivePlaylist(i))),
               ])),
-    ]);
+          SizedBox(
+              height: 48,
+              child: ListView(scrollDirection: Axis.horizontal, children: [
+                WinButton('全部',
+                    selected: _selectedLiveGroup < 0,
+                    onPressed: () =>
+                        _updateWindowsState(() => _selectedLiveGroup = -1)),
+                for (int i = 0; i < _liveGroups.length; i++)
+                  WinButton(_liveGroups[i].name,
+                      selected: _selectedLiveGroup == i,
+                      onPressed: () =>
+                          _updateWindowsState(() => _selectedLiveGroup = i)),
+              ])),
+          const SizedBox(height: 14),
+          Expanded(
+              child: LayoutBuilder(
+                  builder: (_, box) => box.maxWidth >= 900
+                      ? Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                              Expanded(child: player),
+                              const SizedBox(width: 22),
+                              SizedBox(width: 300, child: list)
+                            ])
+                      : SingleChildScrollView(
+                          child: Column(children: [
+                          SizedBox(
+                              height: (box.maxWidth * 9 / 16).clamp(180, 340),
+                              child: player),
+                          const SizedBox(height: 12),
+                          SizedBox(height: 360, child: list)
+                        ])))),
+        ]));
   }
 
   Widget _windowsSettingsPage(double pad) {
@@ -834,4 +1003,171 @@ extension _WindowsShell on _AdaptiveShellState {
   Widget _windowsWelcome() =>
       _windowsEmpty('从一部影片开始。', '添加内容来源，搜索想看的影片。你的收藏与观看记录会保存在这里。',
           action: _showImportConfigDialog);
+  Widget _windowsSearch(double pad) {
+    final entries = <String, CmsSite>{
+      for (final site in _visibleSupportedSites)
+        '${site.subscriptionId}:${site.key}': site,
+      for (final row in _searchResults)
+        '${row.$1.subscriptionId}:${row.$1.key}': row.$1,
+    };
+    final results = _searchResults
+        .where((r) =>
+            _searchSiteFilterKey.isEmpty ||
+            '${r.$1.subscriptionId}:${r.$1.key}' == _searchSiteFilterKey)
+        .toList();
+    final history =
+        widget.storage.getSearchHistory(forPrivate: _privateSessionUnlocked);
+    return Padding(
+        padding: EdgeInsets.fromLTRB(pad, 8, pad, 20),
+        child: Column(children: [
+          _windowsHeading(_privateSessionUnlocked ? '隐私空间搜索' : '搜索', actions: [
+            WinButton('清空历史', onPressed: () async {
+              await widget.storage
+                  .clearSearchHistory(forPrivate: _privateSessionUnlocked);
+              if (mounted) _updateWindowsState(() {});
+            }),
+          ]),
+          WinPanel(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+              child: Row(children: [
+                Expanded(
+                    child: TextField(
+                        key: const ValueKey('windows-search-input'),
+                        controller: _searchController,
+                        autofocus: true,
+                        style: TextStyle(color: winInk(context)),
+                        decoration: const InputDecoration(
+                            hintText: '搜索影片、剧集',
+                            prefixIcon: Icon(CupertinoIcons.search),
+                            border: InputBorder.none),
+                        onSubmitted: _runGlobalSearch)),
+                WinButton('搜索',
+                    selected: true,
+                    onPressed: () => _runGlobalSearch(_searchController.text)),
+              ])),
+          const SizedBox(height: 14),
+          if (!_searchPerformed && history.isNotEmpty)
+            Align(
+                alignment: Alignment.centerLeft,
+                child: Wrap(spacing: 8, children: [
+                  for (final word in history)
+                    WinButton(word, onPressed: () {
+                      _searchController.text = word;
+                      _runGlobalSearch(word);
+                    })
+                ])),
+          SizedBox(
+              height: 48,
+              child: ListView(scrollDirection: Axis.horizontal, children: [
+                WinButton('全部片源',
+                    selected: _searchSiteFilterKey.isEmpty,
+                    onPressed: () =>
+                        _updateWindowsState(() => _searchSiteFilterKey = '')),
+                for (final entry in entries.entries)
+                  SizedBox(
+                      width: 170,
+                      child: Tooltip(
+                          message: entry.value.name,
+                          child: WinButton(entry.value.name,
+                              selected: entry.key == _searchSiteFilterKey,
+                              onPressed: () => _updateWindowsState(
+                                  () => _searchSiteFilterKey = entry.key)))),
+              ])),
+          if (_searching) const LinearProgressIndicator(minHeight: 2),
+          if (_searchNotices.isNotEmpty)
+            ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 120),
+                child: SingleChildScrollView(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                      for (final entry in _searchNotices.entries)
+                        Row(children: [
+                          Expanded(
+                              child: Text(entry.value,
+                                  style: TextStyle(color: winMuted(context)))),
+                          if (_searchVerificationSites[entry.key]
+                              case final site?)
+                            SourceVerificationButton(
+                                client: widget.client,
+                                site: site,
+                                onVerified: () => _retryVerifiedSearch(site)),
+                        ]),
+                    ]))),
+          const SizedBox(height: 16),
+          Expanded(
+              child: results.isEmpty
+                  ? Center(
+                      child: Text(
+                          _searching
+                              ? '正在搜索已启用的片源…'
+                              : !_searchPerformed
+                                  ? '输入片名，开始查找想看的内容。'
+                                  : '没有匹配影片，试试其他关键词或片源。',
+                          style: TextStyle(color: winMuted(context))))
+                  : ListView.separated(
+                      key: const PageStorageKey('windows-search-results'),
+                      itemCount: results.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 14),
+                      itemBuilder: (context, i) {
+                        final (site, video) = results[i];
+                        return WinPanel(
+                            padding: EdgeInsets.zero,
+                            child: InkWell(
+                                key: ValueKey(
+                                    'windows-search-${site.subscriptionId}-${site.key}-${video.id}'),
+                                onTap: () => _openVideoDetail(site, video),
+                                borderRadius: BorderRadius.circular(24),
+                                child: Padding(
+                                    padding: const EdgeInsets.all(14),
+                                    child: Row(children: [
+                                      SizedBox(
+                                          width: 180,
+                                          height: 105,
+                                          child: ClipRRect(
+                                              borderRadius:
+                                                  BorderRadius.circular(15),
+                                              child: PosterImage(
+                                                  url: video.poster,
+                                                  title:
+                                                      site.isEffectivelyPrivate
+                                                          ? ''
+                                                          : video.title,
+                                                  placeholder: const ColoredBox(
+                                                      color:
+                                                          Color(0x30273548))))),
+                                      const SizedBox(width: 22),
+                                      Expanded(
+                                          child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                            Text(video.title,
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                    color: winInk(context),
+                                                    fontSize: 19,
+                                                    fontWeight:
+                                                        FontWeight.w600)),
+                                            const SizedBox(height: 10),
+                                            Text(
+                                                [
+                                                  video.year,
+                                                  video.remarks,
+                                                  site.name
+                                                ]
+                                                    .where((v) => v.isNotEmpty)
+                                                    .join(' · '),
+                                                maxLines: 2,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                    color: winMuted(context))),
+                                          ])),
+                                      Icon(CupertinoIcons.chevron_right,
+                                          color: winMuted(context), size: 18),
+                                    ]))));
+                      })),
+        ]));
+  }
 }
