@@ -406,10 +406,21 @@ class _WindowsAppearanceHostState extends State<WindowsAppearanceHost> {
       ));
 }
 
-Color winInk(BuildContext context) => WindowsAppearanceScope.of(context).dark
+class WindowsPanelTone extends InheritedWidget {
+  final bool dark;
+  const WindowsPanelTone({super.key, required this.dark, required super.child});
+  @override
+  bool updateShouldNotify(WindowsPanelTone oldWidget) => dark != oldWidget.dark;
+}
+
+bool winDark(BuildContext context) =>
+    context.dependOnInheritedWidgetOfExactType<WindowsPanelTone>()?.dark ??
+    WindowsAppearanceScope.of(context).dark;
+
+Color winInk(BuildContext context) => winDark(context)
     ? const Color(0xFFF2F5FC)
     : const Color(0xFF263649);
-Color winMuted(BuildContext context) => WindowsAppearanceScope.of(context).dark
+Color winMuted(BuildContext context) => winDark(context)
     ? const Color(0xFFBFCDE1)
     : const Color(0xFF39495F);
 
@@ -522,7 +533,7 @@ class WinPanel extends StatelessWidget {
       builder: (context, _) => _surface(context));
 
   Widget _surface(BuildContext context) {
-    final isDark = dark || WindowsAppearanceScope.of(context).dark;
+    final isDark = dark || winDark(context);
     final opaque = GlassworkBackdrop.reduceTransparency.value ||
         MediaQuery.highContrastOf(context) ||
         GlassworkBackdrop.intensity.value <= .02;
@@ -572,11 +583,11 @@ class WinButton extends StatelessWidget {
                     const EdgeInsets.symmetric(horizontal: 18, vertical: 15),
                 backgroundColor: selected
                     ? opaque
-                        ? WindowsAppearanceScope.of(context).dark
+                        ? winDark(context)
                             ? const Color(0xFF455166)
                             : Colors.white
                         : Colors.white.withValues(
-                            alpha: WindowsAppearanceScope.of(context).dark
+                            alpha: winDark(context)
                                 ? .2
                                 : .65)
                     : Colors.transparent,

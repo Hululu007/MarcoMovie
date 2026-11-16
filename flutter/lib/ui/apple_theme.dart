@@ -1692,6 +1692,33 @@ Future<T?> showAppleModalSheet<T>({
   double? maxWidth,
   bool ignoreKeyboardInsets = false,
 }) {
+  if (usesWindowsAppearance(context)) {
+    // Legacy account/maintenance forms use light text. Keep a readable dark
+    // surface while giving Windows sheets the same spacing and controls.
+    return showDialog<T>(context: context, barrierColor: Colors.black26,
+      builder: (dialogContext) => WindowsPanelTone(dark: true,
+        child: WindowsSettingsRegion(child: Builder(builder: (ctx) {
+          final size = MediaQuery.sizeOf(ctx);
+          return Dialog(backgroundColor: Colors.transparent, elevation: 0,
+            insetPadding: const EdgeInsets.all(24),
+            child: ConstrainedBox(constraints: BoxConstraints(
+              maxWidth: math.min(maxWidth ?? 760, size.width - 48),
+              maxHeight: size.height - 48 - (ignoreKeyboardInsets ? 0 : MediaQuery.viewInsetsOf(ctx).bottom)),
+              child: WinPanel(dark: true, padding: EdgeInsets.zero, child: Column(
+                mainAxisSize: MainAxisSize.min, children: [
+                  Padding(padding: const EdgeInsets.fromLTRB(24, 14, 14, 14), child: Row(children: [
+                    Expanded(child: Text(title, style: TextStyle(color: winInk(ctx), fontSize: 19, fontWeight: FontWeight.w600))),
+                    if (trailingAction != null) trailingAction,
+                    IconButton(tooltip: '关闭', icon: Icon(CupertinoIcons.xmark, color: winMuted(ctx), size: 18),
+                      onPressed: () => Navigator.of(ctx).pop()),
+                  ])),
+                  Divider(height: 1, color: winMuted(ctx).withValues(alpha: .15)),
+                  Flexible(child: TextSelectionMouseGuard(child: builder(ctx))),
+                ])),
+            ));
+        }))),
+    );
+  }
   return showCupertinoModalPopup<T>(
     context: context,
     builder: (ctx) {
