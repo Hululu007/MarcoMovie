@@ -193,6 +193,14 @@ jobs:
         with:
           channel: "stable"
           flutter-version: "3.38.9"
+      - name: Validate Windows installer script before building the application
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          python scripts/test_windows_installer.py --compiler "$iscc"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Generate platform runner & build Windows release
         working-directory: flutter
         run: |
