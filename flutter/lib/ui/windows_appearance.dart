@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'apple_theme.dart';
 
 class WindowsBackdropPreset {
   final String id;
@@ -473,16 +474,23 @@ class WinPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isDark = dark || WindowsAppearanceScope.of(context).dark;
+    final opaque = GlassworkBackdrop.reduceTransparency.value ||
+        MediaQuery.highContrastOf(context);
     return ClipRRect(
         borderRadius: BorderRadius.circular(radius),
         child: BackdropFilter(
+          enabled: false,
           filter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
           child: Container(
               padding: padding,
               decoration: BoxDecoration(
-                color: dark
-                    ? const Color(0xCC1C293E)
-                    : Colors.white.withValues(alpha: isDark ? .07 : .29),
+                color: opaque
+                    ? (isDark
+                        ? const Color(0xFF29364A)
+                        : const Color(0xFFF0F1F5))
+                    : dark
+                        ? const Color(0xCC1C293E)
+                        : Colors.white.withValues(alpha: isDark ? .16 : .48),
                 borderRadius: BorderRadius.circular(radius),
                 border: Border.all(
                     color: Colors.white.withValues(alpha: isDark ? .18 : .57)),
