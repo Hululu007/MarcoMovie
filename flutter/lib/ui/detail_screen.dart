@@ -19,6 +19,8 @@ import 'netdisk_sheet.dart';
 import 'player_screen.dart';
 import 'poster_image.dart';
 import 'source_verification_dialog.dart';
+import 'windows_appearance.dart';
+part 'windows_detail.dart';
 
 /// Apple TV+ / Infuse inspired responsive video detail page for iPhone, iPad, Mac, and Windows.
 /// Features:
@@ -182,6 +184,7 @@ class _DetailScreenState extends State<DetailScreen> {
     _resolvedRtScore = cachedRatings?.rt;
   }
 
+  void _updateWindowsState(VoidCallback change) => setState(change);
   @override
   void initState() {
     super.initState();
@@ -1572,6 +1575,9 @@ class _DetailScreenState extends State<DetailScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null) {
+      return _buildWindowsDetail(context);
+    }
     final width = MediaQuery.sizeOf(context).width;
     final wideLayout = width >= 720;
     if (!wideLayout) {

@@ -34,6 +34,8 @@ import 'player_screen.dart';
 import 'poster_image.dart';
 import 'release_notes_view.dart';
 import 'source_verification_dialog.dart';
+import 'windows_appearance.dart';
+part 'windows_shell.dart';
 /// Apple HIG adaptive shell:
 /// - macOS / iPadOS / Desktop (`width >= 700`): Translucent sidebar with traffic-light inset & source card
 /// - iOS (`width < 700`): Frosted-glass top navigation bar and translucent Cupertino bottom tab bar
@@ -158,6 +160,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   bool _windowListenerAttached = false;
   Future<void>? _closingHistoryFlush;
   int _tabIndex = 0;
+  String _windowsPage = 'home';
+  String _windowsSettings = '背景与外观';
   CmsConfig? _config;
   CmsSite? _activeSite;
   List<CmsCategory> _categories = const [];
@@ -253,6 +257,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ? cfg.privateSupportedLives
         : cfg.publicSupportedLives;
   }
+  void _updateWindowsState(VoidCallback change) => setState(change);
   @override
   void initState() {
     super.initState();
@@ -1183,6 +1188,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
   @override
   Widget build(BuildContext context) {
+    if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null) {
+      return _buildWindowsShell(context);
+    }
     final size = MediaQuery.sizeOf(context);
     final useSidebar =
         _isDesktop ? (size.width >= 700) : (size.width > size.height);

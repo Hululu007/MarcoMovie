@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 import 'apple_theme.dart';
+import 'windows_appearance.dart';
 
 /// Immersive Windows 11 caption overlay that hides the legacy Win32 gray title
 /// bar while letting full-bleed ambient backgrounds, hero posters, and video
@@ -201,7 +202,9 @@ class WindowsTitleBar extends StatelessWidget {
                   padding: const EdgeInsets.only(left: 14),
                   child: Align(
                     alignment: Alignment.centerLeft,
-                    child: Opacity(
+                    child: WindowsAppearanceScope.maybeOf(context) != null
+                        ? const SizedBox.expand()
+                        : Opacity(
                       opacity: isFocused ? 0.78 : 0.45,
                       child: const Row(
                         mainAxisSize: MainAxisSize.min,

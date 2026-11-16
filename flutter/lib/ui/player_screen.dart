@@ -21,6 +21,7 @@ import '../core/wogg_source.dart';
 import 'player_interaction_layers.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
+import 'windows_appearance.dart';
 import 'desktop_horizontal_scroller.dart';
 import 'desktop_player_window.dart';
 import 'mobile_player_chrome.dart';
@@ -2292,6 +2293,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildAppleChromeOverlay(BuildContext context) {
+    if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null) {
+      return _buildWindowsChrome(context);
+    }
     final size = MediaQuery.sizeOf(context);
     final isLandscape = size.width > size.height;
     final showLeftLockButton = isLandscape && size.width >= 480;
@@ -2376,6 +2380,50 @@ class _PlayerScreenState extends State<PlayerScreen>
         ),
       ),
     );
+  }
+
+  bool _windowsMoreControls = false;
+
+  Widget _buildWindowsChrome(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final scale = (width / 1250).clamp(.76, 1.0);
+    Widget control(String label, IconData icon, VoidCallback action) {
+      return TextButton.icon(
+        onPressed: action,
+        style: TextButton.styleFrom(foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12)),
+        icon: Icon(icon, size: 17), label: Text(label, style: const TextStyle(fontSize: 12)),
+      );
+    }
+    return SafeArea(child: Stack(fit: StackFit.expand, children: [
+      Positioned(left: 28, right: 28, top: 20,
+        child: _buildTopHeader(context, true, scale, includeLockButton: true)),
+      if (_windowsMoreControls)
+        Positioned(left: 24, right: 24, bottom: 190,
+          child: Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 1080),
+            child: _buildScrollableToolDock(isLandscape: false, scale: scale)))),
+      Positioned(left: 24, right: 24, bottom: 27, child: Center(
+        child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 1080),
+          child: WinPanel(dark: true, radius: 30, padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              if (!_isLiveStream) _buildProgressBarCapsule(context, true, scale),
+              const SizedBox(height: 8),
+              Row(children: [
+                _buildCenterTransportButtons(.59 * scale),
+                const Spacer(),
+                if (!_isLiveStream && width >= 880) control('${_normalSpeed}×', CupertinoIcons.speedometer, _showSpeedSheet),
+                if (!_isLiveStream && width >= 1000) control('字幕', CupertinoIcons.captions_bubble, _showSubtitleTracksSheet),
+                control(_isLiveStream ? '信号' : '选集', CupertinoIcons.list_bullet, _showEpisodesSheet),
+                control('更多', CupertinoIcons.ellipsis, () {
+                  setState(() => _windowsMoreControls = !_windowsMoreControls);
+                  if (_windowsMoreControls) { _hideTimer?.cancel(); } else { _scheduleHide(); }
+                }),
+              ]),
+            ]),
+          ),
+        ),
+      )),
+    ]));
   }
 
   Widget _buildTopHeader(

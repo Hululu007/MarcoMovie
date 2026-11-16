@@ -1,3 +1,10 @@
+## 2026-11-16 Windows 柔光界面更新（Windows 0.5.22）
+
+- [Windows 0.5.22 更新说明](docs/releases/windows-v0.5.22.md)
+- 新增顶部导航、柔光渐变与自定义图片背景，重排首页、发现、直播、收藏历史、详情和设置。
+- 播放器新增底部悬浮控制栏，原有功能集中在常用操作与「更多」菜单，保留完整播放、网盘、离线下载、同步备份与隐私空间能力。
+- 新增背景持久化、无效图片、缩小窗口与详情操作的专项回归检查。
+
 ## 2026-11-15 4K 网盘秒拉秒解析、6 路并发分片代理与同站死链回捞升级（Android TV 0.5.25 · Android 手机/平板 0.5.25 · iOS / iPadOS 0.5.31 · Windows 0.5.21 · macOS 0.5.18）
 
 - [Android 电视 / 盒子 0.5.25](docs/releases/android-tv-v0.5.25.md) · [Android 手机 / 平板 0.5.25](docs/releases/android-mobile-v0.5.25.md) · [iOS / iPadOS 0.5.31](docs/releases/ios-v0.5.31.md) · [Windows 0.5.21](docs/releases/windows-v0.5.21.md) · [macOS 0.5.18](docs/releases/macos-v0.5.18.md)

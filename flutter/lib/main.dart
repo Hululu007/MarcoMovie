@@ -13,6 +13,7 @@ import 'core/storage_service.dart';
 import 'ui/adaptive_shell.dart';
 import 'ui/apple_theme.dart';
 import 'ui/windows_title_bar.dart';
+import 'ui/windows_appearance.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   AppLog.init();
@@ -157,7 +158,9 @@ class MarcoMovieApp extends StatelessWidget {
             fontFamily: primaryFont,
             fontFamilyFallback: _cjkFontFallback,
           ),
-          child: wrapped,
+          child: isWin
+              ? WindowsAppearanceHost(directory: storage.dataDirectory, child: wrapped)
+              : wrapped,
         );
       },
       home: AdaptiveShell(storage: storage, client: client),
