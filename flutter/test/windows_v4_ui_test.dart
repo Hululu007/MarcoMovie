@@ -15,6 +15,8 @@ import 'package:marco_movie/core/models.dart';
 import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:marco_movie/ui/detail_screen.dart';
 import 'package:marco_movie/ui/windows_appearance.dart';
+import 'package:marco_movie/ui/cloud_sync_panel.dart';
+import 'package:marco_movie/ui/netdisk_sheet.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'test_storage_helper.dart';
 
@@ -77,6 +79,20 @@ class WindowsFixtureClient extends CmsClient {
   Future<CmsListing> fetchSearch(CmsSite site, String keyword,
           {int page = 1}) async =>
       const CmsListing(videos: [fixtureVideo]);
+}
+
+Future<void> captureWindowsPage(WidgetTester tester, String name) async {
+  if (Platform.environment['MARCO_CAPTURE_DIR'] case final String output) {
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+        find.byKey(const ValueKey('capture')));
+    await tester.runAsync(() async {
+      final image = await boundary.toImage();
+      final data = await image.toByteData(format: ui.ImageByteFormat.png);
+      await Directory(output).create(recursive: true);
+      await File('$output/$name.png').writeAsBytes(data!.buffer.asUint8List());
+      image.dispose();
+    });
+  }
 }
 
 class PrivacyFixtureClient extends WindowsFixtureClient {
@@ -318,6 +334,19 @@ void main() {
             ]
           })));
       final client = WindowsFixtureClient();
+      await tester.runAsync(() => storage.upsertWatchHistory(
+          const WatchHistoryEntry(
+              site: 'owned',
+              id: 'history',
+              title: '昨日的旅途',
+              poster: '',
+              line: '主线路',
+              episode: '第 3 集',
+              index: 2,
+              position: 60000,
+              duration: 1200000,
+              updated: 1),
+          triggerSync: false));
       final appearance = WindowsAppearance(Directory.systemTemp);
       addTearDown(appearance.dispose);
       await tester.pumpWidget(MaterialApp(
@@ -331,6 +360,10 @@ void main() {
                   onSetPreventCloseForTest: (_) async {}))));
       await tester.pumpAndSettle();
       expect(find.text('影片详情'), findsOneWidget);
+      expect(find.text('最近在看'), findsOneWidget);
+      expect(find.text('为你呈现'), findsOneWidget,
+          reason: 'History and recommendations must coexist on home');
+      await captureWindowsPage(tester, 'home-${size.width.toInt()}');
       expect(tester.takeException(), isNull);
       await tester.tap(find.text('发现').first);
       await tester.pumpAndSettle();
@@ -366,6 +399,9 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
       await tester.pumpAndSettle();
       expect(find.byType(DetailScreen), findsOneWidget);
+      expect(
+          find.byKey(const ValueKey('windows-detail-poster')), findsOneWidget);
+      expect(find.text('切换片源'), findsOneWidget);
       await tester.tap(find.text('返回'));
       await tester.pumpAndSettle();
       expect(find.text('海边'), findsOneWidget);
@@ -408,10 +444,14 @@ void main() {
           image.dispose();
         });
       }
-      for (final tab in ['播放', '内容来源', '账号', '同步与备份', '更多设置']) {
+      for (final tab in ['首页与排版', '播放', '内容来源', '账号', '同步与备份', '更多设置']) {
         await tester.tap(find.widgetWithText(WinButton, tab).first);
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull, reason: 'Settings: $tab');
+        if (tab == '播放') {
+          await captureWindowsPage(
+              tester, 'playback-settings-${size.width.toInt()}');
+        }
       }
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
@@ -467,7 +507,7 @@ void main() {
       await tester.tap(find.text(digit));
     }
     await tester.pumpAndSettle();
-    expect(find.text('仅隐私可见的影片'), findsOneWidget);
+    expect(find.text('仅隐私可见的影片'), findsWidgets);
     await tester.tap(find.text('退出隐私空间'));
     await tester.pump();
     expect(find.text('仅隐私可见的影片'), findsNothing);
@@ -534,6 +574,109 @@ void main() {
     await tester.tap(find.text('全部剧集'));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  for (final size in [
+    const Size(720, 520),
+    const Size(1280, 800),
+    const Size(1920, 1080)
+  ]) {
+    testWidgets(
+        'Responsive detail keeps poster, source and episode access at $size',
+        (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.physicalSize = size;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final storage = await initTestStorage();
+      final appearance = WindowsAppearance(Directory.systemTemp);
+      addTearDown(appearance.dispose);
+      await tester.pumpWidget(MaterialApp(
+          builder: (_, child) => WindowsAppearanceScope(
+              controller: appearance,
+              child: RepaintBoundary(
+                  key: const ValueKey('capture'), child: child!)),
+          home: DetailScreen(
+              site: fixtureSite,
+              initialVideo: fixtureVideo,
+              storage: storage,
+              client: WindowsFixtureClient())));
+      await tester.pumpAndSettle();
+      final poster =
+          tester.getRect(find.byKey(const ValueKey('windows-detail-poster')));
+      expect(poster.top, greaterThanOrEqualTo(0));
+      expect(poster.bottom, lessThan(size.height));
+      if (size.width >= 1180) {
+        expect(tester.getRect(find.byKey(const ValueKey('ep_card_0_0'))).bottom,
+            lessThan(size.height),
+            reason:
+                'Wide windows should expose episodes without scrolling past the hero');
+      }
+      await captureWindowsPage(tester, 'detail-${size.width.toInt()}');
+      await tester.ensureVisible(find.text('备用线路'));
+      await tester.tap(find.text('备用线路'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(const ValueKey('ep_card_1_0')));
+      expect(find.byKey(const ValueKey('ep_card_1_0')).hitTestable(),
+          findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
+  testWidgets(
+      'Windows account and sync routes use the same appearance and return safely',
+      (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.physicalSize = const Size(720, 520);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final storage = await initTestStorage();
+    final appearance = WindowsAppearance(Directory.systemTemp);
+    addTearDown(appearance.dispose);
+    await tester.pumpWidget(MaterialApp(
+        builder: (_, child) => WindowsAppearanceScope(
+            controller: appearance,
+            child:
+                RepaintBoundary(key: const ValueKey('capture'), child: child!)),
+        home: Builder(
+            builder: (context) => Scaffold(
+                    body: Column(children: [
+                  TextButton(
+                      onPressed: () =>
+                          showNetdiskAccountSheet(context, storage),
+                      child: const Text('accounts')),
+                  TextButton(
+                      onPressed: () => showCloudSyncSheet(context, storage),
+                      child: const Text('sync')),
+                ])))));
+    for (final route in ['accounts', 'sync']) {
+      await tester.tap(find.text(route));
+      await tester.pumpAndSettle();
+      expect(find.byType(WinSettingsScaffold), findsOneWidget);
+      expect(find.byType(WinSettingsRow), findsWidgets);
+      await captureWindowsPage(tester, '$route-720');
+      if (route == 'sync') {
+        final field = find.byKey(const ValueKey('sync-webdav-url'));
+        if (field.evaluate().isNotEmpty) {
+          await tester.ensureVisible(field);
+          await tester.enterText(field, 'https://owned.invalid/dav');
+        }
+      }
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('返回'));
+      await tester.pumpAndSettle();
+      expect(find.byType(WinSettingsScaffold), findsNothing);
+    }
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
     debugDefaultTargetPlatformOverride = null;

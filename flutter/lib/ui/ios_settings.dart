@@ -1,3 +1,4 @@
+import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart' show Colors, Material, MaterialType;
 import 'apple_theme.dart';
@@ -401,6 +402,9 @@ class IosSettingsGroup extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (usesWindowsSettings(context)) {
+      return WinSettingsGroup(header: header, footer: footer, children: children);
+    }
     final separated = <Widget>[];
     for (var i = 0; i < children.length; i++) {
       separated.add(children[i]);
@@ -500,6 +504,11 @@ class _IosSettingsRowState extends State<IosSettingsRow> {
 
   @override
   Widget build(BuildContext context) {
+    if (usesWindowsSettings(context)) {
+      return WinSettingsRow(title: widget.title, titleColor: widget.titleColor,
+          subtitle: widget.subtitle, icon: widget.icon, value: widget.trailingText,
+          trailing: widget.trailing, onTap: widget.onTap);
+    }
     final row = ColoredBox(
       color: _pressed ? const Color(0xFF2C2C2E) : const Color(0x00000000),
       child: ConstrainedBox(

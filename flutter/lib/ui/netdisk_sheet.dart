@@ -19,6 +19,7 @@ import 'apple_theme.dart';
 import 'ios_settings.dart';
 import 'local_qr_code.dart';
 import 'quark_library_sheet.dart';
+import 'windows_appearance.dart';
 
 const MethodChannel netdiskAuthChannel = MethodChannel(
   'marco_movie/netdisk_auth',
@@ -34,6 +35,18 @@ Future<void> showNetdiskAccountSheet(
   NetdiskService? service,
   String iosBackLabel = '返回',
 }) async {
+  if (usesWindowsAppearance(context)) {
+    await Navigator.of(context).push<void>(buildApplePageRoute<void>(
+        builder: (_) => WinSettingsScaffold(
+            title: '网盘账号',
+            subtitle: '管理影视线路使用的账号与解析顺序。',
+            child: _NetdiskAccountSheet(
+                storage: storage,
+                initialDriveKey: initialDriveKey,
+                onChanged: onChanged,
+                service: service))));
+    return;
+  }
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     await Navigator.of(context).push<void>(
       buildApplePageRoute<void>(
@@ -82,8 +95,7 @@ class _NetdiskAccountSheet extends StatefulWidget {
 
 class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
     with WidgetsBindingObserver {
-  late final NetdiskService _service =
-      widget.service ??
+  late final NetdiskService _service = widget.service ??
       NetdiskService(quarkAccounts: widget.storage.quarkAccounts);
   String? _activeQrDriveKey;
   NetdiskQrSession? _qrSession;
@@ -162,10 +174,11 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
         _qrSession = session;
         _qrStatusText = _driveByKey(driveKey).appHint;
       });
-      if (_foreground) _pollTimer = Timer(
-        const Duration(seconds: 3),
-        () => _pollQr(attempt, session),
-      );
+      if (_foreground)
+        _pollTimer = Timer(
+          const Duration(seconds: 3),
+          () => _pollQr(attempt, session),
+        );
     } catch (_) {
       if (!mounted || attempt != _qrAttempt) return;
       setState(() {
@@ -184,8 +197,10 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
 
   Future<void> _pollQr(int attempt, NetdiskQrSession session) async {
     bool current() =>
-        mounted && ModalRoute.of(context)?.isCurrent != false &&
-        attempt == _qrAttempt && identical(_qrSession, session);
+        mounted &&
+        ModalRoute.of(context)?.isCurrent != false &&
+        attempt == _qrAttempt &&
+        identical(_qrSession, session);
     if (!current() || !_foreground || _pollingAttempt == attempt) return;
     _pollTimer?.cancel();
     _pollingAttempt = attempt;
@@ -301,7 +316,8 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
       );
       if (mounted) {
         setState(() {
-          _qrStatusText = '可存储二维码到相册后，打开${drive.providerName} App「扫一扫 → 相册」确认登录';
+          _qrStatusText =
+              '可存储二维码到相册后，打开${drive.providerName} App「扫一扫 → 相册」确认登录';
         });
       }
     } catch (_) {}
@@ -506,91 +522,91 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
             child: TextSelectionMouseGuard(
               child: SingleChildScrollView(
                 child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '${drive.providerName} · 账号配置',
-                    style: const TextStyle(
-                      fontSize: 19,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  TextSelectionMouseGuard(
-                    child: TextField(
-                      controller: controller,
-                      maxLines: 3,
-                      autocorrect: false,
-                      enableSuggestions: false,
-                      decoration: const InputDecoration(
-                        hintText: '粘贴 Cookie 或 Token…',
-                      ),
-                    ),
-                  ),
-                  if (error.isNotEmpty) ...[
-                    const SizedBox(height: 10),
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                     Text(
-                      error,
-                      style: const TextStyle(color: AppleColors.systemRed),
-                    ),
-                  ],
-                  const SizedBox(height: 18),
-                  Wrap(
-                    spacing: 12,
-                    runSpacing: 10,
-                    children: [
-                      AppleCapsuleButton(
-                        label: '取消',
-                        compact: true,
-                        onPressed: () => Navigator.of(ctx).pop(),
+                      '${drive.providerName} · 账号配置',
+                      style: const TextStyle(
+                        fontSize: 19,
+                        fontWeight: FontWeight.w700,
                       ),
-                      AppleCapsuleButton(
-                        label: saving
-                            ? '正在验证…'
-                            : driveKey == 'quark'
-                            ? '验证并保存'
-                            : '保存配置',
-                        primary: true,
-                        compact: true,
-                        onPressed: () async {
-                          if (saving) return;
-                          update(() {
-                            saving = true;
-                            error = '';
-                          });
-                          try {
-                            var credential = controller.text.trim();
-                            if (driveKey == 'quark' && credential.isNotEmpty) {
-                              credential =
-                                  (await widget.storage.quarkAccounts
-                                          .validateCredential(credential))
-                                      .toCredential();
-                            }
-                            if (!mounted ||
-                                !ctx.mounted ||
-                                ModalRoute.of(ctx)?.isCurrent == false)
-                              return;
-                            await widget.storage.setNetdiskCredential(
-                              driveKey,
-                              credential,
-                            );
-                            widget.onChanged?.call();
-                            if (ctx.mounted) Navigator.of(ctx).pop();
-                            if (mounted) setState(() {});
-                          } catch (_) {
-                            if (ctx.mounted)
-                              update(() {
-                                saving = false;
-                                error = '账户验证失败，请检查凭据或重新扫码';
-                              });
-                          }
-                        },
+                    ),
+                    const SizedBox(height: 14),
+                    TextSelectionMouseGuard(
+                      child: TextField(
+                        controller: controller,
+                        maxLines: 3,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        decoration: const InputDecoration(
+                          hintText: '粘贴 Cookie 或 Token…',
+                        ),
+                      ),
+                    ),
+                    if (error.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Text(
+                        error,
+                        style: const TextStyle(color: AppleColors.systemRed),
                       ),
                     ],
-                  ),
-                ],
-              ),
+                    const SizedBox(height: 18),
+                    Wrap(
+                      spacing: 12,
+                      runSpacing: 10,
+                      children: [
+                        AppleCapsuleButton(
+                          label: '取消',
+                          compact: true,
+                          onPressed: () => Navigator.of(ctx).pop(),
+                        ),
+                        AppleCapsuleButton(
+                          label: saving
+                              ? '正在验证…'
+                              : driveKey == 'quark'
+                                  ? '验证并保存'
+                                  : '保存配置',
+                          primary: true,
+                          compact: true,
+                          onPressed: () async {
+                            if (saving) return;
+                            update(() {
+                              saving = true;
+                              error = '';
+                            });
+                            try {
+                              var credential = controller.text.trim();
+                              if (driveKey == 'quark' &&
+                                  credential.isNotEmpty) {
+                                credential = (await widget.storage.quarkAccounts
+                                        .validateCredential(credential))
+                                    .toCredential();
+                              }
+                              if (!mounted ||
+                                  !ctx.mounted ||
+                                  ModalRoute.of(ctx)?.isCurrent == false)
+                                return;
+                              await widget.storage.setNetdiskCredential(
+                                driveKey,
+                                credential,
+                              );
+                              widget.onChanged?.call();
+                              if (ctx.mounted) Navigator.of(ctx).pop();
+                              if (mounted) setState(() {});
+                            } catch (_) {
+                              if (ctx.mounted)
+                                update(() {
+                                  saving = false;
+                                  error = '账户验证失败，请检查凭据或重新扫码';
+                                });
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -615,18 +631,89 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
 
   @override
   Widget build(BuildContext context) {
-    final orderLabels = widget.storage.driveOrder
-        .map((k) {
-          return switch (k) {
-            'quark' => '夸父',
-            'uc' => '优汐',
-            'baidu' => '嘟嘟',
-            'ali' => '阿狸',
-            _ => k,
-          };
-        })
-        .join(' > ');
+    final orderLabels = widget.storage.driveOrder.map((k) {
+      return switch (k) {
+        'quark' => '夸父',
+        'uc' => '优汐',
+        'baidu' => '嘟嘟',
+        'ali' => '阿狸',
+        _ => k,
+      };
+    }).join(' > ');
 
+    if (usesWindowsAppearance(context)) {
+      return Column(
+          key: const ValueKey('netdisk-account-sheet'),
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            WinSettingsGroup(children: [
+              WinSettingsRow(
+                  title: '解析优先顺序',
+                  subtitle: orderLabels,
+                  icon: CupertinoIcons.arrow_up_arrow_down,
+                  trailing: WinButton('切换顺序', onPressed: _rotateDriveOrder))
+            ]),
+            const SizedBox(height: 18),
+            if (_activeQrDriveKey != null) ...[
+              _buildQrScannerCard(_driveByKey(_activeQrDriveKey!)),
+              const SizedBox(height: 18)
+            ],
+            for (final drive in NetdiskService.drives) ...[
+              WinSettingsGroup(children: [
+                WinSettingsRow(
+                    title: drive.providerName,
+                    subtitle: '对应线路：${drive.lineBadges.join(" / ")}',
+                    icon: CupertinoIcons.cloud,
+                    value: widget.storage.isNetdiskLoggedIn(drive.key)
+                        ? '已连接'
+                        : '未连接'),
+                Padding(
+                    padding: const EdgeInsets.fromLTRB(18, 12, 18, 16),
+                    child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Wrap(spacing: 8, runSpacing: 8, children: [
+                          WinButton(
+                              widget.storage.isNetdiskLoggedIn(drive.key)
+                                  ? '重新扫码'
+                                  : '扫码登录',
+                              key: ValueKey('netdisk-scan-btn-${drive.key}'),
+                              selected:
+                                  !widget.storage.isNetdiskLoggedIn(drive.key),
+                              icon: CupertinoIcons.qrcode,
+                              onPressed: () => _startQrLogin(drive.key)),
+                          WinButton('手动配置 Token',
+                              icon: CupertinoIcons.pencil,
+                              onPressed: () =>
+                                  _showManualInputDialog(drive.key)),
+                          if (drive.key == 'quark' &&
+                              widget.storage.getNetdiskCred('quark').isNotEmpty)
+                            WinButton('浏览网盘视频',
+                                key: const ValueKey('quark-browse-files'),
+                                onPressed: () {
+                              setState(_cancelQr);
+                              showQuarkLibrarySheet(context, widget.storage);
+                            }),
+                          if (widget.storage.isNetdiskLoggedIn(drive.key))
+                            WinButton('退出账号', onPressed: () async {
+                              setState(_cancelQr);
+                              try {
+                                await widget.storage
+                                    .setNetdiskCredential(drive.key, '');
+                                widget.onChanged?.call();
+                                if (mounted) setState(() {});
+                              } catch (e) {
+                                if (context.mounted)
+                                  ScaffoldMessenger.maybeOf(context)
+                                      ?.showSnackBar(
+                                          SnackBar(content: Text('清除凭据失败：$e')));
+                              }
+                            }),
+                        ]))),
+              ]),
+              const SizedBox(height: 16),
+            ],
+          ]);
+    }
     return SingleChildScrollView(
       key: const ValueKey('netdisk-account-sheet'),
       padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
@@ -701,19 +788,20 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
 
     return Container(
       key: ValueKey('netdisk-qr-card-${drive.key}'),
-      padding: const EdgeInsets.all(18),
+      padding: EdgeInsets.all(18),
       decoration: BoxDecoration(
-        gradient: LinearGradient(
+        color: usesWindowsAppearance(context) ? winMuted(context).withValues(alpha: .06) : null,
+        gradient: usesWindowsAppearance(context) ? null : LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
           colors: [
-            const Color(0xFF0A84FF).withValues(alpha: 0.22),
-            const Color(0xFF1C1C1E).withValues(alpha: 0.92),
+            Color(0xFF0A84FF).withValues(alpha: 0.22),
+            Color(0xFF1C1C1E).withValues(alpha: 0.92),
           ],
         ),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: const Color(0xFF0A84FF).withValues(alpha: 0.45),
+          color: Color(0xFF0A84FF).withValues(alpha: 0.45),
           width: 1,
         ),
       ),
@@ -721,17 +809,17 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
         children: [
           Row(
             children: [
-              const Icon(
+              Icon(
                 CupertinoIcons.qrcode_viewfinder,
                 color: Color(0xFF5AC8FA),
                 size: 22,
               ),
-              const SizedBox(width: 8),
+              SizedBox(width: 8),
               Expanded(
                 child: Text(
                   '${drive.tvAlias}（${drive.providerName}）扫码登录',
-                  style: const TextStyle(
-                    color: Colors.white,
+                  style: TextStyle(
+                    color: settingsInk(context),
                     fontSize: 16,
                     fontWeight: FontWeight.w700,
                   ),
@@ -741,7 +829,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                 onTap: () {
                   setState(_cancelQr);
                 },
-                child: const Text(
+                child: Text(
                   '收起',
                   style: TextStyle(
                     color: Color(0xFF5AC8FA),
@@ -752,15 +840,15 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
               ),
             ],
           ),
-          const SizedBox(height: 14),
+          SizedBox(height: 14),
           Container(
             width: 196,
             height: 196,
-            padding: const EdgeInsets.all(10),
+            padding: EdgeInsets.all(10),
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(18),
-              boxShadow: const [
+              boxShadow: [
                 BoxShadow(
                   color: Color(0x55000000),
                   blurRadius: 18,
@@ -769,28 +857,28 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
               ],
             ),
             child: _loadingQr
-                ? const Center(child: CupertinoActivityIndicator(radius: 14))
+                ? Center(child: CupertinoActivityIndicator(radius: 14))
                 : qrData.isEmpty
-                ? const Center(
-                    child: Icon(
-                      CupertinoIcons.exclamationmark_circle,
-                      color: Colors.black54,
-                      size: 36,
-                    ),
-                  )
-                : LocalQrCode(data: qrData),
+                    ? Center(
+                        child: Icon(
+                          CupertinoIcons.exclamationmark_circle,
+                          color: Colors.black54,
+                          size: 36,
+                        ),
+                      )
+                    : LocalQrCode(data: qrData),
           ),
-          const SizedBox(height: 12),
+          SizedBox(height: 12),
           Text(
             _qrStatusText,
             textAlign: TextAlign.center,
-            style: const TextStyle(
-              color: Color(0xFFEBEBF5),
+            style: TextStyle(
+              color: settingsMuted(context),
               fontSize: 13,
               fontWeight: FontWeight.w500,
             ),
           ),
-          const SizedBox(height: 14),
+          SizedBox(height: 14),
           Wrap(
             spacing: 10,
             runSpacing: 8,
@@ -828,7 +916,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
               ),
               if (drive.key == 'ali')
                 AppleCapsuleButton(
-                  key: const ValueKey('netdisk-ali-scan-app'),
+                  key: ValueKey('netdisk-ali-scan-app'),
                   icon: CupertinoIcons.viewfinder,
                   label: 'App相册扫码',
                   compact: true,

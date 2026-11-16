@@ -11,6 +11,7 @@ import '../core/storage_service.dart';
 import 'apple_theme.dart';
 import 'ios_settings.dart';
 import 'local_qr_code.dart';
+import 'windows_appearance.dart';
 
 typedef CloudSyncAppliedCallback = void Function({
   required bool subscriptionsChanged,
@@ -26,6 +27,15 @@ Future<void> showCloudSyncSheet(
   void Function(String title, String message)? onNotice,
   String iosBackLabel = '返回',
 }) async {
+  if (usesWindowsAppearance(context)) {
+    await Navigator.of(context).push<void>(buildApplePageRoute<void>(
+        builder: (_) => WinSettingsScaffold(
+            title: '多端网络同步',
+            subtitle: '通过 WebDAV 或局域网同步收藏、观看进度与内容来源。',
+            child: CloudSyncSettingsPanel(
+                storage: storage, onSynced: onSynced, onNotice: onNotice))));
+    return;
+  }
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     await Navigator.of(context).push<void>(
       buildApplePageRoute<void>(
@@ -401,17 +411,19 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         smartQuotesType: SmartQuotesType.disabled,
         smartDashesType: SmartDashesType.disabled,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        placeholderStyle: const TextStyle(
-          color: Color(0x66EBEBF5),
+        placeholderStyle: TextStyle(
+          color: settingsMuted(context),
           fontSize: 14,
         ),
-        style: const TextStyle(
-          color: AppleColors.labelPrimary,
+        style: TextStyle(
+          color: settingsInk(context),
           fontSize: 14.5,
         ),
         suffix: suffix,
         decoration: BoxDecoration(
-          color: const Color(0xFF2C2C2E),
+          color: usesWindowsAppearance(context)
+              ? winMuted(context).withValues(alpha: .08)
+              : const Color(0xFF2C2C2E),
           borderRadius: BorderRadius.circular(10),
         ),
       ),
@@ -439,7 +451,9 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
               iconColor: widget.storage.isWebdavConfigured
                   ? AppleColors.systemBlue
                   : AppleColors.systemTeal,
-              title: widget.storage.isWebdavConfigured ? 'WebDAV 云同步已配置' : '支持云端与局域网互通',
+              title: widget.storage.isWebdavConfigured
+                  ? 'WebDAV 云同步已配置'
+                  : '支持云端与局域网互通',
               subtitle: widget.storage.syncStatusSummary,
             ),
           ],
@@ -475,7 +489,8 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         const SizedBox(height: 20),
         IosSettingsGroup(
           header: '同步范围与自动化',
-          footer: '开启「同时同步我的订阅源配置」后，新手机、平板、电脑或电视连上同一账号或局域网即可一步拉取公开订阅源、观看历史与收藏；关闭时也不会覆盖云端已有订阅。',
+          footer:
+              '开启「同时同步我的订阅源配置」后，新手机、平板、电脑或电视连上同一账号或局域网即可一步拉取公开订阅源、观看历史与收藏；关闭时也不会覆盖云端已有订阅。',
           children: [
             IosSettingsSwitchRow(
               key: const ValueKey('sync-switch-auto'),
@@ -594,7 +609,8 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
         const SizedBox(height: 20),
         IosSettingsGroup(
           header: '局域网设备点对点双向同步（无需网盘账号）',
-          footer: '同一 Wi-Fi / 局域网下，任一设备开启接收码，另一台设备输入或扫码获取该地址即可直接双向合并进度、收藏与公开订阅源（兼容 Android TV、手机、老电视精简版、iPhone、iPad、Windows 与 Mac）。',
+          footer:
+              '同一 Wi-Fi / 局域网下，任一设备开启接收码，另一台设备输入或扫码获取该地址即可直接双向合并进度、收藏与公开订阅源（兼容 Android TV、手机、老电视精简版、iPhone、iPad、Windows 与 Mac）。',
           dividerIndent: 16,
           children: [
             IosSettingsRow(
@@ -632,7 +648,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                     Text(
                       receiverUrl,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(
+                      style: TextStyle(
                         color: AppleColors.systemCyan,
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
@@ -660,7 +676,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                                   setState(() => _selectedLanHostIndex = i),
                               child: Text(
                                 _lanHosts[i],
-                                style: const TextStyle(
+                                style: TextStyle(
                                   color: Colors.white,
                                   fontSize: 12,
                                 ),
@@ -682,10 +698,10 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                         Clipboard.setData(ClipboardData(text: receiverUrl));
                         _notifyNotice('已复制同步地址', '本机局域网同步地址已复制到剪贴板。');
                       },
-                      child: const Text(
+                      child: Text(
                         '复制本机同步地址',
                         style: TextStyle(
-                          color: AppleColors.labelPrimary,
+                          color: settingsInk(context),
                           fontSize: 13,
                           fontWeight: FontWeight.w500,
                         ),
@@ -711,7 +727,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                       setState(() => _lanPeerCtrl.text = text);
                     }
                   },
-                  child: const Text(
+                  child: Text(
                     '粘贴',
                     style: TextStyle(
                       color: AppleColors.systemBlue,

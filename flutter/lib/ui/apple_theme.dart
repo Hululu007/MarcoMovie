@@ -1,6 +1,7 @@
 import 'dart:io' show Platform;
 import 'dart:math' as math;
 import 'dart:ui';
+import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
@@ -1421,6 +1422,10 @@ class AppleSettingsGlassCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (usesWindowsSettings(context)) {
+      return WinPanel(radius: borderRadius?.topLeft.x ?? 20,
+          padding: padding ?? EdgeInsets.zero, child: child);
+    }
     final radius = borderRadius ?? BorderRadius.circular(16);
     final shape = RoundedRectangleBorder(borderRadius: radius);
     return RepaintBoundary(
@@ -1485,6 +1490,9 @@ class AppleGroupedSection extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) {
+    if (usesWindowsSettings(context)) {
+      return WinSettingsGroup(header: header, footer: footer, children: children);
+    }
     final separated = <Widget>[];
     for (int i = 0; i < children.length; i++) {
       separated.add(children[i]);
@@ -1563,6 +1571,10 @@ class AppleGroupedTile extends StatelessWidget {
   });
   @override
   Widget build(BuildContext context) {
+    if (usesWindowsSettings(context)) {
+      return WinSettingsRow(title: title, subtitle: subtitle, icon: icon,
+          value: trailingText, trailing: trailing, onTap: onTap);
+    }
     final content = ConstrainedBox(
       constraints: BoxConstraints(minHeight: minHeight),
       child: Padding(

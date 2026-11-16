@@ -6358,6 +6358,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         builder: (context, rawStrength, _) {
           final strength = rawStrength.clamp(0.0, 1.0);
           final pct = (strength * 100).round();
+          if (usesWindowsAppearance(context)) {
+            return Column(children: [
+              WinSettingsRow(title: '面板通透度', subtitle: '调整界面面板，背景模糊可在背景与外观中单独设置',
+                  value: '$pct%', icon: CupertinoIcons.drop),
+              Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 12), child: Slider(
+                key: const ValueKey('settings-liquid-glass-slider'), value: strength,
+                onChanged: (v) { GlassworkBackdrop.intensity.value = v; GlassworkBackdrop.reduceTransparency.value = v <= .02; },
+                onChangeEnd: (v) async { await widget.storage.setGlassBlurStrength(v); refreshBoth(); })),
+            ]);
+          }
           final levelLabel = strength < 0.05
               ? '关闭'
               : strength < 0.48
@@ -6484,6 +6494,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   if (subCtx.mounted) setSubState(() {});
                 }
 
+                if (usesWindowsAppearance(subCtx)) {
+                  return WinSettingsScaffold(title: title, subtitle: subtitle,
+                      child: sectionBuilder(subCtx, refreshBoth));
+                }
                 final topPad = MediaQuery.paddingOf(subCtx).top;
                 final width = MediaQuery.sizeOf(subCtx).width;
                 final hPad = width >= 720 ? 32.0 : 16.0;
@@ -6596,7 +6610,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               title: '背景与外观',
               subtitle: '选择柔光预设、导入照片或调整界面明暗',
               onTap: () {
-                Navigator.of(context).pop();
+                if (Navigator.of(context).canPop()) Navigator.of(context).pop();
                 _updateWindowsState(() {
                   _windowsSettings = '背景与外观';
                   _windowsPage = 'settings';
@@ -7755,6 +7769,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     VoidCallback? onStateChanged,
   }) {
     final expanded = _expandedSettings.contains(settingKey);
+    if (usesWindowsAppearance(context)) {
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        WinSettingsRow(title: title, subtitle: subtitle, icon: icon, value: trailingText,
+            trailing: Icon(expanded ? CupertinoIcons.chevron_up : CupertinoIcons.chevron_down,
+                size: 14, color: winMuted(context)), onTap: () {
+          if (expanded) { _expandedSettings.remove(settingKey); }
+          else { _expandedSettings.add(settingKey); }
+          if (onStateChanged != null) { onStateChanged(); } else { setState(() {}); }
+        }),
+        if (expanded) Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 16), child: drawerChild),
+      ]);
+    }
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -7919,6 +7945,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               builder: (context) {
                 final opt = options[i];
                 final selected = opt.$1 == currentValue;
+                if (usesWindowsAppearance(context)) {
+                  return WinSettingsRow(title: opt.$2, subtitle: opt.$3,
+                      onTap: () => onSelected(opt.$1),
+                      trailing: Icon(selected ? CupertinoIcons.checkmark_circle_fill : CupertinoIcons.circle,
+                          color: selected ? const Color(0xFF426B91) : winMuted(context), size: 20));
+                }
                 return GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => onSelected(opt.$1),
@@ -8169,8 +8201,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   recordedCount > 0
                       ? '当前空间已独立记录 $recordedCount 部影片'
                       : '当前空间暂无片头 / 片尾独立记录',
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
+                  style: TextStyle(
+                    color: settingsInk(context),
                     fontSize: 13.5,
                     fontWeight: FontWeight.w600,
                   ),
@@ -8179,10 +8211,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ],
           ),
           const SizedBox(height: 8),
-          const Text(
+          Text(
             '每部影片独立记录片头与片尾跳过节点，仅保存在本机、不跨片共用也不参与全局同步。在播放页点击「跳片头 / 跳片尾」会优先默认设为当前播放时间，并支持按秒微调。',
             style: TextStyle(
-              color: AppleColors.labelSecondary,
+              color: settingsMuted(context),
               fontSize: 12.5,
               height: 1.45,
             ),
@@ -8206,7 +8238,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     setState(() {});
                   }
                 },
-                child: const Text(
+                child: Text(
                   '清空全部片头片尾独立记录',
                   style: TextStyle(
                     color: AppleColors.systemRed,

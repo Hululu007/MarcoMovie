@@ -14,7 +14,7 @@ extension _WindowsShell on _AdaptiveShellState {
   Widget _buildWindowsShell(BuildContext context) {
     final appearance = WindowsAppearanceScope.of(context);
     final width = MediaQuery.sizeOf(context).width;
-    final pad = width > 1100 ? 44.0 : 24.0;
+    final pad = width > 1100 ? 32.0 : 22.0;
     return CallbackShortcuts(
         bindings: {
           const SingleActivator(LogicalKeyboardKey.keyK, control: true):
@@ -31,7 +31,7 @@ extension _WindowsShell on _AdaptiveShellState {
                       bottom: false,
                       child: Column(children: [
                         Padding(
-                            padding: EdgeInsets.fromLTRB(pad, 17, pad, 25),
+                            padding: EdgeInsets.fromLTRB(pad, 10, pad, 14),
                             child: Row(children: [
                               GestureDetector(
                                   key: const ValueKey('home-brand-logo'),
@@ -76,6 +76,14 @@ extension _WindowsShell on _AdaptiveShellState {
                                   onPressed: _showGlobalSearchSheet),
                               const SizedBox(width: 7),
                               IconButton(
+                                  tooltip: '背景与外观 · ${appearance.label}',
+                                  icon: Icon(CupertinoIcons.paintbrush,
+                                      color: winInk(context), size: 20),
+                                  onPressed: () => _updateWindowsState(() {
+                                        _windowsSettings = '背景与外观';
+                                        _windowsPage = 'settings';
+                                      })),
+                              IconButton(
                                   tooltip: '设置',
                                   icon: Icon(CupertinoIcons.gear_alt,
                                       color: winInk(context), size: 21),
@@ -104,22 +112,6 @@ extension _WindowsShell on _AdaptiveShellState {
                           'settings' => _windowsSettingsPage(pad),
                           _ => _windowsHome(pad),
                         }),
-                        if (_windowsPage == 'home')
-                          Align(
-                              alignment: Alignment.centerRight,
-                              child: Padding(
-                                  padding: EdgeInsets.fromLTRB(0, 5, pad, 10),
-                                  child: WinPanel(
-                                      radius: 22,
-                                      padding: EdgeInsets.zero,
-                                      child: WinButton(appearance.label,
-                                          icon: CupertinoIcons.paintbrush,
-                                          onPressed: () {
-                                        _updateWindowsState(() {
-                                          _windowsSettings = '背景与外观';
-                                          _windowsPage = 'settings';
-                                        });
-                                      })))),
                       ]))),
             )));
   }
@@ -188,50 +180,126 @@ extension _WindowsShell on _AdaptiveShellState {
             : _refreshCurrentHomeView,
         button: _homeError == null ? '选择片源' : '重新加载',
       );
-    final featured = _windowsRecommendedVideos.first;
     final history =
         _privateSessionUnlocked || !widget.storage.showContinueWatching
             ? <WatchHistoryEntry>[]
-            : _cachedWatchHistory.take(4).toList();
-    return ListView(padding: EdgeInsets.fromLTRB(pad, 0, pad, 20), children: [
-      if (widget.storage.showHeroBanner) _windowsHero(featured),
-      const SizedBox(height: 28),
-      Row(children: [
-        Expanded(
-            child: Text(history.isEmpty ? '为你呈现' : '最近在看',
-                style: TextStyle(
-                    color: winInk(context),
-                    fontSize: 23,
-                    fontWeight: FontWeight.w600))),
-        WinButton(history.isEmpty ? '浏览全部' : '观看记录',
-            icon: CupertinoIcons.chevron_right, onPressed: () {
-          _updateWindowsState(() {
-            _windowsPage = history.isEmpty ? 'discover' : 'library';
-            _librarySegment = 1;
-          });
+            : _cachedWatchHistory.take(3).toList();
+    final showHero = widget.storage.showHeroBanner;
+    return LayoutBuilder(builder: (context, box) {
+      final sideHistory =
+          box.maxWidth >= 1100 && showHero && history.isNotEmpty;
+      return ListView(padding: EdgeInsets.fromLTRB(pad, 0, pad, 24), children: [
+        if (showHero)
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(
+                flex: 7, child: _windowsHero(_windowsRecommendedVideos.first)),
+            if (sideHistory) ...[
+              const SizedBox(width: 20),
+              Expanded(flex: 3, child: _windowsContinueWatching(history)),
+            ],
+          ]),
+        if (history.isNotEmpty && !sideHistory) ...[
+          if (showHero) const SizedBox(height: 18),
+          _windowsContinueWatching(history),
+        ],
+        if (showHero || history.isNotEmpty) const SizedBox(height: 20),
+        Row(children: [
+          Expanded(
+              child: Text('为你呈现',
+                  style: TextStyle(
+                      color: winInk(context),
+                      fontSize: 21,
+                      fontWeight: FontWeight.w600))),
+          WinButton('浏览全部',
+              icon: CupertinoIcons.chevron_right,
+              onPressed: () => _windowsNavigate('discover')),
+        ]),
+        const SizedBox(height: 12),
+        LayoutBuilder(builder: (context, grid) {
+          final targetWidth = switch (widget.storage.gridDensity) {
+            'comfortable' => 210.0,
+            'compact' => 135.0,
+            _ => 170.0,
+          };
+          final columns = (grid.maxWidth / targetWidth).floor().clamp(3, 12);
+          return Wrap(spacing: 18, runSpacing: 20, children: [
+            for (final video in _windowsRecommendedVideos)
+              SizedBox(
+                  width: (grid.maxWidth - (columns - 1) * 18) / columns,
+                  child: _windowsVideoCard(video, _activeSite!)),
+          ]);
         }),
-      ]),
-      const SizedBox(height: 14),
-      LayoutBuilder(builder: (_, box) {
-        final columns = box.maxWidth >= 1000 ? 4 : 3;
-        return Wrap(spacing: 23, runSpacing: 24, children: [
-          if (history.isNotEmpty)
-            for (final entry in history)
-              SizedBox(
-                  width: (box.maxWidth - (columns - 1) * 23) / columns,
-                  child: _windowsHistoryCard(entry))
-          else
-            for (final video in _windowsRecommendedVideos
-                .skip(widget.storage.showHeroBanner ? 1 : 0)
-                .take(columns))
-              SizedBox(
-                  width: (box.maxWidth - (columns - 1) * 23) / columns,
-                  child:
-                      _windowsVideoCard(video, _activeSite!, landscape: true)),
-        ]);
-      }),
-    ]);
+      ]);
+    });
   }
+
+  Widget _windowsContinueWatching(List<WatchHistoryEntry> history) => WinPanel(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+        radius: 24,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(
+                child: Text('最近在看',
+                    style: TextStyle(
+                        color: winInk(context),
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600))),
+            WinButton('记录',
+                onPressed: () => _updateWindowsState(() {
+                      _windowsPage = 'library';
+                      _librarySegment = 1;
+                    })),
+          ]),
+          for (final entry in history)
+            Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () => _openSyncedMediaEntry(
+                      siteKey: entry.site,
+                      videoId: entry.id,
+                      title: entry.title,
+                      poster: _resolveHistoryPoster(entry)),
+                  child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 7),
+                      child: Row(children: [
+                        ClipRRect(
+                            borderRadius: BorderRadius.circular(10),
+                            child: SizedBox(
+                                width: 70,
+                                height: 48,
+                                child: PosterImage(
+                                    url: _resolveHistoryPoster(entry),
+                                    title: entry.title,
+                                    placeholder: ColoredBox(
+                                        color: winMuted(context)
+                                            .withValues(alpha: .1))))),
+                        const SizedBox(width: 12),
+                        Expanded(
+                            child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                              Text(entry.title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      color: winInk(context),
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 13)),
+                              const SizedBox(height: 4),
+                              Text(entry.episode,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                      color: winMuted(context), fontSize: 11)),
+                            ])),
+                        const SizedBox(width: 8),
+                        Icon(CupertinoIcons.play_circle,
+                            size: 24, color: winMuted(context)),
+                      ])),
+                )),
+        ]),
+      );
 
   Widget _windowsHomeError() => Center(
           child: WinPanel(
@@ -257,7 +325,7 @@ extension _WindowsShell on _AdaptiveShellState {
   Widget _windowsHero(CmsVideo video) {
     final compact = MediaQuery.sizeOf(context).width < 900;
     return SizedBox(
-        height: compact ? 350 : 420,
+        height: compact ? 254 : 280,
         child: ClipRRect(
             borderRadius: BorderRadius.circular(30),
             child: Stack(fit: StackFit.expand, children: [
@@ -280,7 +348,7 @@ extension _WindowsShell on _AdaptiveShellState {
                 1
               ]))),
               Padding(
-                  padding: EdgeInsets.all(compact ? 30 : 47),
+                  padding: EdgeInsets.all(compact ? 24 : 28),
                   child: Align(
                       alignment: Alignment.centerLeft,
                       child: SizedBox(
@@ -294,16 +362,16 @@ extension _WindowsShell on _AdaptiveShellState {
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
                                         color: Colors.white70, fontSize: 12)),
-                                const SizedBox(height: 18),
+                                const SizedBox(height: 10),
                                 Text(video.title,
                                     maxLines: 2,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
                                         color: Colors.white,
-                                        fontSize: compact ? 35 : 46,
+                                        fontSize: compact ? 28 : 32,
                                         height: 1.25,
                                         fontWeight: FontWeight.w600)),
-                                const SizedBox(height: 17),
+                                const SizedBox(height: 10),
                                 Text(
                                     [video.year, video.area, video.remarks]
                                         .where((s) => s.isNotEmpty)
@@ -312,26 +380,14 @@ extension _WindowsShell on _AdaptiveShellState {
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(
                                         color: Colors.white70, fontSize: 13)),
-                                if (video.description.isNotEmpty) ...[
-                                  const SizedBox(height: 14),
-                                  Text(
-                                      video.description
-                                          .replaceAll(RegExp('<[^>]+>'), ''),
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(
-                                          color: Colors.white70,
-                                          fontSize: 13,
-                                          height: 1.7))
-                                ],
-                                const SizedBox(height: 27),
+                                const SizedBox(height: 16),
                                 FilledButton.icon(
                                     style: FilledButton.styleFrom(
                                         backgroundColor: Colors.white,
                                         foregroundColor:
                                             const Color(0xFF253B51),
                                         padding: const EdgeInsets.symmetric(
-                                            horizontal: 25, vertical: 20)),
+                                            horizontal: 20, vertical: 12)),
                                     onPressed: () =>
                                         _openVideoDetail(_activeSite!, video),
                                     icon: const Icon(CupertinoIcons.play_fill,
@@ -911,7 +967,7 @@ extension _WindowsShell on _AdaptiveShellState {
   }
 
   Widget _windowsSettingsPage(double pad) {
-    const tabs = ['背景与外观', '播放', '内容来源', '账号', '同步与备份', '更多设置'];
+    const tabs = ['背景与外观', '首页与排版', '播放', '内容来源', '账号', '同步与备份', '更多设置'];
     return Padding(
         padding: EdgeInsets.fromLTRB(pad, 8, pad, 24),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -936,23 +992,40 @@ extension _WindowsShell on _AdaptiveShellState {
                 ])),
             const SizedBox(width: 30),
             Expanded(
-                child: _windowsSettings == '更多设置'
-                    ? WinPanel(
-                        dark: true,
-                        padding: EdgeInsets.zero,
-                        child: _buildSettingsTab(context, useSidebar: true))
-                    : SingleChildScrollView(child: _windowsSettingsContent())),
+                child: SingleChildScrollView(child: WindowsSettingsRegion(child: _windowsSettingsContent()))),
           ])),
         ]));
   }
 
   Widget _windowsSettingsContent() {
     if (_windowsSettings == '背景与外观') return const WindowsAppearanceSettings();
+    if (_windowsSettings == '首页与排版')
+      return _buildLayoutSettingsSection(
+          context, () => _updateWindowsState(() {}));
     if (_windowsSettings == '播放')
-      return WinPanel(
-          dark: true,
-          child: _buildPlaybackSettingsSection(
-              context, () => _updateWindowsState(() {})));
+      return _buildPlaybackSettingsSection(
+          context, () => _updateWindowsState(() {}));
+    if (_windowsSettings == '更多设置')
+      return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        _buildAppearanceSettingsSection(
+            context, () => _updateWindowsState(() {})),
+        const SizedBox(height: 22),
+        _buildCloudAndDataSettingsSection(
+            context, () => _updateWindowsState(() {})),
+        const SizedBox(height: 22),
+        WinSettingsGroup(header: '版本与诊断', children: [
+          WinSettingsRow(
+              title: '软件更新与版本',
+              value: 'v$_currentAppVersion',
+              icon: CupertinoIcons.arrow_down_circle,
+              onTap: _showUpdateCheckSheet),
+          WinSettingsRow(
+              title: '导出诊断日志包',
+              subtitle: '导出脱敏环境信息与最近的运行日志',
+              icon: CupertinoIcons.doc_plaintext,
+              onTap: () => _exportDiagnosticsBundle(context)),
+        ]),
+      ]);
     if (_windowsSettings == '内容来源')
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         _windowsHeading('内容来源'),

@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'apple_theme.dart';
@@ -589,6 +590,199 @@ class WinButton extends StatelessWidget {
               Flexible(child: Text(label, overflow: TextOverflow.ellipsis))
             ]),
           ));
+}
+
+bool usesWindowsAppearance(BuildContext context) =>
+    defaultTargetPlatform == TargetPlatform.windows &&
+    WindowsAppearanceScope.maybeOf(context) != null;
+
+/// Limits shared settings adapters to settings routes, leaving player sheets intact.
+class WindowsSettingsRegion extends InheritedWidget {
+  const WindowsSettingsRegion({super.key, required super.child});
+  @override
+  bool updateShouldNotify(WindowsSettingsRegion oldWidget) => false;
+}
+
+bool usesWindowsSettings(BuildContext context) => usesWindowsAppearance(context) &&
+    context.dependOnInheritedWidgetOfExactType<WindowsSettingsRegion>() != null;
+
+Color settingsInk(BuildContext context) =>
+    usesWindowsAppearance(context) ? winInk(context) : AppleColors.labelPrimary;
+Color settingsMuted(BuildContext context) => usesWindowsAppearance(context)
+    ? winMuted(context)
+    : AppleColors.labelSecondary;
+
+/// Shared Windows settings surfaces, including secondary routes and account forms.
+class WinSettingsGroup extends StatelessWidget {
+  final String? header;
+  final String? footer;
+  final List<Widget> children;
+  const WinSettingsGroup(
+      {super.key, this.header, this.footer, required this.children});
+  @override
+  Widget build(BuildContext context) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (header?.isNotEmpty ?? false)
+            Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 4, 10),
+                child: Text(header!,
+                    style: TextStyle(
+                        color: winInk(context),
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600))),
+          WinPanel(
+              radius: 20,
+              padding: EdgeInsets.zero,
+              child: Column(children: [
+                for (var i = 0; i < children.length; i++) ...[
+                  if (i > 0)
+                    Divider(
+                        height: 1,
+                        indent: 18,
+                        endIndent: 18,
+                        color: winMuted(context).withValues(alpha: .12)),
+                  children[i],
+                ],
+              ])),
+          if (footer?.isNotEmpty ?? false)
+            Padding(
+                padding: const EdgeInsets.fromLTRB(4, 9, 4, 0),
+                child: Text(footer!,
+                    style: TextStyle(
+                        color: winMuted(context), fontSize: 12, height: 1.5))),
+        ],
+      );
+}
+
+class WinSettingsRow extends StatelessWidget {
+  final String title;
+  final String? subtitle;
+  final String? value;
+  final IconData? icon;
+  final Widget? trailing;
+  final VoidCallback? onTap;
+  final Color? titleColor;
+  const WinSettingsRow(
+      {super.key,
+      required this.title,
+      this.subtitle,
+      this.value,
+      this.icon,
+      this.trailing,
+      this.onTap,
+      this.titleColor});
+  @override
+  Widget build(BuildContext context) => Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+            child: LayoutBuilder(builder: (context, box) {
+              final narrow = box.maxWidth < 520;
+              return Row(children: [
+                if (icon != null) ...[
+                  Icon(icon, size: 20, color: winMuted(context)),
+                  const SizedBox(width: 14),
+                ],
+                Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                      Text(title,
+                          style: TextStyle(
+                              color: titleColor ?? winInk(context),
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600)),
+                      if (subtitle?.isNotEmpty ?? false)
+                        Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Text(subtitle!,
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                    color: winMuted(context),
+                                    fontSize: 12,
+                                    height: 1.45))),
+                      if (narrow && (value?.isNotEmpty ?? false))
+                        Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(value!,
+                                style: TextStyle(
+                                    color: winInk(context), fontSize: 12))),
+                    ])),
+                if (!narrow && (value?.isNotEmpty ?? false)) ...[
+                  const SizedBox(width: 16),
+                  ConstrainedBox(
+                      constraints: BoxConstraints(maxWidth: box.maxWidth * .27),
+                      child: Text(value!,
+                          maxLines: 2,
+                          textAlign: TextAlign.end,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: winMuted(context), fontSize: 12))),
+                ],
+                if (trailing != null) ...[
+                  const SizedBox(width: 14),
+                  trailing!
+                ] else if (onTap != null) ...[
+                  const SizedBox(width: 12),
+                  Icon(CupertinoIcons.chevron_right,
+                      size: 14, color: winMuted(context))
+                ],
+              ]);
+            })),
+      ));
+}
+
+class WinSettingsScaffold extends StatelessWidget {
+  final String title;
+  final String? subtitle;
+  final Widget child;
+  const WinSettingsScaffold(
+      {super.key, required this.title, this.subtitle, required this.child});
+  @override
+  Widget build(BuildContext context) => Scaffold(
+      backgroundColor: Colors.transparent,
+      body: WindowsBackdrop(
+          child: SafeArea(
+              child: Column(children: [
+        Padding(
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 12),
+            child: Row(children: [
+              WinButton('返回',
+                  icon: CupertinoIcons.back,
+                  onPressed: () => Navigator.of(context).maybePop()),
+              const SizedBox(width: 16),
+              Expanded(
+                  child: Text(title,
+                      style: TextStyle(
+                          color: winInk(context),
+                          fontSize: 24,
+                          fontWeight: FontWeight.w600))),
+            ])),
+        Expanded(
+            child: Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 1120),
+                    child: SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(28, 8, 28, 28),
+                        child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              if (subtitle?.isNotEmpty ?? false)
+                                Padding(
+                                    padding: const EdgeInsets.only(bottom: 20),
+                                    child: Text(subtitle!,
+                                        style: TextStyle(
+                                            color: winMuted(context),
+                                            height: 1.5))),
+                              WindowsSettingsRegion(child: child),
+                            ]))))),
+      ]))));
 }
 
 class WindowsAppearanceSettings extends StatelessWidget {
