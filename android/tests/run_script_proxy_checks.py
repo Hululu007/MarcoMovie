@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory(prefix='script-proxy-check-') as temporary:
     shims = {
         'android/util/Base64.java': 'package android.util; public final class Base64 { public static final int DEFAULT=0,NO_WRAP=2; public static byte[] decode(String v,int f){return java.util.Base64.getMimeDecoder().decode(v);} public static String encodeToString(byte[] v,int f){return java.util.Base64.getEncoder().encodeToString(v);} }',
         'android/text/TextUtils.java': 'package android.text; public final class TextUtils { public static String join(CharSequence d,Iterable<?> values){StringBuilder s=new StringBuilder();for(Object v:values){if(s.length()>0)s.append(d);s.append(v);}return s.toString();} }',
-        'com/pilipala/marcomovie/CspEngine.java': 'package com.pilipala.marcomovie; final class CspEngine {static Object[] proxy(android.app.Application app,Cms.Config config,java.util.Map<String,String> p){throw new AssertionError("script request reached JAR fallback");}}',
+        'com/pilipala/marcomovie/CspEngine.java': 'package com.pilipala.marcomovie; final class CspEngine {static Object[] proxy(android.app.Application app,Cms.Config config,java.util.Map<String,String> p){throw new AssertionError("script request reached JAR fallback");} static void onPluginDanmaku(String url){} static void onPluginSubtitle(String path){}}',
         'com/pilipala/marcomovie/AppLog.java': 'package com.pilipala.marcomovie; final class AppLog {static void w(String tag,String message,Throwable error){}}',
     }
     shim_files = []
