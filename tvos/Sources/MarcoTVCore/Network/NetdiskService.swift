@@ -142,13 +142,18 @@ public enum NetdiskSessionValidator {
         "mock_placeholder_",
     ]
 
+    private static func containsForbiddenControl(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            scalar.value == 0x0D || scalar.value == 0x0A || scalar.value == 0x00 || scalar.value == 0x7F
+        }
+    }
+
     public static func isUsable(driveKey: String, credential rawCredential: String) -> Bool {
         let key = driveKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let trimmed = rawCredential.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               trimmed.utf8.count <= maxCredentialBytes,
-              !trimmed.contains("\r"),
-              !trimmed.contains("\n")
+              !containsForbiddenControl(trimmed)
         else {
             return false
         }
@@ -161,7 +166,7 @@ public enum NetdiskSessionValidator {
         switch key {
         case "quark", "uc":
             let cookieStr = extractCookieHeader(driveKey: key, credential: trimmed)
-            guard !cookieStr.isEmpty, !cookieStr.contains("\r"), !cookieStr.contains("\n") else {
+            guard !cookieStr.isEmpty, !containsForbiddenControl(cookieStr) else {
                 return false
             }
             let pairs = parseCookiePairs(cookieStr)
