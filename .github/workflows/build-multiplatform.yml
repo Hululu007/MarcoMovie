@@ -526,7 +526,6 @@ jobs:
           cp /tmp/marco-ohos-overlay/entry/src/main/ets/plugins/Ohos*.ts ohos/entry/src/main/ets/plugins/
           mkdir -p ohos/entry/src/main/cpp
           cp -r /tmp/marco-ohos-overlay/entry/src/main/cpp/* ohos/entry/src/main/cpp/
-          cp /tmp/marco-ohos-overlay/entry/src/main/module.json5 ohos/entry/src/main/module.json5
           cp /tmp/marco-ohos-overlay/AppScope/resources/base/element/string.json ohos/AppScope/resources/base/element/string.json
           cp /tmp/marco-ohos-overlay/entry/src/main/resources/base/element/* ohos/entry/src/main/resources/base/element/
           python3 prepare_ohos.py

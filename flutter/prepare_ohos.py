@@ -213,8 +213,11 @@ def _write_text_idempotent(path: Path, content: str) -> bool:
     return True
 
 
+OHOS_SDK_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+\(\d+\)$")
+
+
 def sync_ohos_version(project_root: Path = ROOT) -> tuple[str, int]:
-    """Synchronize ohos/AppScope/app.json5, entry/build-profile.json5, and oh-package.json5."""
+    """Synchronize ohos/AppScope/app.json5, build-profile.json5, module.json5, and oh-package.json5."""
     version_name, version_code = resolve_harmonyos_version(project_root)
     app_json5 = project_root / "ohos" / "AppScope" / "app.json5"
     if app_json5.exists():
@@ -230,6 +233,32 @@ def sync_ohos_version(project_root: Path = ROOT) -> tuple[str, int]:
     app_obj["label"] = "$string:app_name"
     _write_text_idempotent(app_json5, json.dumps(doc, indent=2, ensure_ascii=False))
 
+    root_profile = project_root / "ohos" / "build-profile.json5"
+    if root_profile.exists():
+        root_doc = load_json5(root_profile)
+        products = root_doc.get("app", {}).get("products", [])
+        changed_root = False
+        for product in products:
+            if not isinstance(product, dict):
+                continue
+            compat = str(product.get("compatibleSdkVersion") or "").strip()
+            if not OHOS_SDK_VERSION_RE.match(compat):
+                compat = "5.0.0(12)"
+                product["compatibleSdkVersion"] = compat
+                changed_root = True
+            if "targetSdkVersion" in product:
+                target_sdk = str(product.get("targetSdkVersion") or "").strip()
+                if not OHOS_SDK_VERSION_RE.match(target_sdk):
+                    product["targetSdkVersion"] = compat
+                    changed_root = True
+            if "compileSdkVersion" in product:
+                compile_sdk = str(product.get("compileSdkVersion") or "").strip()
+                if not OHOS_SDK_VERSION_RE.match(compile_sdk):
+                    del product["compileSdkVersion"]
+                    changed_root = True
+        if changed_root:
+            _write_text_idempotent(root_profile, json.dumps(root_doc, indent=2, ensure_ascii=False))
+
     entry_profile = project_root / "ohos" / "entry" / "build-profile.json5"
     if entry_profile.exists():
         entry_doc = load_json5(entry_profile)
@@ -241,6 +270,41 @@ def sync_ohos_version(project_root: Path = ROOT) -> tuple[str, int]:
             "abiFilters": ["arm64-v8a", "x86_64"],
         }
         _write_text_idempotent(entry_profile, json.dumps(entry_doc, indent=2, ensure_ascii=False))
+
+    module_json5 = project_root / "ohos" / "entry" / "src" / "main" / "module.json5"
+    if module_json5.exists():
+        mod_doc = load_json5(module_json5)
+        mod_obj = mod_doc.setdefault("module", {})
+        mod_obj["deviceTypes"] = ["phone", "tablet", "2in1", "tv"]
+        abilities = mod_obj.get("abilities", [])
+        for ability in abilities:
+            if isinstance(ability, dict) and ability.get("name") == "EntryAbility":
+                ability["exported"] = True
+                ability["orientation"] = "auto_rotation_restricted"
+                ability["supportWindowMode"] = ["fullscreen", "split", "floating"]
+                ability["backgroundModes"] = ["audioPlayback"]
+                ability["skills"] = [
+                    {
+                        "entities": ["entity.system.home", "entity.system.leanback"],
+                        "actions": ["action.system.home"],
+                    }
+                ]
+        existing_perms = {
+            p.get("name")
+            for p in mod_obj.get("requestPermissions", [])
+            if isinstance(p, dict) and p.get("name")
+        }
+        perms_list = list(mod_obj.get("requestPermissions", []))
+        for req_perm in (
+            "ohos.permission.INTERNET",
+            "ohos.permission.GET_NETWORK_INFO",
+            "ohos.permission.GET_WIFI_INFO",
+            "ohos.permission.KEEP_BACKGROUND_RUNNING",
+        ):
+            if req_perm not in existing_perms:
+                perms_list.append({"name": req_perm})
+        mod_obj["requestPermissions"] = perms_list
+        _write_text_idempotent(module_json5, json.dumps(mod_doc, indent=2, ensure_ascii=False))
 
     for pkg_rel in ("ohos/oh-package.json5", "ohos/entry/oh-package.json5"):
         pkg_path = project_root / pkg_rel

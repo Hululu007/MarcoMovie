@@ -117,6 +117,31 @@ class PrepareOhosTests(unittest.TestCase):
                 patched_entry["buildOption"]["arkOptions"]["obfuscation"]["ruleOptions"]["enable"]
             )
 
+            # 4) Normalization of non-parenthesized targetSdkVersion ("26.0.0") from DevEco 6.1 CLI
+            (sandbox / "ohos" / "build-profile.json5").write_text(
+                """{
+  app: {
+    signingConfigs: [],
+    products: [
+      {
+        name: 'default',
+        signingConfig: 'default',
+        compatibleSdkVersion: '5.0.5(17)',
+        targetSdkVersion: '26.0.0',
+        runtimeOS: 'HarmonyOS',
+      }
+    ]
+  }
+}
+""",
+                encoding="utf-8",
+            )
+            prepare_ohos.sync_ohos_version(sandbox)
+            patched_root = prepare_ohos.load_json5(sandbox / "ohos" / "build-profile.json5")
+            prod0 = patched_root["app"]["products"][0]
+            self.assertEqual(prod0["compatibleSdkVersion"], "5.0.5(17)")
+            self.assertEqual(prod0["targetSdkVersion"], "5.0.5(17)")
+
     def test_patch_and_restore_pubspec_roundtrip_is_byte_identical(self) -> None:
         icon_master = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
         real_root_bytes = (FLUTTER_DIR / "pubspec.yaml").read_bytes()
