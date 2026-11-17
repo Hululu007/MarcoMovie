@@ -28,8 +28,8 @@ NON_OHOS_PACKAGES = {
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
-def _strip_json5_comments_and_trailing_commas(raw: str) -> str:
-    """Convert a JSON5 configuration document into standard JSON for parsing."""
+def _strip_json5_comments_and_normalize_quotes(raw: str) -> str:
+    """Strip // and /* */ comments and normalize single-quoted JSON5 strings into JSON strings."""
     out: list[str] = []
     i = 0
     n = len(raw)
@@ -38,19 +38,38 @@ def _strip_json5_comments_and_trailing_commas(raw: str) -> str:
     while i < n:
         ch = raw[i]
         if in_string:
-            out.append(ch)
             if ch == "\\" and i + 1 < n:
-                out.append(raw[i + 1])
+                nxt = raw[i + 1]
+                if nxt == "\r":
+                    i += 3 if (i + 2 < n and raw[i + 2] == "\n") else 2
+                    continue
+                if nxt == "\n":
+                    i += 2
+                    continue
+                if quote_char == "'" and nxt == "'":
+                    out.append("'")
+                    i += 2
+                    continue
+                out.append("\\")
+                out.append(nxt)
                 i += 2
                 continue
             if ch == quote_char:
+                out.append('"')
                 in_string = False
+                i += 1
+                continue
+            if quote_char == "'" and ch == '"':
+                out.append('\\"')
+                i += 1
+                continue
+            out.append(ch)
             i += 1
             continue
         if ch in ('"', "'"):
             in_string = True
             quote_char = ch
-            out.append(ch)
+            out.append('"')
             i += 1
             continue
         if ch == "/" and i + 1 < n and raw[i + 1] == "/":
@@ -66,9 +85,61 @@ def _strip_json5_comments_and_trailing_commas(raw: str) -> str:
             continue
         out.append(ch)
         i += 1
-    cleaned = "".join(out)
-    cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
-    return cleaned
+    return "".join(out)
+
+
+def _strip_json5_comments_and_trailing_commas(raw: str) -> str:
+    """Convert a full JSON5 configuration document into standard JSON for parsing."""
+    step1 = _strip_json5_comments_and_normalize_quotes(raw)
+    out: list[str] = []
+    i = 0
+    n = len(step1)
+    ident_re = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+
+    while i < n:
+        ch = step1[i]
+        if ch == '"':
+            out.append(ch)
+            i += 1
+            while i < n:
+                c = step1[i]
+                out.append(c)
+                if c == "\\" and i + 1 < n:
+                    out.append(step1[i + 1])
+                    i += 2
+                    continue
+                if c == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+
+        if ch == ",":
+            j = i + 1
+            while j < n and step1[j] in (" ", "\t", "\r", "\n"):
+                j += 1
+            if j < n and step1[j] in ("}", "]"):
+                i += 1
+                continue
+
+        if ch.isalpha() or ch in ("_", "$"):
+            m = ident_re.match(step1, i)
+            if m:
+                ident = m.group(0)
+                j = m.end()
+                while j < n and step1[j] in (" ", "\t", "\r", "\n"):
+                    j += 1
+                if j < n and step1[j] == ":":
+                    out.append(f'"{ident}"')
+                else:
+                    out.append(ident)
+                i = m.end()
+                continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
 
 
 def load_json5(path: Path) -> dict:
@@ -177,6 +248,14 @@ def sync_ohos_version(project_root: Path = ROOT) -> tuple[str, int]:
             pkg_doc = load_json5(pkg_path)
             pkg_doc["version"] = version_name
             _write_text_idempotent(pkg_path, json.dumps(pkg_doc, indent=2, ensure_ascii=False))
+
+    base_strings = project_root / "ohos" / "entry" / "src" / "main" / "resources" / "base" / "element" / "string.json"
+    if base_strings.exists():
+        base_str_text = base_strings.read_text(encoding="utf-8")
+        for locale in ("en_US", "zh_CN"):
+            loc_strings = project_root / "ohos" / "entry" / "src" / "main" / "resources" / locale / "element" / "string.json"
+            if loc_strings.exists():
+                _write_text_idempotent(loc_strings, base_str_text)
 
     return version_name, version_code
 

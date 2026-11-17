@@ -530,6 +530,10 @@ jobs:
           cp /tmp/marco-ohos-overlay/AppScope/resources/base/element/string.json ohos/AppScope/resources/base/element/string.json
           cp /tmp/marco-ohos-overlay/entry/src/main/resources/base/element/* ohos/entry/src/main/resources/base/element/
           python3 prepare_ohos.py
+          echo "=== Generated ohos/hvigor/hvigor-config.json5 ==="
+          cat ohos/hvigor/hvigor-config.json5 || true
+          echo "=== Generated ohos/build-profile.json5 ==="
+          cat ohos/build-profile.json5 || true
           flutter pub get
           VERSION=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['harmonyos']['versionName'])")
           BUILD_NUM=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['harmonyos']['buildNumber'])")
