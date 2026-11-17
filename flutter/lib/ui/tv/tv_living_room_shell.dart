@@ -767,6 +767,16 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
     );
   }
 
+  void _stepLiveGroup(int delta) {
+    if (_liveGroups.length <= 1) {
+      return;
+    }
+    setState(() {
+      final len = _liveGroups.length;
+      _selectedLiveGroupIdx = ((_selectedLiveGroupIdx + delta) % len + len) % len;
+    });
+  }
+
   KeyEventResult _handleRootKey(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) {
       return KeyEventResult.ignored;
@@ -776,6 +786,18 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
         event.logicalKey == LogicalKeyboardKey.f1) {
       unawaited(_showSitePickerDialog());
       return KeyEventResult.handled;
+    }
+    if (_tabIndex == 1 && _liveGroups.length > 1) {
+      if (event.logicalKey == LogicalKeyboardKey.bracketLeft ||
+          event.logicalKey == LogicalKeyboardKey.pageUp) {
+        _stepLiveGroup(-1);
+        return KeyEventResult.handled;
+      }
+      if (event.logicalKey == LogicalKeyboardKey.bracketRight ||
+          event.logicalKey == LogicalKeyboardKey.pageDown) {
+        _stepLiveGroup(1);
+        return KeyEventResult.handled;
+      }
     }
     // Triple-Up on Home scrolls smoothly back to top
     if (_tabIndex == 0 && event.logicalKey == LogicalKeyboardKey.arrowUp) {
@@ -1154,9 +1176,12 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
     final safeGroupIdx = _liveGroups.isEmpty
         ? 0
         : _selectedLiveGroupIdx.clamp(0, _liveGroups.length - 1);
-    final channels = _liveGroups.isEmpty
-        ? const <LiveChannel>[]
-        : _liveGroups[safeGroupIdx].channels;
+    final activeGroup = _liveGroups.isEmpty ? null : _liveGroups[safeGroupIdx];
+    final channels = activeGroup?.channels ?? const <LiveChannel>[];
+    final totalChannels = _liveGroups.fold<int>(
+      0,
+      (sum, g) => sum + g.channels.length,
+    );
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(36, 8, 36, 28),
@@ -1165,7 +1190,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
         children: [
           if (lives.length > 1)
             Padding(
-              padding: const EdgeInsets.only(bottom: 14),
+              padding: const EdgeInsets.only(bottom: 12),
               child: SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 child: Row(
@@ -1183,6 +1208,111 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                         ),
                       ),
                   ],
+                ),
+              ),
+            ),
+          if (!_liveLoading && _liveError == null && activeGroup != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: Focus(
+                onKeyEvent: (_, event) {
+                  if (event is KeyDownEvent && _liveGroups.length > 1) {
+                    if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+                      _stepLiveGroup(-1);
+                      return KeyEventResult.handled;
+                    }
+                    if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+                      _stepLiveGroup(1);
+                      return KeyEventResult.handled;
+                    }
+                  }
+                  return KeyEventResult.ignored;
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF151822),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.09),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: AppleColors.systemBlue.withValues(alpha: 0.18),
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: AppleColors.systemBlue.withValues(
+                              alpha: 0.55,
+                            ),
+                          ),
+                        ),
+                        child: Text(
+                          '📡 ${activeSource.name} · ${_liveGroups.length} 组 / 共 $totalChannels 频道',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Text(
+                          '当前分组：${activeGroup.name} (${channels.length} 台)',
+                          style: const TextStyle(
+                            color: AppleColors.labelPrimary,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      const Spacer(),
+                      if (_liveGroups.length > 1) ...[
+                        TvFocusPill(
+                          autofocus: true,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 7,
+                          ),
+                          onSelect: () => _stepLiveGroup(-1),
+                          child: const Text(
+                            '◀ 上一组',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        TvFocusPill(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 7,
+                          ),
+                          onSelect: () => _stepLiveGroup(1),
+                          child: const Text(
+                            '下一组 ▶',
+                            style: TextStyle(fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
               ),
             ),

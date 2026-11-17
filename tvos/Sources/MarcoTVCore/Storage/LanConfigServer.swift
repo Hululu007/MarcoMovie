@@ -58,10 +58,14 @@ public final class LanConfigServer: @unchecked Sendable {
         stop()
     }
 
-    public var isExpired: Bool {
+    private func withLock<T>(_ body: () -> T) -> T {
         lock.lock()
-        let closed = isClosed
-        lock.unlock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    public var isExpired: Bool {
+        let closed = withLock { isClosed }
         return closed || Date() > expiresAt
     }
 
@@ -74,13 +78,9 @@ public final class LanConfigServer: @unchecked Sendable {
     }
 
     public func start(loopbackOnly: Bool = false) async throws -> UInt16 {
-        lock.lock()
-        if listener != nil && port > 0 {
-            let p = port
-            lock.unlock()
+        if let p = withLock({ (listener != nil && port > 0) ? port : nil }) {
             return p
         }
-        lock.unlock()
 
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
@@ -127,21 +127,22 @@ public final class LanConfigServer: @unchecked Sendable {
             nwListener.start(queue: self.queue)
         }
 
-        lock.lock()
-        self.listener = nwListener
-        self.port = boundPort
-        self.isClosed = false
-        lock.unlock()
+        withLock {
+            self.listener = nwListener
+            self.port = boundPort
+            self.isClosed = false
+        }
         return boundPort
     }
 
     public func stop() {
-        lock.lock()
-        isClosed = true
-        let current = listener
-        listener = nil
-        port = 0
-        lock.unlock()
+        let current = withLock { () -> NWListener? in
+            isClosed = true
+            let existing = listener
+            listener = nil
+            port = 0
+            return existing
+        }
         current?.cancel()
     }
 
@@ -342,7 +343,9 @@ public final class LanConfigServer: @unchecked Sendable {
 
         let pushPath = "\(tokenPath)/push"
         let syncPath = "\(tokenPath)/sync"
-        guard rawPath == tokenPath || rawPath == pushPath || rawPath == syncPath else {
+        let netdiskPath = "\(tokenPath)/netdisk"
+        let isNetdiskApi = (rawPath == "/api/netdisk" || rawPath == netdiskPath)
+        guard rawPath == tokenPath || rawPath == pushPath || rawPath == syncPath || isNetdiskApi else {
             sendText(connection: connection, status: 404, text: "页面不存在")
             return
         }
@@ -358,6 +361,45 @@ public final class LanConfigServer: @unchecked Sendable {
                 sendText(connection: connection, status: 403, text: "来源校验未通过")
                 return
             }
+        }
+
+        if isNetdiskApi {
+            guard method == "POST" else {
+                sendText(connection: connection, status: 405, text: "请求方式不支持")
+                return
+            }
+            guard let json = (try? JSONSerialization.jsonObject(with: bodyData)) as? [String: Any] else {
+                sendJsonObject(connection: connection, status: 400, obj: ["ok": false, "error": "无效的 JSON 请求"])
+                return
+            }
+            let driveKey = ((json["drive"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let credential = ((json["credential"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let driveInfo = NetdiskDriveInfo.info(for: driveKey) else {
+                sendJsonObject(connection: connection, status: 400, obj: ["ok": false, "error": "不支持的网盘类型"])
+                return
+            }
+            do {
+                try storage.setNetdiskCredential(credential, for: driveInfo.key)
+                let evt = LanConfigAppliedEvent(
+                    historyCount: storage.watchHistory().count,
+                    favoriteCount: storage.favorites().count,
+                    subscriptionCount: storage.subscriptions().count,
+                    message: "已绑定 \(driveInfo.tvName)（\(driveInfo.providerName)）"
+                )
+                onApplied?(evt)
+                sendJsonObject(
+                    connection: connection,
+                    status: 200,
+                    obj: ["ok": true, "drive": driveInfo.key, "message": evt.message]
+                )
+            } catch {
+                sendJsonObject(
+                    connection: connection,
+                    status: 400,
+                    obj: ["ok": false, "error": error.localizedDescription]
+                )
+            }
+            return
         }
 
         if rawPath == tokenPath {
@@ -573,7 +615,7 @@ public final class LanConfigServer: @unchecked Sendable {
         h1{font-size:22px;margin:0 0 8px}
         p{color:#a8b0c2;line-height:1.6;margin:6px 0 16px}
         label{display:block;font-weight:600;margin:16px 0 8px;color:#dbe1f0}
-        input,textarea{width:100%;box-sizing:border-box;background:#0f1118;border:1px solid #32384f;border-radius:12px;color:#fff;padding:12px;font-size:14px}
+        input,textarea,select{width:100%;box-sizing:border-box;background:#0f1118;border:1px solid #32384f;border-radius:12px;color:#fff;padding:12px;font-size:14px}
         textarea{min-height:110px;font-family:ui-monospace,monospace}
         button{margin-top:12px;width:100%;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;border:0;border-radius:12px;padding:13px;font-size:15px;font-weight:600;cursor:pointer}
         .status{margin-top:14px;padding:12px;border-radius:12px;display:none;background:#1e293b;color:#93c5fd}
@@ -583,7 +625,7 @@ public final class LanConfigServer: @unchecked Sendable {
         <body>
         <main>
           <h1>Marco Movie · Apple TV 扫码快传</h1>
-          <p>免遥控器输入：粘贴订阅链接、JSON/M3U 配置内容，或上传 <b>marco-movie-backup.json</b> 备份文件一键同步至电视。</p>
+          <p>免遥控器输入：粘贴订阅链接、JSON/M3U 配置、4K 网盘会话凭据，或上传 <b>marco-movie-backup.json</b> 备份文件一键同步至电视。</p>
           <label>1. 订阅 / 多仓地址</label>
           <input id="subUrl" type="url" placeholder="粘贴 HTTP(S) 订阅或仓库地址">
           <input id="subName" type="text" placeholder="可选备注名称（例如：客厅主线路）" style="margin-top:8px">
@@ -597,22 +639,33 @@ public final class LanConfigServer: @unchecked Sendable {
           <input id="backupFile" type="file" accept=".json,application/json">
           <button onclick="pushFile()">上传并恢复备份</button>
 
+          <label>4. 推送 4K 网盘 Cookie / 刷新令牌（仅存电视钥匙串）</label>
+          <select id="netdiskDrive">
+            <option value="quark">我的夸父（夸克网盘 __pus / __puus）</option>
+            <option value="uc">我的优汐（UC网盘 __pus）</option>
+            <option value="baidu">我的嘟嘟（百度网盘 BDUSS）</option>
+            <option value="ali">我的阿狸（阿里云盘 refreshToken）</option>
+          </select>
+          <textarea id="netdiskCred" style="min-height:76px;margin-top:8px" placeholder="粘贴对应网盘 Cookie 或阿里云盘 refreshToken"></textarea>
+          <button onclick="pushNetdisk()">推送网盘凭据到电视</button>
+
           <div id="statusBox" class="status"></div>
           <label>多端双向同步接口地址</label>
           <code>\(safeUrl)</code>
         </main>
         <script>
         const pushEndpoint = location.pathname.replace(/\\/$/, '') + '/push';
+        const netdiskEndpoint = '/api/netdisk';
         function showMsg(msg, isErr) {
           const box = document.getElementById('statusBox');
           box.style.display = 'block';
           box.style.color = isErr ? '#fca5a5' : '#86efac';
           box.textContent = msg;
         }
-        async function postPayload(body) {
+        async function postPayload(body, endpoint) {
           showMsg('正在推送至 Apple TV…', false);
           try {
-            const r = await fetch(pushEndpoint, {
+            const r = await fetch(endpoint || pushEndpoint, {
               method: 'POST',
               headers: {'Content-Type': 'application/json'},
               body: JSON.stringify(body)
@@ -642,6 +695,12 @@ public final class LanConfigServer: @unchecked Sendable {
           const reader = new FileReader();
           reader.onload = () => postPayload({ backupJson: String(reader.result || '') });
           reader.readAsText(f, 'utf-8');
+        }
+        function pushNetdisk() {
+          postPayload({
+            drive: document.getElementById('netdiskDrive').value,
+            credential: document.getElementById('netdiskCred').value
+          }, netdiskEndpoint);
         }
         </script>
         </body>

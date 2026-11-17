@@ -220,8 +220,16 @@ class TvOSWorkspaceTests(unittest.TestCase):
 
         core_swift = sorted((TVOS_DIR / "Sources" / "MarcoTVCore").rglob("*.swift"))
         app_swift = sorted((TVOS_DIR / "Sources" / "MarcoMovieTV").rglob("*.swift"))
-        self.assertGreaterEqual(len(core_swift), 8)
-        self.assertGreaterEqual(len(app_swift), 9)
+        self.assertGreaterEqual(len(core_swift), 14)
+        self.assertGreaterEqual(len(app_swift), 11)
+
+        for required_rel in (
+            "../Sources/MarcoTVCore/Network/NetdiskService.swift",
+            "../Sources/MarcoTVCore/Network/NetdiskRangeProxyServer.swift",
+            "../Sources/MarcoTVCore/Network/NetdiskShareResolver.swift",
+            "../Sources/MarcoMovieTV/NetdiskAccountSheetView.swift",
+        ):
+            self.assertIn(required_rel, referenced_paths, f"Phase 2 file missing from project.pbxproj: {required_rel}")
 
         for swift_file in core_swift + app_swift:
             rel_path = f"../{swift_file.relative_to(TVOS_DIR).as_posix()}"
@@ -233,7 +241,7 @@ class TvOSWorkspaceTests(unittest.TestCase):
 
     def test_swift_files_have_balanced_delimiters_and_imports(self) -> None:
         swift_files = sorted(TVOS_DIR.rglob("*.swift"))
-        self.assertGreaterEqual(len(swift_files), 18)
+        self.assertGreaterEqual(len(swift_files), 28)
 
         pairs = {"{": "}", "(": ")", "[": "]"}
         closing = set(pairs.values())
@@ -252,6 +260,35 @@ class TvOSWorkspaceTests(unittest.TestCase):
                     expected = stack.pop()
                     self.assertEqual(ch, expected, f"Mismatched '{ch}' (expected '{expected}') in {sf}")
             self.assertEqual(stack, [], f"Unclosed delimiters {stack} in {sf}")
+
+    def test_tvos16_availability_guards_and_phase2_tests(self) -> None:
+        import re
+
+        for ui_file in sorted((TVOS_DIR / "Sources" / "MarcoMovieTV").rglob("*.swift")):
+            lines = ui_file.read_text(encoding="utf-8").splitlines()
+            for idx, line in enumerate(lines):
+                if re.search(r"\bMenu\s*\(", line):
+                    prev_window = "\n".join(lines[max(0, idx - 3) : idx + 1])
+                    self.assertIn(
+                        "#available(tvOS 17.0",
+                        prev_window,
+                        f"{ui_file.name}:{idx + 1}: Menu(...) must be guarded by #available(tvOS 17.0, *)",
+                    )
+                self.assertIsNone(
+                    re.search(r"\.onChange\s*\(\s*of:[^)]+\)\s*\{\s*\w+\s*,\s*\w+\s+in", line),
+                    f"{ui_file.name}:{idx + 1}: 2-arg onChange requires tvOS 17.0",
+                )
+
+        phase2_test = TVOS_DIR / "Tests" / "MarcoTVCoreTests" / "NetdiskAndRangeProxyTests.swift"
+        self.assertTrue(phase2_test.is_file(), "Missing NetdiskAndRangeProxyTests.swift")
+        test_text = phase2_test.read_text(encoding="utf-8")
+        for token in (
+            "testHeaderPolicyRedirectIsolationAndIdentityEncoding",
+            "testRangeProxyHeadMultiChunkStreaming416AndSeekPreemption",
+            "testNetdiskQrStateMachineAndShareResolver",
+            "testKeychainNetdiskCrudBackupIsolationAndLanPush",
+        ):
+            self.assertIn(token, test_text)
 
     def test_patch_tvos_ipa_macho_and_plist_and_packaging(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

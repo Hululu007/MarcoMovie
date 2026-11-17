@@ -51,6 +51,8 @@ public final class AppViewModel: ObservableObject {
     public let storage: TvStorageManager
     public let cmsClient: CmsClient
     public let proxyServer: LocalHeaderProxyServer
+    public let rangeProxyServer: NetdiskRangeProxyServer
+    public let netdiskService: NetdiskService
     public let webdavService: WebDavSyncService
 
     @Published public var selectedTab: LivingRoomTab = .discover
@@ -60,6 +62,7 @@ public final class AppViewModel: ObservableObject {
     @Published public private(set) var favorites: [FavoriteItem] = []
     @Published public private(set) var preferences = PlaybackPreferences()
     @Published public var webdavConfig = WebDavConfig()
+    @Published public private(set) var loggedInNetdiskDrives: Set<String> = []
 
     // Discover state
     @Published public private(set) var activeSite: CmsSite?
@@ -89,9 +92,11 @@ public final class AppViewModel: ObservableObject {
     @Published public private(set) var searchBatches: [SiteSearchBatch] = []
     @Published public private(set) var isSearching = false
 
-    // LAN QR & Modals
+    // LAN QR, Netdisk & Modals
     @Published public var showSiteSwitcherSheet = false
     @Published public var showLanQrModal = false
+    @Published public var showNetdiskSheet = false
+    @Published public var selectedNetdiskDriveKey: String = "quark"
     @Published public private(set) var lanQrUrl: String = ""
     @Published public var statusBannerMessage: String?
     @Published public private(set) var isSyncingWebDav = false
@@ -102,11 +107,15 @@ public final class AppViewModel: ObservableObject {
     public init(
         storage: TvStorageManager = TvStorageManager(),
         cmsClient: CmsClient = CmsClient(),
-        proxyServer: LocalHeaderProxyServer = LocalHeaderProxyServer()
+        proxyServer: LocalHeaderProxyServer = LocalHeaderProxyServer(),
+        rangeProxyServer: NetdiskRangeProxyServer = NetdiskRangeProxyServer(),
+        netdiskService: NetdiskService = NetdiskService()
     ) {
         self.storage = storage
         self.cmsClient = cmsClient
         self.proxyServer = proxyServer
+        self.rangeProxyServer = rangeProxyServer
+        self.netdiskService = netdiskService
         self.webdavService = WebDavSyncService(storage: storage)
 
         reloadLocalState()
@@ -125,6 +134,7 @@ public final class AppViewModel: ObservableObject {
         favorites = storage.favorites()
         preferences = storage.preferences()
         webdavConfig = storage.loadWebDavConfig()
+        loggedInNetdiskDrives = Set(storage.loggedInNetdiskDrives())
         config = storage.mergedConfig()
 
         let avail = config.publicAvailableSites
@@ -460,7 +470,34 @@ public final class AppViewModel: ObservableObject {
         preferences = storage.preferences()
     }
 
-    // MARK: - LAN QR Server & WebDAV Sync
+    // MARK: - 4K Netdisk Accounts & LAN QR Server & WebDAV Sync
+
+    public func openNetdiskSheet(preferredDriveKey: String? = nil) {
+        if let key = preferredDriveKey, NetdiskDriveInfo.info(for: key) != nil {
+            selectedNetdiskDriveKey = key
+        }
+        showNetdiskSheet = true
+    }
+
+    public func saveNetdiskCredential(driveKey: String, credential: String) throws {
+        try storage.setNetdiskCredential(credential, for: driveKey)
+        loggedInNetdiskDrives = Set(storage.loggedInNetdiskDrives())
+        if let info = NetdiskDriveInfo.info(for: driveKey) {
+            statusBannerMessage = "\(info.tvName)（\(info.providerName)）授权成功"
+        }
+    }
+
+    public func logoutNetdisk(driveKey: String) {
+        try? storage.removeNetdiskCredential(for: driveKey)
+        loggedInNetdiskDrives = Set(storage.loggedInNetdiskDrives())
+        let proxy = rangeProxyServer
+        Task {
+            await proxy.revokeAll()
+        }
+        if let info = NetdiskDriveInfo.info(for: driveKey) {
+            statusBannerMessage = "已退出 \(info.tvName)"
+        }
+    }
 
     public func openLanQrModal() {
         showLanQrModal = true
@@ -482,11 +519,11 @@ public final class AppViewModel: ObservableObject {
             syncService: webdavService,
             cmsClient: cmsClient
         ) { [weak self] event in
-            Task { @MainActor in
-                guard let self = self else { return }
-                self.statusBannerMessage = event.message
-                self.reloadLocalState()
-                await self.loadHomeForActiveSite()
+            Task { @MainActor [weak self] in
+                guard let strongSelf = self else { return }
+                strongSelf.statusBannerMessage = event.message
+                strongSelf.reloadLocalState()
+                await strongSelf.loadHomeForActiveSite()
             }
         }
         if let _ = try? await server.start() {

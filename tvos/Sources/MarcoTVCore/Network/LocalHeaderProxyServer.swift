@@ -74,14 +74,16 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
         stop()
     }
 
-    public func startIfNeeded() async throws -> UInt16 {
+    private func withLock<T>(_ body: () -> T) -> T {
         lock.lock()
-        if listener != nil && port > 0 {
-            let existingPort = port
-            lock.unlock()
+        defer { lock.unlock() }
+        return body()
+    }
+
+    public func startIfNeeded() async throws -> UInt16 {
+        if let existingPort = withLock({ (listener != nil && port > 0) ? port : nil }) {
             return existingPort
         }
-        lock.unlock()
 
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
@@ -126,20 +128,21 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
             nwListener.start(queue: self.queue)
         }
 
-        lock.lock()
-        self.listener = nwListener
-        self.port = boundPort
-        lock.unlock()
+        withLock {
+            self.listener = nwListener
+            self.port = boundPort
+        }
         return boundPort
     }
 
     public func stop() {
-        lock.lock()
-        let current = listener
-        listener = nil
-        port = 0
-        sessions.removeAll()
-        lock.unlock()
+        let current = withLock { () -> NWListener? in
+            let existing = listener
+            listener = nil
+            port = 0
+            sessions.removeAll()
+            return existing
+        }
         current?.cancel()
     }
 
@@ -153,14 +156,14 @@ public final class LocalHeaderProxyServer: @unchecked Sendable {
         let sessionId = tokenBytes.map { String(format: "%02x", $0) }.joined()
         let session = StreamSession(id: sessionId, rootUrl: url, headers: headers, createdAt: Date())
 
-        lock.lock()
-        if sessions.count >= 64,
-           let oldest = sessions.min(by: { $0.value.createdAt < $1.value.createdAt })?.key
-        {
-            sessions.removeValue(forKey: oldest)
+        withLock {
+            if sessions.count >= 64,
+               let oldest = sessions.min(by: { $0.value.createdAt < $1.value.createdAt })?.key
+            {
+                sessions.removeValue(forKey: oldest)
+            }
+            sessions[sessionId] = session
         }
-        sessions[sessionId] = session
-        lock.unlock()
 
         let ext = url.pathExtension.lowercased()
         let leaf = (ext == "mp4" || ext == "mkv" || ext == "mov" || ext == "ts") ? "stream.\(ext)" : "master.m3u8"

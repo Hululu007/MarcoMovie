@@ -16,6 +16,7 @@ public struct DetailView: View {
     @State private var selectedLineIndex = 0
     @State private var selectedGroupPage = 0
     @State private var descending = false
+    @State private var showInlineNetdiskSheet = false
 
     public init(site: CmsSite, summaryVideo: CmsVideo) {
         self.site = site
@@ -144,6 +145,28 @@ public struct DetailView: View {
                             .foregroundColor(TvTheme.mutedText)
                     } else {
                         playLineSelector
+                        if let driveKey = currentLine?.netdiskDriveKey,
+                           !appModel.loggedInNetdiskDrives.contains(driveKey),
+                           let driveInfo = NetdiskDriveInfo.info(for: driveKey)
+                        {
+                            HStack(spacing: 16) {
+                                Image(systemName: "externaldrive.badge.exclamationmark")
+                                    .foregroundColor(TvTheme.gold)
+                                Text("当前线路需要登录「\(driveInfo.tvName)（\(driveInfo.providerName)）」方可启用 6 线程 4K 原画播放")
+                                    .font(.callout)
+                                    .foregroundColor(.white)
+                                Spacer()
+                                Button("立即扫码登录") {
+                                    appModel.selectedNetdiskDriveKey = driveKey
+                                    showInlineNetdiskSheet = true
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(TvTheme.accent)
+                            }
+                            .padding(18)
+                            .background(TvTheme.elevatedSurface)
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
                         episodeGroupToolbar
                         episodeGrid
                     }
@@ -153,6 +176,10 @@ public struct DetailView: View {
         }
         .padding(48)
         .background(TvTheme.background)
+        .sheet(isPresented: $showInlineNetdiskSheet) {
+            NetdiskAccountSheetView()
+                .environmentObject(appModel)
+        }
         .task {
             descending = appModel.preferences.episodesDescending
             await loadFullDetail()
@@ -185,7 +212,15 @@ public struct DetailView: View {
                         } label: {
                             HStack(spacing: 6) {
                                 Text(line.name)
-                                if line.isM3u8Preferred {
+                                if line.isNetdiskLine {
+                                    Text("4K 云盘")
+                                        .font(.caption2.bold())
+                                        .foregroundColor(TvTheme.gold)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(TvTheme.gold.opacity(0.22))
+                                        .clipShape(Capsule())
+                                } else if line.isM3u8Preferred {
                                     Text("HLS")
                                         .font(.caption2.bold())
                                         .padding(.horizontal, 6)

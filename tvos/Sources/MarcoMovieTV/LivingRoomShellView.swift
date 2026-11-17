@@ -62,6 +62,10 @@ public struct LivingRoomShellView: View {
                 LanQrPushModalView()
                     .environmentObject(appModel)
             }
+            .sheet(isPresented: $appModel.showNetdiskSheet) {
+                NetdiskAccountSheetView()
+                    .environmentObject(appModel)
+            }
             .sheet(
                 isPresented: Binding(
                     get: { appModel.selectedDetailContext != nil },

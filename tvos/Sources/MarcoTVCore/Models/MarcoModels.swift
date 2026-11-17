@@ -440,7 +440,30 @@ public struct CmsEpisode: Codable, Hashable, Identifiable, Sendable {
         url.hasPrefix("mmjs://play?")
     }
 
+    public var isNetdiskUrl: Bool {
+        let lower = url.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower.hasPrefix("mmquark://") || lower.hasPrefix("mmwogg://") || lower.hasPrefix("mmcloud://") {
+            return true
+        }
+        let sharePrefixes = [
+            "https://pan.quark.cn/s/",
+            "http://pan.quark.cn/s/",
+            "https://drive.uc.cn/s/",
+            "http://drive.uc.cn/s/",
+            "https://pan.baidu.com/s/",
+            "http://pan.baidu.com/s/",
+            "https://www.alipan.com/s/",
+            "http://www.alipan.com/s/",
+            "https://www.aliyundrive.com/s/",
+            "http://www.aliyundrive.com/s/",
+        ]
+        return sharePrefixes.contains { lower.hasPrefix($0) }
+    }
+
     public var isDirectPlayable: Bool {
+        if isNetdiskUrl {
+            return false
+        }
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("/") || trimmed.lowercased().hasPrefix("file://") {
             return true
@@ -487,6 +510,36 @@ public struct CmsLine: Codable, Hashable, Identifiable, Sendable {
     public var isM3u8Preferred: Bool {
         name.lowercased().contains("m3u8")
             || (episodes.first?.url.lowercased().contains(".m3u8") ?? false)
+    }
+
+    public var netdiskDriveKey: String? {
+        let lowerName = name.lowercased()
+        let firstUrl = episodes.first?.url.lowercased() ?? ""
+        if lowerName.contains("夸父") || lowerName.contains("夸克") || lowerName.contains("quark")
+            || firstUrl.contains("quark.cn") || firstUrl.hasPrefix("mmquark://") || firstUrl.hasPrefix("mmwogg://quark")
+        {
+            return "quark"
+        }
+        if lowerName.contains("优汐") || lowerName.contains("uc网盘") || lowerName.contains("uc原画")
+            || firstUrl.contains("drive.uc.cn") || firstUrl.hasPrefix("mmwogg://uc")
+        {
+            return "uc"
+        }
+        if lowerName.contains("嘟嘟") || lowerName.contains("百度") || lowerName.contains("baidu")
+            || firstUrl.contains("pan.baidu.com") || firstUrl.hasPrefix("mmwogg://baidu")
+        {
+            return "baidu"
+        }
+        if lowerName.contains("阿狸") || lowerName.contains("阿里") || lowerName.contains("alipan") || lowerName.contains("aliyundrive")
+            || firstUrl.contains("alipan.com") || firstUrl.contains("aliyundrive.com") || firstUrl.hasPrefix("mmwogg://ali")
+        {
+            return "ali"
+        }
+        return nil
+    }
+
+    public var isNetdiskLine: Bool {
+        netdiskDriveKey != nil || (episodes.first?.isNetdiskUrl ?? false)
     }
 }
 
@@ -881,6 +934,21 @@ public struct PlaybackPreferences: Codable, Hashable, Sendable {
     public var repeatMode: String
     public var selectedSiteKey: String
     public var preferredSiteKey: String
+    public var netdiskQuality: String
+    public var playerKernel: String
+
+    private enum CodingKeys: String, CodingKey {
+        case skipIntroSec
+        case skipOutroSec
+        case playSpeed
+        case autoNext
+        case episodesDescending
+        case repeatMode
+        case selectedSiteKey
+        case preferredSiteKey
+        case netdiskQuality
+        case playerKernel
+    }
 
     public init(
         skipIntroSec: Int = 0,
@@ -890,7 +958,9 @@ public struct PlaybackPreferences: Codable, Hashable, Sendable {
         episodesDescending: Bool = false,
         repeatMode: String = "off",
         selectedSiteKey: String = "",
-        preferredSiteKey: String = ""
+        preferredSiteKey: String = "",
+        netdiskQuality: String = "auto",
+        playerKernel: String = "range_proxy"
     ) {
         self.skipIntroSec = min(max(skipIntroSec, 0), 600)
         self.skipOutroSec = min(max(skipOutroSec, 0), 600)
@@ -900,6 +970,34 @@ public struct PlaybackPreferences: Codable, Hashable, Sendable {
         self.repeatMode = ["off", "one", "all"].contains(repeatMode) ? repeatMode : "off"
         self.selectedSiteKey = selectedSiteKey
         self.preferredSiteKey = preferredSiteKey
+        self.netdiskQuality = ["auto", "4k_hdr", "1080p"].contains(netdiskQuality) ? netdiskQuality : "auto"
+        self.playerKernel = ["avkit", "range_proxy"].contains(playerKernel) ? playerKernel : "range_proxy"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let skipIntro = try container.decodeIfPresent(Int.self, forKey: .skipIntroSec) ?? 0
+        let skipOutro = try container.decodeIfPresent(Int.self, forKey: .skipOutroSec) ?? 0
+        let speed = try container.decodeIfPresent(Double.self, forKey: .playSpeed) ?? 1.0
+        let autoNextVal = try container.decodeIfPresent(Bool.self, forKey: .autoNext) ?? true
+        let descVal = try container.decodeIfPresent(Bool.self, forKey: .episodesDescending) ?? false
+        let rep = try container.decodeIfPresent(String.self, forKey: .repeatMode) ?? "off"
+        let selSite = try container.decodeIfPresent(String.self, forKey: .selectedSiteKey) ?? ""
+        let prefSite = try container.decodeIfPresent(String.self, forKey: .preferredSiteKey) ?? ""
+        let quality = try container.decodeIfPresent(String.self, forKey: .netdiskQuality) ?? "auto"
+        let kernel = try container.decodeIfPresent(String.self, forKey: .playerKernel) ?? "range_proxy"
+        self.init(
+            skipIntroSec: skipIntro,
+            skipOutroSec: skipOutro,
+            playSpeed: speed,
+            autoNext: autoNextVal,
+            episodesDescending: descVal,
+            repeatMode: rep,
+            selectedSiteKey: selSite,
+            preferredSiteKey: prefSite,
+            netdiskQuality: quality,
+            playerKernel: kernel
+        )
     }
 }
 
@@ -952,16 +1050,22 @@ public struct ResolvedPlayback: Hashable, Sendable {
     public var playableUrl: URL
     public var headers: [String: String]
     public var isProxied: Bool
+    public var kernelLabel: String
+    public var resolutionBadge: String
 
     public init(
         originalUrl: String,
         playableUrl: URL,
         headers: [String: String] = [:],
-        isProxied: Bool = false
+        isProxied: Bool = false,
+        kernelLabel: String = "AVKit 硬解",
+        resolutionBadge: String = ""
     ) {
         self.originalUrl = originalUrl
         self.playableUrl = playableUrl
         self.headers = headers
         self.isProxied = isProxied
+        self.kernelLabel = kernelLabel
+        self.resolutionBadge = resolutionBadge
     }
 }

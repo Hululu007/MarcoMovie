@@ -116,6 +116,8 @@ public enum BackupCodec {
     public static let keyRepeatMode = "repeat_mode"
     public static let keySelectedSite = "selected_site"
     public static let keyPreferredSite = "preferred_site"
+    public static let keyNetdiskQuality = "netdisk_quality"
+    public static let keyPlayerKernel = "player_kernel"
 
     public static func encodeBackupJson(_ payload: BackupPayload) throws -> String {
         let publicSubs = payload.subscriptions.filter { !$0.isEffectivelyPrivate }
@@ -148,6 +150,8 @@ public enum BackupCodec {
             keyRepeatMode: payload.preferences.repeatMode,
             keySelectedSite: payload.preferences.selectedSiteKey,
             keyPreferredSite: payload.preferences.preferredSiteKey,
+            keyNetdiskQuality: payload.preferences.netdiskQuality,
+            keyPlayerKernel: payload.preferences.playerKernel,
         ]
         if !publicSubs.isEmpty {
             settings[keySubscriptions] = publicSubs.map { $0.toDictionary() }
@@ -260,7 +264,9 @@ public enum BackupCodec {
             episodesDescending: (settings[keyEpisodesDescending] as? Bool) ?? false,
             repeatMode: (settings[keyRepeatMode] as? String) ?? "off",
             selectedSiteKey: (settings[keySelectedSite] as? String) ?? "",
-            preferredSiteKey: (settings[keyPreferredSite] as? String) ?? ""
+            preferredSiteKey: (settings[keyPreferredSite] as? String) ?? "",
+            netdiskQuality: (settings[keyNetdiskQuality] as? String) ?? "auto",
+            playerKernel: (settings[keyPlayerKernel] as? String) ?? "range_proxy"
         )
 
         return BackupPayload(
@@ -833,7 +839,9 @@ public final class TvStorageManager: @unchecked Sendable {
             episodesDescending: next.episodesDescending,
             repeatMode: next.repeatMode,
             selectedSiteKey: next.selectedSiteKey,
-            preferredSiteKey: next.preferredSiteKey
+            preferredSiteKey: next.preferredSiteKey,
+            netdiskQuality: next.netdiskQuality,
+            playerKernel: next.playerKernel
         )
         writeCodableAtomically(preferencesCache, to: cachesDirectory.appendingPathComponent("preferences.json"))
         persistKeychainAnchor()
@@ -862,7 +870,48 @@ public final class TvStorageManager: @unchecked Sendable {
         persistKeychainAnchor()
     }
 
-    // MARK: - Keychain Credentials (WebDAV & Privacy PIN)
+    // MARK: - Keychain Credentials (WebDAV, Netdisk & Privacy PIN)
+
+    private static func netdiskAccountKey(for driveKey: String) -> String {
+        "netdisk.\(driveKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
+    }
+
+    public func setNetdiskCredential(_ credential: String, for driveKey: String) throws {
+        let key = driveKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard NetdiskDriveInfo.info(for: key) != nil else {
+            throw MarcoError.invalidFormat("不支持的网盘类型：\(driveKey)")
+        }
+        guard NetdiskSessionValidator.isUsable(driveKey: key, credential: credential) else {
+            throw MarcoError.invalidFormat("网盘凭据格式无效或缺少核心会话字段")
+        }
+        let normalized = NetdiskSessionValidator.normalizeCredential(driveKey: key, rawCredential: credential)
+        try keychain.setData(Data(normalized.utf8), forAccount: Self.netdiskAccountKey(for: key))
+    }
+
+    public func netdiskCredential(for driveKey: String) -> String {
+        let key = driveKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard NetdiskDriveInfo.info(for: key) != nil,
+              let data = try? keychain.data(forAccount: Self.netdiskAccountKey(for: key)),
+              let raw = String(data: data, encoding: .utf8),
+              NetdiskSessionValidator.isUsable(driveKey: key, credential: raw)
+        else {
+            return ""
+        }
+        return raw
+    }
+
+    public func removeNetdiskCredential(for driveKey: String) throws {
+        let key = driveKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        try keychain.removeData(forAccount: Self.netdiskAccountKey(for: key))
+    }
+
+    public func isNetdiskLoggedIn(_ driveKey: String) -> Bool {
+        !netdiskCredential(for: driveKey).isEmpty
+    }
+
+    public func loggedInNetdiskDrives() -> [String] {
+        NetdiskDriveInfo.allDrives.map(\.key).filter { isNetdiskLoggedIn($0) }
+    }
 
     public func loadWebDavConfig() -> WebDavConfig {
         guard let data = try? keychain.data(forAccount: Self.accountWebDavSecret),
@@ -953,6 +1002,9 @@ public final class TvStorageManager: @unchecked Sendable {
         try? keychain.removeData(forAccount: Self.accountAnchorSnapshot)
         try? keychain.removeData(forAccount: Self.accountWebDavSecret)
         try? keychain.removeData(forAccount: Self.accountPrivacyPinHash)
+        for drive in NetdiskDriveInfo.allDrives {
+            try? keychain.removeData(forAccount: Self.netdiskAccountKey(for: drive.key))
+        }
     }
 
     // MARK: - Internal File & Keychain Anchor I/O

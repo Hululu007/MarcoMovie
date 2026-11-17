@@ -32,15 +32,18 @@ public final class CmsClient: @unchecked Sendable {
     public static let fallbackOkHttpUserAgent = "okhttp/4.12.0"
 
     private let session: URLSession
+    private let netdiskResolver: NetdiskShareResolver
     private let jsHostCacheLock = NSLock()
     private var jsHosts: [String: JsSourceHost] = [:]
 
-    public init(timeoutSeconds: TimeInterval = 15) {
+    public init(timeoutSeconds: TimeInterval = 15, netdiskResolver: NetdiskShareResolver? = nil) {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = timeoutSeconds
         config.timeoutIntervalForResource = timeoutSeconds * 2
         config.httpShouldSetCookies = false
-        self.session = URLSession(configuration: config)
+        let builtSession = URLSession(configuration: config)
+        self.session = builtSession
+        self.netdiskResolver = netdiskResolver ?? NetdiskShareResolver(session: builtSession)
     }
 
     public func fetchRawBytes(
@@ -283,14 +286,17 @@ public final class CmsClient: @unchecked Sendable {
         }
     }
 
-    // MARK: - Playback Stream & Local Header Proxy Resolution
+    // MARK: - Playback Stream, Netdisk Share & Multi-Worker Range Proxy Resolution
 
     public func resolvePlayback(
         site: CmsSite,
         lineName: String = "",
         episode: CmsEpisode,
         parses: [CmsParse] = [],
-        proxyServer: LocalHeaderProxyServer? = nil
+        proxyServer: LocalHeaderProxyServer? = nil,
+        storage: TvStorageManager? = nil,
+        rangeProxyServer: NetdiskRangeProxyServer? = nil,
+        isLiveStream: Bool = false
     ) async throws -> ResolvedPlayback {
         var resolvedUrlString = episode.url.trimmingCharacters(in: .whitespacesAndNewlines)
         var mergedHeaders = LiveCatalogParser.mergeHeaders([site.headers, episode.headers])
@@ -302,7 +308,26 @@ public final class CmsClient: @unchecked Sendable {
                 resolvedUrlString = jsResult.url
                 mergedHeaders = LiveCatalogParser.mergeHeaders([mergedHeaders, jsResult.headers])
             }
-        } else if !episode.isDirectPlayable {
+        }
+
+        // Route Netdisk share pages and authenticated Netdisk streams through NetdiskShareResolver + RangeProxy
+        if let storage = storage,
+           NetdiskShareResolver.detectDriveKey(for: resolvedUrlString, lineName: lineName) != nil
+        {
+            let prefs = storage.preferences()
+            return try await netdiskResolver.resolvePlayback(
+                rawUrl: resolvedUrlString,
+                lineName: lineName,
+                extraHeaders: mergedHeaders,
+                qualityPreference: prefs.netdiskQuality,
+                playerKernel: prefs.playerKernel,
+                storage: storage,
+                rangeProxy: rangeProxyServer,
+                headerProxy: proxyServer
+            )
+        }
+
+        if !site.hasQuickJsAdapter && !episode.isDirectPlayable {
             // Try JSON parse endpoint (`site.playUrl` or `parses` with type 1)
             let parserCandidates: [String] = {
                 var out: [String] = []
@@ -341,6 +366,28 @@ public final class CmsClient: @unchecked Sendable {
             throw MarcoError.invalidFormat("无法解析播放流地址：\(resolvedUrlString)")
         }
 
+        let badge = NetdiskShareResolver.inferResolutionBadge(from: finalUrl.absoluteString, fallbackQuality: "auto")
+        let lowerExt = finalUrl.pathExtension.lowercased()
+        let isDirectContainer = ["mkv", "mp4", "m4v", "mov"].contains(lowerExt)
+        let preferredKernel = storage?.preferences().playerKernel ?? "range_proxy"
+
+        if !isLiveStream, isDirectContainer, preferredKernel == "range_proxy", let rangeProxy = rangeProxyServer {
+            let policy = NetdiskHeaderPolicy(
+                originUrl: finalUrl,
+                baseHeaders: mergedHeaders,
+                cookieDomains: []
+            )
+            let (_, loopbackUrl) = try await rangeProxy.registerStream(url: finalUrl, policy: policy)
+            return ResolvedPlayback(
+                originalUrl: finalUrl.absoluteString,
+                playableUrl: loopbackUrl,
+                headers: mergedHeaders,
+                isProxied: true,
+                kernelLabel: "\(rangeProxy.workers) 线程分片代理",
+                resolutionBadge: badge
+            )
+        }
+
         let needsHeaderProxy = !mergedHeaders.isEmpty
             && (finalUrl.scheme?.lowercased() == "http" || finalUrl.scheme?.lowercased() == "https")
         if needsHeaderProxy, let proxy = proxyServer {
@@ -349,26 +396,33 @@ public final class CmsClient: @unchecked Sendable {
                 originalUrl: finalUrl.absoluteString,
                 playableUrl: loopbackUrl,
                 headers: mergedHeaders,
-                isProxied: true
+                isProxied: true,
+                kernelLabel: lowerExt == "m3u8" ? "HLS 代理硬解" : "AVKit 硬解",
+                resolutionBadge: badge
             )
         }
         return ResolvedPlayback(
             originalUrl: finalUrl.absoluteString,
             playableUrl: finalUrl,
             headers: mergedHeaders,
-            isProxied: false
+            isProxied: false,
+            kernelLabel: "AVKit 硬解",
+            resolutionBadge: badge
         )
     }
 
     // MARK: - Internal Helpers
 
-    private func resolveJsHost(for site: CmsSite) async throws -> JsSourceHost {
+    private func withJsHostLock<T>(_ body: () -> T) -> T {
         jsHostCacheLock.lock()
-        if let cached = jsHosts[site.key] {
-            jsHostCacheLock.unlock()
+        defer { jsHostCacheLock.unlock() }
+        return body()
+    }
+
+    private func resolveJsHost(for site: CmsSite) async throws -> JsSourceHost {
+        if let cached = withJsHostLock({ jsHosts[site.key] }) {
             return cached
         }
-        jsHostCacheLock.unlock()
 
         let scriptCode: String
         if site.api == "csp_LocalScript.js" || site.api == "csp_LocalRule.js" {
@@ -392,9 +446,9 @@ public final class CmsClient: @unchecked Sendable {
         let host = try JsSourceHost(site: site, scriptSource: scriptCode)
         try await host.initialize()
 
-        jsHostCacheLock.lock()
-        jsHosts[site.key] = host
-        jsHostCacheLock.unlock()
+        withJsHostLock {
+            jsHosts[site.key] = host
+        }
         return host
     }
 

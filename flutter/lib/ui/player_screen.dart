@@ -28,6 +28,7 @@ import 'desktop_player_window.dart';
 import 'mobile_player_chrome.dart';
 import 'netdisk_sheet.dart';
 import 'source_verification_dialog.dart';
+import 'tv/tv_player_overlay.dart';
 import 'windows_title_bar.dart';
 
 /// Apple AVPlayerViewController / Apple TV+ inspired video player with:
@@ -1791,6 +1792,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                 _stepEpisode(
                   event.logicalKey == LogicalKeyboardKey.arrowUp ? -1 : 1,
                 );
+              } else if (!_isLiveStream &&
+                  event.logicalKey == LogicalKeyboardKey.arrowDown) {
+                _openTvPlayerControlSheet();
               } else {
                 setState(() => _controlsVisible = !_controlsVisible);
                 if (_controlsVisible) _scheduleHide();
@@ -1800,7 +1804,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             if (event is KeyDownEvent &&
                 (event.logicalKey == LogicalKeyboardKey.contextMenu ||
                     event.logicalKey == LogicalKeyboardKey.f1)) {
-              _showEpisodesSheet();
+              _openTvPlayerControlSheet();
               return KeyEventResult.handled;
             }
             if (event is KeyDownEvent &&
@@ -3837,6 +3841,32 @@ class _PlayerScreenState extends State<PlayerScreen>
             }).toList(),
           ),
         ],
+      ),
+    );
+  }
+
+  void _openTvPlayerControlSheet() {
+    unawaited(
+      showTvPlayerControlSheet(
+        context: context,
+        player: _player,
+        currentSpeed: _normalSpeed,
+        onSpeedSelected: (nextSpeed) {
+          if (!mounted) return;
+          setState(() => _normalSpeed = nextSpeed);
+          widget.storage.setPlaySpeed(nextSpeed);
+          final speedLabel =
+              nextSpeed.toString().replaceAll(RegExp(r'\.0$'), '');
+          _showHud('倍速 ${speedLabel}x');
+        },
+        currentFit: _fit,
+        onFitSelected: (nextFit) {
+          if (!mounted) return;
+          setState(() => _fit = nextFit);
+          _showHud('画面比例：$_fitLabel');
+        },
+        onOpenEpisodes: _showEpisodesSheet,
+        isLiveStream: _isLiveStream,
       ),
     );
   }

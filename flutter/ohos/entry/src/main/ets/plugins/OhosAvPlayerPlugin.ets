@@ -70,6 +70,10 @@ class PlayerSession {
   positionMs: number = 0;
   durationMs: number = 0;
   bufferedMs: number = 0;
+  bufferingPercent: number = 100;
+  bitrate: number = 0;
+  videoWidth: number = 0;
+  videoHeight: number = 0;
   pendingStartPositionMs: number = 0;
   pendingAutoPlay: boolean = true;
   pendingSpeed: media.PlaybackSpeed | null = null;
@@ -144,7 +148,25 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
           const startPositionMs: number = Math.max(0, Math.trunc(Number(this.getArg(call, 'startPositionMs') ?? 0)));
           const rawAutoPlay: ESObject = this.getArg(call, 'autoPlay');
           const autoPlay: boolean = rawAutoPlay === undefined || rawAutoPlay === null ? true : Boolean(rawAutoPlay);
-          result.success(await this.handleOpen(playerId, url, rawHeaders, startPositionMs, autoPlay));
+          const rawPreferredHdr: ESObject = this.getArg(call, 'preferredHdr');
+          const preferredHdr: boolean =
+            rawPreferredHdr === undefined || rawPreferredHdr === null ? true : Boolean(rawPreferredHdr);
+          const rawBufferSec: ESObject = this.getArg(call, 'preferredBufferDuration');
+          const preferredBufferDuration: number =
+            rawBufferSec === undefined || rawBufferSec === null
+              ? 20
+              : Math.min(20, Math.max(1, Math.trunc(Number(rawBufferSec))));
+          result.success(
+            await this.handleOpen(
+              playerId,
+              url,
+              rawHeaders,
+              startPositionMs,
+              autoPlay,
+              preferredHdr,
+              preferredBufferDuration
+            )
+          );
           return;
         }
         case 'play': {
@@ -189,6 +211,12 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
           const playerId: number = Math.trunc(Number(this.getArg(call, 'playerId') ?? 0));
           const index: number = Math.trunc(Number(this.getArg(call, 'index') ?? 0));
           result.success(await this.handleSelectTrack(playerId, index));
+          return;
+        }
+        case 'deselectTrack': {
+          const playerId: number = Math.trunc(Number(this.getArg(call, 'playerId') ?? 0));
+          const index: number = Math.trunc(Number(this.getArg(call, 'index') ?? 0));
+          result.success(await this.handleDeselectTrack(playerId, index));
           return;
         }
         case 'dispose': {
@@ -283,10 +311,31 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
     if (session.disposed) {
       return;
     }
+    const cleanWidth: number = Math.max(0, Math.trunc(width));
+    const cleanHeight: number = Math.max(0, Math.trunc(height));
+    session.videoWidth = cleanWidth;
+    session.videoHeight = cleanHeight;
     const payload: Record<string, Object> = {
       'type': 'videoSize',
-      'width': Math.max(0, Math.trunc(width)),
-      'height': Math.max(0, Math.trunc(height))
+      'width': cleanWidth,
+      'height': cleanHeight,
+      'bitrate': Math.max(0, Math.trunc(session.bitrate))
+    };
+    session.streamHandler.emit(payload);
+  }
+
+  private emitBufferingPercent(session: PlayerSession, percent: number): void {
+    if (session.disposed) {
+      return;
+    }
+    const clamped: number = Math.min(100, Math.max(0, Math.trunc(percent)));
+    session.bufferingPercent = clamped;
+    const payload: Record<string, Object> = {
+      'type': 'bufferingPercent',
+      'percent': clamped,
+      'bitrate': Math.max(0, Math.trunc(session.bitrate)),
+      'width': session.videoWidth,
+      'height': session.videoHeight
     };
     session.streamHandler.emit(payload);
   }
@@ -486,9 +535,11 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
       }
       if (infoType === media.BufferingInfoType.BUFFERING_START) {
         session.buffering = true;
+        this.emitBufferingPercent(session, 0);
         this.emitState(session);
       } else if (infoType === media.BufferingInfoType.BUFFERING_END) {
         session.buffering = false;
+        this.emitBufferingPercent(session, 100);
         this.emitState(session);
       } else if (infoType === media.BufferingInfoType.CACHED_DURATION) {
         session.bufferedMs = Math.max(
@@ -497,8 +548,9 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
         );
         this.emitPosition(session);
       } else if (infoType === media.BufferingInfoType.BUFFERING_PERCENT) {
+        const pct: number = Math.min(100, Math.max(0, value));
+        this.emitBufferingPercent(session, pct);
         if (session.durationMs > 0) {
-          const pct: number = Math.min(100, Math.max(0, value));
           session.bufferedMs = Math.max(
             session.bufferedMs,
             Math.trunc((session.durationMs * pct) / 100)
@@ -530,12 +582,23 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
     });
   }
 
+  private isNetworkStreamUrl(url: string): boolean {
+    const colonIdx: number = url.indexOf(':');
+    if (colonIdx <= 0) {
+      return false;
+    }
+    const scheme: string = url.substring(0, colonIdx).toLowerCase();
+    return scheme === 'http' || scheme === 'https' || scheme === 'rtmp' || scheme === 'rtsp';
+  }
+
   private async handleOpen(
     playerId: number,
     url: string,
     rawHeaders: ESObject,
     startPositionMs: number,
-    autoPlay: boolean
+    autoPlay: boolean,
+    preferredHdr: boolean = true,
+    preferredBufferDuration: number = 20
   ): Promise<boolean> {
     const session: PlayerSession = this.requireSession(playerId);
     const trimmedUrl: string = url.trim();
@@ -551,16 +614,24 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
     session.positionMs = startPositionMs;
     session.durationMs = 0;
     session.bufferedMs = startPositionMs;
+    session.bufferingPercent = 0;
+    session.bitrate = 0;
+    session.videoWidth = 0;
+    session.videoHeight = 0;
     session.pendingStartPositionMs = startPositionMs;
     session.pendingAutoPlay = autoPlay;
     this.emitState(session);
 
     const headers: Record<string, string> = this.toHeaderRecord(rawHeaders);
     const headerKeys: Array<string> = Object.keys(headers);
-    if (headerKeys.length > 0) {
+    if (headerKeys.length > 0 || this.isNetworkStreamUrl(trimmedUrl)) {
       try {
         const mediaSource: media.MediaSource = media.createMediaSourceWithUrl(trimmedUrl, headers);
-        const playbackStrategy: media.PlaybackStrategy = {};
+        const clampedBufferSec: number = Math.min(20, Math.max(1, Math.trunc(preferredBufferDuration)));
+        const playbackStrategy: media.PlaybackStrategy = {
+          preferredBufferDuration: clampedBufferSec,
+          preferredHdr: preferredHdr
+        };
         await session.avPlayer.setMediaSource(mediaSource, playbackStrategy);
       } catch (_err) {
         session.avPlayer.url = trimmedUrl;
@@ -649,15 +720,25 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
       const rawWidth: Object | undefined = desc[media.MediaDescriptionKey.MD_KEY_WIDTH];
       const rawHeight: Object | undefined = desc[media.MediaDescriptionKey.MD_KEY_HEIGHT];
       const rawName: Object | undefined = desc[media.MediaDescriptionKey.MD_KEY_TRACK_NAME];
+      const trackTypeInt: number = Math.trunc(Number(rawType ?? -1));
+      const trackBitrate: number = Math.trunc(Number(rawBitrate ?? 0));
+      const trackWidth: number = Math.trunc(Number(rawWidth ?? 0));
+      const trackHeight: number = Math.trunc(Number(rawHeight ?? 0));
+      if (trackTypeInt === 1 && trackBitrate > 0) {
+        session.bitrate = trackBitrate;
+      }
+      if (trackTypeInt === 1 && trackWidth > 0 && trackHeight > 0 && session.videoWidth === 0) {
+        this.emitVideoSize(session, trackWidth, trackHeight);
+      }
       const item: Record<string, Object> = {
         'index': Math.trunc(Number(rawIndex ?? i)),
-        'trackType': Math.trunc(Number(rawType ?? -1)),
+        'trackType': trackTypeInt,
         'codec': String(rawMime ?? ''),
         'mimeType': String(rawMime ?? ''),
         'language': String(rawLang ?? ''),
-        'bitrate': Math.trunc(Number(rawBitrate ?? 0)),
-        'width': Math.trunc(Number(rawWidth ?? 0)),
-        'height': Math.trunc(Number(rawHeight ?? 0)),
+        'bitrate': trackBitrate,
+        'width': trackWidth,
+        'height': trackHeight,
         'title': String(rawName ?? '')
       };
       tracks.push(item);
@@ -668,7 +749,16 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
   private async handleSelectTrack(playerId: number, index: number): Promise<boolean> {
     const session: PlayerSession = this.requireSession(playerId);
     if (this.isPlayableState(session.avPlayer.state)) {
-      session.avPlayer.selectTrack(index);
+      await session.avPlayer.selectTrack(index);
+      return true;
+    }
+    return false;
+  }
+
+  private async handleDeselectTrack(playerId: number, index: number): Promise<boolean> {
+    const session: PlayerSession = this.requireSession(playerId);
+    if (this.isPlayableState(session.avPlayer.state)) {
+      await session.avPlayer.deselectTrack(index);
       return true;
     }
     return false;

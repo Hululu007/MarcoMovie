@@ -25,6 +25,7 @@ public struct SettingsView: View {
                     .foregroundColor(.white)
 
                 lanQrAndManualUrlSection
+                netdiskAndRangeProxySection
                 multiDepotAndSitesSection
                 webdavCloudSyncSection
                 playbackPreferencesSection
@@ -111,6 +112,85 @@ public struct SettingsView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(manualSubUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isImportingUrl)
+            }
+        }
+        .padding(24)
+        .background(TvTheme.surface.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    // MARK: - 1B. 4K Netdisk Accounts & Multi-Worker Range Proxy
+
+    private var netdiskAndRangeProxySection: some View {
+        let authedCount = appModel.loggedInNetdiskDrives.count
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("4K 网盘账号与多线程加速（夸父 / 优汐 / 嘟嘟 / 阿狸）")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                Spacer()
+                Text("已登录 \(authedCount) / 4 个网盘")
+                    .font(.callout.weight(.semibold))
+                    .foregroundColor(authedCount > 0 ? .green : TvTheme.secondaryText)
+            }
+
+            HStack(spacing: 14) {
+                ForEach(NetdiskDriveInfo.allDrives) { drive in
+                    let isLogged = appModel.loggedInNetdiskDrives.contains(drive.key)
+                    Button {
+                        appModel.openNetdiskSheet(preferredDriveKey: drive.key)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(isLogged ? Color.green : Color.gray)
+                                .frame(width: 8, height: 8)
+                            Text(drive.tvName)
+                                .font(.callout.weight(.semibold))
+                            Text(isLogged ? "已授权" : "扫码登录")
+                                .font(.caption2)
+                                .foregroundColor(TvTheme.secondaryText)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(TvTheme.elevatedSurface)
+                        .clipShape(Capsule())
+                    }
+                    .tvCardButtonStyle()
+                }
+                Spacer()
+                Button {
+                    appModel.openNetdiskSheet()
+                } label: {
+                    Label("管理 4K 网盘扫码授权", systemImage: "externaldrive.badge.wifi")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(TvTheme.accent)
+            }
+
+            HStack(spacing: 24) {
+                HStack(spacing: 8) {
+                    Text("默认网盘画质：")
+                        .font(.callout)
+                    ForEach([("auto", "自动优选"), ("4k_hdr", "4K 原画 HDR"), ("1080p", "1080P 流畅")], id: \.0) { item in
+                        Button(item.1) {
+                            appModel.updatePlaybackPreferences { $0.netdiskQuality = item.0 }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(appModel.preferences.netdiskQuality == item.0 ? TvTheme.accent : .gray)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Text("加速模式：")
+                        .font(.callout)
+                    ForEach([("range_proxy", "6 线程分片代理"), ("avkit", "AVKit 原生直连")], id: \.0) { item in
+                        Button(item.1) {
+                            appModel.updatePlaybackPreferences { $0.playerKernel = item.0 }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(appModel.preferences.playerKernel == item.0 ? TvTheme.accent : .gray)
+                    }
+                }
             }
         }
         .padding(24)

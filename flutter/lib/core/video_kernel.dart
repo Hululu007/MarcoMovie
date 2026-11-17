@@ -10,6 +10,30 @@ import 'package:media_kit_video/media_kit_video.dart';
 
 import 'ohos_runtime.dart';
 
+/// Playback pipeline mode used by [VideoKernel] across desktop, mobile, and HarmonyOS NEXT.
+enum VideoKernelMode {
+  auto,
+  ohosHardwareHdr,
+  proxyAccelerated,
+}
+
+/// Formats stream pixel dimensions into a crisp living-room badge (`4K UHD`, `1080P FHD`, etc.).
+String formatVideoResolutionLabel(int? width, int? height) {
+  final w = width ?? 0;
+  final h = height ?? 0;
+  if (w <= 0 || h <= 0) return '';
+  if (w >= 3840 || h >= 2160) return '4K UHD';
+  if (w >= 2560 || h >= 1440) return '2K QHD';
+  if (w >= 1920 || h >= 1080) return '1080P FHD';
+  if (w >= 1280 || h >= 720) return '720P HD';
+  return 'SD ${math.min(w, h)}P';
+}
+
+extension VideoKernelPlayerStateX on PlayerState {
+  /// Human-readable resolution tier badge for the active video stream.
+  String get videoResolutionLabel => formatVideoResolutionLabel(width, height);
+}
+
 /// HarmonyOS NEXT native `@kit.MediaKit` `AVPlayer` implementation of [PlatformPlayer],
 /// rendering frames zero-copy through Flutter's GPU `TextureRegistry`.
 class OhosPlatformPlayer extends PlatformPlayer {
@@ -25,6 +49,9 @@ class OhosPlatformPlayer extends PlatformPlayer {
   final Map<String, String> _properties = <String, String>{};
   final Map<String, int> _audioTrackIndices = <String, int>{};
   final Map<String, int> _subtitleTrackIndices = <String, int>{};
+  int? _activeSubtitleTrackIndex;
+  int _bufferingPercent = 100;
+  int _streamBitrate = 0;
 
   OhosPlatformPlayer({
     super.configuration = const PlayerConfiguration(),
@@ -34,6 +61,10 @@ class OhosPlatformPlayer extends PlatformPlayer {
   ValueListenable<int?> get textureIdListenable => _textureId;
   int? get textureId => _textureId.value;
   int? get playerId => _playerId;
+  int? get activeSubtitleTrackIndex => _activeSubtitleTrackIndex;
+  int get bufferingPercent => _bufferingPercent;
+  int get streamBitrate => _streamBitrate;
+  String get videoResolutionLabel => state.videoResolutionLabel;
   Map<String, String> get properties => Map<String, String>.unmodifiable(_properties);
 
   /// Compatibility hook for `PlayerScreen`'s libmpv property hints (`user-agent`, `referrer`, etc.).
@@ -120,10 +151,24 @@ class OhosPlatformPlayer extends PlatformPlayer {
       case 'videoSize':
         final w = (event['width'] as num?)?.toInt() ?? 0;
         final h = (event['height'] as num?)?.toInt() ?? 0;
+        final br = (event['bitrate'] as num?)?.toInt() ?? 0;
+        if (br > 0) {
+          _streamBitrate = br;
+        }
         if (w > 0 && h > 0) {
           state = state.copyWith(width: w, height: h);
           widthController.add(w);
           heightController.add(h);
+        }
+        break;
+      case 'bufferingPercent':
+        final pct = (event['percent'] as num?)?.toInt();
+        if (pct != null) {
+          _bufferingPercent = pct.clamp(0, 100);
+        }
+        final br = (event['bitrate'] as num?)?.toInt() ?? 0;
+        if (br > 0) {
+          _streamBitrate = br;
         }
         break;
       case 'tracks':
@@ -166,6 +211,11 @@ class OhosPlatformPlayer extends PlatformPlayer {
         _subtitleTrackIndices[id] = idx;
         subtitleTracks.add(SubtitleTrack(id, title, language, codec: codec));
       }
+    }
+
+    if (_activeSubtitleTrackIndex != null &&
+        !_subtitleTrackIndices.containsValue(_activeSubtitleTrackIndex)) {
+      _activeSubtitleTrackIndex = null;
     }
 
     final nextTracks = Tracks(
@@ -211,6 +261,20 @@ class OhosPlatformPlayer extends PlatformPlayer {
       mergedHeaders.addAll(media.httpHeaders!);
     }
 
+    _activeSubtitleTrackIndex = null;
+    _bufferingPercent = 0;
+    _streamBitrate = 0;
+
+    final hdrRaw = _properties['hdr']?.trim().toLowerCase();
+    final preferredHdr = hdrRaw == null || hdrRaw.isEmpty
+        ? true
+        : (hdrRaw == 'true' || hdrRaw == '1' || hdrRaw == 'yes');
+    final parsedBufferSec = int.tryParse(_properties['buffer-seconds'] ?? '');
+    final preferredBufferDuration =
+        (parsedBufferSec != null && parsedBufferSec > 0)
+            ? parsedBufferSec.clamp(1, 20)
+            : 20;
+
     state = state.copyWith(
       playlist: nextPlaylist,
       playing: false,
@@ -228,6 +292,8 @@ class OhosPlatformPlayer extends PlatformPlayer {
       'headers': mergedHeaders,
       'startPositionMs': media.start?.inMilliseconds ?? 0,
       'autoPlay': play,
+      'preferredHdr': preferredHdr,
+      'preferredBufferDuration': preferredBufferDuration,
     });
 
     // Query track metadata asynchronously once prepared.
@@ -343,12 +409,26 @@ class OhosPlatformPlayer extends PlatformPlayer {
     final next = state.track.copyWith(subtitle: track);
     state = state.copyWith(track: next);
     trackController.add(next);
+    if (track == SubtitleTrack.no() || track.id == 'no') {
+      final prevIdx = _activeSubtitleTrackIndex;
+      _activeSubtitleTrackIndex = null;
+      if (pid != null && prevIdx != null && !_disposed) {
+        await _controlChannel.invokeMethod<void>('deselectTrack', {
+          'playerId': pid,
+          'index': prevIdx,
+        });
+      }
+      return;
+    }
     final idx = _subtitleTrackIndices[track.id];
-    if (pid != null && idx != null && !_disposed) {
-      await _controlChannel.invokeMethod<void>('selectTrack', {
-        'playerId': pid,
-        'index': idx,
-      });
+    if (idx != null) {
+      _activeSubtitleTrackIndex = idx;
+      if (pid != null && !_disposed) {
+        await _controlChannel.invokeMethod<void>('selectTrack', {
+          'playerId': pid,
+          'index': idx,
+        });
+      }
     }
   }
 
@@ -386,9 +466,11 @@ class VideoKernel {
   final VideoController? mediaKitController;
   final OhosPlatformPlayer? ohosPlatform;
   final Widget? debugSurface;
+  final VideoKernelMode mode;
 
   const VideoKernel._({
     required this.player,
+    required this.mode,
     this.mediaKitController,
     this.ohosPlatform,
     this.debugSurface,
@@ -398,17 +480,23 @@ class VideoKernel {
     Player? debugPlayer,
     Widget? debugVideoSurface,
     required String hwdec,
+    VideoKernelMode? mode,
   }) {
     if (debugPlayer != null) {
+      final isOhosDebug = debugPlayer.platform is OhosPlatformPlayer;
       return VideoKernel._(
         player: debugPlayer,
+        mode: mode ??
+            (isOhosDebug
+                ? VideoKernelMode.ohosHardwareHdr
+                : VideoKernelMode.auto),
         mediaKitController: debugVideoSurface == null && !OhosRuntime.isOhos
             ? VideoController(
                 debugPlayer,
                 configuration: VideoControllerConfiguration(hwdec: hwdec),
               )
             : null,
-        ohosPlatform: debugPlayer.platform is OhosPlatformPlayer
+        ohosPlatform: isOhosDebug
             ? debugPlayer.platform as OhosPlatformPlayer
             : null,
         debugSurface: debugVideoSurface,
@@ -419,6 +507,7 @@ class VideoKernel {
       final ohos = OhosPlatformPlayer();
       return VideoKernel._(
         player: Player(platformPlayer: ohos),
+        mode: mode ?? VideoKernelMode.ohosHardwareHdr,
         ohosPlatform: ohos,
         debugSurface: debugVideoSurface,
       );
@@ -427,6 +516,7 @@ class VideoKernel {
     final nativePlayer = Player();
     return VideoKernel._(
       player: nativePlayer,
+      mode: mode ?? VideoKernelMode.auto,
       mediaKitController: debugVideoSurface == null
           ? VideoController(
               nativePlayer,

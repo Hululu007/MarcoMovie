@@ -8,8 +8,10 @@ import 'package:flutter/services.dart';
 
 import '../../core/cms_client.dart';
 import '../../core/models.dart';
+import '../../core/resilient_http_client.dart';
 import '../../core/storage_service.dart';
 import '../apple_theme.dart';
+import '../netdisk_sheet.dart';
 import '../player_screen.dart';
 import '../poster_image.dart';
 import 'tv_focus_widgets.dart';
@@ -30,6 +32,56 @@ class TvDetailScreen extends StatefulWidget {
     required this.storage,
     required this.client,
   });
+
+  /// Resolves the Netdisk provider key (`quark` | `uc` | `baidu` | `ali`)
+  /// for a playback line or episode, or `null` if it is a direct stream line.
+  static String? detectNetdiskDrive(CmsLine line, {CmsEpisode? episode}) {
+    String? checkEpisode(CmsEpisode ep) {
+      final cp = ep.cloudProvider;
+      if (cp != null && cp.isNotEmpty) {
+        return cp;
+      }
+      final shareProvider = ResilientHttpClient.cloudProviderForShare(ep.url);
+      if (shareProvider != null && shareProvider.isNotEmpty) {
+        return shareProvider;
+      }
+      final lowerUrl = ep.url.toLowerCase();
+      if (lowerUrl.contains('pan.quark.cn')) return 'quark';
+      if (lowerUrl.contains('drive.uc.cn')) return 'uc';
+      if (lowerUrl.contains('pan.baidu.com')) return 'baidu';
+      if (lowerUrl.contains('alipan.com') ||
+          lowerUrl.contains('aliyundrive.com')) {
+        return 'ali';
+      }
+      return null;
+    }
+
+    if (episode != null) {
+      final fromTarget = checkEpisode(episode);
+      if (fromTarget != null) return fromTarget;
+    }
+    for (final ep in line.episodes.take(6)) {
+      final fromEp = checkEpisode(ep);
+      if (fromEp != null) return fromEp;
+    }
+
+    final rawName = line.name.trim();
+    final lowerName = rawName.toLowerCase();
+    if (rawName.contains('夸父') || rawName.contains('夸克') || lowerName.contains('quark')) {
+      return 'quark';
+    }
+    if (rawName.contains('优汐') ||
+        RegExp(r'(?<![a-z])uc(?![a-z])').hasMatch(lowerName)) {
+      return 'uc';
+    }
+    if (rawName.contains('嘟嘟') || rawName.contains('百度') || lowerName.contains('baidu')) {
+      return 'baidu';
+    }
+    if (rawName.contains('阿狸') || rawName.contains('阿里') || lowerName.contains('alipan') || lowerName.contains('aliyundrive')) {
+      return 'ali';
+    }
+    return null;
+  }
 
   @override
   State<TvDetailScreen> createState() => _TvDetailScreenState();
@@ -129,11 +181,37 @@ class _TvDetailScreenState extends State<TvDetailScreen> {
       return;
     }
     final safeLine = lineIndex.clamp(0, _video.lines.length - 1);
-    if (_video.lines[safeLine].episodes.isEmpty) {
+    final targetLine = _video.lines[safeLine];
+    if (targetLine.episodes.isEmpty) {
       return;
     }
     final safeEp =
-        episodeIndex.clamp(0, _video.lines[safeLine].episodes.length - 1);
+        episodeIndex.clamp(0, targetLine.episodes.length - 1);
+    final targetEp = targetLine.episodes[safeEp];
+
+    final driveKey = TvDetailScreen.detectNetdiskDrive(
+      targetLine,
+      episode: targetEp,
+    );
+    if (driveKey != null && !widget.storage.isNetdiskLoggedIn(driveKey)) {
+      await showNetdiskAccountSheet(
+        context,
+        widget.storage,
+        initialDriveKey: driveKey,
+        onChanged: () {
+          if (mounted) {
+            setState(() {});
+          }
+        },
+      );
+      if (!mounted || !widget.storage.isNetdiskLoggedIn(driveKey)) {
+        if (mounted) {
+          setState(() {});
+        }
+        return;
+      }
+    }
+
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => PlayerScreen(
@@ -390,13 +468,52 @@ class _TvDetailScreenState extends State<TvDetailScreen> {
                             ),
                           )
                         else ...[
-                          const Text(
-                            '播放线路',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                            ),
+                          Row(
+                            children: [
+                              const Text(
+                                '播放线路',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              if (lines.any(
+                                (l) => TvDetailScreen.detectNetdiskDrive(l) != null,
+                              )) ...[
+                                const SizedBox(width: 14),
+                                TvFocusPill(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 6,
+                                  ),
+                                  onSelect: () async {
+                                    final activeDrive = activeLine != null
+                                        ? TvDetailScreen.detectNetdiskDrive(
+                                            activeLine,
+                                          )
+                                        : null;
+                                    await showNetdiskAccountSheet(
+                                      context,
+                                      widget.storage,
+                                      initialDriveKey: activeDrive,
+                                      onChanged: () {
+                                        if (mounted) {
+                                          setState(() {});
+                                        }
+                                      },
+                                    );
+                                    if (mounted) {
+                                      setState(() {});
+                                    }
+                                  },
+                                  child: const Text(
+                                    '☁️ 云盘扫码管理',
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                              ],
+                            ],
                           ),
                           const SizedBox(height: 10),
                           SingleChildScrollView(
@@ -404,21 +521,71 @@ class _TvDetailScreenState extends State<TvDetailScreen> {
                             child: Row(
                               children: [
                                 for (var i = 0; i < lines.length; i++)
-                                  Padding(
-                                    padding: const EdgeInsets.only(right: 10),
-                                    child: TvFocusPill(
-                                      selected: i == _selectedLineIndex,
-                                      onSelect: () {
-                                        setState(() {
-                                          _selectedLineIndex = i;
-                                          _selectedGroupIndex = 0;
-                                        });
-                                      },
-                                      child: Text(
-                                        '${lines[i].name} (${lines[i].episodes.length})',
-                                        style: const TextStyle(fontSize: 14),
-                                      ),
-                                    ),
+                                  Builder(
+                                    builder: (_) {
+                                      final driveKey =
+                                          TvDetailScreen.detectNetdiskDrive(
+                                            lines[i],
+                                          );
+                                      return Padding(
+                                        padding: const EdgeInsets.only(
+                                          right: 10,
+                                        ),
+                                        child: TvFocusPill(
+                                          selected: i == _selectedLineIndex,
+                                          onSelect: () {
+                                            setState(() {
+                                              _selectedLineIndex = i;
+                                              _selectedGroupIndex = 0;
+                                            });
+                                          },
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(
+                                                '${lines[i].name} (${lines[i].episodes.length})',
+                                                style: const TextStyle(
+                                                  fontSize: 14,
+                                                ),
+                                              ),
+                                              if (driveKey != null) ...[
+                                                const SizedBox(width: 8),
+                                                Container(
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 7,
+                                                        vertical: 2,
+                                                      ),
+                                                  decoration: BoxDecoration(
+                                                    color: const Color(
+                                                      0x33F5A623,
+                                                    ),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          6,
+                                                        ),
+                                                    border: Border.all(
+                                                      color: const Color(
+                                                        0xCCF5A623,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  child: const Text(
+                                                    '4K 云盘',
+                                                    style: TextStyle(
+                                                      color: Color(0xFFFFCA58),
+                                                      fontSize: 11,
+                                                      fontWeight:
+                                                          FontWeight.w700,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+                                        ),
+                                      );
+                                    },
                                   ),
                               ],
                             ),
