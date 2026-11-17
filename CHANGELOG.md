@@ -1,3 +1,10 @@
+## 2026-11-17 新增 Apple TV（tvOS）与 HarmonyOS NEXT（手机 / 平板 / 智慧屏）双系统首发支持（Apple TV 0.1.0 · HarmonyOS NEXT 0.1.0）
+
+- [Apple TV 0.1.0](docs/releases/appletv-v0.1.0.md) · [HarmonyOS NEXT 0.1.0](docs/releases/harmonyos-v0.1.0.md)
+- **原生 Apple TV（`tvos/`，tvOS 16.0+）客户端首发**：基于 Swift 5.9、SwiftUI 与 AVKit 打造 10 英尺大屏遥控焦点界面（顶部导航栏、自适应海报墙、详情选集页、Siri Remote 焦点反馈与系统语音/键盘搜索），内嵌 C 源码静态编译的 QuickJS-NG 脚本宿主，支持 JSON / XML CMS、加密订阅解码、多仓切换与 M3U / TXT 直播。
+- **HarmonyOS NEXT（`flutter/ohos/`，API 12+）通用客户端首发**：单 `.hap` 安装包自适应鸿蒙手机、平板 / 2in1 与鸿蒙智慧屏（大屏自动切换 10 英尺遥控焦点边框与局域网扫码配对界面）；基于鸿蒙 Stage 模型封装原生 ArkTS `AVPlayer` + `XComponent` GPU 硬件纹理零拷贝播放插件（`OhosAvPlayerPlugin`）、系统安全凭据存储插件（`OhosSecureStoragePlugin`）与 CMake 原生 `libmarco_qjs.so` 脚本引擎。
+- **双新系统完整支持 4K 网盘扫码授权、6 路并发 Range 分片代理与全端同步互通**：Apple TV 与鸿蒙（含智慧屏）设置页均内置夸克、UC、百度网盘、阿里云盘四盘扫码授权与本机 `127.0.0.1` 6 路并发滑动窗口分片回环代理（支持尾部索引秒跳与 `401`/`403` 自动刷新）、4K / HDR10 / 杜比视界 / HLG 徽标识别、多音轨与内封字幕切换，并与 Android / iOS / Windows / macOS 完整互通 `marco-movie-sync` v2（WebDAV 云同步与局域网直连同步）及 `marco-movie-backup` 备份文件。
+
 ## 2026-11-17 多端片源兼容、交互体验与同步备份升级（Android 手机/平板 0.5.26 · Android Lite 0.5.7 · iOS / iPadOS 0.5.32 · Windows 0.5.24 · macOS 0.5.19）
 
 - [Android 手机 / 平板 0.5.26](docs/releases/android-mobile-v0.5.26.md) · [Android Lite 0.5.7](docs/releases/android-lite-v0.5.7.md) · [iOS / iPadOS 0.5.32](docs/releases/ios-v0.5.32.md) · [Windows 0.5.24](docs/releases/windows-v0.5.24.md) · [macOS 0.5.19](docs/releases/macos-v0.5.19.md)

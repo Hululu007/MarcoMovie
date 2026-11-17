@@ -31,6 +31,8 @@ class TestReadmeSync(unittest.TestCase):
             "windows": {"versionName": "0.5.18", "buildNumber": 68},
             "macos": {"versionName": "0.5.15", "buildNumber": 65},
             "ios": {"versionName": "0.5.25", "buildNumber": 75},
+            "appletv": {"versionName": "0.1.0", "buildNumber": 1},
+            "harmonyos": {"versionName": "0.1.0", "buildNumber": 1000001},
         }
         (self.root / "flutter/edition-versions.json").write_text(
             json.dumps(self.flutter_versions, indent=2), encoding="utf-8"
@@ -38,7 +40,7 @@ class TestReadmeSync(unittest.TestCase):
 
         self.stale_readme = (
             "<div align=\"center\">\n"
-            "  <p>支持 Android 电视、手机、平板及 Windows / macOS / iOS 多端自适应的播放器。</p>\n"
+            "  <p>支持 Android 电视、手机、平板，HarmonyOS NEXT（手机 / 平板 / 智慧屏），Apple TV（tvOS）及 Windows / macOS / iOS 多端自适应的播放器。</p>\n"
             "  <p>作者：<a href=\"https://github.com/Pilipala9919\">Pilipala</a> · Android 手机：0.5.21 · Android 电视：0.5.21 · Android Lite：0.5.4 · Windows：0.5.17 · macOS：0.5.14 · iOS：0.5.24 · 各端独立更新</p>\n"
             "</div>\n"
         )
@@ -55,6 +57,8 @@ class TestReadmeSync(unittest.TestCase):
         self.assertIn("Windows：0.5.18", line)
         self.assertIn("macOS：0.5.15", line)
         self.assertIn("iOS：0.5.25", line)
+        self.assertIn("Apple TV：0.1.0", line)
+        self.assertIn("HarmonyOS NEXT：0.1.0", line)
 
     def test_check_fails_on_stale_readme(self):
         code = sync_readme(self.root, check_only=True)

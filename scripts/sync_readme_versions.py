@@ -27,16 +27,20 @@ def build_expected_version_line(root: Path = ROOT) -> str:
     windows = flutter_data.get("windows", {}).get("versionName")
     macos = flutter_data.get("macos", {}).get("versionName")
     ios = flutter_data.get("ios", {}).get("versionName")
+    appletv = flutter_data.get("appletv", {}).get("versionName")
+    harmonyos = flutter_data.get("harmonyos", {}).get("versionName")
 
     for name, val in [("android-mobile", mobile), ("android-tv", tv), ("android-lite", lite),
-                      ("windows", windows), ("macos", macos), ("ios", ios)]:
+                      ("windows", windows), ("macos", macos), ("ios", ios),
+                      ("appletv", appletv), ("harmonyos", harmonyos)]:
         if not val:
             raise ValueError(f"Missing versionName for {name}")
 
     return (
         f"  <p>作者：<a href=\"https://github.com/Pilipala9919\">Pilipala</a> · "
         f"Android 手机：{mobile} · Android 电视：{tv} · Android Lite：{lite} · "
-        f"Windows：{windows} · macOS：{macos} · iOS：{ios} · 各端独立更新</p>"
+        f"Windows：{windows} · macOS：{macos} · iOS：{ios} · "
+        f"Apple TV：{appletv} · HarmonyOS NEXT：{harmonyos} · 各端独立更新</p>"
     )
 
 

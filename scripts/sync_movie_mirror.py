@@ -26,6 +26,8 @@ PLATFORM_LIMIT = 300 * 1024 * 1024
 PLATFORMS = (
     ('MarcoMovie-{version}-mobile.apk', 'Android 手机 / 平板版 (64位)', 'Android 6.0+ · 原生 64 位 (arm64-v8a) 与 32 位双架构 · 竖屏触控 UI'),
     ('MarcoMovie-{version}-ios-unsigned.ipa', 'iPhone / iPad 版 (IPA)', 'iOS / iPadOS 14.0+ · 支持巨魔 (TrollStore) 直接安装或自签安装'),
+    ('MarcoMovie-{version}-tvos-appletv-unsigned.ipa', 'Apple TV 版 (IPA)', 'tvOS 16.0+ · Siri Remote 大屏遥控 UI · 支持自签工具或巨魔安装'),
+    ('MarcoMovie-{version}-harmonyos-universal.hap', 'HarmonyOS NEXT 通用版 (HAP)', 'HarmonyOS NEXT API 12+ · 手机 / 平板 / 智慧屏单包自适应 · 需签名后安装'),
     ('MarcoMovie-{version}-windows-setup.exe', 'Windows 安装版 (推荐)', 'Windows 10 / 11 · 64 位安装向导 · 内置运行库与快捷方式，支持后续一键更新'),
     ('MarcoMovie-{version}-windows-x64.zip', 'Windows 绿色版 (ZIP)', 'Windows 10 / 11 · 64 位便携压缩包 · 完整解压后运行 marco_movie.exe'),
     ('MarcoMovie-{version}-macos.zip', 'macOS 版', 'macOS · 解压后拖入“应用程序”；未公证，首次打开请右键选择“打开”'),
@@ -243,7 +245,7 @@ def sync(output):
     output.mkdir(parents=True, exist_ok=True)
     for name, data in files.items():
         target = output / name
-        if target.exists() and target.suffix in ('.apk', '.zip', '.ipa', '.exe') and target.read_bytes() != data:
+        if target.exists() and target.suffix in ('.apk', '.zip', '.ipa', '.exe', '.hap') and target.read_bytes() != data:
             raise ValueError('Immutable asset already differs')
         target.write_bytes(data)
     feed_path.parent.mkdir(exist_ok=True)

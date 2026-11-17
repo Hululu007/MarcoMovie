@@ -83,6 +83,30 @@ class PackageTests(unittest.TestCase):
         self.assertIn('legacy.ipa', m.patch_card(page, 'ios-unsigned.ipa',
                       dict(url='https://fixture.invalid/legacy.ipa', size=123, sha256='c'*64)))
 
+    def test_appletv_and_harmonyos_independent_releases_sync_and_archive(self):
+        tvos_name = 'MarcoMovie-0.1.0-tvos-appletv-unsigned.ipa'
+        ohos_name = 'MarcoMovie-0.1.0-harmonyos-universal.hap'
+        tvos_rel = dict(tag_name='appletv-v0.1.0', published_at='2026-11-17T15:00:00Z',
+                        draft=False, prerelease=False, body='Apple TV 首发支持',
+                        assets=[{'name': tvos_name}, {'name': 'MarcoMovie-0.1.0-appletv-unsigned.ipa'}])
+        ohos_rel = dict(tag_name='harmonyos-v0.1.0', published_at='2026-11-17T15:05:00Z',
+                        draft=False, prerelease=False, body='HarmonyOS NEXT 首发支持',
+                        assets=[{'name': ohos_name}, {'name': 'MarcoMovie-0.1.0-harmonyos.hap'}])
+        def download(rel, name, output):
+            return ('https://fixture.invalid/' + name, 2097152, 'd' * 64, None)
+        with patch.object(m, 'platform_asset', side_effect=download):
+            versions = m.sync(self.out, [tvos_rel, ohos_rel])
+        self.assertEqual(versions, {'appletv': '0.1.0', 'harmonyos': '0.1.0'})
+        self.assertEqual(json.loads((self.out / 'updates/appletv.json').read_text(encoding='utf-8'))['versionName'], '0.1.0')
+        self.assertEqual(json.loads((self.out / 'updates/harmonyos.json').read_text(encoding='utf-8'))['versionName'], '0.1.0')
+        self.assertTrue((self.out / 'updates/history/appletv-v0.1.0.md').exists())
+        self.assertTrue((self.out / 'updates/history/harmonyos-v0.1.0.md').exists())
+        page = (self.out / 'index.html').read_text(encoding='utf-8')
+        self.assertIn('https://fixture.invalid/' + tvos_name, page)
+        self.assertIn('https://fixture.invalid/' + ohos_name, page)
+        self.assertIn('Apple TV · 0.1.0', page)
+        self.assertIn('HarmonyOS NEXT · 0.1.0', page)
+
     def test_named_windows_card_preserves_the_installed_client_updater(self):
         names = ['MarcoMovie-0.5.1-windows-x64-setup.exe', 'MarcoMovie-0.5.1-windows-x64-portable.zip',
                  'MarcoMovie-0.5.1-windows-setup.exe']

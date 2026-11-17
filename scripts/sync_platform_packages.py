@@ -16,6 +16,8 @@ from platform_package_names import ALIASES as CLEAR_NAMES
 
 SUFFIXES = {
     'ios': ('ios-unsigned.ipa',),
+    'appletv': ('appletv-unsigned.ipa',),
+    'harmonyos': ('harmonyos.hap',),
     'windows': ('windows-setup.exe', 'windows-x64.zip'),
     'macos': ('macos.zip',),
 }
@@ -72,7 +74,7 @@ def release_history(output, releases):
     files = {}
     for item in records:
         # Validate saved names too: an on-disk index never supplies output paths.
-        if not re.fullmatch(r'(?:(?:ios|windows|macos|android-tv|android-mobile|android-lite)-)?v\d+\.\d+\.\d+(?:-preview)?', item['tag']):
+        if not re.fullmatch(r'(?:(?:ios|windows|macos|appletv|harmonyos|android-tv|android-mobile|android-lite)-)?v\d+\.\d+\.\d+(?:-preview)?', item['tag']):
             raise ValueError('Invalid archived release tag')
         text = item['notes'] if item['notes'].strip() else '该历史版本未提供更新说明。'
         files[f'updates/history/{item["tag"]}.md'] = (text + '\n').encode('utf-8')
@@ -450,7 +452,7 @@ def sync(output, releases=None):
     # the complete snapshot; never rewrite a previously published binary.
     for name, body in files.items():
         target = output / name
-        if target.exists() and target.suffix in ('.ipa', '.exe', '.zip', '.apk') and target.read_bytes() != body:
+        if target.exists() and target.suffix in ('.ipa', '.exe', '.zip', '.apk', '.hap') and target.read_bytes() != body:
             raise ValueError('Immutable package differs: ' + name)
     for name, body in files.items():
         target = output / name
