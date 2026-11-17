@@ -9,6 +9,7 @@ import 'package:flutter/services.dart' show MissingPluginException;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'app_log.dart';
+import 'ohos_runtime.dart';
 
 /// Abstract contract for platform-secure credential storage.
 abstract class SecureCredentialStore {
@@ -134,13 +135,17 @@ class DefaultSecureCredentialStore implements SecureCredentialStore {
 
   DefaultSecureCredentialStore({
     Directory? dataDirectory,
-    SecureStorageBackend backend = const FlutterSecureStorageBackend(),
+    SecureStorageBackend? backend,
   })  : _dataDirectory = dataDirectory,
-        _backend = backend;
+        _backend = backend ??
+            (OhosRuntime.isOhos
+                ? const OhosSecureStorageBackend()
+                : const FlutterSecureStorageBackend());
 
   @visibleForTesting
   static void clearTestBackends() {
     FlutterSecureStorageBackend._unmockedTestFallback.clear();
+    OhosSecureStorageBackend.clearTestFallback();
   }
 
   /// True when a legacy `secure_credentials.enc` file existed on disk, failed decryption

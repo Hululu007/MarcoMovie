@@ -10,5 +10,13 @@
   "ios": {
     "versionName": "0.5.32",
     "buildNumber": 82
+  },
+  "appletv": {
+    "versionName": "0.1.0",
+    "buildNumber": 1
+  },
+  "harmonyos": {
+    "versionName": "0.1.0",
+    "buildNumber": 1000001
   }
 }

@@ -23,6 +23,7 @@ import '../core/download_service.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
 import '../core/storage_service.dart';
+import '../core/ohos_runtime.dart';
 import '../core/app_log.dart';
 import '../core/search_source_notice.dart';
 import 'apple_theme.dart';
@@ -1194,6 +1195,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
   bool get _isDesktop {
     if (kIsWeb) return false;
+    if (OhosRuntime.isOhos &&
+        OhosRuntime.deviceProfile.deviceType.toLowerCase() == '2in1') {
+      return true;
+    }
     return defaultTargetPlatform == TargetPlatform.windows ||
         defaultTargetPlatform == TargetPlatform.macOS ||
         defaultTargetPlatform == TargetPlatform.linux;

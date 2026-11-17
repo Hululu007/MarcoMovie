@@ -11,6 +11,8 @@
 | Windows 64 位免安装版 | `MarcoMovie-X.Y.Z-windows-x64-portable.zip` |
 | Mac 桌面版 | `MarcoMovie-X.Y.Z-macos-desktop.zip` |
 | iPhone、iPad 未签名包 | `MarcoMovie-X.Y.Z-ios-iphone-ipad-unsigned.ipa` |
+| Apple TV (tvOS) 未签名包 | `MarcoMovie-X.Y.Z-tvos-appletv-unsigned.ipa` |
+| HarmonyOS NEXT（手机 / 平板 / 智慧屏通用包） | `MarcoMovie-X.Y.Z-harmonyos-universal.hap` |
 
 同一文件旁提供同名 `.sha256` 校验文件。Mac 名称不额外宣称处理器架构；
 具体兼容范围以该次构建的验证记录为准。iPhone 包保留未签名标识。

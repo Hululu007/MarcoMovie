@@ -15,6 +15,7 @@ import 'csp_bridge.dart';
 import 'models.dart';
 import 'quark_account.dart';
 import 'netdisk_session.dart';
+import 'ohos_runtime.dart';
 import 'secure_credential_store.dart';
 import 'storage_file_store.dart';
 
@@ -85,6 +86,7 @@ class StorageService {
   static const String keySyncLastStatus = 'sync_last_status';
   static const String keyVideoSkipRecords = 'video_skip_records';
   static const String keyPlayerAlwaysShowClock = 'player_always_show_clock';
+  static const String keyTvUiMode = 'tv_ui_mode';
   static const int maxVideoSkipRecords = 500;
   static const String _subscriptionsFileName = 'subscriptions.json';
   static const String _watchHistoryFileName = 'watch_history.json';
@@ -597,6 +599,13 @@ class StorageService {
       }
       return Directory('${Directory.systemTemp.path}/marco_movie_data');
     }
+    if (OhosRuntime.isOhos &&
+        OhosRuntime.filesDir != null &&
+        OhosRuntime.filesDir!.isNotEmpty) {
+      final dir = Directory('${OhosRuntime.filesDir}/data');
+      _cachedProductionDataDir = dir;
+      return dir;
+    }
     try {
       final support = await getApplicationSupportDirectory();
       final dir = Directory('${support.path}/data');
@@ -696,6 +705,7 @@ class StorageService {
       _prefs.getString(keyDefaultAspectMode) ?? 'contain';
   String get playerKernel =>
       _prefs.getString(keyPlayerKernel) ?? 'exo';
+  String get tvUiMode => _prefs.getString(keyTvUiMode) ?? 'auto';
   String get quarkCookie =>
       _credentialCache[keyQuarkCookie] ?? _prefs.getString(keyQuarkCookie) ?? '';
   String get ucCookie =>
@@ -2196,6 +2206,15 @@ class StorageService {
   }
   Future<void> setPlayerKernel(String kernel) async {
     await _prefs.setString(keyPlayerKernel, kernel.trim());
+  }
+  Future<void> setTvUiMode(String mode) async {
+    final normalized = switch (mode.trim().toLowerCase()) {
+      'tv' => 'tv',
+      'standard' => 'standard',
+      _ => 'auto',
+    };
+    await _prefs.setString(keyTvUiMode, normalized);
+    OhosRuntime.uiModeRevision.value++;
   }
   /// Selects the recommended line index from [lines] based on [preferredQuality]
   /// and the user's configured Netdisk drive order.

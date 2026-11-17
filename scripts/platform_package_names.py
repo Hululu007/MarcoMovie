@@ -12,11 +12,15 @@ ALIASES = {
     'windows-x64.zip': 'windows-x64-portable.zip',
     'macos.zip': 'macos-desktop.zip',
     'ios-unsigned.ipa': 'ios-iphone-ipad-unsigned.ipa',
+    'appletv-unsigned.ipa': 'tvos-appletv-unsigned.ipa',
+    'harmonyos.hap': 'harmonyos-universal.hap',
 }
 PLATFORMS = {
     'windows': ('windows-setup.exe', 'windows-x64.zip'),
     'macos': ('macos.zip',),
     'ios': ('ios-unsigned.ipa',),
+    'appletv': ('appletv-unsigned.ipa',),
+    'harmonyos': ('harmonyos.hap',),
 }
 MSG_PLACEHOLDER_RE = re.compile(r'%[1-9]')
 

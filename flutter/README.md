@@ -1,6 +1,6 @@
 # Marco Movie · Flutter 客户端
 
-本目录覆盖 Windows、macOS、iPhone、iPad。原生 Android 手机/平板版、电视版和 Lite 使用各自安装包。各端使用共用配置格式的部分字段，但插件运行环境和备份字段支持并不完全相同，详见[兼容与验证边界](../docs/COMPATIBILITY.md)。
+本目录覆盖 Windows、macOS、iPhone、iPad 以及 **HarmonyOS NEXT（`flutter/ohos/`：鸿蒙手机、平板/2in1 与鸿蒙智慧屏大屏焦点 UI）**；Apple TV（tvOS 16.0+）独立原生工程位于仓库根目录 `../tvos/`。原生 Android 手机/平板版、电视版和 Lite 使用各自安装包。各端使用共用配置格式的部分字段，但插件运行环境和备份字段支持并不完全相同，详见[兼容与验证边界](../docs/COMPATIBILITY.md)。
 
 应用不内置影视资源或订阅，配置由用户自行提供。
 

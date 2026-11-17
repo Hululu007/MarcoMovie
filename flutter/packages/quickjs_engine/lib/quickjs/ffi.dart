@@ -158,7 +158,7 @@ final DynamicLibrary _qjsLib = Platform.environment['FLUTTER_TEST'] == 'true'
         : (Platform.isLinux
             ? DynamicLibrary.open(Platform.environment['LIBQUICKJSC_PATH'] ??
                 'libquickjs_c_bridge_plugin.so')
-            : (Platform.isAndroid
+            : ((Platform.isAndroid || Platform.operatingSystem == 'ohos')
                 ? DynamicLibrary.open('libquickjs_c_bridge_plugin.so')
                 : DynamicLibrary.process())));
 

@@ -6,7 +6,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
 import '../core/cms_client.dart';
 import '../core/emby_library.dart';
 import '../core/csp_bridge.dart';
@@ -16,6 +15,8 @@ import '../core/models.dart';
 import '../core/playback_recovery_policy.dart';
 import '../core/playback_startup.dart';
 import '../core/playback_wakelock.dart';
+import '../core/ohos_runtime.dart';
+import '../core/video_kernel.dart';
 import '../core/web_media_resolver.dart';
 import '../core/wogg_source.dart';
 import 'player_interaction_layers.dart';
@@ -110,8 +111,8 @@ class PlayerCloudMediaSession {
 
 class _PlayerScreenState extends State<PlayerScreen>
     with WidgetsBindingObserver {
+  late final VideoKernel _videoKernel;
   late final Player _player;
-  VideoController? _controller;
   late Future<void> _playerConfiguration;
   final CmsClient _client = CmsClient();
   final List<StreamSubscription<dynamic>> _playerSubscriptions = [];
@@ -178,6 +179,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   final _cloudMedia = PlayerCloudMediaSession();
   final _localMedia = PlayerLocalMediaSession();
   final _startup = PlaybackStartup();
+  final _tvSeek = TvRemoteSeekController();
   int _pendingResumeMs = 0;
   int _lastKnownPositionMs = 0;
   int _lastKnownDurationMs = 0;
@@ -268,18 +270,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       _desktopWindow = DesktopPlayerWindow()..addListener(_windowChanged);
       _desktopWindow!.initialize().catchError(_windowError);
     }
-    _player = widget.debugPlayer ?? Player();
+    _videoKernel = VideoKernel.create(
+      debugPlayer: widget.debugPlayer,
+      debugVideoSurface: widget.debugVideoSurface,
+      hwdec: _hardwareDecoder(_playerKernel),
+    );
+    _player = _videoKernel.player;
     // Keep one source lease for this page, including pause and overlapping
     // episode/quality transitions. Release only after the decoder is disposed.
     _releaseSourceSession = _client.pinPlaybackSource(widget.site);
-    if (widget.debugVideoSurface == null) {
-      _controller = VideoController(
-        _player,
-        configuration: VideoControllerConfiguration(
-          hwdec: _hardwareDecoder(_playerKernel),
-        ),
-      );
-    }
     _playerConfiguration = _applyPlayerKernel(_playerKernel);
 
     _playerSubscriptions.add(_player.stream.width.listen((w) {
@@ -1740,6 +1739,93 @@ class _PlayerScreenState extends State<PlayerScreen>
             }
             return KeyEventResult.handled;
           }
+          final isTvMode = OhosRuntime.shouldUseTvUi(widget.storage.tvUiMode);
+          if (isTvMode) {
+            final nowMs = DateTime.now().millisecondsSinceEpoch;
+            if (event is KeyUpEvent &&
+                (event.logicalKey == LogicalKeyboardKey.arrowRight ||
+                    event.logicalKey == LogicalKeyboardKey.arrowLeft)) {
+              final committedMs = _tvSeek.commitOnKeyUp(nowMs);
+              if (committedMs != null && !_isLiveStream) {
+                setState(() {
+                  _isDraggingSeek = false;
+                  _position = Duration(milliseconds: committedMs);
+                });
+                _player.seek(Duration(milliseconds: committedMs));
+                _showHud('跳转至 ${_formatDuration(Duration(milliseconds: committedMs))}');
+                _scheduleHide();
+              }
+              return KeyEventResult.handled;
+            }
+            if ((event is KeyDownEvent || event is KeyRepeatEvent) &&
+                !_isLiveStream &&
+                (event.logicalKey == LogicalKeyboardKey.arrowRight ||
+                    event.logicalKey == LogicalKeyboardKey.arrowLeft)) {
+              final dir =
+                  event.logicalKey == LogicalKeyboardKey.arrowRight ? 1 : -1;
+              final effectiveDurMs = _duration.inMilliseconds > 0
+                  ? _duration.inMilliseconds
+                  : _lastKnownDurationMs;
+              _tvSeek.onKeyDown(
+                direction: dir,
+                currentPositionMs: _position.inMilliseconds,
+                durationMs: effectiveDurMs,
+                nowEpochMs: nowMs,
+              );
+              final preview = _tvSeek.updatePreview(nowMs);
+              final targetFmt =
+                  _formatDuration(Duration(milliseconds: preview.targetMs));
+              setState(() {
+                _isDraggingSeek = true;
+                _dragTargetPosMs = preview.targetMs;
+                _hudText = preview.isHoldPreview
+                    ? '${dir > 0 ? "⏩" : "⏪"} $targetFmt · ${preview.currentSpeedX.round()}s/s'
+                    : '${dir > 0 ? "快进" : "快退"} 15s -> $targetFmt';
+              });
+              return KeyEventResult.handled;
+            }
+            if (event is KeyDownEvent &&
+                (event.logicalKey == LogicalKeyboardKey.arrowUp ||
+                    event.logicalKey == LogicalKeyboardKey.arrowDown)) {
+              if (_isLiveStream && !_controlsVisible) {
+                _stepEpisode(
+                  event.logicalKey == LogicalKeyboardKey.arrowUp ? -1 : 1,
+                );
+              } else {
+                setState(() => _controlsVisible = !_controlsVisible);
+                if (_controlsVisible) _scheduleHide();
+              }
+              return KeyEventResult.handled;
+            }
+            if (event is KeyDownEvent &&
+                (event.logicalKey == LogicalKeyboardKey.contextMenu ||
+                    event.logicalKey == LogicalKeyboardKey.f1)) {
+              _showEpisodesSheet();
+              return KeyEventResult.handled;
+            }
+            if (event is KeyDownEvent &&
+                (event.logicalKey == LogicalKeyboardKey.goBack ||
+                    event.logicalKey == LogicalKeyboardKey.escape)) {
+              if (_tvSeek.isActive) {
+                _tvSeek.cancel();
+                setState(() {
+                  _isDraggingSeek = false;
+                  _hudText = '已取消跳转';
+                });
+                return KeyEventResult.handled;
+              }
+              if (_controlsVisible) {
+                setState(() => _controlsVisible = false);
+                return KeyEventResult.handled;
+              }
+              unawaited(
+                _saveProgress(immediate: true).whenComplete(() {
+                  if (context.mounted) _exitPlayer();
+                }),
+              );
+              return KeyEventResult.handled;
+            }
+          }
           if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
             return KeyEventResult.ignored;
           }
@@ -2177,12 +2263,11 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: [
               Center(
                 child: RepaintBoundary(
-                  child: widget.debugVideoSurface ??
-                      Video(
-                        controller: _controller!,
-                        fit: _fit,
-                        controls: NoVideoControls,
-                      ),
+                  child: _videoKernel.buildVideoSurface(
+                    fit: _fit,
+                    videoWidth: _videoWidth,
+                    videoHeight: _videoHeight,
+                  ),
                 ),
               ),
               if (_playerBrightness < 0.995)

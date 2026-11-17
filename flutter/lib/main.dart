@@ -9,14 +9,17 @@ import 'package:media_kit/media_kit.dart';
 import 'core/app_log.dart';
 import 'core/cms_client.dart';
 import 'core/download_service.dart';
+import 'core/ohos_runtime.dart';
 import 'core/storage_service.dart';
 import 'ui/adaptive_shell.dart';
 import 'ui/apple_theme.dart';
+import 'ui/tv/tv_living_room_shell.dart';
 import 'ui/windows_title_bar.dart';
 import 'ui/windows_appearance.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   AppLog.init();
+  await OhosRuntime.ensureInitialized();
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     await windowManager.ensureInitialized();
     await windowManager.setMinimumSize(const Size(720, 520));
@@ -28,10 +31,12 @@ Future<void> main() async {
       await windowManager.setBackgroundColor(AppleColors.background);
     }
   }
-  try {
-    MediaKit.ensureInitialized();
-  } catch (e) {
-    debugPrint('MediaKit init warning: $e');
+  if (!OhosRuntime.isOhos) {
+    try {
+      MediaKit.ensureInitialized();
+    } catch (e) {
+      debugPrint('MediaKit init warning: $e');
+    }
   }
   try {
     SystemChrome.setSystemUIOverlayStyle(
@@ -62,7 +67,9 @@ class AppScrollBehavior extends MaterialScrollBehavior {
       !kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.windows ||
           defaultTargetPlatform == TargetPlatform.macOS ||
-          defaultTargetPlatform == TargetPlatform.linux);
+          defaultTargetPlatform == TargetPlatform.linux ||
+          (OhosRuntime.isOhos &&
+              OhosRuntime.deviceProfile.deviceType.toLowerCase() == '2in1'));
 
   @override
   Set<PointerDeviceKind> get dragDevices => isDesktopPlatform
@@ -163,7 +170,15 @@ class MarcoMovieApp extends StatelessWidget {
               : wrapped,
         );
       },
-      home: AdaptiveShell(storage: storage, client: client),
+      home: ValueListenableBuilder<int>(
+        valueListenable: OhosRuntime.uiModeRevision,
+        builder: (context, _, __) {
+          if (OhosRuntime.shouldUseTvUi(storage.tvUiMode)) {
+            return TvLivingRoomShell(storage: storage, client: client);
+          }
+          return AdaptiveShell(storage: storage, client: client);
+        },
+      ),
     );
   }
 }

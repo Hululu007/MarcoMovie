@@ -1,0 +1,17 @@
+/build/
+/.hvigor/
+/.idea/
+/.pubspec_backup/
+/oh_modules/
+/har/
+/local.properties
+*.hap
+*.har
+*.hsp
+*.so
+entry/build/
+entry/.cxx/
+entry/oh_modules/
+entry/libs/
+AppScope/resources/base/media/*.png
+entry/src/main/resources/base/media/*.png

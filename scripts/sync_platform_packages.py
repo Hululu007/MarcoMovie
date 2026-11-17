@@ -21,6 +21,7 @@ SUFFIXES = {
 }
 PLATFORM_LABELS = {
     'ios': 'iPhone / iPad', 'windows': 'Windows', 'macos': 'macOS',
+    'appletv': 'Apple TV', 'harmonyos': 'HarmonyOS NEXT',
     'android-tv': 'Android 电视', 'android-mobile': 'Android 手机 / 平板',
     'android-lite': 'Android Lite',
 }
@@ -29,6 +30,7 @@ NOTE_SUFFIXES = {
     'android-lite.apk': 'android-lite',
     'preview.apk': 'android-tv', 'mobile.apk': 'android-mobile',
     'lite.apk': 'android-lite', 'ios-unsigned.ipa': 'ios',
+    'appletv-unsigned.ipa': 'appletv', 'harmonyos.hap': 'harmonyos',
     'windows-setup.exe': 'windows', 'windows-x64.zip': 'windows',
     'macos.zip': 'macos',
 }
@@ -38,7 +40,7 @@ NOTE_SUFFIXES.update({new: NOTE_SUFFIXES[old] for old, new in CLEAR_NAMES.items(
 def note_record(release):
     """Keep the published text verbatim; filenames/tags establish platform scope."""
     tag = release.get('tag_name', '')
-    match = re.fullmatch(r'(?:(ios|windows|macos|android-tv|android-mobile|android-lite)-)?v(\d+\.\d+\.\d+)(-preview)?', tag)
+    match = re.fullmatch(r'(?:(ios|windows|macos|appletv|harmonyos|android-tv|android-mobile|android-lite)-)?v(\d+\.\d+\.\d+)(-preview)?', tag)
     if not match or release.get('draft') or not release.get('published_at'):
         return None
     platform, version, _ = match.groups()

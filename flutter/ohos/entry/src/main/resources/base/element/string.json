@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Marco Movie HarmonyOS NEXT Player"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "Marco Movie main player ability"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Marco Movie"
+    }
+  ]
+}

@@ -34,7 +34,26 @@ flutter build windows --release   # Windows x64
 # macOS 上构建 iOS 无签名包：flutter build ios --release --no-codesign
 ```
 
-仓库也已内置 `.github/workflows/build-multiplatform.yml`，推送或手动触发后可在 GitHub Actions 云端自动生成 Windows、macOS 与 iOS 构建产物。
+仓库也已内置 `.github/workflows/build-multiplatform.yml`，推送或手动触发后可在 GitHub Actions 云端自动生成 Windows、macOS、iOS、Apple TV（`tvOS`）与 HarmonyOS NEXT（`.hap`）构建产物。
+
+## 构建 Apple TV（tvOS 16.0+）与 HarmonyOS NEXT 客户端
+
+- **Apple TV (`tvos/`)**：独立 Swift + SwiftUI + AVKit + QuickJS-NG 原生工程。在 macOS（Xcode 15/16+）上执行：
+  ```sh
+  python3 tvos/prepare_tvos.py
+  (cd tvos && swift test)
+  xcodebuild -project tvos/RunnerProject/MarcoMovieTV.xcodeproj -scheme MarcoMovieTV -sdk appletvos -configuration Release CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build
+  python3 tvos/patch_tvos_ipa.py tvos/DerivedData/Build/Products/Release-appletvos/MarcoMovieTV.app --ipa dist/MarcoMovie-0.1.0-appletv-unsigned.ipa
+  ```
+- **HarmonyOS NEXT (`flutter/ohos/`)**：基于 OpenHarmony 版 Flutter SDK 与 HarmonyOS Command Line Tools（API 12+），单包自适应手机、平板/2in1 与鸿蒙智慧屏（含大屏遥控器焦点 UI）：
+  ```sh
+  cd flutter
+  python3 prepare_platform.py
+  python3 prepare_ohos.py --patch-pubspec
+  flutter pub get
+  flutter build hap --release --target-platform ohos-arm64
+  python3 prepare_ohos.py --restore-pubspec
+  ```
 
 ## 签名
 

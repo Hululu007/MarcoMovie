@@ -1,4 +1,4 @@
-name: Build Multiplatform (Android / Windows / macOS / iOS)
+name: Build Multiplatform (Android / Windows / macOS / iOS / Apple TV / HarmonyOS)
 
 on:
   workflow_dispatch:
@@ -14,13 +14,17 @@ on:
           - windows
           - macos
           - ios
+          - appletv
+          - harmonyos
   push:
     branches:
       - main
+      - feat/appletv-harmonyos
     paths:
       - "android/**"
       - "lite/**"
       - "flutter/**"
+      - "tvos/**"
       - "shared/**"
       - "scripts/**"
       - ".github/workflows/build-multiplatform.yml"
@@ -108,6 +112,7 @@ jobs:
           python android/tests/run_conformance_checks.py
           python scripts/test_lite_conformance.py
           python -m unittest discover -s flutter -p "test_*.py"
+          python -m unittest discover -s tvos -p "test_*.py"
           python scripts/test_movie_mirror.py
           python scripts/test_platform_packages.py
           python scripts/test_ios_python_packaging.py
@@ -124,7 +129,7 @@ jobs:
         run: |
           python prepare_platform.py
           flutter pub get
-          flutter test test/conformance_test.dart
+          flutter test test/conformance_test.dart test/harmonyos_and_tv_ui_test.dart
       - name: Shared script runtime and native patch checks
         run: |
           node scripts/test_js_module_interop.cjs
@@ -142,7 +147,7 @@ jobs:
         run: python scripts/test_catpaw_host.py
 
   build-android:
-    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'android'
+    if: (github.event_name != 'workflow_dispatch' && github.ref_name != 'feat/appletv-harmonyos') || inputs.target == 'all' || inputs.target == 'android'
     name: Build & Verify Android TV/Phone/Tablet APK
     needs: [verify-and-checks]
     runs-on: ubuntu-latest
@@ -180,7 +185,7 @@ jobs:
             android/build/build-validation.json
 
   build-windows:
-    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'desktop' || inputs.target == 'windows'
+    if: (github.event_name != 'workflow_dispatch' && github.ref_name != 'feat/appletv-harmonyos') || inputs.target == 'all' || inputs.target == 'desktop' || inputs.target == 'windows'
     name: Build Windows Desktop (x64)
     needs: [verify-and-checks]
     runs-on: windows-latest
@@ -251,7 +256,7 @@ jobs:
             flutter/dist/*.sha256
 
   build-macos:
-    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'desktop' || inputs.target == 'macos'
+    if: (github.event_name != 'workflow_dispatch' && github.ref_name != 'feat/appletv-harmonyos') || inputs.target == 'all' || inputs.target == 'desktop' || inputs.target == 'macos'
     name: Build macOS Desktop (Apple Silicon & Intel)
     needs: [verify-and-checks]
     runs-on: macos-15-intel
@@ -296,7 +301,7 @@ jobs:
             flutter/dist/*.sha256
 
   build-ios:
-    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'ios'
+    if: (github.event_name != 'workflow_dispatch' && github.ref_name != 'feat/appletv-harmonyos') || inputs.target == 'all' || inputs.target == 'ios'
     name: Build iOS & iPadOS (.ipa unsigned)
     needs: [verify-and-checks]
     runs-on: macos-15-intel
@@ -406,6 +411,136 @@ jobs:
             flutter/build/python-runtime/lxml-logs/*.log
             flutter/build/python-runtime/lxml-logs/*.json
             flutter/ios/Pods/Target Support Files/catpaw_runtime/*.xcconfig
+
+  build-appletv:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'appletv'
+    name: Build Apple TV (tvOS 16.0+ .ipa unsigned)
+    needs: [verify-and-checks]
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Prepare tvOS QuickJS/JS-Host sources, icons & Xcode project
+        run: python3 tvos/prepare_tvos.py
+      - name: Run MarcoTVCore Swift unit & 20-case conformance tests
+        working-directory: tvos
+        run: swift test
+      - name: Build Apple TV Release .app and package unsigned .ipa
+        run: |
+          VERSION=$(python3 -c "import json; print(json.load(open('flutter/edition-versions.json'))['appletv']['versionName'])")
+          BUILD_NUM=$(python3 -c "import json; print(json.load(open('flutter/edition-versions.json'))['appletv']['buildNumber'])")
+          xcodebuild \
+            -project tvos/RunnerProject/MarcoMovieTV.xcodeproj \
+            -scheme MarcoMovieTV \
+            -sdk appletvos \
+            -configuration Release \
+            -derivedDataPath tvos/DerivedData \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUM" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          APP_PATH="tvos/DerivedData/Build/Products/Release-appletvos/MarcoMovieTV.app"
+          mkdir -p flutter/dist
+          IPA_NAME="MarcoMovie-$VERSION-appletv-unsigned.ipa"
+          python3 tvos/patch_tvos_ipa.py "$APP_PATH" --ipa "flutter/dist/$IPA_NAME"
+          (cd flutter/dist && shasum -a 256 "$IPA_NAME" > "$IPA_NAME.sha256")
+          python3 scripts/platform_package_names.py --folder flutter/dist --platform appletv --version "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MarcoMovie-AppleTV-IPA
+          path: |
+            flutter/dist/*.ipa
+            flutter/dist/*.sha256
+
+  build-harmonyos:
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'harmonyos'
+    name: Build HarmonyOS NEXT Universal HAP (Phone / Tablet / 2in1 / Smart Screen)
+    needs: [verify-and-checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: "17"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.3"
+      - name: Install Linux texture compression dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev
+      - name: Setup HarmonyOS Command Line Tools & SDK
+        uses: ErBWs/setup-ohos@v2
+        with:
+          version: "6.1.1.280"
+          cache: true
+      - name: Restore or clone OpenHarmony Flutter SDK
+        id: ohos-flutter-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/flutter-ohos-sdk
+          key: flutter-ohos-sdk-${{ vars.OHOS_FLUTTER_REF || 'oh-3.35.7-release' }}
+      - name: Ensure OpenHarmony Flutter SDK & DevEco env vars are ready
+        env:
+          OHOS_FLUTTER_REPO: ${{ vars.OHOS_FLUTTER_REPO || 'https://gitcode.com/openharmony-sig/flutter_flutter.git' }}
+          OHOS_FLUTTER_REF: ${{ vars.OHOS_FLUTTER_REF || 'oh-3.35.7-release' }}
+        run: |
+          if [ ! -x "/tmp/flutter-ohos-sdk/bin/flutter" ]; then
+            rm -rf /tmp/flutter-ohos-sdk
+            git clone --depth 1 --branch "$OHOS_FLUTTER_REF" "$OHOS_FLUTTER_REPO" /tmp/flutter-ohos-sdk
+          fi
+          echo "FLUTTER_ROOT=/tmp/flutter-ohos-sdk" >> "$GITHUB_ENV"
+          echo "DEVECO_SDK_HOME=$HOS_SDK_HOME" >> "$GITHUB_ENV"
+          echo "TOOL_HOME=$(dirname "$HOS_SDK_HOME")" >> "$GITHUB_ENV"
+          echo "/tmp/flutter-ohos-sdk/bin" >> "$GITHUB_PATH"
+      - name: Prepare HarmonyOS Stage-model runner & build Universal HAP
+        working-directory: flutter
+        run: |
+          python3 prepare_platform.py
+          python3 prepare_ohos.py --patch-pubspec
+          trap 'python3 prepare_ohos.py --restore-pubspec' EXIT
+          rm -rf /tmp/marco-ohos-overlay
+          cp -r ohos /tmp/marco-ohos-overlay
+          flutter create --platforms=ohos --org com.pilipala --project-name=marco_movie .
+          cp -r /tmp/marco-ohos-overlay/entry/src/main/ets/* ohos/entry/src/main/ets/
+          mkdir -p ohos/entry/src/main/cpp
+          cp -r /tmp/marco-ohos-overlay/entry/src/main/cpp/* ohos/entry/src/main/cpp/
+          cp /tmp/marco-ohos-overlay/entry/src/main/module.json5 ohos/entry/src/main/module.json5
+          cp /tmp/marco-ohos-overlay/entry/build-profile.json5 ohos/entry/build-profile.json5
+          cp /tmp/marco-ohos-overlay/AppScope/app.json5 ohos/AppScope/app.json5
+          cp /tmp/marco-ohos-overlay/AppScope/resources/base/element/string.json ohos/AppScope/resources/base/element/string.json
+          cp /tmp/marco-ohos-overlay/entry/src/main/resources/base/element/* ohos/entry/src/main/resources/base/element/
+          python3 prepare_ohos.py
+          flutter pub get
+          VERSION=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['harmonyos']['versionName'])")
+          BUILD_NUM=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['harmonyos']['buildNumber'])")
+          flutter build hap --release --target-platform ohos-arm64 --build-name="$VERSION" --build-number="$BUILD_NUM"
+          HAP_SRC=$(find ohos/entry/build/default/outputs/default -maxdepth 1 -name '*.hap' | head -n 1)
+          if [ -z "$HAP_SRC" ] || [ ! -f "$HAP_SRC" ]; then
+            echo "ERROR: Expected .hap output under ohos/entry/build/default/outputs/default" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          HAP_NAME="MarcoMovie-$VERSION-harmonyos.hap"
+          cp "$HAP_SRC" "dist/$HAP_NAME"
+          (cd dist && sha256sum "$HAP_NAME" > "$HAP_NAME.sha256")
+          python3 ../scripts/platform_package_names.py --folder dist --platform harmonyos --version "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MarcoMovie-HarmonyOS-HAP
+          path: |
+            flutter/dist/*.hap
+            flutter/dist/*.sha256
 
   publish-release:
     name: Attach Multiplatform Assets & Promote Official Release

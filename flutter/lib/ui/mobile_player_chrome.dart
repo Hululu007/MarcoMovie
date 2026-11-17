@@ -1,4 +1,5 @@
 import 'package:flutter/services.dart';
+import '../core/ohos_runtime.dart';
 
 /// Owns the mobile system UI changes made by one player route.
 class MobilePlayerChrome {
@@ -9,6 +10,14 @@ class MobilePlayerChrome {
   Future<bool> setLandscape(bool landscape) async {
     if (_closed) return false;
     final request = ++_request;
+    if (OhosRuntime.isSmartScreenHardware) {
+      return !_closed && request == _request;
+    }
+    if (OhosRuntime.isOhos) {
+      await OhosRuntime.setPreferredOrientation(
+        landscape ? 'landscape' : 'portrait',
+      );
+    }
     await SystemChrome.setPreferredOrientations(
       landscape
           ? const [
@@ -29,9 +38,13 @@ class MobilePlayerChrome {
     if (_closing != null) return _closing!;
     _closed = true;
     ++_request;
+    if (OhosRuntime.isSmartScreenHardware) {
+      return _closing = Future<void>.value();
+    }
     // Issue both restores before awaiting; pending entry continuations are
     // invalidated above and cannot hide the system bars after this restoration.
     return _closing = Future.wait<void>([
+      if (OhosRuntime.isOhos) OhosRuntime.setPreferredOrientation('auto'),
       SystemChrome.setPreferredOrientations(DeviceOrientation.values),
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge),
     ]).then((_) {});

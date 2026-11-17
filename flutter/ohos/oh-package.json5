@@ -1,0 +1,18 @@
+{
+  "modelVersion": "5.0.0",
+  "name": "marco_movie",
+  "version": "0.1.0",
+  "description": "Marco Movie HarmonyOS NEXT container.",
+  "main": "",
+  "author": "Pilipala",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@ohos/flutter_ohos": "file:./har/flutter.har"
+  },
+  "devDependencies": {
+    "@ohos/hypium": "1.0.18"
+  },
+  "overrides": {
+    "@ohos/flutter_ohos": "file:./har/flutter.har"
+  }
+}
