@@ -14,6 +14,7 @@ import '../../core/ohos_runtime.dart';
 import '../../core/storage_service.dart';
 import '../apple_theme.dart';
 import '../cloud_sync_panel.dart';
+import '../netdisk_sheet.dart';
 import '../player_screen.dart';
 import 'tv_detail_screen.dart';
 import 'tv_focus_widgets.dart';
@@ -1538,6 +1539,18 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                 child: const Text('🗂️ 管理订阅源与切换仓库'),
               ),
               TvFocusPill(
+                onSelect: () => showNetdiskAccountSheet(
+                  context,
+                  widget.storage,
+                  onChanged: () {
+                    if (mounted) {
+                      setState(() {});
+                    }
+                  },
+                ),
+                child: const Text('🗂️ 网盘 4K 账号扫码授权（夸克/UC/百度/阿里）'),
+              ),
+              TvFocusPill(
                 onSelect: () => showCloudSyncSheet(
                   context,
                   widget.storage,
@@ -1607,6 +1620,38 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                   },
                   child: Text('${s}x'),
                 ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              const Text(
+                '线路优选：',
+                style: TextStyle(color: AppleColors.labelSecondary),
+              ),
+              TvFocusPill(
+                selected: widget.storage.preferredQuality == '4k_netdisk',
+                onSelect: () async {
+                  await widget.storage.setPreferredQuality('4k_netdisk');
+                  if (mounted) {
+                    setState(() {});
+                  }
+                },
+                child: const Text('4K 原画网盘优先'),
+              ),
+              TvFocusPill(
+                selected: widget.storage.preferredQuality == 'auto',
+                onSelect: () async {
+                  await widget.storage.setPreferredQuality('auto');
+                  if (mounted) {
+                    setState(() {});
+                  }
+                },
+                child: const Text('默认直链顺序'),
+              ),
             ],
           ),
           const SizedBox(height: 16),

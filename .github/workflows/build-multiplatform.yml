@@ -489,7 +489,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/flutter-ohos-sdk
-          key: flutter-ohos-sdk-${{ vars.OHOS_FLUTTER_REF || 'oh-3.35.7-release' }}
+          key: flutter-ohos-sdk-v2-${{ vars.OHOS_FLUTTER_REF || 'oh-3.35.7-release' }}
       - name: Ensure OpenHarmony Flutter SDK & DevEco env vars are ready
         env:
           OHOS_FLUTTER_REPO: ${{ vars.OHOS_FLUTTER_REPO || 'https://gitcode.com/openharmony-sig/flutter_flutter.git' }}
@@ -499,10 +499,16 @@ jobs:
             rm -rf /tmp/flutter-ohos-sdk
             git clone --depth 1 --branch "$OHOS_FLUTTER_REF" "$OHOS_FLUTTER_REPO" /tmp/flutter-ohos-sdk
           fi
+          git -C /tmp/flutter-ohos-sdk config user.email "ci@localhost"
+          git -C /tmp/flutter-ohos-sdk config user.name "CI"
+          git -C /tmp/flutter-ohos-sdk tag -f -a "3.35.7" -m "Flutter 3.35.7 OHOS"
+          printf '3.35.7\n' > /tmp/flutter-ohos-sdk/version
+          rm -f /tmp/flutter-ohos-sdk/bin/cache/flutter.version.json
           echo "FLUTTER_ROOT=/tmp/flutter-ohos-sdk" >> "$GITHUB_ENV"
           echo "DEVECO_SDK_HOME=$HOS_SDK_HOME" >> "$GITHUB_ENV"
           echo "TOOL_HOME=$(dirname "$HOS_SDK_HOME")" >> "$GITHUB_ENV"
           echo "/tmp/flutter-ohos-sdk/bin" >> "$GITHUB_PATH"
+          /tmp/flutter-ohos-sdk/bin/flutter --version
       - name: Prepare HarmonyOS Stage-model runner & build Universal HAP
         working-directory: flutter
         run: |
@@ -512,6 +518,7 @@ jobs:
           rm -rf /tmp/marco-ohos-overlay
           cp -r ohos /tmp/marco-ohos-overlay
           flutter create --platforms=ohos --org com.pilipala --project-name=marco_movie .
+          rm -f test/widget_test.dart
           cp -r /tmp/marco-ohos-overlay/entry/src/main/ets/* ohos/entry/src/main/ets/
           mkdir -p ohos/entry/src/main/cpp
           cp -r /tmp/marco-ohos-overlay/entry/src/main/cpp/* ohos/entry/src/main/cpp/

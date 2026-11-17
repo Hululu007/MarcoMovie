@@ -103,6 +103,18 @@ public final class WebDavSyncService: @unchecked Sendable {
         self.transport = transport
     }
 
+    private func isConditionalWriteDisabled(for hostKey: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return noConditionalWriteHosts.contains(hostKey)
+    }
+
+    private func disableConditionalWrite(for hostKey: String) {
+        lock.lock()
+        noConditionalWriteHosts.insert(hostKey)
+        lock.unlock()
+    }
+
     // MARK: - Canonical URL & Identity Rules
 
     public static func resolveWebdavFileUrl(_ rawUrl: String) throws -> String {
@@ -594,10 +606,7 @@ public final class WebDavSyncService: @unchecked Sendable {
                     syncHistory: config.syncHistory
                 )
                 let payloadBytes = Data(merged.payloadJson.utf8)
-
-                lock.lock()
-                let skipCond = noConditionalWriteHosts.contains(hostKey)
-                lock.unlock()
+                let skipCond = isConditionalWriteDisabled(for: hostKey)
 
                 var ifMatch: String?
                 var ifNoneMatch: String?
@@ -628,9 +637,7 @@ public final class WebDavSyncService: @unchecked Sendable {
                         ifNoneMatch: nil
                     )
                     if (200...299).contains(retry.statusCode) {
-                        lock.lock()
-                        noConditionalWriteHosts.insert(hostKey)
-                        lock.unlock()
+                        disableConditionalWrite(for: hostKey)
                     }
                     putResp = retry
                 }
@@ -651,9 +658,7 @@ public final class WebDavSyncService: @unchecked Sendable {
                             ifNoneMatch: nil
                         )
                         if (200...299).contains(fallback.statusCode) {
-                            lock.lock()
-                            noConditionalWriteHosts.insert(hostKey)
-                            lock.unlock()
+                            disableConditionalWrite(for: hostKey)
                         }
                         putResp = fallback
                     }

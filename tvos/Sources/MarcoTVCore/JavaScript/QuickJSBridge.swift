@@ -547,8 +547,11 @@ public final class QuickJSBridge: @unchecked Sendable {
 
     private func newJsString(ctx: OpaquePointer, _ str: String) -> JSValue {
         let utf8 = Array(str.utf8)
+        if utf8.isEmpty {
+            return "".withCString { JS_NewStringLen(ctx, $0, 0) }
+        }
         return utf8.withUnsafeBufferPointer { buf in
-            JS_NewStringLen(ctx, UnsafeRawPointer(buf.baseAddress)?.assumingMemoryBound(to: CChar.self) ?? "", buf.count)
+            JS_NewStringLen(ctx, UnsafeRawPointer(buf.baseAddress!).assumingMemoryBound(to: CChar.self), buf.count)
         }
     }
 
