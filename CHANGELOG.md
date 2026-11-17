@@ -1,5 +1,6 @@
 ## 2026-11-17 多端片源兼容、交互体验与同步备份升级（Android 手机/平板 0.5.26 · Android Lite 0.5.7 · iOS / iPadOS 0.5.32 · Windows 0.5.24 · macOS 0.5.19）
 
+- [Android 手机 / 平板 0.5.26](docs/releases/android-mobile-v0.5.26.md) · [Android Lite 0.5.7](docs/releases/android-lite-v0.5.7.md) · [iOS / iPadOS 0.5.32](docs/releases/ios-v0.5.32.md) · [Windows 0.5.24](docs/releases/windows-v0.5.24.md) · [macOS 0.5.19](docs/releases/macos-v0.5.19.md)
 - **桌面端交互与沙盒导入修复（Windows / macOS）**：macOS 补齐 `com.apple.security.files.user-selected.read-write` 用户自选文件沙盒权限与内存字节读取兜底，修复本地订阅与离线 `.zip` 配置包选择无响应（`#57`）；Windows 修复中文输入法拼写组合态回车提前触发残缺搜索及直播频道筛选问题（`#27`）；优化桌面播放器鼠标微小位移防抖（需累计位移达标才唤醒控制栏）并将空闲自动收起时间缩短至 `2.2s`（`#50`）。
 - **网盘伪装 `.mp3` 视频识别、本地协议与弹幕推送兼容（全端非电视端）**：夸克、UC、百度、阿里云盘分享自动将 `>= 15 MiB` 的伪装 `.mp3` 识别为视频并在 `mpv` / `ExoPlayer` 优先启用视频轨道与 MP4/MKV/FLV/AVI 容器魔数嗅探（`#31`）；Android `LocalProxy` 新增回环 `/action` 与 `/proxy?do=danmaku` 弹幕/字幕推送接口（保留防跨站来源校验，`#36`）；支持 `clan://` 本地存储协议解析（`#41`）及 `CspEngine` 损坏 JAR 自动清缓存重下与脱敏诊断提示（`#28`）。
 - **Android 6 HTTPS 证书兼容、移动端搜索流畅度与 Lite 单站直导（Android 手机/平板 / Android Lite）**：为 API 14–23 注入 `[系统信任库 + ISRG Root X1]` 复合 TLS 信任链并补齐 `SniOverrideSocketFactory` 全重载 SNI 透传（`#55`）；Android 手机端多源并发搜索增加 `220ms` 节流、触摸滑动期间延后重排与条目视图复用（`#45`）；Android Lite 支持单采集站 JSON/XML 接口地址直接包装导入（`#55`）。
