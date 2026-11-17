@@ -482,7 +482,7 @@ jobs:
       - name: Setup HarmonyOS Command Line Tools & SDK
         uses: ErBWs/setup-ohos@v2
         with:
-          version: "6.1.1.280"
+          version: "26.0.0.821"
           cache: true
       - name: Restore or clone OpenHarmony Flutter SDK
         id: ohos-flutter-cache

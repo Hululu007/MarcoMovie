@@ -11,7 +11,7 @@ import {
 } from '@ohos/flutter_ohos';
 import { bundleManager, common, Want } from '@kit.AbilityKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
-import { dataPreferences } from '@kit.ArkData';
+import { preferences as dataPreferences } from '@kit.ArkData';
 import { asset } from '@kit.AssetStoreKit';
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { window } from '@kit.ArkUI';
@@ -540,7 +540,7 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
           updateAttrs.set(asset.Tag.SECRET, secretBytes);
           await asset.update(query, updateAttrs);
         } else {
-          throw addErr;
+          throw new Error(String(addError?.message ?? 'AssetStore add failed'));
         }
       }
       await this.deleteSecureFallback(key);
