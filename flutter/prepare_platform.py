@@ -1072,6 +1072,12 @@ def main() -> None:
                     "</dict>",
                     "  <key>com.apple.security.files.downloads.read-write</key>\n  <true/>\n</dict>",
                 )
+            # NSOpenPanel / NSSavePanel require user-selected file access under App Sandbox
+            if "com.apple.security.files.user-selected.read-write" not in text:
+                text = text.replace(
+                    "</dict>",
+                    "  <key>com.apple.security.files.user-selected.read-write</key>\n  <true/>\n</dict>",
+                )
             ent.write_text(text, encoding="utf-8")
         info_plist = macos_runner / "Info.plist"
         if info_plist.exists():

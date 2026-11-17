@@ -2274,6 +2274,25 @@ final class MobileShell {
                         () -> {
                             cachedSearchScrollY = resultScroll.getScrollY();
                         });
+        final boolean[] userTouchingResults = {false};
+        final boolean[] deferredResultRebuild = {false};
+        final Runnable[] scheduleResultRefresh = new Runnable[1];
+        resultScroll.setOnTouchListener(
+                (v, ev) -> {
+                    int act = ev.getActionMasked();
+                    if (act == android.view.MotionEvent.ACTION_DOWN
+                            || act == android.view.MotionEvent.ACTION_MOVE) {
+                        userTouchingResults[0] = true;
+                    } else if (act == android.view.MotionEvent.ACTION_UP
+                            || act == android.view.MotionEvent.ACTION_CANCEL) {
+                        userTouchingResults[0] = false;
+                        if (deferredResultRebuild[0] && scheduleResultRefresh[0] != null) {
+                            deferredResultRebuild[0] = false;
+                            a.ui.postDelayed(scheduleResultRefresh[0], 48L);
+                        }
+                    }
+                    return false;
+                });
         page.addView(resultScroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         final LinearLayout resultList = a.vertical();
@@ -2281,6 +2300,9 @@ final class MobileShell {
         resultScroll.addView(resultList, new ScrollView.LayoutParams(-1, -2));
 
         final int[] searchSerial = {0};
+        final java.util.Map<String, View> rowViewCache = new java.util.HashMap<String, View>();
+        final boolean[] refreshPosted = {false};
+        final long[] lastRefreshAtMs = {0L};
         final Runnable renderSearchStatus =
                 () -> {
                     int separator = cachedSearchStatus.indexOf('\n');
@@ -2315,7 +2337,6 @@ final class MobileShell {
         final Runnable[] refreshSiteFilterBar = new Runnable[1];
         final Runnable rebuildFilteredResults =
                 () -> {
-                    resultList.removeAllViews();
                     List<CachedSearchHit> ordered = new ArrayList<>();
                     for (CachedSearchHit hit : cachedSearchHits) {
                         if (cachedSearchSiteFilter.isEmpty()
@@ -2350,11 +2371,72 @@ final class MobileShell {
                                                 p2);
                                 return Integer.compare(s2, s1);
                             });
-                    for (CachedSearchHit hit : ordered) {
-                        resultList.addView(buildSearchResultRow(hit.site, hit.video));
+                    int limit = Math.min(ordered.size(), 180);
+                    List<View> desiredViews = new ArrayList<View>(limit);
+                    for (int idx = 0; idx < limit; idx++) {
+                        CachedSearchHit hit = ordered.get(idx);
+                        String cacheKey =
+                                (hit.site == null ? "" : hit.site.key)
+                                        + "\0"
+                                        + (hit.video == null ? "" : hit.video.id);
+                        View row = rowViewCache.get(cacheKey);
+                        if (row == null) {
+                            row = buildSearchResultRow(hit.site, hit.video);
+                            rowViewCache.put(cacheKey, row);
+                        }
+                        desiredViews.add(row);
                     }
+                    boolean identicalOrder = resultList.getChildCount() == desiredViews.size();
+                    if (identicalOrder) {
+                        for (int idx = 0; idx < desiredViews.size(); idx++) {
+                            if (resultList.getChildAt(idx) != desiredViews.get(idx)) {
+                                identicalOrder = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (!identicalOrder) {
+                        resultList.removeAllViews();
+                        for (int idx = 0; idx < desiredViews.size(); idx++) {
+                            View row = desiredViews.get(idx);
+                            if (row.getParent() instanceof ViewGroup) {
+                                ((ViewGroup) row.getParent()).removeView(row);
+                            }
+                            resultList.addView(row);
+                        }
+                    }
+                    lastRefreshAtMs[0] = android.os.SystemClock.uptimeMillis();
                     renderSearchStatus.run();
                     if (refreshSiteFilterBar[0] != null) refreshSiteFilterBar[0].run();
+                };
+        scheduleResultRefresh[0] =
+                () -> {
+                    if (userTouchingResults[0]) {
+                        deferredResultRebuild[0] = true;
+                        renderSearchStatus.run();
+                        return;
+                    }
+                    long now = android.os.SystemClock.uptimeMillis();
+                    long elapsed = now - lastRefreshAtMs[0];
+                    if (elapsed >= 220L) {
+                        refreshPosted[0] = false;
+                        deferredResultRebuild[0] = false;
+                        rebuildFilteredResults.run();
+                    } else if (!refreshPosted[0]) {
+                        refreshPosted[0] = true;
+                        a.ui.postDelayed(
+                                () -> {
+                                    refreshPosted[0] = false;
+                                    if (userTouchingResults[0]) {
+                                        deferredResultRebuild[0] = true;
+                                        renderSearchStatus.run();
+                                    } else {
+                                        deferredResultRebuild[0] = false;
+                                        rebuildFilteredResults.run();
+                                    }
+                                },
+                                Math.max(32L, 220L - elapsed));
+                    }
                 };
 
         refreshSiteFilterBar[0] =
@@ -2516,6 +2598,8 @@ final class MobileShell {
                     cachedSearchStatus = "";
                     cachedSearchSiteFilter = "";
                     cachedSearchHits.clear();
+                    rowViewCache.clear();
+                    deferredResultRebuild[0] = false;
                     cachedSearchScrollY = 0;
                     cachedSiteFilterScrollX = 0;
                     siteFilterRow.removeAllViews();
@@ -2631,6 +2715,8 @@ final class MobileShell {
                     cachedSearchKeyword = kw;
                     cachedSearchSiteFilter = "";
                     cachedSearchHits.clear();
+                    rowViewCache.clear();
+                    deferredResultRebuild[0] = false;
                     cachedSearchScrollY = 0;
                     cachedSiteFilterScrollX = 0;
                     siteFilterRow.removeAllViews();
@@ -2718,6 +2804,19 @@ final class MobileShell {
                                                                                     site, v));
                                                                 }
                                                             }
+                                                            boolean isFinalBatch =
+                                                                    completed[0]
+                                                                            >= searchableSites
+                                                                                    .size();
+                                                            if (isFinalBatch) {
+                                                                deferredResultRebuild[0] = false;
+                                                                rebuildFilteredResults.run();
+                                                            } else {
+                                                                scheduleResultRefresh[0].run();
+                                                            }
+                                                        } else if (completed[0]
+                                                                >= searchableSites.size()) {
+                                                            deferredResultRebuild[0] = false;
                                                             rebuildFilteredResults.run();
                                                         }
                                                         if (completed[0] < searchableSites.size()) {

@@ -1245,16 +1245,23 @@ final class MobileIosSettings {
                                     });
 
                             boolean syncSubs = CloudSyncDialog.isSyncSubscriptionsEnabled(a);
+                            boolean syncHist = CloudSyncDialog.isSyncHistoryEnabled(a);
+                            int syncScopeIdx = (syncSubs && syncHist) ? 0 : (!syncSubs ? 1 : 2);
                             addChoices(
                                     a,
                                     body,
-                                    "同时同步我的公开订阅源配置",
-                                    new String[] {"同步订阅源", "仅同步进度与收藏"},
-                                    syncSubs ? 0 : 1,
+                                    "云同步内容范围",
+                                    new String[] {"同步订阅源 + 进度与收藏", "仅同步进度与收藏", "仅同步订阅源（隔离观看记录）"},
+                                    syncScopeIdx,
                                     idx -> {
+                                        boolean nextSubs = idx != 1;
+                                        boolean nextHist = idx != 2;
                                         a.prefs
                                                 .edit()
-                                                .putBoolean(Prefs.WEBDAV_SYNC_SUBS, idx == 0)
+                                                .putBoolean(Prefs.WEBDAV_SYNC_SUBS, nextSubs)
+                                                .putBoolean(
+                                                        CloudSyncDialog.PREF_WEBDAV_SYNC_HISTORY,
+                                                        nextHist)
                                                 .apply();
                                         ctl.rerenderInPlace();
                                     });

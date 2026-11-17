@@ -288,6 +288,11 @@ public final class LiteJvmChecks {
         String missingTypeXmlLite = "{\"sites\":[{\"key\":\"no_type_xml\",\"name\":\"NoTypeXml\",\"api\":\"http://127.0.0.1:9/vod.xml\"}]}";
         List<LiteCatalog.Site> parsedMissingXml = LiteCatalog.parse(missingTypeXmlLite, "http://127.0.0.1:9/config.json");
         check(parsedMissingXml.size() == 1 && parsedMissingXml.get(0).type == 0 && parsedMissingXml.get(0).supported, "Lite missing type XML site defaults to type 0 and is supported");
+
+        // 8. Direct MacCMS VOD JSON / XML endpoint import (#55)
+        String directCmsJson = "{\"code\":1,\"msg\":\"数据列表\",\"page\":1,\"pagecount\":10,\"list\":[{\"vod_id\":1001,\"vod_name\":\"测试片\"}]}";
+        List<LiteCatalog.Site> directJsonSites = LiteCatalog.parse(directCmsJson, "http://vod.example/api.php/provide/vod/?ac=list&pg=1");
+        check(directJsonSites.size() == 1 && directJsonSites.get(0).type == 1 && directJsonSites.get(0).supported && "http://vod.example/api.php/provide/vod/".equals(directJsonSites.get(0).api), "Lite imports direct MacCMS JSON VOD endpoint (#55)");
     }
 
     private static void testXmlAndJsonCmsParsing() throws Exception {

@@ -705,6 +705,12 @@ public final class LiteCatalog {
                 }
             }
         }
+        if (cleaned.startsWith("<")) {
+            String lowerXml = cleaned.toLowerCase(Locale.ROOT);
+            if (lowerXml.contains("<rss") && lowerXml.contains("<list")) {
+                return new JSONObject().put("_mm_direct_xml", true);
+            }
+        }
         if (cleaned.startsWith("[")) {
             JSONArray sites = new JSONArray(cleaned);
             if (sites.length() == 0) throw new IOException("配置数组需要包含带 api 的来源对象");
@@ -719,7 +725,80 @@ public final class LiteCatalog {
         return new JSONObject(cleaned);
     }
 
+    private static boolean isDirectCmsResponse(JSONObject root) {
+        if (root == null) return false;
+        if (root.optBoolean("_mm_direct_xml", false)) return true;
+        JSONArray videos = root.optJSONArray("list");
+        JSONArray categories = root.optJSONArray("class");
+        if (videos != null) {
+            for (int i = 0; i < videos.length(); i++) {
+                JSONObject v = videos.optJSONObject(i);
+                if (v != null
+                        && (Json.str(v, "vod_id", "").trim().length() > 0
+                                || Json.str(v, "vod_name", "").trim().length() > 0)) {
+                    return true;
+                }
+            }
+        }
+        if (categories != null) {
+            for (int i = 0; i < categories.length(); i++) {
+                JSONObject c = categories.optJSONObject(i);
+                if (c != null
+                        && Json.str(c, "type_id", "").trim().length() > 0
+                        && Json.str(c, "type_name", "").trim().length() > 0) {
+                    return true;
+                }
+            }
+        }
+        return videos != null
+                && videos.length() == 0
+                && Json.integer(root, "code", -1) == 1
+                && Json.integer(root, "page", 0) > 0
+                && Json.integer(root, "pagecount", -1) >= 0;
+    }
+
+    private static JSONObject directCmsConfig(JSONObject doc, String origin) throws Exception {
+        String address = http(origin);
+        URI uri = new URI(address);
+        StringBuilder api = new StringBuilder(address.split("[?#]", 2)[0]);
+        String query = uri.getRawQuery();
+        if (query != null) {
+            boolean first = true;
+            String[] parts = query.split("&");
+            for (int i = 0; i < parts.length; i++) {
+                String part = parts[i];
+                if (part.length() == 0) continue;
+                String key = URLDecoder.decode(part.split("=", 2)[0], "UTF-8");
+                if ("ac".equals(key)
+                        || "t".equals(key)
+                        || "pg".equals(key)
+                        || "wd".equals(key)
+                        || "ids".equals(key)
+                        || "h".equals(key)) continue;
+                api.append(first ? '?' : '&').append(part);
+                first = false;
+            }
+        }
+        String endpoint = api.toString();
+        boolean isXml = doc.optBoolean("_mm_direct_xml", false) || hasXmlInUrlPath(endpoint);
+        JSONObject site =
+                new JSONObject()
+                        .put("key", "cms_" + UUID.nameUUIDFromBytes(endpoint.getBytes("UTF-8")))
+                        .put("name", "采集源 · " + new URL(endpoint).getHost())
+                        .put("type", isXml ? 0 : 1)
+                        .put("api", endpoint)
+                        .put("searchable", 1);
+        JSONObject out = new JSONObject().put("sites", new JSONArray().put(site));
+        String tagged = Json.str(doc, com.pilipala.source.Warehouse.ORIGIN, "");
+        if (tagged.length() > 0) out.put(com.pilipala.source.Warehouse.ORIGIN, tagged);
+        return out;
+    }
+
     public static String importConfig(String raw, String origin) throws Exception {
+        JSONObject preview = decodeConfig(raw);
+        if (isDirectCmsResponse(preview)) {
+            return directCmsConfig(preview, origin).toString();
+        }
         return com.pilipala.source.Warehouse.resolve(
                 raw,
                 origin,
@@ -743,6 +822,9 @@ public final class LiteCatalog {
     public static List<Site> parse(String raw, String base) throws Exception {
         JSONObject document = decodeConfig(raw);
         base = Json.str(document, com.pilipala.source.Warehouse.ORIGIN, base);
+        if (isDirectCmsResponse(document)) {
+            document = directCmsConfig(document, base);
+        }
         JSONArray rows = document.optJSONArray("sites");
         if ((rows == null || rows.length() == 0) && Json.str(document, "api", "").length() > 0)
             rows = new JSONArray().put(document);

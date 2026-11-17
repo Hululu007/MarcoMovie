@@ -720,7 +720,8 @@ public class MoviePlayer {
                                 | androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
                                         .FLAG_IGNORE_SPLICE_INFO_STREAM);
             }
-            mediaSourceFactory = new DefaultMediaSourceFactory(data, extractors);
+            mediaSourceFactory =
+                    new DefaultMediaSourceFactory(data, wrapDisguisedMp3Extractors(extractors));
             exo.setMediaSource(playbackSource(address));
             exo.prepare();
         } catch (Exception error) {
@@ -756,6 +757,60 @@ public class MoviePlayer {
                 || host.contains("xunlei");
     }
 
+    static androidx.media3.extractor.ExtractorsFactory wrapDisguisedMp3Extractors(
+            final androidx.media3.extractor.DefaultExtractorsFactory base) {
+        return new androidx.media3.extractor.ExtractorsFactory() {
+            @Override
+            public androidx.media3.extractor.Extractor[] createExtractors() {
+                return reorderDisguisedMp3Extractors(base.createExtractors());
+            }
+
+            @Override
+            public androidx.media3.extractor.Extractor[] createExtractors(
+                    Uri uri, Map<String, java.util.List<String>> responseHeaders) {
+                return reorderDisguisedMp3Extractors(base.createExtractors(uri, responseHeaders));
+            }
+        };
+    }
+
+    /**
+     * Netdisk shares frequently rename MP4/MKV/FLV video files to {@code .mp3} to evade content
+     * filters (#31). When Media3 places {@code Mp3Extractor} at index 0 based on the {@code .mp3}
+     * suffix or {@code audio/mpeg} header, its permissive sync-word scan can false-match H.264/HEVC
+     * bitstreams and drop the video track. Moving strict magic-byte video container extractors
+     * ahead of {@code Mp3Extractor} lets real video containers match at byte 0 while genuine MP3
+     * audio files fall through to {@code Mp3Extractor} immediately.
+     */
+    static androidx.media3.extractor.Extractor[] reorderDisguisedMp3Extractors(
+            androidx.media3.extractor.Extractor[] list) {
+        if (list == null || list.length <= 1) return list;
+        if (!list[0].getClass().getSimpleName().contains("Mp3")) return list;
+        java.util.List<androidx.media3.extractor.Extractor> strictVideo =
+                new java.util.ArrayList<androidx.media3.extractor.Extractor>(6);
+        java.util.List<androidx.media3.extractor.Extractor> rest =
+                new java.util.ArrayList<androidx.media3.extractor.Extractor>(list.length);
+        for (int i = 0; i < list.length; i++) {
+            androidx.media3.extractor.Extractor ex = list[i];
+            String name = ex.getClass().getSimpleName();
+            if (name.contains("Mp4")
+                    || name.contains("Matroska")
+                    || name.contains("Mkv")
+                    || name.contains("Flv")
+                    || name.contains("Avi")) {
+                strictVideo.add(ex);
+            } else {
+                rest.add(ex);
+            }
+        }
+        if (strictVideo.isEmpty()) return list;
+        androidx.media3.extractor.Extractor[] out =
+                new androidx.media3.extractor.Extractor[list.length];
+        int idx = 0;
+        for (int i = 0; i < strictVideo.size(); i++) out[idx++] = strictVideo.get(i);
+        for (int i = 0; i < rest.size(); i++) out[idx++] = rest.get(i);
+        return out;
+    }
+
     private static String sniffMime(
             Context context, Uri address, Map<String, String> requestHeaders, RequestScope scope) {
         if (scope != null && scope.cancelled) return null;
@@ -763,10 +818,11 @@ public class MoviePlayer {
         if (type == C.CONTENT_TYPE_HLS) return MimeTypes.APPLICATION_M3U8;
         if (type == C.CONTENT_TYPE_DASH) return MimeTypes.APPLICATION_MPD;
         String path = address.getPath();
+        boolean mp3Path = path != null && path.toLowerCase(Locale.ROOT).endsWith(".mp3");
         if (path != null
+                && !mp3Path
                 && path.toLowerCase(Locale.ROOT)
-                        .matches(".*\\.(mp4|mkv|webm|mp3|aac|flac|ogg|ts|flv|mov|avi)$"))
-            return null;
+                        .matches(".*\\.(mp4|mkv|webm|aac|flac|ogg|ts|flv|mov|avi)$")) return null;
         String fullUri = address.toString().toLowerCase(Locale.ROOT);
         if (fullUri.contains(".m3u8")) return MimeTypes.APPLICATION_M3U8;
         if (fullUri.contains(".mpd")) return MimeTypes.APPLICATION_MPD;
@@ -797,10 +853,11 @@ public class MoviePlayer {
                 String lower = contentType.toLowerCase(Locale.ROOT);
                 if (lower.contains("mpegurl")) return MimeTypes.APPLICATION_M3U8;
                 if (lower.contains("dash+xml")) return MimeTypes.APPLICATION_MPD;
-                if (lower.startsWith("video/")
-                        || lower.startsWith("audio/")
-                        || lower.contains("matroska")
-                        || lower.contains("octet-stream")) return null;
+                if (!mp3Path
+                        && (lower.startsWith("video/")
+                                || lower.startsWith("audio/")
+                                || lower.contains("matroska")
+                                || lower.contains("octet-stream"))) return null;
             }
             byte[] prefix = new byte[PROBE_MAX_BYTES];
             int count = 0;

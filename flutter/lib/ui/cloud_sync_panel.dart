@@ -112,6 +112,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
 
   bool _autoSync = true;
   bool _syncSubs = true;
+  bool _syncHistory = true;
   bool _obscurePass = true;
   bool _syncingWebdav = false;
   bool _syncingLan = false;
@@ -136,6 +137,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
     _confirmedPass = initialPass;
     _autoSync = widget.storage.webdavAuto;
     _syncSubs = widget.storage.webdavSyncSubs;
+    _syncHistory = widget.storage.webdavSyncHistory;
   }
 
   @override
@@ -173,6 +175,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
       pass: nextPass,
       auto: _autoSync,
       syncSubs: _syncSubs,
+      syncHistory: _syncHistory,
     );
     _confirmedUrl = nextUrl;
     _confirmedPass = nextPass;
@@ -511,6 +514,7 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
                     pass: _passCtrl.text,
                     auto: v,
                     syncSubs: _syncSubs,
+                    syncHistory: _syncHistory,
                   );
                   widget.onSynced?.call(subscriptionsChanged: false);
                 } catch (e) {
@@ -532,6 +536,27 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
               onChanged: (v) async {
                 setState(() => _syncSubs = v);
                 await widget.storage.setWebdavSyncSubs(v);
+                if (!v && !_syncHistory) {
+                  setState(() => _syncHistory = true);
+                  await widget.storage.setWebdavSyncHistory(true);
+                }
+                widget.onSynced?.call(subscriptionsChanged: false);
+              },
+            ),
+            IosSettingsSwitchRow(
+              key: const ValueKey('sync-switch-history'),
+              icon: CupertinoIcons.clock_fill,
+              iconColor: AppleColors.systemBlue,
+              title: '同时同步观看历史与收藏',
+              subtitle: '关闭后仅同步订阅源配置，方便与家人共享片源但隔离各自观看记录',
+              value: _syncHistory,
+              onChanged: (v) async {
+                setState(() => _syncHistory = v);
+                await widget.storage.setWebdavSyncHistory(v);
+                if (!v && !_syncSubs) {
+                  setState(() => _syncSubs = true);
+                  await widget.storage.setWebdavSyncSubs(true);
+                }
                 widget.onSynced?.call(subscriptionsChanged: false);
               },
             ),

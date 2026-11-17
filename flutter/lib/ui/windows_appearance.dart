@@ -560,7 +560,7 @@ class WinPanel extends StatelessWidget {
                 border: Border.all(
                     color: Colors.white.withValues(alpha: isDark ? .18 : .57)),
               ),
-              child: child),
+              child: Material(type: MaterialType.transparency, child: child)),
         ));
   }
 }

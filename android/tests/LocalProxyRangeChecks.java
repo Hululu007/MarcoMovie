@@ -68,6 +68,9 @@ public final class LocalProxyRangeChecks {
         testKnownContainerDetection();
         testChunkedProxyEndToEndAndKeepAlive();
         testLegacyChainChunksMixedPayloadTypes();
+        testDanmakuActionPushRoute();
+        testDisguisedMp3VideoExtractorOrder();
+        testClanUriAndApi23TlsSupport();
         System.out.println("ALL " + passed + " LocalProxy + ChunkedProxyDataSource checks passed.");
     }
 
@@ -406,6 +409,208 @@ public final class LocalProxyRangeChecks {
                 check(exact, "legacy chainChunks mixed payload bytes match 100%");
             }
         }
+    }
+
+    private static void testDanmakuActionPushRoute() throws Exception {
+        try (LocalProxy proxy =
+                new LocalProxy(
+                        null,
+                        new Cms.Config(),
+                        params -> new Object[] {404, "text/plain", "unused"},
+                        (app, cfg, params) -> new Object[] {404, "text/plain", "unused"})) {
+            final String[] received = {null};
+            proxy.danmakuConsumer = path -> received[0] = path;
+            int port = ProxyAddress.port;
+
+            // 1. GET /action?do=refresh&type=danmaku&path=... (#36)
+            try (Socket raw = new Socket("127.0.0.1", port)) {
+                raw.setSoTimeout(5000);
+                OutputStream out = raw.getOutputStream();
+                String req =
+                        "GET /action?do=refresh&type=danmaku&path=http%3A%2F%2F127.0.0.1%3A9978%2Fproxy%3Fdo%3Ddm"
+                                + " HTTP/1.1\r\nHost: 127.0.0.1:"
+                                + port
+                                + "\r\nConnection: close\r\n\r\n";
+                out.write(req.getBytes(StandardCharsets.ISO_8859_1));
+                out.flush();
+                HttpReply reply = readHttpReply(raw.getInputStream());
+                check(
+                        reply.status == 200
+                                && "ok".equals(new String(reply.body, StandardCharsets.UTF_8))
+                                && "http://127.0.0.1:9978/proxy?do=dm".equals(received[0]),
+                        "GET /action?do=refresh&type=danmaku pushes danmaku URL with 200 ok");
+            }
+
+            // 2. POST /action form-encoded danmaku push
+            received[0] = null;
+            try (Socket raw = new Socket("127.0.0.1", port)) {
+                raw.setSoTimeout(5000);
+                OutputStream out = raw.getOutputStream();
+                byte[] form =
+                        "do=refresh&type=danmaku&path=https%3A%2F%2Fdanmaku.example%2Fdm.xml"
+                                .getBytes(StandardCharsets.UTF_8);
+                String req =
+                        "POST /action HTTP/1.1\r\nHost: 127.0.0.1:"
+                                + port
+                                + "\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: "
+                                + form.length
+                                + "\r\nConnection: close\r\n\r\n";
+                out.write(req.getBytes(StandardCharsets.ISO_8859_1));
+                out.write(form);
+                out.flush();
+                HttpReply reply = readHttpReply(raw.getInputStream());
+                check(
+                        reply.status == 200 && "https://danmaku.example/dm.xml".equals(received[0]),
+                        "POST /action form body pushes danmaku URL with 200 ok");
+            }
+
+            // 3. Cross-origin browser CSRF attempt to /action must be rejected with 403
+            received[0] = null;
+            try (Socket raw = new Socket("127.0.0.1", port)) {
+                raw.setSoTimeout(5000);
+                OutputStream out = raw.getOutputStream();
+                String req =
+                        "GET /action?do=refresh&type=danmaku&path=https://evil.example/dm.xml"
+                                + " HTTP/1.1\r\nHost: 127.0.0.1:"
+                                + port
+                                + "\r\nOrigin: https://evil.example\r\nConnection: close\r\n\r\n";
+                out.write(req.getBytes(StandardCharsets.ISO_8859_1));
+                out.flush();
+                HttpReply reply = readHttpReply(raw.getInputStream());
+                check(
+                        reply.status == 403 && received[0] == null,
+                        "cross-origin browser request to /action rejected with 403");
+            }
+        }
+    }
+
+    private static class FakeExtractor implements androidx.media3.extractor.Extractor {
+        @Override
+        public boolean sniff(androidx.media3.extractor.ExtractorInput input) {
+            return false;
+        }
+
+        @Override
+        public void init(androidx.media3.extractor.ExtractorOutput output) {}
+
+        @Override
+        public int read(
+                androidx.media3.extractor.ExtractorInput input,
+                androidx.media3.extractor.PositionHolder seekPosition) {
+            return RESULT_END_OF_INPUT;
+        }
+
+        @Override
+        public void seek(long position, long timeUs) {}
+
+        @Override
+        public void release() {}
+    }
+
+    private static final class Mp3ExtractorStub extends FakeExtractor {}
+
+    private static final class Mp4ExtractorStub extends FakeExtractor {}
+
+    private static final class MatroskaExtractorStub extends FakeExtractor {}
+
+    private static final class TsExtractorStub extends FakeExtractor {}
+
+    private static void testDisguisedMp3VideoExtractorOrder() {
+        androidx.media3.extractor.Extractor[] input =
+                new androidx.media3.extractor.Extractor[] {
+                    new Mp3ExtractorStub(),
+                    new TsExtractorStub(),
+                    new Mp4ExtractorStub(),
+                    new MatroskaExtractorStub()
+                };
+        androidx.media3.extractor.Extractor[] ordered =
+                MoviePlayer.reorderDisguisedMp3Extractors(input);
+        int mp4Idx = -1;
+        int mkvIdx = -1;
+        int mp3Idx = -1;
+        for (int i = 0; i < ordered.length; i++) {
+            String name = ordered[i].getClass().getSimpleName();
+            if (mp4Idx < 0 && name.contains("Mp4")) mp4Idx = i;
+            if (mkvIdx < 0 && name.contains("Matroska")) mkvIdx = i;
+            if (mp3Idx < 0 && name.contains("Mp3")) mp3Idx = i;
+        }
+        check(
+                mp4Idx == 0 && mkvIdx == 1 && mp3Idx > mkvIdx,
+                "disguised .mp3 stream places MP4/MKV container extractors ahead of Mp3Extractor");
+    }
+
+    private static void testClanUriAndApi23TlsSupport() throws Exception {
+        String normalized = Cms.normalizeClanUri("clan://localhost/oktv/fty/fty.json");
+        check(
+                normalized.startsWith("file://") && normalized.endsWith("/oktv/fty/fty.json"),
+                "clan://localhost URI normalizes to file:// URI (#41)");
+        String relative = Cms.resolve("clan://localhost/oktv/fty/fty.json", "./spider.jar");
+        check(
+                relative.startsWith("file://") && relative.endsWith("/oktv/fty/spider.jar"),
+                "relative ./spider.jar resolves against clan:// origin (#41)");
+        check(
+                Cms.buildCompositeIsrgSocketFactory() != null,
+                "API 23 composite ISRG Root X1 SSLSocketFactory builds cleanly (#55)");
+
+        // Verify Android CloudSync source-only mode (syncHistory=false, #44)
+        CloudSync.SubscriptionItem sharedSub =
+                CloudSync.SubscriptionItem.create(
+                        "家庭共享源",
+                        "https://config.example/family.json",
+                        "{\"sites\":[{\"key\":\"s1\",\"name\":\"共享源\",\"type\":1,\"api\":\"https://vod.example/api.php/provide/vod/\"}]}",
+                        true,
+                        "",
+                        1000L);
+        String parentPayload =
+                new JSONObject()
+                        .put("schema", CloudSync.SCHEMA)
+                        .put("version", CloudSync.VERSION)
+                        .put(
+                                "watch_history",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", "s1")
+                                                        .put("id", "parent_vid")
+                                                        .put("title", "Parent Movie")
+                                                        .put("updated", 2000L)))
+                        .put(
+                                "favorites",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put("site", "s1")
+                                                        .put("id", "parent_fav")
+                                                        .put("title", "Parent Fav")
+                                                        .put("updated", 2100L)))
+                        .put("subscriptions", new JSONArray().put(sharedSub.toJson()))
+                        .toString();
+        String elderLocalHist =
+                "[{\"site\":\"s1\",\"id\":\"elder_vid\",\"title\":\"Elder Opera\",\"updated\":2500}]";
+        CloudSync.MergeResult elderMerged =
+                CloudSync.merge(
+                        elderLocalHist,
+                        "[]",
+                        "{}",
+                        Collections.emptyList(),
+                        true,
+                        false,
+                        parentPayload,
+                        3000L);
+        JSONObject writtenBack = new JSONObject(elderMerged.payloadJson);
+        check(
+                elderMerged.subscriptions != null
+                        && elderMerged.subscriptions.size() == 1
+                        && elderLocalHist.equals(elderMerged.historyJson)
+                        && "[]".equals(elderMerged.favoritesJson)
+                        && writtenBack.getJSONArray("watch_history").length() == 1
+                        && "parent_vid"
+                                .equals(
+                                        writtenBack
+                                                .getJSONArray("watch_history")
+                                                .getJSONObject(0)
+                                                .getString("id")),
+                "CloudSync syncHistory=false syncs subscriptions while isolating local & remote history (#44)");
     }
 
     private static final class HttpReply {

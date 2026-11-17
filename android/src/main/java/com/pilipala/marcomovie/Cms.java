@@ -453,11 +453,43 @@ public final class Cms {
     }
 
     /**
+     * Converts TVBox / OK影视 {@code clan://localhost/...} or {@code clan://...} local storage URIs
+     * (#41) into standard {@code file://} URIs rooted at external storage ({@code /sdcard}).
+     */
+    public static String normalizeClanUri(String value) {
+        if (value == null) return "";
+        String trimmed = value.trim();
+        if (!trimmed.regionMatches(true, 0, "clan://", 0, 7)) return value;
+        String rest = trimmed.substring(7);
+        if (rest.regionMatches(true, 0, "localhost/", 0, 10)) {
+            rest = rest.substring(10);
+        } else if (rest.regionMatches(true, 0, "127.0.0.1/", 0, 10)) {
+            rest = rest.substring(10);
+        }
+        while (rest.startsWith("/")) rest = rest.substring(1);
+        if (rest.isEmpty() || rest.contains("..")) return value;
+        java.io.File sdcard = null;
+        try {
+            Object dir =
+                    Class.forName("android.os.Environment")
+                            .getMethod("getExternalStorageDirectory")
+                            .invoke(null);
+            if (dir instanceof java.io.File) sdcard = (java.io.File) dir;
+        } catch (Throwable ignored) {
+        }
+        if (sdcard == null) sdcard = new java.io.File("/sdcard");
+        return fileUri(new java.io.File(sdcard, rest));
+    }
+
+    /**
      * Preserves {@code file://} origins only for real filesystem URIs; {@code content://} document
      * picks keep an empty origin so relative paths are not rewritten against bogus {@code
      * file:///document/...} paths and imported configs remain eligible for ConfigLibrary & sync.
      */
     public static String localImportOrigin(String scheme, String uriString) {
+        if (uriString != null && uriString.trim().regionMatches(true, 0, "clan://", 0, 7)) {
+            return normalizeClanUri(uriString);
+        }
         if ("file".equalsIgnoreCase(scheme) && uriString != null) {
             return uriString.trim();
         }
@@ -466,15 +498,23 @@ public final class Cms {
 
     static String resolve(String origin, String target) {
         if (target == null) return "";
+        if (target.trim().regionMatches(true, 0, "clan://", 0, 7)) {
+            return normalizeClanUri(target);
+        }
+        String effectiveOrigin =
+                origin != null && origin.trim().regionMatches(true, 0, "clan://", 0, 7)
+                        ? normalizeClanUri(origin)
+                        : origin;
         if (isHttp(target)
                 || target.isEmpty()
                 || target.startsWith("file://")
                 || target.startsWith("csp_")
-                || origin == null
-                || (!isHttp(origin) && !origin.startsWith("file://"))) return target;
+                || effectiveOrigin == null
+                || (!isHttp(effectiveOrigin) && !effectiveOrigin.startsWith("file://")))
+            return target;
         try {
-            URL resolved = new URL(new URL(origin), target);
-            return "file".equals(resolved.getProtocol()) && origin.startsWith("file://")
+            URL resolved = new URL(new URL(effectiveOrigin), target);
+            return "file".equals(resolved.getProtocol()) && effectiveOrigin.startsWith("file://")
                     ? fileUri(new java.io.File(resolved.toURI()))
                     : resolved.toString();
         } catch (Exception e) {
@@ -1314,7 +1354,151 @@ public final class Cms {
         }
     }
 
-    private static final class SniOverrideSocketFactory extends SSLSocketFactory {
+    private static final String ISRG_ROOT_X1_PEM =
+            "-----BEGIN CERTIFICATE-----\n"
+                    + "MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw\n"
+                    + "TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh\n"
+                    + "cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4\n"
+                    + "WhcNMzUwNjA0MTEwNDM4WjBPMQswCQYDVQQGEwJVUzEpMCcGA1UEChMgSW50ZXJu\n"
+                    + "ZXQgU2VjdXJpdHkgUmVzZWFyY2ggR3JvdXAxFTATBgNVBAMTDElTUkcgUm9vdCBY\n"
+                    + "MTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAK3oJHP0FDfzm54rVygc\n"
+                    + "h77ct984kIxuPOZXoHj3dcKi/vVqbvYATyjb3miGbESTtrFj/RQSa78f0uoxmyF+\n"
+                    + "0TM8ukj13Xnfs7j/EvEhmkvBioZxaUpmZmyPfjxwv60pIgbz5MDmgK7iS4+3mX6U\n"
+                    + "A5/TR5d8mUgjU+g4rk8Kb4Mu0UlXjIB0ttov0DiNewNwIRt18jA8+o+u3dpjq+sW\n"
+                    + "T8KOEUt+zwvo/7V3LvSye0rgTBIlDHCNAymg4VMk7BPZ7hm/ELNKjD+Jo2FR3qyH\n"
+                    + "B5T0Y3HsLuJvW5iB4YlcNHlsdu87kGJ55tukmi8mxdAQ4Q7e2RCOFvu396j3x+UC\n"
+                    + "B5iPNgiV5+I3lg02dZ77DnKxHZu8A/lJBdiB3QW0KtZB6awBdpUKD9jf1b0SHzUv\n"
+                    + "KBds0pjBqAlkd25HN7rOrFleaJ1/ctaJxQZBKT5ZPt0m9STJEadao0xAH0ahmbWn\n"
+                    + "OlFuhjuefXKnEgV4We0+UXgVCwOPjdAvBbI+e0ocS3MFEvzG6uBQE3xDk3SzynTn\n"
+                    + "jh8BCNAw1FtxNrQHusEwMFxIt4I7mKZ9YIqioymCzLq9gwQbooMDQaHWBfEbwrbw\n"
+                    + "qHyGO0aoSCqI3Haadr8faqU9GY/rOPNk3sgrDQoo//fb4hVC1CLQJ13hef4Y53CI\n"
+                    + "rU7m2Ys6xt0nUW7/vGT1M0NPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNV\n"
+                    + "HRMBAf8EBTADAQH/MB0GA1UdDgQWBBR5tFnme7bl5AFzgAiIyBpY9umbbjANBgkq\n"
+                    + "hkiG9w0BAQsFAAOCAgEAVR9YqbyyqFDQDLHYGmkgJykIrGF1XIpu+ILlaS/V9lZL\n"
+                    + "ubhzEFnTIZd+50xx+7LSYK05qAvqFyFWhfFQDlnrzuBZ6brJFe+GnY+EgPbk6ZGQ\n"
+                    + "3BebYhtF8GaV0nxvwuo77x/Py9auJ/GpsMiu/X1+mvoiBOv/2X/qkSsisRcOj/KK\n"
+                    + "NFtY2PwByVS5uCbMiogziUwthDyC3+6WVwW6LLv3xLfHTjuCvjHIInNzktHCgKQ5\n"
+                    + "ORAzI4JMPJ+GslWYHb4phowim57iaztXOoJwTdwJx4nLCgdNbOhdjsnvzqvHu7Ur\n"
+                    + "TkXWStAmzOVyyghqpZXjFaH3pO3JLF+l+/+sKAIuvtd7u+Nxe5AW0wdeRlN8NwdC\n"
+                    + "jNPElpzVmbUq4JUagEiuTDkHzsxHpFKVK7q4+63SM1N95R1NbdWhscdCb+ZAJzVc\n"
+                    + "oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq\n"
+                    + "4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA\n"
+                    + "mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d\n"
+                    + "emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=\n"
+                    + "-----END CERTIFICATE-----";
+
+    private static volatile boolean api23TrustInstalled;
+
+    /**
+     * Android 6.0 (API 23) ignores {@code res/xml/network_security_config.xml} (#55), so Let's
+     * Encrypt ({@code ISRG Root X1}) HTTPS sites fail certificate validation while HTTP works.
+     * Installs a composite [system + ISRG Root X1] default SSLSocketFactory on API 14..23 devices.
+     */
+    static void ensureApi23RootTrust() {
+        if (api23TrustInstalled) return;
+        int sdk = 0;
+        try {
+            sdk = Class.forName("android.os.Build$VERSION").getField("SDK_INT").getInt(null);
+        } catch (Throwable ignored) {
+        }
+        if (sdk < 14 || sdk >= 24) {
+            api23TrustInstalled = true;
+            return;
+        }
+        synchronized (Cms.class) {
+            if (api23TrustInstalled) return;
+            api23TrustInstalled = true;
+            try {
+                SSLSocketFactory compat = buildCompositeIsrgSocketFactory();
+                if (compat != null) {
+                    HttpsURLConnection.setDefaultSSLSocketFactory(compat);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    static SSLSocketFactory buildCompositeIsrgSocketFactory() {
+        try {
+            X509TrustManager systemTm = null;
+            TrustManagerFactory sysTmf =
+                    TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            sysTmf.init((java.security.KeyStore) null);
+            for (TrustManager tm : sysTmf.getTrustManagers()) {
+                if (tm instanceof X509TrustManager) {
+                    systemTm = (X509TrustManager) tm;
+                    break;
+                }
+            }
+            java.security.cert.CertificateFactory cf =
+                    java.security.cert.CertificateFactory.getInstance("X.509");
+            java.security.cert.X509Certificate isrgCert =
+                    (java.security.cert.X509Certificate)
+                            cf.generateCertificate(
+                                    new ByteArrayInputStream(ISRG_ROOT_X1_PEM.getBytes("UTF-8")));
+            java.security.KeyStore ks =
+                    java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType());
+            ks.load(null, null);
+            ks.setCertificateEntry("isrg_root_x1", isrgCert);
+            TrustManagerFactory isrgTmf =
+                    TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            isrgTmf.init(ks);
+            X509TrustManager isrgTm = null;
+            for (TrustManager tm : isrgTmf.getTrustManagers()) {
+                if (tm instanceof X509TrustManager) {
+                    isrgTm = (X509TrustManager) tm;
+                    break;
+                }
+            }
+            final X509TrustManager finalSys = systemTm;
+            final X509TrustManager finalIsrg = isrgTm;
+            X509TrustManager composite =
+                    new X509TrustManager() {
+                        @Override
+                        public void checkClientTrusted(
+                                java.security.cert.X509Certificate[] chain, String authType)
+                                throws java.security.cert.CertificateException {
+                            if (finalSys != null) finalSys.checkClientTrusted(chain, authType);
+                        }
+
+                        @Override
+                        public void checkServerTrusted(
+                                java.security.cert.X509Certificate[] chain, String authType)
+                                throws java.security.cert.CertificateException {
+                            try {
+                                if (finalSys != null) {
+                                    finalSys.checkServerTrusted(chain, authType);
+                                    return;
+                                }
+                            } catch (java.security.cert.CertificateException ignored) {
+                            }
+                            if (finalIsrg != null) {
+                                finalIsrg.checkServerTrusted(chain, authType);
+                            } else {
+                                throw new java.security.cert.CertificateException(
+                                        "No trust manager available");
+                            }
+                        }
+
+                        @Override
+                        public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                            List<java.security.cert.X509Certificate> out = new ArrayList<>();
+                            if (finalSys != null)
+                                out.addAll(Arrays.asList(finalSys.getAcceptedIssuers()));
+                            if (finalIsrg != null)
+                                out.addAll(Arrays.asList(finalIsrg.getAcceptedIssuers()));
+                            return out.toArray(new java.security.cert.X509Certificate[out.size()]);
+                        }
+                    };
+            SSLContext ctx = SSLContext.getInstance("TLS");
+            ctx.init(null, new TrustManager[] {composite}, null);
+            return new SniOverrideSocketFactory(ctx.getSocketFactory(), null);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    static final class SniOverrideSocketFactory extends SSLSocketFactory {
         private final SSLSocketFactory delegate;
         private final String sniHost;
 
@@ -1334,35 +1518,47 @@ public final class Cms {
         }
 
         @Override
+        public Socket createSocket() throws IOException {
+            return configureSocket(delegate.createSocket(), sniHost);
+        }
+
+        @Override
         public Socket createSocket(Socket s, String host, int port, boolean autoClose)
                 throws IOException {
-            return enableModernTls(delegate.createSocket(s, sniHost, port, autoClose));
+            String targetHost = sniHost != null && !sniHost.isEmpty() ? sniHost : host;
+            return configureSocket(
+                    delegate.createSocket(s, targetHost, port, autoClose), targetHost);
         }
 
         @Override
         public Socket createSocket(String host, int port) throws IOException {
-            return enableModernTls(delegate.createSocket(host, port));
+            return configureSocket(
+                    delegate.createSocket(host, port),
+                    sniHost != null && !sniHost.isEmpty() ? sniHost : host);
         }
 
         @Override
         public Socket createSocket(String host, int port, InetAddress localHost, int localPort)
                 throws IOException {
-            return enableModernTls(delegate.createSocket(host, port, localHost, localPort));
+            return configureSocket(
+                    delegate.createSocket(host, port, localHost, localPort),
+                    sniHost != null && !sniHost.isEmpty() ? sniHost : host);
         }
 
         @Override
         public Socket createSocket(InetAddress host, int port) throws IOException {
-            return enableModernTls(delegate.createSocket(host, port));
+            return configureSocket(delegate.createSocket(host, port), sniHost);
         }
 
         @Override
         public Socket createSocket(
                 InetAddress address, int port, InetAddress localAddress, int localPort)
                 throws IOException {
-            return enableModernTls(delegate.createSocket(address, port, localAddress, localPort));
+            return configureSocket(
+                    delegate.createSocket(address, port, localAddress, localPort), sniHost);
         }
 
-        private static Socket enableModernTls(Socket socket) {
+        private static Socket configureSocket(Socket socket, String hostname) {
             if (socket instanceof SSLSocket) {
                 SSLSocket ssl = (SSLSocket) socket;
                 String[] supported = ssl.getSupportedProtocols();
@@ -1373,6 +1569,15 @@ public final class Cms {
                     }
                     if (!enabled.isEmpty()) {
                         ssl.setEnabledProtocols(enabled.toArray(new String[0]));
+                    }
+                }
+                if (hostname != null
+                        && !hostname.isEmpty()
+                        && !hostname.startsWith("[")
+                        && !hostname.matches("\\d{1,3}(?:\\.\\d{1,3}){3}")) {
+                    try {
+                        ssl.getClass().getMethod("setHostname", String.class).invoke(ssl, hostname);
+                    } catch (Throwable ignored) {
                     }
                 }
             }
@@ -2568,6 +2773,9 @@ public final class Cms {
 
     private static HttpURLConnection openHttpConnection(URL url, boolean forceDirect)
             throws IOException {
+        if ("https".equalsIgnoreCase(url.getProtocol())) {
+            ensureApi23RootTrust();
+        }
         if (forceDirect || isLoopbackUrlHost(url.getHost())) {
             return (HttpURLConnection) url.openConnection(Proxy.NO_PROXY);
         }

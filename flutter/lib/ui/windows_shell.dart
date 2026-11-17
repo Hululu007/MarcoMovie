@@ -857,7 +857,11 @@ extension _WindowsShell on _AdaptiveShellState {
               style: TextStyle(color: winInk(context)),
               decoration: const InputDecoration(
                   hintText: '搜索全部频道', prefixIcon: Icon(CupertinoIcons.search)),
-              onChanged: (v) =>
+              onChanged: (v) {
+                if (_liveSearchController.value.isComposingRangeValid) return;
+                _updateWindowsState(() => _liveSearchQuery = v);
+              },
+              onSubmitted: (v) =>
                   _updateWindowsState(() => _liveSearchQuery = v)),
           const SizedBox(height: 12),
           if (_liveLoading) const LinearProgressIndicator(minHeight: 2),
@@ -1113,12 +1117,18 @@ extension _WindowsShell on _AdaptiveShellState {
                         key: const ValueKey('windows-search-input'),
                         controller: _searchController,
                         autofocus: true,
+                        textInputAction: TextInputAction.search,
                         style: TextStyle(color: winInk(context)),
                         decoration: const InputDecoration(
                             hintText: '搜索影片、剧集',
                             prefixIcon: Icon(CupertinoIcons.search),
                             border: InputBorder.none),
-                        onSubmitted: _runGlobalSearch)),
+                        onSubmitted: (kw) {
+                          if (_searchController.value.isComposingRangeValid) {
+                            return;
+                          }
+                          _runGlobalSearch(kw);
+                        })),
                 WinButton('搜索',
                     selected: true,
                     onPressed: () => _runGlobalSearch(_searchController.text)),

@@ -203,6 +203,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   final List<int> _midPlaybackStallEpochsMs = <int>[];
   Timer? _midPlaybackStallTimer;
   int _lastPointerScheduleMs = 0;
+  double _pointerWakeAccumulatedPx = 0;
+  int _pointerWakeWindowStartMs = 0;
   final Set<int> _failedLinesForEpisode = <int>{};
   final Set<int> _failedLiveEpisodes = <int>{};
   final Set<String> _failedQualityUrls = <String>{};
@@ -1168,7 +1170,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _scheduleHide() {
     _hideTimer?.cancel();
     if (_screenLocked || (isWindowsDesktopUi && _windowsMoreControls)) return;
-    _hideTimer = Timer(const Duration(seconds: 4), () {
+    final hideDelay = _desktop
+        ? const Duration(milliseconds: 2200)
+        : const Duration(seconds: 4);
+    _hideTimer = Timer(hideDelay, () {
       if (mounted &&
           !_screenLocked &&
           _playing &&
@@ -1268,15 +1273,27 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _onPointerMove(Offset delta) {
-    if (!_desktop || delta.distanceSquared < 0.25) return;
+    final dist = delta.distance;
+    if (!_desktop || dist < 1.0) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final hidden = _screenLocked ? !_lockButtonVisible : !_controlsVisible;
+    if (hidden) {
+      if (now - _pointerWakeWindowStartMs > 350) {
+        _pointerWakeWindowStartMs = now;
+        _pointerWakeAccumulatedPx = 0;
+      }
+      _pointerWakeAccumulatedPx += dist;
+      if (_pointerWakeAccumulatedPx < 12.0) return;
+      _pointerWakeAccumulatedPx = 0;
+      _pointerWakeWindowStartMs = 0;
+    }
     if (_screenLocked) {
       if (!_lockButtonVisible) {
         setState(() => _lockButtonVisible = true);
-        _lastPointerScheduleMs = DateTime.now().millisecondsSinceEpoch;
+        _lastPointerScheduleMs = now;
         _scheduleLockHide();
         return;
       }
-      final now = DateTime.now().millisecondsSinceEpoch;
       if (now - _lastPointerScheduleMs >= 250) {
         _lastPointerScheduleMs = now;
         _scheduleLockHide();
@@ -1285,11 +1302,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     if (!_controlsVisible) {
       setState(() => _controlsVisible = true);
-      _lastPointerScheduleMs = DateTime.now().millisecondsSinceEpoch;
+      _lastPointerScheduleMs = now;
       _scheduleHide();
       return;
     }
-    final now = DateTime.now().millisecondsSinceEpoch;
     if (now - _lastPointerScheduleMs >= 250) {
       _lastPointerScheduleMs = now;
       _scheduleHide();
@@ -1462,6 +1478,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         await dyn.setProperty('dither-depth', 'no');
         await dyn.setProperty('hdr-compute-peak', 'no');
       }
+      await dyn.setProperty('vid', 'auto');
+      await dyn.setProperty('audio-display', 'no');
       switch (kernel) {
         case 'ijk':
           await dyn.setProperty('cache', 'yes');
@@ -1832,7 +1850,9 @@ class _PlayerScreenState extends State<PlayerScreen>
               : SystemMouseCursors.basic,
           onHover: (event) => _onPointerMove(event.delta),
           child: Listener(
-            onPointerMove: (event) => _onPointerMove(event.delta),
+            onPointerMove: (event) {
+              if (event.down) _onPointerMove(event.delta);
+            },
             child: PlayerInteractionLayers(
               controls: Stack(
                 fit: StackFit.expand,

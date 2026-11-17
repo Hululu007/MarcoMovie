@@ -898,7 +898,9 @@ class CloudShareClient {
       RegExp(
         r'\.(mp4|mkv|ts|m3u8|mov|avi|flv|wmv|webm|m4v|m2ts|mts|rmvb|mpg|mpeg|iso)$',
         caseSensitive: false,
-      ).hasMatch(name);
+      ).hasMatch(name) ||
+      (RegExp(r'\.mp3$', caseSensitive: false).hasMatch(name) &&
+          _size(row['size']) >= 15 * 1024 * 1024);
   static Map _map(dynamic value) => value is Map ? value : const {};
   static String _string(dynamic value) => value?.toString() ?? '';
   static int _integer(dynamic value) =>

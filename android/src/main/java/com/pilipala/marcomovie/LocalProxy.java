@@ -30,8 +30,13 @@ public final class LocalProxy implements Closeable {
                 throws Exception;
     }
 
+    interface DanmakuConsumer {
+        void accept(String path);
+    }
+
     private final ScriptResolver scripts;
     private final SourceResolver sources;
+    volatile DanmakuConsumer danmakuConsumer = CspEngine::onPluginDanmaku;
     volatile boolean closed;
 
     public LocalProxy(Application application, Cms.Config source) throws IOException {
@@ -301,7 +306,11 @@ public final class LocalProxy implements Closeable {
         int qAt = rawTarget.indexOf('?');
         String path = qAt >= 0 ? rawTarget.substring(0, qAt) : rawTarget;
         String query = qAt >= 0 ? rawTarget.substring(qAt + 1) : null;
-        if (!"/proxy".equals(path) || (!method.equals("GET") && !method.equals("HEAD"))) {
+        boolean isActionRoute =
+                "/action".equals(path) && (method.equals("GET") || method.equals("POST"));
+        boolean isProxyRoute =
+                "/proxy".equals(path) && (method.equals("GET") || method.equals("HEAD"));
+        if (!isProxyRoute && !isActionRoute) {
             simple(out, 404, "Not found");
             return false;
         }
@@ -323,6 +332,33 @@ public final class LocalProxy implements Closeable {
                 String val = h.substring(at + 1).trim();
                 headers.put(lowerKey, val);
                 params.put(rawKey, val);
+            }
+        }
+        byte[] postBody = null;
+        if ("POST".equals(method)) {
+            int contentLen = 0;
+            String rawLen = headers.get("content-length");
+            if (rawLen != null && !rawLen.isEmpty()) {
+                try {
+                    contentLen = Integer.parseInt(rawLen.trim());
+                } catch (NumberFormatException badLen) {
+                    simple(out, 400, "Invalid Content-Length");
+                    return false;
+                }
+            }
+            if (contentLen < 0 || contentLen > 16384) {
+                simple(out, 400, "Payload too large");
+                return false;
+            }
+            postBody = new byte[contentLen];
+            int off = 0;
+            while (off < contentLen) {
+                int r = in.read(postBody, off, contentLen - off);
+                if (r < 0) break;
+                off += r;
+            }
+            if (off < contentLen) {
+                postBody = Arrays.copyOf(postBody, off);
             }
         }
         boolean chunkedClient = "1".equals(headers.remove("x-movie-chunked-client"));
@@ -350,6 +386,31 @@ public final class LocalProxy implements Closeable {
                 }
             }
         }
+        if (isActionRoute && postBody != null && postBody.length > 0) {
+            String bodyText = new String(postBody, "UTF-8").trim();
+            if (bodyText.startsWith("{")) {
+                try {
+                    JSONObject bodyJson = new JSONObject(bodyText);
+                    Iterator<String> keys = bodyJson.keys();
+                    while (keys.hasNext()) {
+                        String k = keys.next();
+                        if (!bodyJson.isNull(k)) params.put(k, String.valueOf(bodyJson.opt(k)));
+                    }
+                } catch (Exception ignored) {
+                }
+            } else {
+                for (String pair : bodyText.split("&")) {
+                    if (pair.isEmpty()) continue;
+                    String[] p = pair.split("=", 2);
+                    try {
+                        String key = URLDecoder.decode(p[0], "UTF-8");
+                        String value = p.length == 2 ? URLDecoder.decode(p[1], "UTF-8") : "";
+                        params.put(key, value);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        }
         String requestToken = params.remove("_mm_token");
         boolean isJs =
                 "js".equalsIgnoreCase(params.get("do")) || "py".equalsIgnoreCase(params.get("do"));
@@ -374,6 +435,36 @@ public final class LocalProxy implements Closeable {
                 isJs)) {
             simple(out, 403, "Forbidden");
             return false;
+        }
+        if (isActionRoute || "danmaku".equalsIgnoreCase(params.get("do"))) {
+            String actionDo = params.get("do");
+            String actionType = params.get("type");
+            String mediaPath = params.get("path");
+            if (mediaPath == null || mediaPath.trim().isEmpty()) mediaPath = params.get("url");
+            if (mediaPath == null || mediaPath.trim().isEmpty()) mediaPath = params.get("danmaku");
+            boolean isDanmakuPush =
+                    "danmaku".equalsIgnoreCase(actionDo)
+                            || ("refresh".equalsIgnoreCase(actionDo)
+                                    && "danmaku".equalsIgnoreCase(actionType))
+                            || (actionDo == null && "danmaku".equalsIgnoreCase(actionType));
+            if (isDanmakuPush && mediaPath != null && !mediaPath.trim().isEmpty()) {
+                DanmakuConsumer consumer = danmakuConsumer;
+                if (consumer != null) consumer.accept(mediaPath.trim());
+                simple(out, 200, "ok");
+                return false;
+            }
+            if ("refresh".equalsIgnoreCase(actionDo)
+                    && "subtitle".equalsIgnoreCase(actionType)
+                    && mediaPath != null
+                    && !mediaPath.trim().isEmpty()) {
+                CspEngine.onPluginSubtitle(mediaPath.trim());
+                simple(out, 200, "ok");
+                return false;
+            }
+            if (isActionRoute) {
+                simple(out, 404, "Not found");
+                return false;
+            }
         }
         if ("ck".equalsIgnoreCase(params.get("do"))) {
             simple(out, 200, "ok");

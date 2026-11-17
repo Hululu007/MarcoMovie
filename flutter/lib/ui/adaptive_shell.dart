@@ -3,6 +3,7 @@ import 'package:window_manager/window_manager.dart';
 import 'desktop_horizontal_scroller.dart';
 import 'source_choice_sliver.dart';
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui';
@@ -11001,12 +11002,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   padding: EdgeInsets.zero,
                   onPressed: submitting ? null : () async {
                     try {
-                      final picked = await FilePicker.platform.pickFiles(type: FileType.any, withData: false);
+                      final picked = await FilePicker.platform.pickFiles(
+                        type: FileType.any,
+                        withData: false,
+                      );
                       final entry = picked?.files.single;
-                      if (entry == null || entry.path == null || !ctx.mounted) return;
-                      final file = File(entry.path!);
-                      if (await file.length() > CmsClient.maxResponseBytes) throw const FormatException('文件超过 6 MB');
-                      final body = CmsClient.readSubscriptionFile(await file.readAsBytes(), entry.name);
+                      if (entry == null || !ctx.mounted) return;
+                      final Uint8List rawBytes;
+                      if (entry.path != null && entry.path!.isNotEmpty) {
+                        final file = File(entry.path!);
+                        if (await file.length() > CmsClient.maxResponseBytes) {
+                          throw const FormatException('文件超过 6 MB');
+                        }
+                        rawBytes = await file.readAsBytes();
+                      } else if (entry.bytes != null) {
+                        if (entry.bytes!.length > CmsClient.maxResponseBytes) {
+                          throw const FormatException('文件超过 6 MB');
+                        }
+                        rawBytes = entry.bytes!;
+                      } else {
+                        return;
+                      }
+                      final body = CmsClient.readSubscriptionFile(rawBytes, entry.name);
                       if (!ctx.mounted) return;
                       setModalState(() { jsonCtrl.text = body; urlCtrl.clear(); errorText = null; });
                     } catch (e) {
@@ -11366,7 +11383,80 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ),
               ],
-              const SizedBox(height: 16),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: AppleCapsuleButton(
+                      key: const ValueKey('backup-save-json-file'),
+                      label: '导出为 JSON 文件',
+                      icon: CupertinoIcons.square_arrow_down,
+                      onPressed: () async {
+                        try {
+                          final bytes = Uint8List.fromList(utf8.encode(ctrl.text));
+                          final outputPath = await FilePicker.platform.saveFile(
+                            dialogTitle: '导出 Marco Movie 备份 JSON',
+                            fileName: 'marco-movie-backup.json',
+                            type: FileType.custom,
+                            allowedExtensions: const ['json'],
+                            bytes: bytes,
+                          );
+                          if (outputPath == null || !ctx.mounted) return;
+                          if (!Platform.isIOS && !Platform.isAndroid && outputPath.isNotEmpty) {
+                            await File(outputPath).writeAsBytes(bytes, flush: true);
+                          }
+                          setModalState(() => errorText = null);
+                          _showAppleNotice('导出成功', '备份 JSON 文件已保存。');
+                        } catch (e) {
+                          if (ctx.mounted) {
+                            setModalState(() => errorText = '保存 JSON 文件失败：$e');
+                          }
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: AppleCapsuleButton(
+                      key: const ValueKey('backup-load-json-file'),
+                      label: '选择 JSON 文件',
+                      icon: CupertinoIcons.folder,
+                      onPressed: () async {
+                        try {
+                          final picked = await FilePicker.platform.pickFiles(
+                            type: FileType.any,
+                            withData: false,
+                          );
+                          final entry = picked?.files.single;
+                          if (entry == null || !ctx.mounted) return;
+                          final String text;
+                          if (entry.path != null && entry.path!.isNotEmpty) {
+                            final file = File(entry.path!);
+                            if (await file.length() > StorageService.maxSyncPayloadBytes) {
+                              throw const FormatException('备份文件超过 8 MB 限制');
+                            }
+                            text = await file.readAsString();
+                          } else if (entry.bytes != null) {
+                            text = utf8.decode(entry.bytes!);
+                          } else {
+                            return;
+                          }
+                          if (!ctx.mounted) return;
+                          setModalState(() {
+                            ctrl.text = text;
+                            errorText = null;
+                          });
+                        } catch (e) {
+                          if (ctx.mounted) {
+                            setModalState(() => errorText = '读取备份文件失败：$e');
+                          }
+                        }
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
               SizedBox(
                 width: double.infinity,
                 child: AppleCapsuleButton(

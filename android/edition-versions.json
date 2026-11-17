@@ -4,11 +4,11 @@
     "versionCode": 87
   },
   "android-mobile": {
-    "versionName": "0.5.25",
-    "versionCode": 88
+    "versionName": "0.5.26",
+    "versionCode": 89
   },
   "android-lite": {
-    "versionName": "0.5.6",
-    "versionCode": 56
+    "versionName": "0.5.7",
+    "versionCode": 57
   }
 }

@@ -450,7 +450,10 @@ class QuarkDriveClient {
               RegExp(
                 r'\.(?:mp4|mkv|ts|m3u8|mov|avi|flv|wmv|webm|m4v|m2ts|mts|rmvb|mpg|mpeg|iso)$',
                 caseSensitive: false,
-              ).hasMatch(row['file_name'])) {
+              ).hasMatch(row['file_name']) ||
+              (RegExp(r'\.mp3$', caseSensitive: false)
+                      .hasMatch(row['file_name']) &&
+                  (_integer(row['size']) ?? 0) >= 15 * 1024 * 1024)) {
             if (target != null && row['fid'] != target) continue;
             if (fileIds.add(row['fid'])) {
               if (files.length >= 5000) {

@@ -96,8 +96,14 @@ final class CloudSyncDialog {
         return a != null && a.prefs != null && a.prefs.getBoolean(Prefs.WEBDAV_AUTO, true);
     }
 
+    static final String PREF_WEBDAV_SYNC_HISTORY = "webdav_sync_history";
+
     static boolean isSyncSubscriptionsEnabled(MainActivity a) {
         return a != null && a.prefs != null && a.prefs.getBoolean(Prefs.WEBDAV_SYNC_SUBS, true);
+    }
+
+    static boolean isSyncHistoryEnabled(MainActivity a) {
+        return a == null || a.prefs == null || a.prefs.getBoolean(PREF_WEBDAV_SYNC_HISTORY, true);
     }
 
     static String statusSummary(MainActivity a) {
@@ -106,9 +112,11 @@ final class CloudSyncDialog {
         if (!isConfigured(a)) return "支持坚果云 / Nextcloud / Alist / 群晖 WebDAV 与局域网互传";
         boolean auto = a.prefs.getBoolean(Prefs.WEBDAV_AUTO, true);
         boolean subs = a.prefs.getBoolean(Prefs.WEBDAV_SYNC_SUBS, true);
+        boolean hist = a.prefs.getBoolean(PREF_WEBDAV_SYNC_HISTORY, true);
         long lastTs = a.prefs.getLong(Prefs.SYNC_LAST_TIME, 0L);
         String lastStatus = a.prefs.getString(Prefs.SYNC_LAST_STATUS, "");
-        String mode = (auto ? "自动云同步" : "手动云同步") + (subs ? " · 含订阅源" : " · 仅进度收藏");
+        String scope = (subs && hist) ? " · 含订阅源" : (subs ? " · 仅同步源" : " · 仅进度收藏");
+        String mode = (auto ? "自动云同步" : "手动云同步") + scope;
         if (lastTs > 0L) {
             String timeStr =
                     new SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(new Date(lastTs));
@@ -288,6 +296,7 @@ final class CloudSyncDialog {
         RUNTIME.cancelOwned(a);
         final String user = appPrefs.getString(Prefs.WEBDAV_USER, "").trim();
         final boolean syncSubs = appPrefs.getBoolean(Prefs.WEBDAV_SYNC_SUBS, true);
+        final boolean syncHist = appPrefs.getBoolean(PREF_WEBDAV_SYNC_HISTORY, true);
         final File filesDir = appCtx.getFilesDir();
 
         SYNC_EXEC.execute(
@@ -322,6 +331,7 @@ final class CloudSyncDialog {
                                                             buildPrefsStore(appPrefs),
                                                             localSubs,
                                                             syncSubs,
+                                                            syncHist,
                                                             remoteJson,
                                                             startMs);
                                             if (syncSubs
@@ -764,9 +774,15 @@ final class CloudSyncDialog {
 
     private static CloudSync.MergeResult mergeAndPersistLocal(
             final MainActivity a, final String remoteJson, final long now) throws Exception {
-        final boolean[] syncSubsHolder = new boolean[1];
-        runOnMainSync(a, () -> syncSubsHolder[0] = isSyncSubscriptionsEnabled(a));
-        final boolean syncSubs = syncSubsHolder[0];
+        final boolean[] syncFlags = new boolean[] {true, true};
+        runOnMainSync(
+                a,
+                () -> {
+                    syncFlags[0] = isSyncSubscriptionsEnabled(a);
+                    syncFlags[1] = isSyncHistoryEnabled(a);
+                });
+        final boolean syncSubs = syncFlags[0];
+        final boolean syncHist = syncFlags[1];
         final List<CloudSync.SubscriptionItem> localSubs =
                 syncSubs ? collectPublicSubscriptions(a) : null;
         final SharedPreferences prefs = a.prefs;
@@ -776,6 +792,7 @@ final class CloudSyncDialog {
                         buildPrefsStore(prefs),
                         localSubs,
                         syncSubs,
+                        syncHist,
                         remoteJson,
                         now);
 
@@ -787,9 +804,15 @@ final class CloudSyncDialog {
 
     private static String exportCurrentPayload(final MainActivity a, final long now)
             throws Exception {
-        final boolean[] syncSubsHolder = new boolean[1];
-        runOnMainSync(a, () -> syncSubsHolder[0] = isSyncSubscriptionsEnabled(a));
-        final boolean syncSubs = syncSubsHolder[0];
+        final boolean[] syncFlags = new boolean[] {true, true};
+        runOnMainSync(
+                a,
+                () -> {
+                    syncFlags[0] = isSyncSubscriptionsEnabled(a);
+                    syncFlags[1] = isSyncHistoryEnabled(a);
+                });
+        final boolean syncSubs = syncFlags[0];
+        final boolean syncHist = syncFlags[1];
         final List<CloudSync.SubscriptionItem> localSubs =
                 syncSubs ? collectPublicSubscriptions(a) : null;
         final SharedPreferences prefs = a.prefs;
@@ -797,8 +820,8 @@ final class CloudSyncDialog {
                 WatchHistory.callOnStorageExecutor(
                         () ->
                                 new String[] {
-                                    prefs.getString(Prefs.WATCH_HISTORY, "[]"),
-                                    prefs.getString(Prefs.FAVORITES, "[]"),
+                                    syncHist ? prefs.getString(Prefs.WATCH_HISTORY, "[]") : "[]",
+                                    syncHist ? prefs.getString(Prefs.FAVORITES, "[]") : "[]",
                                     prefs.getString(Prefs.SYNC_TOMBSTONES, "")
                                 });
         return CloudSync.exportPayload(snap[0], snap[1], snap[2], localSubs, syncSubs, now);

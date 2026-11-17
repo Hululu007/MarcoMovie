@@ -256,6 +256,25 @@ final class CloudSync {
             final String remotePayloadJson,
             final long now)
             throws Exception {
+        return mergeSerial(
+                serialExecutor,
+                store,
+                localSubscriptions,
+                syncSubscriptions,
+                true,
+                remotePayloadJson,
+                now);
+    }
+
+    static MergeResult mergeSerial(
+            final ExecutorService serialExecutor,
+            final LocalStore store,
+            final List<SubscriptionItem> localSubscriptions,
+            final boolean syncSubscriptions,
+            final boolean syncHistory,
+            final String remotePayloadJson,
+            final long now)
+            throws Exception {
         Callable<MergeResult> task =
                 () -> {
                     ExecutorService prev = ACTIVE_SERIAL_EXECUTOR.get();
@@ -271,6 +290,7 @@ final class CloudSync {
                                         localTomb,
                                         localSubscriptions,
                                         syncSubscriptions,
+                                        syncHistory,
                                         remotePayloadJson,
                                         now);
                         store.writeMerged(
@@ -745,6 +765,26 @@ final class CloudSync {
             boolean syncSubscriptions,
             String remotePayloadJson,
             long now) {
+        return merge(
+                localHistoryJson,
+                localFavoritesJson,
+                localTombstonesJson,
+                localSubscriptions,
+                syncSubscriptions,
+                true,
+                remotePayloadJson,
+                now);
+    }
+
+    static MergeResult merge(
+            String localHistoryJson,
+            String localFavoritesJson,
+            String localTombstonesJson,
+            List<SubscriptionItem> localSubscriptions,
+            boolean syncSubscriptions,
+            boolean syncHistory,
+            String remotePayloadJson,
+            long now) {
         List<WatchHistory.Entry> localHist = WatchHistory.read(localHistoryJson);
         List<Favorites.Entry> localFavs = Favorites.read(localFavoritesJson);
         Tombstones tombs = Tombstones.read(localTombstonesJson);
@@ -754,6 +794,9 @@ final class CloudSync {
         Map<String, Long> remoteFavAdded = new LinkedHashMap<>();
         List<SubscriptionItem> remoteSubs = new ArrayList<>();
         JSONArray rawRemoteSubsArray = null;
+        JSONArray rawRemoteHistArray = null;
+        JSONArray rawRemoteFavsArray = null;
+        JSONObject rawRemoteTombsObj = null;
 
         if (remotePayloadJson != null && !remotePayloadJson.trim().isEmpty()) {
             try {
@@ -766,8 +809,21 @@ final class CloudSync {
                     throw new IllegalArgumentException("不支持的同步文件格式: " + schema);
                 }
                 JSONObject remoteTombObj = root.optJSONObject("tombstones");
+                rawRemoteTombsObj = remoteTombObj;
                 if (remoteTombObj != null) {
-                    tombs.merge(Tombstones.read(remoteTombObj.toString()));
+                    if (syncHistory) {
+                        tombs.merge(Tombstones.read(remoteTombObj.toString()));
+                    } else {
+                        Iterator<String> tKeys = remoteTombObj.keys();
+                        JSONObject subOnlyTombs = new JSONObject();
+                        while (tKeys.hasNext()) {
+                            String tk = tKeys.next();
+                            if (tk != null && tk.startsWith("sub:")) {
+                                subOnlyTombs.put(tk, remoteTombObj.optLong(tk));
+                            }
+                        }
+                        tombs.merge(Tombstones.read(subOnlyTombs.toString()));
+                    }
                 }
                 JSONArray hArr = root.optJSONArray("watch_history");
                 if (hArr == null) hArr = root.optJSONArray("history");
@@ -781,7 +837,8 @@ final class CloudSync {
                         hArr = new JSONArray((String) rawH);
                     }
                 }
-                if (hArr != null) {
+                rawRemoteHistArray = hArr;
+                if (syncHistory && hArr != null) {
                     remoteHist = parseRemoteHistory(hArr);
                 }
                 JSONArray fArr = root.optJSONArray("favorites");
@@ -792,7 +849,8 @@ final class CloudSync {
                         fArr = new JSONArray((String) rawF);
                     }
                 }
-                if (fArr != null) {
+                rawRemoteFavsArray = fArr;
+                if (syncHistory && fArr != null) {
                     parseRemoteFavorites(fArr, remoteFavs, remoteFavAdded);
                 }
                 if (root.has("subscriptions") && root.optJSONArray("subscriptions") != null) {
@@ -931,6 +989,86 @@ final class CloudSync {
                 afterDigest.add(subscriptionStateKey(s));
             }
             subsChanged = !beforeDigest.equals(afterDigest);
+        }
+
+        if (!syncHistory) {
+            String nextTombJson = tombs.json();
+            JSONObject cloudTombs = new JSONObject();
+            if (rawRemoteTombsObj != null) {
+                Iterator<String> rk = rawRemoteTombsObj.keys();
+                while (rk.hasNext()) {
+                    String k = rk.next();
+                    try {
+                        cloudTombs.put(k, rawRemoteTombsObj.optLong(k));
+                    } catch (JSONException ignored) {
+                    }
+                }
+            }
+            JSONObject localTombObj = tombs.toJsonObject();
+            Iterator<String> lk = localTombObj.keys();
+            while (lk.hasNext()) {
+                String k = lk.next();
+                if (k != null && k.startsWith("sub:")) {
+                    long lv = localTombObj.optLong(k);
+                    if (lv > cloudTombs.optLong(k)) {
+                        try {
+                            cloudTombs.put(k, lv);
+                        } catch (JSONException ignored) {
+                        }
+                    }
+                }
+            }
+            String payload;
+            try {
+                JSONObject out =
+                        new JSONObject()
+                                .put("schema", SCHEMA)
+                                .put("version", VERSION)
+                                .put("updated", now)
+                                .put("updatedAt", now)
+                                .put(
+                                        "watch_history",
+                                        rawRemoteHistArray != null
+                                                ? rawRemoteHistArray
+                                                : new JSONArray())
+                                .put(
+                                        "favorites",
+                                        rawRemoteFavsArray != null
+                                                ? rawRemoteFavsArray
+                                                : new JSONArray())
+                                .put("tombstones", cloudTombs);
+                if (syncSubscriptions) {
+                    JSONArray subsArr = new JSONArray();
+                    if (mergedSubs != null) {
+                        for (SubscriptionItem sub : mergedSubs) {
+                            if (sub == null || sub.key == null || sub.key.isEmpty()) continue;
+                            if (tombs.get("sub:" + sub.key) >= sub.updatedAt) continue;
+                            subsArr.put(sub.toJson());
+                        }
+                    }
+                    out.put("subscriptions", subsArr);
+                } else if (rawRemoteSubsArray != null) {
+                    out.put("subscriptions", rawRemoteSubsArray);
+                }
+                payload = out.toString();
+            } catch (JSONException e) {
+                payload = "{}";
+            }
+            int subCount =
+                    syncSubscriptions
+                            ? (mergedSubs == null ? 0 : mergedSubs.size())
+                            : (localSubscriptions == null ? 0 : localSubscriptions.size());
+            return new MergeResult(
+                    localHistoryJson != null ? localHistoryJson : "[]",
+                    localFavoritesJson != null ? localFavoritesJson : "[]",
+                    nextTombJson,
+                    mergedSubs,
+                    payload,
+                    0,
+                    0,
+                    subCount,
+                    subsChanged,
+                    subsChanged);
         }
 
         JSONArray outHistArr = new JSONArray();

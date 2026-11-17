@@ -81,7 +81,9 @@ class AliShareClient {
           } else if (row['category'] == 'video' ||
               RegExp(r'\.(mp4|mkv|m4v|mov|ts|m2ts|avi|webm|flv)$',
                       caseSensitive: false)
-                  .hasMatch(name)) {
+                  .hasMatch(name) ||
+              (RegExp(r'\.mp3$', caseSensitive: false).hasMatch(name) &&
+                  _integer(row['size']) >= 15 * 1024 * 1024)) {
             episodes.add(CmsEpisode(
               name: fullName,
               url: Uri(scheme: 'mmcloud', host: 'ali', queryParameters: {

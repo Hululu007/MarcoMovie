@@ -176,13 +176,25 @@ public final class CspEngine implements SourceEngine {
                     throw firstError;
                 }
             }
-            pluginSha256 = digest(artifact, "SHA-256");
-            DexClassLoader loader = loader(app, artifact, pluginSha256);
+            String resolvedSha = digest(artifact, "SHA-256");
+            DexClassLoader loader;
+            try {
+                loader = loader(app, artifact, resolvedSha);
+                try (InputStream resource = loader.getResourceAsStream("classes.dex")) {
+                    if (resource == null) throw new IOException("插件类加载器无法读取原始资源");
+                }
+            } catch (Throwable loadErr) {
+                evictCachedArtifact(application, activeJarDeclaration, artifact, resolvedSha);
+                artifact = obtain(application, activeJarDeclaration);
+                resolvedSha = digest(artifact, "SHA-256");
+                loader = loader(app, artifact, resolvedSha);
+                try (InputStream resource = loader.getResourceAsStream("classes.dex")) {
+                    if (resource == null) throw new IOException("插件类加载器无法读取原始资源");
+                }
+            }
+            pluginSha256 = resolvedSha;
             activeProxyLoader = loader;
             pluginLock = new Object();
-            try (InputStream resource = loader.getResourceAsStream("classes.dex")) {
-                if (resource == null) throw new IOException("插件类加载器无法读取原始资源");
-            }
             String className = "com.github.catvod.spider." + site.api.substring(4);
             Object candidate = loader.loadClass(className).getDeclaredConstructor().newInstance();
             if (!(candidate instanceof Spider)) throw new IOException("插件父接口与当前宿主不兼容");
@@ -202,8 +214,43 @@ public final class CspEngine implements SourceEngine {
         } catch (Throwable error) {
             Throwable cause = unwrap(error);
             diagnostic("load_failed", site.api, cause);
+            String detail = safePluginErrorDetail(cause);
             throw new EngineException(
-                    "扩展引擎初始化失败：" + cause.getClass().getSimpleName() + "。此来源尚未验证兼容。", cause);
+                    "扩展引擎初始化失败："
+                            + cause.getClass().getSimpleName()
+                            + (detail.isEmpty() ? "" : "（" + detail + "）")
+                            + "。此来源尚未验证兼容。",
+                    cause);
+        }
+    }
+
+    private static String safePluginErrorDetail(Throwable cause) {
+        if (cause == null || cause.getMessage() == null) return "";
+        String msg = cause.getMessage().trim();
+        if (msg.isEmpty()) return "";
+        msg = msg.replaceAll("(?i)https?://\\S+", "<url>");
+        if (msg.length() > 80) msg = msg.substring(0, 80) + "…";
+        return msg;
+    }
+
+    private static void evictCachedArtifact(
+            Application app, String declaration, File artifact, String sha) {
+        try {
+            if (sha != null && !sha.isEmpty()) {
+                LOADERS.remove(sha);
+                VERIFIED_CACHE.remove(sha);
+            }
+            if (artifact != null && artifact.exists()) {
+                artifact.setWritable(true);
+                artifact.delete();
+            }
+            if (app != null && declaration != null && !declaration.isEmpty()) {
+                File folder = new File(unwrapApplication(app).getFilesDir(), "csp");
+                String key = hex(declaration.trim().split(";md5;", 2)[0].trim().getBytes("UTF-8"));
+                File identity = new File(folder, "selection-" + key + ".txt");
+                if (identity.exists()) identity.delete();
+            }
+        } catch (Throwable ignored) {
         }
     }
 

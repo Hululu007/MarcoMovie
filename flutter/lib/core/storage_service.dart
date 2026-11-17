@@ -79,6 +79,7 @@ class StorageService {
   static const String keyWebdavPass = 'webdav_pass';
   static const String keyWebdavAuto = 'webdav_auto';
   static const String keyWebdavSyncSubs = 'webdav_sync_subs';
+  static const String keyWebdavSyncHistory = 'webdav_sync_history';
   static const String keySyncTombstones = 'sync_tombstones';
   static const String keySyncLastTime = 'sync_last_time';
   static const String keySyncLastStatus = 'sync_last_status';
@@ -3139,6 +3140,7 @@ class StorageService {
       _credentialCache[keyWebdavPass] ?? _prefs.getString(keyWebdavPass) ?? '';
   bool get webdavAuto => _prefs.getBool(keyWebdavAuto) ?? true;
   bool get webdavSyncSubs => _prefs.getBool(keyWebdavSyncSubs) ?? true;
+  bool get webdavSyncHistory => _prefs.getBool(keyWebdavSyncHistory) ?? true;
   int get syncLastTime => _prefs.getInt(keySyncLastTime) ?? 0;
   String get syncLastStatus => _prefs.getString(keySyncLastStatus) ?? '';
   bool get isWebdavConfigured => webdavUrl.isNotEmpty;
@@ -3168,6 +3170,7 @@ class StorageService {
     required String pass,
     required bool auto,
     bool? syncSubs,
+    bool? syncHistory,
   }) async {
     await _writeSecret(keyWebdavPass, pass);
     await _prefs.setString(keyWebdavUrl, url.trim());
@@ -3176,6 +3179,9 @@ class StorageService {
     if (syncSubs != null) {
       await _prefs.setBool(keyWebdavSyncSubs, syncSubs);
     }
+    if (syncHistory != null) {
+      await _prefs.setBool(keyWebdavSyncHistory, syncHistory);
+    }
     if (!auto || url.trim().isEmpty) {
       cancelPendingAutoSync();
     }
@@ -3183,6 +3189,10 @@ class StorageService {
 
   Future<void> setWebdavSyncSubs(bool enabled) async {
     await _prefs.setBool(keyWebdavSyncSubs, enabled);
+  }
+
+  Future<void> setWebdavSyncHistory(bool enabled) async {
+    await _prefs.setBool(keyWebdavSyncHistory, enabled);
   }
 
   static bool _isHttpOriginUrl(String raw) {
@@ -3374,17 +3384,38 @@ class StorageService {
   String exportSyncPayload({
     int? nowMs,
     List<dynamic>? preservedRemoteSubscriptions,
+    List<dynamic>? preservedRemoteHistory,
+    List<dynamic>? preservedRemoteFavorites,
+    Map<String, int>? preservedRemoteTombstones,
   }) {
     final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
-    final hist = getWatchHistory().map((e) => e.toJson()).toList();
-    final localFavEntries = getFavorites(forPrivate: false);
-    final favs = localFavEntries.map((f) => f.toJson()).toList();
-    final tombs = _readSyncTombstones();
-    for (final f in localFavEntries) {
-      if (f.updated > 0) {
-        final addKey = 'add:${f.key}';
-        final prev = tombs[addKey] ?? 0;
-        if (f.updated > prev) tombs[addKey] = f.updated;
+    final syncHistory = webdavSyncHistory;
+    final List<dynamic> hist;
+    final List<dynamic> favs;
+    final Map<String, int> tombs;
+    if (syncHistory) {
+      hist = getWatchHistory().map((e) => e.toJson()).toList();
+      final localFavEntries = getFavorites(forPrivate: false);
+      favs = localFavEntries.map((f) => f.toJson()).toList();
+      tombs = _readSyncTombstones();
+      for (final f in localFavEntries) {
+        if (f.updated > 0) {
+          final addKey = 'add:${f.key}';
+          final prev = tombs[addKey] ?? 0;
+          if (f.updated > prev) tombs[addKey] = f.updated;
+        }
+      }
+    } else {
+      hist = preservedRemoteHistory ?? const <dynamic>[];
+      favs = preservedRemoteFavorites ?? const <dynamic>[];
+      tombs = <String, int>{
+        if (preservedRemoteTombstones != null) ...preservedRemoteTombstones,
+      };
+      for (final entry in _readSyncTombstones().entries) {
+        if (entry.key.startsWith('sub:')) {
+          final prev = tombs[entry.key] ?? 0;
+          if (entry.value > prev) tombs[entry.key] = entry.value;
+        }
       }
     }
     List<dynamic>? subsPayload;
@@ -3483,8 +3514,8 @@ class StorageService {
     if (remotePayloadRaw == null || remotePayloadRaw.trim().isEmpty) {
       final payload = exportSyncPayload(nowMs: now);
       return (
-        historyCount: localHist.length,
-        favoriteCount: localFavs.length,
+        historyCount: webdavSyncHistory ? localHist.length : 0,
+        favoriteCount: webdavSyncHistory ? localFavs.length : 0,
         subscriptionCount: webdavSyncSubs ? localPublicSubs.length : 0,
         changed: false,
         subscriptionsChanged: false,
@@ -3514,6 +3545,8 @@ class StorageService {
     final remoteTombs = <String, int>{};
     final remoteSubsRaw = <Map<String, dynamic>>[];
     List<dynamic>? preservedRemoteSubs;
+    List<dynamic>? preservedRemoteHist;
+    List<dynamic>? preservedRemoteFavs;
 
     if (schema == syncSchema) {
       final rh =
@@ -3521,6 +3554,7 @@ class StorageService {
           decoded['history'] ??
           decoded['watchHistory'];
       if (rh is List) {
+        preservedRemoteHist = rh;
         for (final item in rh.whereType<Map>()) {
           final e = WatchHistoryEntry.fromJson(Map<String, dynamic>.from(item));
           if (e.site.isNotEmpty && e.id.isNotEmpty) remoteHist.add(e);
@@ -3528,6 +3562,7 @@ class StorageService {
       }
       final rf = decoded['favorites'];
       if (rf is List) {
+        preservedRemoteFavs = rf;
         for (final item in rf.whereType<Map>()) {
           final map = Map<String, dynamic>.from(item);
           map['updated'] ??= map['addedAt'];
@@ -3822,6 +3857,34 @@ class StorageService {
     }
 
     return _runSequentialMutation(() async {
+      if (!webdavSyncHistory) {
+        if (subscriptionsChanged) {
+          final localTombs = _readSyncTombstones();
+          for (final entry in remoteTombs.entries) {
+            if (entry.key.startsWith('sub:')) {
+              final cur = localTombs[entry.key] ?? 0;
+              if (entry.value > cur) localTombs[entry.key] = entry.value;
+            }
+          }
+          await _writeSyncTombstones(localTombs);
+        }
+        final payloadJson = exportSyncPayload(
+          nowMs: now,
+          preservedRemoteSubscriptions: preservedRemoteSubs,
+          preservedRemoteHistory: preservedRemoteHist,
+          preservedRemoteFavorites: preservedRemoteFavs,
+          preservedRemoteTombstones: remoteTombs,
+        );
+        return (
+          historyCount: 0,
+          favoriteCount: 0,
+          subscriptionCount: finalSubCount,
+          changed: subscriptionsChanged,
+          subscriptionsChanged: subscriptionsChanged,
+          payloadJson: payloadJson,
+        );
+      }
+
       if (_historyCorrupted) {
         throw StateError('本地观看历史数据损坏，已停止同步覆盖（已备份至 watch_history_corrupt_*）');
       }
