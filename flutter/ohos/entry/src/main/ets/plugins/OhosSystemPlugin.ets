@@ -1,6 +1,7 @@
 import {
   AbilityAware,
   AbilityPluginBinding,
+  BinaryMessenger,
   FlutterPlugin,
   FlutterPluginBinding,
   MethodCall,
@@ -15,8 +16,15 @@ import { asset } from '@kit.AssetStoreKit';
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
 import { window } from '@kit.ArkUI';
 import { util } from '@kit.ArkTS';
+import {
+  extractMethodArg,
+  recordFromDynamicObject,
+  stringArrayFromDynamicValue
+} from './OhosDynamicBridge';
 
 const CHANNEL_NAME: string = 'com.pilipala.marcomovie/ohos_system';
+const REMOTE_KEY_CHANNEL_NAME: string = 'com.pilipala.marcomovie/ohos_remote';
+const OHOS_REMOTE_KEY_EVENT_NAME: string = 'MARCO_OHOS_REMOTE_KEY_EVENT';
 const PATH_PROVIDER_CHANNEL: string = 'plugins.flutter.io/path_provider';
 const SHARED_PREFS_CHANNEL: string = 'plugins.flutter.io/shared_preferences';
 const PACKAGE_INFO_CHANNEL: string = 'dev.fluttercommunity.plus/package_info';
@@ -26,11 +34,61 @@ const SECURE_FALLBACK_STORE_NAME: string = 'marco_movie_secure_fallback';
 const ASSET_NOT_FOUND_CODE: number = 24000002;
 const ASSET_DUPLICATE_CODE: number = 24000003;
 
+class PathProviderCompatHandler implements MethodCallHandler {
+  private readonly host: OhosSystemPlugin;
+
+  constructor(host: OhosSystemPlugin) {
+    this.host = host;
+  }
+
+  onMethodCall(call: MethodCall, result: MethodResult): void {
+    this.host.handlePathProviderCompat(call, result);
+  }
+}
+
+class SharedPrefsCompatHandler implements MethodCallHandler {
+  private readonly host: OhosSystemPlugin;
+
+  constructor(host: OhosSystemPlugin) {
+    this.host = host;
+  }
+
+  onMethodCall(call: MethodCall, result: MethodResult): void {
+    this.host.dispatchSharedPrefsCompat(call, result);
+  }
+}
+
+class PackageInfoCompatHandler implements MethodCallHandler {
+  private readonly host: OhosSystemPlugin;
+
+  constructor(host: OhosSystemPlugin) {
+    this.host = host;
+  }
+
+  onMethodCall(call: MethodCall, result: MethodResult): void {
+    this.host.handlePackageInfoCompat(call, result);
+  }
+}
+
+class UrlLauncherCompatHandler implements MethodCallHandler {
+  private readonly host: OhosSystemPlugin;
+
+  constructor(host: OhosSystemPlugin) {
+    this.host = host;
+  }
+
+  onMethodCall(call: MethodCall, result: MethodResult): void {
+    this.host.handleUrlLauncherCompat(call, result);
+  }
+}
+
 export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCallHandler {
   private channel: MethodChannel | null = null;
+  private remoteChannel: MethodChannel | null = null;
   private compatChannels: Array<MethodChannel> = [];
   private appContext: common.Context | null = null;
   private abilityContext: common.UIAbilityContext | null = null;
+  private remoteBoundContext: common.UIAbilityContext | null = null;
 
   constructor(context?: common.UIAbilityContext) {
     if (context !== undefined) {
@@ -44,87 +102,116 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
 
   onAttachedToEngine(binding: FlutterPluginBinding): void {
     this.appContext = binding.getApplicationContext();
-    const messenger = binding.getBinaryMessenger();
+    const messenger: BinaryMessenger = binding.getBinaryMessenger();
     this.channel = new MethodChannel(messenger, CHANNEL_NAME);
     this.channel.setMethodCallHandler(this);
+    this.remoteChannel = new MethodChannel(messenger, REMOTE_KEY_CHANNEL_NAME);
     this.registerStandardFlutterChannels(messenger);
+    this.bindRemoteEventHubIfReady();
   }
 
   onDetachedFromEngine(_binding: FlutterPluginBinding): void {
+    this.unbindRemoteEventHub();
     if (this.channel !== null) {
       this.channel.setMethodCallHandler(null);
       this.channel = null;
     }
-    for (const compat of this.compatChannels) {
-      compat.setMethodCallHandler(null);
+    this.remoteChannel = null;
+    for (let i = 0; i < this.compatChannels.length; i++) {
+      this.compatChannels[i].setMethodCallHandler(null);
     }
     this.compatChannels = [];
     this.appContext = null;
   }
 
-  private registerStandardFlutterChannels(messenger: ESObject): void {
-    const pathCh = new MethodChannel(messenger, PATH_PROVIDER_CHANNEL);
-    pathCh.setMethodCallHandler({
-      onMethodCall: (call: MethodCall, result: MethodResult): void => {
-        const dirs = this.handleGetDirectories();
-        switch (call.method) {
-          case 'getTemporaryDirectory':
-            result.success(dirs['tempDir']);
-            return;
-          case 'getApplicationCacheDirectory':
-            result.success(dirs['cacheDir']);
-            return;
-          case 'getApplicationDocumentsDirectory':
-          case 'getApplicationSupportDirectory':
-          case 'getLibraryDirectory':
-          case 'getExternalStorageDirectory':
-            result.success(dirs['filesDir']);
-            return;
-          default:
-            result.notImplemented();
-        }
+  private bindRemoteEventHubIfReady(): void {
+    if (this.abilityContext === null || this.remoteChannel === null) {
+      return;
+    }
+    if (this.remoteBoundContext === this.abilityContext) {
+      return;
+    }
+    this.unbindRemoteEventHub();
+    this.remoteBoundContext = this.abilityContext;
+    this.remoteBoundContext.eventHub.on(OHOS_REMOTE_KEY_EVENT_NAME, (payload: Record<string, Object>) => {
+      if (this.remoteChannel !== null) {
+        this.remoteChannel.invokeMethod('onRemoteKeyEvent', payload);
       }
     });
+  }
 
-    const prefsCh = new MethodChannel(messenger, SHARED_PREFS_CHANNEL);
-    prefsCh.setMethodCallHandler({
-      onMethodCall: (call: MethodCall, result: MethodResult): void => {
-        this.dispatchSharedPrefsCompat(call, result);
+  private unbindRemoteEventHub(): void {
+    if (this.remoteBoundContext !== null) {
+      try {
+        this.remoteBoundContext.eventHub.off(OHOS_REMOTE_KEY_EVENT_NAME);
+      } catch (_err) {
+        // Ignore teardown errors when ability context is already destroyed.
       }
-    });
+      this.remoteBoundContext = null;
+    }
+  }
 
-    const pkgCh = new MethodChannel(messenger, PACKAGE_INFO_CHANNEL);
-    pkgCh.setMethodCallHandler({
-      onMethodCall: (_call: MethodCall, result: MethodResult): void => {
-        this.handleGetPackageInfo().then((info) => {
-          info['buildSignature'] = '';
-          result.success(info);
-        }).catch((err: Error) => {
-          result.error('OHOS_PKG_ERR', err.message, null);
-        });
-      }
-    });
+  private registerStandardFlutterChannels(messenger: BinaryMessenger): void {
+    const pathCh: MethodChannel = new MethodChannel(messenger, PATH_PROVIDER_CHANNEL);
+    pathCh.setMethodCallHandler(new PathProviderCompatHandler(this));
 
-    const urlCh = new MethodChannel(messenger, URL_LAUNCHER_CHANNEL);
-    urlCh.setMethodCallHandler({
-      onMethodCall: (call: MethodCall, result: MethodResult): void => {
-        if (call.method === 'canLaunch') {
-          result.success(true);
-          return;
-        }
-        if (call.method === 'launch' || call.method === 'launchUrl') {
-          const url: string = String(this.getArg(call, 'url') ?? '');
-          this.handleOpenExternalUrl(url).then((ok) => result.success(ok)).catch(() => result.success(false));
-          return;
-        }
-        result.notImplemented();
-      }
-    });
+    const prefsCh: MethodChannel = new MethodChannel(messenger, SHARED_PREFS_CHANNEL);
+    prefsCh.setMethodCallHandler(new SharedPrefsCompatHandler(this));
+
+    const pkgCh: MethodChannel = new MethodChannel(messenger, PACKAGE_INFO_CHANNEL);
+    pkgCh.setMethodCallHandler(new PackageInfoCompatHandler(this));
+
+    const urlCh: MethodChannel = new MethodChannel(messenger, URL_LAUNCHER_CHANNEL);
+    urlCh.setMethodCallHandler(new UrlLauncherCompatHandler(this));
 
     this.compatChannels = [pathCh, prefsCh, pkgCh, urlCh];
   }
 
-  private async dispatchSharedPrefsCompat(call: MethodCall, result: MethodResult): Promise<void> {
+  handlePathProviderCompat(call: MethodCall, result: MethodResult): void {
+    const dirs: Record<string, string> = this.handleGetDirectories();
+    switch (call.method) {
+      case 'getTemporaryDirectory':
+        result.success(dirs['tempDir']);
+        return;
+      case 'getApplicationCacheDirectory':
+        result.success(dirs['cacheDir']);
+        return;
+      case 'getApplicationDocumentsDirectory':
+      case 'getApplicationSupportDirectory':
+      case 'getLibraryDirectory':
+      case 'getExternalStorageDirectory':
+        result.success(dirs['filesDir']);
+        return;
+      default:
+        result.notImplemented();
+    }
+  }
+
+  handlePackageInfoCompat(_call: MethodCall, result: MethodResult): void {
+    this.handleGetPackageInfo().then((info: Record<string, string>) => {
+      info['buildSignature'] = '';
+      result.success(info);
+    }).catch((err: Error) => {
+      result.error('OHOS_PKG_ERR', err.message, null);
+    });
+  }
+
+  handleUrlLauncherCompat(call: MethodCall, result: MethodResult): void {
+    if (call.method === 'canLaunch') {
+      result.success(true);
+      return;
+    }
+    if (call.method === 'launch' || call.method === 'launchUrl') {
+      const url: string = String(this.getArg(call, 'url') ?? '');
+      this.handleOpenExternalUrl(url)
+        .then((ok: boolean) => result.success(ok))
+        .catch(() => result.success(false));
+      return;
+    }
+    result.notImplemented();
+  }
+
+  async dispatchSharedPrefsCompat(call: MethodCall, result: MethodResult): Promise<void> {
     try {
       switch (call.method) {
         case 'getAll':
@@ -163,9 +250,11 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
 
   onAttachedToAbility(binding: AbilityPluginBinding): void {
     this.abilityContext = binding.getAbility().context as common.UIAbilityContext;
+    this.bindRemoteEventHubIfReady();
   }
 
   onDetachedFromAbility(): void {
+    this.unbindRemoteEventHub();
     this.abilityContext = null;
   }
 
@@ -269,21 +358,7 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
   }
 
   private getArg(call: MethodCall, key: string): ESObject {
-    const callObj: ESObject = call as ESObject;
-    if (typeof callObj.argument === 'function') {
-      const val: ESObject = callObj.argument(key);
-      if (val !== undefined) {
-        return val;
-      }
-    }
-    const args: ESObject = call.args;
-    if (args === null || args === undefined) {
-      return undefined;
-    }
-    if (args instanceof Map) {
-      return args.get(key);
-    }
-    return args[key];
+    return extractMethodArg(call, key);
   }
 
   private requireContext(): common.Context {
@@ -349,28 +424,8 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
 
   private async handlePrefsGetAll(): Promise<Record<string, Object>> {
     const prefs: dataPreferences.Preferences = await this.getPrefsStore(PREFS_STORE_NAME);
-    const allObj: ESObject = await prefs.getAll();
-    const out: Record<string, Object> = {};
-    if (allObj === null || allObj === undefined) {
-      return out;
-    }
-    if (allObj instanceof Map) {
-      allObj.forEach((value: Object, key: string) => {
-        if (value !== undefined && value !== null) {
-          out[String(key)] = value;
-        }
-      });
-      return out;
-    }
-    const keys: Array<string> = Object.keys(allObj);
-    for (let i = 0; i < keys.length; i++) {
-      const k: string = keys[i];
-      const v: ESObject = allObj[k];
-      if (v !== undefined && v !== null) {
-        out[k] = v as Object;
-      }
-    }
-    return out;
+    const allObj: Object = await prefs.getAll();
+    return recordFromDynamicObject(allObj);
   }
 
   private async handlePrefsSet(key: string, valueType: string, value: ESObject): Promise<boolean> {
@@ -392,13 +447,7 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
         break;
       }
       case 'stringList': {
-        const list: Array<string> = [];
-        if (Array.isArray(value)) {
-          const rawArr: Array<ESObject> = value as Array<ESObject>;
-          for (let i = 0; i < rawArr.length; i++) {
-            list.push(String(rawArr[i] ?? ''));
-          }
-        }
+        const list: Array<string> = stringArrayFromDynamicValue(value);
         await prefs.put(key, list);
         break;
       }

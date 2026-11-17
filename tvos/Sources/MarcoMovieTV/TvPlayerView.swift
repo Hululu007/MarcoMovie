@@ -239,14 +239,19 @@ public struct TvPlayerView: View {
                     }
                     Spacer()
                     if !currentSession.isLiveStream {
-                        Menu("倍速 \(String(format: "%.2gx", selectedSpeed))") {
-                            ForEach(speedChoices, id: \.self) { sp in
-                                Button("\(String(format: "%.2gx", sp))") {
-                                    selectedSpeed = sp
-                                    engine.setPlaybackRate(Float(sp))
-                                    appModel.updatePlaybackPreferences { $0.playSpeed = sp }
+                        if #available(tvOS 17.0, *) {
+                            Menu("倍速 \(String(format: "%.2gx", selectedSpeed))") {
+                                ForEach(speedChoices, id: \.self) { sp in
+                                    Button("\(String(format: "%.2gx", sp))") {
+                                        applyPlaybackSpeed(sp)
+                                    }
                                 }
                             }
+                        } else {
+                            Button("倍速 \(String(format: "%.2gx", selectedSpeed))") {
+                                cyclePlaybackSpeed()
+                            }
+                            .buttonStyle(.bordered)
                         }
                     }
                 }
@@ -366,6 +371,18 @@ public struct TvPlayerView: View {
         Task {
             await loadCurrentEpisodeStream()
         }
+    }
+
+    private func applyPlaybackSpeed(_ sp: Double) {
+        selectedSpeed = sp
+        engine.setPlaybackRate(Float(sp))
+        appModel.updatePlaybackPreferences { $0.playSpeed = sp }
+    }
+
+    private func cyclePlaybackSpeed() {
+        let currentIdx = speedChoices.firstIndex { abs($0 - selectedSpeed) < 0.01 } ?? 1
+        let nextSp = speedChoices[(currentIdx + 1) % speedChoices.count]
+        applyPlaybackSpeed(nextSp)
     }
 
     private func showTransientHud() {

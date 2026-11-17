@@ -375,15 +375,16 @@ public final class AppViewModel: ObservableObject {
         isSearching = true
 
         let sitesSnapshot = config.publicAvailableSites
-        searchTask = Task {
-            _ = await cmsClient.searchAllSites(sites: sitesSnapshot, keyword: kw) { [weak self] batch in
-                await MainActor.run {
-                    guard let self = self, !Task.isCancelled else { return }
-                    self.searchBatches.append(batch)
+        searchTask = Task { [weak self] in
+            guard let client = self?.cmsClient else { return }
+            _ = await client.searchAllSites(sites: sitesSnapshot, keyword: kw) { [weak self] batch in
+                await MainActor.run { [weak self] in
+                    guard let strongSelf = self, !Task.isCancelled else { return }
+                    strongSelf.searchBatches.append(batch)
                 }
             }
             if !Task.isCancelled {
-                self.isSearching = false
+                self?.isSearching = false
             }
         }
     }

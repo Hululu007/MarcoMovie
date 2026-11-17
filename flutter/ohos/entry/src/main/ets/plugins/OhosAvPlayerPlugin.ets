@@ -14,6 +14,10 @@ import {
 } from '@ohos/flutter_ohos';
 import { media } from '@kit.MediaKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import {
+  extractMethodArg,
+  stringRecordFromDynamicObject
+} from './OhosDynamicBridge';
 
 const METHOD_CHANNEL_NAME: string = 'com.pilipala.marcomovie/ohos_avplayer';
 const EVENT_CHANNEL_PREFIX: string = 'com.pilipala.marcomovie/ohos_avplayer/events/';
@@ -208,46 +212,11 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
   }
 
   private getArg(call: MethodCall, key: string): ESObject {
-    const callObj: ESObject = call as ESObject;
-    if (typeof callObj.argument === 'function') {
-      const val: ESObject = callObj.argument(key);
-      if (val !== undefined) {
-        return val;
-      }
-    }
-    const args: ESObject = call.args;
-    if (args === null || args === undefined) {
-      return undefined;
-    }
-    if (args instanceof Map) {
-      return args.get(key);
-    }
-    return args[key];
+    return extractMethodArg(call, key);
   }
 
   private toHeaderRecord(rawHeaders: ESObject): Record<string, string> {
-    const out: Record<string, string> = {};
-    if (rawHeaders === null || rawHeaders === undefined) {
-      return out;
-    }
-    if (rawHeaders instanceof Map) {
-      rawHeaders.forEach((v: Object, k: Object) => {
-        const key: string = String(k ?? '').trim();
-        if (key.length > 0 && v !== null && v !== undefined) {
-          out[key] = String(v);
-        }
-      });
-      return out;
-    }
-    const keys: Array<string> = Object.keys(rawHeaders);
-    for (let i = 0; i < keys.length; i++) {
-      const k: string = keys[i].trim();
-      const v: ESObject = rawHeaders[keys[i]];
-      if (k.length > 0 && v !== null && v !== undefined) {
-        out[k] = String(v);
-      }
-    }
-    return out;
+    return stringRecordFromDynamicObject(rawHeaders);
   }
 
   private requireSession(playerId: number): PlayerSession {
@@ -339,17 +308,9 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
       throw new Error('OhosAvPlayerPlugin is not attached to a FlutterEngine');
     }
     const playerId: number = ++this.nextPlayerId;
-    let surfaceEntry: SurfaceTextureEntry;
-    let textureId: number;
-    const registryObj: ESObject = this.textureRegistry as ESObject;
-    if (typeof registryObj.registerSurfaceTexture === 'function') {
-      surfaceEntry = registryObj.registerSurfaceTexture() as SurfaceTextureEntry;
-      textureId = Math.trunc(Number((surfaceEntry as ESObject).getTextureId()));
-    } else {
-      textureId = Math.trunc(Number(this.textureRegistry.getTextureId()));
-      surfaceEntry = this.textureRegistry.registerTexture(textureId);
-    }
-    const surfaceId: string = surfaceEntry.getSurfaceId().toString();
+    const textureId: number = Math.trunc(Number(this.textureRegistry.getTextureId()));
+    const surfaceEntry: SurfaceTextureEntry = this.textureRegistry.registerTexture(textureId);
+    const surfaceId: string = String(surfaceEntry.getSurfaceId());
 
     const avPlayer: media.AVPlayer = await media.createAVPlayer();
     const streamHandler: AvPlayerEventStreamHandler = new AvPlayerEventStreamHandler();
@@ -741,11 +702,10 @@ export class OhosAvPlayerPlugin implements FlutterPlugin, MethodCallHandler {
     }
 
     try {
-      const entryObj: ESObject = session.surfaceEntry as ESObject;
-      if (typeof entryObj.release === 'function') {
-        entryObj.release();
-      } else if (this.textureRegistry !== null) {
+      if (this.textureRegistry !== null) {
         this.textureRegistry.unregisterTexture(session.textureId);
+      } else {
+        session.surfaceEntry.release();
       }
     } catch (_err) {
       // Ignore texture cleanup errors during engine detach.

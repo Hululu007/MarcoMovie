@@ -516,23 +516,29 @@ jobs:
           python3 prepare_ohos.py --patch-pubspec
           trap 'python3 prepare_ohos.py --restore-pubspec' EXIT
           rm -rf /tmp/marco-ohos-overlay
-          cp -r ohos /tmp/marco-ohos-overlay
+          mv ohos /tmp/marco-ohos-overlay
           flutter create --platforms=ohos --org com.pilipala --project-name=marco_movie .
           rm -f test/widget_test.dart
-          cp -r /tmp/marco-ohos-overlay/entry/src/main/ets/* ohos/entry/src/main/ets/
+          cp /tmp/marco-ohos-overlay/entry/src/main/ets/entryability/EntryAbility.ets ohos/entry/src/main/ets/entryability/EntryAbility.ets
+          cp /tmp/marco-ohos-overlay/entry/src/main/ets/pages/Index.ets ohos/entry/src/main/ets/pages/Index.ets
+          mkdir -p ohos/entry/src/main/ets/plugins
+          cp /tmp/marco-ohos-overlay/entry/src/main/ets/plugins/Ohos*.ets ohos/entry/src/main/ets/plugins/
+          cp /tmp/marco-ohos-overlay/entry/src/main/ets/plugins/Ohos*.ts ohos/entry/src/main/ets/plugins/
           mkdir -p ohos/entry/src/main/cpp
           cp -r /tmp/marco-ohos-overlay/entry/src/main/cpp/* ohos/entry/src/main/cpp/
           cp /tmp/marco-ohos-overlay/entry/src/main/module.json5 ohos/entry/src/main/module.json5
-          cp /tmp/marco-ohos-overlay/entry/build-profile.json5 ohos/entry/build-profile.json5
-          cp /tmp/marco-ohos-overlay/AppScope/app.json5 ohos/AppScope/app.json5
           cp /tmp/marco-ohos-overlay/AppScope/resources/base/element/string.json ohos/AppScope/resources/base/element/string.json
           cp /tmp/marco-ohos-overlay/entry/src/main/resources/base/element/* ohos/entry/src/main/resources/base/element/
           python3 prepare_ohos.py
           flutter pub get
           VERSION=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['harmonyos']['versionName'])")
           BUILD_NUM=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['harmonyos']['buildNumber'])")
-          flutter build hap --release --target-platform ohos-arm64 --build-name="$VERSION" --build-number="$BUILD_NUM"
-          HAP_SRC=$(find ohos/entry/build/default/outputs/default -maxdepth 1 -name '*.hap' | head -n 1)
+          flutter build hap --release --target-platform ohos-arm64 --build-name="$VERSION" --build-number="$BUILD_NUM" || {
+            echo "=== Hvigor diagnostic build logs ===" >&2
+            find ohos/.hvigor -name '*.log' -exec tail -n 120 {} + >&2 || true
+            exit 1
+          }
+          HAP_SRC=$(find ohos/entry/build -name '*.hap' | sort | head -n 1)
           if [ -z "$HAP_SRC" ] || [ ! -f "$HAP_SRC" ]; then
             echo "ERROR: Expected .hap output under ohos/entry/build/default/outputs/default" >&2
             exit 1

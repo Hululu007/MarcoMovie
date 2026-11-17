@@ -143,26 +143,33 @@ def _write_text_idempotent(path: Path, content: str) -> bool:
 
 
 def sync_ohos_version(project_root: Path = ROOT) -> tuple[str, int]:
-    """Synchronize ohos/AppScope/app.json5 and oh-package.json5 with edition-versions.json."""
+    """Synchronize ohos/AppScope/app.json5, entry/build-profile.json5, and oh-package.json5."""
     version_name, version_code = resolve_harmonyos_version(project_root)
     app_json5 = project_root / "ohos" / "AppScope" / "app.json5"
     if app_json5.exists():
         doc = load_json5(app_json5)
     else:
-        doc = {
-            "app": {
-                "bundleName": "com.pilipala.marcomovie",
-                "vendor": "Pilipala",
-                "versionCode": version_code,
-                "versionName": version_name,
-                "icon": "$media:app_icon",
-                "label": "$string:app_name",
-            }
-        }
+        doc = {"app": {}}
     app_obj = doc.setdefault("app", {})
+    app_obj["bundleName"] = "com.pilipala.marcomovie"
+    app_obj["vendor"] = "Pilipala"
     app_obj["versionCode"] = version_code
     app_obj["versionName"] = version_name
+    app_obj["icon"] = "$media:app_icon"
+    app_obj["label"] = "$string:app_name"
     _write_text_idempotent(app_json5, json.dumps(doc, indent=2, ensure_ascii=False))
+
+    entry_profile = project_root / "ohos" / "entry" / "build-profile.json5"
+    if entry_profile.exists():
+        entry_doc = load_json5(entry_profile)
+        build_opt = entry_doc.setdefault("buildOption", {})
+        build_opt["externalNativeOptions"] = {
+            "path": "./src/main/cpp/CMakeLists.txt",
+            "arguments": "",
+            "cppFlags": "-std=c++17",
+            "abiFilters": ["arm64-v8a", "x86_64"],
+        }
+        _write_text_idempotent(entry_profile, json.dumps(entry_doc, indent=2, ensure_ascii=False))
 
     for pkg_rel in ("ohos/oh-package.json5", "ohos/entry/oh-package.json5"):
         pkg_path = project_root / pkg_rel
@@ -262,7 +269,7 @@ def _relax_quickjs_pubspec(pubspec_text: str) -> str:
 
 
 def _backup_dir(project_root: Path) -> Path:
-    return project_root / "ohos" / ".pubspec_backup"
+    return project_root / ".ohos_pubspec_backup"
 
 
 def patch_pubspecs(project_root: Path = ROOT) -> None:
