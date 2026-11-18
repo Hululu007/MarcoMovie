@@ -584,7 +584,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _liveGroupsScrollController.dispose();
     super.dispose();
   }
-  void _reloadSavedConfig() {
+  void _reloadSavedConfig({bool bypassHomeSnapshot = false}) {
     // A deleted source may still have catalogue/live/search requests in flight.
     // Invalidate them before exposing the new registry, including an empty one.
     _cancelCatalogue();
@@ -632,7 +632,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       if (_privateSessionUnlocked) {
         _selectedPrivateSiteKey = _activeSite!.key;
       }
-      _loadSiteHome();
+      _loadSiteHome(bypassSnapshot: bypassHomeSnapshot);
     } else {
       _activeSite = null;
       _categories = const [];
@@ -752,7 +752,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _filterGenreLabel.isEmpty &&
         _filterArea.isEmpty &&
         _filterYear.isEmpty) {
-      await _loadSiteHome();
+      await _loadSiteHome(bypassSnapshot: true);
       return;
     }
     await _reloadFilteredListing(page: 1);
@@ -3901,7 +3901,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     setState(() {
       _privateSessionUnlocked = false;
     });
-    _reloadSavedConfig();
+    _reloadSavedConfig(bypassHomeSnapshot: true);
   }
 
   void _openPrivateSpaceWithAuth() {
