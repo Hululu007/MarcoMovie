@@ -293,13 +293,21 @@ class PosterLoader {
     if (cached != null) return cached;
     final cleaned = rawTitle
         .replaceAll(RegExp(r'[\(（\[【].*?[\)）\]】]'), '')
-        .replaceAll(RegExp(r'第[0-9一二三四五六七八九十百]+[季部集期篇章]'), '')
         .replaceAll(
           RegExp(
-            r'\b(4K|1080[pP]|2160[pP]|720[pP]|HD|BD|国语|粤语|中字|更新至.*|全\d+集)\b',
+            r'[\s·\-—:：]*(?:更新至|更至|更新到|连载至|全\s*\d+\s*[集期话篇章]|共\s*\d+\s*[集期话篇章]|已完结|完结).*$',
           ),
           '',
         )
+        .replaceAll(RegExp(r'第[0-9一二三四五六七八九十百零〇]+[季部集期篇章话]'), '')
+        .replaceAll(
+          RegExp(
+            r'(?<![A-Za-z0-9])(?:4K|2160[pP]|1080[pP]|720[pP]|HD|BD|HDR|SDR)(?![A-Za-z0-9])',
+            caseSensitive: false,
+          ),
+          '',
+        )
+        .replaceAll(RegExp(r'(?:国语|粤语|中字|双语|超清|蓝光|未删减版?)\s*$'), '')
         .replaceAll(RegExp(r'(?:19|20)\d{2}\s*$'), '')
         .trim();
     if (_cleanTitleMemo.length > 1024) {

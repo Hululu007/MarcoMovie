@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -360,6 +361,29 @@ class CatPawHost {
     final entries = manifest['files'] as List;
     if (entries.isEmpty || entries.length > 32) {
       throw const FormatException('DRPY 本机运行组件数量无效');
+    }
+    if (bootstrap == null) {
+      final stagedManifest = File('${root.path}/drpy-assets.json');
+      if (await stagedManifest.exists() &&
+          await stagedManifest.length() == manifestBytes.length &&
+          listEquals(await stagedManifest.readAsBytes(), manifestBytes)) {
+        var allPresent = true;
+        for (final entry in entries) {
+          if (entry is! Map ||
+              entry['name'] is! String ||
+              entry['bytes'] is! int) {
+            allPresent = false;
+            break;
+          }
+          final staged = File('${root.path}/${entry['name']}');
+          if (!await staged.exists() ||
+              await staged.length() != entry['bytes']) {
+            allPresent = false;
+            break;
+          }
+        }
+        if (allPresent) return;
+      }
     }
     final seen = <String>{};
     final verified = <String, List<int>>{};

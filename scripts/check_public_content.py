@@ -123,6 +123,7 @@ CLOUD_SHARE_HOSTS = {
     'flutter/lib/core/netdisk_service.dart': {'auth.aliyundrive.com'},
     'flutter/lib/core/cloud_share.dart': {'fast.uc.cn'},
     'flutter/lib/core/doh_resolver.dart': {'dns.alidns.com', 'cloudflare-dns.com', 'dns.google'},
+    'shared/catpaw/drpy-http.cjs': {'223.5.5.5', '1.12.12.12', 'dns.alidns.com', 'cloudflare-dns.com'},
 }
 
 def paths():

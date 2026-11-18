@@ -3383,6 +3383,37 @@ const WEX_NATIVE_SHAS = new Set([
   '646f8bb4dda60536f8d71f537892f4631053e9cc2a21d458015bd0bb143a1fb5'
 ]);
 const WEX_TEMPLATE_PROFILE = '9848e4d7b2d81b193ec458459d21f9cada92e0374a424a9ddaeaf440736af178';
+const wexDexCache = new Map();
+
+function readWexDexCached(bytes, profile) {
+  const artifactSha = sha(bytes);
+  const cached = wexDexCache.get(artifactSha);
+  if (cached) return cached;
+  const budget = { bytes: 0, entries: 0 };
+  if (profile) {
+    const native = zipMember(bytes, 'assets/wexguard_v8.so');
+    if (native.length !== profile.nativeSize || sha(native) !== profile.nativeSha) {
+      throw Error('guard_artifact_integrity');
+    }
+    const dex = new Dex(zipMember(unwrapWexGuard(zipMember(bytes, 'assets/wexshinidie.guard', budget)), 'classes.dex', budget));
+    if (wexDexCache.size >= 2) wexDexCache.delete(wexDexCache.keys().next().value);
+    wexDexCache.set(artifactSha, dex);
+    return dex;
+  }
+  let native;
+  try {
+    native = zipMember(bytes, 'assets/wexguard_v8.so', budget);
+  } catch (_) {
+    throw Error('guard_artifact_unsupported');
+  }
+  if (native.length !== 48680 || !WEX_NATIVE_SHAS.has(sha(native))) {
+    throw Error('guard_artifact_unsupported');
+  }
+  const dex = new Dex(zipMember(unwrapWexGuard(zipMember(bytes, 'assets/wexshinidie.guard', budget)), 'classes.dex', budget));
+  if (wexDexCache.size >= 2) wexDexCache.delete(wexDexCache.keys().next().value);
+  wexDexCache.set(artifactSha, dex);
+  return dex;
+}
 
 function extractWex(bytes, adapter, rawExtension) {
   if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > MAX) fail();
@@ -3390,17 +3421,12 @@ function extractWex(bytes, adapter, rawExtension) {
   const profile = PROFILES[sha(bytes)];
   const extText = decodeWexExtension(rawExtension);
   const extObj = parseExtObject(extText);
-  const budget = { bytes: 0, entries: 0 };
   const extracted = {};
 
   if (profile) {
-    const native = zipMember(bytes, 'assets/wexguard_v8.so');
-    if (native.length !== profile.nativeSize || sha(native) !== profile.nativeSha) {
-      throw Error('guard_artifact_integrity');
-    }
+    const dex = readWexDexCached(bytes, profile);
     const spec = profile.spiders[adapter];
     if (!spec) throw Error('guard_artifact_unsupported');
-    const dex = new Dex(zipMember(unwrapWexGuard(zipMember(bytes, 'assets/wexshinidie.guard', budget)), 'classes.dex', budget));
     for (const [, [methodName, expectedHash]] of Object.entries(spec.methods)) {
       dex.reviewedCodeByHash(spec.cls, methodName, expectedHash);
     }
@@ -3420,20 +3446,11 @@ function extractWex(bytes, adapter, rawExtension) {
       }
     }
   } else {
-    let native;
-    try {
-      native = zipMember(bytes, 'assets/wexguard_v8.so', budget);
-    } catch (_) {
-      throw Error('guard_artifact_unsupported');
-    }
-    if (native.length !== 48680 || !WEX_NATIVE_SHAS.has(sha(native))) {
-      throw Error('guard_artifact_unsupported');
-    }
     const tpl = PROFILES[WEX_TEMPLATE_PROFILE];
     const spec = tpl && tpl.spiders && tpl.spiders[adapter];
     if (!spec) throw Error('guard_artifact_unsupported');
     try {
-      const dex = new Dex(zipMember(unwrapWexGuard(zipMember(bytes, 'assets/wexshinidie.guard', budget)), 'classes.dex', budget));
+      const dex = readWexDexCached(bytes, null);
       if (!dex.classMethods(spec.cls)) throw Error('guard_artifact_unsupported');
       const extractUnique = (clsName, methodName, unit) => {
         const list = dex.extractMethodLiterals(clsName, methodName);

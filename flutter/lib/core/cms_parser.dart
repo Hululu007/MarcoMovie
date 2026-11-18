@@ -2060,6 +2060,11 @@ class CmsParser {
     if (lower.contains('mdzypic.com') || lower.contains('macci.cc')) {
       return true;
     }
+    if (RegExp(
+      r'/(?:loading|lazyload|load|nopic|no-pic|default_pic|blank|none)\.(?:gif|png|jpe?g|webp|svg)(?:[?#]|$)',
+    ).hasMatch(lower)) {
+      return true;
+    }
     return false;
   }
 

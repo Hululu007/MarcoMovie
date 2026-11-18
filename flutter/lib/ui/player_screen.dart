@@ -358,6 +358,13 @@ class _PlayerScreenState extends State<PlayerScreen>
             _loading = false;
           }
         });
+        if (shouldClearLoading &&
+            _playing &&
+            !_buffering &&
+            _controlsVisible &&
+            (_hideTimer == null || !_hideTimer!.isActive)) {
+          _scheduleHide();
+        }
       } else {
         _position = nextPos;
       }
@@ -399,10 +406,18 @@ class _PlayerScreenState extends State<PlayerScreen>
         } else {
           _duration = dur;
         }
-        if (dur > Duration.zero && _loading) {
+        final clearedLoading = dur > Duration.zero && _loading;
+        if (clearedLoading) {
           _loading = false;
         }
       });
+      if (dur > Duration.zero &&
+          _playing &&
+          !_buffering &&
+          _controlsVisible &&
+          (_hideTimer == null || !_hideTimer!.isActive)) {
+        _scheduleHide();
+      }
       if (!_isLiveStream && dur > Duration.zero && _pendingResumeMs > 0) {
         final sessionAtSeek = _playSession;
         final maxSeek = math.max(0, dur.inMilliseconds - 2000);
@@ -535,12 +550,34 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncMobileSystemBars();
+  }
+
+  void _syncMobileSystemBars({bool force = false}) {
+    if (_desktop ||
+        widget.embedded ||
+        OhosRuntime.shouldUseTvUi(widget.storage.tvUiMode)) {
+      return;
+    }
+    final size = MediaQuery.maybeSizeOf(context);
+    final isLandscape = size != null && size.width > size.height;
+    final isTablet = size != null && size.shortestSide >= 600;
+    final immersive =
+        _screenLocked || !_controlsVisible || isLandscape || isTablet;
+    unawaited(_mobileChrome.setImmersive(immersive, force: force));
+  }
+
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
       _saveProgress(immediate: true);
       widget.storage.flushPendingHistory();
       widget.storage.scheduleAutoWebdavSync(immediate: true);
+    } else if (state == AppLifecycleState.resumed) {
+      _syncMobileSystemBars(force: true);
     }
   }
 
@@ -1181,6 +1218,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           !_buffering &&
           _playbackError.isEmpty) {
         setState(() => _controlsVisible = false);
+        _syncMobileSystemBars();
       }
     });
   }
@@ -1245,6 +1283,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _playerFocusNode.requestFocus();
       }
       _showHud('已锁定屏幕 · 防误触开启');
+      _syncMobileSystemBars();
       _scheduleLockHide();
     } else {
       setState(() {
@@ -1256,6 +1295,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _playerFocusNode.requestFocus();
       }
       _showHud('已解锁屏幕');
+      _syncMobileSystemBars();
       _scheduleHide();
     }
   }
@@ -1269,6 +1309,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _playerFocusNode.requestFocus();
     }
     setState(() => _controlsVisible = !_controlsVisible);
+    _syncMobileSystemBars();
     if (_controlsVisible) _scheduleHide();
   }
 

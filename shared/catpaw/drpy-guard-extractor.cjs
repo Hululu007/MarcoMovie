@@ -245,7 +245,14 @@ const FTY_NATIVE_MASKS = Object.freeze({
   'fac9e3937d9928e437ebff79bc5164df418a6adb212494ef21c273579b045dcb': 0xb7
 });
 
+const ftyArtifactCache = new Map();
+
 function readFtyGuardArtifact(bytes, needDex = true) {
+  const artifactSha = Buffer.isBuffer(bytes) && bytes.length <= MAX ? sha(bytes) : '';
+  if (artifactSha && needDex) {
+    const cached = ftyArtifactCache.get(artifactSha);
+    if (cached && cached.reader) return cached;
+  }
   const budget = { bytes: 0, entries: 0 };
   let native;
   try {
@@ -261,7 +268,12 @@ function readFtyGuardArtifact(bytes, needDex = true) {
   if (!needDex) return result;
   const payload = zipMember(bytes, 'assets/ftyshinidie.guard', budget);
   const dex = zipMember(unwrapGuard(payload), 'classes.dex', budget);
-  return { ...result, reader: new Dex(dex) };
+  const full = { ...result, reader: new Dex(dex) };
+  if (artifactSha) {
+    if (ftyArtifactCache.size >= 2) ftyArtifactCache.delete(ftyArtifactCache.keys().next().value);
+    ftyArtifactCache.set(artifactSha, full);
+  }
+  return full;
 }
 
 class Dex {
@@ -644,13 +656,21 @@ class Dex {
 }
 function extractKnownPlugin(bytes, adapter = 'dm84-v1') {
   if (!Buffer.isBuffer(bytes) || bytes.length > MAX) fail();
-  const profile = PROFILES[sha(bytes)];
+  const artifactSha = sha(bytes);
+  const profile = PROFILES[artifactSha];
   let reader;
   if (profile) {
-    const budget = { bytes: 0, entries: 0 };
-    const payload = zipMember(bytes, 'assets/ftyshinidie.guard', budget);
-    const dex = zipMember(unwrapGuard(payload), 'classes.dex', budget);
-    reader = new Dex(dex);
+    const cached = ftyArtifactCache.get(artifactSha);
+    if (cached && cached.reader) {
+      reader = cached.reader;
+    } else {
+      const budget = { bytes: 0, entries: 0 };
+      const payload = zipMember(bytes, 'assets/ftyshinidie.guard', budget);
+      const dex = zipMember(unwrapGuard(payload), 'classes.dex', budget);
+      reader = new Dex(dex);
+      if (ftyArtifactCache.size >= 2) ftyArtifactCache.delete(ftyArtifactCache.keys().next().value);
+      ftyArtifactCache.set(artifactSha, { reader });
+    }
   } else {
     ({ reader } = readFtyGuardArtifact(bytes, true));
   }

@@ -4,9 +4,11 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:path_provider/path_provider.dart';
 import 'cms_parser.dart';
 import 'csp_bridge.dart';
 import 'csp_rule_engines.dart';
@@ -95,14 +97,135 @@ class CmsClient {
   late final DrpySource _drpy = DrpySource(host: _scriptHost,
       read: (url, headers) => _getText(url, headers: headers));
   late final GuardSource _guard = GuardSource(host: _scriptHost, drpy: _drpy,
-      read: (url, headers) => _getBytes(url, headers: headers, byteLimit: GuardSource.maxArtifactBytes));
+      read: _getPluginArtifactBytes);
   late final WoggSource _wogg = WoggSource(
       read: (url, headers) => _getText(url, headers: headers),
-      readBytes: (url, headers) => _getBytes(url, headers: headers,
-          byteLimit: GuardSource.maxArtifactBytes),
+      readBytes: _getPluginArtifactBytes,
       listShare: _listCloudShare,
       listShareWithCancellation: (url, cancel) =>
           runSourceOperation(() => _listCloudShare(url), cancellation: cancel));
+
+  Future<Uint8List> _getPluginArtifactBytes(
+    String url,
+    Map<String, String> headers,
+  ) async {
+    if (_http != null ||
+        kIsWeb ||
+        Platform.environment.containsKey('FLUTTER_TEST')) {
+      return _getBytes(
+        url,
+        headers: headers,
+        byteLimit: GuardSource.maxArtifactBytes,
+      );
+    }
+    File? cacheFile;
+    File? metaFile;
+    try {
+      final support = await getApplicationSupportDirectory();
+      final dir = Directory('${support.path}/plugin_jar_cache');
+      await dir.create(recursive: true);
+      final sortedHeaders = headers.entries.toList()
+        ..sort((a, b) => a.key.compareTo(b.key));
+      final cacheKey = sha256
+          .convert(
+            utf8.encode(
+              jsonEncode([
+                url,
+                [for (final e in sortedHeaders) [e.key, e.value]],
+              ]),
+            ),
+          )
+          .toString();
+      cacheFile = File('${dir.path}/$cacheKey.jar');
+      metaFile = File('${dir.path}/$cacheKey.json');
+      if (await cacheFile.exists() && await metaFile.exists()) {
+        final len = await cacheFile.length();
+        if (len > 0 && len <= GuardSource.maxArtifactBytes) {
+          final meta = jsonDecode(await metaFile.readAsString());
+          if (meta is Map &&
+              meta['sha256'] is String &&
+              meta['ts'] is int &&
+              DateTime.now().millisecondsSinceEpoch - (meta['ts'] as int) <=
+                  24 * 3600 * 1000) {
+            final diskBytes = await cacheFile.readAsBytes();
+            if (sha256.convert(diskBytes).toString() == meta['sha256']) {
+              return diskBytes;
+            }
+          }
+        }
+      }
+    } catch (_) {
+      cacheFile = null;
+      metaFile = null;
+    }
+    try {
+      final downloaded = await _getBytes(
+        url,
+        headers: headers,
+        byteLimit: GuardSource.maxArtifactBytes,
+      );
+      final targetCacheFile = cacheFile;
+      final targetMetaFile = metaFile;
+      if (targetCacheFile != null &&
+          targetMetaFile != null &&
+          downloaded.isNotEmpty) {
+        unawaited(() async {
+          try {
+            final tmp = File(
+              '${targetCacheFile.path}.tmp-${DateTime.now().microsecondsSinceEpoch}',
+            );
+            await tmp.writeAsBytes(downloaded, flush: true);
+            await tmp.rename(targetCacheFile.path);
+            await targetMetaFile.writeAsString(
+              jsonEncode({
+                'sha256': sha256.convert(downloaded).toString(),
+                'ts': DateTime.now().millisecondsSinceEpoch,
+              }),
+              flush: true,
+            );
+            final entries = await targetCacheFile.parent
+                .list()
+                .where((e) => e is File && e.path.endsWith('.jar'))
+                .cast<File>()
+                .toList();
+            if (entries.length > 8) {
+              final stats = <(File, DateTime)>[];
+              for (final f in entries) {
+                stats.add((f, (await f.stat()).modified));
+              }
+              stats.sort((a, b) => a.$2.compareTo(b.$2));
+              for (final (old, _) in stats.take(stats.length - 8)) {
+                try {
+                  await old.delete();
+                  final m = File(
+                    '${old.path.substring(0, old.path.length - 4)}.json',
+                  );
+                  if (await m.exists()) await m.delete();
+                } catch (_) {}
+              }
+            }
+          } catch (_) {}
+        }());
+      }
+      return downloaded;
+    } catch (error) {
+      if (cacheFile != null && metaFile != null) {
+        try {
+          if (await cacheFile.exists() && await metaFile.exists()) {
+            final meta = jsonDecode(await metaFile.readAsString());
+            final diskBytes = await cacheFile.readAsBytes();
+            if (meta is Map &&
+                diskBytes.isNotEmpty &&
+                diskBytes.length <= GuardSource.maxArtifactBytes &&
+                sha256.convert(diskBytes).toString() == meta['sha256']) {
+              return diskBytes;
+            }
+          }
+        } catch (_) {}
+      }
+      rethrow;
+    }
+  }
 
   bool Function() get _sourceCancelled {
     final abort = Zone.current[_cancelKey] as Completer<void>?;
@@ -2114,21 +2237,58 @@ class CmsClient {
     if (listing.videos.isEmpty) return fallback;
     return _mergeDetail(listing.videos.first, fallback);
   }
-  CmsVideo _mergeDetail(CmsVideo detailed, CmsVideo fallback) => CmsVideo(
-    id: detailed.id.isEmpty ? fallback.id : detailed.id,
-    title: detailed.title.isEmpty ? fallback.title : detailed.title,
-    poster: CmsParser.isBrokenPosterUrl(detailed.poster) ? fallback.poster : detailed.poster,
-    remarks: detailed.remarks.isEmpty ? fallback.remarks : detailed.remarks,
-    year: detailed.year.isEmpty ? fallback.year : detailed.year,
-    area: detailed.area.isEmpty ? fallback.area : detailed.area,
-    actor: detailed.actor.isEmpty ? fallback.actor : detailed.actor,
-    description: detailed.description.isEmpty ? fallback.description : detailed.description,
-    tag: detailed.tag.isEmpty ? fallback.tag : detailed.tag,
-    doubanScore: detailed.doubanScore ?? fallback.doubanScore,
-    rtScore: detailed.rtScore ?? fallback.rtScore,
-    lines: detailed.lines,
-    sourceWarnings: detailed.sourceWarnings,
+  static final RegExp _pollutedTitleSuffixRe = RegExp(
+    r'^[\s·\-—:：]*(?:更新至|更至|更新到|连载至|全\s*\d+\s*[集期话]|共\s*\d+\s*[集期话]|已完结|完结).*$',
   );
+
+  CmsVideo _mergeDetail(CmsVideo detailed, CmsVideo fallback) {
+    final rawDetailTitle = detailed.title.trim();
+    final cleanFallbackTitle = fallback.title.trim();
+    var mergedTitle = rawDetailTitle.isEmpty ? fallback.title : detailed.title;
+    var extractedRemarks = '';
+    if (cleanFallbackTitle.isNotEmpty &&
+        rawDetailTitle.length > cleanFallbackTitle.length &&
+        rawDetailTitle.startsWith(cleanFallbackTitle)) {
+      final tail = rawDetailTitle.substring(cleanFallbackTitle.length).trim();
+      if (_pollutedTitleSuffixRe.hasMatch(tail)) {
+        mergedTitle = cleanFallbackTitle;
+        extractedRemarks = tail.replaceFirst(RegExp(r'^[\s·\-—:：]+'), '').trim();
+      }
+    } else if (rawDetailTitle.isNotEmpty) {
+      final suffixMatch = RegExp(
+        r'^(.+?)(?:[\s·\-—:：]*(?:更新至|更至|更新到|连载至)(?:第?\s*\d+\s*[集期话篇章]|[^\s]{1,12}))\s*$',
+      ).firstMatch(rawDetailTitle);
+      if (suffixMatch != null && suffixMatch.group(1)!.trim().isNotEmpty) {
+        mergedTitle = suffixMatch.group(1)!.trim();
+        extractedRemarks = rawDetailTitle
+            .substring(suffixMatch.group(1)!.length)
+            .replaceFirst(RegExp(r'^[\s·\-—:：]+'), '')
+            .trim();
+      }
+    }
+    final mergedRemarks = detailed.remarks.isNotEmpty
+        ? detailed.remarks
+        : (fallback.remarks.isNotEmpty ? fallback.remarks : extractedRemarks);
+    return CmsVideo(
+      id: detailed.id.isEmpty ? fallback.id : detailed.id,
+      title: mergedTitle,
+      poster: CmsParser.isBrokenPosterUrl(detailed.poster)
+          ? fallback.poster
+          : detailed.poster,
+      remarks: mergedRemarks,
+      year: detailed.year.isEmpty ? fallback.year : detailed.year,
+      area: detailed.area.isEmpty ? fallback.area : detailed.area,
+      actor: detailed.actor.isEmpty ? fallback.actor : detailed.actor,
+      description: detailed.description.isEmpty
+          ? fallback.description
+          : detailed.description,
+      tag: detailed.tag.isEmpty ? fallback.tag : detailed.tag,
+      doubanScore: detailed.doubanScore ?? fallback.doubanScore,
+      rtScore: detailed.rtScore ?? fallback.rtScore,
+      lines: detailed.lines,
+      sourceWarnings: detailed.sourceWarnings,
+    );
+  }
   Uri? _sourceCredentialOrigin(CmsSite site) {
     if (site.isHttpApi) return Uri.tryParse(site.api);
     Object? extension = site.ext;
@@ -2861,8 +3021,11 @@ class CmsClient {
         inFlight++;
         final abort = Completer<void>();
         requests.add(abort);
+        final perSiteTimeout = Duration(
+          seconds: (_usesJs(site) || site.isCatPaw) ? 20 : 12,
+        );
         runZoned(() => fetchSearch(site, keyword), zoneValues: {_cancelKey: abort})
-            .timeout(const Duration(seconds: 12))
+            .timeout(perSiteTimeout)
             .then((listing) {
           if (!cancelled && !controller.isClosed && listing.videos.isNotEmpty) {
             controller.add((site, listing.videos));

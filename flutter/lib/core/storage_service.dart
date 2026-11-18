@@ -87,6 +87,7 @@ class StorageService {
   static const String keyVideoSkipRecords = 'video_skip_records';
   static const String keyPlayerAlwaysShowClock = 'player_always_show_clock';
   static const String keyTvUiMode = 'tv_ui_mode';
+  static const String keyHomeSnapshots = 'site_home_snapshots_v1';
   static const int maxVideoSkipRecords = 500;
   static const String _subscriptionsFileName = 'subscriptions.json';
   static const String _watchHistoryFileName = 'watch_history.json';
@@ -1319,6 +1320,9 @@ class StorageService {
     await _prefs.setString(keyOrigin, public.isEmpty ? '' : public.first.url);
     await _prefs.setString(keyDepots, '[]');
     await _prefs.setString(keyActiveDepotName, public.isEmpty ? '' : public.first.activeDepotName);
+    for (final old in removed) {
+      await clearCachedSiteHomes(subscriptionId: old.id);
+    }
     _invalidateConfigCache();
     final config = loadSavedConfig();
     final availPublic = config?.publicAvailableSites ?? const <CmsSite>[];
@@ -2748,6 +2752,164 @@ class StorageService {
   Future<void> clearSearchHistory({bool forPrivate = false}) async {
     final storageKey = forPrivate ? keyPrivateSearchHistory : keySearchHistory;
     await _prefs.setString(storageKey, '[]');
+    if (!forPrivate) {
+      await clearCachedSiteHomes();
+    }
+  }
+
+  static String _siteHomeSnapshotKey(CmsSite site) =>
+      '${site.subscriptionId}::${site.key}::${site.api}::${site.ext.hashCode}';
+
+  ({List<CmsCategory> categories, CmsListing listing})? getCachedSiteHome(
+    CmsSite site,
+  ) {
+    if (site.isEffectivelyPrivate) return null;
+    final raw = _prefs.getString(keyHomeSnapshots);
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      final entry = decoded[_siteHomeSnapshotKey(site)];
+      if (entry is! Map) return null;
+      final savedAt = (entry['ts'] as num?)?.toInt() ?? 0;
+      // Expire snapshots older than 7 days so dead sites do not linger forever.
+      if (savedAt > 0 &&
+          DateTime.now().millisecondsSinceEpoch - savedAt >
+              7 * 24 * 3600 * 1000) {
+        return null;
+      }
+      final cats = <CmsCategory>[
+        for (final c in (entry['categories'] as List? ?? const []))
+          if (c is Map &&
+              (c['id'] ?? '').toString().isNotEmpty &&
+              (c['name'] ?? '').toString().isNotEmpty)
+            CmsCategory(
+              id: c['id'].toString(),
+              name: c['name'].toString(),
+              parentId: (c['parentId'] ?? '').toString(),
+            ),
+      ];
+      final vids = <CmsVideo>[
+        for (final v in (entry['videos'] as List? ?? const []))
+          if (v is Map &&
+              ((v['id'] ?? '').toString().isNotEmpty ||
+                  (v['title'] ?? '').toString().isNotEmpty))
+            CmsVideo(
+              id: (v['id'] ?? '').toString(),
+              title: (v['title'] ?? '').toString(),
+              poster: (v['poster'] ?? '').toString(),
+              remarks: (v['remarks'] ?? '').toString(),
+              year: (v['year'] ?? '').toString(),
+              area: (v['area'] ?? '').toString(),
+              actor: (v['actor'] ?? '').toString(),
+              description: (v['description'] ?? '').toString(),
+              tag: (v['tag'] ?? '').toString(),
+              doubanScore: (v['doubanScore'] as num?)?.toDouble(),
+              rtScore: (v['rtScore'] as num?)?.toInt(),
+            ),
+      ];
+      if (vids.isEmpty) return null;
+      return (
+        categories: cats,
+        listing: CmsListing(
+          page: 1,
+          pageCount: ((entry['pageCount'] as num?)?.toInt() ?? 1).clamp(
+            1,
+            9999,
+          ),
+          videos: vids,
+          sourceFiltered: entry['sourceFiltered'] == true,
+        ),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> saveCachedSiteHome(
+    CmsSite site,
+    List<CmsCategory> categories,
+    CmsListing listing,
+  ) async {
+    if (site.isEffectivelyPrivate || listing.videos.isEmpty) return;
+    try {
+      final existing = <String, dynamic>{};
+      final raw = _prefs.getString(keyHomeSnapshots);
+      if (raw != null && raw.isNotEmpty) {
+        final parsed = jsonDecode(raw);
+        if (parsed is Map) {
+          for (final e in parsed.entries) {
+            if (e.value is Map) existing[e.key.toString()] = e.value;
+          }
+        }
+      }
+      final key = _siteHomeSnapshotKey(site);
+      existing.remove(key);
+      existing[key] = <String, dynamic>{
+        'subId': site.subscriptionId,
+        'ts': DateTime.now().millisecondsSinceEpoch,
+        'pageCount': listing.pageCount,
+        'sourceFiltered': listing.sourceFiltered,
+        'categories': [
+          for (final c in categories.take(40))
+            {
+              'id': c.id,
+              'name': c.name,
+              if (c.parentId.isNotEmpty) 'parentId': c.parentId,
+            },
+        ],
+        'videos': [
+          for (final v in listing.videos.take(36))
+            {
+              'id': v.id,
+              'title': v.title,
+              if (v.poster.isNotEmpty) 'poster': v.poster,
+              if (v.remarks.isNotEmpty) 'remarks': v.remarks,
+              if (v.year.isNotEmpty) 'year': v.year,
+              if (v.area.isNotEmpty) 'area': v.area,
+              if (v.tag.isNotEmpty) 'tag': v.tag,
+              if (v.doubanScore != null) 'doubanScore': v.doubanScore,
+              if (v.rtScore != null) 'rtScore': v.rtScore,
+            },
+        ],
+      };
+      while (existing.length > 8) {
+        existing.remove(existing.keys.first);
+      }
+      await _prefs.setString(keyHomeSnapshots, jsonEncode(existing));
+    } catch (_) {}
+  }
+
+  Future<void> clearCachedSiteHomes({String? subscriptionId}) async {
+    if (subscriptionId == null) {
+      await _prefs.remove(keyHomeSnapshots);
+      return;
+    }
+    final raw = _prefs.getString(keyHomeSnapshots);
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final parsed = jsonDecode(raw);
+      if (parsed is! Map) {
+        await _prefs.remove(keyHomeSnapshots);
+        return;
+      }
+      final kept = <String, dynamic>{};
+      for (final e in parsed.entries) {
+        final v = e.value;
+        final subId = v is Map ? (v['subId'] ?? '').toString() : '';
+        if (subId != subscriptionId &&
+            !e.key.toString().startsWith('$subscriptionId::')) {
+          kept[e.key.toString()] = v;
+        }
+      }
+      if (kept.isEmpty) {
+        await _prefs.remove(keyHomeSnapshots);
+      } else {
+        await _prefs.setString(keyHomeSnapshots, jsonEncode(kept));
+      }
+    } catch (_) {
+      await _prefs.remove(keyHomeSnapshots);
+    }
   }
   /// Exports a backup JSON string compatible with both Android (`MarcoMovie-1`) and Flutter.
   String publicSupportedKey() {
