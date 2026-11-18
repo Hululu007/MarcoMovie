@@ -1,3 +1,8 @@
+## 未发布 — Android 电视 / 盒子 0.5.26（code 90）
+
+- V17电视界面、导航与大字号焦点、搜索联想及隐私隔离、暂停标记、续播字幕和伪装媒体识别。
+- [候选变更与实际验证边界](docs/releases/android-tv-v0.5.26.md)。原生隐私与本轮升级回归待执行，未宣称已发布或全设备通过。
+
 ## 2026-11-17 新增 Apple TV（tvOS）与 HarmonyOS NEXT（手机 / 平板 / 智慧屏）双系统首发支持（Apple TV 0.1.0 · HarmonyOS NEXT 0.1.0）
 
 - [Apple TV 0.1.0](docs/releases/appletv-v0.1.0.md) · [HarmonyOS NEXT 0.1.0](docs/releases/harmonyos-v0.1.0.md)

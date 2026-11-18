@@ -18,6 +18,8 @@ final class Prefs {
     static final String UI_SCALE_PERCENT = "ui_scale_percent";
     static final String NAV_SCALE_PERCENT = "nav_scale_percent";
     static final String TV_DOCK_POSITION = "tv_dock_position";
+    static final String TV_NAVIGATION_MODE = "tv_navigation_mode";
+    static final String TV_AMBIENT_PERCENT = "tv_ambient_percent";
     static final String TV_PLAYER_STYLE = "tv_player_style";
     static final String STARTUP_ANIMATION = "startup_animation";
     static final String SHOW_HERO_BANNER = "show_hero_banner";
@@ -72,6 +74,8 @@ final class Prefs {
     static final String WATCH_HISTORY = "watch_history";
     static final String GLOBAL_SEARCH_HISTORY = "global_search_history";
     static final String PHONETIC_TITLES = "phonetic_titles";
+    // Leave the unversioned derived cache untouched for rollback; never import it into V2.
+    static final String PHONETIC_PUBLIC_TITLES_V2 = "phonetic_public_titles_v2";
 
     // Multi-device cloud (WebDAV) & LAN sync keys (kept outside KEYS so UI reset preserves sync).
     static final String WEBDAV_URL = "webdav_url";
@@ -102,6 +106,8 @@ final class Prefs {
         UI_SCALE_PERCENT,
         NAV_SCALE_PERCENT,
         TV_DOCK_POSITION,
+        TV_NAVIGATION_MODE,
+        TV_AMBIENT_PERCENT,
         TV_PLAYER_STYLE,
         STARTUP_ANIMATION,
         SHOW_HERO_BANNER,
@@ -163,6 +169,8 @@ final class Prefs {
         ranges.put(HOME_COLUMNS, new int[] {5, 8});
         ranges.put(NAV_SCALE_PERCENT, new int[] {85, 140});
         ranges.put(TV_DOCK_POSITION, new int[] {0, 1});
+        ranges.put(TV_NAVIGATION_MODE, new int[] {0, 1});
+        ranges.put(TV_AMBIENT_PERCENT, new int[] {0, 100});
         ranges.put(TV_PLAYER_STYLE, new int[] {0, 1});
         ranges.put(HOME_ROWS, new int[] {1, 4});
         ranges.put(HOME_SECTIONS, new int[] {0, 5});
@@ -188,6 +196,15 @@ final class Prefs {
     }
 
     private Prefs() {}
+
+    /** Unset mode preserves saved right/top placement; a fresh TV defaults to the left rail. */
+    static boolean useTvLeftDock(boolean television, boolean hasLegacyPosition, int mode) {
+        return television && (mode == 1 || (mode != 0 && mode != 1 && !hasLegacyPosition));
+    }
+
+    static float tvAmbientStrength(int percent) {
+        return Math.max(0, Math.min(100, percent)) / 100f;
+    }
 
     /**
      * Validates a candidate setting from a backup payload. Returns a sanitized {@link Boolean},

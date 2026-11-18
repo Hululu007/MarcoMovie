@@ -20,7 +20,18 @@ public final class GlobalSearchScreen implements AutoCloseable {
     EditText input;
     TextView composition, status;
     boolean syncingInput, imeActive;
+    int imeConnectionDepth;
+    Runnable pendingImeRead;
+    private interface ImeEdit { boolean run(); }
     long lastInputClickMs;
+    boolean resultPrivateMode;
+    TvSearchContext pageContext;
+    boolean contextDiscarded;
+    final TvSearchPageSlot pageRequests = new TvSearchPageSlot();
+    String pageFailureSource = "", pageFailureReason = "";
+    final List<Cms.Site> searchSites = new ArrayList<>();
+    final Map<String, Integer> sourceScroll = new HashMap<>(), sourceLimits = new HashMap<>();
+    final Map<String, String> sourceFocus = new HashMap<>();
     Runnable pendingInputClick;
     LinearLayout candidates, keys, resultBody, sourceFilters;
     SearchCoordinator coordinator, retryCoordinator;
@@ -30,9 +41,16 @@ public final class GlobalSearchScreen implements AutoCloseable {
     boolean closed;
     int pageTicket, searchSerial, candidatePage, finished, failed, timedOut, busy, matched;
     String activeFilter = "", submitted = "", edited = "";
+    TvSearchImeState imeDraft = new TvSearchImeState();
     Runnable pendingSearch, pendingRender;
     java.util.concurrent.Future<?> expansion;
+    java.util.concurrent.Future<?> suggestionWork;
+    int suggestionSerial;
+    String suggestedQuery;
+    HorizontalScrollView suggestionScroll;
+    LinearLayout titleSuggestions;
     final Map<String, Button> filterButtons = new LinkedHashMap<>();
+    final Map<String, String> filterNames = new HashMap<>();
     final Set<String> displayed = new LinkedHashSet<>();
     LinearLayout resultGrid, lastRow;
     TextView emptyResult, resultHint;
@@ -47,24 +65,54 @@ public final class GlobalSearchScreen implements AutoCloseable {
     final Map<String, LinearLayout> posterCards = new HashMap<>();
     final Map<PinyinKeyboardModel.Mode, Button> modeButtons = new LinkedHashMap<>();
     SearchInputServer qrServer;
+    int qrGeneration;
     String qrAddress = "";
     AppDialog qrDialog;
 
-    static String staticSubmitted = "";
-    static Cms.Config staticConfig;
-    static long staticTime;
-    static int staticMatched;
-    static final LinkedHashMap<String, SourceResult> staticResults = new LinkedHashMap<>();
+    private static Snapshot cache;
+
+    private static final class Snapshot {
+        final TvSearchContext context;
+        final String query, filter;
+        final long time;
+        final List<String> variants;
+        final List<Cms.Site> sites;
+        final Map<String, SourceResult> results;
+        final Map<String, Integer> scroll, limits;
+        final Map<String, String> focus;
+        final PinyinKeyboardModel.Snapshot keyboard;
+        final TvSearchImeState ime;
+        final int candidatePage;
+        Snapshot(GlobalSearchScreen screen) {
+            context = screen.pageContext;
+            query = screen.submitted; filter = screen.activeFilter; time = screen.resultTime;
+            variants = new ArrayList<>(screen.searchVariants);
+            sites = new ArrayList<>(screen.searchSites);
+            results = new LinkedHashMap<>(screen.results);
+            scroll = new HashMap<>(screen.sourceScroll);
+            limits = new HashMap<>(screen.sourceLimits);
+            focus = new HashMap<>(screen.sourceFocus);
+            keyboard = screen.keyboard == null ? null : screen.keyboard.snapshot();
+            ime = screen.imeDraft.copy(); candidatePage = screen.candidatePage;
+        }
+    }
 
     static final class SourceResult {
         final Cms.Site site;
         final List<Cms.Video> videos;
         final SearchCoordinator.Outcome outcome;
+        final TvSearchPages pages;
 
         SourceResult(Cms.Site site, List<Cms.Video> videos, SearchCoordinator.Outcome outcome) {
+            this(site, videos, outcome, null);
+        }
+
+        SourceResult(Cms.Site site, List<Cms.Video> videos, SearchCoordinator.Outcome outcome,
+                TvSearchPages pages) {
             this.site = site;
             this.videos = videos;
             this.outcome = outcome;
+            this.pages = pages;
         }
     }
 
@@ -74,24 +122,35 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     public void show() {
-        String restored = keyboard == null ? initial : keyboard.query();
-        if (results.isEmpty()
-                && !staticResults.isEmpty()
-                && staticConfig == a.config
-                && System.currentTimeMillis() - staticTime < 7200000L
-                && (restored.trim().isEmpty() || restored.trim().equals(staticSubmitted))) {
-            restored = staticSubmitted;
-            submitted = staticSubmitted;
-            resultConfig = staticConfig;
-            resultTime = staticTime;
-            matched = staticMatched;
-            results.putAll(staticResults);
+        if (pageContext != null && !contextMatches()) discardContext();
+        PinyinKeyboardModel.Snapshot restoredKeyboard = keyboard == null ? null : keyboard.snapshot();
+        int restoredCandidatePage = candidatePage;
+        String restored = keyboard == null ? (contextDiscarded ? "" : initial) : keyboard.query();
+        Snapshot saved = cache;
+        if (results.isEmpty() && saved != null && !a.privateMode
+                && saved.context.matches(a.config, a.privateMode, a.engineEpoch)
+                && System.currentTimeMillis() - saved.time >= 0
+                && System.currentTimeMillis() - saved.time < 7200000L
+                && (restored.trim().isEmpty() || restored.trim().equals(saved.query))) {
+            restored = submitted = saved.query;
+            restoredKeyboard = saved.keyboard; imeDraft = saved.ime.copy(); restoredCandidatePage = saved.candidatePage;
+            resultConfig = a.config; resultPrivateMode = a.privateMode; resultTime = saved.time;
+            searchVariants = saved.variants;
+            results.putAll(saved.results); searchSites.addAll(saved.sites);
+            sourceCount = searchSites.size(); activeFilter = saved.filter;
+            sourceScroll.putAll(saved.scroll); sourceLimits.putAll(saved.limits);
+            sourceFocus.putAll(saved.focus);
+            shownLimit = sourceLimits.containsKey(activeFilter) ? sourceLimits.get(activeFilter) : 24;
+            savedResultScroll = sourceScroll.containsKey(activeFilter) ? sourceScroll.get(activeFilter) : 0;
+            recount();
         }
-        boolean searchAgain = !submitted.isEmpty() || !initial.trim().isEmpty();
+        boolean searchAgain = !submitted.isEmpty() || (!contextDiscarded && !initial.trim().isEmpty());
         boolean reuse =
                 !results.isEmpty()
                         && submitted.equals(restored.trim())
                         && resultConfig == a.config
+                        && resultPrivateMode == a.privateMode
+                        && System.currentTimeMillis() - resultTime >= 0
                         && System.currentTimeMillis() - resultTime < 7200000L;
         a.renderPage("", "");
         closed = false;
@@ -112,8 +171,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
         emptyResult = null;
         moreResults = null;
         pageTicket = a.generation;
-        a.root.setBackgroundColor(0xff101013);
-        if (a.root.getChildAt(0) instanceof ImageLoader.Atmosphere) a.root.removeViewAt(0);
+        pageContext = new TvSearchContext(a.config, a.privateMode, a.engineEpoch);
+        if (!a.isTvDevice()) {
+            a.root.setBackgroundColor(0xff101013);
+            if (a.root.getChildAt(0) instanceof ImageLoader.Atmosphere) a.root.removeViewAt(0);
+        }
         a.body.setPadding(a.dp(32), a.dp(14), a.dp(32), a.dp(16));
         try {
             keyboard = new PinyinKeyboardModel(a.getAssets().open("search/pinyin-characters.tsv"));
@@ -121,7 +183,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
             a.paragraph("内置拼音字库无法读取，请重新安装完整版本。");
             return;
         }
-        keyboard.set(restored);
+        if (restoredKeyboard != null) keyboard.restore(restoredKeyboard);
+        else keyboard.set(restored);
         LinearLayout split = a.row();
         split.setGravity(Gravity.TOP);
         int height =
@@ -139,9 +202,9 @@ public final class GlobalSearchScreen implements AutoCloseable {
         keyboardScroll.setClipToPadding(false);
         keyboardScroll.addView(left, new ScrollView.LayoutParams(-1, -2));
         split.addView(keyboardScroll, new LinearLayout.LayoutParams(a.dp(282), -1));
-        columns =
-                TvLayoutPolicy.searchColumns(
-                        a.windowWidth() / a.getResources().getDisplayMetrics().density - 346);
+        float availableWidth = a.windowWidth() / a.getResources().getDisplayMetrics().density - 346;
+        columns = a.isTvDevice() ? Math.max(2, Math.min(6, (int) (availableWidth / 95)))
+                : TvLayoutPolicy.searchColumns(availableWidth);
         LinearLayout headingRow = a.row();
         headingRow.setGravity(Gravity.CENTER_VERTICAL);
         TextView heading = a.text("搜索所有片源", 22, MainActivity.WHITE);
@@ -153,31 +216,57 @@ public final class GlobalSearchScreen implements AutoCloseable {
         qrBtn.setMinHeight(a.dp(30));
         qrBtn.setMinimumHeight(a.dp(30));
         qrBtn.setPadding(a.dp(10), a.dp(3), a.dp(10), a.dp(3));
-        headingRow.addView(qrBtn, new LinearLayout.LayoutParams(-2, a.dp(30)));
+        if (!a.isTvDevice()) headingRow.addView(qrBtn, new LinearLayout.LayoutParams(-2, a.dp(30)));
         left.addView(headingRow, new LinearLayout.LayoutParams(-1, -2));
         a.gap(left, 12);
         input =
                 new EditText(a) {
                     @Override
-                    public boolean onKeyPreIme(int keyCode, KeyEvent event) {
-                        if (keyCode == KeyEvent.KEYCODE_BACK
-                                && event.getAction() == KeyEvent.ACTION_UP
-                                && imeActive) {
-                            imeActive = false;
-                            setCursorVisible(false);
-                            setShowSoftInputOnFocus(false);
-                        }
-                        return super.onKeyPreIme(keyCode, event);
+                    public android.view.inputmethod.InputConnection onCreateInputConnection(
+                            android.view.inputmethod.EditorInfo info) {
+                        android.view.inputmethod.InputConnection base = super.onCreateInputConnection(info);
+                        if (base == null) return null;
+                        final EditText owner = this;
+                        return new android.view.inputmethod.InputConnectionWrapper(base, false) {
+                            private boolean edit(ImeEdit change) {
+                                if (!current() || !imeActive || input != owner) return false;
+                                imeConnectionDepth++;
+                                try { return change.run(); }
+                                finally { imeConnectionDepth--; captureImeUpdate(); }
+                            }
+                            @Override public boolean setComposingText(CharSequence text, int cursor) {
+                                return edit(() -> super.setComposingText(text, cursor));
+                            }
+                            @Override public boolean setComposingRegion(int start, int end) {
+                                return edit(() -> super.setComposingRegion(start, end));
+                            }
+                            @Override public boolean commitText(CharSequence text, int cursor) {
+                                return edit(() -> super.commitText(text, cursor));
+                            }
+                            @Override public boolean finishComposingText() {
+                                return edit(() -> super.finishComposingText());
+                            }
+                            @Override public boolean setSelection(int start, int end) {
+                                return edit(() -> super.setSelection(start, end));
+                            }
+                            @Override public boolean deleteSurroundingText(int before, int after) {
+                                return edit(() -> super.deleteSurroundingText(before, after));
+                            }
+                        };
                     }
 
                     @Override
-                    public boolean onTouchEvent(MotionEvent event) {
-                        boolean hadFocus = hasFocus();
-                        boolean handled = super.onTouchEvent(event);
-                        if (event.getAction() == MotionEvent.ACTION_UP && !hadFocus && hasFocus()) {
-                            handleInputClick();
+                    public boolean onKeyPreIme(int keyCode, KeyEvent event) {
+                        if (keyCode == KeyEvent.KEYCODE_BACK && imeActive) {
+                            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                                finishSystemIme(false);
+                                hideSystemIme();
+                                setCursorVisible(false);
+                                setShowSoftInputOnFocus(false);
+                            }
+                            return true;
                         }
-                        return handled;
+                        return super.onKeyPreIme(keyCode, event);
                     }
 
                     @Override
@@ -241,7 +330,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         input.setOnFocusChangeListener(
                 (v, f) -> {
                     if (!f && imeActive) {
-                        imeActive = false;
+                        finishSystemIme(false);
                         input.setCursorVisible(false);
                         input.setShowSoftInputOnFocus(false);
                         hideSystemIme();
@@ -261,6 +350,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         input.setOnClickListener(v -> handleInputClick());
         input.setOnEditorActionListener(
                 (v, actionId, event) -> {
+                    finishSystemIme(true);
                     hideSystemIme();
                     submit();
                     return true;
@@ -276,13 +366,37 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
                     @Override
                     public void afterTextChanged(android.text.Editable s) {
-                        if (syncingInput || keyboard == null) return;
-                        keyboard.set(s == null ? "" : s.toString());
+                        if (!current() || syncingInput || keyboard == null) return;
+                        if (imeActive) {
+                            // replace() may notify this watcher before BaseInputConnection sets spans.
+                            if (imeConnectionDepth == 0) {
+                                if (pendingImeRead != null) a.ui.removeCallbacks(pendingImeRead);
+                                pendingImeRead = () -> { pendingImeRead = null; captureImeUpdate(); };
+                                a.ui.post(pendingImeRead);
+                            }
+                            return;
+                        } else {
+                            imeDraft.clear(); keyboard.set(s == null ? "" : s.toString());
+                        }
                         updateAfterImeInput();
                     }
                 });
         input.setOnKeyListener((v, key, event) -> physicalKey(key, event));
-        left.addView(input, new LinearLayout.LayoutParams(-1, a.dp(48)));
+        if (a.isTvDevice()) {
+            LinearLayout inputRow = a.row();
+            inputRow.setGravity(Gravity.CENTER_VERTICAL);
+            inputRow.setBackground(a.bg(0xff29292e, 10));
+            inputRow.addView(input, new LinearLayout.LayoutParams(0, a.dp(48), 1));
+            qrBtn.setText("扫码");
+            qrBtn.setContentDescription("手机扫码输入");
+            // Two CJK glyphs plus padding do not fit in the former 42dp slot.
+            // Measure the label at the active font scale instead of ellipsizing it away.
+            qrBtn.setMinWidth(a.dp(64));
+            qrBtn.setMinimumWidth(a.dp(64));
+            qrBtn.setEllipsize(null);
+            inputRow.addView(qrBtn, new LinearLayout.LayoutParams(-2, a.dp(40)));
+            left.addView(inputRow, new LinearLayout.LayoutParams(-1, a.dp(48)));
+        } else left.addView(input, new LinearLayout.LayoutParams(-1, a.dp(48)));
         composition = a.text("", 12, MainActivity.MUTED);
         composition.setSingleLine(true);
         composition.setPadding(a.dp(2), a.dp(5), 0, 0);
@@ -338,7 +452,12 @@ public final class GlobalSearchScreen implements AutoCloseable {
         split.addView(right, new LinearLayout.LayoutParams(0, -1, 1));
         status = a.text("输入即搜索 · 停顿片刻自动更新结果。", 14, MainActivity.MUTED);
         status.setMinHeight(a.dp(30));
-        right.addView(status);
+        LinearLayout resultHeader = a.row();
+        resultHeader.setGravity(Gravity.CENTER_VERTICAL);
+        TextView resultTitle = a.text("搜索结果", 19, MainActivity.WHITE);
+        resultTitle.setTypeface(null, Typeface.BOLD);
+        if (a.isTvDevice()) resultHeader.addView(resultTitle);
+        else right.addView(status);
         HorizontalScrollView filterScroll = new HorizontalScrollView(a);
         filterScroll.setTag("search-source-scroll");
         filterScroll.setHorizontalScrollBarEnabled(false);
@@ -349,7 +468,22 @@ public final class GlobalSearchScreen implements AutoCloseable {
         sourceFilters.setClipToPadding(false);
         sourceFilters.setPadding(a.dp(4), a.dp(5), a.dp(4), a.dp(5));
         filterScroll.addView(sourceFilters);
-        right.addView(filterScroll, new LinearLayout.LayoutParams(-1, a.dp(46)));
+        if (a.isTvDevice()) {
+            resultHeader.addView(filterScroll, new LinearLayout.LayoutParams(0, a.dp(46), 1));
+            right.addView(resultHeader);
+            right.addView(status);
+        } else right.addView(filterScroll, new LinearLayout.LayoutParams(-1, a.dp(46)));
+        if (a.isTvDevice()) {
+            suggestionScroll = new HorizontalScrollView(a);
+            suggestionScroll.setTag("search-title-suggestions");
+            suggestionScroll.setHorizontalScrollBarEnabled(false);
+            titleSuggestions = a.row();
+            titleSuggestions.setGravity(Gravity.CENTER_VERTICAL);
+            titleSuggestions.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
+            suggestionScroll.addView(titleSuggestions);
+            suggestionScroll.setVisibility(View.GONE);
+            right.addView(suggestionScroll, new LinearLayout.LayoutParams(-1, a.dp(44)));
+        }
         resultScroll = new TvScrollView(a);
         resultScroll.setTag("global-search-results");
         resultScroll.setClipToPadding(false);
@@ -371,10 +505,53 @@ public final class GlobalSearchScreen implements AutoCloseable {
             showHistory();
             if (searchAgain && !restored.trim().isEmpty()) submit();
         }
+        candidatePage = restoredCandidatePage; renderCandidates();
+    }
+
+    boolean contextMatches() {
+        return pageContext != null && pageContext.matches(a.config, a.privateMode, a.engineEpoch);
     }
 
     boolean current() {
-        return !closed && !a.isFinishing() && pageTicket == a.generation;
+        return !closed && !a.isFinishing() && !a.switchingPrivacy
+                && pageTicket == a.generation && contextMatches();
+    }
+
+    static void invalidateContext(MainActivity activity) {
+        TvSearchContext.revokeAll();
+        cache = null;
+        activity.ui.removeCallbacks(activity.learnPendingTitles);
+        activity.pendingTitles.clear();
+        if (activity.searchScreen != null) activity.searchScreen.discardContext();
+    }
+
+    private void discardContext() {
+        close();
+        contextDiscarded = true;
+        submitted = edited = activeFilter = "";
+        keyboard = null; imeDraft.clear();
+        if (input != null) input.setText("");
+        if (composition != null) composition.setText("");
+        if (resultBody != null) resultBody.removeAllViews();
+        if (sourceFilters != null) sourceFilters.removeAllViews();
+        results.clear(); searchSites.clear(); searchVariants = Collections.emptyList();
+        sourceScroll.clear(); sourceLimits.clear(); sourceFocus.clear();
+        shownLimit = 24; savedResultScroll = 0;
+    }
+
+    private void cacheResults() {
+        if (contextMatches() && !a.privateMode && !submitted.isEmpty() && !results.isEmpty())
+            cache = new Snapshot(this);
+    }
+
+    private void recount() {
+        finished = results.size(); failed = timedOut = busy = matched = 0;
+        for (SourceResult result : results.values()) {
+            if (result.outcome == SearchCoordinator.Outcome.RESULT) matched++;
+            if (result.outcome == SearchCoordinator.Outcome.FAILED) failed++;
+            if (result.outcome == SearchCoordinator.Outcome.TIMEOUT) timedOut++;
+            if (result.outcome == SearchCoordinator.Outcome.BUSY) busy++;
+        }
     }
 
     void modeButton(LinearLayout row, String title, PinyinKeyboardModel.Mode mode) {
@@ -394,7 +571,12 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     Button keyButton(LinearLayout row, String label, String tag, Runnable action, float weight) {
-        Button b = a.button(label, tag, action);
+        Button b = a.button(label, tag, () -> {
+            if (!current()) return;
+            if ("search-clear".equals(tag)) imeDraft.clear();
+            if (imeDraft.composing()) { a.toast("输入法文字尚未确认，请双击输入框继续或取消"); return; }
+            action.run();
+        });
         b.setMinWidth(0);
         b.setMinimumWidth(0);
         b.setMinHeight(0);
@@ -466,8 +648,9 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void handleInputClick() {
+        if (!current()) return;
         long now = android.os.SystemClock.uptimeMillis();
-        if (now - lastInputClickMs <= 500L) {
+        if (TvV17SearchInput.isDoubleClick(lastInputClickMs, now)) {
             lastInputClickMs = 0L;
             if (pendingInputClick != null) {
                 a.ui.removeCallbacks(pendingInputClick);
@@ -481,25 +664,28 @@ public final class GlobalSearchScreen implements AutoCloseable {
         pendingInputClick =
                 () -> {
                     pendingInputClick = null;
-                    if (!current() || imeActive) return;
+                    if (!current() || imeActive || !input.hasFocus()) return;
                     View first = a.root.findViewWithTag("search-key:a");
                     if (first != null) first.requestFocus();
                 };
-        a.ui.postDelayed(pendingInputClick, 420);
+        a.ui.postDelayed(pendingInputClick, TvV17SearchInput.DOUBLE_CLICK_MS + 1);
     }
 
     void openSystemIme() {
-        if (input == null || keyboard == null) return;
+        if (!current() || input == null || keyboard == null) return;
         imeActive = true;
-        if (!keyboard.composition().isEmpty()) {
-            keyboard.set(keyboard.query());
-        }
+        imeDraft.open(keyboard);
         syncingInput = true;
-        String currentText = keyboard.query();
+        String currentText = imeDraft.text;
         if (!currentText.equals(input.getText().toString())) {
             input.setText(currentText);
         }
-        input.setSelection(input.getText().length());
+        input.setSelection(Math.min(currentText.length(), imeDraft.selection));
+        if (imeDraft.composing()) {
+            android.view.inputmethod.InputConnection connection = input.onCreateInputConnection(
+                    new android.view.inputmethod.EditorInfo());
+            if (connection != null) connection.setComposingRegion(imeDraft.start, imeDraft.end);
+        }
         syncingInput = false;
         input.setShowSoftInputOnFocus(true);
         input.setCursorVisible(true);
@@ -523,6 +709,44 @@ public final class GlobalSearchScreen implements AutoCloseable {
         if (composition != null) composition.setText("已调出电视输入法 · 可直接输入中文或拼音");
     }
 
+    void suspendForIme() {
+        cancelSuggestions();
+        if (pendingSearch != null) { a.ui.removeCallbacks(pendingSearch); pendingSearch = null; }
+        searchSerial++; cancelWork();
+        edited = ""; // After composition ends, even the same query must replace canceled work.
+        status.setText("输入法正在组词，确认后搜索");
+        resultBody.setVisibility(View.INVISIBLE);
+    }
+
+    void readImeDraft() {
+        if (!imeActive || keyboard == null || input == null || !contextMatches()) return;
+        android.text.Editable value = input.getText();
+        imeDraft.update(value.toString(),
+                android.view.inputmethod.BaseInputConnection.getComposingSpanStart(value),
+                android.view.inputmethod.BaseInputConnection.getComposingSpanEnd(value),
+                input.getSelectionEnd(), keyboard);
+    }
+
+    void captureImeUpdate() {
+        if (!current() || !imeActive || syncingInput || imeConnectionDepth != 0) return;
+        if (pendingImeRead != null) { a.ui.removeCallbacks(pendingImeRead); pendingImeRead = null; }
+        PinyinKeyboardModel.Snapshot previous = keyboard.snapshot();
+        readImeDraft();
+        if (imeDraft.composing()) suspendForIme();
+        else updateAfterImeInput(!TvSearchImeState.sameKeyboard(previous, keyboard.snapshot()));
+    }
+
+    void finishSystemIme(boolean commit) {
+        if (!imeActive || keyboard == null) return;
+        readImeDraft();
+        imeActive = false;
+        boolean resetCandidates = commit || imeDraft.keyboardChanged(keyboard);
+        if (commit) imeDraft.commit(keyboard);
+        else imeDraft.close(keyboard);
+        if (imeDraft.composing()) { suspendForIme(); return; }
+        changed(resetCandidates);
+    }
+
     void hideSystemIme() {
         if (input == null) return;
         try {
@@ -535,8 +759,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     boolean physicalKey(int key, KeyEvent event) {
+        if (!current()) return false;
+        if (!imeActive && imeDraft.composing()) return false;
         if (imeActive && a.getCurrentFocus() == input) {
             if (key == KeyEvent.KEYCODE_SEARCH && event.getAction() == KeyEvent.ACTION_DOWN) {
+                finishSystemIme(true);
                 hideSystemIme();
                 submit();
                 return true;
@@ -575,8 +802,12 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void changed() {
-        if (input == null) return;
-        String display =
+        changed(true);
+    }
+
+    void changed(boolean resetCandidates) {
+        if (!current() || input == null || keyboard == null) return;
+        String display = imeDraft.composing() ? imeDraft.text :
                 keyboard.query().isEmpty()
                         ? ""
                         : keyboard.committed()
@@ -589,20 +820,89 @@ public final class GlobalSearchScreen implements AutoCloseable {
             input.setSelection(display.length());
         }
         syncingInput = false;
-        updateAfterImeInput();
+        updateAfterImeInput(resetCandidates);
     }
 
     void updateAfterImeInput() {
-        if (composition == null) return;
+        updateAfterImeInput(true);
+    }
+
+    void updateAfterImeInput(boolean resetCandidates) {
+        if (!current() || keyboard == null || composition == null) return;
+        if (imeDraft.composing()) { composition.setText("输入法文字未确认，双击继续输入"); suspendForIme(); return; }
+        resultBody.setVisibility(View.VISIBLE);
         composition.setText(
                 keyboard.composition().isEmpty()
                         ? (keyboard.mode() == PinyinKeyboardModel.Mode.PINYIN
                                 ? "默认识别首拼 / 全拼 · 双击输入框调出电视输入法"
                                 : "直接输入字母、首字母或数字 · 双击输入框调出输入法")
                         : "拼音  " + keyboard.composition());
-        candidatePage = 0;
+        if (resetCandidates) candidatePage = 0;
         renderCandidates();
+        updateTitleSuggestions();
         scheduleSearch();
+    }
+
+    void cancelSuggestions() {
+        suggestionSerial++;
+        suggestedQuery = null;
+        if (suggestionWork != null) { suggestionWork.cancel(true); suggestionWork = null; }
+        if (titleSuggestions != null) titleSuggestions.removeAllViews();
+        if (suggestionScroll != null) suggestionScroll.setVisibility(View.GONE);
+    }
+
+    void updateTitleSuggestions() {
+        if (suggestionScroll == null || !current() || keyboard == null) return;
+        // The shared index contains public history. Never display it inside a private space.
+        if (a.privateMode || imeDraft.composing()) { cancelSuggestions(); return; }
+        final String query = keyboard.query().trim();
+        if (query.equals(suggestedQuery)) return;
+        cancelSuggestions();
+        suggestedQuery = query;
+        if (query.isEmpty()) return;
+        final int ticket = suggestionSerial;
+        suggestionWork = a.phoneticWork.submit(() -> {
+            if (a.phonetic == null) try {
+                a.phoneticReady.await(8, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException cancelled) {
+                Thread.currentThread().interrupt(); return;
+            }
+            if (Thread.currentThread().isInterrupted()) return;
+            PhoneticSearchIndex index = a.phonetic;
+            final List<String> values = index == null ? Collections.emptyList() : index.suggestTitles(query, 6);
+            a.ui.post(() -> {
+                if (!acceptsTitleSuggestions(ticket, query)) return;
+                titleSuggestions.removeAllViews();
+                if (values.isEmpty()) return;
+                TextView label = a.text("片名联想", 12, MainActivity.MUTED);
+                label.setPadding(0, 0, a.dp(8), 0);
+                titleSuggestions.addView(label);
+                for (String title : values) {
+                    Button choice = a.button(title, "search-title:" + title, () -> {
+                        if (!current() || ticket != suggestionSerial || a.privateMode || imeDraft.composing()) return;
+                        input.requestFocus();
+                        imeDraft.clear(); keyboard.set(title); changed(); submit(true);
+                    });
+                    choice.setTag("search-title:" + title);
+                    choice.setTextSize(13);
+                    choice.setSingleLine(true);
+                    choice.setMaxWidth(a.dp(200));
+                    choice.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                    choice.setMinWidth(0); choice.setMinimumWidth(0);
+                    choice.setMinHeight(0); choice.setMinimumHeight(0);
+                    choice.setPadding(a.dp(10), 0, a.dp(10), 0);
+                    LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-2, a.dp(34));
+                    size.rightMargin = a.dp(6); titleSuggestions.addView(choice, size);
+                }
+                suggestionScroll.scrollTo(0, 0);
+                suggestionScroll.setVisibility(View.VISIBLE);
+            });
+        });
+    }
+
+    boolean acceptsTitleSuggestions(int ticket, String query) {
+        return current() && ticket == suggestionSerial && !a.privateMode && !imeDraft.composing()
+                && keyboard != null && query.equals(keyboard.query().trim());
     }
 
     void renderCandidates() {
@@ -657,6 +957,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void scheduleSearch() {
+        if (!current() || keyboard == null || imeDraft.composing()) return;
         String query = keyboard.query().trim();
         if (query.equals(edited)) return;
         edited = query;
@@ -665,6 +966,20 @@ public final class GlobalSearchScreen implements AutoCloseable {
         ++searchSerial;
         restoringResults = false;
         cancelWork();
+        // Old results must never be shown under a newly edited query during debounce.
+        if (!query.equals(submitted)) {
+            cache = null;
+            results.clear();
+            searchSites.clear();
+            sourceScroll.clear();
+            sourceFocus.clear();
+            sourceLimits.clear();
+            clearCards();
+            filterButtons.clear();
+            sourceFilters.removeAllViews();
+            resultBody.removeAllViews();
+            resultGrid = null;
+        }
         if (query.isEmpty()) {
             submitted = "";
             results.clear();
@@ -695,6 +1010,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
     void submit(boolean remember) {
         if (!current()) return;
+        if (imeDraft.composing()) { a.toast("请先在输入法确认组词"); return; }
         if (pendingSearch != null) {
             a.ui.removeCallbacks(pendingSearch);
             pendingSearch = null;
@@ -708,6 +1024,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         restoringResults = false;
         submitted = query;
         resultConfig = a.config;
+        resultPrivateMode = a.privateMode;
         resultTime = System.currentTimeMillis();
         if (remember) saveHistory(query);
         if (coordinator != null) coordinator.close();
@@ -718,6 +1035,10 @@ public final class GlobalSearchScreen implements AutoCloseable {
         filterButtons.clear();
         sourceFilters.removeAllViews();
         shownLimit = 24;
+        searchSites.clear();
+        sourceScroll.clear();
+        sourceFocus.clear();
+        sourceLimits.clear();
         resetGrid();
         final int serial = ++searchSerial;
         List<Cms.Site> sources = new ArrayList<>();
@@ -731,6 +1052,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 (x, y) -> Boolean.compare(!x.key.equals(selected), !y.key.equals(selected)));
         final int total = sources.size();
         sourceCount = total;
+        searchSites.addAll(sources);
+        renderFilters();
         status.setText(total == 0 ? "没有可搜索来源，请先导入配置并启用来源扩展。" : "正在搜索全部 " + total + " 个来源…");
         if (total == 0) return;
         expansion =
@@ -745,8 +1068,6 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                 }
                             if (Thread.currentThread().isInterrupted()) return;
                             final PhoneticSearchIndex index = a.phonetic;
-                            if (index != null && !query.matches("[A-Za-z0-9' -]+"))
-                                if (!a.privateMode) index.prefer(query);
                             final List<String> baseVariants =
                                     index == null
                                             ? Collections.singletonList(query)
@@ -755,13 +1076,19 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                     SearchVariants.mergeTerms(query, baseVariants);
                             a.ui.post(
                                     () -> {
-                                        if (current() && serial == searchSerial)
+                                        if (current() && serial == searchSerial) {
+                                            if (index != null && !resultPrivateMode
+                                                    && !query.matches("[A-Za-z0-9' -]+")) index.prefer(query);
                                             startSources(sources, query, variants, serial);
+                                        }
                                     });
                         });
     }
 
     void startSources(List<Cms.Site> sources, String query, List<String> variants, int serial) {
+        if (!current() || serial != searchSerial) return;
+        final TvSearchContext context = pageContext;
+        final Map<String, TvSearchPages> batches = new java.util.concurrent.ConcurrentHashMap<>();
         final int total = sources.size();
         searchVariants = variants;
         if (variants.size() > 1) {
@@ -774,14 +1101,17 @@ public final class GlobalSearchScreen implements AutoCloseable {
         SearchCoordinator.configureThreads(a.prefs.getInt(Prefs.SEARCH_THREADS, 6));
         coordinator =
                 new SearchCoordinator(
-                        (site, keyword) -> searchSource(site, query, variants),
+                        (site, keyword) -> firstPage(context, site, query, variants, batches),
                         (site, videos, outcome) ->
                                 a.ui.post(
                                         () -> {
-                                            if (!current() || serial != searchSerial) return;
+                                            if (!current() || serial != searchSerial || resultConfig != a.config
+                                                    || resultPrivateMode != a.privateMode) return;
                                             a.learnTitles(videos);
                                             SourceResult source =
-                                                    new SourceResult(site, videos, outcome);
+                                                    new SourceResult(site, videos, outcome,
+                                                            outcome == SearchCoordinator.Outcome.RESULT || outcome == SearchCoordinator.Outcome.EMPTY
+                                                                    ? batches.get(site.key) : null);
                                             results.put(site.key, source);
                                             finished++;
                                             if (outcome == SearchCoordinator.Outcome.RESULT)
@@ -791,18 +1121,13 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                             if (outcome == SearchCoordinator.Outcome.TIMEOUT)
                                                 timedOut++;
                                             if (outcome == SearchCoordinator.Outcome.BUSY) busy++;
-                                            staticSubmitted = submitted;
-                                            staticConfig = resultConfig;
-                                            staticTime = resultTime;
-                                            staticMatched = matched;
-                                            staticResults.clear();
-                                            staticResults.putAll(results);
+                                            cacheResults();
                                             updateStatus(total);
                                             scheduleRender();
                                         }),
                         Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20))
                                 * 1000L,
-                        90000L);
+                        90000L, a.isTvDevice() ? TvSearchPages.MAX_RESULTS : 24);
         coordinator.start(sources, query);
     }
 
@@ -826,19 +1151,105 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 });
     }
 
+    List<Cms.Video> firstPage(TvSearchContext context, Cms.Site site, String query,
+            List<String> variants, Map<String, TvSearchPages> batches) throws Exception {
+        if (!a.isTvDevice()) return searchSource(site, query, variants);
+        TvSearchPages pages = TvSearchPages.first(query, variants, title -> matchesTitle(title, query),
+                (term, page) -> fetchSearchPage(context, site, term, page));
+        batches.put(site.key, pages);
+        return pages.videos;
+    }
+
+    boolean matchesTitle(String title, String query) {
+        return !query.matches("[A-Za-z0-9' -]+") || a.phonetic == null || a.phonetic.matches(title, query);
+    }
+
+    Cms.Listing fetchSearchPage(TvSearchContext context, Cms.Site site, String term, int page)
+            throws Exception {
+        if (!context.matches(a.config, a.privateMode, a.engineEpoch)
+                || Thread.currentThread().isInterrupted()) throw new InterruptedException();
+        // Initialization may block; never hold the Activity monitor across SingleFlight.get().
+        final SourceEngine engine = SourceController.engine(a, site, context);
+        if (!context.matches(a.config, a.privateMode, a.engineEpoch)
+                || Thread.currentThread().isInterrupted()) throw new InterruptedException();
+        try {
+            return Cms.listing(engine.search(term, page));
+        } catch (com.pilipala.catpaw.CatPawHost.DrpySourceException error) {
+            if ("drpy_verification_required".equals(error.code))
+                throw new SearchCoordinator.VerificationRequiredException();
+            throw error;
+        }
+    }
+
+    SourceResult nextPageSource() {
+        for (SourceResult result : results.values())
+            if ((activeFilter.isEmpty() || activeFilter.equals(result.site.key))
+                    && result.pages != null && result.pages.hasMore()) return result;
+        return null;
+    }
+
+    void loadNextPage() {
+        if (!current() || pageRequests.get() != null) return;
+        final SourceResult source = nextPageSource();
+        if (source == null) return;
+        final int serial = searchSerial;
+        final TvSearchContext context = pageContext;
+        final java.util.concurrent.atomic.AtomicReference<TvSearchPages> completed =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        pageFailureSource = pageFailureReason = "";
+        final SearchCoordinator[] owner = new SearchCoordinator[1];
+        owner[0] = new SearchCoordinator((site, query) -> {
+            TvSearchPages next = source.pages.next(title -> matchesTitle(title, source.pages.query),
+                    (term, page) -> fetchSearchPage(context, site, term, page));
+            completed.set(next);
+            return next.videos;
+        }, (site, videos, outcome) -> a.ui.post(() -> {
+            if (!pageRequests.finish(owner[0])) return;
+            if (!current() || serial != searchSerial) return;
+            if (results.get(site.key) != source) { renderResults(); return; }
+            if (completed.get() != null && (outcome == SearchCoordinator.Outcome.RESULT
+                    || outcome == SearchCoordinator.Outcome.EMPTY)) {
+                TvSearchPages next = completed.get();
+                results.put(site.key, new SourceResult(site, next.videos, outcome, next));
+                if (activeFilter.isEmpty() || activeFilter.equals(site.key)) {
+                    shownLimit = Math.min(Integer.MAX_VALUE - 24, shownLimit) + 24;
+                    focusNewResults = true;
+                }
+                recount(); cacheResults();
+            } else {
+                pageFailureSource = site.key;
+                pageFailureReason = outcome == SearchCoordinator.Outcome.TIMEOUT ? "下一页超时"
+                        : outcome == SearchCoordinator.Outcome.VERIFICATION_REQUIRED ? "下一页需网站验证码"
+                        : outcome == SearchCoordinator.Outcome.BUSY ? "下一页未完成" : "下一页请求失败";
+            }
+            updateStatus(sourceCount); scheduleRender();
+        }), Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20)) * 1000L,
+                40000L, TvSearchPages.MAX_RESULTS);
+        pageRequests.bind(owner[0]);
+        owner[0].start(Collections.singletonList(source.site), submitted);
+        renderResults();
+    }
+
     void retrySelected() {
         SourceResult selected = results.get(activeFilter);
-        if (selected == null || retryCoordinator != null) return;
+        if (!current() || selected == null || retryCoordinator != null) return;
+        pageRequests.cancel();
+        pageFailureSource = pageFailureReason = "";
+        final TvSearchContext context = pageContext;
+        final Map<String, TvSearchPages> batches = new java.util.concurrent.ConcurrentHashMap<>();
+        final String query = submitted;
+        final List<String> variants = new ArrayList<>(searchVariants);
         final int serial = searchSerial;
         retrySource.setEnabled(false);
         emptyResult.setText("正在重新搜索此源…");
         retryCoordinator =
                 new SearchCoordinator(
-                        (site, query) -> searchSource(site, submitted, searchVariants),
+                        (site, ignored) -> firstPage(context, site, query, variants, batches),
                         (site, videos, outcome) ->
                                 a.ui.post(
                                         () -> {
-                                            if (!current() || serial != searchSerial) return;
+                                            if (!current() || serial != searchSerial || resultConfig != a.config
+                                                    || resultPrivateMode != a.privateMode) return;
                                             if (retryCoordinator != null) {
                                                 retryCoordinator.close();
                                                 retryCoordinator = null;
@@ -857,7 +1268,9 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                             }
                                             results.put(
                                                     site.key,
-                                                    new SourceResult(site, videos, outcome));
+                                                    new SourceResult(site, videos, outcome,
+                                                            outcome == SearchCoordinator.Outcome.RESULT || outcome == SearchCoordinator.Outcome.EMPTY
+                                                                    ? batches.get(site.key) : null));
                                             if (outcome == SearchCoordinator.Outcome.RESULT)
                                                 matched++;
                                             if (outcome == SearchCoordinator.Outcome.FAILED)
@@ -865,12 +1278,13 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                             if (outcome == SearchCoordinator.Outcome.TIMEOUT)
                                                 timedOut++;
                                             if (outcome == SearchCoordinator.Outcome.BUSY) busy++;
+                                            cacheResults();
                                             updateStatus(sourceCount);
                                             scheduleRender();
                                         }),
                         Prefs.clampSearchTimeoutSeconds(a.prefs.getInt(Prefs.SEARCH_TIMEOUT, 20))
                                 * 1000L,
-                        40000L);
+                        40000L, a.isTvDevice() ? TvSearchPages.MAX_RESULTS : 24);
         retryCoordinator.start(Collections.singletonList(selected.site), submitted);
     }
 
@@ -895,6 +1309,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void cancelWork() {
+        pageRequests.cancel();
+        pageFailureSource = pageFailureReason = "";
         if (retryCoordinator != null) {
             retryCoordinator.close();
             retryCoordinator = null;
@@ -921,10 +1337,11 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
     void scheduleRender() {
         if (pendingRender != null) return;
+        final int serial = searchSerial;
         pendingRender =
                 () -> {
                     pendingRender = null;
-                    if (!current()) return;
+                    if (!current() || serial != searchSerial) return;
                     renderFilters();
                     renderResults();
                 };
@@ -933,9 +1350,13 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
     void renderFilters() {
         if (!filterButtons.containsKey("")) addFilter("全部", "");
-        for (SourceResult source : results.values())
+        if (!searchSites.isEmpty()) {
+            for (Cms.Site site : searchSites)
+                if (!filterButtons.containsKey(site.key)) addFilter(clean(site.name), site.key);
+        } else for (SourceResult source : results.values())
             if (!filterButtons.containsKey(source.site.key))
                 addFilter(clean(source.site.name), source.site.key);
+        updateFilterLabels();
     }
 
     void addFilter(String label, String key) {
@@ -944,11 +1365,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         label,
                         "search-filter:" + key,
                         () -> {
-                            activeFilter = key;
-                            shownLimit = 24;
-                            updateFilterLabels();
-                            resetGrid();
-                            renderResults();
+                            if (a.isTvDevice()) focusSelectedResults();
+                            else selectFilter(key);
                         });
         b.setTextSize(12);
         b.setMinWidth(a.dp(64));
@@ -959,12 +1377,55 @@ public final class GlobalSearchScreen implements AutoCloseable {
         b.setSingleLine(true);
         b.setGravity(Gravity.CENTER);
         b.setContentDescription(label);
-        b.setOnFocusChangeListener((v, focus) -> styleFilter(b, key, focus));
+        b.setOnFocusChangeListener((v, focus) -> {
+            if (focus && a.isTvDevice()) selectFilter(key);
+            styleFilter(b, key, focus);
+        });
+        if (a.isTvDevice()) b.setOnKeyListener((v, keyCode, event) -> {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && event.getAction() == KeyEvent.ACTION_DOWN) {
+                focusSelectedResults();
+                return true;
+            }
+            return false;
+        });
         LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-2, a.dp(34));
         size.setMargins(a.dp(2), 0, a.dp(8), 0);
         sourceFilters.addView(b, size);
         filterButtons.put(key, b);
+        filterNames.put(key, label);
         styleFilter(b, key, false);
+    }
+
+    void rememberSourcePosition() {
+        if (resultScroll == null) return;
+        sourceScroll.put(activeFilter, resultScroll.getScrollY());
+        sourceLimits.put(activeFilter, shownLimit);
+        String tag = focusedTag(resultGrid);
+        if (tag != null) sourceFocus.put(activeFilter, tag);
+    }
+
+    void selectFilter(String key) {
+        if (!current()) return;
+        if (key.equals(activeFilter)) return;
+        rememberSourcePosition();
+        focusNewResults = false;
+        activeFilter = key;
+        shownLimit = sourceLimits.containsKey(key) ? sourceLimits.get(key) : 24;
+        updateFilterLabels();
+        resetGrid();
+        renderResults();
+        final int scroll = sourceScroll.containsKey(key) ? sourceScroll.get(key) : 0;
+        final int serial = searchSerial;
+        resultScroll.post(() -> { if (current() && serial == searchSerial && key.equals(activeFilter)) resultScroll.scrollTo(0, scroll); });
+    }
+
+    void focusSelectedResults() {
+        if (!current()) return;
+        String tag = sourceFocus.get(activeFilter);
+        View target = tag == null ? null : a.root.findViewWithTag(tag);
+        if (target == null && !displayed.isEmpty()) target = posterCards.get(displayed.iterator().next());
+        if (target != null) target.requestFocus();
+        else if (retrySource != null && retrySource.getVisibility() == View.VISIBLE) retrySource.requestFocus();
     }
 
     void styleFilter(Button b, String key, boolean focused) {
@@ -984,10 +1445,36 @@ public final class GlobalSearchScreen implements AutoCloseable {
                 1.035f);
     }
 
+    boolean hasVerification() {
+        for (SourceResult result : results.values())
+            if (result.outcome == SearchCoordinator.Outcome.VERIFICATION_REQUIRED) return true;
+        return false;
+    }
+
     void updateFilterLabels() {
         for (Map.Entry<String, Button> entry : filterButtons.entrySet()) {
             Button b = entry.getValue();
-            styleFilter(b, entry.getKey(), b.hasFocus());
+            String key = entry.getKey();
+            if (a.isTvDevice()) {
+                String suffix;
+                if (key.isEmpty()) {
+                    int count = 0;
+                    for (SourceResult result : results.values()) count += result.videos.size();
+                    suffix = finished < sourceCount ? " · 搜索中"
+                            : count == 0 && (failed > 0 || timedOut > 0 || busy > 0 || hasVerification())
+                                    ? " · 未完成" : " " + count;
+                } else {
+                    SourceResult result = results.get(key);
+                    suffix = result == null ? " · 搜索中"
+                            : result.outcome == SearchCoordinator.Outcome.RESULT || result.outcome == SearchCoordinator.Outcome.EMPTY
+                                    ? " " + result.videos.size()
+                                    : result.outcome == SearchCoordinator.Outcome.TIMEOUT ? " · 超时"
+                                    : result.outcome == SearchCoordinator.Outcome.VERIFICATION_REQUIRED ? " · 验证"
+                                    : result.outcome == SearchCoordinator.Outcome.BUSY ? " · 未完成" : " · 失败";
+                }
+                b.setText(filterNames.get(key) + suffix);
+            }
+            styleFilter(b, key, b.hasFocus());
         }
     }
 
@@ -1009,13 +1496,20 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         "显示更多结果",
                         "search-more-results",
                         () -> {
-                            shownLimit = Math.min(120, shownLimit + 24);
-                            focusNewResults = true;
-                            renderResults();
+                             if (!current()) return;
+                             int available = 0;
+                             for (SourceResult r : results.values())
+                                 if (activeFilter.isEmpty() || activeFilter.equals(r.site.key)) available += r.videos.size();
+                             if (available <= shownLimit) loadNextPage();
+                             else {
+                                 shownLimit = shownLimit > Integer.MAX_VALUE - 24 ? Integer.MAX_VALUE : shownLimit + 24;
+                                 focusNewResults = true;
+                                 renderResults();
+                             }
                         });
         moreResults.setVisibility(View.GONE);
         a.addButton(resultBody, moreResults);
-        resultHint = a.text("全部视图显示前 120 条，可切换上方来源查看更多。", 12, MainActivity.MUTED);
+        resultHint = a.text("已显示当前取得的结果。", 12, MainActivity.MUTED);
         resultHint.setVisibility(View.GONE);
         resultBody.addView(resultHint);
     }
@@ -1028,10 +1522,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         boolean remaining = false;
         for (SourceResult source : results.values())
             if (activeFilter.isEmpty() || source.site.key.equals(activeFilter))
-                for (int i = 0;
-                        i < Math.min(activeFilter.isEmpty() ? 12 : 24, source.videos.size())
-                                && available < 120;
-                        i++) {
+                for (int i = 0; i < source.videos.size(); i++) {
                     available++;
                     if (available > shownLimit) continue;
                     Cms.Video video = source.videos.get(i);
@@ -1077,7 +1568,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
             SourceResult selected = results.get(activeFilter);
             emptyResult.setText(
                     selected == null
-                            ? (finished == sourceCount ? "本次未获得可显示的结果。可选择上方来源查看具体状态。" : "正在等待其他来源…")
+                            ? (!activeFilter.isEmpty() || finished < sourceCount ? "正在等待此来源的搜索结果…" : "本次未获得可显示的结果。可选择上方来源查看具体状态。")
                             : selected.outcome == SearchCoordinator.Outcome.VERIFICATION_REQUIRED
                                     ? "此片源搜索需要完成网站验证码，暂时无法返回结果。可先选择其他片源。"
                                     : selected.outcome == SearchCoordinator.Outcome.FAILED
@@ -1091,10 +1582,24 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                                             : "此源已响应，但没有匹配结果。可更换关键词再试。");
         }
         retrySource.setVisibility(
-                !activeFilter.isEmpty() && displayed.isEmpty() ? View.VISIBLE : View.GONE);
+                !activeFilter.isEmpty() && results.containsKey(activeFilter) && displayed.isEmpty() ? View.VISIBLE : View.GONE);
         retrySource.setEnabled(retryCoordinator == null);
-        moreResults.setVisibility(available > shownLimit ? View.VISIBLE : View.GONE);
-        resultHint.setVisibility(displayed.size() >= 120 ? View.VISIBLE : View.GONE);
+        boolean localMore = available > shownLimit;
+        SourceResult next = nextPageSource();
+        moreResults.setVisibility(localMore || next != null || pageRequests.get() != null ? View.VISIBLE : View.GONE);
+        moreResults.setEnabled(pageRequests.get() == null || localMore);
+        moreResults.setText(localMore ? "显示更多已取得结果"
+                : pageRequests.get() != null ? "正在读取下一页…"
+                : next != null && next.site.key.equals(pageFailureSource) ? pageFailureReason + " · 重试"
+                : "读取来源下一页");
+        boolean limited = false;
+        for (SourceResult r : results.values())
+            if ((activeFilter.isEmpty() || activeFilter.equals(r.site.key)) && r.pages != null && r.pages.limited)
+                limited = true;
+        resultHint.setText(limited ? "部分来源已达5000条保留上限，请缩小关键词继续查找。"
+                : "已显示当前取得的结果；没有更多已确认的来源分页。");
+        resultHint.setVisibility(!remaining && !localMore && next == null && finished >= sourceCount
+                ? View.VISIBLE : View.GONE);
         if (!remaining && restoringResults) {
             restoringResults = false;
             View saved =
@@ -1102,13 +1607,16 @@ public final class GlobalSearchScreen implements AutoCloseable {
                             ? null
                             : a.root.findViewWithTag(a.current.focus);
             if (saved != null) saved.requestFocus();
-            resultScroll.scrollTo(0, savedResultScroll);
+            final int scroll = savedResultScroll;
+            final int serial = searchSerial;
+            resultScroll.post(() -> { if (current() && serial == searchSerial) resultScroll.scrollTo(0, scroll); });
         }
         if (remaining && pendingRender == null) {
+            final int serial = searchSerial;
             pendingRender =
                     () -> {
                         pendingRender = null;
-                        if (current()) renderResults();
+                        if (current() && serial == searchSerial) renderResults();
                     };
             a.ui.postDelayed(pendingRender, 16);
         }
@@ -1118,10 +1626,15 @@ public final class GlobalSearchScreen implements AutoCloseable {
         LinearLayout card = a.vertical();
         card.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(8));
         ImageView poster = new ImageView(a);
-        poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        poster.setBackground(a.bg(0xff25252a, 9));
-        poster.setClipToOutline(true);
-        LinearLayout.LayoutParams posterSize = new LinearLayout.LayoutParams(a.dp(110), a.dp(165));
+        if (a.isTvDevice()) TvV17PosterCard.artwork(a, poster);
+        else {
+            poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            poster.setBackground(a.bg(0xff25252a, 9));
+            poster.setClipToOutline(true);
+        }
+        int posterWidth = a.isTvDevice() ? Math.max(70, Math.min(110,
+                (int) ((a.windowWidth() / a.getResources().getDisplayMetrics().density - 360) / columns) - 15)) : 110;
+        LinearLayout.LayoutParams posterSize = new LinearLayout.LayoutParams(a.dp(posterWidth), a.dp(posterWidth * 3 / 2));
         posterSize.gravity = Gravity.CENTER_HORIZONTAL;
         card.addView(poster, posterSize);
         a.poster(video.poster, poster);
@@ -1142,12 +1655,15 @@ public final class GlobalSearchScreen implements AutoCloseable {
         final String query = submitted;
         card.setOnClickListener(
                 view -> {
+                    if (!current()) return;
                     saveHistory(query);
                     a.openListing(source.site, video);
                 });
         card.setOnFocusChangeListener(
                 (view, selected) -> {
-                    FocusMotion.style(
+                    if (selected) sourceFocus.put(activeFilter, String.valueOf(card.getTag()));
+                    if (a.isTvDevice()) TvV17PosterCard.focus(a, card, title, selected);
+                    else FocusMotion.style(
                             a,
                             card,
                             selected,
@@ -1159,6 +1675,16 @@ public final class GlobalSearchScreen implements AutoCloseable {
                             true,
                             1.035f);
                 });
+        if (a.isTvDevice()) card.setOnKeyListener((v, key, event) -> {
+            if (key == KeyEvent.KEYCODE_DPAD_UP && event.getAction() == KeyEvent.ACTION_DOWN) {
+                int index = new ArrayList<>(displayed).indexOf(source.site.key + ":" + video.id);
+                if (index >= 0 && index < columns) {
+                    Button tab = filterButtons.get(activeFilter);
+                    if (tab != null) { tab.requestFocus(); return true; }
+                }
+            }
+            return false;
+        });
         return card;
     }
 
@@ -1190,6 +1716,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         }
         closeQrServer();
         String ip = PhoneConfigDialog.lanAddress();
+        final int generation = qrGeneration;
         qrServer =
                 new SearchInputServer(
                         new SearchInputServer.Listener() {
@@ -1197,12 +1724,14 @@ public final class GlobalSearchScreen implements AutoCloseable {
                             public void onKeyword(String keyword, boolean submitNow) {
                                 a.ui.post(
                                         () -> {
-                                            if (!current() || keyboard == null) return;
+                                            if (!current() || keyboard == null || generation != qrGeneration
+                                                    || qrServer == null || qrServer.expired()) return;
                                             if (submitNow
                                                     && qrDialog != null
                                                     && qrDialog.isShowing()) {
                                                 qrDialog.dismiss();
                                             }
+                                            imeDraft.clear();
                                             keyboard.set(keyword == null ? "" : keyword);
                                             changed();
                                             if (submitNow
@@ -1220,12 +1749,14 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
                             @Override
                             public List<String> recentKeywords() {
-                                return a.privateMode ? Collections.emptyList() : history();
+                                return !current() || generation != qrGeneration || a.privateMode
+                                        ? Collections.emptyList() : history();
                             }
 
                             @Override
                             public String currentKeyword() {
-                                return keyboard == null ? "" : keyboard.query().trim();
+                                return !current() || generation != qrGeneration || keyboard == null
+                                        ? "" : keyboard.query().trim();
                             }
                         });
         qrAddress = qrServer.address(ip);
@@ -1245,6 +1776,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void showQrDialog(boolean forceRefresh) {
+        if (!current()) return;
         if (qrDialog != null && qrDialog.isShowing()) {
             qrDialog.dismiss();
             qrDialog = null;
@@ -1290,6 +1822,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void closeQrServer() {
+        qrGeneration++;
         if (qrServer != null) {
             qrServer.close();
             qrServer = null;
@@ -1298,6 +1831,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void showHistory() {
+        if (!current()) return;
         resultBody.removeAllViews();
         try {
             String address = ensureQrServer(false);
@@ -1355,7 +1889,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
                             value,
                             "search-history:" + value,
                             () -> {
-                                keyboard.set(value);
+                                if (!current()) return;
+                                imeDraft.clear(); keyboard.set(value);
                                 changed();
                                 submit();
                             });
@@ -1366,6 +1901,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                         "清除搜索记录",
                         "search-clear-history",
                         () -> {
+                            if (!current()) return;
                             a.prefs.edit().remove(Prefs.GLOBAL_SEARCH_HISTORY).apply();
                             showHistory();
                         });
@@ -1374,6 +1910,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
     List<String> history() {
         List<String> out = new ArrayList<>();
+        if (!current() || a.privateMode) return out;
         try {
             JSONArray list = new JSONArray(a.prefs.getString(Prefs.GLOBAL_SEARCH_HISTORY, "[]"));
             for (int i = 0; i < Math.min(8, list.length()); i++) {
@@ -1386,7 +1923,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
     }
 
     void saveHistory(String query) {
-        if (a.privateMode) return;
+        if (!current() || a.privateMode) return;
         List<String> previous = history();
         previous.remove(query);
         previous.add(0, query);
@@ -1397,12 +1934,19 @@ public final class GlobalSearchScreen implements AutoCloseable {
 
     @Override
     public void close() {
+        cancelSuggestions();
+        if (imeActive && keyboard != null && contextMatches()) {
+            readImeDraft(); imeDraft.close(keyboard);
+        }
+        imeActive = false;
+        if (pendingImeRead != null) { a.ui.removeCallbacks(pendingImeRead); pendingImeRead = null; }
         closed = true;
         if (qrDialog != null && qrDialog.isShowing()) {
             qrDialog.dismiss();
         }
         qrDialog = null;
         closeQrServer();
+        rememberSourcePosition();
         if (resultScroll != null) savedResultScroll = resultScroll.getScrollY();
         if (pendingInputClick != null) {
             a.ui.removeCallbacks(pendingInputClick);
@@ -1416,5 +1960,14 @@ public final class GlobalSearchScreen implements AutoCloseable {
         clearCards();
         searchSerial++;
         cancelWork();
+        // Requests cancelled while opening another page remain retryable on return.
+        if (contextMatches() && !submitted.isEmpty() && resultConfig == a.config && resultPrivateMode == a.privateMode) {
+            for (Cms.Site site : searchSites) if (!results.containsKey(site.key)) {
+                results.put(site.key, new SourceResult(site, Collections.emptyList(), SearchCoordinator.Outcome.BUSY));
+                finished++;
+                busy++;
+            }
+        }
+        cacheResults();
     }
 }

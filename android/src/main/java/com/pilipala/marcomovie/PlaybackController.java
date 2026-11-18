@@ -695,6 +695,7 @@ final class PlaybackController {
 
     static void showPlaybackLoading(MainActivity a) {
         a.playbackLoadingFocus = a.getCurrentFocus();
+        if (a.markerHost != null) a.markerHost.abort();
         a.playbackLoading = new PlaybackLoading(a);
         a.root.addView(a.playbackLoading, new FrameLayout.LayoutParams(-1, -1));
         if (a.playerChrome != null) a.playerChrome.update();
@@ -1292,7 +1293,8 @@ final class PlaybackController {
                                                         });
                                                 ready.setOnCompletionListener(
                                                         mp -> {
-                                                            if (ticket != a.generation) return;
+                                                            if (ticket != a.generation || a.player != ready) return;
+                                                            if (a.markerHost != null) a.markerHost.abort();
                                                             if (a.playingBookmark != null) {
                                                                 int dur = ready.getDuration();
                                                                 if (dur > 0) {
@@ -1318,7 +1320,8 @@ final class PlaybackController {
                                                         });
                                                 ready.setOnErrorListener(
                                                         (mp, what, extra) -> {
-                                                            if (ticket != a.generation) return true;
+                                                            if (ticket != a.generation || a.player != ready) return true;
+                                                            if (a.markerHost != null) a.markerHost.abort();
                                                             if (PlaybackFailure.decoderFallback(
                                                                             what)
                                                                     && a.prefs.getInt(
@@ -1917,6 +1920,7 @@ final class PlaybackController {
     }
 
     static void releasePlayer(MainActivity a) {
+        if (a.markerHost != null) a.markerHost.abort();
         finishSeek(a, false);
         if (a.hideLockButton != null) {
             a.ui.removeCallbacks(a.hideLockButton);
@@ -1951,6 +1955,8 @@ final class PlaybackController {
                 || a.miniMode
                 || (a.playbackControls != null && a.playbackControls.dialogOpen)) return false;
         int key = event.getKeyCode();
+        if (a.isTvDevice() && key == KeyEvent.KEYCODE_DPAD_UP && a.playbackControls != null
+                && a.playbackControls.markers().open(event)) return true;
         boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
         View focus = a.getCurrentFocus();
         boolean horizontal =

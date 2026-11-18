@@ -80,7 +80,7 @@ public final class CompatChecks {
         HomeKeyTracker shortcuts = new HomeKeyTracker();
         check(
                 !shortcuts.up(100, 0) && !shortcuts.up(300, 0) && shortcuts.up(500, 0),
-                "three discrete up taps trigger home shortcut");
+                "legacy non-TV three discrete up taps trigger home shortcut");
         check(!shortcuts.up(600, 1) && !shortcuts.up(700, 2), "held Up does not count as taps");
         shortcuts.reset();
         check(

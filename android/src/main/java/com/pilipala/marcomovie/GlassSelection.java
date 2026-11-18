@@ -9,6 +9,7 @@ final class GlassSelection {
     final ViewGroup owner;
     final float cornerDp;
     final boolean subtle;
+    final boolean navigationLens;
     final MotionSpring left = new MotionSpring(0, 38, .25f),
             top = new MotionSpring(0, 38, .25f),
             right = new MotionSpring(0, 38, .25f),
@@ -27,10 +28,15 @@ final class GlassSelection {
     }
 
     GlassSelection(MainActivity activity, ViewGroup parent, float cornerDp, boolean subtle) {
+        this(activity, parent, cornerDp, subtle, false);
+    }
+
+    GlassSelection(MainActivity activity, ViewGroup parent, float cornerDp, boolean subtle, boolean navigationLens) {
         a = activity;
         owner = parent;
         this.cornerDp = cornerDp;
         this.subtle = subtle;
+        this.navigationLens = navigationLens;
         fillShader =
                 subtle
                         ? new LinearGradient(
@@ -38,7 +44,8 @@ final class GlassSelection {
                                 0,
                                 1,
                                 1,
-                                new int[] {0x2affffff, 0x16ffffff, 0x1effffff},
+                                navigationLens ? new int[] {0x42e6f0ff, 0x1ac6d8ec, 0x29d6e8ff}
+                                        : new int[] {0x2affffff, 0x16ffffff, 0x1effffff},
                                 new float[] {0, .55f, 1},
                                 Shader.TileMode.CLAMP)
                         : new LinearGradient(
@@ -56,7 +63,8 @@ final class GlassSelection {
                                 0,
                                 1,
                                 1,
-                                new int[] {0x54ffffff, 0x1effffff, 0x32ffffff},
+                                navigationLens ? new int[] {0xb8f5faff, 0x45c2d7ef, 0x789db9d6}
+                                        : new int[] {0x54ffffff, 0x1effffff, 0x32ffffff},
                                 null,
                                 Shader.TileMode.CLAMP)
                         : new LinearGradient(
@@ -142,6 +150,17 @@ final class GlassSelection {
         }
         float maxRadius = Math.min(drawing.width(), drawing.height()) * .5f;
         float radius = cornerDp > 0 ? Math.min(a.dp(cornerDp), maxRadius) : maxRadius;
+        if (navigationLens && (a.reduced || a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false))) {
+            paint.setShader(null);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0xff354353);
+            canvas.drawRoundRect(drawing, radius, radius, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(Math.max(1, a.dp(1.25f)));
+            paint.setColor(0xffd5e4f5);
+            canvas.drawRoundRect(drawing, radius, radius, paint);
+            return;
+        }
         float w = Math.max(1f, drawing.width()), h = Math.max(1f, drawing.height());
         shaderMatrix.setScale(w, h);
         shaderMatrix.postTranslate(drawing.left, drawing.top);
@@ -156,7 +175,7 @@ final class GlassSelection {
         paint.setShader(strokeShader);
         canvas.drawRoundRect(drawing, radius, radius, paint);
         paint.setShader(null);
-        if (!subtle) {
+        if (!subtle || navigationLens) {
             paint.setStrokeWidth(Math.max(1, a.dp(.65f)));
             paint.setColor(0x25ffffff);
             drawing.inset(a.dp(2), a.dp(2));

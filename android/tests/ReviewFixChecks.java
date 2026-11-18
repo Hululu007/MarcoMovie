@@ -188,7 +188,7 @@ public final class ReviewFixChecks {
         // to or removed from Prefs.KEYS. Security policy switches (such as EXPERIMENTAL_CSP and
         // ONLY_ALLOW_HTTPS_PLUGINS) are intentionally excluded so backups cannot weaken policy.
         check(
-                Prefs.KEYS.length == 38,
+                Prefs.KEYS.length == 40,
                 "backup settings key table includes TV dock position, TV player style, tunneled playback, and existing appearance settings");
         check(
                 Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_DOCK_POSITION, 0))
@@ -196,6 +196,29 @@ public final class ReviewFixChecks {
                                 .equals(Prefs.sanitizeSetting(Prefs.TV_DOCK_POSITION, 1))
                         && Prefs.sanitizeSetting(Prefs.TV_DOCK_POSITION, 2) == null,
                 "TV dock position round-trips only right and top");
+        check(
+                Prefs.useTvLeftDock(true, false, -1)
+                        && !Prefs.useTvLeftDock(true, true, -1)
+                        && Prefs.useTvLeftDock(true, true, 1)
+                        && !Prefs.useTvLeftDock(true, false, 0)
+                        && !Prefs.useTvLeftDock(false, false, -1)
+                        && !Prefs.useTvLeftDock(false, true, 1),
+                "TV navigation keeps legacy placement, allows explicit switching, and excludes mobile");
+        check(
+                Integer.valueOf(1).equals(Prefs.sanitizeSetting(Prefs.TV_NAVIGATION_MODE, 1))
+                        && Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_NAVIGATION_MODE, 0))
+                        && Prefs.sanitizeSetting(Prefs.TV_NAVIGATION_MODE, -1) == null
+                        && Prefs.sanitizeSetting(Prefs.TV_NAVIGATION_MODE, 2) == null
+                        && Prefs.sanitizeSetting(Prefs.TV_NAVIGATION_MODE, "1") == null,
+                "backup validates the independent TV navigation mode without changing old position meaning");
+        check(
+                Prefs.tvAmbientStrength(-1) == 0f && Prefs.tvAmbientStrength(150) == 1f
+                        && Prefs.tvAmbientStrength(25) == .25f
+                        && Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_AMBIENT_PERCENT, 0))
+                        && Integer.valueOf(100).equals(Prefs.sanitizeSetting(Prefs.TV_AMBIENT_PERCENT, 100))
+                        && Prefs.sanitizeSetting(Prefs.TV_AMBIENT_PERCENT, -1) == null
+                        && Prefs.sanitizeSetting(Prefs.TV_AMBIENT_PERCENT, 101) == null,
+                "TV ambient percentage accepts backup endpoints, rejects outliers, and clamps runtime strength");
         check(
                 Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_PLAYER_STYLE, 0))
                         && Integer.valueOf(1)

@@ -59,6 +59,21 @@ public final class PinyinKeyboardModel {
         return (committed + composition).trim();
     }
 
+    public static final class Snapshot {
+        final String committed, composition;
+        final Mode mode;
+        Snapshot(String committed, String composition, Mode mode) {
+            this.committed = committed; this.composition = composition; this.mode = mode;
+        }
+    }
+
+    public Snapshot snapshot() { return new Snapshot(committed, composition, mode); }
+
+    public void restore(Snapshot value) {
+        if (value == null) return;
+        committed = value.committed; composition = value.composition; mode = value.mode;
+    }
+
     public void set(String value) {
         committed = value == null ? "" : value;
         composition = "";

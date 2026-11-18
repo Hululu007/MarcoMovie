@@ -40,6 +40,16 @@ public class MoviePlayer {
         void onCompletion(MoviePlayer player);
     }
 
+    /** Optional TV marker observer, not a command or a seek request acknowledgement. */
+    interface OnSeekPositionListener { void position(MoviePlayer player, long actualPosition); }
+    private OnSeekPositionListener seekPositionListener;
+    void setOnSeekPositionListener(OnSeekPositionListener listener) {
+        onMain(() -> { seekPositionListener = listener; return null; });
+    }
+    protected final void observeSeekPosition(long actualPosition) {
+        if (seekPositionListener != null) seekPositionListener.position(this, actualPosition);
+    }
+
     public interface OnVideoSizeChangedListener {
         void onVideoSizeChanged(MoviePlayer player, int width, int height);
     }
@@ -89,6 +99,8 @@ public class MoviePlayer {
     private int lastHttpStatus, lastErrorTrack;
     private org.json.JSONObject options = new org.json.JSONObject();
     private DefaultMediaSourceFactory mediaSourceFactory;
+    private androidx.media3.datasource.DataSource.Factory subtitleDataSourceFactory;
+    private final boolean televisionSubtitles;
     private String mediaMime;
     private boolean hlsFallbackAttempted;
     private final boolean ijkMode;
@@ -132,6 +144,7 @@ public class MoviePlayer {
     private MoviePlayer(
             Context context, boolean initializeExo, int requestedDecoder, boolean forceIjk) {
         this.context = context.getApplicationContext();
+        televisionSubtitles = context instanceof MainActivity && ((MainActivity) context).isTvDevice();
         this.ijkMode = forceIjk;
         if (!initializeExo) return;
         onMain(
@@ -264,6 +277,13 @@ public class MoviePlayer {
                             });
                     exo.addListener(
                             new Player.Listener() {
+                                @Override
+                                public void onPositionDiscontinuity(Player.PositionInfo oldPosition,
+                                        Player.PositionInfo newPosition, int reason) {
+                                    if (!released && (reason == Player.DISCONTINUITY_REASON_SEEK
+                                            || reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT))
+                                        observeSeekPosition(newPosition.positionMs);
+                                }
                                 @Override
                                 public void onPlaybackStateChanged(int state) {
                                     if (released) return;
@@ -562,8 +582,8 @@ public class MoviePlayer {
                 });
     }
 
-    static final int PROBE_BUDGET_MS = 3000;
-    static final int PROBE_MAX_BYTES = 512;
+    static final int PROBE_BUDGET_MS = MediaContentProbe.BUDGET_MS;
+    static final int PROBE_MAX_BYTES = MediaContentProbe.MAX_BYTES;
 
     private static Map<String, String> sanitizeHeadersForAddress(
             Uri address, Map<String, String> sourceHeaders) {
@@ -619,9 +639,11 @@ public class MoviePlayer {
 
                     String declared = MediaOptions.mime(options);
                     String fullLower = address.toString().toLowerCase(Locale.ROOT);
-                    boolean explicitHls =
-                            fullLower.contains(".m3u8") || (isLive && fullLower.contains("m3u8"));
-                    boolean explicitDash = fullLower.contains(".mpd");
+                    // Query tokens and display names are not container signatures.
+                    int uriType = Util.inferContentType(address);
+                    boolean explicitHls = uriType == C.CONTENT_TYPE_HLS;
+                    boolean explicitDash = uriType == C.CONTENT_TYPE_DASH;
+                    boolean disguised = MediaContentProbe.disguisedPath(address.getPath());
                     boolean knownContainer =
                             !explicitHls
                                     && !explicitDash
@@ -631,12 +653,12 @@ public class MoviePlayer {
                                     && !explicitHls
                                     && !explicitDash
                                     && isCloudDriveOrLocalProxyContainer(address, fullLower);
-                    if (isLive
+                    if (!disguised && (isLive
                             || declared != null
                             || explicitHls
                             || explicitDash
                             || knownContainer
-                            || cloudOrLocalProxy) {
+                            || cloudOrLocalProxy)) {
                         String fastMime =
                                 declared != null
                                         ? declared
@@ -665,7 +687,7 @@ public class MoviePlayer {
                                         } catch (Exception ignored) {
                                         }
                                         if (scope.cancelled) return;
-                                        final String resolvedMime = mime;
+                                        final String resolvedMime = mime != null ? mime : declared;
                                         main.post(
                                                 () ->
                                                         startExoPrepare(
@@ -722,6 +744,7 @@ public class MoviePlayer {
             }
             mediaSourceFactory =
                     new DefaultMediaSourceFactory(data, wrapDisguisedMp3Extractors(extractors));
+            subtitleDataSourceFactory = data;
             exo.setMediaSource(playbackSource(address));
             exo.prepare();
         } catch (Exception error) {
@@ -814,93 +837,13 @@ public class MoviePlayer {
     private static String sniffMime(
             Context context, Uri address, Map<String, String> requestHeaders, RequestScope scope) {
         if (scope != null && scope.cancelled) return null;
-        int type = Util.inferContentType(address);
-        if (type == C.CONTENT_TYPE_HLS) return MimeTypes.APPLICATION_M3U8;
-        if (type == C.CONTENT_TYPE_DASH) return MimeTypes.APPLICATION_MPD;
-        String path = address.getPath();
-        boolean mp3Path = path != null && path.toLowerCase(Locale.ROOT).endsWith(".mp3");
-        if (path != null
-                && !mp3Path
-                && path.toLowerCase(Locale.ROOT)
-                        .matches(".*\\.(mp4|mkv|webm|aac|flac|ogg|ts|flv|mov|avi)$")) return null;
-        String fullUri = address.toString().toLowerCase(Locale.ROOT);
-        if (fullUri.contains(".m3u8")) return MimeTypes.APPLICATION_M3U8;
-        if (fullUri.contains(".mpd")) return MimeTypes.APPLICATION_MPD;
-        if (fullUri.contains(".mkv")
-                || fullUri.contains(".mp4")
-                || fullUri.contains(".flv")
-                || fullUri.contains(".ts")) return null;
-        String scheme = address.getScheme();
-        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) return null;
-        long deadlineNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(PROBE_BUDGET_MS);
-        HttpURLConnection connection = null;
         try {
-            connection = ProxyAddress.openHttpConnection(new URL(address.toString()));
-            RequestScope.attach(connection);
-            connection.setConnectTimeout(1200);
-            connection.setReadTimeout(1200);
-            connection.setInstanceFollowRedirects(true);
-            connection.setRequestProperty("User-Agent", defaultUserAgent(context));
-            if (ProxyAddress.isLoopbackHost(address.getHost())) {
-                connection.setRequestProperty(ChunkedProxyDataSource.HEADER_CHUNKED_CLIENT, "1");
-            }
-            connection.setRequestProperty("Range", "bytes=0-" + (PROBE_MAX_BYTES - 1));
-            for (Map.Entry<String, String> header : requestHeaders.entrySet())
-                connection.setRequestProperty(header.getKey(), header.getValue());
-            if (scope != null && scope.cancelled) return null;
-            String contentType = connection.getContentType();
-            if (contentType != null) {
-                String lower = contentType.toLowerCase(Locale.ROOT);
-                if (lower.contains("mpegurl")) return MimeTypes.APPLICATION_M3U8;
-                if (lower.contains("dash+xml")) return MimeTypes.APPLICATION_MPD;
-                if (!mp3Path
-                        && (lower.startsWith("video/")
-                                || lower.startsWith("audio/")
-                                || lower.contains("matroska")
-                                || lower.contains("octet-stream"))) return null;
-            }
-            byte[] prefix = new byte[PROBE_MAX_BYTES];
-            int count = 0;
-            try (InputStream stream = connection.getInputStream()) {
-                while (count < prefix.length && System.nanoTime() < deadlineNs) {
-                    if (scope != null && scope.cancelled) return null;
-                    int remainingMs =
-                            (int)
-                                    Math.max(
-                                            250L,
-                                            TimeUnit.NANOSECONDS.toMillis(
-                                                    deadlineNs - System.nanoTime()));
-                    connection.setReadTimeout(Math.min(2500, remainingMs));
-                    int n = stream.read(prefix, count, prefix.length - count);
-                    if (n < 0) break;
-                    count += n;
-                    if (count >= 4
-                            && (prefix[0] & 0xFF) == 0x1A
-                            && (prefix[1] & 0xFF) == 0x45
-                            && (prefix[2] & 0xFF) == 0xDF
-                            && (prefix[3] & 0xFF) == 0xA3) {
-                        // EBML / Matroska (.mkv / .webm) magic bytes
-                        return null;
-                    }
-                    String partial = new String(prefix, 0, count, "UTF-8").trim();
-                    if (partial.startsWith("\ufeff")) partial = partial.substring(1).trim();
-                    if (partial.startsWith("#EXTM3U")) return MimeTypes.APPLICATION_M3U8;
-                    if (partial.contains("<MPD")) return MimeTypes.APPLICATION_MPD;
-                    if (count >= 16 && !partial.startsWith("<") && !partial.startsWith("#"))
-                        return null;
-                }
-            }
-            String start = new String(prefix, 0, count, "UTF-8").trim();
-            if (start.startsWith("\ufeff")) start = start.substring(1).trim();
-            if (start.startsWith("#EXTM3U")) return MimeTypes.APPLICATION_M3U8;
-            if (start.contains("<MPD")) return MimeTypes.APPLICATION_MPD;
-        } catch (Exception ignored) {
-            /* The real loader reports transport failures. */
-        } finally {
-            if (connection != null) RequestScope.detach(connection);
-            if (connection != null) connection.disconnect();
-        }
-        return null;
+            Map<String, String> probeHeaders = new LinkedHashMap<>(requestHeaders);
+            if (ProxyAddress.isLoopbackHost(address.getHost()))
+                probeHeaders.put(ChunkedProxyDataSource.HEADER_CHUNKED_CLIENT, "1");
+            return MediaContentProbe.probe(new URL(address.toString()), probeHeaders,
+                    defaultUserAgent(context), scope);
+        } catch (Exception ignored) { return null; }
     }
 
     public void start() {
@@ -1283,8 +1226,10 @@ public class MoviePlayer {
 
     private androidx.media3.exoplayer.source.MediaSource playbackSource(Uri address)
             throws Exception {
-        androidx.media3.exoplayer.source.MediaSource video =
-                mediaSourceFactory.createMediaSource(mediaItem(address));
+        MediaItem item = mediaItem(address);
+        androidx.media3.exoplayer.source.MediaSource video = televisionSubtitles
+                ? androidx.media3.exoplayer.source.TvSubtitleSource.create(mediaSourceFactory, subtitleDataSourceFactory, item)
+                : mediaSourceFactory.createMediaSource(item);
         org.json.JSONObject extra = options.optJSONObject("extra");
         String audio = extra == null ? "" : extra.optString("audio");
         if (!Cms.isHttp(audio)) return video;

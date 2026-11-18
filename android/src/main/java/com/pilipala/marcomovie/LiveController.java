@@ -29,6 +29,10 @@ final class LiveController {
     }
 
     static void liveSources(MainActivity a) {
+        if (a.isTvDevice()) {
+            new TvV17LiveScreen(a).show();
+            return;
+        }
         a.renderPage("直播", "LIVE TV");
         LinearLayout actions = a.row();
         a.addButton(
@@ -234,6 +238,22 @@ final class LiveController {
             }
         }
         return 0;
+    }
+
+    static void playFromCatalog(MainActivity a, LiveCatalog.Source source,
+            LiveCatalog.Catalog catalog, LiveCatalog.Channel channel, LiveCatalog.Stream stream,
+            TvSearchContext context) {
+        if (!context.matches(a.config, a.privateMode, a.engineEpoch)) {
+            a.notice("来源已更改，请重新打开直播。");
+            return;
+        }
+        if (stream == null || !channel.streams.contains(stream)) {
+            a.notice("所选线路不在当前频道中。");
+            return;
+        }
+        try { a.liveSession = LiveSession.forChannel(source, catalog, channel); }
+        catch (IllegalArgumentException invalid) { a.notice("频道列表已失效，请返回后重试。"); return; }
+        playLive(a, source, channel, stream);
     }
 
     static void playLive(

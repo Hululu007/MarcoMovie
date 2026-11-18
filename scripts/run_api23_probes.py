@@ -104,6 +104,7 @@ def main():
                 adb("shell", "pm", "clear", "com.pilipala.marcomovie")
                 adb("logcat", "-c")
                 log = adb("shell", "am", "instrument", "-w",
+                          *(["-e", "isolated_target", "true"] if probe == "HomeProbe" else []),
                           "com.pilipala.marcomovie.test/com.pilipala.marcomovie." + probe)
                 print(log)
                 match = re.search(r"INSTRUMENTATION_STATUS: result=(\{[^\r\n]+\})", log)

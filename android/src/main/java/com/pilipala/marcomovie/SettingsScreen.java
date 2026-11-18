@@ -20,6 +20,10 @@ final class SettingsScreen {
         a.renderPage("", "");
         if (a.isTvDevice() && a.scroll instanceof TvScrollView)
             ((TvScrollView) a.scroll).readingMode = true;
+        if (a.isTvDevice()) {
+            tvPage(title, note);
+            return;
+        }
         if (!a.isTvDevice()) {
             LinearLayout topNav = a.row();
             topNav.setGravity(Gravity.CENTER_VERTICAL);
@@ -47,6 +51,64 @@ final class SettingsScreen {
         }
     }
 
+    /** The screen stack still owns return and focus; the right column owns existing rows. */
+    void tvPage(String title, String note) {
+        LinearLayout outer = a.body;
+        TextView heading = a.text("设置", 28, TvV17Theme.TEXT);
+        heading.setTypeface(null, Typeface.BOLD);
+        outer.addView(heading);
+        a.gap(outer, 18);
+
+        LinearLayout columns = a.row();
+        columns.setGravity(Gravity.TOP);
+        columns.setClipChildren(false);
+        LinearLayout navigation = a.vertical();
+        navigation.setClipChildren(false);
+        LinearLayout.LayoutParams navSize = new LinearLayout.LayoutParams(a.dp(220), -2);
+        navSize.rightMargin = a.dp(28);
+        columns.addView(navigation, navSize);
+        LinearLayout content = a.vertical();
+        content.setClipChildren(false);
+        columns.addView(content, new LinearLayout.LayoutParams(0, -2, 1f));
+        outer.addView(columns, new LinearLayout.LayoutParams(-1, -2));
+
+        tvCategory(navigation, "播放与字幕", "settings-playback", this::playback,
+                title.equals("播放与字幕") || title.equals("解码组件"));
+        tvCategory(navigation, "显示与操作", "settings-appearance", this::appearance,
+                title.equals("首页与壁纸") || title.equals("首页壁纸"));
+        tvCategory(navigation, "内容与连接", "settings-content", this::content,
+                title.equals("内容与连接"));
+        tvCategory(navigation, "数据与备份", "settings-backup-page", this::backup,
+                title.equals("数据与备份"));
+        tvCategory(navigation, "关于与更新", "settings-updates",
+                () -> new UpdateScreen(a).show(), false);
+
+        a.body = content;
+        TextView section = a.text(title, 23, TvV17Theme.TEXT);
+        section.setTypeface(null, Typeface.BOLD);
+        content.addView(section);
+        a.gap(content, 12);
+        if (!note.isEmpty()) {
+            content.addView(a.text(note, 13, TvV17Theme.MUTED));
+            a.gap(content, 10);
+        }
+    }
+
+    void tvCategory(LinearLayout parent, String title, String tag, Runnable destination,
+            boolean selected) {
+        Button button = a.navButton(title, tag, () -> open(destination));
+        button.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
+        button.setTextSize(16);
+        int resting = selected ? 0xff3b4653 : 0xff222a34;
+        button.setBackground(TvV17Surface.rounded(resting, a.dp(12), 0x40ffffff, a.dp(1)));
+        button.setOnFocusChangeListener((view, focused) -> FocusMotion.style(
+                a, button, focused, resting, TvV17Theme.FOCUS, 12,
+                TvV17Theme.TEXT, MainActivity.DARK, false, 1.02f));
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, a.dp(52));
+        size.bottomMargin = a.dp(8);
+        parent.addView(button, size);
+    }
+
     void link(String title, String detail, String key, Runnable action) {
         boolean tv = a.isTvDevice();
         LinearLayout row = a.row();
@@ -70,15 +132,19 @@ final class SettingsScreen {
         row.setFocusable(tv);
         row.setFocusableInTouchMode(tv);
         row.setClickable(true);
-        row.setBackground(a.bg(0xff222226, 14));
+        int surface = tv && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
+                ? TvV17Theme.OPAQUE_SURFACE : TvV17Theme.SURFACE;
+        row.setBackground(tv
+                ? TvV17Surface.rounded(surface, a.dp(14), 0x2affffff, a.dp(1))
+                : a.bg(0xff222226, 14));
         row.setOnFocusChangeListener(
                 (v, f) -> {
                     FocusMotion.style(
                             a,
                             row,
                             f,
-                            0xff222226,
-                            0xff37373e,
+                            tv ? surface : 0xff222226,
+                            tv ? 0xff46515e : 0xff37373e,
                             14,
                             MainActivity.WHITE,
                             MainActivity.WHITE,
@@ -101,6 +167,10 @@ final class SettingsScreen {
     }
 
     void show() {
+        if (a.isTvDevice()) {
+            playback();
+            return;
+        }
         page("设置", "");
         link("首页与壁纸", "", "settings-appearance", () -> open(this::appearance));
         link("播放与字幕", "", "settings-playback", () -> open(this::playback));
@@ -536,8 +606,13 @@ final class SettingsScreen {
                             .setNegativeButton("返回", null)
                             .show();
                 });
-        if (a.isTvDevice())
-            ints("Dock 位置", Prefs.TV_DOCK_POSITION, new String[] {"右侧", "顶部"}, new int[] {0, 1}, 0);
+        if (a.isTvDevice()) {
+            ints("电视导航布局", Prefs.TV_NAVIGATION_MODE,
+                    new String[] {"原有布局", "左侧自动收起"}, new int[] {0, 1},
+                    a.useLeftDock() ? 1 : 0);
+            if (!a.useLeftDock())
+                ints("Dock 位置", Prefs.TV_DOCK_POSITION, new String[] {"右侧", "顶部"}, new int[] {0, 1}, 0);
+        }
         ints(
                 "导航栏字体与按钮大小",
                 Prefs.NAV_SCALE_PERCENT,
@@ -567,6 +642,10 @@ final class SettingsScreen {
                 () -> com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root));
         toggle("开屏动画", Prefs.STARTUP_ANIMATION, true, null);
         toggle("海报配色柔光", Prefs.HOME_AMBIENT, true, null);
+        if (a.isTvDevice())
+            ints("柔光强度", Prefs.TV_AMBIENT_PERCENT,
+                    new String[] {"0%", "25%", "50%", "75%", "100%"},
+                    new int[] {0, 25, 50, 75, 100}, 100);
         toggle(
                 "减少动态效果",
                 Prefs.REDUCED,
@@ -742,6 +821,21 @@ final class SettingsScreen {
 
     void data() {
         page("搜索与数据", "搜索默认识别首拼和全拼，并检索配置中全部可搜索来源。");
+        contentRows();
+        backupRows();
+    }
+
+    void content() {
+        page("内容与连接", "搜索默认识别首拼和全拼，并检索配置中全部可搜索来源。");
+        contentRows();
+    }
+
+    void backup() {
+        page("数据与备份", "管理同步、备份和本机记录。");
+        backupRows();
+    }
+
+    void contentRows() {
         ints(
                 "同时搜索的来源数",
                 Prefs.SEARCH_THREADS,
@@ -761,6 +855,10 @@ final class SettingsScreen {
                         : "剪贴板粘贴、网址输入或本地包 (.json/.js/.py/.zip)",
                 "settings-import",
                 a::importDialog);
+        if (a.isTvDevice()) {
+            link("已添加源与线路管理", "切换订阅、管理线路或添加新源",
+                    "settings-source-manager", a::chooseOrImport);
+        }
         link(
                 "导入或管理电视直播源",
                 "支持 M3U、TXT (#genre#)、JSON 及本地直播文件",
@@ -780,6 +878,9 @@ final class SettingsScreen {
                 "网盘扫码登录、凭据与网盘顺序（由配置提供）",
                 "settings-accounts",
                 () -> AccountPanel.show(a, null));
+    }
+
+    void backupRows() {
         if (!a.privateMode) {
             link(
                     "多端网络同步",
@@ -922,15 +1023,19 @@ final class SettingsScreen {
         row.setFocusable(tv);
         row.setFocusableInTouchMode(tv);
         row.setClickable(true);
-        row.setBackground(a.bg(0xff222226, 14));
+        int surface = tv && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
+                ? TvV17Theme.OPAQUE_SURFACE : TvV17Theme.SURFACE;
+        row.setBackground(tv
+                ? TvV17Surface.rounded(surface, a.dp(14), 0x2affffff, a.dp(1))
+                : a.bg(0xff222226, 14));
         row.setOnFocusChangeListener(
                 (v, f) ->
                         FocusMotion.style(
                                 a,
                                 row,
                                 f,
-                                0xff222226,
-                                0xff37373e,
+                                tv ? surface : 0xff222226,
+                                tv ? 0xff46515e : 0xff37373e,
                                 14,
                                 MainActivity.WHITE,
                                 MainActivity.WHITE,
