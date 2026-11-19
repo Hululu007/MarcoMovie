@@ -1,0 +1,47 @@
+name: Capture Redesigned Apple TV Simulator Screenshots
+
+on:
+  push:
+    branches:
+      - temp/appletv-ui-v2-verify
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture-appletv-simulator:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Prepare tvOS Xcode project & Run Swift Core Tests
+        run: |
+          python3 tvos/prepare_tvos.py
+          cd tvos && swift test
+      - name: Build MarcoMovieTV for Apple TV Simulator
+        run: |
+          xcodebuild \
+            -project tvos/RunnerProject/MarcoMovieTV.xcodeproj \
+            -scheme MarcoMovieTV \
+            -sdk appletvsimulator \
+            -configuration Release \
+            -derivedDataPath tvos/DerivedDataSim \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+      - name: Boot Apple TV 4K Simulator & Capture Real Runtime Screens
+        run: |
+          APP_PATH=$(find tvos/DerivedDataSim/Build/Products -name "MarcoMovieTV.app" | head -n 1)
+          codesign --force --deep --sign - "$APP_PATH"
+          python3 scripts/capture_appletv_sim.py --app "$APP_PATH" --out-dir "$RUNNER_TEMP/appletv-real-screens-v3"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: appletv-simulator-real-screenshots-v3
+          retention-days: 5
+          path: ${{ runner.temp }}/appletv-real-screens-v3/*.png

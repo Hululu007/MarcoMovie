@@ -634,5 +634,11 @@ public struct DetailView: View {
             errorMessage = error.localizedDescription
         }
         isLoading = false
+        #if targetEnvironment(simulator)
+        if ProcessInfo.processInfo.environment["MARCO_SIM_SCENE"] == "episodes" {
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            showEpisodeSelection = true
+        }
+        #endif
     }
 }
