@@ -1590,6 +1590,12 @@ final class HomeScreen {
         }
     }
 
+    boolean renderedWindowComplete() {
+        int rendered = 0;
+        for (List<View> row : rows) rendered += row.size();
+        return rendered >= windowEnd() - state.windowStart;
+    }
+
     void maybeAutoLoadMore() {
         if (!active()
                 || busy
@@ -1597,6 +1603,7 @@ final class HomeScreen {
                 || !state.ready
                 || state.categoryFailed
                 || snapshot == null
+                || !renderedWindowComplete()
                 || (homeHost != null && !state.library)) return;
         if (windowEnd() < state.videos.size()) {
             showWindow(state.windowStart + windowSize());
