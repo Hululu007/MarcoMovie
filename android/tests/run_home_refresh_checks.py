@@ -7,8 +7,8 @@ ROOT = Path(__file__).resolve().parents[2]
 HOME = 'android/src/main/java/com/pilipala/marcomovie/HomeScreen.java'
 
 
-def method(text):
-    start = text.index('    void updateMore() {')
+def method(text, name='updateMore'):
+    start = text.index('    void '+name+'() {')
     at = text.index('{', start); depth = 1; end = at + 1
     while depth:
         depth += (text[end] == '{') - (text[end] == '}'); end += 1
@@ -29,8 +29,8 @@ with tempfile.TemporaryDirectory(prefix='home-refresh-') as directory:
           static class Button {String text="重新加载"; boolean focus; int visibility=0;
             String getText(){return text;} boolean hasFocus(){return focus;}
             void setText(String s){text=s;} void setVisibility(int v){visibility=v;}}
-          static class State {boolean ready,categoryFailed;}
-          Button more=new Button(); State state=new State();
+          static class State {boolean ready,categoryFailed; int windowStart;}
+          Button more=new Button(), earlier=new Button(); State state=new State();
           METHOD
           public static void main(String[] args){
             RetryCheck h=new RetryCheck(); h.state.ready=true; h.state.categoryFailed=true;
@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='home-refresh-') as directory:
             if(h.more.visibility!=0)throw new AssertionError("first-page retry lost");
             h.state.ready=true;h.updateMore();if(h.more.visibility!=8)throw new AssertionError("success leaves retry visible");
             System.out.println("PASS 4 extracted actual updateMore transitions");
-          }}'''.replace('METHOD',method(source))
+          }}'''.replace('METHOD',method(source)+(method(source,'updateEarlier') if label=='fixed' else ''))
         p=work/'RetryCheck.java';p.write_text(test,encoding='utf8')
         subprocess.run([javac,'-encoding','UTF-8','-d',str(work),str(p)],check=True)
         r=subprocess.run([java,'-cp',str(work),'RetryCheck'],capture_output=True,text=True)

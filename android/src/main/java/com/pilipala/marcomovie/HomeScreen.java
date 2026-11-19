@@ -1530,7 +1530,7 @@ final class HomeScreen {
             clearGrid();
             existing = state.windowStart;
         }
-        earlier.setVisibility(state.windowStart > 0 ? View.VISIBLE : View.GONE);
+        updateEarlier();
         if (existing < windowEnd()) a.learnTitles(state.videos.subList(existing, windowEnd()));
         status.setText(
                 state.selectedFilters.isEmpty()
@@ -1576,8 +1576,16 @@ final class HomeScreen {
                     });
     }
 
+    void updateEarlier() {
+        if (state == null) return;
+        // Hiding the pressed button before its destination receives focus can select a category.
+        if (state.windowStart > 0) earlier.setVisibility(View.VISIBLE);
+        else if (!earlier.hasFocus()) earlier.setVisibility(View.GONE);
+    }
+
     /** Keeps "加载更多" hidden during normal browsing (only shown as retry on failure). */
     void updateMore() {
+        updateEarlier();
         if (state != null
                 && (state.categoryFailed
                         || (!state.ready && "重新加载".equals(String.valueOf(more.getText()))))) {
