@@ -24,6 +24,7 @@ import '../core/models.dart';
 import '../core/netdisk_service.dart';
 import '../core/storage_service.dart';
 import '../core/ohos_runtime.dart';
+import '../core/spider_plugin_registry.dart';
 import '../core/app_log.dart';
 import '../core/search_source_notice.dart';
 import 'apple_theme.dart';
@@ -37,6 +38,7 @@ import 'player_screen.dart';
 import 'poster_image.dart';
 import 'release_notes_view.dart';
 import 'source_verification_dialog.dart';
+import 'spider_extensions_panel.dart';
 import 'windows_appearance.dart';
 part 'windows_shell.dart';
 /// Apple HIG adaptive shell:
@@ -7449,11 +7451,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           const SizedBox(height: 10),
                           SizedBox(
                             width: double.infinity,
-                            child: CupertinoSlider(
+                            child: IosNativeSlider(
                               key: const ValueKey('ios-glass-slider'),
                               value: value,
                               min: 0,
                               max: 1,
+                              activeColor: AppleColors.systemBlue,
+                              accessibilityLabel: '玻璃强度',
                               onChanged: (v) {
                                 GlassworkBackdrop.intensity.value = v;
                                 GlassworkBackdrop.reduceTransparency.value =
@@ -7757,6 +7761,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ],
           ),
         ]),
+      ),
+      SettingsPane(
+        'extensions',
+        '蜘蛛扩展与网关',
+        '热插拔脚本扩展包与自建局域网网关兜底（适配 .so 线路）',
+        CupertinoIcons.cube_box_fill,
+        AppleColors.systemIndigo,
+        sectionGroup: 'account',
+        trailingText: SpiderPluginRegistry.instance.gatewayConfig.isActive
+            ? '网关已开启'
+            : (SpiderPluginRegistry.instance.enabledPackCount > 0
+                ? '${SpiderPluginRegistry.instance.enabledPackCount} 扩展包'
+                : '本机模式'),
+        content: SpiderExtensionsPanel(
+          storage: storage,
+          client: widget.client,
+          sites: sites,
+          onChanged: () {
+            _reloadSavedConfig();
+            refresh();
+          },
+          onNotice: _showAppleNotice,
+        ),
       ),
       SettingsPane(
         'data',
@@ -10953,6 +10980,35 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
 
+  Future<void> _openSpiderExtensionsPage({String iosBackLabel = '切换片源'}) {
+    final sites = _config?.sites ?? const <CmsSite>[];
+    return _openIosOrModalPage<void>(
+      title: '蜘蛛扩展与网关',
+      backLabel: iosBackLabel,
+      maxWidth: 640,
+      builder: (ctx) => ListView(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          18,
+          16,
+          MediaQuery.paddingOf(ctx).bottom + 36,
+        ),
+        children: [
+          SpiderExtensionsPanel(
+            storage: widget.storage,
+            client: widget.client,
+            sites: sites,
+            onChanged: () {
+              _reloadSavedConfig();
+              if (mounted) setState(() {});
+            },
+            onNotice: _showAppleNotice,
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showSitePickerDialog() {
     final isIos = defaultTargetPlatform == TargetPlatform.iOS;
     final inPrivacyMode = _privateSessionUnlocked;
@@ -11103,6 +11159,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
           String siteBadgeLabel(CmsSite s) {
             final lower = '${s.name} ${s.api} ${s.key}'.toLowerCase();
+            if (s.usesAdapterPack) return '扩展插件';
+            if (s.usesSpiderGateway) return '网关代理';
             if (CspBridge.isMyDriveSite(s)) return '云盘配置';
             if (CspBridge.isSearchOnlySite(s)) return '搜索专用';
             if (CspBridge.isNetdiskSite(s)) return '4K网盘';
@@ -11119,6 +11177,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           Color siteBadgeColor(CmsSite s) {
             final badge = siteBadgeLabel(s);
             return switch (badge) {
+              '扩展插件' => const Color(0xFFBF5AF2),
+              '网关代理' => const Color(0xFF5AC8FA),
               '云盘配置' => const Color(0xFF0A84FF),
               '搜索专用' => const Color(0xFF64D2FF),
               '4K网盘' => const Color(0xFF30D158),
@@ -11379,6 +11439,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         title: s.name,
                         message: s.unsupportedReason,
                         actions: [
+                          const AppleNativeAlertAction(
+                            id: 'open_extensions',
+                            title: '配置扩展包 / 自建网关',
+                          ),
                           if (unsupportedCount > 1)
                             AppleNativeAlertAction(
                               id: 'hide_all_unsupported',
@@ -11402,7 +11466,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         ],
                       ).then((action) async {
                         if (!ctx.mounted) return;
-                        if (action == 'hide_all_unsupported') {
+                        if (action == 'open_extensions') {
+                          await _openSpiderExtensionsPage(
+                            iosBackLabel: '切换片源',
+                          );
+                          if (ctx.mounted) setPickerState(() {});
+                        } else if (action == 'hide_all_unsupported') {
                           final ids = unsupportedSites
                               .map(widget.storage.siteIdentityOf)
                               .toList();

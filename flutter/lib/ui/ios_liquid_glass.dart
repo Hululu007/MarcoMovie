@@ -555,6 +555,20 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
     return IosNativeRouteGate(
       builder: (context, nativeActive) {
         if (!nativeActive) {
+          if (IosLiquidGlassBridge.isAvailable) {
+            return _Ios26GlassButtonPlaceholder(
+              style: widget.style,
+              symbol: widget.symbol,
+              trailingSymbol: widget.trailingSymbol,
+              label: widget.label,
+              symbolSize: widget.symbolSize,
+              foregroundColor: widget.foregroundColor,
+              tintColor: widget.tintColor,
+              width: _resolvedWidth(context),
+              height: widget.height,
+              onTap: widget.onTap,
+            );
+          }
           return widget.fallback;
         }
         return RepaintBoundary(
@@ -674,11 +688,18 @@ class _IosNativeGlassPillState extends State<IosNativeGlassPill> {
   Widget build(BuildContext context) {
     return IosNativeRouteGate(
       builder: (context, nativeActive) {
-        if (!nativeActive) {
-          return widget.fallback;
-        }
         final count = widget.actions.length;
         final width = 12.0 + count * 38.0 + math.max(0, count - 1) * 0.6;
+        if (!nativeActive) {
+          if (IosLiquidGlassBridge.isAvailable) {
+            return _Ios26GlassPillPlaceholder(
+              actions: widget.actions,
+              width: width,
+              height: widget.height,
+            );
+          }
+          return widget.fallback;
+        }
         return RepaintBoundary(
           child: SizedBox(
             width: width,
@@ -770,6 +791,14 @@ class _IosNativeSegmentedControlState extends State<IosNativeSegmentedControl> {
     return IosNativeRouteGate(
       builder: (context, nativeActive) {
         if (!nativeActive) {
+          if (IosLiquidGlassBridge.isAvailable) {
+            return _Ios26SegmentedPlaceholder(
+              segments: widget.segments,
+              selectedIndex: widget.selectedIndex,
+              height: widget.height,
+              onChanged: widget.onChanged,
+            );
+          }
           return widget.fallback;
         }
         return RepaintBoundary(
@@ -785,6 +814,548 @@ class _IosNativeSegmentedControlState extends State<IosNativeSegmentedControl> {
           ),
         );
       },
+    );
+  }
+}
+
+/// Native iOS 26 UIKit `UISwitch` (with authentic Liquid Glass expanding crystal
+/// thumb on press/drag), seamlessly falling back to `CupertinoSwitch` on older
+/// iOS, non-iOS platforms, and during route transitions.
+class IosNativeSwitch extends StatefulWidget {
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+  final Color activeColor;
+  final String? accessibilityLabel;
+
+  const IosNativeSwitch({
+    super.key,
+    required this.value,
+    required this.onChanged,
+    this.activeColor = CupertinoColors.activeGreen,
+    this.accessibilityLabel,
+  });
+
+  @override
+  State<IosNativeSwitch> createState() => _IosNativeSwitchState();
+}
+
+class _IosNativeSwitchState extends State<IosNativeSwitch> {
+  MethodChannel? _channel;
+
+  Map<String, dynamic> _buildParams() => <String, dynamic>{
+        'value': widget.value,
+        'onTintColor': widget.activeColor.toARGB32(),
+        'enabled': widget.onChanged != null,
+        if (widget.accessibilityLabel != null &&
+            widget.accessibilityLabel!.isNotEmpty)
+          'accessibilityLabel': widget.accessibilityLabel,
+      };
+
+  void _onViewCreated(int id) {
+    _channel?.setMethodCallHandler(null);
+    final ch = MethodChannel('marco_movie/ios26_switch_$id');
+    _channel = ch;
+    ch.setMethodCallHandler((call) async {
+      if (!mounted) return;
+      if (call.method == 'onChanged' && call.arguments is bool) {
+        widget.onChanged?.call(call.arguments as bool);
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant IosNativeSwitch oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final ch = _channel;
+    if (ch == null) return;
+    if (oldWidget.value != widget.value ||
+        oldWidget.activeColor != widget.activeColor ||
+        (oldWidget.onChanged == null) != (widget.onChanged == null) ||
+        oldWidget.accessibilityLabel != widget.accessibilityLabel) {
+      unawaited(_safeUpdate(ch));
+    }
+  }
+
+  Future<void> _safeUpdate(MethodChannel ch) async {
+    try {
+      await ch.invokeMethod<void>('update', _buildParams());
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _channel?.setMethodCallHandler(null);
+    _channel = null;
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IosNativeRouteGate(
+      builder: (context, nativeActive) {
+        if (!nativeActive) {
+          return CupertinoSwitch(
+            value: widget.value,
+            activeTrackColor: widget.activeColor,
+            onChanged: widget.onChanged,
+          );
+        }
+        return RepaintBoundary(
+          child: SizedBox(
+            width: 51,
+            height: 31,
+            child: UiKitView(
+              viewType: 'marco_movie/ios26_switch',
+              creationParams: _buildParams(),
+              creationParamsCodec: const StandardMessageCodec(),
+              onPlatformViewCreated: _onViewCreated,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Native iOS 26 UIKit `UISlider` (with authentic Liquid Glass magnifying pill
+/// thumb during scrubbing), falling back cleanly to `CupertinoSlider`.
+class IosNativeSlider extends StatefulWidget {
+  final double value;
+  final double min;
+  final double max;
+  final Color activeColor;
+  final String? accessibilityLabel;
+  final ValueChanged<double>? onChanged;
+  final ValueChanged<double>? onChangeEnd;
+
+  const IosNativeSlider({
+    super.key,
+    required this.value,
+    this.min = 0.0,
+    this.max = 1.0,
+    this.activeColor = CupertinoColors.activeBlue,
+    this.accessibilityLabel,
+    required this.onChanged,
+    this.onChangeEnd,
+  });
+
+  @override
+  State<IosNativeSlider> createState() => _IosNativeSliderState();
+}
+
+class _IosNativeSliderState extends State<IosNativeSlider> {
+  MethodChannel? _channel;
+
+  Map<String, dynamic> _buildParams() => <String, dynamic>{
+        'value': widget.value.clamp(widget.min, widget.max).toDouble(),
+        'min': widget.min,
+        'max': widget.max,
+        'tintColor': widget.activeColor.toARGB32(),
+        if (widget.accessibilityLabel != null &&
+            widget.accessibilityLabel!.isNotEmpty)
+          'accessibilityLabel': widget.accessibilityLabel,
+      };
+
+  void _onViewCreated(int id) {
+    _channel?.setMethodCallHandler(null);
+    final ch = MethodChannel('marco_movie/ios26_slider_$id');
+    _channel = ch;
+    ch.setMethodCallHandler((call) async {
+      if (!mounted) return;
+      final raw = call.arguments;
+      if (raw is! num) return;
+      final v = raw.toDouble().clamp(widget.min, widget.max).toDouble();
+      if (call.method == 'onChanged') {
+        widget.onChanged?.call(v);
+      } else if (call.method == 'onChangeEnd') {
+        widget.onChangeEnd?.call(v);
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant IosNativeSlider oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final ch = _channel;
+    if (ch == null) return;
+    if ((oldWidget.value - widget.value).abs() > 0.0005 ||
+        oldWidget.min != widget.min ||
+        oldWidget.max != widget.max ||
+        oldWidget.activeColor != widget.activeColor ||
+        oldWidget.accessibilityLabel != widget.accessibilityLabel) {
+      unawaited(_safeUpdate(ch));
+    }
+  }
+
+  Future<void> _safeUpdate(MethodChannel ch) async {
+    try {
+      await ch.invokeMethod<void>('update', _buildParams());
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _channel?.setMethodCallHandler(null);
+    _channel = null;
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IosNativeRouteGate(
+      builder: (context, nativeActive) {
+        if (!nativeActive) {
+          return SizedBox(
+            width: double.infinity,
+            height: 36,
+            child: CupertinoSlider(
+              value: widget.value.clamp(widget.min, widget.max).toDouble(),
+              min: widget.min,
+              max: widget.max,
+              activeColor: widget.activeColor,
+              onChanged: widget.onChanged,
+              onChangeEnd: widget.onChangeEnd,
+            ),
+          );
+        }
+        return RepaintBoundary(
+          child: SizedBox(
+            width: double.infinity,
+            height: 36,
+            child: UiKitView(
+              viewType: 'marco_movie/ios26_slider',
+              creationParams: _buildParams(),
+              creationParamsCodec: const StandardMessageCodec(),
+              onPlatformViewCreated: _onViewCreated,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+IconData _cupertinoIconForSfSymbol(String? symbol) => switch (symbol) {
+      'chevron.backward' => CupertinoIcons.back,
+      'chevron.down' => CupertinoIcons.chevron_down,
+      'archivebox.fill' || 'archivebox' => CupertinoIcons.archivebox_fill,
+      'square.3.layers.3d' ||
+      'square.stack.3d.up' ||
+      'square.stack.3d.up.fill' =>
+        CupertinoIcons.layers_alt_fill,
+      'lock.shield.fill' => CupertinoIcons.lock_shield_fill,
+      'cloud.fill' => CupertinoIcons.cloud_fill,
+      'cloud' => CupertinoIcons.cloud,
+      'line.3.horizontal.decrease' => CupertinoIcons.slider_horizontal_3,
+      'arrow.triangle.2.circlepath' => CupertinoIcons.arrow_2_circlepath,
+      'magnifyingglass' => CupertinoIcons.search,
+      'qrcode.viewfinder' => CupertinoIcons.qrcode,
+      'arrow.down.to.line' => CupertinoIcons.arrow_down_to_line,
+      'heart.fill' => CupertinoIcons.heart_fill,
+      'heart' => CupertinoIcons.heart,
+      'play.rectangle' => CupertinoIcons.play_rectangle,
+      'play.rectangle.fill' => CupertinoIcons.play_rectangle_fill,
+      'dot.radiowaves.left.and.right' =>
+        CupertinoIcons.dot_radiowaves_left_right,
+      'gearshape' => CupertinoIcons.gear_alt,
+      'gearshape.fill' => CupertinoIcons.gear_alt_fill,
+      'xmark' => CupertinoIcons.xmark,
+      'plus' => CupertinoIcons.plus,
+      'slider.horizontal.3' => CupertinoIcons.slider_horizontal_3,
+      _ => CupertinoIcons.circle,
+    };
+
+/// Zero-`BackdropFilter`, exact-geometry transition placeholder matching native
+/// iOS 26 `MarcoNativeGlassButtonPlatformView` so route push/pop animations
+/// never shift size or flash legacy Flutter fallback styling.
+class _Ios26GlassButtonPlaceholder extends StatelessWidget {
+  final String style;
+  final String? symbol;
+  final String? trailingSymbol;
+  final String label;
+  final double symbolSize;
+  final Color foregroundColor;
+  final Color? tintColor;
+  final double width;
+  final double height;
+  final VoidCallback onTap;
+
+  const _Ios26GlassButtonPlaceholder({
+    required this.style,
+    required this.symbol,
+    required this.trailingSymbol,
+    required this.label,
+    required this.symbolSize,
+    required this.foregroundColor,
+    required this.tintColor,
+    required this.width,
+    required this.height,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isCapsule = style == 'capsule' &&
+        (label.isNotEmpty ||
+            (trailingSymbol != null && trailingSymbol!.isNotEmpty));
+    final radius = BorderRadius.circular(height * 0.5);
+    final baseBg = tintColor != null
+        ? Color.alphaBlend(
+            tintColor!.withValues(alpha: 0.78),
+            const Color(0xFF1C1C20),
+          )
+        : const Color(0xD626262B);
+    final topBg = tintColor != null
+        ? Color.alphaBlend(
+            const Color(0x22FFFFFF),
+            baseBg,
+          )
+        : const Color(0xDC34343A);
+
+    return GestureDetector(
+      key: const ValueKey('ios26-glass-button-transition-placeholder'),
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: SizedBox(
+        width: width,
+        height: height,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: radius,
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [topBg, baseBg],
+            ),
+            border: Border.all(
+              color: tintColor != null
+                  ? Colors.white.withValues(alpha: 0.28)
+                  : Colors.white.withValues(alpha: 0.18),
+              width: 0.65,
+            ),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x38000000),
+                blurRadius: 10,
+                offset: Offset(0, 3),
+              ),
+            ],
+          ),
+          child: isCapsule
+              ? Padding(
+                  padding: const EdgeInsets.only(left: 12, right: 11),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      if (symbol != null && symbol!.isNotEmpty) ...[
+                        Icon(
+                          _cupertinoIconForSfSymbol(symbol),
+                          size: symbolSize,
+                          color: foregroundColor,
+                        ),
+                        const SizedBox(width: 5),
+                      ],
+                      if (label.isNotEmpty)
+                        Flexible(
+                          child: Text(
+                            label,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: foregroundColor,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: -0.2,
+                            ),
+                          ),
+                        ),
+                      if (trailingSymbol != null &&
+                          trailingSymbol!.isNotEmpty) ...[
+                        const SizedBox(width: 5),
+                        Icon(
+                          _cupertinoIconForSfSymbol(trailingSymbol),
+                          size: math.max(symbolSize - 3.0, 11.0),
+                          color: foregroundColor.withValues(alpha: 0.82),
+                        ),
+                      ],
+                    ],
+                  ),
+                )
+              : Center(
+                  child: symbol != null && symbol!.isNotEmpty
+                      ? Icon(
+                          _cupertinoIconForSfSymbol(symbol),
+                          size: symbolSize,
+                          color: foregroundColor,
+                        )
+                      : const SizedBox.shrink(),
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Ios26GlassPillPlaceholder extends StatelessWidget {
+  final List<IosNativeGlassPillAction> actions;
+  final double width;
+  final double height;
+
+  const _Ios26GlassPillPlaceholder({
+    required this.actions,
+    required this.width,
+    required this.height,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      key: const ValueKey('ios26-glass-pill-transition-placeholder'),
+      width: width,
+      height: height,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(height * 0.5),
+          gradient: const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xDC34343A), Color(0xD626262B)],
+          ),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.18),
+            width: 0.65,
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 0; i < actions.length; i++) ...[
+                if (i > 0)
+                  Container(
+                    width: 0.6,
+                    height: 18,
+                    color: Colors.white.withValues(alpha: 0.24),
+                  ),
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: actions[i].onTap,
+                  child: SizedBox(
+                    width: 38,
+                    height: 38,
+                    child: Center(
+                      child: Icon(
+                        _cupertinoIconForSfSymbol(actions[i].symbol),
+                        size: 17.5,
+                        color: actions[i].color,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Zero-`BackdropFilter`, exact-geometry transition placeholder matching native
+/// iOS 26 `UISegmentedControl` (continuous capsule track + translucent sliding
+/// thumb + equal-width segments) so returning to Home/Netdisk/Library never
+/// flashes legacy separate pills.
+class _Ios26SegmentedPlaceholder extends StatelessWidget {
+  final List<String> segments;
+  final int selectedIndex;
+  final double height;
+  final ValueChanged<int> onChanged;
+
+  const _Ios26SegmentedPlaceholder({
+    required this.segments,
+    required this.selectedIndex,
+    required this.height,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final count = segments.length;
+    if (count == 0) return SizedBox(width: double.infinity, height: height);
+    final safeIdx = selectedIndex.clamp(0, count - 1);
+    return SizedBox(
+      key: const ValueKey('ios26-segmented-transition-placeholder'),
+      width: double.infinity,
+      height: height,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(height * 0.5),
+          color: const Color(0xCC222227),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.14),
+            width: 0.6,
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(2.5),
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final segW = constraints.maxWidth / count;
+              final segH = constraints.maxHeight;
+              return Stack(
+                children: [
+                  Positioned(
+                    left: segW * safeIdx,
+                    top: 0,
+                    width: segW,
+                    height: segH,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(segH * 0.5),
+                        gradient: const LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [Color(0xFF5D5D64), Color(0xFF4A4A50)],
+                        ),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.22),
+                          width: 0.5,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      for (var i = 0; i < count; i++)
+                        Expanded(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => onChanged(i),
+                            child: Center(
+                              child: Text(
+                                segments[i],
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: i == safeIdx
+                                      ? Colors.white
+                                      : Colors.white.withValues(alpha: 0.76),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+      ),
     );
   }
 }

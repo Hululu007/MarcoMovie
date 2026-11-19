@@ -94,6 +94,14 @@ private enum MarcoLiquidGlassSupport {
       MarcoNativeSegmentedControlFactory(messenger: messenger),
       withId: "marco_movie/ios26_segmented_control"
     )
+    registrar.register(
+      MarcoNativeSwitchFactory(messenger: messenger),
+      withId: "marco_movie/ios26_switch"
+    )
+    registrar.register(
+      MarcoNativeSliderFactory(messenger: messenger),
+      withId: "marco_movie/ios26_slider"
+    )
   }
 
   private static func loadBrandLogoImage(registrar: FlutterPluginRegistrar) -> UIImage? {
@@ -2699,5 +2707,238 @@ private final class MarcoNativeSegmentedControlPlatformView: NSObject, FlutterPl
     if idx >= 0 {
       channel.invokeMethod("onChanged", arguments: idx)
     }
+  }
+}
+
+// MARK: - 5. Native iOS 26 UISwitch (Liquid Glass Expanding Crystal Thumb)
+
+private final class MarcoNativeSwitchFactory: NSObject, FlutterPlatformViewFactory {
+  private let messenger: FlutterBinaryMessenger
+
+  init(messenger: FlutterBinaryMessenger) {
+    self.messenger = messenger
+    super.init()
+  }
+
+  func createArgsCodec() -> FlutterMessageCodec & NSObjectProtocol {
+    return FlutterStandardMessageCodec.sharedInstance()
+  }
+
+  func create(
+    withFrame frame: CGRect,
+    viewIdentifier viewId: Int64,
+    arguments args: Any?
+  ) -> FlutterPlatformView {
+    return MarcoNativeSwitchPlatformView(
+      frame: frame,
+      viewId: viewId,
+      arguments: args as? [String: Any],
+      messenger: messenger
+    )
+  }
+}
+
+private final class MarcoNativeSwitchPlatformView: NSObject, FlutterPlatformView {
+  private let hostView = UIView(frame: .zero)
+  private let toggle = UISwitch(frame: .zero)
+  private let channel: FlutterMethodChannel
+
+  init(
+    frame: CGRect,
+    viewId: Int64,
+    arguments args: [String: Any]?,
+    messenger: FlutterBinaryMessenger
+  ) {
+    self.channel = FlutterMethodChannel(
+      name: "marco_movie/ios26_switch_\(viewId)",
+      binaryMessenger: messenger
+    )
+    super.init()
+
+    hostView.frame = frame
+    hostView.backgroundColor = .clear
+    hostView.isOpaque = false
+    hostView.clipsToBounds = false
+    hostView.overrideUserInterfaceStyle = .dark
+
+    toggle.overrideUserInterfaceStyle = .dark
+    toggle.onTintColor = UIColor.systemGreen
+    toggle.translatesAutoresizingMaskIntoConstraints = false
+    toggle.addTarget(self, action: #selector(valueChanged), for: .valueChanged)
+    hostView.addSubview(toggle)
+
+    NSLayoutConstraint.activate([
+      toggle.centerXAnchor.constraint(equalTo: hostView.centerXAnchor),
+      toggle.centerYAnchor.constraint(equalTo: hostView.centerYAnchor),
+    ])
+
+    if let args = args {
+      apply(args, animated: false)
+    }
+
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self = self else {
+        result(nil)
+        return
+      }
+      DispatchQueue.main.async {
+        if call.method == "update", let args = call.arguments as? [String: Any] {
+          self.apply(args, animated: true)
+          result(nil)
+        } else {
+          result(FlutterMethodNotImplemented)
+        }
+      }
+    }
+  }
+
+  deinit {
+    channel.setMethodCallHandler(nil)
+  }
+
+  func view() -> UIView {
+    return hostView
+  }
+
+  private func apply(_ args: [String: Any], animated: Bool) {
+    if let color = MarcoLiquidGlassSupport.colorFromARGB(args["onTintColor"]) {
+      toggle.onTintColor = color
+    }
+    if let enabled = args["enabled"] as? Bool {
+      toggle.isEnabled = enabled
+    }
+    if let a11y = args["accessibilityLabel"] as? String, !a11y.isEmpty {
+      toggle.accessibilityLabel = a11y
+    }
+    if let val = args["value"] as? Bool, toggle.isOn != val {
+      toggle.setOn(val, animated: animated)
+    }
+  }
+
+  @objc private func valueChanged() {
+    channel.invokeMethod("onChanged", arguments: toggle.isOn)
+  }
+}
+
+// MARK: - 6. Native iOS 26 UISlider (Liquid Glass Magnifying Pill Thumb)
+
+private final class MarcoNativeSliderFactory: NSObject, FlutterPlatformViewFactory {
+  private let messenger: FlutterBinaryMessenger
+
+  init(messenger: FlutterBinaryMessenger) {
+    self.messenger = messenger
+    super.init()
+  }
+
+  func createArgsCodec() -> FlutterMessageCodec & NSObjectProtocol {
+    return FlutterStandardMessageCodec.sharedInstance()
+  }
+
+  func create(
+    withFrame frame: CGRect,
+    viewIdentifier viewId: Int64,
+    arguments args: Any?
+  ) -> FlutterPlatformView {
+    return MarcoNativeSliderPlatformView(
+      frame: frame,
+      viewId: viewId,
+      arguments: args as? [String: Any],
+      messenger: messenger
+    )
+  }
+}
+
+private final class MarcoNativeSliderPlatformView: NSObject, FlutterPlatformView {
+  private let hostView = UIView(frame: .zero)
+  private let slider = UISlider(frame: .zero)
+  private let channel: FlutterMethodChannel
+
+  init(
+    frame: CGRect,
+    viewId: Int64,
+    arguments args: [String: Any]?,
+    messenger: FlutterBinaryMessenger
+  ) {
+    self.channel = FlutterMethodChannel(
+      name: "marco_movie/ios26_slider_\(viewId)",
+      binaryMessenger: messenger
+    )
+    super.init()
+
+    hostView.frame = frame
+    hostView.backgroundColor = .clear
+    hostView.isOpaque = false
+    hostView.clipsToBounds = false
+    hostView.overrideUserInterfaceStyle = .dark
+
+    slider.overrideUserInterfaceStyle = .dark
+    slider.minimumTrackTintColor = UIColor.systemBlue
+    slider.maximumTrackTintColor = UIColor.white.withAlphaComponent(0.22)
+    slider.isContinuous = true
+    slider.translatesAutoresizingMaskIntoConstraints = false
+    slider.addTarget(self, action: #selector(valueChanged), for: .valueChanged)
+    slider.addTarget(self, action: #selector(touchEnded), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+    hostView.addSubview(slider)
+
+    NSLayoutConstraint.activate([
+      slider.leadingAnchor.constraint(equalTo: hostView.leadingAnchor),
+      slider.trailingAnchor.constraint(equalTo: hostView.trailingAnchor),
+      slider.centerYAnchor.constraint(equalTo: hostView.centerYAnchor),
+    ])
+
+    if let args = args {
+      apply(args)
+    }
+
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self = self else {
+        result(nil)
+        return
+      }
+      DispatchQueue.main.async {
+        if call.method == "update", let args = call.arguments as? [String: Any] {
+          self.apply(args)
+          result(nil)
+        } else {
+          result(FlutterMethodNotImplemented)
+        }
+      }
+    }
+  }
+
+  deinit {
+    channel.setMethodCallHandler(nil)
+  }
+
+  func view() -> UIView {
+    return hostView
+  }
+
+  private func apply(_ args: [String: Any]) {
+    if let minVal = (args["min"] as? NSNumber)?.floatValue {
+      slider.minimumValue = minVal
+    }
+    if let maxVal = (args["max"] as? NSNumber)?.floatValue {
+      slider.maximumValue = maxVal
+    }
+    if let tint = MarcoLiquidGlassSupport.colorFromARGB(args["tintColor"]) {
+      slider.minimumTrackTintColor = tint
+    }
+    if let a11y = args["accessibilityLabel"] as? String, !a11y.isEmpty {
+      slider.accessibilityLabel = a11y
+    }
+    if !slider.isTracking, let val = (args["value"] as? NSNumber)?.floatValue {
+      if abs(slider.value - val) > 0.0005 {
+        slider.setValue(val, animated: false)
+      }
+    }
+  }
+
+  @objc private func valueChanged() {
+    channel.invokeMethod("onChanged", arguments: Double(slider.value))
+  }
+
+  @objc private func touchEnded() {
+    channel.invokeMethod("onChangeEnd", arguments: Double(slider.value))
   }
 }

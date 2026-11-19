@@ -328,7 +328,7 @@ void main() {
   );
 
   testWidgets(
-    'Issue 2: iOS settings cards render spacious height, subtitles, and fit cleanly above dock',
+    'Issue 2: iOS 26 settings cards render authentic inset-grouped rows, search pill, and fit cleanly above dock',
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     (tester) async {
       tester.view.physicalSize = const Size(390, 844);
@@ -365,13 +365,16 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byKey(const ValueKey('ios-settings-root')), findsOneWidget);
-      expect(find.text('主题壁纸、流光光晕与毛玻璃质感'), findsOneWidget);
-      expect(find.text('海报网格密度、副标题与主页模块'), findsOneWidget);
+      expect(find.byKey(const ValueKey('ios-settings-search')), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('settings-category-extensions')),
+        findsOneWidget,
+      );
 
       final appearanceRowRect = tester.getRect(
         find.byKey(const ValueKey('settings-category-appearance')),
       );
-      expect(appearanceRowRect.height, greaterThanOrEqualTo(62.0));
+      expect(appearanceRowRect.height, greaterThanOrEqualTo(44.0));
 
       final groupClip = tester.widget<ClipRRect>(
         find
@@ -381,7 +384,7 @@ void main() {
             )
             .first,
       );
-      expect(groupClip.borderRadius, BorderRadius.circular(16));
+      expect(groupClip.borderRadius, BorderRadius.circular(22));
 
       final aboutRect = tester.getRect(
         find.byKey(const ValueKey('settings-category-about')),

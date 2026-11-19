@@ -33,6 +33,8 @@ import 'models.dart';
 import 'quark_drive.dart';
 import 'quark_account.dart';
 import 'resilient_http_client.dart';
+import 'spider_gateway.dart';
+import 'spider_plugin_registry.dart';
 import 'storage_service.dart';
 import 'web_media_resolver.dart';
 
@@ -1141,6 +1143,44 @@ class CmsClient {
     }
   }
 
+  /// Strict Local-First adapter pack resolution: native local adapters always
+  /// take priority; only unadapted `csp_*` sites matched by an enabled user
+  /// adapter pack are materialized into local JS/DRPY/Python/T4 sites.
+  CmsSite _resolveAdapterSite(CmsSite site) {
+    if (!site.usesAdapterPack) return site;
+    final rule = SpiderPluginRegistry.instance.matchAdapterRule(site);
+    return rule == null ? site : rule.materializeSite(site);
+  }
+
+  bool _usesSpiderGateway(CmsSite site) => site.usesSpiderGateway;
+
+  Future<String> _callSpiderGateway(
+    CmsSite site,
+    String action, [
+    Map<String, dynamic> params = const <String, dynamic>{},
+  ]) {
+    return SpiderGatewayClient.invoke(
+      SpiderPluginRegistry.instance.gatewayConfig,
+      site: site,
+      action: action,
+      params: params,
+      client: _http,
+    );
+  }
+
+  /// Downloads and validates a remote `marco-adapter-pack-v1` JSON plugin pack.
+  Future<SpiderAdapterPack> fetchSpiderAdapterPack(String rawUrl) async {
+    final normalized = CmsParser.extractAndNormalizeUrl(rawUrl);
+    if (normalized.isEmpty) {
+      throw const FormatException('请输入有效的 HTTP(S) 插件包地址');
+    }
+    final text = await _getText(normalized);
+    return SpiderAdapterPack.parseJsonString(
+      text,
+      fallbackSourceUrl: normalized,
+    );
+  }
+
   Future<Map<String, dynamic>> sourceVerificationAction(
     CmsSite site, Map<String, Object?> action, {Completer<void>? cancellation}
   ) async {
@@ -1382,7 +1422,23 @@ class CmsClient {
   String _detailAction(CmsSite site) => site.type == 0 ? 'videolist' : 'detail';
 
   Future<(List<CmsCategory>, CmsListing)> fetchHome(CmsSite site) async {
+    site = _resolveAdapterSite(site);
     _requireSourceAdapter(site);
+    if (_usesSpiderGateway(site)) {
+      final raw = await _callSpiderGateway(site, 'home', {'filter': true});
+      final categories = CmsParser.parseCategories(raw);
+      var listing = CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmgw'));
+      if (listing.videos.isEmpty) {
+        try {
+          final vodRaw = await _callSpiderGateway(site, 'homeVod');
+          listing = CmsParser.parseListing(_wrapJsEpisodeIds(vodRaw, scheme: 'mmgw'));
+        } catch (_) {}
+        if (listing.videos.isEmpty && categories.isNotEmpty) {
+          listing = await fetchCategory(site, categories.first.id, 1);
+        }
+      }
+      return (categories, listing);
+    }
     if (_isHttpT4(site)) {
       final raw = await _callT4(site, {'filter': 'true'});
       final categories = CmsParser.parseCategories(raw);
@@ -1464,7 +1520,27 @@ class CmsClient {
     List<String> childIds = const [],
     CmsFilter? filter,
   }) async {
+    site = _resolveAdapterSite(site);
     _requireSourceAdapter(site);
+    if (_usesSpiderGateway(site)) {
+      final filters = <String, String>{
+        if (filter != null && filter.genreLabel.isNotEmpty && filter.genreLabel != '全部') 'class': filter.genreLabel,
+        if (filter != null && filter.area.isNotEmpty && filter.area != '全部') 'area': filter.area,
+        if (filter != null && filter.year.isNotEmpty && filter.year != '全部') 'year': filter.year,
+      };
+      final raw = await _callSpiderGateway(site, 'category', {
+        'tid': categoryId,
+        'pg': page,
+        'filter': filters,
+      });
+      final listing = CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmgw'));
+      return CmsListing(
+        page: listing.page,
+        pageCount: listing.pageCount,
+        videos: listing.videos,
+        sourceFiltered: filters.isNotEmpty,
+      );
+    }
     if (_isHttpT4(site)) {
       final filters = <String, String>{
         if (filter != null && filter.genreLabel.isNotEmpty && filter.genreLabel != '全部') 'class': filter.genreLabel,
@@ -1580,7 +1656,15 @@ class CmsClient {
     String keyword, {
     int page = 1,
   }) async {
+    site = _resolveAdapterSite(site);
     _requireSourceAdapter(site);
+    if (_usesSpiderGateway(site)) {
+      final raw = await _callSpiderGateway(site, 'search', {
+        'wd': keyword.trim(),
+        'pg': page,
+      });
+      return CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmgw'));
+    }
     if (_isHttpT4(site)) {
       final raw = await _callT4(site, {'wd': keyword.trim(), 'quick': 'false', 'pg': '$page'});
       return CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmt4'));
@@ -1748,7 +1832,7 @@ class CmsClient {
     final filtered = candidates.where((s) => s.key != source.key &&
         s.isEffectivelyPrivate == source.isEffectivelyPrivate && s.searchable &&
         s.canBrowse && !CspBridge.isDoubanSite(s) && !CspBridge.isMyDriveSite(s) &&
-        (_usesJs(s) || CspBridge.usesWoggNetdiskAdapter(s) || !CspBridge.canHandleSite(s) || CspBridge.backendsForSite(s).isNotEmpty ||
+        (_usesJs(s) || s.usesAdapterPack || s.usesSpiderGateway || CspBridge.usesWoggNetdiskAdapter(s) || !CspBridge.canHandleSite(s) || CspBridge.backendsForSite(s).isNotEmpty ||
           CspRuleEngines.supports(s) || CspBridge.isBiliSite(s) ||
           CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s))).toList();
     int sitePriority(CmsSite s) {
@@ -1892,6 +1976,9 @@ class CmsClient {
   String _detailCacheKey(CmsSite site, CmsVideo fallback) => jsonEncode([
         JsSourceHost.generation,
         _pythonHost.generation,
+        SpiderPluginRegistry.instance.enabledRuleCount,
+        SpiderPluginRegistry.instance.gatewayConfig.isActive,
+        SpiderPluginRegistry.instance.gatewayConfig.normalizedBaseUrl,
         site.subscriptionId,
         site.sourceKey,
         site.isEffectivelyPrivate,
@@ -2186,11 +2273,17 @@ class CmsClient {
   }
 
   Future<CmsVideo> _fetchDetailUncached(CmsSite site, CmsVideo fallback) async {
+    site = _resolveAdapterSite(site);
     if (fallback.id.startsWith('mmquark://owned?')) {
       return _mergeDetail(CmsVideo(id: fallback.id, title: fallback.title,
           lines: [CmsLine(name: '夸克网盘', episodes: [
             CmsEpisode(name: fallback.title, url: fallback.id),
           ])]), fallback);
+    }
+    if (_usesSpiderGateway(site)) {
+      final raw = await _callSpiderGateway(site, 'detail', {'id': fallback.id});
+      final listing = CmsParser.parseListing(_wrapJsEpisodeIds(raw, scheme: 'mmgw'));
+      return listing.videos.isEmpty ? fallback : _mergeDetail(listing.videos.first, fallback);
     }
     if (_isHttpT4(site)) {
       final raw = await _callT4(site, {'ac': 'detail', 'ids': fallback.id});
@@ -2689,6 +2782,7 @@ class CmsClient {
     CmsEpisode episode, {
     List<CmsParse> parses = const [],
   }) async {
+    site = _resolveAdapterSite(site);
     if (episode.url.startsWith('mmshare://') ||
         episode.url.toLowerCase().startsWith('push://') ||
         ResilientHttpClient.cloudProviderForShare(episode.url) != null) {
@@ -2723,6 +2817,38 @@ class CmsClient {
           accounts: (await StorageService.init()).quarkAccounts, httpClient: _http, isCancelled: _sourceCancelled);
       try { return await drive.resolveWoggShare(episode); }
       finally { if (_quark == null) drive.close(); }
+    }
+    if (episode.isGatewayEpisode) {
+      if (!_usesSpiderGateway(site) &&
+          !SpiderPluginRegistry.instance.gatewayConfig.isActive) {
+        throw const FormatException('蜘蛛网关未启用，无法解析该线路播放地址');
+      }
+      final parameters = Uri.parse(episode.url).queryParameters;
+      final raw = jsonDecode(
+        await _callSpiderGateway(site, 'play', {
+          'flag': parameters['flag'] ?? '',
+          'id': parameters['id'] ?? '',
+        }),
+      );
+      if (raw is! Map) throw const FormatException('蜘蛛网关没有返回有效的播放地址');
+      final payloadUrl = raw['url'];
+      if (payloadUrl is String) {
+        final shareResolved = await _tryResolveCloudShareTarget(
+          site,
+          episode,
+          payloadUrl,
+          parses: parses,
+        );
+        if (shareResolved != null) return shareResolved;
+      }
+      final payload = await _maybeUnwrapSpiderPayload(site, raw, parses: parses);
+      return SourcePlayback.decode(
+        payload,
+        episode,
+        localUrl: _scriptHost.resolve,
+        sourceHeaders: site.headers,
+        sourceOrigin: _sourceCredentialOrigin(site),
+      );
     }
     if (WoggSource.supports(site)) {
       throw const FormatException('请刷新详情以读取原始网盘线路，旧缓存不能用于此源');
@@ -2979,14 +3105,14 @@ class CmsClient {
       }
       if (CspBridge.canHandleSite(s)) {
         final backends = CspBridge.backendsForSite(s);
-        final nativeAdapter = _usesJs(s) || CspRuleEngines.supports(s) || CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s);
+        final nativeAdapter = _usesJs(s) || s.usesAdapterPack || s.usesSpiderGateway || CspRuleEngines.supports(s) || CspBridge.isBiliSite(s) || CspBridge.isFirstAidSite(s) || CspBridge.isTuxiaobeiSite(s);
         if (!nativeAdapter && backends.isEmpty) continue;
         final String sig;
-        if (_usesJs(s)) {
+        if (_usesJs(s) || s.usesAdapterPack || s.usesSpiderGateway) {
           // The same plugin key in two subscriptions can have different
           // artifacts, extensions and credentials. They are separate sources.
           sig = jsonEncode([s.subscriptionId, s.key, s.api, s.ext,
-            s.pluginReference, s.headers]);
+            s.pluginReference, s.headers, s.usesAdapterPack, s.usesSpiderGateway]);
         } else if (CspRuleEngines.supports(s)) {
           sig = jsonEncode(['csp_rule', s.subscriptionId, s.key, s.api, s.ext]);
         } else if (CspBridge.isBiliSite(s)) {

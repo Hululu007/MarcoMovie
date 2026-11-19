@@ -822,6 +822,28 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
           );
         }
 
+        // On iOS 26+ during route transitions (when IosNativeRouteGate temporarily
+        // unmounts UiKitView to prevent Impeller cross-route black occlusion),
+        // render a pixel-matched, zero-BackdropFilter placeholder identical in
+        // geometry & visual style to MarcoDockContainerView so there is zero
+        // size jump or legacy-style flash.
+        if (IosLiquidGlassBridge.isAvailable &&
+            !widget.isLandscape &&
+            widget.nativeItems != null &&
+            widget.nativeItems!.isNotEmpty) {
+          Widget placeholder = Padding(
+            padding: EdgeInsets.only(bottom: portraitBottom),
+            child: _buildIos26TransitionDockPlaceholder(context),
+          );
+          if (widget.hidden) {
+            placeholder = IgnorePointer(
+              ignoring: true,
+              child: Opacity(opacity: 0, child: placeholder),
+            );
+          }
+          return placeholder;
+        }
+
         final margin = widget.isLandscape
             ? EdgeInsets.only(
                 right: safe.right > 0 ? safe.right + 4 : 10,
@@ -854,6 +876,193 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
         }
         return content;
       },
+    );
+  }
+
+  Widget _buildIos26TransitionDockPlaceholder(BuildContext context) {
+    const totalH = 72.0;
+    const dockSize = 62.0;
+    const outerMargin = 16.0;
+    const gap = 10.0;
+    const inset = 4.0;
+    final hasSearch = widget.onSearch != null;
+    final n = math.max(widget.items.length, 1);
+
+    BoxDecoration glassDeco(double radius) => BoxDecoration(
+          borderRadius: BorderRadius.circular(radius),
+          gradient: const LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xDC303036), Color(0xD4202026)],
+          ),
+          border: Border.all(
+            color: Colors.white.withValues(alpha: 0.18),
+            width: 0.65,
+          ),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x42000000),
+              blurRadius: 16,
+              offset: Offset(0, 6),
+            ),
+          ],
+        );
+
+    return SizedBox(
+      key: const ValueKey('ios26-dock-transition-placeholder'),
+      width: double.infinity,
+      height: totalH,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final totalW = constraints.maxWidth.isFinite
+              ? constraints.maxWidth
+              : MediaQuery.sizeOf(context).width;
+          final maxRowWidth = math.min(totalW, 440.0);
+          final rowX = (totalW - maxRowWidth) * 0.5;
+
+          if (widget.collapsed) {
+            final rightInset = math.max(
+              outerMargin,
+              totalW - (rowX + maxRowWidth - outerMargin),
+            );
+            return Align(
+              alignment: Alignment.centerRight,
+              child: Padding(
+                padding: EdgeInsets.only(right: rightInset),
+                child: SizedBox(
+                  width: dockSize,
+                  height: dockSize,
+                  child: DecoratedBox(
+                    decoration: glassDeco(dockSize * 0.5),
+                    child: const Center(
+                      child: MarcoBrandLogo(
+                        iconSize: 32,
+                        showWordmark: false,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }
+
+          final tabW = hasSearch
+              ? math.max(
+                  maxRowWidth - outerMargin * 2 - dockSize - gap,
+                  180.0,
+                )
+              : math.max(maxRowWidth - outerMargin * 2, 180.0);
+          final innerW = tabW - inset * 2;
+          final slotW = innerW / n;
+          const lensH = dockSize - inset * 2;
+
+          return Center(
+            child: SizedBox(
+              width: maxRowWidth,
+              height: totalH,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: outerMargin),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: tabW,
+                      height: dockSize,
+                      child: DecoratedBox(
+                        decoration: glassDeco(dockSize * 0.5),
+                        child: Stack(
+                          children: [
+                            Positioned(
+                              left: inset + slotW * _safeIndex,
+                              top: inset,
+                              width: slotW,
+                              height: lensH,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  borderRadius:
+                                      BorderRadius.circular(lensH * 0.5),
+                                  color: Colors.white.withValues(alpha: 0.16),
+                                  border: Border.all(
+                                    color: Colors.white.withValues(alpha: 0.18),
+                                    width: 0.5,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            Positioned.fill(
+                              child: Padding(
+                                padding: const EdgeInsets.all(inset),
+                                child: Row(
+                                  children: [
+                                    for (var i = 0; i < widget.items.length; i++)
+                                      Expanded(
+                                        child: Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          children: [
+                                            Icon(
+                                              i == _safeIndex
+                                                  ? widget.items[i].$2
+                                                  : widget.items[i].$1,
+                                              size: 20.5,
+                                              color: i == _safeIndex
+                                                  ? Colors.white
+                                                  : Colors.white
+                                                      .withValues(alpha: 0.84),
+                                            ),
+                                            const SizedBox(height: 3),
+                                            Text(
+                                              widget.items[i].$3,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontSize: 10.5,
+                                                fontWeight: i == _safeIndex
+                                                    ? FontWeight.w600
+                                                    : FontWeight.w500,
+                                                color: i == _safeIndex
+                                                    ? Colors.white
+                                                    : Colors.white.withValues(
+                                                        alpha: 0.84,
+                                                      ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (hasSearch) ...[
+                      const SizedBox(width: gap),
+                      SizedBox(
+                        width: dockSize,
+                        height: dockSize,
+                        child: DecoratedBox(
+                          decoration: glassDeco(dockSize * 0.5),
+                          child: const Center(
+                            child: Icon(
+                              CupertinoIcons.search,
+                              size: 22,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 

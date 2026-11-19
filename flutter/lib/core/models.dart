@@ -3,6 +3,7 @@ library;
 
 import 'csp_bridge.dart';
 import 'live_catalog_parser.dart';
+import 'spider_plugin_registry.dart';
 
 class CmsDepot {
   final String name;
@@ -322,13 +323,31 @@ class CmsSite {
   /// M3U/TXT VOD playlists (`m3u_vod://`), and TVBox `csp_*` / `.js` spider sites via `CspBridge`.
   bool get isEmby => api.startsWith('emby://account/');
   bool get isCatPaw => api.startsWith('catpaw://');
+  bool get usesAdapterPack =>
+      key != 'mydrive' &&
+      !isExtTooLarge &&
+      (type == 3 || isScriptOrJarApi) &&
+      !CspBridge.hasAdapter(this) &&
+      SpiderPluginRegistry.instance.matchAdapterRule(this) != null;
+
+  bool get usesSpiderGateway =>
+      key != 'mydrive' &&
+      !isExtTooLarge &&
+      (type == 3 || isScriptOrJarApi) &&
+      !CspBridge.hasAdapter(this) &&
+      SpiderPluginRegistry.instance.matchAdapterRule(this) == null &&
+      SpiderPluginRegistry.instance.canGatewayHandle(this);
+
   bool get canBrowse =>
       key != 'mydrive' &&
       (isEmby ||
           isCatPaw ||
           (type == 4 && isHttpApi) ||
           (isScriptOrJarApi
-              ? CspBridge.hasAdapter(this)
+              ? (CspBridge.hasAdapter(this) ||
+                    SpiderPluginRegistry.instance.hasPluginOrGatewaySupport(
+                      this,
+                    ))
               : isM3uVodApi ||
                     ((isHttpApi || isScriptOrJarApi) &&
                         (type == 0 ||
@@ -346,7 +365,9 @@ class CmsSite {
     if (key == 'mydrive') {
       return statusUnsupportedType;
     }
-    if ((type == 3 || isScriptOrJarApi) && CspBridge.hasAdapter(this)) {
+    if ((type == 3 || isScriptOrJarApi) &&
+        (CspBridge.hasAdapter(this) ||
+            SpiderPluginRegistry.instance.hasPluginOrGatewaySupport(this))) {
       return statusOk;
     }
     if (isEmby || isCatPaw || isM3uVodApi || (type == 4 && isHttpApi)) {
@@ -778,8 +799,9 @@ class CmsEpisode {
   }
 
   bool get isScriptEpisode => url.startsWith('mmjs://play?');
+  bool get isGatewayEpisode => url.startsWith('mmgw://play?');
   bool get needsSourceResolution =>
-      isScriptEpisode || url.startsWith('mmcloud://') || url.startsWith('mmemby://play?') || url.startsWith('mmpaw://play?') || url.startsWith('mmt4://play?') || url.startsWith('mmquark://owned?') || url.startsWith('mmwogg://quark?');
+      isScriptEpisode || isGatewayEpisode || url.startsWith('mmcloud://') || url.startsWith('mmemby://play?') || url.startsWith('mmpaw://play?') || url.startsWith('mmt4://play?') || url.startsWith('mmquark://owned?') || url.startsWith('mmwogg://quark?');
 
   /// Whether [url] points to an already-downloaded local file (offline playback).
   bool get isLocalFile {

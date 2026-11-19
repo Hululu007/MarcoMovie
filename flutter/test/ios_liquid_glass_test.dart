@@ -633,4 +633,197 @@ void main() {
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
+
+  testWidgets(
+    'iOS 26 route transitions render exact-size zero-BackdropFilter placeholders with zero jump',
+    (tester) async {
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      const dockItems = <(IconData, IconData, String)>[
+        (CupertinoIcons.play_rectangle, CupertinoIcons.play_rectangle_fill, '主页'),
+        (CupertinoIcons.dot_radiowaves_left_right, CupertinoIcons.dot_radiowaves_left_right, '直播'),
+        (CupertinoIcons.square_stack_3d_up, CupertinoIcons.square_stack_3d_up_fill, '片库'),
+        (CupertinoIcons.gear_alt, CupertinoIcons.gear_alt_fill, '设置'),
+      ];
+      const nativeItems = <IosNativeDockItem>[
+        IosNativeDockItem(label: '主页', symbol: 'play.rectangle', selectedSymbol: 'play.rectangle.fill'),
+        IosNativeDockItem(label: '直播', symbol: 'dot.radiowaves.left.and.right'),
+        IosNativeDockItem(label: '片库', symbol: 'square.stack.3d.up', selectedSymbol: 'square.stack.3d.up.fill'),
+        IosNativeDockItem(label: '设置', symbol: 'gearshape', selectedSymbol: 'gearshape.fill'),
+      ];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                IosNativeGlassButton(
+                  key: const ValueKey('test-source-btn'),
+                  style: 'capsule',
+                  symbol: 'square.3.layers.3d',
+                  trailingSymbol: 'chevron.down',
+                  label: '玩偶哥哥',
+                  height: 36,
+                  maxWidth: 180,
+                  onTap: () {},
+                  fallback: const SizedBox(width: 99, height: 22),
+                ),
+                IosNativeSegmentedControl(
+                  key: const ValueKey('test-seg'),
+                  segments: const ['推荐', '电影', '剧集'],
+                  selectedIndex: 0,
+                  height: 36,
+                  onChanged: (_) {},
+                  fallback: const SizedBox(height: 18),
+                ),
+              ],
+            ),
+            bottomNavigationBar: AppleLiquidGlassDock(
+              selectedIndex: 0,
+              onSelect: (_) {},
+              isLandscape: false,
+              items: dockItems,
+              nativeItems: nativeItems,
+              onSearch: () {},
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final restingBtnSize = tester.getSize(
+        find.byKey(const ValueKey('test-source-btn')),
+      );
+      final restingSegSize = tester.getSize(
+        find.byKey(const ValueKey('test-seg')),
+      );
+      final restingDockSize = tester.getSize(
+        find.byType(AppleLiquidGlassDock),
+      );
+
+      // Push a route so IosNativeRouteGate swaps to iOS 26 transition placeholders.
+      final nav = tester.state<NavigatorState>(find.byType(Navigator));
+      nav.push<void>(
+        buildApplePageRoute<void>(
+          builder: (_) => const Scaffold(body: Center(child: Text('Next'))),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+
+      expect(find.byType(UiKitView), findsNothing);
+      expect(
+        find.byKey(const ValueKey('ios26-glass-button-transition-placeholder')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('ios26-segmented-transition-placeholder')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('ios26-dock-transition-placeholder')),
+        findsOneWidget,
+      );
+      expect(find.byType(BackdropFilter), findsNothing);
+
+      // Geometry during transition must match resting UiKitView size to 0.0pt!
+      expect(
+        tester.getSize(find.byKey(const ValueKey('test-source-btn'))),
+        restingBtnSize,
+      );
+      expect(
+        tester.getSize(find.byKey(const ValueKey('test-seg'))),
+        restingSegSize,
+      );
+      expect(
+        tester.getSize(find.byType(AppleLiquidGlassDock)),
+        restingDockSize,
+      );
+      expect(tester.takeException(), isNull);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'iOS 26 native mode mounts UISwitch and UISlider UiKitViews and Settings search finds deep panes',
+    (tester) async {
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [
+                IosSettingsSwitchRow(
+                  title: '自动播放下一集',
+                  value: true,
+                  onChanged: (_) {},
+                ),
+                IosNativeSlider(
+                  value: 0.68,
+                  onChanged: (_) {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      final types = tester
+          .widgetList<UiKitView>(find.byType(UiKitView))
+          .map((v) => v.viewType)
+          .toList();
+      expect(types, contains('marco_movie/ios26_switch'));
+      expect(types, contains('marco_movie/ios26_slider'));
+
+      // Switch back to fallback mode to verify Settings search & extensions category.
+      IosLiquidGlassBridge.setAvailableForTest(false);
+      final storage = await initTestStorage();
+      await storage.saveConfig(
+        '{"sites":[{"key":"test","name":"测试源","type":1,"api":"https://source.example/api"}]}',
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AdaptiveShell(
+            storage: storage,
+            client: CmsClient(
+              client: MockClient(
+                (_) async => http.Response('{"class":[],"list":[]}', 200),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.tap(find.text('设置').last);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('settings-category-extensions')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('ios-settings-search')), findsOneWidget);
+
+      await tester.enterText(
+        find.descendant(
+          of: find.byKey(const ValueKey('ios-settings-search')),
+          matching: find.byType(CupertinoTextField),
+        ),
+        '网关',
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('蜘蛛扩展与网关'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
 }

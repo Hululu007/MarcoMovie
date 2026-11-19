@@ -1,0 +1,15 @@
+services:
+  marco-spider-gateway:
+    build: .
+    container_name: marco-spider-gateway
+    restart: unless-stopped
+    ports:
+      - "9981:9981/tcp"
+      - "41978:41978/udp"
+    environment:
+      MARCO_GATEWAY_NAME: "家庭 NAS 蜘蛛网关"
+      # Replace with your own strong random token before starting:
+      MARCO_GATEWAY_TOKEN: "change-me-to-a-random-token"
+      MARCO_GATEWAY_ROUTES: "/config/routes.json"
+    volumes:
+      - ./routes.json:/config/routes.json:ro

@@ -17,6 +17,7 @@ import 'quark_account.dart';
 import 'netdisk_session.dart';
 import 'ohos_runtime.dart';
 import 'secure_credential_store.dart';
+import 'spider_plugin_registry.dart';
 import 'storage_file_store.dart';
 
 export 'storage_file_store.dart';
@@ -88,6 +89,11 @@ class StorageService {
   static const String keyPlayerAlwaysShowClock = 'player_always_show_clock';
   static const String keyTvUiMode = 'tv_ui_mode';
   static const String keyHomeSnapshots = 'site_home_snapshots_v1';
+  static const String keySpiderAdapterPacks = 'spider_adapter_packs_v1';
+  static const String keySpiderGatewayEnabled = 'spider_gateway_enabled';
+  static const String keySpiderGatewayUrl = 'spider_gateway_url';
+  static const String keySpiderGatewayDeviceName = 'spider_gateway_device_name';
+  static const String keySpiderGatewayToken = 'spider_gateway_token';
   static const int maxVideoSkipRecords = 500;
   static const String _subscriptionsFileName = 'subscriptions.json';
   static const String _watchHistoryFileName = 'watch_history.json';
@@ -461,6 +467,7 @@ class StorageService {
     await _cleanupLeftoverTempFiles();
     await _migrateCredentialsIfNeeded();
     await _migrateFromPrefsIfNeeded();
+    _hydrateSpiderExtensions();
     getSubscriptions();
   }
 
@@ -499,6 +506,7 @@ class StorageService {
       keyUcCookie,
       keyBaiduCookie,
       keyAliToken,
+      keySpiderGatewayToken,
     ]) {
       if (_prefs.containsKey(key)) {
         final plain = _prefs.getString(key) ?? '';
@@ -4747,5 +4755,103 @@ class StorageService {
       _syncInFlight = false;
       if (ownsClient) httpClient.close();
     }
+  }
+
+  // ==================== Cross-Platform Spider Adapter Packs & BYO Gateway ====================
+
+  List<SpiderAdapterPack> get spiderAdapterPacks {
+    final raw = _prefs.getString(keySpiderAdapterPacks);
+    if (raw == null || raw.trim().isEmpty) return const <SpiderAdapterPack>[];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const <SpiderAdapterPack>[];
+      final out = <SpiderAdapterPack>[];
+      for (final item in decoded) {
+        if (item is Map) {
+          try {
+            out.add(SpiderAdapterPack.fromJson(Map<String, dynamic>.from(item)));
+          } catch (_) {}
+        }
+      }
+      return out;
+    } catch (_) {
+      return const <SpiderAdapterPack>[];
+    }
+  }
+
+  SpiderGatewayConfig get spiderGatewayConfig {
+    return SpiderGatewayConfig(
+      enabled: _prefs.getBool(keySpiderGatewayEnabled) ?? false,
+      baseUrl: _prefs.getString(keySpiderGatewayUrl) ?? '',
+      token: _credentialCache[keySpiderGatewayToken] ?? '',
+      deviceName: _prefs.getString(keySpiderGatewayDeviceName) ?? '',
+    );
+  }
+
+  void _hydrateSpiderExtensions() {
+    SpiderPluginRegistry.instance.hydrate(
+      packs: spiderAdapterPacks,
+      gateway: spiderGatewayConfig,
+    );
+  }
+
+  Future<void> saveSpiderAdapterPacks(List<SpiderAdapterPack> packs) async {
+    final encoded = jsonEncode([for (final p in packs) p.toJson()]);
+    if (utf8.encode(encoded).length > SpiderAdapterPack.maxPackBytes * 4) {
+      throw const FormatException('已安装的插件包总大小超过 8 MB 上限');
+    }
+    await _prefs.setString(keySpiderAdapterPacks, encoded);
+    SpiderPluginRegistry.instance.setPacks(packs);
+    _invalidateConfigCache();
+  }
+
+  Future<SpiderAdapterPack> importSpiderAdapterPackJson(
+    String rawJson, {
+    String sourceUrl = '',
+  }) async {
+    final pack = SpiderAdapterPack.parseJsonString(
+      rawJson,
+      fallbackSourceUrl: sourceUrl,
+    );
+    final current = List<SpiderAdapterPack>.of(spiderAdapterPacks);
+    final existingIdx = current.indexWhere((p) => p.id == pack.id);
+    if (existingIdx >= 0) {
+      current[existingIdx] = pack;
+    } else {
+      current.insert(0, pack);
+    }
+    await saveSpiderAdapterPacks(current);
+    return pack;
+  }
+
+  Future<void> setSpiderAdapterPackEnabled(String packId, bool enabled) async {
+    final current = spiderAdapterPacks
+        .map((p) => p.id == packId ? p.copyWith(enabled: enabled) : p)
+        .toList();
+    await saveSpiderAdapterPacks(current);
+  }
+
+  Future<void> removeSpiderAdapterPack(String packId) async {
+    final current = spiderAdapterPacks.where((p) => p.id != packId).toList();
+    await saveSpiderAdapterPacks(current);
+  }
+
+  Future<void> saveSpiderGatewayConfig(SpiderGatewayConfig config) async {
+    final normalized = SpiderGatewayConfig.normalizeBaseUrl(config.baseUrl);
+    if (config.enabled && normalized.isEmpty) {
+      throw const FormatException('请先填写有效的网关地址（如 http://127.0.0.1:9981 或 https://gateway.example）');
+    }
+    final clean = SpiderGatewayConfig(
+      enabled: config.enabled && normalized.isNotEmpty,
+      baseUrl: normalized,
+      token: config.token.trim(),
+      deviceName: config.deviceName.trim(),
+    );
+    await _prefs.setBool(keySpiderGatewayEnabled, clean.enabled);
+    await _prefs.setString(keySpiderGatewayUrl, clean.baseUrl);
+    await _prefs.setString(keySpiderGatewayDeviceName, clean.deviceName);
+    await _writeSecret(keySpiderGatewayToken, clean.token);
+    SpiderPluginRegistry.instance.setGatewayConfig(clean);
+    _invalidateConfigCache();
   }
 }
