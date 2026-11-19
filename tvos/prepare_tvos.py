@@ -24,6 +24,16 @@ ANDROID_JS_HOST_DIR = REPO_ROOT / "android" / "src" / "main" / "assets" / "js-ho
 FLUTTER_JS_HOST_DIR = REPO_ROOT / "flutter" / "assets" / "js-host"
 SHARED_CATPAW_DIR = REPO_ROOT / "shared" / "catpaw"
 TVOS_JS_HOST_DST_DIR = TVOS_DIR / "Sources" / "MarcoTVCore" / "Resources" / "js-host"
+TVOS_CATPAW_DST_DIR = TVOS_DIR / "Sources" / "MarcoTVCore" / "Resources" / "catpaw"
+
+# Node-only worker scripts are not needed on tvOS (QuickJS-NG executes DRPY2 & Guard adapters in-process,
+# and Apple Foundation handles GBK/GB18030/Big5 natively via CFStringConvertEncodingToNSStringEncoding).
+CATPAW_TVOS_SKIP_FILES = {
+    "drpy-worker.cjs",
+    "drpy-http.cjs",
+    "drpy-bootstrap-worker.cjs",
+    "drpy-encoding.cjs",
+}
 
 APP_ICON_512 = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
 LOGO_MARK_PNG = REPO_ROOT / "android" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png"
@@ -159,6 +169,39 @@ def resize_rgba_nearest(
         for sx4 in x_map:
             drow[pos : pos + 4] = srow[sx4 : sx4 + 4]
             pos += 4
+        out_rows.append(bytes(drow))
+    return out_rows
+
+
+def resize_rgba_box(
+    src_w: int, src_h: int, src_rows: list[bytes], dst_w: int, dst_h: int
+) -> list[bytes]:
+    """Smooth box-averaged RGBA downsampler for crisp brand marks."""
+    out_rows: list[bytes] = []
+    for dy in range(dst_h):
+        y0 = (dy * src_h) // dst_h
+        y1 = max(y0 + 1, ((dy + 1) * src_h) // dst_h)
+        drow = bytearray(dst_w * 4)
+        for dx in range(dst_w):
+            x0 = (dx * src_w) // dst_w
+            x1 = max(x0 + 1, ((dx + 1) * src_w) // dst_w)
+            r_sum = g_sum = b_sum = a_sum = count = 0
+            for sy in range(y0, min(src_h, y1)):
+                srow = src_rows[sy]
+                for sx in range(x0, min(src_w, x1)):
+                    p = sx * 4
+                    a = srow[p + 3]
+                    r_sum += srow[p] * a
+                    g_sum += srow[p + 1] * a
+                    b_sum += srow[p + 2] * a
+                    a_sum += a
+                    count += 1
+            pos = dx * 4
+            if a_sum > 0 and count > 0:
+                drow[pos] = min(255, r_sum // a_sum)
+                drow[pos + 1] = min(255, g_sum // a_sum)
+                drow[pos + 2] = min(255, b_sum // a_sum)
+                drow[pos + 3] = min(255, a_sum // count)
         out_rows.append(bytes(drow))
     return out_rows
 
@@ -303,6 +346,40 @@ def sync_js_host_assets() -> list[Path]:
     return copied
 
 
+def sync_catpaw_assets() -> list[Path]:
+    """Sync SHA-256 verified DRPY2 & Guard extractor/adapter assets from shared/catpaw/."""
+    manifest_path = SHARED_CATPAW_DIR / "drpy-assets.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"CatPaw DRPY asset manifest missing: {manifest_path}")
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    files = manifest.get("files")
+    if not isinstance(files, list) or not files:
+        raise ValueError("Invalid drpy-assets.json manifest")
+
+    TVOS_CATPAW_DST_DIR.mkdir(parents=True, exist_ok=True)
+    copied: list[Path] = []
+    dst_manifest = TVOS_CATPAW_DST_DIR / "drpy-assets.json"
+    shutil.copy2(manifest_path, dst_manifest)
+    copied.append(dst_manifest)
+
+    for entry in files:
+        name = entry["name"]
+        if name in CATPAW_TVOS_SKIP_FILES:
+            continue
+        src = SHARED_CATPAW_DIR / name
+        if not src.exists():
+            raise FileNotFoundError(f"Missing CatPaw asset: {src}")
+        raw = src.read_bytes()
+        if len(raw) != entry["bytes"] or hashlib.sha256(raw).hexdigest() != entry["sha256"]:
+            raise ValueError(f"SHA-256 verification failed for CatPaw asset: {name}")
+        dst = TVOS_CATPAW_DST_DIR / name
+        dst.write_bytes(raw)
+        copied.append(dst)
+
+    return copied
+
+
 # ==============================================================================
 # Step 3: Generate tvOS BrandAssets (400x240, 800x480, 1280x768, Top Shelf)
 # ==============================================================================
@@ -414,6 +491,23 @@ def generate_tvos_xcassets() -> None:
                 "info": {"author": "xcode", "version": 1},
             },
         )
+
+    # In-app brand mark imageset (BrandLogoMark) for top navigation & modal headers
+    mark_dir = ASSETS_DIR / "BrandLogoMark.imageset"
+    mark_dir.mkdir(parents=True, exist_ok=True)
+    mark_src_w = len(front_rows[0]) // 4
+    mark_src_h = len(front_rows)
+    mark_meta = []
+    for scale, dim in ((1, 96), (2, 192)):
+        mname = f"brand_logo_mark_{scale}x.png"
+        scaled_mark = resize_rgba_box(mark_src_w, mark_src_h, front_rows, dim, dim)
+        raw_scan = b"".join(b"\x00" + row for row in scaled_mark)
+        (mark_dir / mname).write_bytes(encode_png_from_scanlines(dim, dim, 6, raw_scan))
+        mark_meta.append({"filename": mname, "idiom": "universal", "scale": f"{scale}x"})
+    _write_json(
+        mark_dir / "Contents.json",
+        {"images": mark_meta, "info": {"author": "xcode", "version": 1}},
+    )
 
 
 # ==============================================================================
@@ -559,6 +653,16 @@ def generate_xcodeproj() -> Path:
             "sourceTree": "<group>",
         },
     )
+    catpaw_fref = put(
+        _pbx_id("fref:catpaw"),
+        {
+            "isa": "PBXFileReference",
+            "lastKnownFileType": "folder",
+            "name": "catpaw",
+            "path": "../Sources/MarcoTVCore/Resources/catpaw",
+            "sourceTree": "<group>",
+        },
+    )
     info_fref = put(
         _pbx_id("fref:Info.plist"),
         {
@@ -602,6 +706,7 @@ def generate_xcodeproj() -> Path:
 
     assets_bfile = put(_pbx_id("bfile:Assets.xcassets"), {"isa": "PBXBuildFile", "fileRef": assets_fref})
     jshost_bfile = put(_pbx_id("bfile:js-host"), {"isa": "PBXBuildFile", "fileRef": jshost_fref})
+    catpaw_bfile = put(_pbx_id("bfile:catpaw"), {"isa": "PBXBuildFile", "fileRef": catpaw_fref})
     link_cquickjs_bfile = put(
         _pbx_id("bfile:link:libCQuickJS.a"), {"isa": "PBXBuildFile", "fileRef": cquickjs_prod_ref}
     )
@@ -622,7 +727,7 @@ def generate_xcodeproj() -> Path:
         _pbx_id("grp:MarcoMovieTV"),
         {
             "isa": "PBXGroup",
-            "children": app_file_refs + [assets_fref, jshost_fref, info_fref],
+            "children": app_file_refs + [assets_fref, jshost_fref, catpaw_fref, info_fref],
             "name": "MarcoMovieTV",
             "sourceTree": "<group>",
         },
@@ -687,7 +792,7 @@ def generate_xcodeproj() -> Path:
         {
             "isa": "PBXResourcesBuildPhase",
             "buildActionMask": "2147483647",
-            "files": [assets_bfile, jshost_bfile],
+            "files": [assets_bfile, jshost_bfile, catpaw_bfile],
             "runOnlyForDeploymentPostprocessing": "0",
         },
     )
@@ -938,12 +1043,14 @@ def generate_xcodeproj() -> Path:
 def prepare_all() -> dict[str, object]:
     copied_qjs = sync_quickjs_sources()
     copied_js = sync_js_host_assets()
+    copied_catpaw = sync_catpaw_assets()
     generate_tvos_xcassets()
     info_plist = generate_info_plist()
     pbxproj = generate_xcodeproj()
     return {
         "quickjs_files": len(copied_qjs),
         "js_host_files": len(copied_js),
+        "catpaw_files": len(copied_catpaw),
         "info_plist": str(info_plist),
         "pbxproj": str(pbxproj),
     }
@@ -953,7 +1060,9 @@ def main() -> None:
     summary = prepare_all()
     print(
         f"Prepared tvOS workspace: {summary['quickjs_files']} QuickJS files, "
-        f"{summary['js_host_files']} JS host scripts, Xcode project -> {summary['pbxproj']}"
+        f"{summary['js_host_files']} JS host scripts, "
+        f"{summary['catpaw_files']} CatPaw DRPY/Guard assets, "
+        f"Xcode project -> {summary['pbxproj']}"
     )
 
 

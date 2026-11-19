@@ -7,7 +7,7 @@ public struct DiscoverView: View {
     @EnvironmentObject private var appModel: AppViewModel
 
     private let posterColumns: [GridItem] = Array(
-        repeating: GridItem(.flexible(), spacing: 28),
+        repeating: GridItem(.flexible(), spacing: 26),
         count: 6
     )
 
@@ -15,38 +15,36 @@ public struct DiscoverView: View {
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 34) {
-                headerToolbar
+            VStack(alignment: .leading, spacing: 28) {
+                discoverTopToolbar
 
                 if !appModel.watchHistory.isEmpty {
                     continueWatchingRail
-                }
-
-                if !appModel.categories.isEmpty {
-                    categoryCapsulesBar
                 }
 
                 if appModel.isLoadingDiscover && appModel.discoverVideos.isEmpty {
                     HStack {
                         Spacer()
                         ProgressView("正在加载片单…")
+                            .font(TvFont.body)
                             .padding(.vertical, 80)
                         Spacer()
                     }
                 } else if let err = appModel.discoverError, appModel.discoverVideos.isEmpty {
                     VStack(spacing: 16) {
                         Text("加载失败：\(err)")
+                            .font(TvFont.body)
                             .foregroundColor(.orange)
                         HStack(spacing: 16) {
                             Button("重试") {
                                 Task { await appModel.loadHomeForActiveSite() }
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(TvPillButtonStyle(prominent: true))
 
                             Button("切换其他片源") {
                                 appModel.showSiteSwitcherSheet = true
                             }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(TvPillButtonStyle())
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -55,8 +53,9 @@ public struct DiscoverView: View {
                     posterGridWall
                 }
             }
-            .padding(.horizontal, 48)
-            .padding(.vertical, 32)
+            .padding(.horizontal, 56)
+            .padding(.top, 12)
+            .padding(.bottom, 48)
         }
         .task {
             if appModel.discoverVideos.isEmpty && appModel.activeSite != nil {
@@ -65,45 +64,62 @@ public struct DiscoverView: View {
         }
     }
 
-    private var headerToolbar: some View {
-        HStack(spacing: 20) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Marco Movie")
-                    .font(.title2.bold())
-                    .foregroundColor(.white)
-                if let site = appModel.activeSite {
-                    Text("当前片源：\(site.name) · 可用 \(appModel.config.availableSites.count)/\(appModel.config.sites.count)")
-                        .font(.caption)
-                        .foregroundColor(TvTheme.secondaryText)
+    private var discoverTopToolbar: some View {
+        HStack(spacing: 18) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 14) {
+                    categoryCapsule(id: "", label: "精选推荐")
+                    ForEach(appModel.categories) { category in
+                        categoryCapsule(id: category.id, label: category.name)
+                    }
                 }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 8)
             }
 
-            Spacer()
+            Spacer(minLength: 16)
 
-            Button {
-                appModel.showSiteSwitcherSheet = true
-            } label: {
-                Label(appModel.activeSite?.name ?? "切换片源", systemImage: "rectangle.stack.badge.play")
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 10)
-            }
-            .buttonStyle(.bordered)
+            HStack(spacing: 12) {
+                Button {
+                    appModel.showSiteSwitcherSheet = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.stack.3d.up.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                        Text(appModel.activeSite?.name ?? "切换片源")
+                            .lineLimit(1)
+                    }
+                }
+                .buttonStyle(TvPillButtonStyle())
 
-            Button {
-                appModel.openLanQrModal()
-            } label: {
-                Label("扫码快传", systemImage: "qrcode")
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 10)
+                Button {
+                    appModel.openLanQrModal()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "qrcode")
+                            .font(.system(size: 16, weight: .semibold))
+                        Text("扫码快传")
+                    }
+                }
+                .buttonStyle(TvPillButtonStyle())
             }
-            .buttonStyle(.bordered)
         }
     }
 
+    private func categoryCapsule(id: String, label: String) -> some View {
+        let isSelected = appModel.selectedCategoryId == id
+        return Button {
+            Task { await appModel.selectCategory(id) }
+        } label: {
+            Text(label)
+        }
+        .buttonStyle(TvPillButtonStyle(active: isSelected))
+    }
+
     private var continueWatchingRail: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("继续观看")
-                .font(.headline)
+                .font(TvFont.sectionTitle)
                 .foregroundColor(.white)
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -122,76 +138,26 @@ public struct DiscoverView: View {
                                 appModel.selectedDetailContext = (targetSite, stubVideo)
                             }
                         } label: {
-                            VStack(alignment: .leading, spacing: 8) {
-                                ZStack(alignment: .bottomLeading) {
-                                    RemotePosterView(url: item.poster, title: item.title, cornerRadius: 14)
-                                        .frame(width: 260, height: 148)
-
-                                    GeometryReader { geo in
-                                        VStack {
-                                            Spacer()
-                                            ZStack(alignment: .leading) {
-                                                Rectangle()
-                                                    .fill(Color.black.opacity(0.55))
-                                                    .frame(height: 5)
-                                                Rectangle()
-                                                    .fill(TvTheme.accent)
-                                                    .frame(width: geo.size.width * item.progressFraction, height: 5)
-                                            }
-                                        }
-                                    }
-                                    .frame(width: 260, height: 148)
-                                }
-                                Text(item.title)
-                                    .font(.callout.weight(.semibold))
-                                    .foregroundColor(.white)
-                                    .lineLimit(1)
-                                    .frame(width: 260, alignment: .leading)
-                                Text(item.episode.isEmpty ? "继续播放" : item.episode)
-                                    .font(.caption2)
-                                    .foregroundColor(TvTheme.secondaryText)
-                                    .lineLimit(1)
-                            }
+                            ContinueWatchingCard(item: item)
                         }
                         .tvCardButtonStyle()
                     }
                 }
+                .padding(.horizontal, 6)
                 .padding(.vertical, 8)
             }
         }
     }
 
-    private var categoryCapsulesBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 14) {
-                categoryCapsule(id: "", label: "精选推荐")
-                ForEach(appModel.categories) { category in
-                    categoryCapsule(id: category.id, label: category.name)
-                }
-            }
-            .padding(.vertical, 6)
-        }
-    }
-
-    private func categoryCapsule(id: String, label: String) -> some View {
-        let isSelected = appModel.selectedCategoryId == id
-        return Button {
-            Task { await appModel.selectCategory(id) }
-        } label: {
-            Text(label)
-                .font(.callout.weight(isSelected ? .bold : .medium))
-                .foregroundColor(isSelected ? .white : TvTheme.secondaryText)
-                .padding(.horizontal, 22)
-                .padding(.vertical, 10)
-                .background(isSelected ? TvTheme.accent : TvTheme.surface)
-                .clipShape(Capsule())
-        }
-        .tvCardButtonStyle()
-    }
-
     private var posterGridWall: some View {
-        VStack(spacing: 24) {
-            LazyVGrid(columns: posterColumns, spacing: 36) {
+        VStack(alignment: .leading, spacing: 18) {
+            if !appModel.watchHistory.isEmpty {
+                Text("精选片库")
+                    .font(TvFont.sectionTitle)
+                    .foregroundColor(.white)
+            }
+
+            LazyVGrid(columns: posterColumns, spacing: 32) {
                 ForEach(appModel.discoverVideos) { video in
                     Button {
                         if let site = appModel.activeSite {
@@ -212,20 +178,74 @@ public struct DiscoverView: View {
             }
 
             if appModel.isLoadingMore {
-                ProgressView()
-                    .padding(.vertical, 24)
+                HStack {
+                    Spacer()
+                    ProgressView()
+                        .padding(.vertical, 24)
+                    Spacer()
+                }
             }
         }
     }
 }
 
+private struct ContinueWatchingCard: View {
+    @Environment(\.tvCardFocused) private var isFocused
+    let item: WatchHistoryItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            ZStack(alignment: .bottomLeading) {
+                RemotePosterView(url: item.poster, title: item.title, cornerRadius: 16)
+                    .frame(width: 268, height: 150)
+
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.60))
+                        .frame(width: 268, height: 5)
+                    Rectangle()
+                        .fill(TvTheme.accent)
+                        .frame(width: 268 * item.progressFraction, height: 5)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(
+                        isFocused ? Color.white : TvTheme.glassStroke,
+                        lineWidth: isFocused ? 2.5 : 1.1
+                    )
+            )
+            .shadow(
+                color: isFocused ? Color.black.opacity(0.55) : Color.black.opacity(0.25),
+                radius: isFocused ? 18 : 8,
+                y: isFocused ? 8 : 4
+            )
+
+            Text(item.title)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .frame(width: 268, alignment: .leading)
+
+            Text(item.episode.isEmpty ? "继续播放" : "\(item.episode) · 已看 \(Int(item.progressFraction * 100))%")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(TvTheme.secondaryText)
+                .lineLimit(1)
+        }
+    }
+}
+
 public struct PosterCardCell: View {
+    @Environment(\.tvCardFocused) private var isFocused
     public let video: CmsVideo
     public let headers: [String: String]
+    public let sourceBadge: String?
 
-    public init(video: CmsVideo, headers: [String: String] = [:]) {
+    public init(video: CmsVideo, headers: [String: String] = [:], sourceBadge: String? = nil) {
         self.video = video
         self.headers = headers
+        self.sourceBadge = sourceBadge
     }
 
     public var body: some View {
@@ -241,30 +261,60 @@ public struct PosterCardCell: View {
 
                 if let score = video.doubanScore {
                     Text(String(format: "%.1f", score))
-                        .font(.caption2.bold())
+                        .font(TvFont.badge)
                         .foregroundColor(.black)
-                        .padding(.horizontal, 8)
+                        .padding(.horizontal, 9)
                         .padding(.vertical, 4)
                         .background(TvTheme.gold)
                         .clipShape(Capsule())
                         .padding(10)
                 } else if !video.remarks.isEmpty {
                     Text(video.remarks)
-                        .font(.caption2.weight(.semibold))
+                        .font(TvFont.badge)
                         .foregroundColor(.white)
                         .lineLimit(1)
-                        .padding(.horizontal, 8)
+                        .padding(.horizontal, 9)
                         .padding(.vertical, 4)
                         .background(Color.black.opacity(0.72))
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.8))
                         .clipShape(Capsule())
                         .padding(10)
                 }
             }
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(
+                        isFocused ? Color.white : TvTheme.glassStroke,
+                        lineWidth: isFocused ? 2.5 : 1.1
+                    )
+            )
+            .shadow(
+                color: isFocused ? Color.black.opacity(0.58) : Color.black.opacity(0.26),
+                radius: isFocused ? 20 : 10,
+                y: isFocused ? 10 : 5
+            )
 
-            Text(video.title)
-                .font(.callout.weight(.medium))
-                .foregroundColor(.white)
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(video.title)
+                    .font(TvFont.cardTitle)
+                    .foregroundColor(isFocused ? .white : Color(white: 0.94))
+                    .lineLimit(1)
+
+                if let src = sourceBadge, !src.isEmpty {
+                    Text(src)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(TvTheme.secondaryText)
+                        .lineLimit(1)
+                } else {
+                    let metaParts = [video.year, video.area].filter { !$0.isEmpty }
+                    if !metaParts.isEmpty {
+                        Text(metaParts.joined(separator: " · "))
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(TvTheme.mutedText)
+                            .lineLimit(1)
+                    }
+                }
+            }
         }
     }
 }

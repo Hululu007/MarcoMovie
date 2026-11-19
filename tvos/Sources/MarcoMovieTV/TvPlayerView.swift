@@ -311,6 +311,9 @@ public struct TvPlayerView: View {
     @State private var activeKernelLabel: String = "AVKit 硬解"
     @State private var activeResolutionBadge: String = ""
     @State private var showNetdiskAuthSheet = false
+    @State private var showEpisodeSelectionSheet = false
+    @State private var pickerLineIndex: Int = 0
+    @State private var pickerDescending: Bool = false
 
     private let speedChoices: [Double] = [0.75, 1.0, 1.25, 1.5, 2.0]
 
@@ -368,14 +371,16 @@ public struct TvPlayerView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let err = playbackError {
-                VStack(spacing: 18) {
+                VStack(spacing: 16) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.largeTitle)
+                        .font(.system(size: 42))
                         .foregroundColor(.yellow)
                     Text("播放地址解析失败：\(err)")
+                        .font(TvFont.body)
                         .foregroundColor(.white)
                         .multilineTextAlignment(.center)
-                    HStack(spacing: 16) {
+                        .frame(maxWidth: 720)
+                    HStack(spacing: 14) {
                         if err.contains("扫码") || (currentLine?.isNetdiskLine == true) {
                             Button("扫码授权 4K 网盘") {
                                 if let key = currentLine?.netdiskDriveKey {
@@ -383,24 +388,27 @@ public struct TvPlayerView: View {
                                 }
                                 showNetdiskAuthSheet = true
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(TvTheme.accent)
+                            .buttonStyle(TvPillButtonStyle(prominent: true))
                         }
 
                         Button("重试") {
                             Task { await loadCurrentEpisodeStream() }
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(TvPillButtonStyle(prominent: true))
 
                         Button("关闭播放器") {
                             persistProgressAndDismiss()
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(TvPillButtonStyle())
                     }
                 }
                 .padding(36)
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .background(TvTheme.surface.opacity(0.92))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .strokeBorder(TvTheme.glassStroke, lineWidth: 1)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
@@ -408,10 +416,44 @@ public struct TvPlayerView: View {
                 hudBannerView
             }
         }
+        #if os(tvOS)
+        .fullScreenCover(isPresented: $showNetdiskAuthSheet) {
+            NetdiskAccountSheetView()
+                .environmentObject(appModel)
+        }
+        .fullScreenCover(isPresented: $showEpisodeSelectionSheet) {
+            EpisodeSelectionView(
+                site: currentSession.site,
+                video: currentSession.video,
+                selectedLineIndex: $pickerLineIndex,
+                descending: $pickerDescending,
+                activePlayingLineIndex: currentSession.lineIndex,
+                activePlayingEpisodeIndex: currentSession.episodeIndex
+            ) { lineIdx, epIdx, resumeMs in
+                switchToEpisode(lineIndex: lineIdx, episodeIndex: epIdx, seekMs: resumeMs)
+            }
+            .environmentObject(appModel)
+        }
+        #else
         .sheet(isPresented: $showNetdiskAuthSheet) {
             NetdiskAccountSheetView()
                 .environmentObject(appModel)
         }
+        .sheet(isPresented: $showEpisodeSelectionSheet) {
+            EpisodeSelectionView(
+                site: currentSession.site,
+                video: currentSession.video,
+                selectedLineIndex: $pickerLineIndex,
+                descending: $pickerDescending,
+                activePlayingLineIndex: currentSession.lineIndex,
+                activePlayingEpisodeIndex: currentSession.episodeIndex
+            ) { lineIdx, epIdx, resumeMs in
+                switchToEpisode(lineIndex: lineIdx, episodeIndex: epIdx, seekMs: resumeMs)
+            }
+            .environmentObject(appModel)
+            .frame(minWidth: 1120, minHeight: 680)
+        }
+        #endif
         #if os(tvOS)
         .onMoveCommand { direction in
             guard currentSession.isLiveStream, !currentSession.liveFlatChannels.isEmpty else { return }
@@ -430,6 +472,8 @@ public struct TvPlayerView: View {
         }
         .task {
             selectedSpeed = appModel.preferences.playSpeed
+            pickerLineIndex = currentSession.lineIndex
+            pickerDescending = appModel.preferences.episodesDescending
             setIdleTimerDisabled(true)
             configureEngineCallbacks()
             await loadCurrentEpisodeStream()
@@ -442,21 +486,21 @@ public struct TvPlayerView: View {
     }
 
     private var hudBannerView: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             Text(currentSession.video.title)
-                .font(.headline)
+                .font(TvFont.cardTitle)
                 .foregroundColor(.white)
                 .lineLimit(1)
 
             if let ep = currentEpisode {
                 Text(ep.name)
-                    .font(.callout)
+                    .font(TvFont.caption)
                     .foregroundColor(TvTheme.secondaryText)
                     .lineLimit(1)
             }
 
             Text(activeKernelLabel)
-                .font(.caption2.bold())
+                .font(TvFont.badge)
                 .foregroundColor(.white)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
@@ -465,7 +509,7 @@ public struct TvPlayerView: View {
 
             if !displayResolutionBadge.isEmpty {
                 Text(displayResolutionBadge)
-                    .font(.caption2.bold())
+                    .font(TvFont.badge)
                     .foregroundColor(.black)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
@@ -484,11 +528,12 @@ public struct TvPlayerView: View {
                             }
                         }
                     }
+                    .buttonStyle(TvPillButtonStyle(compact: true))
                 } else {
                     Button("音轨：\(currentAudioLabel)") {
                         cycleAudioTrack()
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(TvPillButtonStyle(compact: true))
                 }
             }
 
@@ -501,15 +546,31 @@ public struct TvPlayerView: View {
                             }
                         }
                     }
+                    .buttonStyle(TvPillButtonStyle(compact: true))
                 } else {
                     Button("字幕：\(currentSubtitleLabel)") {
                         cycleSubtitleTrack()
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(TvPillButtonStyle(compact: true))
                 }
             }
 
             if !currentSession.isLiveStream {
+                if (currentLine?.episodes.count ?? 0) > 1 || currentSession.video.lines.count > 1 {
+                    Button {
+                        pickerLineIndex = currentSession.lineIndex
+                        pickerDescending = appModel.preferences.episodesDescending
+                        showEpisodeSelectionSheet = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "square.grid.2x2.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("选集")
+                        }
+                    }
+                    .buttonStyle(TvPillButtonStyle(compact: true))
+                }
+
                 if #available(tvOS 17.0, *) {
                     Menu("倍速 \(String(format: "%.2gx", selectedSpeed))") {
                         ForEach(speedChoices, id: \.self) { sp in
@@ -518,17 +579,19 @@ public struct TvPlayerView: View {
                             }
                         }
                     }
+                    .buttonStyle(TvPillButtonStyle(compact: true))
                 } else {
                     Button("倍速 \(String(format: "%.2gx", selectedSpeed))") {
                         cyclePlaybackSpeed()
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(TvPillButtonStyle(compact: true))
                 }
             }
         }
-        .padding(.horizontal, 28)
-        .padding(.vertical, 14)
-        .background(.ultraThinMaterial)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 12)
+        .background(TvTheme.surface.opacity(0.90))
+        .overlay(Capsule().strokeBorder(TvTheme.glassStroke, lineWidth: 1))
         .clipShape(Capsule())
         .padding(32)
     }
@@ -595,6 +658,25 @@ public struct TvPlayerView: View {
         persistCurrentProgress()
         currentSession.episodeIndex += 1
         currentSession.initialSeekMs = appModel.preferences.skipIntroSec * 1000
+        Task {
+            await loadCurrentEpisodeStream()
+        }
+    }
+
+    private func switchToEpisode(lineIndex: Int, episodeIndex: Int, seekMs: Int) {
+        guard !currentSession.isLiveStream,
+              currentSession.video.lines.indices.contains(lineIndex),
+              currentSession.video.lines[lineIndex].episodes.indices.contains(episodeIndex)
+        else {
+            return
+        }
+        if lineIndex == currentSession.lineIndex && episodeIndex == currentSession.episodeIndex {
+            return
+        }
+        persistCurrentProgress()
+        currentSession.lineIndex = lineIndex
+        currentSession.episodeIndex = episodeIndex
+        currentSession.initialSeekMs = seekMs > 0 ? seekMs : (appModel.preferences.skipIntroSec * 1000)
         Task {
             await loadCurrentEpisodeStream()
         }

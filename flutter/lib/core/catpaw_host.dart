@@ -6,6 +6,8 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'catpaw_embedded_engine.dart';
+import 'ohos_runtime.dart';
 import 'quark_account.dart';
 import 'storage_service.dart';
 
@@ -31,8 +33,18 @@ class CatPawHost {
   final Future<Directory> Function()? directory;
   final String? executable;
   final String? bootstrap;
-  CatPawHost({this.directory, this.executable, this.bootstrap});
+  final bool? useEmbeddedRuntime;
+  CatPawHost({
+    this.directory,
+    this.executable,
+    this.bootstrap,
+    this.useEmbeddedRuntime,
+  });
   Process? _process;
+  EmbeddedCatPawEngine? _embeddedEngine;
+  bool get _useEmbeddedEngine =>
+      useEmbeddedRuntime ??
+      (OhosRuntime.isOhos && executable == null && bootstrap == null);
   Future<Uri>? _starting;
   Future<Uri>? _recovering;
   Uri? _base;
@@ -72,9 +84,24 @@ class CatPawHost {
 
   Future<Directory> _storage() async {
     if (_root != null) return _root!;
-    final folder = directory == null
-        ? Directory('${(await getApplicationSupportDirectory()).path}/catpaw')
-        : await directory!();
+    Directory folder;
+    if (directory != null) {
+      folder = await directory!();
+    } else if (OhosRuntime.isOhos) {
+      await OhosRuntime.ensureInitialized();
+      final filesDir = OhosRuntime.filesDir;
+      if (filesDir != null && filesDir.isNotEmpty) {
+        folder = Directory('$filesDir/catpaw');
+      } else {
+        folder = Directory(
+          '${(await getApplicationSupportDirectory()).path}/catpaw',
+        );
+      }
+    } else {
+      folder = Directory(
+        '${(await getApplicationSupportDirectory()).path}/catpaw',
+      );
+    }
     await folder.create(recursive: true);
     // Node's permission checks use real paths (macOS /var is a symlink).
     return _root = Directory(await folder.resolveSymbolicLinks());
@@ -144,6 +171,25 @@ class CatPawHost {
     if (failedBase != null && await _probeHealth(failedBase)) {
       if (epoch == _generation) _base = failedBase;
       return failedBase;
+    }
+    if (_useEmbeddedEngine) {
+      final currentEngine = _embeddedEngine;
+      if (currentEngine != null &&
+          !currentEngine.isClosed &&
+          await _probeHealth(currentEngine.base)) {
+        if (epoch == _generation) {
+          _base = currentEngine.base;
+          _needsReset = false;
+        }
+        return currentEngine.base;
+      }
+      _embeddedEngine = null;
+      _base = null;
+      if (currentEngine != null) {
+        await currentEngine.close();
+      }
+      if (epoch != _generation) throw StateError('CatPaw 本机服务已关闭');
+      return _starting ??= _start().whenComplete(() => _starting = null);
     }
     final root = await _storage();
     final ready = File('${root.path}/ready.json');
@@ -247,6 +293,19 @@ class CatPawHost {
     final epoch = _generation;
     final root = await _storage();
     await root.create(recursive: true);
+    if (_useEmbeddedEngine) {
+      await _stageDrpyAssets(root);
+      await _syncNetdiskConfig(root);
+      final engine = await EmbeddedCatPawEngine.start(root: root);
+      if (epoch != _generation) {
+        await engine.close();
+        throw StateError('CatPaw 本机服务已关闭');
+      }
+      _embeddedEngine = engine;
+      _base = engine.base;
+      _needsReset = false;
+      return engine.base;
+    }
     final script = File('${root.path}/host.cjs');
     if (bootstrap != null) {
       await File(bootstrap!).copy(script.path);
@@ -966,6 +1025,11 @@ class CatPawHost {
 
   Future<String> install(String code) async {
     if (!isBundle(code)) throw const FormatException('没有 CatPaw 服务入口');
+    if (_useEmbeddedEngine) {
+      throw StateError(
+        '当前鸿蒙端暂不支持运行 Node.js CatPaw 服务包，请改用标准 TVBox/DRPY 订阅，或在桌面端/iOS 端使用该订阅',
+      );
+    }
     final bytes = utf8.encode(code);
     if (bytes.length > 16 * 1024 * 1024)
       throw const FormatException('CatPaw 服务包超过大小限制');
@@ -1037,6 +1101,10 @@ class CatPawHost {
         }
         _verifiedDrpySizes[logical.host] = drpyLen;
       }
+    } else if (_useEmbeddedEngine) {
+      throw StateError(
+        '该线路属于 Node.js CatPaw 服务包，鸿蒙端暂不支持直接运行，请切换其他片源',
+      );
     } else if (!await File('${root.path}/${logical.host}/index.cjs').exists()) {
       throw StateError('此设备没有对应的 CatPaw 服务包，请重新导入原订阅');
     } else if (logical.path.startsWith('/api/spider/')) {
@@ -1045,7 +1113,7 @@ class CatPawHost {
     _checkCancellation(cancellation);
     if (generation != _generation) throw StateError('CatPaw 本机服务已关闭');
     var base = await _withCancellation(_ensure(), cancellation);
-    if (Platform.isIOS &&
+    if ((Platform.isIOS || _useEmbeddedEngine) &&
         (logical.path == '/proxy' || logical.path.contains('/proxy/'))) {
       if (!await _withCancellation(_probeHealth(base), cancellation)) {
         base = await _withCancellation(_recoverLoopback(base), cancellation);
@@ -1278,6 +1346,11 @@ class CatPawHost {
       } catch (_) {
         // The next request must finish cleanup before loading any new sources.
       }
+    }
+    final embedded = _embeddedEngine;
+    _embeddedEngine = null;
+    if (embedded != null) {
+      await embedded.close();
     }
     final process = _process;
     _process = null;

@@ -27,6 +27,8 @@ class TvFocusPill extends StatefulWidget {
   final VoidCallback? onSelect;
   final VoidCallback? onFocusGained;
   final bool selected;
+  final bool prominent;
+  final bool glass;
   final bool autofocus;
   final FocusNode? focusNode;
   final EdgeInsetsGeometry padding;
@@ -40,6 +42,8 @@ class TvFocusPill extends StatefulWidget {
     this.onSelect,
     this.onFocusGained,
     this.selected = false,
+    this.prominent = false,
+    this.glass = false,
     this.autofocus = false,
     this.focusNode,
     this.padding = const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
@@ -73,17 +77,87 @@ class _TvFocusPillState extends State<TvFocusPill> {
   @override
   Widget build(BuildContext context) {
     final active = _focused || _hovered;
-    final bg = widget.backgroundColor ??
-        (active
-            ? AppleColors.systemBlue
-            : (widget.selected
-                ? AppleColors.systemBlue.withValues(alpha: 0.28)
-                : const Color(0xFF23252B)));
-    final borderColor = _focused
-        ? Colors.white
-        : (widget.selected
-            ? AppleColors.systemBlue.withValues(alpha: 0.85)
-            : Colors.white.withValues(alpha: 0.12));
+    final disabled = widget.onSelect == null;
+    final Color bg;
+    final Color borderColor;
+    final Color fgColor;
+    final List<BoxShadow>? shadows;
+
+    if (widget.prominent) {
+      bg = disabled
+          ? Colors.white.withValues(alpha: 0.14)
+          : (active ? Colors.white : const Color(0xF2F7F9FC));
+      borderColor = _focused
+          ? AppleColors.systemBlue
+          : Colors.white.withValues(alpha: disabled ? 0.16 : 0.85);
+      fgColor = disabled
+          ? Colors.white.withValues(alpha: 0.45)
+          : const Color(0xFF0A0F18);
+      shadows = _focused
+          ? [
+              BoxShadow(
+                color: Colors.white.withValues(alpha: 0.38),
+                blurRadius: 24,
+                spreadRadius: 1,
+              ),
+              BoxShadow(
+                color: AppleColors.systemBlue.withValues(alpha: 0.45),
+                blurRadius: 26,
+                offset: const Offset(0, 8),
+              ),
+            ]
+          : [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.34),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+            ];
+    } else if (widget.glass) {
+      bg = widget.backgroundColor ??
+          (active
+              ? Colors.white
+              : (widget.selected
+                  ? AppleColors.systemBlue.withValues(alpha: 0.86)
+                  : Colors.white.withValues(alpha: 0.13)));
+      borderColor = _focused
+          ? Colors.white
+          : (widget.selected
+              ? Colors.white.withValues(alpha: 0.42)
+              : Colors.white.withValues(alpha: 0.24));
+      fgColor = active ? const Color(0xFF0A0F18) : Colors.white;
+      shadows = _focused
+          ? [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.48),
+                blurRadius: 20,
+                offset: const Offset(0, 8),
+              ),
+            ]
+          : null;
+    } else {
+      bg = widget.backgroundColor ??
+          (active
+              ? AppleColors.systemBlue
+              : (widget.selected
+                  ? AppleColors.systemBlue.withValues(alpha: 0.28)
+                  : const Color(0xFF23252B)));
+      borderColor = _focused
+          ? Colors.white
+          : (widget.selected
+              ? AppleColors.systemBlue.withValues(alpha: 0.85)
+              : Colors.white.withValues(alpha: 0.12));
+      fgColor = _focused ? Colors.white : AppleColors.labelPrimary;
+      shadows = _focused
+          ? [
+              BoxShadow(
+                color: AppleColors.systemBlue.withValues(alpha: 0.45),
+                blurRadius: 18,
+                spreadRadius: 1,
+              ),
+            ]
+          : null;
+    }
 
     return Semantics(
       button: true,
@@ -120,10 +194,9 @@ class _TvFocusPillState extends State<TvFocusPill> {
             onTap: widget.onSelect,
             child: AnimatedScale(
               scale: _focused ? 1.05 : 1.0,
-              duration: const Duration(milliseconds: 150),
+              duration: const Duration(milliseconds: 140),
               curve: Curves.easeOutCubic,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
+              child: Container(
                 padding: widget.padding,
                 decoration: BoxDecoration(
                   color: bg,
@@ -132,23 +205,19 @@ class _TvFocusPillState extends State<TvFocusPill> {
                     color: borderColor,
                     width: _focused ? 2.5 : 1.2,
                   ),
-                  boxShadow: _focused
-                      ? [
-                          BoxShadow(
-                            color: AppleColors.systemBlue.withValues(alpha: 0.45),
-                            blurRadius: 18,
-                            spreadRadius: 1,
-                          ),
-                        ]
-                      : null,
+                  boxShadow: shadows,
                 ),
-                child: DefaultTextStyle.merge(
-                  style: TextStyle(
-                    color: _focused ? Colors.white : AppleColors.labelPrimary,
-                    fontWeight:
-                        (_focused || widget.selected) ? FontWeight.w700 : FontWeight.w500,
+                child: IconTheme.merge(
+                  data: IconThemeData(color: fgColor),
+                  child: DefaultTextStyle.merge(
+                    style: TextStyle(
+                      color: fgColor,
+                      fontWeight: (widget.prominent || _focused || widget.selected)
+                          ? FontWeight.w700
+                          : FontWeight.w500,
+                    ),
+                    child: widget.child,
                   ),
-                  child: widget.child,
                 ),
               ),
             ),

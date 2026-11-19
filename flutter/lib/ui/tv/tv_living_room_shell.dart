@@ -847,21 +847,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                 padding: const EdgeInsets.fromLTRB(36, 20, 36, 12),
                 child: Row(
                   children: [
-                    const Icon(
-                      CupertinoIcons.film_fill,
-                      color: AppleColors.systemBlue,
-                      size: 28,
-                    ),
-                    const SizedBox(width: 10),
-                    const Text(
-                      'Marco Movie',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 22,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: -0.4,
-                      ),
-                    ),
+                    const MarcoBrandLogo(iconSize: 38, fontSize: 22),
                     const SizedBox(width: 28),
                     Expanded(
                       child: SingleChildScrollView(
@@ -952,11 +938,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(
-                CupertinoIcons.tv_fill,
-                color: AppleColors.systemBlue,
-                size: 52,
-              ),
+              const MarcoBrandLogo(iconSize: 64, fontSize: 28, stacked: true),
               const SizedBox(height: 18),
               const Text(
                 '欢迎使用 Marco Movie 大屏版',

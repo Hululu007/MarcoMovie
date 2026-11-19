@@ -118,6 +118,9 @@ public enum BackupCodec {
     public static let keyPreferredSite = "preferred_site"
     public static let keyNetdiskQuality = "netdisk_quality"
     public static let keyPlayerKernel = "player_kernel"
+    public static let keyAmbientTheme = "ambient_theme"
+    public static let keyAmbientIntensity = "ambient_intensity"
+    public static let keyAmbientPosterSync = "ambient_poster_sync"
 
     public static func encodeBackupJson(_ payload: BackupPayload) throws -> String {
         let publicSubs = payload.subscriptions.filter { !$0.isEffectivelyPrivate }
@@ -152,6 +155,9 @@ public enum BackupCodec {
             keyPreferredSite: payload.preferences.preferredSiteKey,
             keyNetdiskQuality: payload.preferences.netdiskQuality,
             keyPlayerKernel: payload.preferences.playerKernel,
+            keyAmbientTheme: payload.preferences.ambientTheme,
+            keyAmbientIntensity: payload.preferences.ambientIntensity,
+            keyAmbientPosterSync: payload.preferences.ambientPosterSync,
         ]
         if !publicSubs.isEmpty {
             settings[keySubscriptions] = publicSubs.map { $0.toDictionary() }
@@ -266,7 +272,10 @@ public enum BackupCodec {
             selectedSiteKey: (settings[keySelectedSite] as? String) ?? "",
             preferredSiteKey: (settings[keyPreferredSite] as? String) ?? "",
             netdiskQuality: (settings[keyNetdiskQuality] as? String) ?? "auto",
-            playerKernel: (settings[keyPlayerKernel] as? String) ?? "range_proxy"
+            playerKernel: (settings[keyPlayerKernel] as? String) ?? "range_proxy",
+            ambientTheme: (settings[keyAmbientTheme] as? String) ?? "aurora",
+            ambientIntensity: (settings[keyAmbientIntensity] as? String) ?? "standard",
+            ambientPosterSync: (settings[keyAmbientPosterSync] as? Bool) ?? true
         )
 
         return BackupPayload(
@@ -841,7 +850,10 @@ public final class TvStorageManager: @unchecked Sendable {
             selectedSiteKey: next.selectedSiteKey,
             preferredSiteKey: next.preferredSiteKey,
             netdiskQuality: next.netdiskQuality,
-            playerKernel: next.playerKernel
+            playerKernel: next.playerKernel,
+            ambientTheme: next.ambientTheme,
+            ambientIntensity: next.ambientIntensity,
+            ambientPosterSync: next.ambientPosterSync
         )
         writeCodableAtomically(preferencesCache, to: cachesDirectory.appendingPathComponent("preferences.json"))
         persistKeychainAnchor()

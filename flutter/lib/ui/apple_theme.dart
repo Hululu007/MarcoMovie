@@ -1036,11 +1036,13 @@ class _DockItemState extends State<_DockItem> {
             AnimatedDefaultTextStyle(
               duration: duration,
               curve: Curves.easeOut,
-              style: TextStyle(
-                color: color,
-                fontSize: 10,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-                letterSpacing: 0.1,
+              style: DefaultTextStyle.of(context).style.merge(
+                TextStyle(
+                  color: color,
+                  fontSize: 10,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                  letterSpacing: 0.1,
+                ),
               ),
               child: Text(
                 widget.label,

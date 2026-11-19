@@ -259,6 +259,10 @@ public enum ConfigDecoder {
         return String(out)
     }
 
+    public static func isCatPawBundle(_ code: String) -> Bool {
+        code.contains("catServerFactory") && code.contains("catDartServerPort")
+    }
+
     public static func looksLikeScript(_ raw: String) -> Bool {
         let trimmed = raw.drop(while: { $0.isWhitespace })
         if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") {

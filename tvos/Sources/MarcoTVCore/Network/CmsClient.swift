@@ -31,10 +31,51 @@ public final class CmsClient: @unchecked Sendable {
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
     public static let fallbackOkHttpUserAgent = "okhttp/4.12.0"
 
+    private enum ScriptHostBackend {
+        case spider(JsSourceHost)
+        case drpy(DrpySourceHost)
+
+        func homeContent(filter: Bool = true) async throws -> SiteHomePayload {
+            switch self {
+            case .spider(let h): return try await h.homeContent(filter: filter)
+            case .drpy(let h): return try await h.homeContent(filter: filter)
+            }
+        }
+
+        func categoryContent(tid: String, page: Int = 1) async throws -> CmsListing {
+            switch self {
+            case .spider(let h): return try await h.categoryContent(tid: tid, page: page)
+            case .drpy(let h): return try await h.categoryContent(tid: tid, page: page)
+            }
+        }
+
+        func detailContent(ids: [String]) async throws -> CmsVideo? {
+            switch self {
+            case .spider(let h): return try await h.detailContent(ids: ids)
+            case .drpy(let h): return try await h.detailContent(ids: ids)
+            }
+        }
+
+        func searchContent(keyword: String, quick: Bool = false, page: Int = 1) async throws -> [CmsVideo] {
+            switch self {
+            case .spider(let h): return try await h.searchContent(keyword: keyword, quick: quick, page: page)
+            case .drpy(let h): return try await h.searchContent(keyword: keyword, quick: quick, page: page)
+            }
+        }
+
+        func playerContent(flag: String, id: String, vipFlags: [String] = []) async throws -> JsResolvedPlayStream {
+            switch self {
+            case .spider(let h): return try await h.playerContent(flag: flag, id: id, vipFlags: vipFlags)
+            case .drpy(let h): return try await h.playerContent(flag: flag, id: id, vipFlags: vipFlags)
+            }
+        }
+    }
+
     private let session: URLSession
     private let netdiskResolver: NetdiskShareResolver
     private let jsHostCacheLock = NSLock()
-    private var jsHosts: [String: JsSourceHost] = [:]
+    private var scriptHosts: [String: ScriptHostBackend] = [:]
+    private var jarCache: [String: Data] = [:]
 
     public init(timeoutSeconds: TimeInterval = 15, netdiskResolver: NetdiskShareResolver? = nil) {
         let config = URLSessionConfiguration.ephemeral
@@ -109,6 +150,9 @@ public final class CmsClient: @unchecked Sendable {
         let cleanUrl = CmsParser.extractAndNormalizeUrl(urlString)
         let bytes = try await fetchRawBytes(url: cleanUrl, timeout: 18)
         let unpacked = try ConfigDecoder.decodeConfigDocument(bytes)
+        if ConfigDecoder.isCatPawBundle(unpacked) {
+            throw MarcoError.unsupportedSite("Apple TV (tvOS) 暂不支持运行 Node.js CatPaw 本机服务包，请导入标准 TVBox / DRPY 订阅，或在桌面端/iOS 端使用该订阅")
+        }
         let parsed = try CmsParser.parseConfig(unpacked, origin: cleanUrl, defaultName: defaultName)
         return (unpacked, parsed)
     }
@@ -302,11 +346,21 @@ public final class CmsClient: @unchecked Sendable {
         var mergedHeaders = LiveCatalogParser.mergeHeaders([site.headers, episode.headers])
 
         if site.hasQuickJsAdapter && (!episode.isDirectPlayable || episode.isScriptEpisode) {
-            let host = try await resolveJsHost(for: site)
-            let jsResult = try await host.playerContent(flag: lineName, id: episode.url)
-            if !jsResult.url.isEmpty {
-                resolvedUrlString = jsResult.url
-                mergedHeaders = LiveCatalogParser.mergeHeaders([mergedHeaders, jsResult.headers])
+            if episode.isNetdiskUrl {
+                if let host = try? await resolveJsHost(for: site),
+                   let jsResult = try? await host.playerContent(flag: lineName, id: episode.url),
+                   !jsResult.url.isEmpty
+                {
+                    resolvedUrlString = jsResult.url
+                    mergedHeaders = LiveCatalogParser.mergeHeaders([mergedHeaders, jsResult.headers])
+                }
+            } else {
+                let host = try await resolveJsHost(for: site)
+                let jsResult = try await host.playerContent(flag: lineName, id: episode.url)
+                if !jsResult.url.isEmpty {
+                    resolvedUrlString = jsResult.url
+                    mergedHeaders = LiveCatalogParser.mergeHeaders([mergedHeaders, jsResult.headers])
+                }
             }
         }
 
@@ -419,12 +473,51 @@ public final class CmsClient: @unchecked Sendable {
         return body()
     }
 
-    private func resolveJsHost(for site: CmsSite) async throws -> JsSourceHost {
-        if let cached = withJsHostLock({ jsHosts[site.key] }) {
+    private func resolveJsHost(for site: CmsSite) async throws -> ScriptHostBackend {
+        if let cached = withJsHostLock({ scriptHosts[site.key] }) {
             return cached
         }
 
+        // 1. Guard-ported TVBox plugins (FTY / WEX / DM84 / Auete / Bttwoo / AppGZ / T4 / AppTT / FY)
+        if let adapter = site.guardAdapterKey,
+           let parsedRef = GuardPluginExtractor.parsePluginReference(site.pluginReference)
+        {
+            let jarBytes: Data
+            if let cachedJar = withJsHostLock({ jarCache[parsedRef.url] }) {
+                jarBytes = cachedJar
+            } else {
+                let downloaded = try await fetchRawBytes(url: parsedRef.url, headers: site.headers, timeout: 25)
+                try GuardPluginExtractor.verifyOptionalMd5(data: downloaded, expectedMd5: parsedRef.expectedMd5)
+                withJsHostLock {
+                    if jarCache.count >= 6 {
+                        jarCache.removeAll()
+                    }
+                    jarCache[parsedRef.url] = downloaded
+                }
+                jarBytes = downloaded
+            }
+            let rawExt = (site.rawExtension ?? site.ext).trimmingCharacters(in: .whitespacesAndNewlines)
+            let extracted = try GuardPluginExtractor.extract(
+                artifactBytes: jarBytes,
+                adapter: adapter,
+                extension: rawExt.isEmpty ? nil : rawExt
+            )
+            let drpyHost = try DrpySourceHost(
+                site: site,
+                ruleSource: extracted.rule,
+                origin: extracted.origin
+            )
+            try await drpyHost.initialize()
+            let backend = ScriptHostBackend.drpy(drpyHost)
+            withJsHostLock { scriptHosts[site.key] = backend }
+            return backend
+        }
+
+        // 2. Local or remote DRPY2 rules & CatVod/TVBox JS Spiders
         let scriptCode: String
+        var scriptOrigin = site.api
+        var localModules: [String: String] = [:]
+
         if site.api == "csp_LocalScript.js" || site.api == "csp_LocalRule.js" {
             if let extData = site.ext.data(using: .utf8),
                let extMap = (try? JSONSerialization.jsonObject(with: extData)) as? [String: Any],
@@ -432,24 +525,50 @@ public final class CmsClient: @unchecked Sendable {
                !inlineScript.isEmpty
             {
                 scriptCode = inlineScript
+                if let mods = extMap["modules"] as? [String: String] {
+                    localModules = mods
+                }
+                if let orig = extMap["origin"] as? String, !orig.isEmpty {
+                    scriptOrigin = orig
+                } else {
+                    scriptOrigin = "pkg://local/rule.js"
+                }
             } else {
                 scriptCode = site.ext
+                scriptOrigin = "pkg://local/rule.js"
             }
-        } else if site.isDrpySource && site.ext.lowercased().hasPrefix("http") {
-            let bytes = try await fetchRawBytes(url: site.ext, headers: site.headers)
+        } else if site.isDrpySource && site.ext.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("http") {
+            let extUrl = site.ext.trimmingCharacters(in: .whitespacesAndNewlines)
+            let bytes = try await fetchRawBytes(url: extUrl, headers: site.headers)
             scriptCode = try ConfigDecoder.decodeTextDocument(bytes)
+            scriptOrigin = extUrl
+        } else if site.isDrpySource && !site.ext.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            scriptCode = site.ext
+            scriptOrigin = "pkg://local/rule.js"
         } else {
             let bytes = try await fetchRawBytes(url: site.api, headers: site.headers)
             scriptCode = try ConfigDecoder.decodeTextDocument(bytes)
+            scriptOrigin = site.api
+        }
+
+        if site.isDrpySource || DrpySourceHost.looksLikeDrpyRule(scriptCode) {
+            let drpyHost = try DrpySourceHost(
+                site: site,
+                ruleSource: scriptCode,
+                origin: scriptOrigin,
+                localModules: localModules
+            )
+            try await drpyHost.initialize()
+            let backend = ScriptHostBackend.drpy(drpyHost)
+            withJsHostLock { scriptHosts[site.key] = backend }
+            return backend
         }
 
         let host = try JsSourceHost(site: site, scriptSource: scriptCode)
         try await host.initialize()
-
-        withJsHostLock {
-            jsHosts[site.key] = host
-        }
-        return host
+        let backend = ScriptHostBackend.spider(host)
+        withJsHostLock { scriptHosts[site.key] = backend }
+        return backend
     }
 
     private func appendQuery(_ baseUrl: String, params: [(String, String)]) -> String {

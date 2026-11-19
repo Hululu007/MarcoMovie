@@ -9,88 +9,127 @@ public struct LivingRoomShellView: View {
     public init() {}
 
     public var body: some View {
-        NavigationStack {
-            ZStack(alignment: .bottom) {
-                if !appModel.hasConfiguredSources && appModel.selectedTab == .discover {
-                    WelcomeEmptyStateView()
-                } else {
-                    TabView(selection: $appModel.selectedTab) {
-                        DiscoverView()
-                            .tabItem { Label("发现", systemImage: "sparkles.tv") }
-                            .tag(LivingRoomTab.discover)
+        ZStack(alignment: .bottom) {
+            if !appModel.hasConfiguredSources && appModel.selectedTab == .discover {
+                WelcomeEmptyStateView()
+                    .tvAmbientPageBackground(appModel)
+            } else {
+                TabView(selection: $appModel.selectedTab) {
+                    DiscoverView()
+                        .tvAmbientPageBackground(appModel)
+                        .tabItem { Label("发现", systemImage: "sparkles.tv") }
+                        .tag(LivingRoomTab.discover)
 
-                        LiveTvView()
-                            .tabItem { Label("直播", systemImage: "dot.radiowaves.left.and.right") }
-                            .tag(LivingRoomTab.live)
+                    LiveTvView()
+                        .tvAmbientPageBackground(appModel)
+                        .tabItem { Label("直播", systemImage: "dot.radiowaves.left.and.right") }
+                        .tag(LivingRoomTab.live)
 
-                        SearchView()
-                            .tabItem { Label("搜索", systemImage: "magnifyingglass") }
-                            .tag(LivingRoomTab.search)
+                    SearchView()
+                        .tvAmbientPageBackground(appModel)
+                        .tabItem { Label("搜索", systemImage: "magnifyingglass") }
+                        .tag(LivingRoomTab.search)
 
-                        LibraryView()
-                            .tabItem { Label("片库", systemImage: "books.vertical") }
-                            .tag(LivingRoomTab.library)
+                    LibraryView()
+                        .tvAmbientPageBackground(appModel)
+                        .tabItem { Label("片库", systemImage: "books.vertical") }
+                        .tag(LivingRoomTab.library)
 
-                        SettingsView()
-                            .tabItem { Label("设置", systemImage: "gearshape") }
-                            .tag(LivingRoomTab.settings)
-                    }
+                    SettingsView()
+                        .tvAmbientPageBackground(appModel)
+                        .tabItem { Label("设置", systemImage: "gearshape") }
+                        .tag(LivingRoomTab.settings)
                 }
+            }
 
-                if let banner = appModel.statusBannerMessage {
-                    Text(banner)
-                        .font(.callout.weight(.semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 14)
-                        .background(.ultraThinMaterial)
-                        .clipShape(Capsule())
-                        .padding(.bottom, 36)
-                        .task(id: banner) {
-                            try? await Task.sleep(nanoseconds: 3_500_000_000)
-                            if appModel.statusBannerMessage == banner {
-                                appModel.statusBannerMessage = nil
-                            }
+            if let banner = appModel.statusBannerMessage {
+                Text(banner)
+                    .font(TvFont.button)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 26)
+                    .padding(.vertical, 12)
+                    .background(TvTheme.elevatedSurface.opacity(0.95))
+                    .overlay(Capsule().strokeBorder(TvTheme.glassStroke, lineWidth: 1))
+                    .clipShape(Capsule())
+                    .shadow(color: .black.opacity(0.5), radius: 18, y: 8)
+                    .padding(.bottom, 32)
+                    .task(id: banner) {
+                        try? await Task.sleep(nanoseconds: 3_500_000_000)
+                        if appModel.statusBannerMessage == banner {
+                            appModel.statusBannerMessage = nil
                         }
-                }
+                    }
             }
-            .sheet(isPresented: $appModel.showSiteSwitcherSheet) {
-                SiteDepotSwitcherSheet()
-                    .environmentObject(appModel)
-            }
-            .sheet(isPresented: $appModel.showLanQrModal) {
-                LanQrPushModalView()
-                    .environmentObject(appModel)
-            }
-            .sheet(isPresented: $appModel.showNetdiskSheet) {
-                NetdiskAccountSheetView()
-                    .environmentObject(appModel)
-            }
-            .sheet(
-                isPresented: Binding(
-                    get: { appModel.selectedDetailContext != nil },
-                    set: { if !$0 { appModel.selectedDetailContext = nil } }
-                )
-            ) {
-                if let ctx = appModel.selectedDetailContext {
-                    DetailView(site: ctx.site, summaryVideo: ctx.video)
-                        .environmentObject(appModel)
-                }
-            }
-            #if os(tvOS)
-            .fullScreenCover(item: $appModel.activePlayback) { session in
-                TvPlayerView(session: session)
-                    .environmentObject(appModel)
-                    .ignoresSafeArea()
-            }
-            #else
-            .sheet(item: $appModel.activePlayback) { session in
-                TvPlayerView(session: session)
-                    .environmentObject(appModel)
-                    .frame(minWidth: 960, minHeight: 540)
-            }
-            #endif
         }
+        .overlay {
+            if appModel.hasConfiguredSources || appModel.selectedTab != .discover {
+                MarcoBrandLogo(iconSize: 44, fontSize: 26)
+                    .padding(.leading, 56)
+                    .padding(.top, 52)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+        }
+        #if os(tvOS)
+        .fullScreenCover(isPresented: $appModel.showSiteSwitcherSheet) {
+            SiteDepotSwitcherSheet()
+                .environmentObject(appModel)
+        }
+        .fullScreenCover(isPresented: $appModel.showLanQrModal) {
+            LanQrPushModalView()
+                .environmentObject(appModel)
+        }
+        .fullScreenCover(isPresented: $appModel.showNetdiskSheet) {
+            NetdiskAccountSheetView()
+                .environmentObject(appModel)
+        }
+        .fullScreenCover(
+            isPresented: Binding(
+                get: { appModel.selectedDetailContext != nil },
+                set: { if !$0 { appModel.selectedDetailContext = nil } }
+            )
+        ) {
+            if let ctx = appModel.selectedDetailContext {
+                DetailView(site: ctx.site, summaryVideo: ctx.video)
+                    .environmentObject(appModel)
+            }
+        }
+        .fullScreenCover(item: $appModel.activePlayback) { session in
+            TvPlayerView(session: session)
+                .environmentObject(appModel)
+                .ignoresSafeArea()
+        }
+        #else
+        .sheet(isPresented: $appModel.showSiteSwitcherSheet) {
+            SiteDepotSwitcherSheet()
+                .environmentObject(appModel)
+        }
+        .sheet(isPresented: $appModel.showLanQrModal) {
+            LanQrPushModalView()
+                .environmentObject(appModel)
+        }
+        .sheet(isPresented: $appModel.showNetdiskSheet) {
+            NetdiskAccountSheetView()
+                .environmentObject(appModel)
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { appModel.selectedDetailContext != nil },
+                set: { if !$0 { appModel.selectedDetailContext = nil } }
+            )
+        ) {
+            if let ctx = appModel.selectedDetailContext {
+                DetailView(site: ctx.site, summaryVideo: ctx.video)
+                    .environmentObject(appModel)
+            }
+        }
+        .sheet(item: $appModel.activePlayback) { session in
+            TvPlayerView(session: session)
+                .environmentObject(appModel)
+                .frame(minWidth: 960, minHeight: 540)
+        }
+        #endif
     }
 }
 
@@ -100,49 +139,44 @@ public struct WelcomeEmptyStateView: View {
     public init() {}
 
     public var body: some View {
-        VStack(spacing: 28) {
+        VStack(spacing: 22) {
             Spacer()
 
-            Image(systemName: "appletv.fill")
-                .font(.system(size: 72))
-                .foregroundColor(TvTheme.accent)
-
-            Text("Marco Movie · Apple TV")
-                .font(.largeTitle.bold())
-                .foregroundColor(.white)
+            MarcoBrandLogo(iconSize: 84, fontSize: 44, stacked: true)
 
             Text("本软件仅提供通用媒体目录解析与本地播放能力，不内置、不提供、不托管任何影视或直播内容。")
-                .font(.callout)
+                .font(TvFont.body)
                 .foregroundColor(TvTheme.secondaryText)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 820)
+                .frame(maxWidth: 720)
 
-            HStack(spacing: 24) {
+            HStack(spacing: 18) {
                 Button {
                     appModel.openLanQrModal()
                 } label: {
-                    Label("手机扫码推送配置", systemImage: "qrcode.viewfinder")
-                        .font(.headline)
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 16)
+                    HStack(spacing: 8) {
+                        Image(systemName: "qrcode.viewfinder")
+                        Text("手机扫码推送配置")
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(TvTheme.accent)
+                .buttonStyle(TvPillButtonStyle(prominent: true))
 
                 Button {
                     appModel.selectedTab = .settings
                 } label: {
-                    Label("打开设置与云同步", systemImage: "icloud.and.arrow.down")
-                        .font(.headline)
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 16)
+                    HStack(spacing: 8) {
+                        Image(systemName: "icloud.and.arrow.down")
+                        Text("打开设置与云同步")
+                    }
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(TvPillButtonStyle())
             }
+            .padding(.top, 8)
 
             Spacer()
         }
         .padding(48)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -153,86 +187,103 @@ public struct SiteDepotSwitcherSheet: View {
     public init() {}
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
-                HStack {
+        VStack(alignment: .leading, spacing: 24) {
+            HStack(spacing: 18) {
+                MarcoBrandLogo(iconSize: 40, fontSize: 23)
+                Rectangle()
+                    .fill(TvTheme.glassStroke)
+                    .frame(width: 1.5, height: 34)
+                VStack(alignment: .leading, spacing: 4) {
                     Text("切换片源与多仓线路")
-                        .font(.title2.bold())
-                    Spacer()
-                    Text("可用 \(appModel.config.availableSites.count) / 共 \(appModel.config.sites.count)")
-                        .font(.callout)
+                        .font(TvFont.pageTitle)
+                        .foregroundColor(.white)
+                    Text("可用 \(appModel.config.availableSites.count) / 共 \(appModel.config.sites.count) 个片源")
+                        .font(TvFont.caption)
                         .foregroundColor(TvTheme.secondaryText)
-                    Button("关闭") { dismiss() }
                 }
+                Spacer()
+                Button("关闭") { dismiss() }
+                    .buttonStyle(TvPillButtonStyle())
+            }
 
-                if !appModel.config.depots.isEmpty {
-                    Text("多仓仓库列表")
-                        .font(.headline)
-                        .foregroundColor(TvTheme.secondaryText)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    if !appModel.config.depots.isEmpty {
+                        Text("多仓仓库列表")
+                            .font(TvFont.sectionTitle)
+                            .foregroundColor(.white)
 
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 18)], spacing: 18) {
-                        ForEach(appModel.config.depots) { depot in
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 14)], spacing: 14) {
+                            ForEach(appModel.config.depots) { depot in
+                                Button {
+                                    dismiss()
+                                    Task { await appModel.switchDepot(depot) }
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "shippingbox.fill")
+                                            .foregroundColor(TvTheme.gold)
+                                        Text(depot.name)
+                                            .font(TvFont.cardTitle)
+                                            .lineLimit(1)
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 18)
+                                    .padding(.vertical, 14)
+                                }
+                                .buttonStyle(TvTileButtonStyle(preserveColors: true))
+                            }
+                        }
+                    }
+
+                    Text("已启用片源")
+                        .font(TvFont.sectionTitle)
+                        .foregroundColor(.white)
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 14)], spacing: 14) {
+                        ForEach(appModel.config.publicAvailableSites) { site in
+                            let isActive = appModel.activeSite?.key == site.key
                             Button {
+                                appModel.selectSite(site)
                                 dismiss()
-                                Task { await appModel.switchDepot(depot) }
                             } label: {
-                                HStack {
-                                    Image(systemName: "shippingbox.fill")
-                                        .foregroundColor(TvTheme.gold)
-                                    Text(depot.name)
+                                HStack(spacing: 10) {
+                                    Circle()
+                                        .fill(isActive ? TvTheme.accent : Color.green)
+                                        .frame(width: 9, height: 9)
+                                    Text(site.name)
+                                        .font(TvFont.cardTitle)
                                         .lineLimit(1)
                                     Spacer()
+                                    if site.hasQuickJsAdapter {
+                                        Text("JS")
+                                            .font(TvFont.badge)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 3)
+                                            .background(TvTheme.accent.opacity(0.28))
+                                            .clipShape(Capsule())
+                                    }
                                 }
-                                .padding(16)
-                                .background(TvTheme.elevatedSurface)
-                                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 14)
                             }
-                            .tvCardButtonStyle()
+                            .buttonStyle(TvTileButtonStyle(active: isActive, preserveColors: true))
                         }
                     }
                 }
-
-                Text("已启用片源")
-                    .font(.headline)
-                    .foregroundColor(TvTheme.secondaryText)
-
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 18)], spacing: 18) {
-                    ForEach(appModel.config.publicAvailableSites) { site in
-                        Button {
-                            appModel.selectSite(site)
-                            dismiss()
-                        } label: {
-                            HStack {
-                                Circle()
-                                    .fill(appModel.activeSite?.key == site.key ? TvTheme.accent : Color.green)
-                                    .frame(width: 10, height: 10)
-                                Text(site.name)
-                                    .lineLimit(1)
-                                Spacer()
-                                if site.hasQuickJsAdapter {
-                                    Text("JS")
-                                        .font(.caption2.bold())
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
-                                        .background(TvTheme.accent.opacity(0.25))
-                                        .clipShape(Capsule())
-                                }
-                            }
-                            .padding(16)
-                            .background(
-                                appModel.activeSite?.key == site.key
-                                    ? TvTheme.accent.opacity(0.28)
-                                    : TvTheme.elevatedSurface
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        }
-                        .tvCardButtonStyle()
-                    }
-                }
+                .padding(.vertical, 4)
             }
-            .padding(40)
         }
-        .background(TvTheme.background)
+        .padding(56)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            TvAmbientSoftGlowBackground(
+                themeId: appModel.preferences.ambientTheme,
+                intensity: appModel.preferences.ambientIntensity,
+                posterUrl: appModel.backdropPosterUrl,
+                posterSync: appModel.preferences.ambientPosterSync
+            )
+        )
+        .tvExitHandler { dismiss() }
     }
 }
 
@@ -242,44 +293,64 @@ public struct LanQrPushModalView: View {
     public init() {}
 
     public var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 22) {
+            Spacer()
+
+            MarcoBrandLogo(iconSize: 48, fontSize: 28)
+
             Text("手机扫码推送配置或备份")
-                .font(.title2.bold())
+                .font(TvFont.pageTitle)
                 .foregroundColor(.white)
 
-            Text("请确保手机与 Apple TV 连接同一局域网 Wi-Fi，使用手机相机或浏览器扫描二维码即可免遥控器输入推送订阅链接、JSON 配置或 marco-movie-backup.json 备份文件。")
-                .font(.callout)
+            Text("请确保手机与 Apple TV 连接同一局域网 Wi-Fi，使用手机相机或浏览器扫描下方二维码，即可免输入推送订阅链接、JSON 配置或备份文件。")
+                .font(TvFont.body)
                 .foregroundColor(TvTheme.secondaryText)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 760)
+                .frame(maxWidth: 680)
 
-            QrCodeImageView(payload: appModel.lanQrUrl, size: 280)
+            QrCodeImageView(payload: appModel.lanQrUrl, size: 230)
 
             if !appModel.lanQrUrl.isEmpty {
                 Text(appModel.lanQrUrl)
-                    .font(.system(.callout, design: .monospaced))
+                    .font(.system(size: 15, weight: .semibold, design: .monospaced))
                     .foregroundColor(TvTheme.accent)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 9)
                     .background(TvTheme.surface)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(Capsule().strokeBorder(TvTheme.glassStroke, lineWidth: 1))
+                    .clipShape(Capsule())
             }
 
-            HStack(spacing: 20) {
-                Button("刷新二维码") {
+            HStack(spacing: 16) {
+                Button {
                     Task { await appModel.startOrRefreshLanServer() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.clockwise")
+                        Text("刷新二维码")
+                    }
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(TvPillButtonStyle())
 
                 Button("完成") {
                     appModel.closeLanQrModal()
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(TvTheme.accent)
+                .buttonStyle(TvPillButtonStyle(prominent: true))
             }
+            .padding(.top, 6)
+
+            Spacer()
         }
         .padding(48)
-        .background(TvTheme.background)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            TvAmbientSoftGlowBackground(
+                themeId: appModel.preferences.ambientTheme,
+                intensity: appModel.preferences.ambientIntensity,
+                posterUrl: appModel.backdropPosterUrl,
+                posterSync: appModel.preferences.ambientPosterSync
+            )
+        )
         .tvExitHandler {
             appModel.closeLanQrModal()
         }

@@ -14,25 +14,18 @@ public struct LibraryView: View {
     @State private var section: LibrarySection = .history
     @State private var showClearConfirmation = false
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 26), count: 5)
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 26), count: 6)
 
     public init() {}
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 28) {
-            HStack(spacing: 18) {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(spacing: 12) {
                 ForEach(LibrarySection.allCases, id: \.rawValue) { item in
-                    Button {
+                    Button(item.rawValue) {
                         section = item
-                    } label: {
-                        Text(item.rawValue)
-                            .font(.headline)
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 10)
-                            .background(section == item ? TvTheme.accent : TvTheme.surface)
-                            .clipShape(Capsule())
                     }
-                    .tvCardButtonStyle()
+                    .buttonStyle(TvPillButtonStyle(active: section == item))
                 }
 
                 Spacer()
@@ -40,12 +33,15 @@ public struct LibraryView: View {
                 if (section == .history && !appModel.watchHistory.isEmpty)
                     || (section == .favorites && !appModel.favorites.isEmpty)
                 {
-                    Button(role: .destructive) {
+                    Button {
                         showClearConfirmation = true
                     } label: {
-                        Label("清空\(section.rawValue)", systemImage: "trash")
+                        HStack(spacing: 6) {
+                            Image(systemName: "trash")
+                            Text("清空\(section.rawValue)")
+                        }
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(TvPillButtonStyle(compact: true, destructive: true))
                 }
             }
 
@@ -56,9 +52,12 @@ public struct LibraryView: View {
                     favoritesGrid
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(.horizontal, 48)
-        .padding(.vertical, 32)
+        .padding(.horizontal, 56)
+        .padding(.top, 8)
+        .padding(.bottom, 28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .confirmationDialog(
             "确认清空全部\(section.rawValue)？",
             isPresented: $showClearConfirmation,
@@ -80,7 +79,7 @@ public struct LibraryView: View {
         if appModel.watchHistory.isEmpty {
             emptyPlaceholder(icon: "clock.arrow.circlepath", text: "暂无观看记录")
         } else {
-            LazyVGrid(columns: columns, spacing: 30) {
+            LazyVGrid(columns: columns, spacing: 28) {
                 ForEach(appModel.watchHistory) { item in
                     VStack(alignment: .leading, spacing: 10) {
                         Button {
@@ -89,32 +88,30 @@ public struct LibraryView: View {
                                 appModel.selectedDetailContext = (site, stub)
                             }
                         } label: {
-                            VStack(alignment: .leading, spacing: 8) {
-                                RemotePosterView(url: item.poster, title: item.title)
-                                    .aspectRatio(2.0 / 3.0, contentMode: .fit)
-                                Text(item.title)
-                                    .font(.callout.weight(.semibold))
-                                    .foregroundColor(.white)
-                                    .lineLimit(1)
-                                Text(item.episode.isEmpty ? "观看进度 \(Int(item.progressFraction * 100))%" : "\(item.episode) · \(Int(item.progressFraction * 100))%")
-                                    .font(.caption2)
-                                    .foregroundColor(TvTheme.secondaryText)
-                                    .lineLimit(1)
-                            }
+                            PosterCardCell(
+                                video: CmsVideo(
+                                    id: item.id,
+                                    title: item.title,
+                                    poster: item.poster,
+                                    remarks: item.episode.isEmpty ? "\(Int(item.progressFraction * 100))%" : "\(item.episode) · \(Int(item.progressFraction * 100))%"
+                                )
+                            )
                         }
                         .tvCardButtonStyle()
 
-                        Button(role: .destructive) {
+                        Button {
                             appModel.removeHistoryItem(item)
                         } label: {
-                            Label("移除", systemImage: "xmark.circle")
-                                .font(.caption2)
+                            HStack(spacing: 4) {
+                                Image(systemName: "xmark.circle")
+                                Text("移除记录")
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .foregroundColor(TvTheme.mutedText)
+                        .buttonStyle(TvPillButtonStyle(compact: true))
                     }
                 }
             }
+            .padding(.vertical, 8)
         }
     }
 
@@ -123,7 +120,7 @@ public struct LibraryView: View {
         if appModel.favorites.isEmpty {
             emptyPlaceholder(icon: "heart.slash", text: "暂无收藏影片")
         } else {
-            LazyVGrid(columns: columns, spacing: 30) {
+            LazyVGrid(columns: columns, spacing: 28) {
                 ForEach(appModel.favorites) { fav in
                     VStack(alignment: .leading, spacing: 10) {
                         Button {
@@ -132,46 +129,43 @@ public struct LibraryView: View {
                                 appModel.selectedDetailContext = (site, stub)
                             }
                         } label: {
-                            VStack(alignment: .leading, spacing: 8) {
-                                RemotePosterView(url: fav.poster, title: fav.title)
-                                    .aspectRatio(2.0 / 3.0, contentMode: .fit)
-                                Text(fav.title)
-                                    .font(.callout.weight(.semibold))
-                                    .foregroundColor(.white)
-                                    .lineLimit(1)
-                                if !fav.remarks.isEmpty {
-                                    Text(fav.remarks)
-                                        .font(.caption2)
-                                        .foregroundColor(TvTheme.secondaryText)
-                                        .lineLimit(1)
-                                }
-                            }
+                            PosterCardCell(
+                                video: CmsVideo(
+                                    id: fav.id,
+                                    title: fav.title,
+                                    poster: fav.poster,
+                                    remarks: fav.remarks
+                                )
+                            )
                         }
                         .tvCardButtonStyle()
 
-                        Button(role: .destructive) {
+                        Button {
                             appModel.removeFavoriteItem(fav)
                         } label: {
-                            Label("取消收藏", systemImage: "heart.slash")
-                                .font(.caption2)
+                            HStack(spacing: 4) {
+                                Image(systemName: "heart.slash")
+                                Text("取消收藏")
+                            }
                         }
-                        .buttonStyle(.plain)
-                        .foregroundColor(TvTheme.mutedText)
+                        .buttonStyle(TvPillButtonStyle(compact: true))
                     }
                 }
             }
+            .padding(.vertical, 8)
         }
     }
 
     private func emptyPlaceholder(icon: String, text: String) -> some View {
         VStack(spacing: 14) {
             Image(systemName: icon)
-                .font(.system(size: 48))
+                .font(.system(size: 44))
                 .foregroundColor(TvTheme.mutedText)
             Text(text)
+                .font(TvFont.body)
                 .foregroundColor(TvTheme.secondaryText)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 100)
+        .padding(.vertical, 120)
     }
 }

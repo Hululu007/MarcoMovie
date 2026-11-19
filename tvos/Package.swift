@@ -10,10 +10,19 @@ let jsHostExists = FileManager.default.fileExists(
         .appendingPathComponent("Sources/MarcoTVCore/Resources/js-host")
         .path
 )
+let catpawExists = FileManager.default.fileExists(
+    atPath: packageDir
+        .appendingPathComponent("Sources/MarcoTVCore/Resources/catpaw")
+        .path
+)
 
-let coreResources: [Resource] = jsHostExists
-    ? [.copy("Resources/js-host")]
-    : []
+var coreResources: [Resource] = []
+if jsHostExists {
+    coreResources.append(.copy("Resources/js-host"))
+}
+if catpawExists {
+    coreResources.append(.copy("Resources/catpaw"))
+}
 
 let package = Package(
     name: "MarcoMovieTV",

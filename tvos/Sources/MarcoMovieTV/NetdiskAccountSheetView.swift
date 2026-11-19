@@ -36,16 +36,24 @@ public struct NetdiskAccountSheetView: View {
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                headerRow
-                driveCardsRow
-                qrAndStatusPanel
-                qualityAndKernelPanel
-            }
-            .padding(44)
+        VStack(alignment: .leading, spacing: 24) {
+            headerRow
+            driveCardsRow
+            qrAndStatusPanel
+            qualityAndKernelPanel
+            Spacer(minLength: 0)
         }
-        .background(TvTheme.background)
+        .padding(.horizontal, 56)
+        .padding(.vertical, 42)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            TvAmbientSoftGlowBackground(
+                themeId: appModel.preferences.ambientTheme,
+                intensity: appModel.preferences.ambientIntensity,
+                posterUrl: appModel.backdropPosterUrl,
+                posterSync: appModel.preferences.ambientPosterSync
+            )
+        )
         .onAppear {
             activeDriveKey = appModel.selectedNetdiskDriveKey
             beginQrFlow(for: activeDriveKey)
@@ -63,12 +71,18 @@ public struct NetdiskAccountSheetView: View {
 
     private var headerRow: some View {
         HStack(alignment: .center, spacing: 18) {
-            VStack(alignment: .leading, spacing: 6) {
+            MarcoBrandLogo(iconSize: 42, fontSize: 24)
+
+            Rectangle()
+                .fill(TvTheme.glassStroke)
+                .frame(width: 1.5, height: 36)
+
+            VStack(alignment: .leading, spacing: 5) {
                 Text("4K 网盘扫码授权与多线程加速")
-                    .font(.title2.bold())
+                    .font(TvFont.pageTitle)
                     .foregroundColor(.white)
                 Text("会话凭据仅加密保存在 Apple TV 本地钥匙串，绝不写入公开备份文件或跨域名泄露。")
-                    .font(.caption)
+                    .font(TvFont.caption)
                     .foregroundColor(TvTheme.secondaryText)
             }
             Spacer()
@@ -77,24 +91,26 @@ public struct NetdiskAccountSheetView: View {
                 dismiss()
                 appModel.openLanQrModal()
             } label: {
-                Label("手机网页粘贴推送", systemImage: "iphone.radiowaves.left.and.right")
+                HStack(spacing: 6) {
+                    Image(systemName: "iphone.radiowaves.left.and.right")
+                    Text("手机网页粘贴推送")
+                }
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(TvPillButtonStyle())
 
             Button("完成") {
                 cancelPolling()
                 dismiss()
             }
-            .buttonStyle(.borderedProminent)
-            .tint(TvTheme.accent)
+            .buttonStyle(TvPillButtonStyle(prominent: true))
         }
     }
 
     // MARK: - 4 Drive Cards
 
     private var driveCardsRow: some View {
-        let cols = Array(repeating: GridItem(.flexible(), spacing: 18), count: 4)
-        return LazyVGrid(columns: cols, spacing: 18) {
+        let cols = Array(repeating: GridItem(.flexible(), spacing: 16), count: 4)
+        return LazyVGrid(columns: cols, spacing: 16) {
             ForEach(NetdiskDriveInfo.allDrives) { drive in
                 let selected = drive.key == activeDriveKey
                 let loggedIn = appModel.loggedInNetdiskDrives.contains(drive.key)
@@ -104,38 +120,31 @@ public struct NetdiskAccountSheetView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
                             Text(drive.tvName)
-                                .font(.headline.bold())
+                                .font(.system(size: 18, weight: .bold))
                                 .foregroundColor(.white)
                             Spacer()
-                            Text(loggedIn ? "已登录" : "未登录")
-                                .font(.caption2.bold())
+                            Text(loggedIn ? "● 已登录" : "未登录")
+                                .font(TvFont.badge)
                                 .foregroundColor(loggedIn ? .green : TvTheme.secondaryText)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 4)
-                                .background(
-                                    (loggedIn ? Color.green : Color.white).opacity(0.16)
-                                )
+                                .background((loggedIn ? Color.green : Color.white).opacity(0.14))
                                 .clipShape(Capsule())
                         }
                         HStack {
                             Text(drive.providerName)
-                                .font(.caption)
+                                .font(TvFont.caption)
                                 .foregroundColor(TvTheme.secondaryText)
                             Spacer()
                             Text(drive.linePrefix)
-                                .font(.caption2.monospaced())
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
                                 .foregroundColor(TvTheme.gold)
                         }
                     }
-                    .padding(18)
-                    .background(selected ? TvTheme.accent.opacity(0.32) : TvTheme.elevatedSurface)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(selected ? TvTheme.accent : Color.clear, lineWidth: 2)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
                 }
-                .tvCardButtonStyle()
+                .buttonStyle(TvTileButtonStyle(active: selected, cornerRadius: 16, preserveColors: true))
             }
         }
     }
@@ -143,22 +152,22 @@ public struct NetdiskAccountSheetView: View {
     // MARK: - QR Panel & Polling Controls
 
     private var qrAndStatusPanel: some View {
-        HStack(alignment: .center, spacing: 40) {
+        HStack(alignment: .center, spacing: 36) {
             ZStack {
                 if let session = qrSession, !session.qrUrl.isEmpty {
-                    QrCodeImageView(payload: session.qrUrl, size: 250)
+                    QrCodeImageView(payload: session.qrUrl, size: 205)
                         .opacity(pollState == .expired ? 0.35 : 1.0)
                 } else {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .fill(TvTheme.elevatedSurface)
-                        .frame(width: 286, height: 286)
+                        .frame(width: 237, height: 237)
                         .overlay(
-                            VStack(spacing: 12) {
+                            VStack(spacing: 10) {
                                 if isGeneratingQr {
                                     ProgressView()
                                 }
-                                Text(isGeneratingQr ? "正在请求官方扫码令牌…" : "点击右侧刷新获取二维码")
-                                    .font(.caption)
+                                Text(isGeneratingQr ? "正在请求扫码令牌…" : "点击右侧刷新二维码")
+                                    .font(TvFont.caption)
                                     .foregroundColor(TvTheme.secondaryText)
                             }
                         )
@@ -166,114 +175,138 @@ public struct NetdiskAccountSheetView: View {
 
                 if pollState == .expired {
                     Text("二维码已失效")
-                        .font(.headline.bold())
+                        .font(TvFont.button)
                         .foregroundColor(.white)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 10)
-                        .background(Color.black.opacity(0.8))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.82))
                         .clipShape(Capsule())
                 }
             }
 
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 12) {
                     Text("\(currentDrive.tvName) · \(currentDrive.providerName)")
-                        .font(.title3.bold())
+                        .font(.system(size: 22, weight: .bold))
                         .foregroundColor(.white)
                     if isCurrentDriveLoggedIn {
-                        Label("钥匙串凭据有效", systemImage: "checkmark.seal.fill")
-                            .font(.caption.bold())
-                            .foregroundColor(.green)
+                        HStack(spacing: 5) {
+                            Image(systemName: "checkmark.seal.fill")
+                            Text("钥匙串凭据有效")
+                        }
+                        .font(TvFont.caption)
+                        .foregroundColor(.green)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.green.opacity(0.14))
+                        .clipShape(Capsule())
                     }
                 }
 
                 Text(currentDrive.appHint)
-                    .font(.callout)
+                    .font(TvFont.body)
                     .foregroundColor(TvTheme.secondaryText)
 
-                HStack(spacing: 10) {
+                HStack(spacing: 9) {
                     Circle()
                         .fill(statusIndicatorColor)
-                        .frame(width: 10, height: 10)
+                        .frame(width: 9, height: 9)
                     Text(statusText)
-                        .font(.callout.weight(.semibold))
+                        .font(TvFont.caption)
                         .foregroundColor(.white)
+                        .lineLimit(1)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
                 .background(TvTheme.elevatedSurface)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(Capsule().strokeBorder(TvTheme.glassStroke, lineWidth: 1))
+                .clipShape(Capsule())
 
-                HStack(spacing: 16) {
+                HStack(spacing: 12) {
                     Button {
                         beginQrFlow(for: currentDrive.key)
                     } label: {
-                        Label(isCurrentDriveLoggedIn ? "重新扫码换绑" : "刷新二维码", systemImage: "arrow.clockwise")
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.clockwise")
+                            Text(isCurrentDriveLoggedIn ? "重新扫码换绑" : "刷新二维码")
+                        }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(TvTheme.accent)
+                    .buttonStyle(TvPillButtonStyle(prominent: true))
                     .disabled(isGeneratingQr)
 
                     if isCurrentDriveLoggedIn {
-                        Button(role: .destructive) {
+                        Button {
                             appModel.logoutNetdisk(driveKey: currentDrive.key)
                             statusText = "已退出 \(currentDrive.tvName) 登录状态"
                             beginQrFlow(for: currentDrive.key)
                         } label: {
-                            Label("退出登录", systemImage: "rectangle.portrait.and.arrow.right")
+                            HStack(spacing: 6) {
+                                Image(systemName: "rectangle.portrait.and.arrow.right")
+                                Text("退出登录")
+                            }
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(TvPillButtonStyle(destructive: true))
                     }
                 }
+                .padding(.top, 2)
             }
             Spacer()
         }
-        .padding(28)
-        .background(TvTheme.surface.opacity(0.75))
+        .padding(26)
+        .background(TvTheme.surface.opacity(0.80))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(TvTheme.glassStroke, lineWidth: 1)
+        )
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
     // MARK: - Quality & Range Proxy Kernel Picker
 
     private var qualityAndKernelPanel: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 20) {
-                Text("云盘画质偏好：")
-                    .font(.callout.weight(.semibold))
-                    .foregroundColor(.white)
+        HStack(spacing: 36) {
+            HStack(spacing: 12) {
+                Text("云盘画质偏好")
+                    .font(TvFont.button)
+                    .foregroundColor(TvTheme.secondaryText)
 
                 ForEach(qualityOptions, id: \.code) { opt in
                     let active = appModel.preferences.netdiskQuality == opt.code
                     Button(opt.label) {
                         appModel.updatePlaybackPreferences { $0.netdiskQuality = opt.code }
                     }
-                    .buttonStyle(.bordered)
-                    .tint(active ? TvTheme.accent : .gray)
+                    .buttonStyle(TvPillButtonStyle(active: active, compact: true))
                 }
-
-                Spacer()
             }
 
-            HStack(spacing: 20) {
-                Text("流媒体加速内核：")
-                    .font(.callout.weight(.semibold))
-                    .foregroundColor(.white)
+            Rectangle()
+                .fill(TvTheme.glassStroke)
+                .frame(width: 1, height: 28)
+
+            HStack(spacing: 12) {
+                Text("加速内核")
+                    .font(TvFont.button)
+                    .foregroundColor(TvTheme.secondaryText)
 
                 ForEach(kernelOptions, id: \.code) { opt in
                     let active = appModel.preferences.playerKernel == opt.code
                     Button(opt.label) {
                         appModel.updatePlaybackPreferences { $0.playerKernel = opt.code }
                     }
-                    .buttonStyle(.bordered)
-                    .tint(active ? TvTheme.accent : .gray)
+                    .buttonStyle(TvPillButtonStyle(active: active, compact: true))
                 }
-
-                Spacer()
             }
+
+            Spacer()
         }
-        .padding(24)
-        .background(TvTheme.surface.opacity(0.6))
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .padding(.horizontal, 26)
+        .padding(.vertical, 18)
+        .background(TvTheme.surface.opacity(0.65))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(TvTheme.glassStroke, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private var statusIndicatorColor: Color {
