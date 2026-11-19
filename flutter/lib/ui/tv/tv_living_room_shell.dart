@@ -1062,6 +1062,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                         return SizedBox(
                           width: 132,
                           child: TvFocusablePosterCard(
+                            autofocus: idx == 0,
                             video: vid,
                             subtitleBadge: item.episode,
                             progressFraction: item.progressFraction,
@@ -1114,7 +1115,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                 (context, index) {
                   final video = _homeVideos[index];
                   return TvFocusablePosterCard(
-                    autofocus: index == 0,
+                    autofocus: index == 0 && !showContinue,
                     video: video,
                     onSelect: () => _openDetail(_activeSite!, video),
                   );
