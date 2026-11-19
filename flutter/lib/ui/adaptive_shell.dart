@@ -1330,7 +1330,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             )
             .toList()
         : List<CmsSite>.from(rawSupported);
-    final prioritized = widget.storage.prioritizeSites(filtered);
+    // Quick-switch UIMenu only lists actually supported routes on this device
+    // (excluding Android .so-only / incompatible spiders), falling back to all
+    // only when zero routes are supported.
+    final availableOnly = filtered.where((s) => s.supported).toList();
+    final menuPool = availableOnly.isNotEmpty ? availableOnly : filtered;
+    final prioritized = widget.storage.prioritizeSites(menuPool);
     final prefKey = widget.storage.preferredSiteKey;
     final activeKey = _activeSite?.key ?? '';
     final defaultGroupName = inPrivacyMode ? '隐私分组' : '默认分组';
@@ -1356,12 +1361,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       groupBuckets.putIfAbsent(g, () => <CmsSite>[]).add(s);
     }
     final useGroupSections = groupBuckets.length > 1;
+    final unsupportedCount = filtered.length - availableOnly.length;
 
     final items = <IosNativeMenuItem>[
       IosNativeMenuItem(
         id: '__all__',
         title: inPrivacyMode ? '搜索与管理隐私片源…' : '搜索与管理全部片源…',
-        subtitle: '共 ${orderedSites.length} 条可用线路',
+        subtitle: unsupportedCount > 0
+            ? '可用 ${availableOnly.length} / 共 ${filtered.length} 条（已自动过滤未适配）'
+            : '共 ${orderedSites.length} 条可用线路',
         symbol: 'magnifyingglass',
         section: 0,
       ),
@@ -5892,59 +5900,66 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
             );
           }
-          return ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: (MediaQuery.sizeOf(ctx).height * 0.72).clamp(320.0, 580.0),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(18, 10, 18, 4),
-                  child: Text(
-                    '提示：向左滑动单条记录可显示「删除」按钮',
-                    style: TextStyle(
-                      color: AppleColors.labelTertiary,
-                      fontSize: 12,
-                    ),
-                  ),
+          final maxListHeight =
+              (MediaQuery.sizeOf(ctx).height * 0.70).clamp(300.0, 580.0);
+          final estimatedHeight = 46.0 + history.length * 102.0 + 36.0;
+          final viewportHeight =
+              estimatedHeight.clamp(160.0, maxListHeight).toDouble();
+          return SizedBox(
+            height: viewportHeight,
+            child: AppleEdgeFade(
+              axis: Axis.vertical,
+              fadeWidth: 24,
+              fadeStart: true,
+              fadeEnd: true,
+              child: ListView.separated(
+                physics: const BouncingScrollPhysics(
+                  parent: AlwaysScrollableScrollPhysics(),
                 ),
-                Flexible(
-                  child: ListView.separated(
-                    shrinkWrap: true,
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
-                    itemCount: history.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
-                    itemBuilder: (ctx, idx) {
-                      final h = history[idx];
-                      final resolvedPoster = _resolveHistoryPoster(h);
-                      return _SwipeToDeleteHistoryTile(
-                        key: ValueKey('sheet_hist_${h.site}_${h.id}'),
-                        entry: h,
-                        posterUrl: resolvedPoster,
-                        onTap: () {
-                          Navigator.of(ctx).pop();
-                          _openSyncedMediaEntry(
-                            siteKey: h.site,
-                            videoId: h.id,
-                            title: h.title,
-                            poster: resolvedPoster,
-                          );
-                        },
-                        onDelete: () async {
-                          await widget.storage.removeWatchHistoryItem(
-                            h.site,
-                            h.id,
-                          );
-                          setSheetState(() {});
-                          if (mounted) setState(() {});
-                        },
+                cacheExtent: 420,
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 26),
+                itemCount: history.length + 1,
+                separatorBuilder: (_, idx) =>
+                    SizedBox(height: idx == 0 ? 8 : 10),
+                itemBuilder: (ctx, idx) {
+                  if (idx == 0) {
+                    return const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                      child: Text(
+                        '提示：向左滑动单条记录可显示「删除」按钮',
+                        style: TextStyle(
+                          color: AppleColors.labelTertiary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    );
+                  }
+                  final h = history[idx - 1];
+                  final resolvedPoster = _resolveHistoryPoster(h);
+                  return _SwipeToDeleteHistoryTile(
+                    key: ValueKey('sheet_hist_${h.site}_${h.id}'),
+                    entry: h,
+                    posterUrl: resolvedPoster,
+                    onTap: () {
+                      Navigator.of(ctx).pop();
+                      _openSyncedMediaEntry(
+                        siteKey: h.site,
+                        videoId: h.id,
+                        title: h.title,
+                        poster: resolvedPoster,
                       );
                     },
-                  ),
-                ),
-              ],
+                    onDelete: () async {
+                      await widget.storage.removeWatchHistoryItem(
+                        h.site,
+                        h.id,
+                      );
+                      setSheetState(() {});
+                      if (mounted) setState(() {});
+                    },
+                  );
+                },
+              ),
             ),
           );
         },
@@ -10640,6 +10655,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
         final canDragReorder = selectedGroup == '全部' && !batchMode;
 
+        final unsupportedCount = ordered.where((s) => !s.supported).length;
         final content = Column(
           children: [
             Padding(
@@ -10667,6 +10683,34 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       ),
                     ),
                   ),
+                  if (!batchMode && unsupportedCount > 0)
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 4,
+                      ),
+                      minimumSize: const Size(28, 28),
+                      onPressed: saving
+                          ? null
+                          : () => update(() {
+                              final toRemove = ordered
+                                  .where((s) => !s.supported)
+                                  .toList();
+                              for (final s in toRemove) {
+                                ordered.removeWhere((e) => e.key == s.key);
+                                selectedKeys.remove(s.key);
+                                removed.add(s);
+                              }
+                            }),
+                      child: Text(
+                        '隐藏未适配 ($unsupportedCount)',
+                        style: const TextStyle(
+                          color: AppleColors.systemOrange,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
                   if (batchMode) ...[
                     CupertinoButton(
                       padding: const EdgeInsets.symmetric(
@@ -10942,6 +10986,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         initialCountSource.where((s) => s.supported).length;
     String selectedGroup = '全部';
     String searchQuery = '';
+    bool onlyAvailable = false;
     final searchCtrl = TextEditingController();
     final importPrivateButton = CupertinoButton(
       padding: const EdgeInsets.symmetric(horizontal: 6),
@@ -11016,6 +11061,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           : !s.isEffectivelyPrivate) &&
                       !CspBridge.isPickerHiddenUtilitySite(s))
                   .toList();
+          final availableCount =
+              countSource.where((s) => s.supported).length;
+          final unsupportedSites =
+              countSource.where((s) => !s.supported).toList();
+          final unsupportedCount = unsupportedSites.length;
           final groupCounts = <String, int>{'全部': countSource.length};
           final groups = <String>['全部'];
           for (final s in countSource) {
@@ -11030,6 +11080,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             selectedGroup = '全部';
           }
           bool matchesFilter(CmsSite s) {
+            if (onlyAvailable && !s.supported) return false;
             final g =
                 s.group.trim().isEmpty ? defaultGroupName : s.group.trim();
             final groupMatch = selectedGroup == '全部' || g == selectedGroup;
@@ -11040,7 +11091,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 g.toLowerCase().contains(q) ||
                 s.api.toLowerCase().contains(q);
           }
-          final filteredSites = supported.where(matchesFilter).toList();
+          // Keep all working routes grouped cleanly at the top and unsupported
+          // Android .so-only routes grouped neatly at the bottom.
+          final matchedSites = supported.where(matchesFilter).toList();
+          final filteredSites = <CmsSite>[
+            for (final s in matchedSites)
+              if (s.supported) s,
+            for (final s in matchedSites)
+              if (!s.supported) s,
+          ];
 
           String siteBadgeLabel(CmsSite s) {
             final lower = '${s.name} ${s.api} ${s.key}'.toLowerCase();
@@ -11219,6 +11278,69 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
             ),
           ),
+            if (unsupportedCount > 0 && availableCount > 0) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Flexible(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () =>
+                          setPickerState(() => onlyAvailable = !onlyAvailable),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: onlyAvailable
+                              ? const Color(0x330A84FF)
+                              : const Color(0x22FFFFFF),
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: onlyAvailable
+                                ? const Color(0x990A84FF)
+                                : const Color(0x28FFFFFF),
+                            width: 0.65,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              onlyAvailable
+                                  ? CupertinoIcons.checkmark_circle_fill
+                                  : CupertinoIcons.line_horizontal_3_decrease_circle,
+                              size: 13.5,
+                              color: onlyAvailable
+                                  ? AppleColors.systemBlue
+                                  : AppleColors.labelSecondary,
+                            ),
+                            const SizedBox(width: 5),
+                            Flexible(
+                              child: Text(
+                                onlyAvailable
+                                    ? '仅看可用 · 已过滤 $unsupportedCount 条'
+                                    : '仅看可用（隐藏 $unsupportedCount 条暂不支持线路）',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: onlyAvailable
+                                      ? Colors.white
+                                      : AppleColors.labelSecondary,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: 12),
                 ],
               )),
@@ -11256,14 +11378,23 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         ctx,
                         title: s.name,
                         message: s.unsupportedReason,
-                        actions: const [
-                          AppleNativeAlertAction(id: 'edit', title: '编辑线路'),
-                          AppleNativeAlertAction(
+                        actions: [
+                          if (unsupportedCount > 1)
+                            AppleNativeAlertAction(
+                              id: 'hide_all_unsupported',
+                              title: '一键隐藏全部未适配 ($unsupportedCount)',
+                              isDestructive: true,
+                            ),
+                          const AppleNativeAlertAction(
+                            id: 'edit',
+                            title: '编辑线路',
+                          ),
+                          const AppleNativeAlertAction(
                             id: 'delete',
                             title: '删除线路',
                             isDestructive: true,
                           ),
-                          AppleNativeAlertAction(
+                          const AppleNativeAlertAction(
                             id: 'ok',
                             title: '我知道了',
                             isDefault: true,
@@ -11271,7 +11402,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         ],
                       ).then((action) async {
                         if (!ctx.mounted) return;
-                        if (action == 'edit') {
+                        if (action == 'hide_all_unsupported') {
+                          final ids = unsupportedSites
+                              .map(widget.storage.siteIdentityOf)
+                              .toList();
+                          await widget.storage.hideSites(ids);
+                          if (mounted) _reloadSavedConfig();
+                          if (ctx.mounted) setPickerState(() {});
+                        } else if (action == 'edit') {
                           final changed = await _showEditSingleSiteDialog(
                             ctx,
                             s,
@@ -12300,66 +12438,69 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
     final pct = (h.progressFraction * 100).round();
     final epLabel = h.episode.isEmpty ? '第 ${h.index + 1} 集' : h.episode;
     final revealProgress = (-_dragOffset / _actionWidth).clamp(0.0, 1.0);
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(18),
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onHorizontalDragStart: _handleDragStart,
-        onHorizontalDragUpdate: _handleDragUpdate,
-        onHorizontalDragEnd: _handleDragEnd,
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: Align(
-                alignment: Alignment.centerRight,
-                child: Opacity(
-                  opacity: revealProgress,
-                  child: GestureDetector(
-                    onTap: () {
-                      HapticFeedback.mediumImpact();
-                      setState(() => _dragOffset = 0.0);
-                      widget.onDelete();
-                    },
-                    child: Container(
-                      width: _actionWidth + 16,
-                      alignment: Alignment.centerRight,
-                      padding: const EdgeInsets.only(right: 18),
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          begin: Alignment.centerLeft,
-                          end: Alignment.centerRight,
-                          colors: [
-                            Color(0xFFE0352B),
-                            Color(0xFFFF453A),
-                          ],
-                        ),
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                      child: const Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            CupertinoIcons.trash_fill,
-                            color: Colors.white,
-                            size: 18,
-                          ),
-                          SizedBox(height: 3),
-                          Text(
-                            '删除',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
+    final showDeleteBg = _dragOffset < -0.5;
+    return RepaintBoundary(
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(18),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragStart: _handleDragStart,
+          onHorizontalDragUpdate: _handleDragUpdate,
+          onHorizontalDragEnd: _handleDragEnd,
+          child: Stack(
+            children: [
+              if (showDeleteBg)
+                Positioned.fill(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: Opacity(
+                      opacity: revealProgress,
+                      child: GestureDetector(
+                        onTap: () {
+                          HapticFeedback.mediumImpact();
+                          setState(() => _dragOffset = 0.0);
+                          widget.onDelete();
+                        },
+                        child: Container(
+                          width: _actionWidth + 16,
+                          alignment: Alignment.centerRight,
+                          padding: const EdgeInsets.only(right: 18),
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              begin: Alignment.centerLeft,
+                              end: Alignment.centerRight,
+                              colors: [
+                                Color(0xFFE0352B),
+                                Color(0xFFFF453A),
+                              ],
                             ),
+                            borderRadius: BorderRadius.circular(18),
                           ),
-                        ],
+                          child: const Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                CupertinoIcons.trash_fill,
+                                color: Colors.white,
+                                size: 18,
+                              ),
+                              SizedBox(height: 3),
+                              Text(
+                                '删除',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ),
-            ),
             AnimatedContainer(
               duration: _dragging
                   ? Duration.zero
@@ -12519,6 +12660,7 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
             ),
           ],
         ),
+      ),
       ),
     );
   }

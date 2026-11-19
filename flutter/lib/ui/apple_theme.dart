@@ -800,10 +800,9 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
     final portraitBottom =
         safe.bottom > 0 ? math.max(safe.bottom - 14.0, 10.0) : 12.0;
 
-    return ValueListenableBuilder<bool>(
-      valueListenable: IosLiquidGlassBridge.available,
-      builder: (context, _, __) {
-        final useNativeIos26 = IosLiquidGlassBridge.isAvailable &&
+    return IosNativeRouteGate(
+      builder: (context, nativeActive) {
+        final useNativeIos26 = nativeActive &&
             !widget.isLandscape &&
             widget.nativeItems != null &&
             widget.nativeItems!.isNotEmpty;
@@ -2087,62 +2086,81 @@ Future<T?> showAppleModalSheet<T>({
                 maxWidth: effectiveMaxWidth,
                 maxHeight: screenSize.height * 0.88,
               ),
-              child: LiquidGlass(
-                borderRadius: 28,
-                rimStrength: 1.0,
-                child: Material(
-                  color: Colors.transparent,
-                  child: SafeArea(
-                    top: false,
-                    left: false,
-                    right: false,
-                    bottom: !isLandscape && !ignoreKeyboardInsets,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const SizedBox(height: 9),
-                        Container(
-                          width: 40,
-                          height: 4.5,
-                          decoration: BoxDecoration(
-                            color: const Color(0x66EBEBF5),
-                            borderRadius: BorderRadius.circular(999),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(28),
+                clipBehavior: Clip.antiAlias,
+                child: Stack(
+                  children: [
+                    const Positioned.fill(
+                      child: IgnorePointer(
+                        child: RepaintBoundary(
+                          child: LiquidGlass(
+                            borderRadius: 28,
+                            rimStrength: 1.0,
+                            child: SizedBox.expand(),
                           ),
                         ),
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(20, 10, 12, 10),
-                          child: Row(
+                      ),
+                    ),
+                    RepaintBoundary(
+                      child: Material(
+                        color: Colors.transparent,
+                        child: SafeArea(
+                          top: false,
+                          left: false,
+                          right: false,
+                          bottom: !isLandscape && !ignoreKeyboardInsets,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              Expanded(
-                                child: Text(
-                                  title,
-                                  style: const TextStyle(
-                                    color: AppleColors.labelPrimary,
-                                    fontSize: 17.5,
-                                    fontWeight: FontWeight.w700,
-                                    letterSpacing: -0.35,
-                                  ),
+                              const SizedBox(height: 9),
+                              Container(
+                                width: 40,
+                                height: 4.5,
+                                decoration: BoxDecoration(
+                                  color: const Color(0x66EBEBF5),
+                                  borderRadius: BorderRadius.circular(999),
                                 ),
                               ),
-                              if (trailingAction != null) trailingAction,
-                              CupertinoButton(
-                                padding: const EdgeInsets.all(6),
-                                minSize: 30,
-                                onPressed: () => Navigator.of(ctx).pop(),
-                                child: const Icon(
-                                  CupertinoIcons.xmark_circle_fill,
-                                  color: AppleColors.labelTertiary,
-                                  size: 26,
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(20, 10, 12, 10),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        title,
+                                        style: const TextStyle(
+                                          color: AppleColors.labelPrimary,
+                                          fontSize: 17.5,
+                                          fontWeight: FontWeight.w700,
+                                          letterSpacing: -0.35,
+                                        ),
+                                      ),
+                                    ),
+                                    if (trailingAction != null) trailingAction,
+                                    CupertinoButton(
+                                      padding: const EdgeInsets.all(6),
+                                      minSize: 30,
+                                      onPressed: () => Navigator.of(ctx).pop(),
+                                      child: const Icon(
+                                        CupertinoIcons.xmark_circle_fill,
+                                        color: AppleColors.labelTertiary,
+                                        size: 26,
+                                      ),
+                                    ),
+                                  ],
                                 ),
+                              ),
+                              Container(height: 0.5, color: const Color(0x22FFFFFF)),
+                              Flexible(
+                                child: TextSelectionMouseGuard(child: builder(ctx)),
                               ),
                             ],
                           ),
                         ),
-                        Container(height: 0.5, color: const Color(0x22FFFFFF)),
-                        Flexible(child: TextSelectionMouseGuard(child: builder(ctx))),
-                      ],
+                      ),
                     ),
-                  ),
+                  ],
                 ),
               ),
             ),

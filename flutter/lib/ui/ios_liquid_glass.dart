@@ -107,6 +107,100 @@ class IosLiquidGlassBridge {
   }
 }
 
+/// Gates mounting of iOS `UiKitView` platform views so they are ONLY active on
+/// the stationary foreground `ModalRoute` (`isCurrent == true`, primary route
+/// transition completed, secondary route transition dismissed).
+///
+/// This prevents Flutter iOS Impeller `FlutterPlatformViewsController` overlay
+/// collisions during `CupertinoPageRoute` parallax push/pop slides and behind
+/// modal sheets (such as the `x = 0..67%` black occlusion artifact).
+class IosNativeRouteGate extends StatefulWidget {
+  final Widget Function(BuildContext context, bool nativeActive) builder;
+
+  const IosNativeRouteGate({super.key, required this.builder});
+
+  @override
+  State<IosNativeRouteGate> createState() => _IosNativeRouteGateState();
+}
+
+class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
+  ModalRoute<dynamic>? _route;
+  Animation<double>? _primaryAnim;
+  Animation<double>? _secondaryAnim;
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    IosLiquidGlassBridge.available.addListener(_recheck);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final nextRoute = ModalRoute.of(context);
+    if (nextRoute != _route) {
+      _detachAnimations();
+      _route = nextRoute;
+      _primaryAnim = nextRoute?.animation;
+      _secondaryAnim = nextRoute?.secondaryAnimation;
+      _primaryAnim?.addListener(_recheck);
+      _primaryAnim?.addStatusListener(_onStatus);
+      _secondaryAnim?.addListener(_recheck);
+      _secondaryAnim?.addStatusListener(_onStatus);
+    }
+    _ready = _computeReady();
+  }
+
+  void _detachAnimations() {
+    _primaryAnim?.removeListener(_recheck);
+    _primaryAnim?.removeStatusListener(_onStatus);
+    _secondaryAnim?.removeListener(_recheck);
+    _secondaryAnim?.removeStatusListener(_onStatus);
+    _primaryAnim = null;
+    _secondaryAnim = null;
+  }
+
+  void _onStatus(AnimationStatus _) => _recheck();
+
+  bool _computeReady() {
+    if (!IosLiquidGlassBridge.isAvailable) return false;
+    final route = _route;
+    if (route == null) return true;
+    if (!route.isCurrent) return false;
+    final primary = _primaryAnim;
+    if (primary != null && (!primary.isCompleted || primary.value < 0.999)) {
+      return false;
+    }
+    final secondary = _secondaryAnim;
+    if (secondary != null &&
+        (!secondary.isDismissed || secondary.value > 0.001)) {
+      return false;
+    }
+    return true;
+  }
+
+  void _recheck() {
+    if (!mounted) return;
+    final next = _computeReady();
+    if (next != _ready) {
+      setState(() => _ready = next);
+    }
+  }
+
+  @override
+  void dispose() {
+    IosLiquidGlassBridge.available.removeListener(_recheck);
+    _detachAnimations();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return widget.builder(context, _ready);
+  }
+}
+
 class IosNativeDockItem {
   final String label;
   final String symbol;
@@ -458,10 +552,9 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: IosLiquidGlassBridge.available,
-      builder: (context, _, __) {
-        if (!IosLiquidGlassBridge.isAvailable) {
+    return IosNativeRouteGate(
+      builder: (context, nativeActive) {
+        if (!nativeActive) {
           return widget.fallback;
         }
         return RepaintBoundary(
@@ -579,22 +672,23 @@ class _IosNativeGlassPillState extends State<IosNativeGlassPill> {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: IosLiquidGlassBridge.available,
-      builder: (context, _, __) {
-        if (!IosLiquidGlassBridge.isAvailable) {
+    return IosNativeRouteGate(
+      builder: (context, nativeActive) {
+        if (!nativeActive) {
           return widget.fallback;
         }
         final count = widget.actions.length;
         final width = 12.0 + count * 38.0 + math.max(0, count - 1) * 0.6;
-        return SizedBox(
-          width: width,
-          height: widget.height,
-          child: UiKitView(
-            viewType: 'marco_movie/ios26_glass_pill',
-            creationParams: _buildParams(),
-            creationParamsCodec: const StandardMessageCodec(),
-            onPlatformViewCreated: _onViewCreated,
+        return RepaintBoundary(
+          child: SizedBox(
+            width: width,
+            height: widget.height,
+            child: UiKitView(
+              viewType: 'marco_movie/ios26_glass_pill',
+              creationParams: _buildParams(),
+              creationParamsCodec: const StandardMessageCodec(),
+              onPlatformViewCreated: _onViewCreated,
+            ),
           ),
         );
       },
@@ -673,10 +767,9 @@ class _IosNativeSegmentedControlState extends State<IosNativeSegmentedControl> {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: IosLiquidGlassBridge.available,
-      builder: (context, _, __) {
-        if (!IosLiquidGlassBridge.isAvailable) {
+    return IosNativeRouteGate(
+      builder: (context, nativeActive) {
+        if (!nativeActive) {
           return widget.fallback;
         }
         return RepaintBoundary(

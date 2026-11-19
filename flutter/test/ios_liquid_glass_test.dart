@@ -545,4 +545,92 @@ void main() {
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
+
+  testWidgets(
+    'IosNativeRouteGate unmounts background route UiKitViews during CupertinoPageRoute push and remounts on pop',
+    (tester) async {
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final storage = await initTestStorage();
+      await storage.saveConfig(
+        '{"sites":['
+        '{"key":"ok1","name":"正常片源","type":1,"api":"https://ok1.example/api"},'
+        '{"key":"so1","name":"易听 | 音乐","type":3,"api":"csp_MusicAiYiTingGuard"}'
+        ']}',
+      );
+      final client = CmsClient(
+        client: MockClient(
+          (_) async => http.Response('{"class":[],"list":[]}', 200),
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AdaptiveShell(storage: storage, client: client),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // Home source UIMenu must automatically filter out unsupported Android .so routes.
+      final homeMenuButtons = tester
+          .widgetList<UiKitView>(find.byType(UiKitView))
+          .where((v) =>
+              v.viewType == 'marco_movie/ios26_glass_button' &&
+              (v.creationParams as Map<dynamic, dynamic>)['menuItems'] != null)
+          .toList();
+      final sourceMenuItems =
+          ((homeMenuButtons.first.creationParams as Map)['menuItems'] as List)
+              .cast<Map<dynamic, dynamic>>();
+      expect(sourceMenuItems.any((m) => m['id'] == 'site:ok1'), isTrue);
+      expect(sourceMenuItems.any((m) => m['id'] == 'site:so1'), isFalse);
+
+      // Push Netdisk page on top of Home; mid-transition BOTH routes must have 0 UiKitViews.
+      final navState = tester.state<NavigatorState>(find.byType(Navigator));
+      navState.push<void>(
+        buildApplePageRoute<void>(
+          builder: (ctx) => IosSettingsScaffold(
+            title: '测试页',
+            body: IosNativeSegmentedControl(
+              segments: const ['全部', '夸克'],
+              selectedIndex: 0,
+              onChanged: (_) {},
+              fallback: const SizedBox(height: 36),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      // Mid-transition: zero live UiKitViews across both routes!
+      expect(find.byType(UiKitView), findsNothing);
+
+      // After push settles: only the foreground route's UiKitViews mount (back + segmented = 2),
+      // while Home's 5 background UiKitViews stay cleanly unmounted.
+      await tester.pumpAndSettle();
+      expect(find.byType(UiKitView), findsNWidgets(2));
+      expect(
+        tester
+            .widgetList<UiKitView>(find.byType(UiKitView))
+            .any((v) => v.viewType == 'marco_movie/ios26_dock'),
+        isFalse,
+      );
+
+      // Pop back to Home: Home's native Dock and controls cleanly remount.
+      navState.pop();
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widgetList<UiKitView>(find.byType(UiKitView))
+            .any((v) => v.viewType == 'marco_movie/ios26_dock'),
+        isTrue,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
 }

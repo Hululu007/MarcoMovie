@@ -695,9 +695,9 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
   }
 }
 
-// MARK: - Native iOS 26 Liquid Glass Privacy Passcode Modal (UISheetPresentationController)
+// MARK: - Native iOS 26 Centered Liquid Glass Privacy Passcode Modal
 
-private final class MarcoNativePinSheetController: UIViewController, UIAdaptivePresentationControllerDelegate {
+private final class MarcoNativePinSheetController: UIViewController {
   private let sessionId: String
   private let mode: String // "verify" | "set"
   private let initialTitle: String
@@ -714,6 +714,9 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
   private var isBusy: Bool = false
   private var errorMessage: String?
 
+  private let backdropControl = UIControl()
+  private let cardShadowView = UIView()
+  private var cardEffectView: UIVisualEffectView!
   private let scrollView = UIScrollView()
   private let contentView = UIView()
   private let badgeView = UIView()
@@ -731,6 +734,7 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
 
   private var completion: FlutterResult?
   private var resolved = false
+  private var didAnimateIn = false
   private var resetWorkItem: DispatchWorkItem?
 
   static func present(args: [String: Any], completion: @escaping FlutterResult) {
@@ -739,23 +743,10 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
       return
     }
     let vc = MarcoNativePinSheetController(args: args, completion: completion)
-    vc.modalPresentationStyle = .pageSheet
+    vc.modalPresentationStyle = .overFullScreen
+    vc.modalTransitionStyle = .crossDissolve
     vc.overrideUserInterfaceStyle = .dark
-    vc.presentationController?.delegate = vc
-    if let sheet = vc.sheetPresentationController {
-      if #available(iOS 16.0, *) {
-        let detentId = UISheetPresentationController.Detent.Identifier("marcoPrivacyPin")
-        let customDetent = UISheetPresentationController.Detent.custom(identifier: detentId) { ctx in
-          return min(566.0, ctx.maximumDetentValue)
-        }
-        sheet.detents = [customDetent]
-      } else {
-        sheet.detents = [.large()]
-      }
-      sheet.prefersGrabberVisible = true
-      sheet.preferredCornerRadius = 32.0
-    }
-    host.present(vc, animated: true, completion: nil)
+    host.present(vc, animated: false, completion: nil)
   }
 
   init(args: [String: Any], completion: @escaping FlutterResult) {
@@ -800,27 +791,51 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
   override func viewDidLoad() {
     super.viewDidLoad()
     overrideUserInterfaceStyle = .dark
+    view.backgroundColor = .clear
+
+    backdropControl.backgroundColor = UIColor.black.withAlphaComponent(0.58)
+    backdropControl.translatesAutoresizingMaskIntoConstraints = false
+    backdropControl.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
+    view.addSubview(backdropControl)
+
+    cardShadowView.backgroundColor = .clear
+    cardShadowView.translatesAutoresizingMaskIntoConstraints = false
+    cardShadowView.layer.shadowColor = UIColor.black.cgColor
+    cardShadowView.layer.shadowOpacity = 0.45
+    cardShadowView.layer.shadowRadius = 28.0
+    cardShadowView.layer.shadowOffset = CGSize(width: 0, height: 14)
+    view.addSubview(cardShadowView)
+
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
-      view.backgroundColor = .clear
+      let glass = UIGlassEffect(style: .regular)
+      cardEffectView = UIVisualEffectView(effect: glass)
     } else {
-      view.backgroundColor = UIColor(red: 0.08, green: 0.08, blue: 0.10, alpha: 1.0)
+      cardEffectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
     }
     #else
-    view.backgroundColor = UIColor(red: 0.08, green: 0.08, blue: 0.10, alpha: 1.0)
+    cardEffectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
     #endif
+    cardEffectView.overrideUserInterfaceStyle = .dark
+    cardEffectView.translatesAutoresizingMaskIntoConstraints = false
+    cardEffectView.layer.cornerRadius = 34.0
+    cardEffectView.layer.cornerCurve = .continuous
+    cardEffectView.clipsToBounds = true
+    cardEffectView.layer.borderWidth = 0.65
+    cardEffectView.layer.borderColor = UIColor.white.withAlphaComponent(0.18).cgColor
+    cardShadowView.addSubview(cardEffectView)
 
     scrollView.translatesAutoresizingMaskIntoConstraints = false
     scrollView.showsVerticalScrollIndicator = false
     scrollView.alwaysBounceVertical = false
-    view.addSubview(scrollView)
+    cardEffectView.contentView.addSubview(scrollView)
 
     contentView.translatesAutoresizingMaskIntoConstraints = false
     scrollView.addSubview(contentView)
 
     // Shield badge
     badgeView.translatesAutoresizingMaskIntoConstraints = false
-    badgeView.layer.cornerRadius = 26.0
+    badgeView.layer.cornerRadius = 25.0
     badgeView.layer.masksToBounds = false
     badgeView.layer.shadowColor = UIColor(red: 0.545, green: 0.361, blue: 0.965, alpha: 1.0).cgColor
     badgeView.layer.shadowOpacity = 0.45
@@ -833,7 +848,7 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
     ]
     badgeGradient.startPoint = CGPoint(x: 0.0, y: 0.0)
     badgeGradient.endPoint = CGPoint(x: 1.0, y: 1.0)
-    badgeGradient.cornerRadius = 26.0
+    badgeGradient.cornerRadius = 25.0
     badgeView.layer.insertSublayer(badgeGradient, at: 0)
 
     let shieldCfg = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .semibold)
@@ -851,15 +866,15 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
     contentView.addSubview(badgeView)
 
     // Title & subtitle
-    titleLabel.font = UIFont.systemFont(ofSize: 20.0, weight: .bold)
+    titleLabel.font = UIFont.systemFont(ofSize: 19.0, weight: .bold)
     titleLabel.textColor = .white
     titleLabel.textAlignment = .center
     titleLabel.numberOfLines = 1
     titleLabel.translatesAutoresizingMaskIntoConstraints = false
     contentView.addSubview(titleLabel)
 
-    subtitleLabel.font = UIFont.systemFont(ofSize: 13.0, weight: .regular)
-    subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.72)
+    subtitleLabel.font = UIFont.systemFont(ofSize: 12.5, weight: .regular)
+    subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.74)
     subtitleLabel.textAlignment = .center
     subtitleLabel.numberOfLines = 2
     subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -868,7 +883,7 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
     // PIN dots
     dotsStack.axis = .horizontal
     dotsStack.alignment = .center
-    dotsStack.spacing = pinLength > 6 ? 10.0 : 16.0
+    dotsStack.spacing = pinLength > 6 ? 10.0 : 15.0
     dotsStack.translatesAutoresizingMaskIntoConstraints = false
     for _ in 0..<pinLength {
       let dot = UIView()
@@ -886,9 +901,9 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
 
     // 3x4 Liquid Glass Keypad
     let isCompactHeight = UIScreen.main.bounds.height < 680.0
-    let keySize: CGFloat = isCompactHeight ? 64.0 : 72.0
-    let rowSpacing: CGFloat = isCompactHeight ? 11.0 : 14.0
-    let colSpacing: CGFloat = isCompactHeight ? 18.0 : 22.0
+    let keySize: CGFloat = isCompactHeight ? 62.0 : 68.0
+    let rowSpacing: CGFloat = isCompactHeight ? 10.0 : 12.0
+    let colSpacing: CGFloat = isCompactHeight ? 16.0 : 20.0
 
     keypadStack.axis = .vertical
     keypadStack.alignment = .center
@@ -930,49 +945,91 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
     keypadStack.addArrangedSubview(bottomRow)
     contentView.addSubview(keypadStack)
 
+    let preferredCardWidth = cardShadowView.widthAnchor.constraint(equalToConstant: 332.0)
+    preferredCardWidth.priority = UILayoutPriority(999)
+    let fitScrollHeight = scrollView.heightAnchor.constraint(equalTo: contentView.heightAnchor)
+    fitScrollHeight.priority = .defaultHigh
+
     NSLayoutConstraint.activate([
-      scrollView.topAnchor.constraint(equalTo: view.topAnchor),
-      scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-      scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-      scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      backdropControl.topAnchor.constraint(equalTo: view.topAnchor),
+      backdropControl.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+      backdropControl.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      backdropControl.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+
+      cardShadowView.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
+      cardShadowView.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor),
+      preferredCardWidth,
+      cardShadowView.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 18.0),
+      cardShadowView.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -18.0),
+      cardShadowView.heightAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.heightAnchor, constant: -32.0),
+
+      cardEffectView.topAnchor.constraint(equalTo: cardShadowView.topAnchor),
+      cardEffectView.bottomAnchor.constraint(equalTo: cardShadowView.bottomAnchor),
+      cardEffectView.leadingAnchor.constraint(equalTo: cardShadowView.leadingAnchor),
+      cardEffectView.trailingAnchor.constraint(equalTo: cardShadowView.trailingAnchor),
+
+      scrollView.topAnchor.constraint(equalTo: cardEffectView.contentView.topAnchor),
+      scrollView.bottomAnchor.constraint(equalTo: cardEffectView.contentView.bottomAnchor),
+      scrollView.leadingAnchor.constraint(equalTo: cardEffectView.contentView.leadingAnchor),
+      scrollView.trailingAnchor.constraint(equalTo: cardEffectView.contentView.trailingAnchor),
+      fitScrollHeight,
 
       contentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
       contentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
-      contentView.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor),
-      contentView.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor),
+      contentView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+      contentView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+      contentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
 
-      badgeView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 26.0),
+      badgeView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 24.0),
       badgeView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-      badgeView.widthAnchor.constraint(equalToConstant: 52.0),
-      badgeView.heightAnchor.constraint(equalToConstant: 52.0),
+      badgeView.widthAnchor.constraint(equalToConstant: 50.0),
+      badgeView.heightAnchor.constraint(equalToConstant: 50.0),
 
       badgeIconView.centerXAnchor.constraint(equalTo: badgeView.centerXAnchor),
       badgeIconView.centerYAnchor.constraint(equalTo: badgeView.centerYAnchor),
       badgeSpinner.centerXAnchor.constraint(equalTo: badgeView.centerXAnchor),
       badgeSpinner.centerYAnchor.constraint(equalTo: badgeView.centerYAnchor),
 
-      titleLabel.topAnchor.constraint(equalTo: badgeView.bottomAnchor, constant: 14.0),
-      titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24.0),
-      titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24.0),
+      titleLabel.topAnchor.constraint(equalTo: badgeView.bottomAnchor, constant: 12.0),
+      titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 22.0),
+      titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -22.0),
 
-      subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6.0),
-      subtitleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 28.0),
-      subtitleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -28.0),
+      subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 5.0),
+      subtitleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24.0),
+      subtitleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24.0),
 
-      dotsStack.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 20.0),
+      dotsStack.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 18.0),
       dotsStack.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
 
-      keypadStack.topAnchor.constraint(equalTo: dotsStack.bottomAnchor, constant: 24.0),
+      keypadStack.topAnchor.constraint(equalTo: dotsStack.bottomAnchor, constant: 22.0),
       keypadStack.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-      keypadStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -24.0),
+      keypadStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -22.0),
     ])
 
+    backdropControl.alpha = 0.0
+    cardShadowView.alpha = 0.0
+    cardShadowView.transform = CGAffineTransform(scaleX: 0.90, y: 0.90)
     refreshUI(animatedDotIndex: nil)
   }
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     becomeFirstResponder()
+    guard !didAnimateIn else { return }
+    didAnimateIn = true
+    UIView.animate(
+      withDuration: 0.30,
+      delay: 0,
+      usingSpringWithDamping: 0.84,
+      initialSpringVelocity: 0.5,
+      options: [.allowUserInteraction],
+      animations: {
+        self.backdropControl.alpha = 1.0
+        self.cardShadowView.alpha = 1.0
+        self.cardShadowView.transform = .identity
+      },
+      completion: nil
+    )
   }
 
   override func viewDidLayoutSubviews() {
@@ -1180,8 +1237,7 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
 
   private func submitPinToFlutter(_ pin: String) {
     guard let channel = MarcoLiquidGlassSupport.bridgeChannel else {
-      finish(succeeded: false)
-      dismiss(animated: true, completion: nil)
+      dismissAnimated(succeeded: false)
       return
     }
     isBusy = true
@@ -1202,8 +1258,7 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
         let ok = (dict?["ok"] as? Bool) ?? false
         if ok {
           UINotificationFeedbackGenerator().notificationOccurred(.success)
-          self.finish(succeeded: true)
-          self.dismiss(animated: true, completion: nil)
+          self.dismissAnimated(succeeded: true)
         } else {
           let errText = (dict?["error"] as? String) ?? "密码错误，请重新输入"
           self.triggerError(errText, resetToFirstStep: self.mode == "set")
@@ -1242,12 +1297,23 @@ private final class MarcoNativePinSheetController: UIViewController, UIAdaptiveP
   }
 
   @objc private func cancelTapped() {
-    finish(succeeded: false)
-    dismiss(animated: true, completion: nil)
+    dismissAnimated(succeeded: false)
   }
 
-  func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
-    finish(succeeded: false)
+  private func dismissAnimated(succeeded: Bool) {
+    finish(succeeded: succeeded)
+    UIView.animate(
+      withDuration: 0.18,
+      delay: 0,
+      options: [.curveEaseIn],
+      animations: {
+        self.backdropControl.alpha = 0.0
+        self.cardShadowView.alpha = 0.0
+        self.cardShadowView.transform = CGAffineTransform(scaleX: 0.92, y: 0.92)
+      }
+    ) { _ in
+      self.dismiss(animated: false, completion: nil)
+    }
   }
 
   private func finish(succeeded: Bool) {

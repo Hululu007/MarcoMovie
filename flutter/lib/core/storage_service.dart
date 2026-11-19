@@ -1683,6 +1683,15 @@ class StorageService {
     await _prefs.setStringList(_removedSites, hidden.toList());
   });
 
+  Future<void> hideSites(Iterable<String> siteIdentities) =>
+      _editSubscriptions(() async {
+        final additions = siteIdentities.where((id) => id.isNotEmpty).toList();
+        if (additions.isEmpty) return;
+        _invalidateConfigCache();
+        final hidden = {...?_prefs.getStringList(_removedSites), ...additions};
+        await _prefs.setStringList(_removedSites, hidden.toList());
+      });
+
   Future<void> removeSite(String siteIdentity) => hideSite(siteIdentity);
 
   Future<void> restoreSite(String siteIdentity) => _editSubscriptions(() async {

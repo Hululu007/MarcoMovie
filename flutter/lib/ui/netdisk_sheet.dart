@@ -803,7 +803,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               // Keep native UISegmentedControl pinned outside the scroll view & away from
-              // any BackdropFilter so Impeller never re-slices PlatformView overlays.
+              // any BackdropFilter; matching 36pt fallback prevents layout shift during push.
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
                 child: IosNativeSegmentedControl(
@@ -811,7 +811,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                   selectedIndex: _selectedDriveFilter,
                   height: 36,
                   onChanged: (idx) => setState(() => _selectedDriveFilter = idx),
-                  fallback: const SizedBox.shrink(),
+                  fallback: _buildFallbackDriveSegments(),
                 ),
               ),
               Flexible(child: scrollList),
@@ -836,13 +836,66 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                 maxWidth: 108,
                 accessibilityLabel: '切换盘序',
                 onTap: _rotateDriveOrder,
-                fallback: const SizedBox.shrink(),
+                fallback: AppleCapsuleButton(
+                  icon: CupertinoIcons.refresh,
+                  label: '切换盘序',
+                  compact: true,
+                  useBackdrop: false,
+                  onPressed: _rotateDriveOrder,
+                ),
               )
             : null,
         body: bodyContent,
       );
     }
     return bodyContent;
+  }
+
+  Widget _buildFallbackDriveSegments() {
+    const labels = ['全部', '夸克', 'UC', '百度', '阿狸'];
+    return Container(
+      height: 36,
+      padding: const EdgeInsets.all(2.5),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1C1C22),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.08),
+          width: 0.6,
+        ),
+      ),
+      child: Row(
+        children: [
+          for (var i = 0; i < labels.length; i++)
+            Expanded(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => setState(() => _selectedDriveFilter = i),
+                child: Container(
+                  alignment: Alignment.center,
+                  decoration: i == _selectedDriveFilter
+                      ? BoxDecoration(
+                          color: const Color(0xFF484852),
+                          borderRadius: BorderRadius.circular(15.5),
+                        )
+                      : null,
+                  child: Text(
+                    labels[i],
+                    maxLines: 1,
+                    style: TextStyle(
+                      color: i == _selectedDriveFilter
+                          ? Colors.white
+                          : const Color(0xB8EBEBF5),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _buildQrScannerCard(NetdiskDriveInfo drive) {
