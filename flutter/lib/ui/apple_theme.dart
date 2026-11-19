@@ -1,6 +1,7 @@
 import 'dart:io' show Platform;
 import 'dart:math' as math;
 import 'dart:ui';
+import 'ios_liquid_glass.dart';
 import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
@@ -699,17 +700,22 @@ class AppleGlassSurface extends StatelessWidget {
   }
 }
 
-/// iOS 27 Liquid Glass tab bar (Dock):
-/// - Portrait: floating glass bar (`64dp`) above the home indicator.
-/// - Landscape: compact vertical glass bar on the right edge.
-/// - Supports both discrete taps AND continuous press-and-slide (`按住左右/上下滑动聚焦切换`):
-///   holding and sliding across the dock smoothly glides the lighter glass lens
-///   under the finger and switches tabs live with haptic selection clicks.
+/// iOS 26 Liquid Glass floating tab bar (Dock):
+/// - Portrait on iOS 26+: true native UIKit `UITabBar` floating glass capsule +
+///   detached circular `UIButton.Configuration.glass()` search button.
+/// - Portrait fallback (iOS 15–18 / Android / Desktop / Tests): matching full-capsule
+///   Liquid Glass pill (`62dp`) with dark inner selection capsule + detached circular
+///   search button on the right.
+/// - Landscape: compact vertical glass pill on the right edge + circular search button.
+/// - Supports both discrete taps AND continuous press-and-slide (`按住左右/上下滑动聚焦切换`).
 class AppleLiquidGlassDock extends StatefulWidget {
   final int selectedIndex;
   final ValueChanged<int> onSelect;
   final bool isLandscape;
   final List<(IconData, IconData, String)> items;
+  final List<IosNativeDockItem>? nativeItems;
+  final VoidCallback? onSearch;
+  final bool hidden;
 
   const AppleLiquidGlassDock({
     super.key,
@@ -717,13 +723,17 @@ class AppleLiquidGlassDock extends StatefulWidget {
     required this.onSelect,
     required this.isLandscape,
     required this.items,
+    this.nativeItems,
+    this.onSearch,
+    this.hidden = false,
   });
 
-  static const double _dockRadius = 26;
-  static const double _lensRadius = 20;
-  static const double _pad = 6;
+  static const double _dockRadius = 31;
+  static const double _lensRadius = 26;
+  static const double _pad = 5;
   static const double _itemH = 52;
   static const double _itemW = 60;
+  static const double _searchGap = 10;
   static const Duration _motion = Duration(milliseconds: 420);
   static const Curve _curve = Cubic(0.2, 1.15, 0.36, 1.0);
 
@@ -732,9 +742,10 @@ class AppleLiquidGlassDock extends StatefulWidget {
     final right = MediaQuery.paddingOf(context).right;
     return _itemW + _pad * 2 + (right > 0 ? right + 4 : 10) + 8;
   }
+
   static double portraitFootprint(BuildContext context) {
     final safe = MediaQuery.paddingOf(context).bottom;
-    return _itemH + 2 * _pad + (safe > 0 ? math.max(safe - 4, 8) : 12) + 8;
+    return _itemH + 2 * _pad + (safe > 0 ? math.max(safe - 14, 10) : 12) + 8;
   }
 
   @override
@@ -774,34 +785,69 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
       _dragLensSlot = null;
       _lastDragSelectedIndex = null;
     });
-    if (!cancelled && target != null && target != _safeIndex) widget.onSelect(target);
+    if (!cancelled && target != null && target != _safeIndex) {
+      widget.onSelect(target);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final safe = MediaQuery.paddingOf(context);
-    final margin = widget.isLandscape
-        ? EdgeInsets.only(
-            right: safe.right > 0 ? safe.right + 4 : 10,
-            top: 12,
-            bottom: 12,
-          )
-        : EdgeInsets.only(
-            left: 20,
-            right: 20,
-            bottom: safe.bottom > 0 ? math.max(safe.bottom - 4, 8) : 12,
+    final portraitBottom =
+        safe.bottom > 0 ? math.max(safe.bottom - 14.0, 10.0) : 12.0;
+
+    return ValueListenableBuilder<bool>(
+      valueListenable: IosLiquidGlassBridge.available,
+      builder: (context, _, __) {
+        final useNativeIos26 = IosLiquidGlassBridge.isAvailable &&
+            !widget.isLandscape &&
+            widget.nativeItems != null &&
+            widget.nativeItems!.isNotEmpty;
+        if (useNativeIos26) {
+          return Padding(
+            padding: EdgeInsets.only(bottom: portraitBottom),
+            child: IosNativeDockView(
+              selectedIndex: _safeIndex,
+              items: widget.nativeItems!,
+              onSelect: widget.onSelect,
+              onSearch: widget.onSearch,
+              showSearch: widget.onSearch != null,
+              hidden: widget.hidden,
+            ),
           );
-    return Padding(
-      padding: margin,
-      child: widget.isLandscape ? _buildVertical() : _buildHorizontal(),
+        }
+
+        final margin = widget.isLandscape
+            ? EdgeInsets.only(
+                right: safe.right > 0 ? safe.right + 4 : 10,
+                top: 12,
+                bottom: 12,
+              )
+            : EdgeInsets.only(
+                left: 16,
+                right: 16,
+                bottom: portraitBottom,
+              );
+        Widget content = Padding(
+          padding: margin,
+          child: widget.isLandscape ? _buildVertical() : _buildHorizontal(),
+        );
+        if (widget.hidden) {
+          content = IgnorePointer(
+            ignoring: true,
+            child: Opacity(opacity: 0, child: content),
+          );
+        }
+        return content;
+      },
     );
   }
 
-  Widget _shell({required Widget child}) {
+  Widget _shell({required Widget child, double? radius}) {
     return RepaintBoundary(
       child: LiquidGlass(
-        borderRadius: AppleLiquidGlassDock._dockRadius,
-        tint: const Color(0x52141418),
+        borderRadius: radius ?? AppleLiquidGlassDock._dockRadius,
+        tint: const Color(0x56161414),
         blur: 20,
         saturation: 1.8,
         child: child,
@@ -815,12 +861,25 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
         final n = math.max(widget.items.length, 1);
         final available =
             constraints.maxWidth.isFinite ? constraints.maxWidth : 360.0;
-        // Shortened, compact iOS 27 pill length in portrait mode
-        final width = math.min(available * 0.82, 284.0).clamp(248.0, 288.0);
-        final itemW = (width - AppleLiquidGlassDock._pad * 2) / n;
+        final hasSearch = widget.onSearch != null;
+        const barH =
+            AppleLiquidGlassDock._itemH + AppleLiquidGlassDock._pad * 2;
+        final maxRowWidth = math.min(available, 420.0);
+        final pillWidth = hasSearch
+            ? math.max(
+                192.0,
+                math.min(
+                  maxRowWidth - barH - AppleLiquidGlassDock._searchGap,
+                  348.0,
+                ),
+              )
+            : math.min(maxRowWidth, 320.0).clamp(220.0, 320.0);
+        final itemW = (pillWidth - AppleLiquidGlassDock._pad * 2) / n;
         final isSliding = _dragLensSlot != null;
         final lensSlot = _dragLensSlot ?? _safeIndex.toDouble();
-        return _shell(
+
+        final pill = _shell(
+          radius: barH * 0.5,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onHorizontalDragStart: (d) =>
@@ -830,9 +889,8 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
             onHorizontalDragEnd: (_) => _endSlide(),
             onHorizontalDragCancel: () => _endSlide(cancelled: true),
             child: SizedBox(
-              width: width,
-              height:
-                  AppleLiquidGlassDock._itemH + AppleLiquidGlassDock._pad * 2,
+              width: pillWidth,
+              height: barH,
               child: Stack(
                 children: [
                   AnimatedPositioned(
@@ -870,6 +928,20 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
             ),
           ),
         );
+
+        if (!hasSearch) return pill;
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            pill,
+            const SizedBox(width: AppleLiquidGlassDock._searchGap),
+            _DockSearchCircleButton(
+              size: barH,
+              onTap: widget.onSearch!,
+            ),
+          ],
+        );
       },
     );
   }
@@ -879,15 +951,24 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
       builder: (context) {
         final n = math.max(widget.items.length, 1);
         final screenH = MediaQuery.sizeOf(context).height;
-        // Lengthened vertical dock in landscape mode
-        final targetTotalH = (screenH * 0.74).clamp(
-          AppleLiquidGlassDock._itemH * n + AppleLiquidGlassDock._pad * 2 + 44.0,
-          324.0,
+        final hasSearch = widget.onSearch != null;
+        const searchSize = 54.0;
+        final searchReserve = hasSearch ? (searchSize + 10.0) : 0.0;
+        final maxAvailableH = math.max(196.0, screenH - 28.0 - searchReserve);
+        final idealMin = math.min(
+          maxAvailableH,
+          AppleLiquidGlassDock._itemH * n + AppleLiquidGlassDock._pad * 2 + 12.0,
         );
+        final targetTotalH = (screenH * 0.72)
+            .clamp(idealMin, math.min(316.0, maxAvailableH))
+            .toDouble();
         final vItemH = (targetTotalH - AppleLiquidGlassDock._pad * 2) / n;
         final isSliding = _dragLensSlot != null;
         final lensSlot = _dragLensSlot ?? _safeIndex.toDouble();
-        return _shell(
+        const pillW =
+            AppleLiquidGlassDock._itemW + AppleLiquidGlassDock._pad * 2;
+        final pill = _shell(
+          radius: pillW * 0.5,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onVerticalDragStart: (d) =>
@@ -897,8 +978,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
             onVerticalDragEnd: (_) => _endSlide(),
             onVerticalDragCancel: () => _endSlide(cancelled: true),
             child: SizedBox(
-              width:
-                  AppleLiquidGlassDock._itemW + AppleLiquidGlassDock._pad * 2,
+              width: pillW,
               height: targetTotalH,
               child: Stack(
                 children: [
@@ -937,6 +1017,19 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
             ),
           ),
         );
+        if (!hasSearch) return pill;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            pill,
+            const SizedBox(height: 10),
+            _DockSearchCircleButton(
+              size: searchSize,
+              onTap: widget.onSearch!,
+            ),
+          ],
+        );
       },
     );
   }
@@ -953,7 +1046,63 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
   }
 }
 
-/// The lighter glass lens behind the selected tab (iOS 27 tab bar selection).
+/// Detached circular Liquid Glass search button paired beside the iOS 26 Dock.
+class _DockSearchCircleButton extends StatefulWidget {
+  final double size;
+  final VoidCallback onTap;
+
+  const _DockSearchCircleButton({
+    required this.size,
+    required this.onTap,
+  });
+
+  @override
+  State<_DockSearchCircleButton> createState() =>
+      _DockSearchCircleButtonState();
+}
+
+class _DockSearchCircleButtonState extends State<_DockSearchCircleButton> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      key: const ValueKey('home-search-button'),
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapCancel: () => setState(() => _pressed = false),
+      onTapUp: (_) => setState(() => _pressed = false),
+      onTap: () {
+        HapticFeedback.lightImpact();
+        widget.onTap();
+      },
+      child: AnimatedScale(
+        scale: _pressed ? 0.90 : 1.0,
+        duration: const Duration(milliseconds: 160),
+        curve: Curves.easeOutCubic,
+        child: RepaintBoundary(
+          child: LiquidGlass(
+            width: widget.size,
+            height: widget.size,
+            borderRadius: widget.size * 0.5,
+            tint: const Color(0x56161414),
+            blur: 20,
+            saturation: 1.8,
+            child: const Center(
+              child: Icon(
+                CupertinoIcons.search,
+                size: 22,
+                color: Color(0xFFFFFFFF),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Dark translucent inner capsule lens behind the selected tab (iOS 26 style).
 class _DockSelectionLens extends StatelessWidget {
   const _DockSelectionLens();
   @override
@@ -963,19 +1112,17 @@ class _DockSelectionLens extends StatelessWidget {
           BorderRadius.circular(AppleLiquidGlassDock._lensRadius),
     );
     return CustomPaint(
-      foregroundPainter: _LiquidRimPainter(shape: shape, strength: 0.92),
+      foregroundPainter: _LiquidRimPainter(shape: shape, strength: 0.42),
       child: DecoratedBox(
         decoration: ShapeDecoration(
           shape: shape,
           gradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
             colors: [
-              Color(0x30FFFFFF),
-              Color(0x14FFFFFF),
-              Color(0x223E9BFF),
+              Color(0x66000000),
+              Color(0x4A000000),
             ],
-            stops: [0.0, 0.55, 1.0],
           ),
         ),
       ),
@@ -1008,7 +1155,7 @@ class _DockItemState extends State<_DockItem> {
     const duration = Duration(milliseconds: 240);
     final selected = widget.selected;
     final color =
-        selected ? const Color(0xFF3E9BFF) : const Color(0xE0F5F5F7);
+        selected ? const Color(0xFFFFFFFF) : const Color(0xD6F5F5F7);
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTapDown: (_) => setState(() => _pressed = true),
@@ -1028,7 +1175,7 @@ class _DockItemState extends State<_DockItem> {
               curve: Curves.easeOut,
               builder: (context, value, _) => Icon(
                 selected ? widget.selectedIcon : widget.icon,
-                size: 22,
+                size: 21,
                 color: value ?? color,
               ),
             ),
@@ -1046,6 +1193,7 @@ class _DockItemState extends State<_DockItem> {
                 widget.label,
                 maxLines: 1,
                 overflow: TextOverflow.clip,
+                textScaler: TextScaler.noScaling,
               ),
             ),
           ],

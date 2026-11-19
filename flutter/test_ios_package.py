@@ -14,25 +14,26 @@ class DeploymentChecks(unittest.TestCase):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.app = Path(self.folder.name)
-        (self.app / 'Info.plist').write_bytes(plistlib.dumps({'MinimumOSVersion': '14.0'}))
+        (self.app / 'Info.plist').write_bytes(plistlib.dumps({'MinimumOSVersion': '15.0'}))
 
     def binary(self, minimum, platform=2, filetype=2):
-        return struct.pack('<8I', 0xfeedfacf, 0x100000c, 0, filetype, 1, 24, 0, 0) + struct.pack('<6I', 0x32, 24, platform, minimum, 0x120000, 0)
+        return struct.pack('<8I', 0xfeedfacf, 0x100000c, 0, filetype, 1, 24, 0, 0) + struct.pack('<6I', 0x32, 24, platform, minimum, 0x1a0000, 0)
 
     def test_real_compatible_deployment_is_unchanged(self):
-        blob = self.binary(0x0d0000)
-        (self.app / 'Runner').write_bytes(blob)
-        validate_app(self.app)
-        self.assertEqual((self.app / 'Runner').read_bytes(), blob)
+        for minos in (0x0e0000, 0x0f0000):
+            blob = self.binary(minos)
+            (self.app / 'Runner').write_bytes(blob)
+            validate_app(self.app)
+            self.assertEqual((self.app / 'Runner').read_bytes(), blob)
 
     def test_dsym_or_object_macho_rejected(self):
         for bad_type in (1, 10):
-            (self.app / 'Runner').write_bytes(self.binary(0x0e0000, filetype=bad_type))
+            (self.app / 'Runner').write_bytes(self.binary(0x0f0000, filetype=bad_type))
             with self.assertRaises(ValueError):
                 validate_app(self.app)
 
     def test_new_engine_is_rejected_instead_of_forging_minimum(self):
-        blob = self.binary(0x0f0000)
+        blob = self.binary(0x100000)
         (self.app / 'Runner').write_bytes(blob)
         with self.assertRaises(ValueError):
             validate_app(self.app)
@@ -102,6 +103,12 @@ class DeploymentChecks(unittest.TestCase):
             self.assertEqual(swift.count('marco_movie/wakelock'), 1)
             self.assertEqual(swift.count('marco_movie/netdisk_auth'), 1)
             self.assertEqual(swift.count('marco_movie/web_sniffer'), 1)
+            self.assertEqual(swift.count('MarcoLiquidGlassPlugin'), 1)
+            self.assertEqual(swift.count('private enum MarcoLiquidGlassSupport'), 1)
+            self.assertEqual(swift.count('"marco_movie/ios26_dock"'), 1)
+            self.assertEqual(swift.count('"marco_movie/ios26_glass_button"'), 1)
+            self.assertEqual(swift.count('"marco_movie/ios26_glass_pill"'), 1)
+            self.assertEqual(swift.count('"marco_movie/ios26_segmented_control"'), 1)
             self.assertEqual(swift.count('final class NetdiskWebAuthController'), 1)
             self.assertEqual(swift.count('private final class HeadlessMediaWebSniffer'), 1)
             self.assertEqual(swift.count('{'), swift.count('}'))

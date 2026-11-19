@@ -2,6 +2,7 @@ import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart' show Colors, Material, MaterialType;
 import 'apple_theme.dart';
+import 'ios_liquid_glass.dart';
 
 class SettingsPane {
   final String id, title, subtitle;
@@ -191,59 +192,62 @@ class IosSettingsScaffold extends StatelessWidget {
           children: [
             DecoratedBox(
               decoration: const BoxDecoration(
-                color: Color(0xF0121214),
-                border: Border(
-                  bottom: BorderSide(color: Color(0x33545458), width: 0.5),
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Color(0xF008080A),
+                    Color(0xCC08080A),
+                    Color(0x0008080A),
+                  ],
+                  stops: [0.0, 0.78, 1.0],
                 ),
               ),
               child: Padding(
                 padding: EdgeInsets.only(
-                  top: mediaPadding.top,
-                  left: mediaPadding.left,
-                  right: mediaPadding.right,
+                  top: mediaPadding.top + 4,
+                  bottom: 6,
+                  left: mediaPadding.left + 12,
+                  right: mediaPadding.right + 12,
                 ),
                 child: SizedBox(
-                  height: 44,
+                  height: 42,
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
                       Align(
                         alignment: Alignment.centerLeft,
-                        child: CupertinoButton(
-                          key: const ValueKey('settings-drawer-back'),
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          minimumSize: const Size(44, 44),
-                          onPressed: () => Navigator.of(context).maybePop(),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(
-                                CupertinoIcons.back,
-                                color: AppleColors.systemBlue,
-                                size: 21,
-                              ),
-                              Flexible(
-                                child: ConstrainedBox(
-                                  constraints:
-                                      const BoxConstraints(maxWidth: 112),
-                                  child: Text(
-                                    backLabel,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      color: AppleColors.systemBlue,
-                                      fontSize: 16.5,
-                                      fontWeight: FontWeight.w400,
-                                    ),
-                                  ),
+                        child: IosNativeGlassButton(
+                          style: 'circle',
+                          symbol: 'chevron.backward',
+                          symbolSize: 17,
+                          width: 40,
+                          height: 40,
+                          accessibilityLabel: backLabel,
+                          onTap: () => Navigator.of(context).maybePop(),
+                          fallback: GestureDetector(
+                            key: const ValueKey('settings-drawer-back'),
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => Navigator.of(context).maybePop(),
+                            child: const LiquidGlass(
+                              width: 40,
+                              height: 40,
+                              borderRadius: 20,
+                              elevated: false,
+                              tint: Color(0x521E1E22),
+                              child: Center(
+                                child: Icon(
+                                  CupertinoIcons.back,
+                                  color: AppleColors.labelPrimary,
+                                  size: 20,
                                 ),
                               ),
-                            ],
+                            ),
                           ),
                         ),
                       ),
                       Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 116),
+                        padding: const EdgeInsets.symmetric(horizontal: 64),
                         child: Text(
                           title,
                           maxLines: 1,
@@ -260,10 +264,7 @@ class IosSettingsScaffold extends StatelessWidget {
                       if (trailing != null)
                         Align(
                           alignment: Alignment.centerRight,
-                          child: Padding(
-                            padding: const EdgeInsets.only(right: 6),
-                            child: trailing!,
-                          ),
+                          child: trailing!,
                         ),
                     ],
                   ),

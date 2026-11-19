@@ -9,6 +9,7 @@ import subprocess
 import sys
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
+IOS_LIQUID_GLASS_SWIFT_PATH = Path(__file__).resolve().parent / "ios_native" / "MarcoLiquidGlass.swift"
 LOGO_MARK = REPO_ROOT / "android" / "src" / "main" / "res" / "drawable-nodpi" / "logo_mark.png"
 OPAQUE_ICON = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
 MACOS_ICON_DIR = ROOT / "brand" / "macos"
@@ -1329,6 +1330,19 @@ def main() -> None:
             if "private final class HeadlessMediaWebSniffer" not in ad_text:
                 ad_text = ad_text.rstrip() + "\n" + APPLE_WEB_SNIFFER_SWIFT
                 ad_changed = True
+            if "MarcoLiquidGlassPlugin" not in ad_text and "GeneratedPluginRegistrant.register(with: self)" in ad_text:
+                ad_text = ad_text.replace(
+                    "GeneratedPluginRegistrant.register(with: self)",
+                    "GeneratedPluginRegistrant.register(with: self)\n"
+                    "    if let glassRegistrar = self.registrar(forPlugin: \"MarcoLiquidGlassPlugin\") {\n"
+                    "      MarcoLiquidGlassSupport.register(with: glassRegistrar, messenger: glassRegistrar.messenger())\n"
+                    "    }",
+                    1,
+                )
+                ad_changed = True
+            if "private enum MarcoLiquidGlassSupport" not in ad_text and IOS_LIQUID_GLASS_SWIFT_PATH.is_file():
+                ad_text = ad_text.rstrip() + "\n\n" + IOS_LIQUID_GLASS_SWIFT_PATH.read_text(encoding="utf-8")
+                ad_changed = True
             if ad_changed:
                 ios_app_delegate.write_text(ad_text, encoding="utf-8")
     ios_app_fw_plist = ROOT / "ios" / "Flutter" / "AppFrameworkInfo.plist"
@@ -1336,7 +1350,7 @@ def main() -> None:
         text = ios_app_fw_plist.read_text(encoding="utf-8")
         text = re.sub(
             r"(<key>MinimumOSVersion</key>\s*<string>)[^<]+(</string>)",
-            r"\g<1>14.0\g<2>",
+            r"\g<1>15.0\g<2>",
             text,
         )
         ios_app_fw_plist.write_text(text, encoding="utf-8")
@@ -1344,20 +1358,25 @@ def main() -> None:
         xcconfig = ROOT / "ios" / "Flutter" / xcconfig_name
         if xcconfig.exists():
             text = xcconfig.read_text(encoding="utf-8")
-            if "no_fixup_chains" not in text:
-                text = (
-                    text.rstrip()
-                    + "\nIPHONEOS_DEPLOYMENT_TARGET = 14.0\n"
-                    + "OTHER_LDFLAGS = $(inherited) -Wl,-no_fixup_chains\n"
-                    + "OTHER_CFLAGS = $(inherited) -fno-objc-msgsend-selector-stubs\n"
-                )
-                xcconfig.write_text(text, encoding="utf-8")
+            text = re.sub(
+                r"(?m)^IPHONEOS_DEPLOYMENT_TARGET\s*=.*$",
+                "IPHONEOS_DEPLOYMENT_TARGET = 15.0",
+                text,
+            )
+            text = re.sub(
+                r"(?m)^OTHER_LDFLAGS\s*=\s*\$\(inherited\)\s+-Wl,-no_fixup_chains\s*$\n?",
+                "",
+                text,
+            )
+            if "IPHONEOS_DEPLOYMENT_TARGET = 15.0" not in text:
+                text = text.rstrip() + "\nIPHONEOS_DEPLOYMENT_TARGET = 15.0\n"
+            xcconfig.write_text(text, encoding="utf-8")
     ios_pbx = ROOT / "ios" / "Runner.xcodeproj" / "project.pbxproj"
     if ios_pbx.exists():
         text = ios_pbx.read_text(encoding="utf-8")
         text = re.sub(
             r"IPHONEOS_DEPLOYMENT_TARGET\s*=\s*[0-9.]+;",
-            "IPHONEOS_DEPLOYMENT_TARGET = 14.0;",
+            "IPHONEOS_DEPLOYMENT_TARGET = 15.0;",
             text,
         )
         ios_pbx.write_text(text, encoding="utf-8")
@@ -1366,26 +1385,16 @@ def main() -> None:
         text = ios_podfile.read_text(encoding="utf-8")
         text = re.sub(
             r"#?\s*platform\s+:ios\s*,\s*'[^']+'",
-            "platform :ios, '14.0'",
+            "platform :ios, '15.0'",
             text,
         )
-        if "no_fixup_chains" not in text and "flutter_additional_ios_build_settings(target)" in text:
+        if "Gem::Version.new('15.0')" not in text and "flutter_additional_ios_build_settings(target)" in text:
             text = text.replace(
                 "flutter_additional_ios_build_settings(target)",
                 "flutter_additional_ios_build_settings(target)\n"
                 "    target.build_configurations.each do |config|\n"
-                "      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0' if Gem::Version.new(config.build_settings.fetch('IPHONEOS_DEPLOYMENT_TARGET', '0')) < Gem::Version.new('14.0')\n"
-                "      config.build_settings['OTHER_LDFLAGS'] = (['$(inherited)'] + Array(config.build_settings['OTHER_LDFLAGS']) + ['-Wl,-no_fixup_chains']).uniq\n"
-                "      config.build_settings['OTHER_CFLAGS'] = (['$(inherited)'] + Array(config.build_settings['OTHER_CFLAGS']) + ['-fno-objc-msgsend-selector-stubs']).uniq\n"
+                "      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0' if Gem::Version.new(config.build_settings.fetch('IPHONEOS_DEPLOYMENT_TARGET', '0')) < Gem::Version.new('15.0')\n"
                 "    end",
-            )
-        # Upgrade an already generated Podfile as well as a fresh runner. Keep
-        # CocoaPods' explicit Flutter/NodeMobile framework link arguments.
-        for key, flag in (("OTHER_LDFLAGS", "-Wl,-no_fixup_chains"),
-                          ("OTHER_CFLAGS", "-fno-objc-msgsend-selector-stubs")):
-            text = text.replace(
-                f"config.build_settings['{key}'] = '$(inherited) {flag}'",
-                f"config.build_settings['{key}'] = (['$(inherited)'] + Array(config.build_settings['{key}']) + ['{flag}']).uniq",
             )
         ios_podfile.write_text(text, encoding="utf-8")
     # Windows icon, working directory, immediate window show, and title

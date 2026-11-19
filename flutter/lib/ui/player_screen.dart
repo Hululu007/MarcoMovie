@@ -22,6 +22,7 @@ import '../core/wogg_source.dart';
 import 'player_interaction_layers.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
+import 'ios_liquid_glass.dart';
 import 'windows_appearance.dart';
 import 'desktop_horizontal_scroller.dart';
 import 'desktop_player_window.dart';
@@ -3687,15 +3688,18 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _showQualityChoices() async {
     final session = _playSession;
-    final selected = await showCupertinoModalPopup<CmsEpisode>(
-      context:context,
-      builder:(sheet)=>CupertinoActionSheet(
-        title:const Text('切换画质'),
-        actions:[for(final choice in _qualityChoices) CupertinoActionSheetAction(
-          isDefaultAction:choice.url == _activeStreamUrl,
-          onPressed:()=>Navigator.pop(sheet,choice),child:Text(choice.name))],
-        cancelButton:CupertinoActionSheetAction(onPressed:()=>Navigator.pop(sheet),child:const Text('取消')),
-      ),
+    final selected = await showAppleNativeActionSheet<CmsEpisode>(
+      context,
+      title: '切换画质',
+      options: [
+        for (final choice in _qualityChoices)
+          AppleNativeSheetOption<CmsEpisode>(
+            value: choice,
+            title: choice.name,
+            isDefault: choice.url == _activeStreamUrl,
+          ),
+      ],
+      cancelLabel: '取消',
     );
     if (!mounted ||
         session != _playSession ||
@@ -4011,19 +4015,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                     : null,
                 onTap: () {
                   if (lineReason != null) {
-                    showCupertinoDialog<void>(
-                      context: ctx,
-                      builder: (dCtx) => CupertinoAlertDialog(
-                        title: Text(_lines[i].name),
-                        content: Padding(
-                          padding: const EdgeInsets.only(top: 6),
-                          child: Text(lineReason),
-                        ),
-                        actions: [
-                          CupertinoDialogAction(
-                            isDefaultAction: true,
-                            onPressed: () => Navigator.of(dCtx).pop(),
-                            child: const Text('我知道了'),
+                    unawaited(
+                      showAppleNativeAlert(
+                        ctx,
+                        title: _lines[i].name,
+                        message: lineReason,
+                        actions: const [
+                          AppleNativeAlertAction(
+                            id: 'ok',
+                            title: '我知道了',
+                            isDefault: true,
                           ),
                         ],
                       ),

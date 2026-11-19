@@ -301,9 +301,9 @@ jobs:
 
   build-ios:
     if: github.event_name != 'workflow_dispatch' || inputs.target == 'all' || inputs.target == 'ios'
-    name: Build iOS & iPadOS (.ipa unsigned)
+    name: Build iOS & iPadOS (.ipa unsigned, iOS 26 Liquid Glass SDK)
     needs: [verify-and-checks]
-    runs-on: macos-15-intel
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -379,6 +379,8 @@ jobs:
           flutter test
           VERSION=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['ios']['versionName'])")
           BUILD_NUM=$(python3 -c "import json; print(json.load(open('edition-versions.json'))['ios']['buildNumber'])")
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
           if ! flutter build ios --release --no-codesign --build-name="$VERSION" --build-number="$BUILD_NUM" --verbose > build/ios-build.log 2>&1; then
             tail -n 160 build/ios-build.log
             exit 1

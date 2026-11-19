@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import '../core/lan_sync_server.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
+import 'ios_liquid_glass.dart';
 import 'ios_settings.dart';
 import 'local_qr_code.dart';
 import 'windows_appearance.dart';
@@ -190,27 +191,21 @@ class _CloudSyncSettingsPanelState extends State<CloudSyncSettingsPanel> {
       );
 
   Future<bool> _confirmCleartextHttpWarning() async {
-    final confirmed = await showCupertinoDialog<bool>(
-      context: context,
-      builder: (ctx) => CupertinoAlertDialog(
-        title: const Text('明文传输风险提示'),
-        content: const Text(
+    final choice = await showAppleNativeAlert(
+      context,
+      title: '明文传输风险提示',
+      message:
           '您配置的 WebDAV 服务使用未加密的 HTTP 协议（http://），在此模式下账号与应用密码将以明文在网络中传输，可能存在凭据泄露风险。建议使用 HTTPS 协议。\n\n是否确认继续保存？',
+      actions: const [
+        AppleNativeAlertAction(id: 'cancel', title: '取消', isCancel: true),
+        AppleNativeAlertAction(
+          id: 'confirm',
+          title: '已知晓风险，继续保存',
+          isDestructive: true,
         ),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('取消'),
-          ),
-          CupertinoDialogAction(
-            isDestructiveAction: true,
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('已知晓风险，继续保存'),
-          ),
-        ],
-      ),
+      ],
     );
-    return confirmed ?? false;
+    return choice == 'confirm';
   }
 
   Future<void> _handleSaveAndWebdavSync() async {

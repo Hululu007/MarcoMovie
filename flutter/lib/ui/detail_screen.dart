@@ -15,6 +15,7 @@ import '../core/web_media_resolver.dart';
 import '../core/wogg_source.dart';
 import 'apple_theme.dart';
 import 'desktop_horizontal_scroller.dart';
+import 'ios_liquid_glass.dart';
 import 'netdisk_sheet.dart';
 import 'player_screen.dart';
 import 'poster_image.dart';
@@ -1322,19 +1323,16 @@ class _DetailScreenState extends State<DetailScreen> {
           final cell = GestureDetector(
             onTap: () {
               if (unavailReason != null) {
-                showCupertinoDialog<void>(
-                  context: ctx,
-                  builder: (dCtx) => CupertinoAlertDialog(
-                    title: Text(ep.name),
-                    content: Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Text(unavailReason),
-                    ),
-                    actions: [
-                      CupertinoDialogAction(
-                        isDefaultAction: true,
-                        onPressed: () => Navigator.of(dCtx).pop(),
-                        child: const Text('我知道了'),
+                unawaited(
+                  showAppleNativeAlert(
+                    ctx,
+                    title: ep.name,
+                    message: unavailReason,
+                    actions: const [
+                      AppleNativeAlertAction(
+                        id: 'ok',
+                        title: '我知道了',
+                        isDefault: true,
                       ),
                     ],
                   ),
@@ -2018,8 +2016,10 @@ class _DetailScreenState extends State<DetailScreen> {
   Widget _buildFloatingGlassCircleButton({
     required IconData icon,
     required VoidCallback onTap,
+    String symbol = 'chevron.backward',
+    String accessibilityLabel = '返回',
   }) {
-    return GestureDetector(
+    final fallback = GestureDetector(
       onTap: onTap,
       child: LiquidGlass(
         width: 40,
@@ -2036,6 +2036,16 @@ class _DetailScreenState extends State<DetailScreen> {
         ),
       ),
     );
+    return IosNativeGlassButton(
+      style: 'circle',
+      symbol: symbol,
+      symbolSize: 17,
+      width: 40,
+      height: 40,
+      accessibilityLabel: accessibilityLabel,
+      onTap: onTap,
+      fallback: fallback,
+    );
   }
 
   /// Top-right floating Liquid Glass source selector button (`选源`):
@@ -2049,7 +2059,7 @@ class _DetailScreenState extends State<DetailScreen> {
         ? _video.lines[safeLineIdx].name
         : (_loading ? '加载片源…' : _activeSite.name);
 
-    return GestureDetector(
+    final fallback = GestureDetector(
       key: const ValueKey('source_picker_button'),
       onTap: _showSourcePickerSheet,
       child: ConstrainedBox(
@@ -2093,6 +2103,19 @@ class _DetailScreenState extends State<DetailScreen> {
         ),
       ),
     );
+
+    return IosNativeGlassButton(
+      style: 'capsule',
+      symbol: 'square.3.layers.3d',
+      trailingSymbol: 'chevron.down',
+      label: activeLineName,
+      symbolSize: 14,
+      maxWidth: 168,
+      height: 40,
+      accessibilityLabel: '切换片源 $activeLineName',
+      onTap: _showSourcePickerSheet,
+      fallback: fallback,
+    );
   }
 
   /// Top-right floating Liquid Glass capsule:
@@ -2106,7 +2129,29 @@ class _DetailScreenState extends State<DetailScreen> {
     final driveKey = currentLine != null && currentLine.episodes.isNotEmpty
         ? currentLine.episodes.first.cloudProvider
         : null;
-    return LiquidGlass(
+
+    void onOpenNetdisk() => showNetdiskAccountSheet(
+          context,
+          widget.storage,
+          initialDriveKey: driveKey ??
+              CspBridge.netdiskDriveKeyForLineName(currentLine?.name ?? ''),
+          onChanged: () {
+            if (mounted) setState(() {});
+          },
+        );
+
+    Future<void> onToggleFavorite() async {
+      final fav = await widget.storage.toggleFavorite(
+        _activeSite,
+        _video,
+      );
+      if (mounted) {
+        setState(() => _isFavorite = fav);
+        _toast(fav ? '已加入收藏片库' : '已从片库移除');
+      }
+    }
+
+    final fallback = LiquidGlass(
       height: 40,
       borderRadius: 999,
       elevated: false,
@@ -2119,15 +2164,7 @@ class _DetailScreenState extends State<DetailScreen> {
             key: const ValueKey('detail-netdisk-qr-button'),
             padding: const EdgeInsets.symmetric(horizontal: 10),
             minSize: 32,
-            onPressed: () => showNetdiskAccountSheet(
-              context,
-              widget.storage,
-              initialDriveKey: driveKey ??
-                  CspBridge.netdiskDriveKeyForLineName(currentLine?.name ?? ''),
-              onChanged: () {
-                if (mounted) setState(() {});
-              },
-            ),
+            onPressed: onOpenNetdisk,
             child: const Icon(
               CupertinoIcons.qrcode_viewfinder,
               color: AppleColors.labelPrimary,
@@ -2157,16 +2194,7 @@ class _DetailScreenState extends State<DetailScreen> {
           CupertinoButton(
             padding: const EdgeInsets.symmetric(horizontal: 10),
             minSize: 32,
-            onPressed: () async {
-              final fav = await widget.storage.toggleFavorite(
-                _activeSite,
-                _video,
-              );
-              if (mounted) {
-                setState(() => _isFavorite = fav);
-                _toast(fav ? '已加入收藏片库' : '已从片库移除');
-              }
-            },
+            onPressed: onToggleFavorite,
             child: Icon(
               _isFavorite
                   ? CupertinoIcons.heart_fill
@@ -2179,6 +2207,31 @@ class _DetailScreenState extends State<DetailScreen> {
           ),
         ],
       ),
+    );
+
+    return IosNativeGlassPill(
+      height: 40,
+      actions: [
+        IosNativeGlassPillAction(
+          symbol: 'qrcode.viewfinder',
+          color: AppleColors.labelPrimary,
+          accessibilityLabel: '网盘扫码',
+          onTap: onOpenNetdisk,
+        ),
+        IosNativeGlassPillAction(
+          symbol: 'arrow.down.to.line',
+          color: AppleColors.labelPrimary,
+          accessibilityLabel: '离线下载',
+          onTap: _showDownloadSheet,
+        ),
+        IosNativeGlassPillAction(
+          symbol: _isFavorite ? 'heart.fill' : 'heart',
+          color: _isFavorite ? AppleColors.systemRed : AppleColors.labelPrimary,
+          accessibilityLabel: _isFavorite ? '取消收藏' : '收藏',
+          onTap: () => unawaited(onToggleFavorite()),
+        ),
+      ],
+      fallback: fallback,
     );
   }
 

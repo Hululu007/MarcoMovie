@@ -29,6 +29,7 @@ import '../core/search_source_notice.dart';
 import 'apple_theme.dart';
 import 'cloud_sync_panel.dart';
 import 'detail_screen.dart';
+import 'ios_liquid_glass.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
 import 'netdisk_sheet.dart';
@@ -436,38 +437,34 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       if (!mounted || !widget.storage.consumeSubscriptionsCorruptionNotice()) {
         return;
       }
-      showCupertinoDialog<void>(
-        context: context,
-        builder: (ctx) => CupertinoAlertDialog(
-          title: const Text('订阅数据异常'),
-          content: const Padding(
-            padding: EdgeInsets.only(top: 6),
-            child: Text(
+      unawaited(
+        showAppleNativeAlert(
+          context,
+          title: '订阅数据异常',
+          message:
               '检测到本地订阅文件读取或解析异常，已自动隔离备份并开启写保护以防止覆盖原数据。修复或替换文件后可点击「重新加载订阅」恢复。',
+          actions: const [
+            AppleNativeAlertAction(
+              key: ValueKey('reload-subscriptions-action'),
+              id: 'reload',
+              title: '重新加载订阅',
             ),
-          ),
-          actions: [
-            CupertinoDialogAction(
-              key: const ValueKey('reload-subscriptions-action'),
-              onPressed: () async {
-                Navigator.of(ctx).pop();
-                final recovered =
-                    await widget.storage.reloadSubscriptionsFromDisk();
-                if (!mounted) return;
-                _reloadSavedConfig();
-                if (recovered) {
-                  _showAppleNotice('已重新加载订阅', '订阅文件已恢复正常并解除写保护。');
-                }
-              },
-              child: const Text('重新加载订阅'),
-            ),
-            CupertinoDialogAction(
-              isDefaultAction: true,
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('好'),
+            AppleNativeAlertAction(
+              id: 'ok',
+              title: '好',
+              isDefault: true,
             ),
           ],
-        ),
+        ).then((choice) async {
+          if (choice != 'reload' || !mounted) return;
+          final recovered =
+              await widget.storage.reloadSubscriptionsFromDisk();
+          if (!mounted) return;
+          _reloadSavedConfig();
+          if (recovered) {
+            _showAppleNotice('已重新加载订阅', '订阅文件已恢复正常并解除写保护。');
+          }
+        }),
       );
     });
   }
@@ -1178,20 +1175,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
   void _showAppleNotice(String title, String message) {
     if (!mounted) return;
-    showCupertinoDialog<void>(
-      context: context,
-      builder: (ctx) => CupertinoAlertDialog(
-        title: Text(title),
-        content: Padding(
-          padding: const EdgeInsets.only(top: 6),
-          child: Text(message),
-        ),
-        actions: [
-          CupertinoDialogAction(
-            isDefaultAction: true,
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('好'),
-          ),
+    unawaited(
+      showAppleNativeAlert(
+        context,
+        title: title,
+        message: message,
+        actions: const [
+          AppleNativeAlertAction(id: 'ok', title: '好', isDefault: true),
         ],
       ),
     );
@@ -1254,11 +1244,32 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         '直播',
       ),
       (
-        CupertinoIcons.square_favorites_alt,
-        CupertinoIcons.square_favorites_alt_fill,
+        CupertinoIcons.square_stack_3d_up,
+        CupertinoIcons.square_stack_3d_up_fill,
         '片库',
       ),
       (CupertinoIcons.gear_alt, CupertinoIcons.gear_alt_fill, '设置'),
+    ];
+    const nativeDockItems = <IosNativeDockItem>[
+      IosNativeDockItem(
+        label: '主页',
+        symbol: 'play.rectangle',
+        selectedSymbol: 'play.rectangle.fill',
+      ),
+      IosNativeDockItem(
+        label: '直播',
+        symbol: 'dot.radiowaves.left.and.right',
+      ),
+      IosNativeDockItem(
+        label: '片库',
+        symbol: 'square.stack.3d.up',
+        selectedSymbol: 'square.stack.3d.up.fill',
+      ),
+      IosNativeDockItem(
+        label: '设置',
+        symbol: 'gearshape',
+        selectedSymbol: 'gearshape.fill',
+      ),
     ];
     final safeTabIndex = _tabIndex.clamp(0, dockItems.length - 1);
     final Widget activePage = switch (safeTabIndex) {
@@ -1317,14 +1328,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         child: Scaffold(
       backgroundColor: AppleColors.background,
       extendBody: true,
-      bottomNavigationBar: useSidebar ? null : IgnorePointer(
-        ignoring: _privacyPortalAnimating,
-        child: Opacity(opacity: _privacyPortalAnimating ? 0 : 1, child: Center(
-        heightFactor: 1,
-        child: AppleLiquidGlassDock(selectedIndex: safeTabIndex,
-          onSelect: (i) => setState(() => _tabIndex = i),
-          isLandscape: false, items: dockItems),
-      ))),
+      bottomNavigationBar: useSidebar
+          ? null
+          : Center(
+              heightFactor: 1,
+              child: AppleLiquidGlassDock(
+                selectedIndex: safeTabIndex,
+                onSelect: (i) => setState(() => _tabIndex = i),
+                isLandscape: false,
+                items: dockItems,
+                nativeItems: nativeDockItems,
+                onSearch: _showGlobalSearchSheet,
+                hidden: _privacyPortalAnimating,
+              ),
+            ),
       body: Stack(
         fit: StackFit.expand,
         children: [
@@ -1382,6 +1399,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   onSelect: (i) => setState(() => _tabIndex = i),
                   isLandscape: true,
                   items: dockItems,
+                  nativeItems: nativeDockItems,
+                  onSearch: _showGlobalSearchSheet,
+                  hidden: _privacyPortalAnimating,
                 ),
               ),
             ),
@@ -1621,27 +1641,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ),
                             );
                           },
-                        ),
-                        const SizedBox(width: 6),
-                        CupertinoButton(
-                          key: const ValueKey('home-search-button'),
-                          padding: EdgeInsets.zero,
-                          minSize: 33,
-                          onPressed: _showGlobalSearchSheet,
-                          child: const LiquidGlass(
-                            width: 33,
-                            height: 33,
-                            borderRadius: 999,
-                            elevated: false,
-                            tint: Color(0x521E1E22),
-                            child: Center(
-                              child: Icon(
-                                CupertinoIcons.search,
-                                color: AppleColors.labelPrimary,
-                                size: 16,
-                              ),
-                            ),
-                          ),
                         ),
                       ],
                     ),
@@ -4534,19 +4533,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             ),
                       onTap: () {
                         if (!s.supported) {
-                          showCupertinoDialog<void>(
-                            context: ctx,
-                            builder: (dCtx) => CupertinoAlertDialog(
-                              title: Text(s.name),
-                              content: Padding(
-                                padding: const EdgeInsets.only(top: 8),
-                                child: Text(s.unsupportedReason),
-                              ),
-                              actions: [
-                                CupertinoDialogAction(
-                                  isDefaultAction: true,
-                                  onPressed: () => Navigator.of(dCtx).pop(),
-                                  child: const Text('我知道了'),
+                          unawaited(
+                            showAppleNativeAlert(
+                              ctx,
+                              title: s.name,
+                              message: s.unsupportedReason,
+                              actions: const [
+                                AppleNativeAlertAction(
+                                  id: 'ok',
+                                  title: '我知道了',
+                                  isDefault: true,
                                 ),
                               ],
                             ),
@@ -5589,48 +5585,53 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             const SizedBox(height: 12),
             SizedBox(
               width: double.infinity,
-              child: CupertinoSlidingSegmentedControl<int>(
-                backgroundColor: AppleColors.fill,
-                thumbColor: const Color(0xFF636366),
-                groupValue: _librarySegment,
-                children: const {
-                  0: Padding(
-                    padding: EdgeInsets.symmetric(vertical: 7),
-                    child: Text(
-                      '收藏片单',
-                      style: TextStyle(
-                        color: AppleColors.labelPrimary,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
+              child: IosNativeSegmentedControl(
+                segments: const ['收藏片单', '观看历史', '离线下载'],
+                selectedIndex: _librarySegment,
+                onChanged: (v) => setState(() => _librarySegment = v),
+                fallback: CupertinoSlidingSegmentedControl<int>(
+                  backgroundColor: AppleColors.fill,
+                  thumbColor: const Color(0xFF636366),
+                  groupValue: _librarySegment,
+                  children: const {
+                    0: Padding(
+                      padding: EdgeInsets.symmetric(vertical: 7),
+                      child: Text(
+                        '收藏片单',
+                        style: TextStyle(
+                          color: AppleColors.labelPrimary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
-                  ),
-                  1: Padding(
-                    padding: EdgeInsets.symmetric(vertical: 7),
-                    child: Text(
-                      '观看历史',
-                      style: TextStyle(
-                        color: AppleColors.labelPrimary,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
+                    1: Padding(
+                      padding: EdgeInsets.symmetric(vertical: 7),
+                      child: Text(
+                        '观看历史',
+                        style: TextStyle(
+                          color: AppleColors.labelPrimary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
-                  ),
-                  2: Padding(
-                    padding: EdgeInsets.symmetric(vertical: 7),
-                    child: Text(
-                      '离线下载',
-                      style: TextStyle(
-                        color: AppleColors.labelPrimary,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
+                    2: Padding(
+                      padding: EdgeInsets.symmetric(vertical: 7),
+                      child: Text(
+                        '离线下载',
+                        style: TextStyle(
+                          color: AppleColors.labelPrimary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
                     ),
-                  ),
-                },
-                onValueChanged: (v) {
-                  if (v != null) setState(() => _librarySegment = v);
-                },
+                  },
+                  onValueChanged: (v) {
+                    if (v != null) setState(() => _librarySegment = v);
+                  },
+                ),
               ),
             ),
             const SizedBox(height: 16),
@@ -6017,27 +6018,24 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
   void _confirmDeleteDownload(DownloadTask t) {
-    showCupertinoDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) => CupertinoAlertDialog(
-        title: const Text('删除下载？'),
-        content: Text('「${t.title} · ${t.episodeName}」及已下载的文件将被删除。'),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
-          ),
-          CupertinoDialogAction(
-            isDestructiveAction: true,
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              DownloadService.instance.remove(t.id);
-            },
-            child: const Text('删除'),
+    unawaited(
+      showAppleNativeAlert(
+        context,
+        title: '删除下载？',
+        message: '「${t.title} · ${t.episodeName}」及已下载的文件将被删除。',
+        actions: const [
+          AppleNativeAlertAction(id: 'cancel', title: '取消', isCancel: true),
+          AppleNativeAlertAction(
+            id: 'delete',
+            title: '删除',
+            isDestructive: true,
           ),
         ],
-      ),
+      ).then((choice) {
+        if (choice == 'delete') {
+          DownloadService.instance.remove(t.id);
+        }
+      }),
     );
   }
   void _playDownloaded(DownloadTask t) {
@@ -7361,18 +7359,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       );
                       refresh();
                       if (!mounted) return;
-                      await showCupertinoDialog<void>(
-                        context: context,
-                        builder: (ctx) => CupertinoAlertDialog(
-                          title: const Text('缓存已清理'),
-                          content: const Text('已清空海报缓存与搜索记录。'),
-                          actions: [
-                            CupertinoDialogAction(
-                              onPressed: () => Navigator.pop(ctx),
-                              child: const Text('好的'),
-                            ),
-                          ],
-                        ),
+                      await showAppleNativeAlert(
+                        context,
+                        title: '缓存已清理',
+                        message: '已清空海报缓存与搜索记录。',
+                        actions: const [
+                          AppleNativeAlertAction(
+                            id: 'ok',
+                            title: '好的',
+                            isDefault: true,
+                          ),
+                        ],
                       );
                     },
                   ),
@@ -7786,16 +7783,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 );
                 refreshBoth();
                 if (!context.mounted) return;
-                showCupertinoDialog<void>(
-                  context: context,
-                  barrierDismissible: true,
-                  builder: (ctx) => CupertinoAlertDialog(
-                    title: const Text('缓存已清理'),
-                    content: const Text('已清空内存与磁盘海报缓存及搜索历史记录。'),
-                    actions: [
-                      CupertinoDialogAction(
-                        onPressed: () => Navigator.of(ctx).pop(),
-                        child: const Text('好的'),
+                unawaited(
+                  showAppleNativeAlert(
+                    context,
+                    title: '缓存已清理',
+                    message: '已清空内存与磁盘海报缓存及搜索历史记录。',
+                    actions: const [
+                      AppleNativeAlertAction(
+                        id: 'ok',
+                        title: '好的',
+                        isDefault: true,
                       ),
                     ],
                   ),
@@ -7816,12 +7813,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (bundles.isEmpty && requested == null) return;
     CmsSite? selected = requested ?? bundles.values.first;
     if (requested == null && bundles.length > 1) {
-      selected = await showCupertinoModalPopup<CmsSite>(context:context,builder:(sheet) => CupertinoActionSheet(
-        title: const Text('选择 CatPaw 订阅'),
-        actions: [for (final site in bundles.values) CupertinoActionSheetAction(
-          onPressed:()=>Navigator.pop(sheet,site),child:Text(site.name))],
-        cancelButton:CupertinoActionSheetAction(onPressed:()=>Navigator.pop(sheet),child:const Text('取消')),
-      ));
+      selected = await showAppleNativeActionSheet<CmsSite>(
+        context,
+        title: '选择 CatPaw 订阅',
+        options: [
+          for (final site in bundles.values)
+            AppleNativeSheetOption<CmsSite>(value: site, title: site.name),
+        ],
+        cancelLabel: '取消',
+      );
     }
     if (selected == null || !mounted) return;
     try {
@@ -7831,11 +7831,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       if (!opened) throw StateError('无法打开本机配置页');
     } catch (_) {
       if (!mounted) return;
-      await showCupertinoDialog<void>(context:context,builder:(dialog)=>CupertinoAlertDialog(
-        title:const Text('无法打开 CatPaw 配置'),
-        content:const Text('请确认订阅已成功导入，并使用包含本机运行组件的完整版本。'),
-        actions:[CupertinoDialogAction(onPressed:()=>Navigator.pop(dialog),child:const Text('好的'))],
-      ));
+      await showAppleNativeAlert(
+        context,
+        title: '无法打开 CatPaw 配置',
+        message: '请确认订阅已成功导入，并使用包含本机运行组件的完整版本。',
+        actions: const [
+          AppleNativeAlertAction(id: 'ok', title: '好的', isDefault: true),
+        ],
+      );
     }
   }
 
@@ -9451,28 +9454,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     BuildContext hostContext,
     CmsSite site,
   ) async {
-    final confirmed = await showCupertinoDialog<bool>(
-      context: hostContext,
-      builder: (dialogCtx) => CupertinoAlertDialog(
-        title: Text('删除「${site.name}」？'),
-        content: const Padding(
-          padding: EdgeInsets.only(top: 8),
-          child: Text('删除后该线路将从片源列表移除，后续刷新订阅也不会重现；可在「管理线路 → 恢复已删」中恢复。'),
+    final choice = await showAppleNativeAlert(
+      hostContext,
+      title: '删除「${site.name}」？',
+      message: '删除后该线路将从片源列表移除，后续刷新订阅也不会重现；可在「管理线路 → 恢复已删」中恢复。',
+      actions: const [
+        AppleNativeAlertAction(id: 'cancel', title: '取消', isCancel: true),
+        AppleNativeAlertAction(
+          id: 'delete',
+          title: '删除',
+          isDestructive: true,
         ),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(dialogCtx).pop(false),
-            child: const Text('取消'),
-          ),
-          CupertinoDialogAction(
-            isDestructiveAction: true,
-            onPressed: () => Navigator.of(dialogCtx).pop(true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
+      ],
     );
-    if (confirmed != true || !mounted) return false;
+    if (choice != 'delete' || !mounted) return false;
     try {
       await widget.storage.removeSite(widget.storage.siteIdentityOf(site));
       if (!site.isEffectivelyPrivate &&
@@ -9792,41 +9787,27 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final curGroup = site.group.trim().isEmpty
         ? (privateMode ? '隐私分组' : '默认分组')
         : site.group.trim();
-    final choice = await showCupertinoModalPopup<String>(
-      context: hostContext,
-      builder: (popupCtx) => CupertinoActionSheet(
-        title: Text(site.name),
-        message: Text('当前分组：$curGroup · 接口：${site.api}'),
-        actions: [
-          CupertinoActionSheetAction(
-            onPressed: () => Navigator.of(popupCtx).pop('group'),
-            child: const Text('修改分组'),
+    final choice = await showAppleNativeActionSheet<String>(
+      hostContext,
+      title: site.name,
+      message: '当前分组：$curGroup · 接口：${site.api}',
+      options: [
+        const AppleNativeSheetOption<String>(value: 'group', title: '修改分组'),
+        const AppleNativeSheetOption<String>(value: 'edit', title: '编辑线路信息'),
+        if (!privateMode && site.supported)
+          AppleNativeSheetOption<String>(
+            value: 'preferred',
+            title: isPref ? '取消默认偏好源' : '设为默认偏好源',
           ),
-          CupertinoActionSheetAction(
-            onPressed: () => Navigator.of(popupCtx).pop('edit'),
-            child: const Text('编辑线路信息'),
-          ),
-          if (!privateMode && site.supported)
-            CupertinoActionSheetAction(
-              onPressed: () => Navigator.of(popupCtx).pop('preferred'),
-              child: Text(isPref ? '取消默认偏好源' : '设为默认偏好源'),
-            ),
-          if (hasOv)
-            CupertinoActionSheetAction(
-              onPressed: () => Navigator.of(popupCtx).pop('reset'),
-              child: const Text('恢复原始配置'),
-            ),
-          CupertinoActionSheetAction(
-            isDestructiveAction: true,
-            onPressed: () => Navigator.of(popupCtx).pop('delete'),
-            child: const Text('删除这条线路'),
-          ),
-        ],
-        cancelButton: CupertinoActionSheetAction(
-          onPressed: () => Navigator.of(popupCtx).pop(),
-          child: const Text('取消'),
+        if (hasOv)
+          const AppleNativeSheetOption<String>(value: 'reset', title: '恢复原始配置'),
+        const AppleNativeSheetOption<String>(
+          value: 'delete',
+          title: '删除这条线路',
+          isDestructive: true,
         ),
-      ),
+      ],
+      cancelLabel: '取消',
     );
     if (choice == null || !hostContext.mounted) return;
     if (choice == 'group') {
@@ -10801,45 +10782,40 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   badgeLabel: siteBadgeLabel,
                   badgeColor: siteBadgeColor,
                   onUnsupportedSelected: (s) {
-                    showCupertinoDialog<void>(
-                      context: ctx,
-                      builder: (dialogCtx) => CupertinoAlertDialog(
-                        title: Text(s.name),
-                        content: Padding(
-                          padding: const EdgeInsets.only(top: 8),
-                          child: Text(s.unsupportedReason),
-                        ),
-                        actions: [
-                          CupertinoDialogAction(
-                            onPressed: () async {
-                              Navigator.of(dialogCtx).pop();
-                              final changed = await _showEditSingleSiteDialog(
-                                ctx,
-                                s,
-                              );
-                              if (changed && ctx.mounted) setPickerState(() {});
-                            },
-                            child: const Text('编辑线路'),
+                    unawaited(
+                      showAppleNativeAlert(
+                        ctx,
+                        title: s.name,
+                        message: s.unsupportedReason,
+                        actions: const [
+                          AppleNativeAlertAction(id: 'edit', title: '编辑线路'),
+                          AppleNativeAlertAction(
+                            id: 'delete',
+                            title: '删除线路',
+                            isDestructive: true,
                           ),
-                          CupertinoDialogAction(
-                            isDestructiveAction: true,
-                            onPressed: () async {
-                              Navigator.of(dialogCtx).pop();
-                              final deleted = await _confirmAndDeleteSingleSite(
-                                ctx,
-                                s,
-                              );
-                              if (deleted && ctx.mounted) setPickerState(() {});
-                            },
-                            child: const Text('删除线路'),
-                          ),
-                          CupertinoDialogAction(
-                            isDefaultAction: true,
-                            onPressed: () => Navigator.of(dialogCtx).pop(),
-                            child: const Text('我知道了'),
+                          AppleNativeAlertAction(
+                            id: 'ok',
+                            title: '我知道了',
+                            isDefault: true,
                           ),
                         ],
-                      ),
+                      ).then((action) async {
+                        if (!ctx.mounted) return;
+                        if (action == 'edit') {
+                          final changed = await _showEditSingleSiteDialog(
+                            ctx,
+                            s,
+                          );
+                          if (changed && ctx.mounted) setPickerState(() {});
+                        } else if (action == 'delete') {
+                          final deleted = await _confirmAndDeleteSingleSite(
+                            ctx,
+                            s,
+                          );
+                          if (deleted && ctx.mounted) setPickerState(() {});
+                        }
+                      }),
                     );
                   },
                   onSelected: (s) {

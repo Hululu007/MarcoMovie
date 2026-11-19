@@ -13,6 +13,7 @@ import 'core/ohos_runtime.dart';
 import 'core/storage_service.dart';
 import 'ui/adaptive_shell.dart';
 import 'ui/apple_theme.dart';
+import 'ui/ios_liquid_glass.dart';
 import 'ui/tv/tv_living_room_shell.dart';
 import 'ui/windows_title_bar.dart';
 import 'ui/windows_appearance.dart';
@@ -20,6 +21,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   AppLog.init();
   await OhosRuntime.ensureInitialized();
+  await IosLiquidGlassBridge.ensureInitialized();
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     await windowManager.ensureInitialized();
     await windowManager.setMinimumSize(const Size(720, 520));
