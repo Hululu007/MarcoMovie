@@ -17,7 +17,8 @@ public final class TvRailMetricsChecks {
                             throw new AssertionError("bottom settings clipped");
                         if (Math.round(Math.round(42 * fit) * density) < Math.round(32 * density))
                             throw new AssertionError("navigation target too small");
-                        if (TvRailMetrics.height(request, density, 8) <= available && fit != request)
+                        if (TvRailMetrics.height(request, density, 8) <= available
+                                && fit != request)
                             throw new AssertionError("unnecessary shrinking");
                         cases++;
                     }

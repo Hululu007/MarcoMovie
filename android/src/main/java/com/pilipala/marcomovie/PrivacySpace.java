@@ -39,14 +39,15 @@ final class PrivacySpace {
     }
 
     static void openTv(MainActivity a) {
-        if (!a.isTvDevice() || !a.foreground || a.switchingPrivacy || a.isFinishing() || dialogOpen) return;
+        if (!a.isTvDevice() || !a.foreground || a.switchingPrivacy || a.isFinishing() || dialogOpen)
+            return;
         if (a.privateMode) switchSpace(a, false);
         else prompt(a);
     }
 
     private static void prompt(MainActivity a) {
-        final TvSearchContext tvContext = a.isTvDevice()
-                ? new TvSearchContext(a.config, a.privateMode, a.engineEpoch) : null;
+        final TvSearchContext tvContext =
+                a.isTvDevice() ? new TvSearchContext(a.config, a.privateMode, a.engineEpoch) : null;
         SharedPreferences lock = a.getSharedPreferences("private-lock", Context.MODE_PRIVATE);
         if (System.currentTimeMillis() < lock.getLong("retry_at", 0)) {
             a.toast("尝试次数较多，请稍后再输入密码");
@@ -66,24 +67,48 @@ final class PrivacySpace {
         if (setup) panel.addView(confirm);
         if (a.isTvDevice()) {
             final EditText[] target = {pin};
-            pin.setOnFocusChangeListener((v, focused) -> { if (focused) target[0] = pin; });
-            confirm.setOnFocusChangeListener((v, focused) -> { if (focused) target[0] = confirm; });
+            pin.setOnFocusChangeListener(
+                    (v, focused) -> {
+                        if (focused) target[0] = pin;
+                    });
+            confirm.setOnFocusChangeListener(
+                    (v, focused) -> {
+                        if (focused) target[0] = confirm;
+                    });
             for (String digits : new String[] {"123", "456", "789", "0⌫"}) {
                 LinearLayout row = a.row();
                 for (int i = 0; i < digits.length(); i++) {
                     final String digit = digits.substring(i, i + 1);
-                    a.addButton(row, a.navButton(digit, "private-pin:" + digit, () -> {
-                        if (!a.foreground || !tvContext.matches(a.config, a.privateMode, a.engineEpoch)) return;
-                        String value = target[0].getText().toString();
-                        if ("⌫".equals(digit)) { if (!value.isEmpty()) target[0].setText(value.substring(0, value.length() - 1)); }
-                        else if (value.length() < 4) target[0].append(digit);
-                    }));
+                    a.addButton(
+                            row,
+                            a.navButton(
+                                    digit,
+                                    "private-pin:" + digit,
+                                    () -> {
+                                        if (!a.foreground
+                                                || !tvContext.matches(
+                                                        a.config, a.privateMode, a.engineEpoch))
+                                            return;
+                                        String value = target[0].getText().toString();
+                                        if ("⌫".equals(digit)) {
+                                            if (!value.isEmpty())
+                                                target[0].setText(
+                                                        value.substring(0, value.length() - 1));
+                                        } else if (value.length() < 4) target[0].append(digit);
+                                    }));
                 }
                 panel.addView(row);
             }
-            if (setup) a.addButton(panel, a.navButton("填写确认密码", "private-pin-confirm-field", () -> {
-                target[0] = confirm; confirm.requestFocus();
-            }));
+            if (setup)
+                a.addButton(
+                        panel,
+                        a.navButton(
+                                "填写确认密码",
+                                "private-pin-confirm-field",
+                                () -> {
+                                    target[0] = confirm;
+                                    confirm.requestFocus();
+                                }));
         }
         dialogOpen = true;
         AppDialog dialog =
@@ -103,8 +128,10 @@ final class PrivacySpace {
         final android.widget.Button submit = dialog.getButton(-1);
         submit.setOnClickListener(
                 button -> {
-                    if (!submit.isEnabled() || tvContext != null
-                            && !tvContext.matches(a.config, a.privateMode, a.engineEpoch)) return;
+                    if (!submit.isEnabled()
+                            || tvContext != null
+                                    && !tvContext.matches(a.config, a.privateMode, a.engineEpoch))
+                        return;
                     if (System.currentTimeMillis() < lock.getLong("retry_at", 0)) {
                         a.toast("尝试次数较多，请稍后再输入密码");
                         return;
@@ -138,7 +165,14 @@ final class PrivacySpace {
                                     }
                                     a.ui.post(
                                             () -> {
-                                                if (tvContext != null && !tvContext.matches(a.config, a.privateMode, a.engineEpoch)) { dialog.dismiss(); return; }
+                                                if (tvContext != null
+                                                        && !tvContext.matches(
+                                                                a.config,
+                                                                a.privateMode,
+                                                                a.engineEpoch)) {
+                                                    dialog.dismiss();
+                                                    return;
+                                                }
                                                 if (a.isFinishing()
                                                         || a.isDestroyed()
                                                         || !dialog.isShowing()) return;
@@ -185,8 +219,12 @@ final class PrivacySpace {
                                 } catch (Exception error) {
                                     a.ui.post(
                                             () -> {
-                                                if (dialog.isShowing() && (tvContext == null
-                                                        || tvContext.matches(a.config, a.privateMode, a.engineEpoch))) {
+                                                if (dialog.isShowing()
+                                                        && (tvContext == null
+                                                                || tvContext.matches(
+                                                                        a.config,
+                                                                        a.privateMode,
+                                                                        a.engineEpoch))) {
                                                     submit.setEnabled(true);
                                                     a.toast("隐私密码验证失败，请重试");
                                                 }
@@ -241,7 +279,10 @@ final class PrivacySpace {
         a.pendingTitles.clear();
         a.phonetic = null;
         active = privateMode;
-        if (!privateMode) { VideoSkipStore.clearPrivateRecords(); VideoMarkerRepository.clearPrivate(); }
+        if (!privateMode) {
+            VideoSkipStore.clearPrivateRecords();
+            VideoMarkerRepository.clearPrivate();
+        }
         a.switchingPrivacy = true;
         MobileShell.activeTab = 0;
         MobileShell.clearSearchSession();

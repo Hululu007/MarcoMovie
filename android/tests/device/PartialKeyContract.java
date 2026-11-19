@@ -9,8 +9,14 @@ final class PartialKeyContract {
         String tag = "null", contentId = "";
         long uptime, captureNs;
         int left, top, right, bottom;
-        boolean usable() { return attached && shown && visible && enabled; }
-        boolean partial() { return pending && cards > 0 && cards < end - start; }
+
+        boolean usable() {
+            return attached && shown && visible && enabled;
+        }
+
+        boolean partial() {
+            return pending && cards > 0 && cards < end - start;
+        }
     }
 
     static String downViolation(State before, State after) {
@@ -27,16 +33,20 @@ final class PartialKeyContract {
     }
 
     static boolean partialKeyWitness(State before) {
-        return before.index >= 0 && before.usable() && before.active && before.ready
-                && !before.busy && before.partial();
+        return before.index >= 0
+                && before.usable()
+                && before.active
+                && before.ready
+                && !before.busy
+                && before.partial();
     }
 
     static String witnessKind(State before) {
         if (!partialKeyWitness(before)) return "not_partial";
         if (before.nextId == before.focusId) return "partial_tail_self";
         if (before.nextIndex >= before.start
-                && (before.nextIndex - before.start) / before.columns >= Math.max(1, before.rows - 2))
-            return "partial_focus_prefetch_boundary";
+                && (before.nextIndex - before.start) / before.columns
+                        >= Math.max(1, before.rows - 2)) return "partial_focus_prefetch_boundary";
         return "partial_ordinary_row";
     }
 }

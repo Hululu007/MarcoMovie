@@ -31,7 +31,12 @@ final class GlassSelection {
         this(activity, parent, cornerDp, subtle, false);
     }
 
-    GlassSelection(MainActivity activity, ViewGroup parent, float cornerDp, boolean subtle, boolean navigationLens) {
+    GlassSelection(
+            MainActivity activity,
+            ViewGroup parent,
+            float cornerDp,
+            boolean subtle,
+            boolean navigationLens) {
         a = activity;
         owner = parent;
         this.cornerDp = cornerDp;
@@ -44,7 +49,8 @@ final class GlassSelection {
                                 0,
                                 1,
                                 1,
-                                navigationLens ? new int[] {0x42e6f0ff, 0x1ac6d8ec, 0x29d6e8ff}
+                                navigationLens
+                                        ? new int[] {0x42e6f0ff, 0x1ac6d8ec, 0x29d6e8ff}
                                         : new int[] {0x2affffff, 0x16ffffff, 0x1effffff},
                                 new float[] {0, .55f, 1},
                                 Shader.TileMode.CLAMP)
@@ -63,7 +69,8 @@ final class GlassSelection {
                                 0,
                                 1,
                                 1,
-                                navigationLens ? new int[] {0xb8f5faff, 0x45c2d7ef, 0x789db9d6}
+                                navigationLens
+                                        ? new int[] {0xb8f5faff, 0x45c2d7ef, 0x789db9d6}
                                         : new int[] {0x54ffffff, 0x1effffff, 0x32ffffff},
                                 null,
                                 Shader.TileMode.CLAMP)
@@ -150,7 +157,8 @@ final class GlassSelection {
         }
         float maxRadius = Math.min(drawing.width(), drawing.height()) * .5f;
         float radius = cornerDp > 0 ? Math.min(a.dp(cornerDp), maxRadius) : maxRadius;
-        if (navigationLens && (a.reduced || a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false))) {
+        if (navigationLens
+                && (a.reduced || a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false))) {
             paint.setShader(null);
             paint.setStyle(Paint.Style.FILL);
             paint.setColor(0xff354353);

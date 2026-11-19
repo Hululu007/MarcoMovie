@@ -188,7 +188,8 @@ final class TvScrollView extends ScrollView {
                 return true;
             }
         }
-        int lineHeight = readingText ? ((android.widget.TextView) focused).getLineHeight() : a.dp(24);
+        int lineHeight =
+                readingText ? ((android.widget.TextView) focused).getLineHeight() : a.dp(24);
         int distance = TvReadingScrollPolicy.step(getHeight() - a.dp(24), lineHeight, a.dp(48));
         int step = distance * (direction == FOCUS_UP ? -1 : 1);
         // Limit queued travel while a remote sends rapid repeat events.

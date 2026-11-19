@@ -16,8 +16,8 @@ final class LiveSession {
                 if (!channel.streams.isEmpty()) channels.add(channel);
     }
 
-    static LiveSession forChannel(LiveCatalog.Source source, LiveCatalog.Catalog catalog,
-            LiveCatalog.Channel channel) {
+    static LiveSession forChannel(
+            LiveCatalog.Source source, LiveCatalog.Catalog catalog, LiveCatalog.Channel channel) {
         if (source == null || catalog == null || channel == null)
             throw new IllegalArgumentException("直播目录已失效");
         LiveSession session = new LiveSession(source, catalog);

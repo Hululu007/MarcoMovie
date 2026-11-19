@@ -68,7 +68,8 @@ final class HomeAmbient extends View {
                                         Bitmap nextField = field(c0, c1);
                                         post(
                                                 () -> {
-                                                    if (image == wanted && isAttachedToWindow()
+                                                    if (image == wanted
+                                                            && isAttachedToWindow()
                                                             && revision == appearanceRevision)
                                                         transitionReady(c0, c1, nextField);
                                                 });
@@ -92,7 +93,8 @@ final class HomeAmbient extends View {
                                 final Bitmap nextField = field(c0, c1);
                                 post(
                                         () -> {
-                                            if (image == wanted && isAttachedToWindow()
+                                            if (image == wanted
+                                                    && isAttachedToWindow()
                                                     && revision == appearanceRevision)
                                                 transitionReady(c0, c1, nextField);
                                         });

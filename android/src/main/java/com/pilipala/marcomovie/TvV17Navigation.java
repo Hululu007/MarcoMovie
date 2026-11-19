@@ -16,7 +16,10 @@ final class TvV17Navigation {
     }
 
     private boolean usable(View view) {
-        return view != null && view.isAttachedToWindow() && view.isShown()
-                && view.isFocusable() && view.isEnabled();
+        return view != null
+                && view.isAttachedToWindow()
+                && view.isShown()
+                && view.isFocusable()
+                && view.isEnabled();
     }
 }

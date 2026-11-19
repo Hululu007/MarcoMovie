@@ -14,8 +14,17 @@ final class TvV17PosterCard {
     }
 
     static void focus(MainActivity a, View card, TextView title, boolean focused) {
-        FocusMotion.style(a, card, focused, Color.TRANSPARENT, Color.TRANSPARENT, 12,
-                TvV17Theme.FOCUS, TvV17Theme.FOCUS, true, 1.035f);
+        FocusMotion.style(
+                a,
+                card,
+                focused,
+                Color.TRANSPARENT,
+                Color.TRANSPARENT,
+                12,
+                TvV17Theme.FOCUS,
+                TvV17Theme.FOCUS,
+                true,
+                1.035f);
         title.setTextColor(focused ? TvV17Theme.TEXT : TvV17Theme.MUTED);
     }
 }

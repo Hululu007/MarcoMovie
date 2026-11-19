@@ -23,8 +23,10 @@ final class TvV17LibraryScreen {
         hero.setId(View.generateViewId());
         hero.setGravity(Gravity.CENTER_VERTICAL);
         hero.setPadding(a.dp(24), a.dp(18), a.dp(24), a.dp(18));
-        GradientDrawable background = new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                new int[] {0xff273b43, 0xff242c39, 0xff171c25});
+        GradientDrawable background =
+                new GradientDrawable(
+                        GradientDrawable.Orientation.LEFT_RIGHT,
+                        new int[] {0xff273b43, 0xff242c39, 0xff171c25});
         background.setCornerRadius(a.dp(18));
         hero.setBackground(background);
         hero.setFocusable(true);
@@ -49,19 +51,28 @@ final class TvV17LibraryScreen {
         actionSize.topMargin = a.dp(12);
         hero.addView(action, actionSize);
         hero.setOnClickListener(v -> a.resumeHistory(entry));
-        hero.setOnFocusChangeListener((v, focused) -> {
-            hero.setAlpha(focused ? 1f : .90f);
-            hero.setElevation(focused ? a.dp(5) : 0);
-            hero.setBackground(TvV17Surface.rounded(focused ? 0xff304750 : 0xff26353f,
-                    a.dp(18), focused ? TvV17Theme.FOCUS : Color.TRANSPARENT,
-                    focused ? a.dp(2) : 0));
-        });
+        hero.setOnFocusChangeListener(
+                (v, focused) -> {
+                    hero.setAlpha(focused ? 1f : .90f);
+                    hero.setElevation(focused ? a.dp(5) : 0);
+                    hero.setBackground(
+                            TvV17Surface.rounded(
+                                    focused ? 0xff304750 : 0xff26353f,
+                                    a.dp(18),
+                                    focused ? TvV17Theme.FOCUS : Color.TRANSPARENT,
+                                    focused ? a.dp(2) : 0));
+                });
         host.addView(hero, new LinearLayout.LayoutParams(-1, a.dp(164)));
         return hero;
     }
 
-    static List<View> preview(MainActivity a, LinearLayout host, Cms.Site site,
-            List<Cms.Video> videos, int columns, int widthDp) {
+    static List<View> preview(
+            MainActivity a,
+            LinearLayout host,
+            Cms.Site site,
+            List<Cms.Video> videos,
+            int columns,
+            int widthDp) {
         host.removeAllViews();
         List<View> cards = new ArrayList<>();
         if (videos == null || videos.isEmpty()) {
@@ -98,10 +109,11 @@ final class TvV17LibraryScreen {
             title.setPadding(a.dp(2), a.dp(7), a.dp(2), 0);
             card.addView(title, new LinearLayout.LayoutParams(-1, a.dp(27)));
             TvV17PosterCard.focus(a, card, title, false);
-            card.setOnFocusChangeListener((v, focused) -> {
-                TvV17PosterCard.focus(a, card, title, focused);
-                if (focused && a.homeAmbient != null) a.homeAmbient.follow(image);
-            });
+            card.setOnFocusChangeListener(
+                    (v, focused) -> {
+                        TvV17PosterCard.focus(a, card, title, focused);
+                        if (focused && a.homeAmbient != null) a.homeAmbient.follow(image);
+                    });
             card.setOnClickListener(v -> a.openListing(site, video));
             LinearLayout.LayoutParams cell = new LinearLayout.LayoutParams(0, -2, 1);
             cell.rightMargin = a.dp(i == columns - 1 ? 0 : 14);

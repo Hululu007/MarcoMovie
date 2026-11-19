@@ -15,7 +15,10 @@ final class TvV17Theme {
     final boolean reducedMotion;
     final boolean reducedTransparency;
 
-    TvV17Theme(float densityScale, float ambientStrength, boolean reducedMotion,
+    TvV17Theme(
+            float densityScale,
+            float ambientStrength,
+            boolean reducedMotion,
             boolean reducedTransparency) {
         this.densityScale = Math.max(.75f, Math.min(1.4f, densityScale));
         this.ambientStrength = Math.max(0f, Math.min(1f, ambientStrength));
@@ -24,6 +27,7 @@ final class TvV17Theme {
     }
 
     int dp(Context context, float value) {
-        return Math.round(value * densityScale * context.getResources().getDisplayMetrics().density);
+        return Math.round(
+                value * densityScale * context.getResources().getDisplayMetrics().density);
     }
 }

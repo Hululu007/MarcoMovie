@@ -206,16 +206,20 @@ public final class ReviewFixChecks {
                 "TV navigation keeps legacy placement, allows explicit switching, and excludes mobile");
         check(
                 Integer.valueOf(1).equals(Prefs.sanitizeSetting(Prefs.TV_NAVIGATION_MODE, 1))
-                        && Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_NAVIGATION_MODE, 0))
+                        && Integer.valueOf(0)
+                                .equals(Prefs.sanitizeSetting(Prefs.TV_NAVIGATION_MODE, 0))
                         && Prefs.sanitizeSetting(Prefs.TV_NAVIGATION_MODE, -1) == null
                         && Prefs.sanitizeSetting(Prefs.TV_NAVIGATION_MODE, 2) == null
                         && Prefs.sanitizeSetting(Prefs.TV_NAVIGATION_MODE, "1") == null,
                 "backup validates the independent TV navigation mode without changing old position meaning");
         check(
-                Prefs.tvAmbientStrength(-1) == 0f && Prefs.tvAmbientStrength(150) == 1f
+                Prefs.tvAmbientStrength(-1) == 0f
+                        && Prefs.tvAmbientStrength(150) == 1f
                         && Prefs.tvAmbientStrength(25) == .25f
-                        && Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_AMBIENT_PERCENT, 0))
-                        && Integer.valueOf(100).equals(Prefs.sanitizeSetting(Prefs.TV_AMBIENT_PERCENT, 100))
+                        && Integer.valueOf(0)
+                                .equals(Prefs.sanitizeSetting(Prefs.TV_AMBIENT_PERCENT, 0))
+                        && Integer.valueOf(100)
+                                .equals(Prefs.sanitizeSetting(Prefs.TV_AMBIENT_PERCENT, 100))
                         && Prefs.sanitizeSetting(Prefs.TV_AMBIENT_PERCENT, -1) == null
                         && Prefs.sanitizeSetting(Prefs.TV_AMBIENT_PERCENT, 101) == null,
                 "TV ambient percentage accepts backup endpoints, rejects outliers, and clamps runtime strength");

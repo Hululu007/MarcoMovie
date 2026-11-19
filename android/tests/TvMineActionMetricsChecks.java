@@ -10,13 +10,19 @@ public final class TvMineActionMetricsChecks {
                     int total = width * 7 + gap * 6;
                     if (width < measuredMinimum) throw new AssertionError("label clipped");
                     if (measuredMinimum * 7 + gap * 6 <= viewport) {
-                        if (total > viewport || viewport - total >= 7) throw new AssertionError("uneven spare space");
-                    } else if (width != measuredMinimum) throw new AssertionError("scrolling row inflated");
+                        if (total > viewport || viewport - total >= 7)
+                            throw new AssertionError("uneven spare space");
+                    } else if (width != measuredMinimum)
+                        throw new AssertionError("scrolling row inflated");
                     cases++;
                 }
             }
         }
-        if (TvMineActionMetrics.width(0, 100, 10, 7) != 100) throw new AssertionError("pre-layout width");
-        System.out.println("PASS " + (cases + 1) + " equal action row fit/scroll budgets; text minimum supplied by actual Paint in UI");
+        if (TvMineActionMetrics.width(0, 100, 10, 7) != 100)
+            throw new AssertionError("pre-layout width");
+        System.out.println(
+                "PASS "
+                        + (cases + 1)
+                        + " equal action row fit/scroll budgets; text minimum supplied by actual Paint in UI");
     }
 }

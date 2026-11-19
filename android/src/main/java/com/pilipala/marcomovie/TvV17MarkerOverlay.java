@@ -12,7 +12,9 @@ import android.widget.TextView;
 final class TvV17MarkerOverlay extends FrameLayout {
     interface Listener {
         void confirm(boolean intro, long selectedTimeMs, long durationMs);
+
         void cancel();
+
         void preview(long selectedTimeMs);
     }
 
@@ -40,7 +42,9 @@ final class TvV17MarkerOverlay extends FrameLayout {
         }
 
         boolean canConfirm() {
-            return frozen && !closed && selectedTimeMs > 0
+            return frozen
+                    && !closed
+                    && selectedTimeMs > 0
                     && (durationMs <= 0 || selectedTimeMs < durationMs);
         }
 
@@ -58,34 +62,45 @@ final class TvV17MarkerOverlay extends FrameLayout {
         }
 
         int key(int key, int action, int repeat, boolean canceled, long downTime) {
-            if (key == KeyEvent.KEYCODE_MENU || key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
-                    || key == KeyEvent.KEYCODE_MEDIA_PLAY || key == KeyEvent.KEYCODE_MEDIA_PAUSE
+            if (key == KeyEvent.KEYCODE_MENU
+                    || key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                    || key == KeyEvent.KEYCODE_MEDIA_PLAY
+                    || key == KeyEvent.KEYCODE_MEDIA_PAUSE
                     || key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD
                     || key == KeyEvent.KEYCODE_MEDIA_REWIND) {
                 if (action == KeyEvent.ACTION_DOWN) pendingActionKey = -1;
                 return HANDLED;
             }
-            if (key != KeyEvent.KEYCODE_BACK && key != KeyEvent.KEYCODE_DPAD_LEFT
-                    && key != KeyEvent.KEYCODE_DPAD_RIGHT && key != KeyEvent.KEYCODE_DPAD_UP
-                    && key != KeyEvent.KEYCODE_DPAD_DOWN && key != KeyEvent.KEYCODE_DPAD_CENTER
-                    && key != KeyEvent.KEYCODE_ENTER && key != KeyEvent.KEYCODE_NUMPAD_ENTER) {
+            if (key != KeyEvent.KEYCODE_BACK
+                    && key != KeyEvent.KEYCODE_DPAD_LEFT
+                    && key != KeyEvent.KEYCODE_DPAD_RIGHT
+                    && key != KeyEvent.KEYCODE_DPAD_UP
+                    && key != KeyEvent.KEYCODE_DPAD_DOWN
+                    && key != KeyEvent.KEYCODE_DPAD_CENTER
+                    && key != KeyEvent.KEYCODE_ENTER
+                    && key != KeyEvent.KEYCODE_NUMPAD_ENTER) {
                 if (action == KeyEvent.ACTION_DOWN) pendingActionKey = -1;
                 return UNHANDLED;
             }
             if (closed) return HANDLED;
-            boolean actionKey = key == KeyEvent.KEYCODE_BACK
-                    || key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER
-                    || key == KeyEvent.KEYCODE_NUMPAD_ENTER;
+            boolean actionKey =
+                    key == KeyEvent.KEYCODE_BACK
+                            || key == KeyEvent.KEYCODE_DPAD_CENTER
+                            || key == KeyEvent.KEYCODE_ENTER
+                            || key == KeyEvent.KEYCODE_NUMPAD_ENTER;
             if (actionKey) {
                 if (action == KeyEvent.ACTION_DOWN && repeat == 0) {
                     if (canceled || pendingActionKey != -1) pendingActionKey = -1;
-                    else { pendingActionKey = key; pendingDownTime = downTime; }
+                    else {
+                        pendingActionKey = key;
+                        pendingDownTime = downTime;
+                    }
                 } else if (action == KeyEvent.ACTION_DOWN
                         && (canceled || pendingActionKey != key || pendingDownTime != downTime)) {
                     pendingActionKey = -1;
-                }
-                else if (action == KeyEvent.ACTION_UP) {
-                    boolean commit = pendingActionKey == key && pendingDownTime == downTime && !canceled;
+                } else if (action == KeyEvent.ACTION_UP) {
+                    boolean commit =
+                            pendingActionKey == key && pendingDownTime == downTime && !canceled;
                     pendingActionKey = -1;
                     if (commit && key == KeyEvent.KEYCODE_BACK) {
                         closed = true;
@@ -101,7 +116,8 @@ final class TvV17MarkerOverlay extends FrameLayout {
                 if (frozen && !canceled) {
                     if (key == KeyEvent.KEYCODE_DPAD_DOWN) editingTime = true;
                     else if (key == KeyEvent.KEYCODE_DPAD_UP) editingTime = false;
-                    else if (editingTime) adjust(key == KeyEvent.KEYCODE_DPAD_LEFT ? -10000 : 10000);
+                    else if (editingTime)
+                        adjust(key == KeyEvent.KEYCODE_DPAD_LEFT ? -10000 : 10000);
                     else if (repeat == 0) intro = key == KeyEvent.KEYCODE_DPAD_LEFT;
                 }
             }
@@ -127,7 +143,8 @@ final class TvV17MarkerOverlay extends FrameLayout {
         LinearLayout card = a.vertical();
         card.setPadding(a.dp(22), a.dp(12), a.dp(22), a.dp(12));
         card.setBackground(TvV17Surface.rounded(0xe61b2528, a.dp(25), 0x33ffffff, a.dp(1)));
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.RIGHT | Gravity.BOTTOM);
+        FrameLayout.LayoutParams lp =
+                new FrameLayout.LayoutParams(-2, -2, Gravity.RIGHT | Gravity.BOTTOM);
         lp.setMargins(a.dp(32), 0, a.dp(48), a.dp(78));
         addView(card, lp);
         status = a.text("正在暂停…", 15, TvV17Theme.MUTED);
@@ -157,8 +174,13 @@ final class TvV17MarkerOverlay extends FrameLayout {
     /** The host routes keys only while this overlay owns input, before global playback handlers. */
     boolean handleKey(KeyEvent event) {
         long before = state.selectedTimeMs;
-        int result = state.key(event.getKeyCode(), event.getAction(), event.getRepeatCount(),
-                event.isCanceled(), event.getDownTime());
+        int result =
+                state.key(
+                        event.getKeyCode(),
+                        event.getAction(),
+                        event.getRepeatCount(),
+                        event.isCanceled(),
+                        event.getDownTime());
         if (result == State.UNHANDLED) return false;
         if (before != state.selectedTimeMs) listener.preview(state.selectedTimeMs);
         if (result == State.CONFIRM)
@@ -182,17 +204,26 @@ final class TvV17MarkerOverlay extends FrameLayout {
     }
 
     private void render() {
-        String time = PlaybackController.formatTime((int) Math.min(Integer.MAX_VALUE, state.selectedTimeMs));
+        String time =
+                PlaybackController.formatTime(
+                        (int) Math.min(Integer.MAX_VALUE, state.selectedTimeMs));
         status.setText("已暂停  " + time + scopeNote);
-        choices.setText((state.intro ? "● " : "○ ") + "片头结束     "
-                + (!state.intro ? "● " : "○ ") + "片尾开始");
-        int percent = state.durationMs > 0
-                ? (int) Math.max(0, Math.min(1000, 1000.0 * state.selectedTimeMs / state.durationMs))
-                : 0;
+        choices.setText(
+                (state.intro ? "● " : "○ ") + "片头结束     " + (!state.intro ? "● " : "○ ") + "片尾开始");
+        int percent =
+                state.durationMs > 0
+                        ? (int)
+                                Math.max(
+                                        0,
+                                        Math.min(
+                                                1000,
+                                                1000.0 * state.selectedTimeMs / state.durationMs))
+                        : 0;
         progress.setProgress(percent);
         progress.setContentDescription("标记时间 " + time);
         if (state.editingTime) hint.setText("← → 调整 10 秒    ↑ 返回选择    返回 取消");
-        else if (state.durationMs <= 0) hint.setText("时长未知，仅记录节点，不能自动跳片尾    ↓ 调整    OK 记录    返回 取消");
+        else if (state.durationMs <= 0)
+            hint.setText("时长未知，仅记录节点，不能自动跳片尾    ↓ 调整    OK 记录    返回 取消");
         else hint.setText("← → 选择    ↓ 调整时间    OK 记录    返回 取消");
         if (!state.canConfirm() && state.durationMs > 0) {
             hint.setText("请选择片内时间    ↓ 调整时间    返回 取消");

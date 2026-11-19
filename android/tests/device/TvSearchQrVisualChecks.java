@@ -18,20 +18,34 @@ public final class TvSearchQrVisualChecks {
         int content = b.getWidth() - b.getCompoundPaddingLeft() - b.getCompoundPaddingRight();
         float text = b.getPaint().measureText(b.getText().toString());
         Rect visible = new Rect();
-        boolean entire = b.getLocalVisibleRect(visible)
-                && visible.left <= 0 && visible.top <= 0
-                && visible.right >= b.getWidth() && visible.bottom >= b.getHeight();
-        JSONObject result = new JSONObject()
-                .put("text", b.getText()).put("width", b.getWidth())
-                .put("text_width", text).put("content_width", content)
-                .put("text_color", b.getCurrentTextColor()).put("focused", b.hasFocus())
-                .put("entirely_visible", entire);
-        if (!"扫码".contentEquals(b.getText()) || !b.isShown() || b.getAlpha() <= 0
-                || b.hasFocus() != expectedFocused || !entire || content < Math.ceil(text)
-                || layout == null || layout.getLineCount() != 1
+        boolean entire =
+                b.getLocalVisibleRect(visible)
+                        && visible.left <= 0
+                        && visible.top <= 0
+                        && visible.right >= b.getWidth()
+                        && visible.bottom >= b.getHeight();
+        JSONObject result =
+                new JSONObject()
+                        .put("text", b.getText())
+                        .put("width", b.getWidth())
+                        .put("text_width", text)
+                        .put("content_width", content)
+                        .put("text_color", b.getCurrentTextColor())
+                        .put("focused", b.hasFocus())
+                        .put("entirely_visible", entire);
+        if (!"扫码".contentEquals(b.getText())
+                || !b.isShown()
+                || b.getAlpha() <= 0
+                || b.hasFocus() != expectedFocused
+                || !entire
+                || content < Math.ceil(text)
+                || layout == null
+                || layout.getLineCount() != 1
                 || layout.getEllipsisCount(0) != 0
-                || layout.getHeight() > b.getHeight() - b.getCompoundPaddingTop()
-                        - b.getCompoundPaddingBottom()) {
+                || layout.getHeight()
+                        > b.getHeight()
+                                - b.getCompoundPaddingTop()
+                                - b.getCompoundPaddingBottom()) {
             throw new AssertionError(result.toString());
         }
         return result;

@@ -41,11 +41,20 @@ public class MoviePlayer {
     }
 
     /** Optional TV marker observer, not a command or a seek request acknowledgement. */
-    interface OnSeekPositionListener { void position(MoviePlayer player, long actualPosition); }
-    private OnSeekPositionListener seekPositionListener;
-    void setOnSeekPositionListener(OnSeekPositionListener listener) {
-        onMain(() -> { seekPositionListener = listener; return null; });
+    interface OnSeekPositionListener {
+        void position(MoviePlayer player, long actualPosition);
     }
+
+    private OnSeekPositionListener seekPositionListener;
+
+    void setOnSeekPositionListener(OnSeekPositionListener listener) {
+        onMain(
+                () -> {
+                    seekPositionListener = listener;
+                    return null;
+                });
+    }
+
     protected final void observeSeekPosition(long actualPosition) {
         if (seekPositionListener != null) seekPositionListener.position(this, actualPosition);
     }
@@ -144,7 +153,8 @@ public class MoviePlayer {
     private MoviePlayer(
             Context context, boolean initializeExo, int requestedDecoder, boolean forceIjk) {
         this.context = context.getApplicationContext();
-        televisionSubtitles = context instanceof MainActivity && ((MainActivity) context).isTvDevice();
+        televisionSubtitles =
+                context instanceof MainActivity && ((MainActivity) context).isTvDevice();
         this.ijkMode = forceIjk;
         if (!initializeExo) return;
         onMain(
@@ -278,12 +288,18 @@ public class MoviePlayer {
                     exo.addListener(
                             new Player.Listener() {
                                 @Override
-                                public void onPositionDiscontinuity(Player.PositionInfo oldPosition,
-                                        Player.PositionInfo newPosition, int reason) {
-                                    if (!released && (reason == Player.DISCONTINUITY_REASON_SEEK
-                                            || reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT))
+                                public void onPositionDiscontinuity(
+                                        Player.PositionInfo oldPosition,
+                                        Player.PositionInfo newPosition,
+                                        int reason) {
+                                    if (!released
+                                            && (reason == Player.DISCONTINUITY_REASON_SEEK
+                                                    || reason
+                                                            == Player
+                                                                    .DISCONTINUITY_REASON_SEEK_ADJUSTMENT))
                                         observeSeekPosition(newPosition.positionMs);
                                 }
+
                                 @Override
                                 public void onPlaybackStateChanged(int state) {
                                     if (released) return;
@@ -653,12 +669,13 @@ public class MoviePlayer {
                                     && !explicitHls
                                     && !explicitDash
                                     && isCloudDriveOrLocalProxyContainer(address, fullLower);
-                    if (!disguised && (isLive
-                            || declared != null
-                            || explicitHls
-                            || explicitDash
-                            || knownContainer
-                            || cloudOrLocalProxy)) {
+                    if (!disguised
+                            && (isLive
+                                    || declared != null
+                                    || explicitHls
+                                    || explicitDash
+                                    || knownContainer
+                                    || cloudOrLocalProxy)) {
                         String fastMime =
                                 declared != null
                                         ? declared
@@ -841,9 +858,11 @@ public class MoviePlayer {
             Map<String, String> probeHeaders = new LinkedHashMap<>(requestHeaders);
             if (ProxyAddress.isLoopbackHost(address.getHost()))
                 probeHeaders.put(ChunkedProxyDataSource.HEADER_CHUNKED_CLIENT, "1");
-            return MediaContentProbe.probe(new URL(address.toString()), probeHeaders,
-                    defaultUserAgent(context), scope);
-        } catch (Exception ignored) { return null; }
+            return MediaContentProbe.probe(
+                    new URL(address.toString()), probeHeaders, defaultUserAgent(context), scope);
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     public void start() {
@@ -1227,9 +1246,11 @@ public class MoviePlayer {
     private androidx.media3.exoplayer.source.MediaSource playbackSource(Uri address)
             throws Exception {
         MediaItem item = mediaItem(address);
-        androidx.media3.exoplayer.source.MediaSource video = televisionSubtitles
-                ? androidx.media3.exoplayer.source.TvSubtitleSource.create(mediaSourceFactory, subtitleDataSourceFactory, item)
-                : mediaSourceFactory.createMediaSource(item);
+        androidx.media3.exoplayer.source.MediaSource video =
+                televisionSubtitles
+                        ? androidx.media3.exoplayer.source.TvSubtitleSource.create(
+                                mediaSourceFactory, subtitleDataSourceFactory, item)
+                        : mediaSourceFactory.createMediaSource(item);
         org.json.JSONObject extra = options.optJSONObject("extra");
         String audio = extra == null ? "" : extra.optString("audio");
         if (!Cms.isHttp(audio)) return video;

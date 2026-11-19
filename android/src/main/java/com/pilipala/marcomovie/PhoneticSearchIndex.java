@@ -145,7 +145,8 @@ public final class PhoneticSearchIndex {
     }
 
     public synchronized void learn(String title) {
-        if (!learningAllowed || title == null
+        if (!learningAllowed
+                || title == null
                 || title.trim().isEmpty()
                 || title.length() > 100
                 || titles.containsKey(title)) return;
@@ -207,8 +208,10 @@ public final class PhoneticSearchIndex {
         Map<String, Integer> ranks = new HashMap<>();
         for (Map.Entry<String, List<Entry>> title : titles.entrySet()) {
             String literal = normalize(title.getKey());
-            int rank = literal.equals(q) ? 12000 : literal.startsWith(q) ? 3000
-                    : literal.contains(q) ? 500 : 0;
+            int rank =
+                    literal.equals(q)
+                            ? 12000
+                            : literal.startsWith(q) ? 3000 : literal.contains(q) ? 500 : 0;
             for (Entry e : title.getValue()) {
                 if (e.full.equals(q) || e.initials.equals(q)) rank = Math.max(rank, 11000);
                 else if (e.full.startsWith(q)) rank = Math.max(rank, 2000);
@@ -217,10 +220,12 @@ public final class PhoneticSearchIndex {
             if (rank > 0) ranks.put(title.getKey(), rank - title.getKey().length());
         }
         List<String> out = new ArrayList<>(ranks.keySet());
-        Collections.sort(out, (x, y) -> {
-            int rank = Integer.compare(ranks.get(y), ranks.get(x));
-            return rank != 0 ? rank : x.compareTo(y);
-        });
+        Collections.sort(
+                out,
+                (x, y) -> {
+                    int rank = Integer.compare(ranks.get(y), ranks.get(x));
+                    return rank != 0 ? rank : x.compareTo(y);
+                });
         return new ArrayList<>(out.subList(0, Math.min(out.size(), Math.min(8, limit))));
     }
 

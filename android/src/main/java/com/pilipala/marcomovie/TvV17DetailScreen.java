@@ -17,8 +17,11 @@ import android.widget.TextView;
 final class TvV17DetailScreen {
     interface Actions {
         void back();
+
         void play();
+
         void favorite();
+
         void synopsis();
     }
 
@@ -36,8 +39,15 @@ final class TvV17DetailScreen {
      * poster is fitted without cropping; neither this component nor its image loader searches for
      * a substitute. The host supplies the existing bookmark/default-line play action.
      */
-    TvV17DetailScreen(MainActivity a, Cms.Site site, Cms.Video video, String verifiedBackdrop,
-            boolean isFavorite, boolean playEnabled, String playLabel, Actions actions) {
+    TvV17DetailScreen(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            String verifiedBackdrop,
+            boolean isFavorite,
+            boolean playEnabled,
+            String playLabel,
+            Actions actions) {
         if (a == null || site == null || video == null || actions == null)
             throw new IllegalArgumentException();
         host = a;
@@ -50,15 +60,19 @@ final class TvV17DetailScreen {
         if (artwork != null && !artwork.trim().isEmpty()) {
             ImageView image = new ImageView(a);
             image.setTag("tv-v17-detail-artwork");
-            image.setScaleType(horizontal ? ImageView.ScaleType.CENTER_CROP : ImageView.ScaleType.FIT_CENTER);
-            FrameLayout.LayoutParams art = new FrameLayout.LayoutParams(
-                    horizontal ? -1 : a.dp(360), a.dp(440), Gravity.TOP | Gravity.RIGHT);
+            image.setScaleType(
+                    horizontal ? ImageView.ScaleType.CENTER_CROP : ImageView.ScaleType.FIT_CENTER);
+            FrameLayout.LayoutParams art =
+                    new FrameLayout.LayoutParams(
+                            horizontal ? -1 : a.dp(360), a.dp(440), Gravity.TOP | Gravity.RIGHT);
             view.addView(image, art);
             a.poster(artwork, image, true);
         }
         View shade = new View(a);
-        shade.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
-                new int[] {0xf710181e, 0xc510181e, 0x5010181e}));
+        shade.setBackground(
+                new GradientDrawable(
+                        GradientDrawable.Orientation.LEFT_RIGHT,
+                        new int[] {0xf710181e, 0xc510181e, 0x5010181e}));
         view.addView(shade, new FrameLayout.LayoutParams(-1, a.dp(440)));
 
         scroll = new TvScrollView(a);
@@ -77,8 +91,11 @@ final class TvV17DetailScreen {
         View breathingRoom = new View(a);
         content.addView(breathingRoom, new LinearLayout.LayoutParams(1, a.dp(100)));
 
-        TextView metadata = a.text(TextUtils.join("  ·  ", DetailScreen.collectMetaPills(video)),
-                14, TvV17Theme.MUTED);
+        TextView metadata =
+                a.text(
+                        TextUtils.join("  ·  ", DetailScreen.collectMetaPills(video)),
+                        14,
+                        TvV17Theme.MUTED);
         content.addView(metadata, new LinearLayout.LayoutParams(-1, -2));
         TextView title = a.text(video.title == null ? "" : video.title, 32, TvV17Theme.TEXT);
         title.setTag("detail-title");
@@ -109,9 +126,12 @@ final class TvV17DetailScreen {
         play = DetailScreen.heroPlayButton(a, playLabel, "detail-play", actions::play);
         play.setEnabled(playEnabled);
         buttons.addView(play, new LinearLayout.LayoutParams(-2, a.dp(46)));
-        favorite = DetailScreen.glassNavButton(a, "", "detail-favorite", isFavorite, actions::favorite);
+        favorite =
+                DetailScreen.glassNavButton(
+                        a, "", "detail-favorite", isFavorite, actions::favorite);
         favorite.setOnFocusChangeListener(
-                (v, focused) -> DetailScreen.styleGlassButton(a, favorite, focused, favorite.isSelected()));
+                (v, focused) ->
+                        DetailScreen.styleGlassButton(a, favorite, focused, favorite.isSelected()));
         setFavorite(isFavorite);
         LinearLayout.LayoutParams favoriteLp = new LinearLayout.LayoutParams(-2, a.dp(46));
         favoriteLp.leftMargin = a.dp(8);

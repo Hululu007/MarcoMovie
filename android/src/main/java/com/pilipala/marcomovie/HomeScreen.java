@@ -115,18 +115,27 @@ final class HomeScreen {
         }
         boolean tvLeftDock = a.homeDock != null && a.homeDock.tvLeft;
         boolean bottomDock = !tvLeftDock && a.useBottomDock();
-        int rightPadDp = tvLeftDock || a.useTopDock() ? 34 : Math.max(100, Math.round(56 * navScale) + 44);
+        int rightPadDp =
+                tvLeftDock || a.useTopDock() ? 34 : Math.max(100, Math.round(56 * navScale) + 44);
         int bottomPadDp = Math.max(86, Math.round(50 * navScale) + 36);
         if (bottomDock) {
             a.body.setPadding(a.dp(18), a.dp(16), a.dp(18), a.dp(bottomPadDp));
         } else {
-            a.body.setPadding(a.dp(tvLeftDock ? Math.max(80, Math.round(56 * navScale) + 30) : 34), a.dp(18), a.dp(rightPadDp), a.dp(36));
+            a.body.setPadding(
+                    a.dp(tvLeftDock ? Math.max(80, Math.round(56 * navScale) + 30) : 34),
+                    a.dp(18),
+                    a.dp(rightPadDp),
+                    a.dp(36));
         }
         a.body.setClipChildren(false);
         a.body.setClipToPadding(false);
         a.scroll.setClipChildren(false);
         float width = a.windowWidth() / a.getResources().getDisplayMetrics().density;
-        int marginDp = bottomDock ? 36 : ((tvLeftDock ? Math.max(80, Math.round(56 * navScale) + 30) : 34) + rightPadDp);
+        int marginDp =
+                bottomDock
+                        ? 36
+                        : ((tvLeftDock ? Math.max(80, Math.round(56 * navScale) + 30) : 34)
+                                + rightPadDp);
         posterWidth = Math.max(48, (int) ((width - marginDp - (COLUMNS - 1) * 14) / COLUMNS) - 8);
         boolean separateHome = tvLeftDock;
         if (separateHome) {
@@ -146,7 +155,8 @@ final class HomeScreen {
         historyHost = a.vertical();
         historyHost.setClipChildren(false);
         historyHost.setClipToPadding(false);
-        (separateHome ? homeHost : a.body).addView(historyHost, new LinearLayout.LayoutParams(-1, -2));
+        (separateHome ? homeHost : a.body)
+                .addView(historyHost, new LinearLayout.LayoutParams(-1, -2));
         historySection();
         if (separateHome) {
             LinearLayout homeHeading = a.row();
@@ -249,7 +259,9 @@ final class HomeScreen {
                 .getViewTreeObserver()
                 .addOnScrollChangedListener(
                         () -> {
-                            if (!active() || a.scroll == null || a.scroll.getScrollY() <= 0
+                            if (!active()
+                                    || a.scroll == null
+                                    || a.scroll.getScrollY() <= 0
                                     || (homeHost != null && !state.library)) return;
                             View child = a.scroll.getChildAt(0);
                             if (child == null) return;
@@ -376,7 +388,9 @@ final class HomeScreen {
     /** Compare every displayed or actionable value, including later cards and category metadata. */
     static boolean sameSnapshotContent(Snapshot old, Snapshot fresh) {
         if (old == fresh) return true;
-        if (old == null || fresh == null || old.pages != fresh.pages
+        if (old == null
+                || fresh == null
+                || old.pages != fresh.pages
                 || !Objects.equals(old.skip, fresh.skip)
                 || !Objects.equals(old.filterSchema, fresh.filterSchema)
                 || old.recommendationsPending != fresh.recommendationsPending
@@ -384,24 +398,52 @@ final class HomeScreen {
                 || old.videos.size() != fresh.videos.size()) return false;
         for (int i = 0; i < old.categories.size(); i++) {
             Cms.Category left = old.categories.get(i), right = fresh.categories.get(i);
-            if (!Objects.equals(left.id, right.id) || !Objects.equals(left.name, right.name)) return false;
+            if (!Objects.equals(left.id, right.id) || !Objects.equals(left.name, right.name))
+                return false;
         }
         for (int i = 0; i < old.videos.size(); i++) {
             Cms.Video left = old.videos.get(i), right = fresh.videos.get(i);
-            if (!Arrays.asList(left.id, left.title, left.poster, left.remarks, left.year,
-                    left.area, left.genre, left.actor, left.director, left.description,
-                    left.action, left.tag, left.doubanScore).equals(
-                    Arrays.asList(right.id, right.title, right.poster, right.remarks, right.year,
-                    right.area, right.genre, right.actor, right.director, right.description,
-                    right.action, right.tag, right.doubanScore)) || left.lines.size() != right.lines.size()) return false;
+            if (!Arrays.asList(
+                                    left.id,
+                                    left.title,
+                                    left.poster,
+                                    left.remarks,
+                                    left.year,
+                                    left.area,
+                                    left.genre,
+                                    left.actor,
+                                    left.director,
+                                    left.description,
+                                    left.action,
+                                    left.tag,
+                                    left.doubanScore)
+                            .equals(
+                                    Arrays.asList(
+                                            right.id,
+                                            right.title,
+                                            right.poster,
+                                            right.remarks,
+                                            right.year,
+                                            right.area,
+                                            right.genre,
+                                            right.actor,
+                                            right.director,
+                                            right.description,
+                                            right.action,
+                                            right.tag,
+                                            right.doubanScore))
+                    || left.lines.size() != right.lines.size()) return false;
             for (int l = 0; l < left.lines.size(); l++) {
                 Cms.Line a = left.lines.get(l), b = right.lines.get(l);
-                if (!Objects.equals(a.name, b.name) || a.episodes.size() != b.episodes.size()) return false;
+                if (!Objects.equals(a.name, b.name) || a.episodes.size() != b.episodes.size())
+                    return false;
                 for (int e = 0; e < a.episodes.size(); e++) {
                     Cms.Episode x = a.episodes.get(e), y = b.episodes.get(e);
-                    if (!Objects.equals(x.name, y.name) || !Objects.equals(x.url, y.url)
+                    if (!Objects.equals(x.name, y.name)
+                            || !Objects.equals(x.url, y.url)
                             || !x.headers.equals(y.headers)
-                            || !String.valueOf(x.media).equals(String.valueOf(y.media))) return false;
+                            || !String.valueOf(x.media).equals(String.valueOf(y.media)))
+                        return false;
                 }
             }
         }
@@ -554,7 +596,8 @@ final class HomeScreen {
                                     status.setText(a.message(e));
                                     if (previewHost != null) {
                                         previewHost.removeAllViews();
-                                        previewHost.addView(a.text(a.message(e), 14, MainActivity.MUTED));
+                                        previewHost.addView(
+                                                a.text(a.message(e), 14, MainActivity.MUTED));
                                     }
                                     more.setText("重新加载");
                                     more.setVisibility(View.VISIBLE);
@@ -815,18 +858,22 @@ final class HomeScreen {
     void refreshHero() {
         if (heroHost == null) return;
         List<WatchHistory.Entry> entries = a.watchHistory();
-        continueHero = TvV17LibraryScreen.hero(a, heroHost, entries.isEmpty() ? null : entries.get(0));
+        continueHero =
+                TvV17LibraryScreen.hero(a, heroHost, entries.isEmpty() ? null : entries.get(0));
         heroHost.setPadding(0, 0, 0, continueHero == null ? 0 : a.dp(18));
     }
 
     void renderPreview() {
         if (previewHost == null || snapshot == null) return;
         View focus = a.getCurrentFocus();
-        String focusedTag = focus != null && previewCards.contains(focus)
-                ? String.valueOf(focus.getTag()) : null;
+        String focusedTag =
+                focus != null && previewCards.contains(focus)
+                        ? String.valueOf(focus.getTag())
+                        : null;
         previewCards.clear();
-        previewCards.addAll(TvV17LibraryScreen.preview(
-                a, previewHost, site, snapshot.videos, COLUMNS, posterWidth));
+        previewCards.addAll(
+                TvV17LibraryScreen.preview(
+                        a, previewHost, site, snapshot.videos, COLUMNS, posterWidth));
         wireHomeNavigation();
         if (focusedTag != null && homeHost.isShown()) {
             View replacement = previewHost.findViewWithTag(focusedTag);
@@ -855,8 +902,12 @@ final class HomeScreen {
         }
         buildTabs();
         if (first && a.current != null && a.current.focus == null) {
-            View initial = homeHost != null && !state.library
-                    ? (continueHero != null ? continueHero : !historyCards.isEmpty() ? historyCards.get(0) : openLibrary) : selectedTab();
+            View initial =
+                    homeHost != null && !state.library
+                            ? (continueHero != null
+                                    ? continueHero
+                                    : !historyCards.isEmpty() ? historyCards.get(0) : openLibrary)
+                            : selectedTab();
             a.current.focus = String.valueOf(initial.getTag());
             restoreFocus();
         }
@@ -1410,7 +1461,7 @@ final class HomeScreen {
                                 () -> {
                                     if (!active() || token != request) return;
                                     busy = false;
-                                     state.categoryFailed = true;
+                                    state.categoryFailed = true;
                                     status.setVisibility(View.VISIBLE);
                                     status.setText(a.message(e));
                                     more.setText("重新加载");
@@ -1527,8 +1578,9 @@ final class HomeScreen {
 
     /** Keeps "加载更多" hidden during normal browsing (only shown as retry on failure). */
     void updateMore() {
-        if (state != null && (state.categoryFailed
-                || (!state.ready && "重新加载".equals(String.valueOf(more.getText()))))) {
+        if (state != null
+                && (state.categoryFailed
+                        || (!state.ready && "重新加载".equals(String.valueOf(more.getText()))))) {
             more.setText("重新加载");
             more.setVisibility(View.VISIBLE);
             return;
@@ -1539,7 +1591,12 @@ final class HomeScreen {
     }
 
     void maybeAutoLoadMore() {
-        if (!active() || busy || state == null || !state.ready || state.categoryFailed || snapshot == null
+        if (!active()
+                || busy
+                || state == null
+                || !state.ready
+                || state.categoryFailed
+                || snapshot == null
                 || (homeHost != null && !state.library)) return;
         if (windowEnd() < state.videos.size()) {
             showWindow(state.windowStart + windowSize());
@@ -1726,15 +1783,19 @@ final class HomeScreen {
     /** A visible target for three-Up and return restoration in the active section. */
     View topTarget() {
         if (homeHost != null && state != null) {
-            View target = state.library ? selectedTab()
-                    : continueHero != null ? continueHero
-                    : !historyCards.isEmpty() ? historyCards.get(0) : openLibrary;
+            View target =
+                    state.library
+                            ? selectedTab()
+                            : continueHero != null
+                                    ? continueHero
+                                    : !historyCards.isEmpty() ? historyCards.get(0) : openLibrary;
             if (target != null && target.isShown() && target.isFocusable() && target.isEnabled())
                 return target;
         }
-        String[] tags = homeHost != null && state != null && state.library
-                ? new String[] {"source-switcher"}
-                : new String[] {"home-history:0", "home-tab:0", "source-switcher"};
+        String[] tags =
+                homeHost != null && state != null && state.library
+                        ? new String[] {"source-switcher"}
+                        : new String[] {"home-history:0", "home-tab:0", "source-switcher"};
         for (String tag : tags) {
             View target = a.root.findViewWithTag(tag);
             if (target != null && target.isShown() && target.isFocusable() && target.isEnabled())
@@ -1749,14 +1810,21 @@ final class HomeScreen {
         boolean switching = state.library != library;
         boolean fromDock = a.homeDock != null && a.homeDock.contains(current);
         if (switching) {
-            String tag = current != null && current.getTag() instanceof String
-                    ? (String) current.getTag() : null;
+            String tag =
+                    current != null && current.getTag() instanceof String
+                            ? (String) current.getTag()
+                            : null;
             if (a.homeDock != null && a.homeDock.contains(current) && a.current != null)
                 tag = a.current.homeReturnFocus;
             View oldTarget = tag == null ? null : a.root.findViewWithTag(tag);
             if (oldTarget == null || !oldTarget.isShown()) tag = null;
-            if (state.library) { state.libraryScroll = a.scroll.getScrollY(); state.libraryFocus = tag; }
-            else { state.homeScroll = a.scroll.getScrollY(); state.homeFocus = tag; }
+            if (state.library) {
+                state.libraryScroll = a.scroll.getScrollY();
+                state.libraryFocus = tag;
+            } else {
+                state.homeScroll = a.scroll.getScrollY();
+                state.homeFocus = tag;
+            }
             state.library = library;
         }
         applySectionVisibility();
@@ -1765,7 +1833,12 @@ final class HomeScreen {
         if (!switching && fromDock && a.current != null) tag = a.current.homeReturnFocus;
         View target = tag == null ? null : a.root.findViewWithTag(tag);
         if (target == null || !target.isShown() || !target.isFocusable())
-            target = library ? selectedTab() : (continueHero != null ? continueHero : !historyCards.isEmpty() ? historyCards.get(0) : openLibrary);
+            target =
+                    library
+                            ? selectedTab()
+                            : (continueHero != null
+                                    ? continueHero
+                                    : !historyCards.isEmpty() ? historyCards.get(0) : openLibrary);
         if (target != null) {
             target.requestFocus();
             if (a.current != null) a.current.focus = String.valueOf(target.getTag());
@@ -1781,14 +1854,18 @@ final class HomeScreen {
             card.setNextFocusUpId(openLibrary.getId());
             card.setNextFocusDownId(card.getId());
         }
-        if (a.homeDock != null && !previewCards.isEmpty()) a.homeDock.leftEdge(previewCards.get(0), false);
-        openLibrary.setNextFocusDownId(previewCards.isEmpty() ? openLibrary.getId() : previewCards.get(0).getId());
-        openLibrary.setNextFocusUpId(historyCards.isEmpty()
-                ? (continueHero == null ? openLibrary.getId() : continueHero.getId())
-                : historyCards.get(0).getId());
+        if (a.homeDock != null && !previewCards.isEmpty())
+            a.homeDock.leftEdge(previewCards.get(0), false);
+        openLibrary.setNextFocusDownId(
+                previewCards.isEmpty() ? openLibrary.getId() : previewCards.get(0).getId());
+        openLibrary.setNextFocusUpId(
+                historyCards.isEmpty()
+                        ? (continueHero == null ? openLibrary.getId() : continueHero.getId())
+                        : historyCards.get(0).getId());
         if (continueHero != null) {
             continueHero.setNextFocusUpId(continueHero.getId());
-            continueHero.setNextFocusDownId(historyCards.isEmpty() ? openLibrary.getId() : historyCards.get(0).getId());
+            continueHero.setNextFocusDownId(
+                    historyCards.isEmpty() ? openLibrary.getId() : historyCards.get(0).getId());
             if (a.homeDock != null) a.homeDock.leftEdge(continueHero, false);
             for (View card : historyCards) card.setNextFocusUpId(continueHero.getId());
             if (allHistory != null) allHistory.setNextFocusUpId(continueHero.getId());
@@ -1965,7 +2042,8 @@ final class HomeScreen {
         if (tvLeftDock) {
             a.homeDock.leftEdge(source, true);
             if (!historyCards.isEmpty()) a.homeDock.leftEdge(historyCards.get(0), false);
-            for (List<View> line : filters.lines) if (!line.isEmpty()) a.homeDock.leftEdge(line.get(0), true);
+            for (List<View> line : filters.lines)
+                if (!line.isEmpty()) a.homeDock.leftEdge(line.get(0), true);
             if (inlineExpanded) {
                 for (List<View> line : inlineFilters.rows)
                     if (!line.isEmpty()) a.homeDock.leftEdge(line.get(0), true);
@@ -2154,7 +2232,9 @@ final class HomeScreen {
                                     ? null
                                     : a.root.findViewWithTag(a.current.focus);
                     View now = a.getCurrentFocus();
-                    if (saved != null && saved.isShown() && saved.isFocusable()
+                    if (saved != null
+                            && saved.isShown()
+                            && saved.isFocusable()
                             && (now == null || now == a.autoFocus || now == saved)) {
                         saved.requestFocus();
                         a.autoFocus = saved;

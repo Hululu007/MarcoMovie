@@ -15,7 +15,9 @@ import java.util.List;
 final class TvV17MineScreen {
     private final MainActivity a;
 
-    TvV17MineScreen(MainActivity activity) { a = activity; }
+    TvV17MineScreen(MainActivity activity) {
+        a = activity;
+    }
 
     void show() {
         a.renderPage("我的", "");
@@ -33,21 +35,32 @@ final class TvV17MineScreen {
         sections.addView(favoritesSection, new LinearLayout.LayoutParams(0, -2, 1.1f));
         a.body.addView(sections);
         List<WatchHistory.Entry> history = a.watchHistory();
-        boolean historyCorrupted = WatchHistory.isCorrupted()
-                || a.prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
+        boolean historyCorrupted =
+                WatchHistory.isCorrupted()
+                        || a.prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
         historySection.addView(a.text("继续观看", 22, TvV17Theme.TEXT));
         a.gap(historySection, 8);
         if (historyCorrupted) {
-            historySection.addView(a.text("观看记录数据损坏，已保留本地备份并暂停更新。请打开全部历史查看恢复选项。", 16, TvV17Theme.MUTED));
+            historySection.addView(
+                    a.text("观看记录数据损坏，已保留本地备份并暂停更新。请打开全部历史查看恢复选项。", 16, TvV17Theme.MUTED));
         } else if (history.isEmpty()) {
             historySection.addView(a.text("暂无观看记录", 16, TvV17Theme.MUTED));
         } else {
             WatchHistory.Entry entry = history.get(0);
-            LinearLayout row = card(entry.poster, entry.title, CatalogScreen.historyLabel(entry),
-                    "mine-history:" + entry.key(), 240);
+            LinearLayout row =
+                    card(
+                            entry.poster,
+                            entry.title,
+                            CatalogScreen.historyLabel(entry),
+                            "mine-history:" + entry.key(),
+                            240);
             row.setOnClickListener(v -> a.resumeHistory(entry));
             // Existing history page owns deletion, sync notification and missing-source recovery.
-            row.setOnLongClickListener(v -> { openHistory(); return true; });
+            row.setOnLongClickListener(
+                    v -> {
+                        openHistory();
+                        return true;
+                    });
             TvMenuAction.bind(row, this::openHistory);
             historySection.addView(row, new LinearLayout.LayoutParams(-1, -2));
         }
@@ -65,9 +78,14 @@ final class TvV17MineScreen {
         int count = Math.min(3, favorites.size());
         for (int i = 0; i < count; i++) {
             Favorites.Entry entry = favorites.get(i);
-            LinearLayout item = card(entry.poster, entry.title, "", "mine-favorite:" + entry.key(), 180);
+            LinearLayout item =
+                    card(entry.poster, entry.title, "", "mine-favorite:" + entry.key(), 180);
             item.setOnClickListener(v -> handler.open(entry));
-            item.setOnLongClickListener(v -> { handler.manage(entry); return true; });
+            item.setOnLongClickListener(
+                    v -> {
+                        handler.manage(entry);
+                        return true;
+                    });
             TvMenuAction.bind(item, () -> handler.manage(entry));
             LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, -2, 1f);
             size.rightMargin = a.dp(16);
@@ -98,21 +116,48 @@ final class TvV17MineScreen {
         row.setClipChildren(false);
         Button[] buttons = {
             a.navButton("全部历史", "mine-history", this::openHistory),
-            a.navButton("全部收藏", "mine-favorites",
-                    () -> a.open(new MainActivity.Screen(() -> new FavoritesScreen(a).show()), true)),
+            a.navButton(
+                    "全部收藏",
+                    "mine-favorites",
+                    () ->
+                            a.open(
+                                    new MainActivity.Screen(() -> new FavoritesScreen(a).show()),
+                                    true)),
             a.navButton("网盘与账号", "mine-accounts", () -> AccountPanel.show(a, null)),
-            a.navButton("投屏", "mine-cast", () -> a.open(new MainActivity.Screen(a::castScreen), true)),
-            a.navButton(a.privateMode ? "退出隐私空间" : "隐私空间", "mine-private", () -> PrivacySpace.openTv(a)),
+            a.navButton(
+                    "投屏", "mine-cast", () -> a.open(new MainActivity.Screen(a::castScreen), true)),
+            a.navButton(
+                    a.privateMode ? "退出隐私空间" : "隐私空间",
+                    "mine-private",
+                    () -> PrivacySpace.openTv(a)),
             a.navButton("同步", "mine-sync", () -> CloudSyncDialog.show(a, null)),
-            a.navButton("配置与设置", "mine-settings", () -> a.open(new MainActivity.Screen(a::settings), true))
+            a.navButton(
+                    "配置与设置",
+                    "mine-settings",
+                    () -> a.open(new MainActivity.Screen(a::settings), true))
         };
         int widest = a.dp(100);
         int height = a.dp(46);
         for (Button button : buttons) {
             button.setId(View.generateViewId());
-            widest = Math.max(widest, (int) Math.ceil(button.getPaint().measureText(button.getText().toString()))
-                    + button.getPaddingLeft() + button.getPaddingRight() + a.dp(4));
-            height = Math.max(height, button.getLineHeight() + button.getPaddingTop() + button.getPaddingBottom() + a.dp(4));
+            widest =
+                    Math.max(
+                            widest,
+                            (int)
+                                            Math.ceil(
+                                                    button.getPaint()
+                                                            .measureText(
+                                                                    button.getText().toString()))
+                                    + button.getPaddingLeft()
+                                    + button.getPaddingRight()
+                                    + a.dp(4));
+            height =
+                    Math.max(
+                            height,
+                            button.getLineHeight()
+                                    + button.getPaddingTop()
+                                    + button.getPaddingBottom()
+                                    + a.dp(4));
         }
         final int minimum = widest, gap = a.dp(10);
         for (int i = 0; i < buttons.length; i++) {
@@ -123,29 +168,43 @@ final class TvV17MineScreen {
             if (i > 0) button.setNextFocusLeftId(buttons[i - 1].getId());
             if (i + 1 < buttons.length) button.setNextFocusRightId(buttons[i + 1].getId());
             View.OnFocusChangeListener styling = button.getOnFocusChangeListener();
-            button.setOnFocusChangeListener((v, focused) -> {
-                if (styling != null) styling.onFocusChange(v, focused);
-                if (focused) viewport.post(() -> {
-                    if (!button.hasFocus() || !viewport.isAttachedToWindow()) return;
-                    Rect rect = new Rect(button.getLeft() - a.dp(3), 0,
-                            button.getRight() + a.dp(3), row.getHeight());
-                    viewport.requestChildRectangleOnScreen(row, rect, true);
-                });
-            });
+            button.setOnFocusChangeListener(
+                    (v, focused) -> {
+                        if (styling != null) styling.onFocusChange(v, focused);
+                        if (focused)
+                            viewport.post(
+                                    () -> {
+                                        if (!button.hasFocus() || !viewport.isAttachedToWindow())
+                                            return;
+                                        Rect rect =
+                                                new Rect(
+                                                        button.getLeft() - a.dp(3),
+                                                        0,
+                                                        button.getRight() + a.dp(3),
+                                                        row.getHeight());
+                                        viewport.requestChildRectangleOnScreen(row, rect, true);
+                                    });
+                    });
         }
         viewport.addView(row, new HorizontalScrollView.LayoutParams(-2, -2));
-        viewport.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
-            int available = r - l - viewport.getPaddingLeft() - viewport.getPaddingRight();
-            int width = TvMineActionMetrics.width(available, minimum, gap, buttons.length);
-            for (Button button : buttons) {
-                LinearLayout.LayoutParams size = (LinearLayout.LayoutParams) button.getLayoutParams();
-                if (size.width != width) { size.width = width; button.setLayoutParams(size); }
-            }
-        });
+        viewport.addOnLayoutChangeListener(
+                (v, l, t, r, b, ol, ot, or, ob) -> {
+                    int available = r - l - viewport.getPaddingLeft() - viewport.getPaddingRight();
+                    int width = TvMineActionMetrics.width(available, minimum, gap, buttons.length);
+                    for (Button button : buttons) {
+                        LinearLayout.LayoutParams size =
+                                (LinearLayout.LayoutParams) button.getLayoutParams();
+                        if (size.width != width) {
+                            size.width = width;
+                            button.setLayoutParams(size);
+                        }
+                    }
+                });
         a.body.addView(viewport, new LinearLayout.LayoutParams(-1, -2));
     }
 
-    private LinearLayout card(String poster, String title, String detail, String tag, int heightDp) {
+    private LinearLayout card(
+            String poster, String title, String detail, String tag, int heightDp) {
         LinearLayout card = a.vertical();
         card.setTag(tag);
         card.setFocusable(true);
@@ -162,7 +221,8 @@ final class TvV17MineScreen {
         card.addView(name);
         if (detail != null && !detail.isEmpty()) card.addView(a.text(detail, 12, TvV17Theme.MUTED));
         a.pressFeedback(card);
-        card.setOnFocusChangeListener((v, focused) -> TvV17PosterCard.focus(a, card, name, focused));
+        card.setOnFocusChangeListener(
+                (v, focused) -> TvV17PosterCard.focus(a, card, name, focused));
         return card;
     }
 }

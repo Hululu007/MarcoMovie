@@ -458,7 +458,9 @@ public final class MainActivity extends Activity {
     }
 
     boolean useLeftDock() {
-        return Prefs.useTvLeftDock(isTvDevice(), prefs.contains(Prefs.TV_DOCK_POSITION),
+        return Prefs.useTvLeftDock(
+                isTvDevice(),
+                prefs.contains(Prefs.TV_DOCK_POSITION),
                 prefs.getInt(Prefs.TV_NAVIGATION_MODE, -1));
     }
 
@@ -980,7 +982,8 @@ public final class MainActivity extends Activity {
                 && !prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false)) {
             homeAmbient = new HomeAmbient(this);
             if (isTvDevice())
-                homeAmbient.setStrength(Prefs.tvAmbientStrength(prefs.getInt(Prefs.TV_AMBIENT_PERCENT, 100)));
+                homeAmbient.setStrength(
+                        Prefs.tvAmbientStrength(prefs.getInt(Prefs.TV_AMBIENT_PERCENT, 100)));
             root.addView(homeAmbient, new FrameLayout.LayoutParams(-1, -1));
         }
         if (navigation) root.addView(homeGradient(), new FrameLayout.LayoutParams(-1, -1));
@@ -1008,8 +1011,17 @@ public final class MainActivity extends Activity {
             } else if (useTopDock()) {
                 body.setPadding(dp(34), dp(18), dp(34), dp(36));
             } else if (useLeftDock()) {
-                int left = Math.max(80, Math.round(56 * Prefs.clampNavScale(
-                        prefs.getInt(Prefs.NAV_SCALE_PERCENT, 100)) / 100f) + 30);
+                int left =
+                        Math.max(
+                                80,
+                                Math.round(
+                                                56
+                                                        * Prefs.clampNavScale(
+                                                                prefs.getInt(
+                                                                        Prefs.NAV_SCALE_PERCENT,
+                                                                        100))
+                                                        / 100f)
+                                        + 30);
                 body.setPadding(dp(left), dp(18), dp(34), dp(36));
             } else {
                 body.setPadding(dp(34), dp(18), dp(100), dp(36));
@@ -1140,7 +1152,8 @@ public final class MainActivity extends Activity {
                     if (scroll != null) scroll.scrollTo(0, s.scroll);
                     if (!isTvDevice()) return;
                     View target = s.focus == null ? null : root.findViewWithTag(s.focus);
-                    if (target != null && (!target.isShown() || !target.isFocusable() || !target.isEnabled()))
+                    if (target != null
+                            && (!target.isShown() || !target.isFocusable() || !target.isEnabled()))
                         target = null;
                     if (target != null) {
                         target.requestFocus();
@@ -1153,7 +1166,8 @@ public final class MainActivity extends Activity {
                             if (first == null) first = root.findViewWithTag("home-tab:0");
                             if (first == null) first = root.findViewWithTag("source-switcher");
                         }
-                        if (first != null && (!first.isShown() || !first.isFocusable() || !first.isEnabled()))
+                        if (first != null
+                                && (!first.isShown() || !first.isFocusable() || !first.isEnabled()))
                             first = null;
                         if (first == null) first = root.findViewWithTag("nav-home");
                         if (first == null) {
@@ -1182,7 +1196,10 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (markerHost != null) { markerHost.cancel(); return; }
+        if (markerHost != null) {
+            markerHost.cancel();
+            return;
+        }
         if (current != null && current.player && !miniMode && playerLocked) {
             PlaybackController.revealLockedHint(this);
             return;
@@ -1437,33 +1454,50 @@ public final class MainActivity extends Activity {
     void initializePhonetic() {
         final boolean publicSpace = !privateMode;
         final SharedPreferences target = prefs;
-        worker.execute(() -> {
-            try {
-                PhoneticSearchIndex dictionary;
-                synchronized (MainActivity.class) {
-                    if (sharedPhoneticDictionary == null)
-                        sharedPhoneticDictionary = new PhoneticSearchIndex(
-                                getAssets().open("search/pinyin-characters.tsv"),
-                                getAssets().open("search/pinyin-phrases.dict.yaml"),
-                                getAssets().open("search/title-phrases.txt"));
-                    dictionary = sharedPhoneticDictionary;
-                }
-                final PhoneticSearchIndex index = dictionary.newSession(publicSpace);
-                // Old cache/history stay byte-for-byte intact. They have no learning provenance,
-                // so rebuild suggestions from newly observed public titles instead of importing.
-                if (publicSpace) try {
-                    org.json.JSONArray saved = new org.json.JSONArray(
-                            target.getString(Prefs.PHONETIC_PUBLIC_TITLES_V2, "[]"));
-                    for (int i = 0; i < saved.length(); i++) index.learn(saved.optString(i));
-                } catch (Exception ignored) {}
-                ui.post(() -> {
+        worker.execute(
+                () -> {
                     try {
-                        if (!isDestroyed() && !isFinishing() && !switchingPrivacy
-                                && publicSpace == !privateMode && prefs == target) phonetic = index;
-                    } finally { phoneticReady.countDown(); }
+                        PhoneticSearchIndex dictionary;
+                        synchronized (MainActivity.class) {
+                            if (sharedPhoneticDictionary == null)
+                                sharedPhoneticDictionary =
+                                        new PhoneticSearchIndex(
+                                                getAssets().open("search/pinyin-characters.tsv"),
+                                                getAssets().open("search/pinyin-phrases.dict.yaml"),
+                                                getAssets().open("search/title-phrases.txt"));
+                            dictionary = sharedPhoneticDictionary;
+                        }
+                        final PhoneticSearchIndex index = dictionary.newSession(publicSpace);
+                        // Old cache/history stay byte-for-byte intact. They have no learning
+                        // provenance,
+                        // so rebuild suggestions from newly observed public titles instead of
+                        // importing.
+                        if (publicSpace)
+                            try {
+                                org.json.JSONArray saved =
+                                        new org.json.JSONArray(
+                                                target.getString(
+                                                        Prefs.PHONETIC_PUBLIC_TITLES_V2, "[]"));
+                                for (int i = 0; i < saved.length(); i++)
+                                    index.learn(saved.optString(i));
+                            } catch (Exception ignored) {
+                            }
+                        ui.post(
+                                () -> {
+                                    try {
+                                        if (!isDestroyed()
+                                                && !isFinishing()
+                                                && !switchingPrivacy
+                                                && publicSpace == !privateMode
+                                                && prefs == target) phonetic = index;
+                                    } finally {
+                                        phoneticReady.countDown();
+                                    }
+                                });
+                    } catch (Exception ignored) {
+                        phoneticReady.countDown();
+                    }
                 });
-            } catch (Exception ignored) { phoneticReady.countDown(); }
-        });
     }
 
     void sourceAction(Cms.Site site, String action) {

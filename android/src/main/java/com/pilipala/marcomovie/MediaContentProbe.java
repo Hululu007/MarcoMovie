@@ -26,7 +26,8 @@ final class MediaContentProbe {
 
     static boolean at(byte[] b, int n, int offset, String value) {
         if (offset + value.length() > n) return false;
-        for (int i = 0; i < value.length(); i++) if ((b[offset + i] & 255) != value.charAt(i)) return false;
+        for (int i = 0; i < value.length(); i++)
+            if ((b[offset + i] & 255) != value.charAt(i)) return false;
         return true;
     }
 
@@ -39,14 +40,16 @@ final class MediaContentProbe {
         if (at(b, n, 0, "RIFF") && at(b, n, 8, "WAVE")) return "audio/wav";
         if (at(b, n, 0, "fLaC")) return "audio/flac";
         if (at(b, n, 0, "OggS")) return BINARY; // Ogg may contain audio or video.
-        if (at(b, n, 0, "ID3")) return BINARY; // ID3 is also legal before other media, not proof of MP3.
+        if (at(b, n, 0, "ID3"))
+            return BINARY; // ID3 is also legal before other media, not proof of MP3.
         if (n >= 377 && b[0] == 0x47 && b[188] == 0x47 && b[376] == 0x47) return "video/mp2t";
         String text = new String(b, 0, n, StandardCharsets.UTF_8).replaceFirst("^\\s+", "");
         if (text.startsWith("\ufeff")) text = text.substring(1).replaceFirst("^\\s+", "");
         // The prefix can end midway through the first line. Wait for its delimiter so
         // '#EXTM3U' followed by 'X' in a later network read cannot be accepted early.
         if (text.matches("(?s)^#EXTM3U[\\t ]*(?:\\r\\n|\\n|\\r).*")) return HLS;
-        if (text.matches("(?s)^(?:<\\?xml[^>]*\\?>\\s*)?(?:<!--.*?-->\\s*)*<MPD(?:\\s|>).*")) return DASH;
+        if (text.matches("(?s)^(?:<\\?xml[^>]*\\?>\\s*)?(?:<!--.*?-->\\s*)*<MPD(?:\\s|>).*"))
+            return DASH;
         // contentType is deliberately insufficient on its own. Proxies may label a login/error
         // body, a single '#' chunk or real audio as mpegurl. Keep the original loader in charge.
         return null;
@@ -62,17 +65,22 @@ final class MediaContentProbe {
             String size = value.substring(slash + 1);
             if (!"*".equals(size) && end >= Long.parseLong(size)) return -1;
             return end + 1;
-        } catch (NumberFormatException invalid) { return -1; }
+        } catch (NumberFormatException invalid) {
+            return -1;
+        }
     }
 
     static boolean sameOrigin(URL a, URL b) {
-        return a.getProtocol().equalsIgnoreCase(b.getProtocol()) && a.getHost().equalsIgnoreCase(b.getHost())
+        return a.getProtocol().equalsIgnoreCase(b.getProtocol())
+                && a.getHost().equalsIgnoreCase(b.getHost())
                 && (a.getPort() < 0 ? a.getDefaultPort() : a.getPort())
-                == (b.getPort() < 0 ? b.getDefaultPort() : b.getPort());
+                        == (b.getPort() < 0 ? b.getDefaultPort() : b.getPort());
     }
 
-    static String probe(URL address, Map<String, String> headers, String userAgent, RequestScope scope) {
-        if (!"http".equalsIgnoreCase(address.getProtocol()) && !"https".equalsIgnoreCase(address.getProtocol())) return null;
+    static String probe(
+            URL address, Map<String, String> headers, String userAgent, RequestScope scope) {
+        if (!"http".equalsIgnoreCase(address.getProtocol())
+                && !"https".equalsIgnoreCase(address.getProtocol())) return null;
         String requestedRange = null;
         for (Map.Entry<String, String> h : headers.entrySet())
             if (h.getKey().equalsIgnoreCase("Range")) requestedRange = h.getValue();
@@ -92,26 +100,37 @@ final class MediaContentProbe {
                 c.setReadTimeout(Math.min(1200, remaining));
                 c.setInstanceFollowRedirects(false);
                 c.setRequestProperty("User-Agent", userAgent);
-                for (Map.Entry<String, String> h : headers.entrySet()) c.setRequestProperty(h.getKey(), h.getValue());
-                if (requestedRange == null) c.setRequestProperty("Range", "bytes=0-" + (MAX_BYTES - 1));
+                for (Map.Entry<String, String> h : headers.entrySet())
+                    c.setRequestProperty(h.getKey(), h.getValue());
+                if (requestedRange == null)
+                    c.setRequestProperty("Range", "bytes=0-" + (MAX_BYTES - 1));
                 int status = c.getResponseCode();
-                if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+                if (status == 301
+                        || status == 302
+                        || status == 303
+                        || status == 307
+                        || status == 308) {
                     String location = c.getHeaderField("Location");
                     if (location == null) return null;
                     URL next = new URL(target, location);
                     // Leave cross-origin/authentication/downgrade handling to the real player.
                     if (!sameOrigin(address, next)) return null;
-                    target = next; continue;
+                    target = next;
+                    continue;
                 }
                 if (status != 200 && status != 206) return null;
-                long responseSpan = status == 206 ? initialRangeLength(c.getHeaderField("Content-Range")) : MAX_BYTES;
+                long responseSpan =
+                        status == 206
+                                ? initialRangeLength(c.getHeaderField("Content-Range"))
+                                : MAX_BYTES;
                 if (responseSpan <= 0) return null;
                 byte[] prefix = new byte[(int) Math.min(MAX_BYTES, responseSpan)];
                 int count = 0;
                 try (InputStream stream = c.getInputStream()) {
                     while (count < prefix.length) {
                         if (scope != null) scope.check();
-                        remaining = (int) TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                        remaining =
+                                (int) TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
                         if (remaining <= 0) break;
                         c.setReadTimeout(Math.min(1200, remaining));
                         int read = stream.read(prefix, count, prefix.length - count);
@@ -125,7 +144,10 @@ final class MediaContentProbe {
             } catch (Exception ignored) {
                 return null; // No extra retry, no mutation of the actual playback headers or URL.
             } finally {
-                if (c != null) { RequestScope.detach(c); c.disconnect(); }
+                if (c != null) {
+                    RequestScope.detach(c);
+                    c.disconnect();
+                }
             }
         }
         return null;

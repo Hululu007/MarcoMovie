@@ -17,9 +17,13 @@ final class TvSearchContext {
     }
 
     boolean matches(Object config, boolean privateMode, int engineEpoch) {
-        return epoch == EPOCH.get() && this.config == config
-                && this.privateMode == privateMode && this.engineEpoch == engineEpoch;
+        return epoch == EPOCH.get()
+                && this.config == config
+                && this.privateMode == privateMode
+                && this.engineEpoch == engineEpoch;
     }
 
-    static void revokeAll() { EPOCH.incrementAndGet(); }
+    static void revokeAll() {
+        EPOCH.incrementAndGet();
+    }
 }

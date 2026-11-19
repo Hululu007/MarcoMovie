@@ -125,10 +125,7 @@ final class MiniDetails {
                         : (a.activeEpisode != null ? a.activeEpisode.name : "");
         if (!currentEpName.isEmpty()) {
             TextView liveBadge =
-                    a.text(
-                            (a.playing ? "● 正在播放 · " : "Ⅱ 已暂停 · ") + currentEpName,
-                            12,
-                            0xff90caf9);
+                    a.text((a.playing ? "● 正在播放 · " : "Ⅱ 已暂停 · ") + currentEpName, 12, 0xff90caf9);
             liveBadge.setSingleLine(true);
             liveBadge.setEllipsize(TextUtils.TruncateAt.END);
             liveBadge.setMaxWidth(a.dp(620));

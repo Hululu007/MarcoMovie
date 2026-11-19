@@ -83,8 +83,8 @@ public final class SearchCoordinator implements AutoCloseable {
         this(runner, listener, requestMs, sessionMs, 24);
     }
 
-    SearchCoordinator(Runner runner, Listener listener, long requestMs, long sessionMs,
-            int resultLimit) {
+    SearchCoordinator(
+            Runner runner, Listener listener, long requestMs, long sessionMs, int resultLimit) {
         this.runner = runner;
         this.listener = listener;
         this.requestMs = requestMs;

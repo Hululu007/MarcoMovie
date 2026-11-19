@@ -394,9 +394,14 @@ final class DetailScreen {
     }
 
     static boolean toggleFavorite(MainActivity a, Cms.Site site, Cms.Video video) {
-        a.prefs.edit().putString(Prefs.FAVORITES,
-                Favorites.toggle(a.prefs.getString(Prefs.FAVORITES, "[]"), site.key, video)).apply();
-        boolean selected = Favorites.contains(a.prefs.getString(Prefs.FAVORITES, "[]"), site.key, video.id);
+        a.prefs
+                .edit()
+                .putString(
+                        Prefs.FAVORITES,
+                        Favorites.toggle(a.prefs.getString(Prefs.FAVORITES, "[]"), site.key, video))
+                .apply();
+        boolean selected =
+                Favorites.contains(a.prefs.getString(Prefs.FAVORITES, "[]"), site.key, video.id);
         CloudSyncDialog.onFavoriteToggled(a, site.key, video.id, selected);
         return selected;
     }

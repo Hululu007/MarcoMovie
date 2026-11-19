@@ -69,9 +69,11 @@ public final class SystemPlayer extends MoviePlayer {
         onMain(
                 () -> {
                     nativePlayer = new MediaPlayer();
-                    nativePlayer.setOnSeekCompleteListener(player -> {
-                        if (!released && prepared) observeSeekPosition(player.getCurrentPosition());
-                    });
+                    nativePlayer.setOnSeekCompleteListener(
+                            player -> {
+                                if (!released && prepared)
+                                    observeSeekPosition(player.getCurrentPosition());
+                            });
                     nativePlayer.setOnPreparedListener(
                             player -> {
                                 if (released) return;

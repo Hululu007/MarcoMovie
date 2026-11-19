@@ -72,16 +72,23 @@ final class SettingsScreen {
         columns.addView(content, new LinearLayout.LayoutParams(0, -2, 1f));
         outer.addView(columns, new LinearLayout.LayoutParams(-1, -2));
 
-        tvCategory(navigation, "播放与字幕", "settings-playback", this::playback,
+        tvCategory(
+                navigation,
+                "播放与字幕",
+                "settings-playback",
+                this::playback,
                 title.equals("播放与字幕") || title.equals("解码组件"));
-        tvCategory(navigation, "显示与操作", "settings-appearance", this::appearance,
+        tvCategory(
+                navigation,
+                "显示与操作",
+                "settings-appearance",
+                this::appearance,
                 title.equals("首页与壁纸") || title.equals("首页壁纸"));
-        tvCategory(navigation, "内容与连接", "settings-content", this::content,
-                title.equals("内容与连接"));
-        tvCategory(navigation, "数据与备份", "settings-backup-page", this::backup,
-                title.equals("数据与备份"));
-        tvCategory(navigation, "关于与更新", "settings-updates",
-                () -> new UpdateScreen(a).show(), false);
+        tvCategory(navigation, "内容与连接", "settings-content", this::content, title.equals("内容与连接"));
+        tvCategory(
+                navigation, "数据与备份", "settings-backup-page", this::backup, title.equals("数据与备份"));
+        tvCategory(
+                navigation, "关于与更新", "settings-updates", () -> new UpdateScreen(a).show(), false);
 
         a.body = content;
         TextView section = a.text(title, 23, TvV17Theme.TEXT);
@@ -94,16 +101,26 @@ final class SettingsScreen {
         }
     }
 
-    void tvCategory(LinearLayout parent, String title, String tag, Runnable destination,
-            boolean selected) {
+    void tvCategory(
+            LinearLayout parent, String title, String tag, Runnable destination, boolean selected) {
         Button button = a.navButton(title, tag, () -> open(destination));
         button.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
         button.setTextSize(16);
         int resting = selected ? 0xff3b4653 : 0xff222a34;
         button.setBackground(TvV17Surface.rounded(resting, a.dp(12), 0x40ffffff, a.dp(1)));
-        button.setOnFocusChangeListener((view, focused) -> FocusMotion.style(
-                a, button, focused, resting, TvV17Theme.FOCUS, 12,
-                TvV17Theme.TEXT, MainActivity.DARK, false, 1.02f));
+        button.setOnFocusChangeListener(
+                (view, focused) ->
+                        FocusMotion.style(
+                                a,
+                                button,
+                                focused,
+                                resting,
+                                TvV17Theme.FOCUS,
+                                12,
+                                TvV17Theme.TEXT,
+                                MainActivity.DARK,
+                                false,
+                                1.02f));
         LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, a.dp(52));
         size.bottomMargin = a.dp(8);
         parent.addView(button, size);
@@ -132,11 +149,14 @@ final class SettingsScreen {
         row.setFocusable(tv);
         row.setFocusableInTouchMode(tv);
         row.setClickable(true);
-        int surface = tv && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
-                ? TvV17Theme.OPAQUE_SURFACE : TvV17Theme.SURFACE;
-        row.setBackground(tv
-                ? TvV17Surface.rounded(surface, a.dp(14), 0x2affffff, a.dp(1))
-                : a.bg(0xff222226, 14));
+        int surface =
+                tv && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
+                        ? TvV17Theme.OPAQUE_SURFACE
+                        : TvV17Theme.SURFACE;
+        row.setBackground(
+                tv
+                        ? TvV17Surface.rounded(surface, a.dp(14), 0x2affffff, a.dp(1))
+                        : a.bg(0xff222226, 14));
         row.setOnFocusChangeListener(
                 (v, f) -> {
                     FocusMotion.style(
@@ -607,11 +627,19 @@ final class SettingsScreen {
                             .show();
                 });
         if (a.isTvDevice()) {
-            ints("电视导航布局", Prefs.TV_NAVIGATION_MODE,
-                    new String[] {"原有布局", "左侧自动收起"}, new int[] {0, 1},
+            ints(
+                    "电视导航布局",
+                    Prefs.TV_NAVIGATION_MODE,
+                    new String[] {"原有布局", "左侧自动收起"},
+                    new int[] {0, 1},
                     a.useLeftDock() ? 1 : 0);
             if (!a.useLeftDock())
-                ints("Dock 位置", Prefs.TV_DOCK_POSITION, new String[] {"右侧", "顶部"}, new int[] {0, 1}, 0);
+                ints(
+                        "Dock 位置",
+                        Prefs.TV_DOCK_POSITION,
+                        new String[] {"右侧", "顶部"},
+                        new int[] {0, 1},
+                        0);
         }
         ints(
                 "导航栏字体与按钮大小",
@@ -643,9 +671,12 @@ final class SettingsScreen {
         toggle("开屏动画", Prefs.STARTUP_ANIMATION, true, null);
         toggle("海报配色柔光", Prefs.HOME_AMBIENT, true, null);
         if (a.isTvDevice())
-            ints("柔光强度", Prefs.TV_AMBIENT_PERCENT,
+            ints(
+                    "柔光强度",
+                    Prefs.TV_AMBIENT_PERCENT,
                     new String[] {"0%", "25%", "50%", "75%", "100%"},
-                    new int[] {0, 25, 50, 75, 100}, 100);
+                    new int[] {0, 25, 50, 75, 100},
+                    100);
         toggle(
                 "减少动态效果",
                 Prefs.REDUCED,
@@ -856,8 +887,7 @@ final class SettingsScreen {
                 "settings-import",
                 a::importDialog);
         if (a.isTvDevice()) {
-            link("已添加源与线路管理", "切换订阅、管理线路或添加新源",
-                    "settings-source-manager", a::chooseOrImport);
+            link("已添加源与线路管理", "切换订阅、管理线路或添加新源", "settings-source-manager", a::chooseOrImport);
         }
         link(
                 "导入或管理电视直播源",
@@ -1023,11 +1053,14 @@ final class SettingsScreen {
         row.setFocusable(tv);
         row.setFocusableInTouchMode(tv);
         row.setClickable(true);
-        int surface = tv && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
-                ? TvV17Theme.OPAQUE_SURFACE : TvV17Theme.SURFACE;
-        row.setBackground(tv
-                ? TvV17Surface.rounded(surface, a.dp(14), 0x2affffff, a.dp(1))
-                : a.bg(0xff222226, 14));
+        int surface =
+                tv && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
+                        ? TvV17Theme.OPAQUE_SURFACE
+                        : TvV17Theme.SURFACE;
+        row.setBackground(
+                tv
+                        ? TvV17Surface.rounded(surface, a.dp(14), 0x2affffff, a.dp(1))
+                        : a.bg(0xff222226, 14));
         row.setOnFocusChangeListener(
                 (v, f) ->
                         FocusMotion.style(
