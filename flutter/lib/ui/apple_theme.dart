@@ -2680,6 +2680,7 @@ class AppleSearchField extends StatefulWidget {
   final FocusNode? focusNode;
   final String placeholder;
   final bool autofocus;
+  final bool borderless;
   final ValueChanged<String>? onChanged;
   final ValueChanged<String>? onSubmitted;
   final VoidCallback? onSuffixTap;
@@ -2690,6 +2691,7 @@ class AppleSearchField extends StatefulWidget {
     this.focusNode,
     this.placeholder = '搜索',
     this.autofocus = false,
+    this.borderless = false,
     this.onChanged,
     this.onSubmitted,
     this.onSuffixTap,
@@ -2787,16 +2789,20 @@ class _AppleSearchFieldState extends State<AppleSearchField> {
       behavior: HitTestBehavior.translucent,
       onTap: () => _effectiveFocusNode.requestFocus(),
       child: Container(
-        constraints: const BoxConstraints(minHeight: 38),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-        decoration: BoxDecoration(
-          color: const Color(0x40787884),
-          borderRadius: BorderRadius.circular(11),
-          border: Border.all(
-            color: const Color(0x24FFFFFF),
-            width: 0.65,
-          ),
-        ),
+        constraints: BoxConstraints(minHeight: widget.borderless ? 36 : 38),
+        padding: widget.borderless
+            ? const EdgeInsets.symmetric(horizontal: 4, vertical: 0)
+            : const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+        decoration: widget.borderless
+            ? null
+            : BoxDecoration(
+                color: const Color(0x40787884),
+                borderRadius: BorderRadius.circular(11),
+                border: Border.all(
+                  color: const Color(0x24FFFFFF),
+                  width: 0.65,
+                ),
+              ),
         child: Row(
           children: [
             const Icon(

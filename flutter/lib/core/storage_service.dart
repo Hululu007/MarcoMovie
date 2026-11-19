@@ -2766,6 +2766,18 @@ class StorageService {
     if (list.length > 16) list.removeRange(16, list.length);
     await _prefs.setString(storageKey, jsonEncode(list));
   }
+  Future<void> removeSearchKeyword(
+    String keyword, {
+    bool forPrivate = false,
+  }) async {
+    final trimmed = keyword.trim();
+    if (trimmed.isEmpty) return;
+    final storageKey = forPrivate ? keyPrivateSearchHistory : keySearchHistory;
+    final list = getSearchHistory(forPrivate: forPrivate)
+        .where((k) => k != trimmed)
+        .toList();
+    await _prefs.setString(storageKey, jsonEncode(list));
+  }
   Future<void> clearSearchHistory({bool forPrivate = false}) async {
     final storageKey = forPrivate ? keyPrivateSearchHistory : keySearchHistory;
     await _prefs.setString(storageKey, '[]');

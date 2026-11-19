@@ -31,6 +31,7 @@ import 'apple_theme.dart';
 import 'cloud_sync_panel.dart';
 import 'detail_screen.dart';
 import 'ios_liquid_glass.dart';
+import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
 import 'netdisk_sheet.dart';
@@ -221,7 +222,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   bool _searching = false;
   int _searchEpoch = 0;
   StreamSubscription<(CmsSite, List<CmsVideo>)>? _searchSubscription;
-  VoidCallback? _searchSheetListener;
+  final ValueNotifier<int> _searchStateRevision = ValueNotifier<int>(0);
+  void _notifySearchUi() {
+    if (mounted) _searchStateRevision.value++;
+  }
   // Live state
   int _selectedLiveSource = 0;
   int _selectedLiveGroup = 0;
@@ -576,6 +580,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     unawaited(CatPawHost.instance.close());
     unawaited(CmsClient.closeScriptSessions());
     _searchController.dispose();
+    _searchStateRevision.dispose();
     _liveSearchController.dispose();
     _homeScrollController.removeListener(_onHomeScroll);
     _homeScrollController.dispose();
@@ -991,7 +996,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _searchKeyword = trimmed;
       _searchPerformed = true;
     });
-    _searchSheetListener?.call();
+    _notifySearchUi();
     _searchSubscription = widget.client
         .searchAcrossSites(
           orderedSites,
@@ -1005,7 +1010,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 _searchVerificationSites['${site.subscriptionId}:${site.key}'] = site;
               }
             });
-            _searchSheetListener?.call();
+            _notifySearchUi();
           },
         )
         .listen(
@@ -1020,22 +1025,40 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 _searchResults.add((site, v));
               }
             });
-            _searchSheetListener?.call();
+            _notifySearchUi();
           },
           onError: (_) {
             if (mounted && epoch == _searchEpoch) {
               setState(() => _searching = false);
-              _searchSheetListener?.call();
+              _notifySearchUi();
             }
           },
           onDone: () {
             if (mounted && epoch == _searchEpoch) {
               _searchSubscription = null;
               setState(() => _searching = false);
-              _searchSheetListener?.call();
+              _notifySearchUi();
             }
           },
         );
+  }
+  void _resetGlobalSearch() {
+    _searchEpoch++;
+    final activeSub = _searchSubscription;
+    _searchSubscription = null;
+    if (activeSub != null) {
+      unawaited(activeSub.cancel());
+    }
+    setState(() {
+      _searching = false;
+      _searchPerformed = false;
+      _searchKeyword = '';
+      _searchSiteFilterKey = '';
+      _searchResults.clear();
+      _searchNotices.clear();
+      _searchVerificationSites.clear();
+    });
+    _notifySearchUi();
   }
   Future<void> _retryVerifiedSearch(CmsSite site) async {
     final epoch = _searchEpoch;
@@ -1056,7 +1079,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         if (!CmsClient.needsSourceVerification(site, error)) _searchVerificationSites.remove(key);
       });
     }
-    _searchSheetListener?.call();
+    _notifySearchUi();
   }
 
   String _searchSourceLabel(CmsSite site) => searchSourceLabel(
@@ -1155,7 +1178,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       unawaited(activeSub!.cancel());
       if (_searching) {
         setState(() => _searching = false);
-        _searchSheetListener?.call();
+        _notifySearchUi();
       }
     }
     if (_loadingMore &&
@@ -3735,529 +3758,40 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _windowsNavigate('search');
       return;
     }
-    final isPriv = _privateSessionUnlocked;
-    showAppleModalSheet<void>(
-      context: context,
-      title: isPriv ? '隐私空间搜索' : '全站搜索',
-      maxWidth: 680,
-      ignoreKeyboardInsets: true,
-      trailingAction: CupertinoButton(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        minSize: 28,
-        onPressed: () {
-          if (widget.storage.getSearchHistory(forPrivate: isPriv).isNotEmpty) {
-            widget.storage.clearSearchHistory(forPrivate: isPriv).then((_) {
-              if (mounted) setState(() {});
-              _searchSheetListener?.call();
-            });
-          }
-        },
-        child: const Text(
-          '清空历史',
-          style: TextStyle(color: AppleColors.labelSecondary, fontSize: 13),
+    Navigator.of(context).push(
+      buildIosSearchOverlayRoute<void>(
+        builder: (_) => IosGlobalSearchPage(
+          controller: _searchController,
+          storage: widget.storage,
+          client: widget.client,
+          stateRevision: _searchStateRevision,
+          readSnapshot: () => GlobalSearchSnapshot(
+            isPrivate: _privateSessionUnlocked,
+            searching: _searching,
+            searchPerformed: _searchPerformed,
+            searchKeyword: _searchKeyword,
+            siteFilterKey: _searchSiteFilterKey,
+            searchEpoch: _searchEpoch,
+            results: _searchResults,
+            notices: _searchNotices,
+            verificationSites: _searchVerificationSites,
+            visibleSupportedSites: _visibleSupportedSites,
+            activeSite: _activeSite,
+            homeHotVideos: _homeVideos,
+          ),
+          sourceLabelOf: _searchSourceLabel,
+          onSearch: (kw) => unawaited(_runGlobalSearch(kw)),
+          onResetSearch: _resetGlobalSearch,
+          onSiteFilterChanged: (nextKey) {
+            setState(() => _searchSiteFilterKey = nextKey);
+            _notifySearchUi();
+          },
+          onRetryVerifiedSearch: _retryVerifiedSearch,
+          onOpenVideoDetail: _openVideoDetail,
+          buildVideoCard: _buildVideoCard,
         ),
       ),
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setSheetState) {
-            _searchSheetListener = () {
-              if (ctx.mounted) setSheetState(() {});
-            };
-            final history = widget.storage.getSearchHistory(forPrivate: isPriv);
-            final size = MediaQuery.sizeOf(ctx);
-            final wide = size.width > 640;
-            final siteCounts = <String, int>{};
-            final siteByKey = <String, CmsSite>{};
-            for (final s in _visibleSupportedSites) {
-              if (s.supported) {
-                siteByKey['${s.subscriptionId}:${s.key}'] = s;
-              }
-            }
-            for (final (site, _) in _searchResults) {
-              final k = '${site.subscriptionId}:${site.key}';
-              siteByKey[k] = site;
-              siteCounts[k] = (siteCounts[k] ?? 0) + 1;
-            }
-            if (_searchSiteFilterKey.isNotEmpty &&
-                !siteByKey.containsKey(_searchSiteFilterKey)) {
-              _searchSiteFilterKey = '';
-            }
-            final filterSiteEntries = siteByKey.entries.toList()
-              ..sort((a, b) {
-                final ca = siteCounts[a.key] ?? 0;
-                final cb = siteCounts[b.key] ?? 0;
-                if (ca != cb) return cb.compareTo(ca);
-                return 0;
-              });
-            final filteredSearchResults = _searchSiteFilterKey.isEmpty
-                ? _searchResults
-                : _searchResults
-                    .where(
-                      (r) =>
-                          '${r.$1.subscriptionId}:${r.$1.key}' ==
-                          _searchSiteFilterKey,
-                    )
-                    .toList(growable: false);
-            return SizedBox(
-              height: (size.height * 0.75).clamp(400.0, 640.0),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: AppleSearchField(
-                            controller: _searchController,
-                            autofocus: true,
-                            placeholder: '搜索片名、演员或导演…',
-                            onSubmitted: (kw) {
-                              _runGlobalSearch(kw);
-                              setSheetState(() {});
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        AppleCapsuleButton(
-                          label: '搜索',
-                          primary: true,
-                          compact: true,
-                          onPressed: () {
-                            _runGlobalSearch(_searchController.text);
-                            setSheetState(() {});
-                          },
-                        ),
-                      ],
-                    ),
-                    if (history.isNotEmpty) ...[
-                      const SizedBox(height: 10),
-                      SizedBox(
-                        height: 30,
-                        child: _SheetOwnedScrollController(
-                          builder: (ctx, historyScrollController) =>
-                              DesktopHorizontalScroller(
-                            controller: historyScrollController,
-                            child: ListView.separated(
-                              controller: historyScrollController,
-                              scrollDirection: Axis.horizontal,
-                              physics: const BouncingScrollPhysics(),
-                              itemCount: history.length,
-                              separatorBuilder: (_, __) =>
-                                  const SizedBox(width: 8),
-                              itemBuilder: (ctx, i) {
-                            final kw = history[i];
-                            return ApplePressableScale(
-                              pressedScale: 0.92,
-                              onTap: () {
-                                _searchController.text = kw;
-                                _runGlobalSearch(kw);
-                                setSheetState(() {});
-                              },
-                              child: Container(
-                                alignment: Alignment.center,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 5,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: AppleColors.groupedSecondary,
-                                  borderRadius: BorderRadius.circular(999),
-                                  border: Border.all(
-                                    color: AppleColors.glassBorder,
-                                    width: 0.5,
-                                  ),
-                                ),
-                                child: Text(
-                                  kw,
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    color: AppleColors.labelSecondary,
-                                    fontSize: 12,
-                                    height: 1.1,
-                                  ),
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-                    const SizedBox(height: 12),
-                    Expanded(
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          if (filterSiteEntries.isNotEmpty) ...[
-                            Container(
-                              key: const ValueKey('search-site-filter-bar'),
-                              width: wide ? 138 : 106,
-                              decoration: BoxDecoration(
-                                color: const Color(0x4018181E),
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(
-                                  color: AppleColors.glassBorder,
-                                  width: 0.6,
-                                ),
-                              ),
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(16),
-                                child: ListView.separated(
-                                  scrollDirection: Axis.vertical,
-                                  physics: const BouncingScrollPhysics(),
-                                  padding: const EdgeInsets.all(6),
-                                  itemCount: filterSiteEntries.length + 1,
-                                  separatorBuilder: (_, __) =>
-                                      const SizedBox(height: 6),
-                                  itemBuilder: (ctx, idx) {
-                                    final isAll = idx == 0;
-                                    final key = isAll
-                                        ? ''
-                                        : filterSiteEntries[idx - 1].key;
-                                    final site = isAll
-                                        ? null
-                                        : filterSiteEntries[idx - 1].value;
-                                    final count = isAll
-                                        ? _searchResults.length
-                                        : (siteCounts[key] ?? 0);
-                                    final selected =
-                                        _searchSiteFilterKey == key;
-                                    final titleText =
-                                        isAll ? '全部线路' : _searchSourceLabel(site!);
-                                    return ApplePressableScale(
-                                      pressedScale: 0.94,
-                                      pressedOpacity: 0.88,
-                                      onTap: () {
-                                        setSheetState(() {
-                                          _searchSiteFilterKey =
-                                              selected && !isAll ? '' : key;
-                                        });
-                                      },
-                                      child: AnimatedContainer(
-                                        duration:
-                                            const Duration(milliseconds: 180),
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 9,
-                                          vertical: 9,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          gradient: selected
-                                              ? const LinearGradient(
-                                                  begin: Alignment.topLeft,
-                                                  end: Alignment.bottomRight,
-                                                  colors: [
-                                                    Color(0xFF2E96FF),
-                                                    Color(0xFF0A84FF),
-                                                  ],
-                                                )
-                                              : null,
-                                          color: selected
-                                              ? null
-                                              : (count > 0
-                                                  ? const Color(0x283E9BFF)
-                                                  : const Color(0x3826262E)),
-                                          borderRadius:
-                                              BorderRadius.circular(11),
-                                          border: Border.all(
-                                            color: selected
-                                                ? const Color(0x99FFFFFF)
-                                                : (count > 0
-                                                    ? const Color(0x553E9BFF)
-                                                    : const Color(0x1FFFFFFF)),
-                                            width: 0.65,
-                                          ),
-                                        ),
-                                        child: Row(
-                                          children: [
-                                            Expanded(
-                                              child: Text(
-                                                titleText,
-                                                maxLines: 2,
-                                                overflow: TextOverflow.ellipsis,
-                                                style: TextStyle(
-                                                  color: selected
-                                                      ? Colors.white
-                                                      : (count > 0
-                                                          ? AppleColors
-                                                              .labelPrimary
-                                                          : AppleColors
-                                                              .labelSecondary),
-                                                  fontSize: 12,
-                                                  fontWeight:
-                                                      selected || count > 0
-                                                          ? FontWeight.w600
-                                                          : FontWeight.w500,
-                                                  height: 1.2,
-                                                ),
-                                              ),
-                                            ),
-                                            if (count > 0) ...[
-                                              const SizedBox(width: 4),
-                                              Container(
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                  horizontal: 5.5,
-                                                  vertical: 2,
-                                                ),
-                                                decoration: BoxDecoration(
-                                                  color: selected
-                                                      ? const Color(0x38FFFFFF)
-                                                      : const Color(0x380A84FF),
-                                                  borderRadius:
-                                                      BorderRadius.circular(
-                                                          999),
-                                                ),
-                                                child: Text(
-                                                  '$count',
-                                                  style: TextStyle(
-                                                    color: selected
-                                                        ? Colors.white
-                                                        : const Color(
-                                                            0xFF70B8FF),
-                                                    fontSize: 10.5,
-                                                    fontWeight: FontWeight.w700,
-                                                  ),
-                                                ),
-                                              ),
-                                            ],
-                                          ],
-                                        ),
-                                      ),
-                                    );
-                                  },
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 11),
-                          ],
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                if (_searching)
-                                  const Padding(
-                                    padding: EdgeInsets.only(bottom: 10),
-                                    child: Row(
-                                      children: [
-                                        CupertinoActivityIndicator(radius: 9),
-                                        SizedBox(width: 8),
-                                        Expanded(
-                                          child: Text(
-                                            '正在并发检索所有可用片源…',
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              color: AppleColors.labelSecondary,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                if (_searchNotices.isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.only(bottom: 10),
-                                    child: Container(
-                                      key: const ValueKey(
-                                        'search-source-notices-box',
-                                      ),
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 10,
-                                        vertical: 6,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0x361A1A20),
-                                        borderRadius: BorderRadius.circular(10),
-                                        border: Border.all(
-                                          color: AppleColors.glassBorder,
-                                          width: 0.5,
-                                        ),
-                                      ),
-                                      child: ConstrainedBox(
-                                        constraints: const BoxConstraints(
-                                          maxHeight: 54.0,
-                                        ),
-                                        child: _SheetOwnedScrollController(
-                                          builder: (ctx, noticeScrollCtrl) =>
-                                              CupertinoScrollbar(
-                                                controller: noticeScrollCtrl,
-                                                child: SingleChildScrollView(
-                                                  controller: noticeScrollCtrl,
-                                                  primary: false,
-                                                  physics:
-                                                      const BouncingScrollPhysics(),
-                                                  child: Column(
-                                                    crossAxisAlignment:
-                                                        CrossAxisAlignment.start,
-                                                    children: [
-                                                      Text(
-                                                        _searchNotices.values
-                                                            .join('\n'),
-                                                        key: const ValueKey(
-                                                          'search-source-notices',
-                                                        ),
-                                                        style: const TextStyle(
-                                                          color: AppleColors
-                                                              .labelSecondary,
-                                                          fontSize: 12,
-                                                          height: 1.45,
-                                                        ),
-                                                      ),
-                                                      for (final site
-                                                          in _searchVerificationSites
-                                                              .values)
-                                                        Padding(
-                                                          padding:
-                                                              const EdgeInsets.only(
-                                                                top: 8,
-                                                              ),
-                                                          child: Column(
-                                                            crossAxisAlignment:
-                                                                CrossAxisAlignment
-                                                                    .start,
-                                                            children: [
-                                                              Text(
-                                                                site.name,
-                                                                style: const TextStyle(
-                                                                  color: AppleColors
-                                                                      .labelSecondary,
-                                                                  fontSize: 12,
-                                                                ),
-                                                              ),
-                                                              const SizedBox(
-                                                                height: 4,
-                                                              ),
-                                                              SourceVerificationButton(
-                                                                key: ValueKey(
-                                                                  '$_searchEpoch:${site.subscriptionId}:${site.key}',
-                                                                ),
-                                                                client:
-                                                                    widget.client,
-                                                                site: site,
-                                                                onVerified: () =>
-                                                                    _retryVerifiedSearch(
-                                                                      site,
-                                                                    ),
-                                                              ),
-                                                            ],
-                                                          ),
-                                                        ),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                Expanded(
-                                  child: filteredSearchResults.isEmpty &&
-                                          !_searching
-                                      ? Center(
-                                          child: SingleChildScrollView(
-                                            primary: false,
-                                            child: Column(
-                                              mainAxisSize: MainAxisSize.min,
-                                              children: [
-                                                const Icon(
-                                                  CupertinoIcons.search,
-                                                  color:
-                                                      AppleColors.labelTertiary,
-                                                  size: 42,
-                                                ),
-                                                const SizedBox(height: 10),
-                                                Text(
-                                                  !_searchPerformed
-                                                      ? '输入关键词，并发检索全部已启用片源'
-                                                      : (_searchSiteFilterKey
-                                                                  .isNotEmpty &&
-                                                              _searchResults
-                                                                  .isNotEmpty)
-                                                          ? '当前所选线路暂无匹配影片'
-                                                          : _searchNotices
-                                                                  .isEmpty
-                                                              ? '没有找到匹配影片'
-                                                              : '本次搜索未返回影片，请查看上方片源提示',
-                                                  textAlign: TextAlign.center,
-                                                  style: const TextStyle(
-                                                    color: AppleColors
-                                                        .labelSecondary,
-                                                    fontSize: 14,
-                                                  ),
-                                                ),
-                                                if (_searchSiteFilterKey
-                                                        .isNotEmpty &&
-                                                    _searchResults
-                                                        .isNotEmpty) ...[
-                                                  const SizedBox(height: 12),
-                                                  AppleCapsuleButton(
-                                                    label:
-                                                        '查看全部线路 (${_searchResults.length})',
-                                                    compact: true,
-                                                    onPressed: () {
-                                                      setSheetState(() {
-                                                        _searchSiteFilterKey =
-                                                            '';
-                                                      });
-                                                    },
-                                                  ),
-                                                ],
-                                              ],
-                                            ),
-                                          ),
-                                        )
-                                      : GridView.builder(
-                                          keyboardDismissBehavior:
-                                              ScrollViewKeyboardDismissBehavior
-                                                  .onDrag,
-                                          padding:
-                                              const EdgeInsets.only(bottom: 16),
-                                          gridDelegate:
-                                              SliverGridDelegateWithMaxCrossAxisExtent(
-                                            maxCrossAxisExtent:
-                                                wide ? 156 : 120,
-                                            mainAxisSpacing: 14,
-                                            crossAxisSpacing: 10,
-                                            childAspectRatio: 0.56,
-                                          ),
-                                          itemCount:
-                                              filteredSearchResults.length,
-                                          itemBuilder: (ctx, i) {
-                                            final (site, video) =
-                                                filteredSearchResults[i];
-                                            return _buildVideoCard(
-                                              site,
-                                              video,
-                                              badge: site.name,
-                                              onTap: () {
-                                                // Keep the search modal sheet resident underneath DetailScreen
-                                                // so returning from DetailScreen lands directly back on search results.
-                                                FocusScope.of(ctx).unfocus();
-                                                _openVideoDetail(site, video);
-                                              },
-                                            );
-                                          },
-                                        ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
-    ).whenComplete(() {
-      _searchSheetListener = null;
-    });
+    );
   }
 
   void _handleHomeLogoTap() {
