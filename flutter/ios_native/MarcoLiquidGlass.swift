@@ -1,7 +1,7 @@
 // MARK: - iOS 26 Native Liquid Glass Bridge (injected into AppDelegate.swift by prepare_platform.py)
 
 private enum MarcoLiquidGlassSupport {
-  private static var bridgeChannel: FlutterMethodChannel?
+  static var bridgeChannel: FlutterMethodChannel?
   static var brandLogoImage: UIImage?
 
   static var isAvailable: Bool {
@@ -65,6 +65,14 @@ private enum MarcoLiquidGlassSupport {
         DispatchQueue.main.async {
           MarcoNativeFilterSheetController.present(args: args, completion: result)
         }
+      case "showPrivacyPin":
+        guard let args = call.arguments as? [String: Any] else {
+          result(nil)
+          return
+        }
+        DispatchQueue.main.async {
+          MarcoNativePinSheetController.present(args: args, completion: result)
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -93,7 +101,7 @@ private enum MarcoLiquidGlassSupport {
     let path = Bundle.main.path(forResource: key, ofType: nil)
       ?? Bundle.main.path(forResource: FlutterDartProject.lookupKey(forAsset: "assets/logo_mark.png"), ofType: nil)
     if let filePath = path, let raw = UIImage(contentsOfFile: filePath) {
-      let target = CGSize(width: 28.0, height: 28.0)
+      let target = CGSize(width: 32.0, height: 32.0)
       let scale = min(target.width / max(raw.size.width, 1.0), target.height / max(raw.size.height, 1.0))
       let drawSize = CGSize(width: raw.size.width * scale, height: raw.size.height * scale)
       let drawOrigin = CGPoint(
@@ -106,7 +114,7 @@ private enum MarcoLiquidGlassSupport {
       }
       return rendered.withRenderingMode(.alwaysOriginal)
     }
-    let symCfg = UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+    let symCfg = UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
     return UIImage(systemName: "film.stack.fill", withConfiguration: symCfg)
   }
 
@@ -120,14 +128,26 @@ private enum MarcoLiquidGlassSupport {
     return UIColor(red: r, green: g, blue: b, alpha: a)
   }
 
+  static func isNearWhite(_ color: UIColor) -> Bool {
+    var r: CGFloat = 1
+    var g: CGFloat = 1
+    var b: CGFloat = 1
+    var a: CGFloat = 1
+    if color.getRed(&r, green: &g, blue: &b, alpha: &a) {
+      return r > 0.90 && g > 0.90 && b > 0.90
+    }
+    return true
+  }
+
   static func buildMenu(
     title: String = "",
     rawItems: [[String: Any]],
     onSelect: @escaping (String) -> Void
   ) -> UIMenu? {
     guard !rawItems.isEmpty else { return nil }
-    var sections: [[UIMenuElement]] = []
+    var sections: [(title: String, elements: [UIMenuElement])] = []
     var currentSectionKey: Int?
+    var currentSectionTitle: String = ""
     var currentBucket: [UIMenuElement] = []
 
     for item in rawItems {
@@ -138,12 +158,17 @@ private enum MarcoLiquidGlassSupport {
       let checked = (item["checked"] as? Bool) ?? false
       let destructive = (item["destructive"] as? Bool) ?? false
       let sectionKey = (item["section"] as? NSNumber)?.intValue ?? 0
+      let secTitle = (item["sectionTitle"] as? String) ?? ""
 
       if let prev = currentSectionKey, prev != sectionKey, !currentBucket.isEmpty {
-        sections.append(currentBucket)
+        sections.append((title: currentSectionTitle, elements: currentBucket))
         currentBucket = []
+        currentSectionTitle = ""
       }
       currentSectionKey = sectionKey
+      if currentSectionTitle.isEmpty && !secTitle.isEmpty {
+        currentSectionTitle = secTitle
+      }
 
       let image = symbol.flatMap { UIImage(systemName: $0) }
       let attrs: UIMenuElement.Attributes = destructive ? [.destructive] : []
@@ -159,12 +184,12 @@ private enum MarcoLiquidGlassSupport {
       currentBucket.append(action)
     }
     if !currentBucket.isEmpty {
-      sections.append(currentBucket)
+      sections.append((title: currentSectionTitle, elements: currentBucket))
     }
-    if sections.count <= 1 {
-      return UIMenu(title: title, children: sections.first ?? [])
+    if sections.count <= 1 && (sections.first?.title.isEmpty ?? true) {
+      return UIMenu(title: title, children: sections.first?.elements ?? [])
     }
-    let inlineMenus = sections.map { UIMenu(title: "", options: .displayInline, children: $0) }
+    let inlineMenus = sections.map { UIMenu(title: $0.title, options: .displayInline, children: $0.elements) }
     return UIMenu(title: title, children: inlineMenus)
   }
 
@@ -670,7 +695,571 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
   }
 }
 
-// MARK: - 1. Native iOS 26 Floating Liquid Glass Dock (Height-Aligned 4+1 & Scroll-Collapsed Logo Menu)
+// MARK: - Native iOS 26 Liquid Glass Privacy Passcode Modal (UISheetPresentationController)
+
+private final class MarcoNativePinSheetController: UIViewController, UIAdaptivePresentationControllerDelegate {
+  private let sessionId: String
+  private let mode: String // "verify" | "set"
+  private let initialTitle: String
+  private let initialSubtitle: String
+  private let confirmTitle: String
+  private let confirmSubtitle: String
+  private let pinLength: Int
+  private let loadingText: String
+  private let mismatchError: String
+
+  private var firstPin: String = ""
+  private var enteredPin: String = ""
+  private var confirming: Bool = false
+  private var isBusy: Bool = false
+  private var errorMessage: String?
+
+  private let scrollView = UIScrollView()
+  private let contentView = UIView()
+  private let badgeView = UIView()
+  private let badgeGradient = CAGradientLayer()
+  private let badgeIconView = UIImageView()
+  private let badgeSpinner = UIActivityIndicatorView(style: .medium)
+  private let titleLabel = UILabel()
+  private let subtitleLabel = UILabel()
+  private let dotsStack = UIStackView()
+  private var dotViews: [UIView] = []
+  private let keypadStack = UIStackView()
+  private var digitButtons: [UIButton] = []
+  private let cancelButton = UIButton(type: .system)
+  private let backspaceButton = UIButton(type: .system)
+
+  private var completion: FlutterResult?
+  private var resolved = false
+  private var resetWorkItem: DispatchWorkItem?
+
+  static func present(args: [String: Any], completion: @escaping FlutterResult) {
+    guard let host = MarcoLiquidGlassSupport.topPresenter() else {
+      completion(nil)
+      return
+    }
+    let vc = MarcoNativePinSheetController(args: args, completion: completion)
+    vc.modalPresentationStyle = .pageSheet
+    vc.overrideUserInterfaceStyle = .dark
+    vc.presentationController?.delegate = vc
+    if let sheet = vc.sheetPresentationController {
+      if #available(iOS 16.0, *) {
+        let detentId = UISheetPresentationController.Detent.Identifier("marcoPrivacyPin")
+        let customDetent = UISheetPresentationController.Detent.custom(identifier: detentId) { ctx in
+          return min(566.0, ctx.maximumDetentValue)
+        }
+        sheet.detents = [customDetent]
+      } else {
+        sheet.detents = [.large()]
+      }
+      sheet.prefersGrabberVisible = true
+      sheet.preferredCornerRadius = 32.0
+    }
+    host.present(vc, animated: true, completion: nil)
+  }
+
+  init(args: [String: Any], completion: @escaping FlutterResult) {
+    self.sessionId = (args["sessionId"] as? String) ?? UUID().uuidString
+    self.mode = (args["mode"] as? String) ?? "verify"
+    self.initialTitle = (args["title"] as? String) ?? "解锁隐私空间"
+    self.initialSubtitle = (args["subtitle"] as? String) ?? "输入设置的密码即可直接进入隐私分组模式"
+    self.confirmTitle = (args["confirmTitle"] as? String) ?? "再次输入确认密码"
+    self.confirmSubtitle = (args["confirmSubtitle"] as? String) ?? "请再次输入刚才设置的 4 位数字密码"
+    let rawLen = (args["pinLength"] as? NSNumber)?.intValue ?? 4
+    self.pinLength = max(4, min(rawLen, 8))
+    self.loadingText = (args["loadingText"] as? String) ?? (self.mode == "set" ? "正在加密保存密码…" : "正在验证密码…")
+    self.mismatchError = (args["mismatchError"] as? String) ?? "两次输入的密码不一致，请重新设置"
+    self.completion = completion
+    super.init(nibName: nil, bundle: nil)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  deinit {
+    resetWorkItem?.cancel()
+    finish(succeeded: false)
+  }
+
+  override var canBecomeFirstResponder: Bool {
+    return true
+  }
+
+  override var keyCommands: [UIKeyCommand]? {
+    var cmds: [UIKeyCommand] = []
+    for d in 0...9 {
+      cmds.append(UIKeyCommand(input: "\(d)", modifierFlags: [], action: #selector(handleDigitKeyCommand(_:))))
+    }
+    cmds.append(UIKeyCommand(input: "\u{8}", modifierFlags: [], action: #selector(backspaceTapped)))
+    cmds.append(UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(cancelTapped)))
+    return cmds
+  }
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    overrideUserInterfaceStyle = .dark
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      view.backgroundColor = .clear
+    } else {
+      view.backgroundColor = UIColor(red: 0.08, green: 0.08, blue: 0.10, alpha: 1.0)
+    }
+    #else
+    view.backgroundColor = UIColor(red: 0.08, green: 0.08, blue: 0.10, alpha: 1.0)
+    #endif
+
+    scrollView.translatesAutoresizingMaskIntoConstraints = false
+    scrollView.showsVerticalScrollIndicator = false
+    scrollView.alwaysBounceVertical = false
+    view.addSubview(scrollView)
+
+    contentView.translatesAutoresizingMaskIntoConstraints = false
+    scrollView.addSubview(contentView)
+
+    // Shield badge
+    badgeView.translatesAutoresizingMaskIntoConstraints = false
+    badgeView.layer.cornerRadius = 26.0
+    badgeView.layer.masksToBounds = false
+    badgeView.layer.shadowColor = UIColor(red: 0.545, green: 0.361, blue: 0.965, alpha: 1.0).cgColor
+    badgeView.layer.shadowOpacity = 0.45
+    badgeView.layer.shadowRadius = 14.0
+    badgeView.layer.shadowOffset = CGSize(width: 0, height: 4)
+
+    badgeGradient.colors = [
+      UIColor(red: 0.545, green: 0.361, blue: 0.965, alpha: 1.0).cgColor,
+      UIColor(red: 0.310, green: 0.275, blue: 0.898, alpha: 1.0).cgColor,
+    ]
+    badgeGradient.startPoint = CGPoint(x: 0.0, y: 0.0)
+    badgeGradient.endPoint = CGPoint(x: 1.0, y: 1.0)
+    badgeGradient.cornerRadius = 26.0
+    badgeView.layer.insertSublayer(badgeGradient, at: 0)
+
+    let shieldCfg = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .semibold)
+    badgeIconView.image = UIImage(systemName: "lock.shield.fill", withConfiguration: shieldCfg)
+    badgeIconView.tintColor = .white
+    badgeIconView.contentMode = .scaleAspectFit
+    badgeIconView.translatesAutoresizingMaskIntoConstraints = false
+    badgeView.addSubview(badgeIconView)
+
+    badgeSpinner.color = .white
+    badgeSpinner.hidesWhenStopped = true
+    badgeSpinner.translatesAutoresizingMaskIntoConstraints = false
+    badgeView.addSubview(badgeSpinner)
+
+    contentView.addSubview(badgeView)
+
+    // Title & subtitle
+    titleLabel.font = UIFont.systemFont(ofSize: 20.0, weight: .bold)
+    titleLabel.textColor = .white
+    titleLabel.textAlignment = .center
+    titleLabel.numberOfLines = 1
+    titleLabel.translatesAutoresizingMaskIntoConstraints = false
+    contentView.addSubview(titleLabel)
+
+    subtitleLabel.font = UIFont.systemFont(ofSize: 13.0, weight: .regular)
+    subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.72)
+    subtitleLabel.textAlignment = .center
+    subtitleLabel.numberOfLines = 2
+    subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+    contentView.addSubview(subtitleLabel)
+
+    // PIN dots
+    dotsStack.axis = .horizontal
+    dotsStack.alignment = .center
+    dotsStack.spacing = pinLength > 6 ? 10.0 : 16.0
+    dotsStack.translatesAutoresizingMaskIntoConstraints = false
+    for _ in 0..<pinLength {
+      let dot = UIView()
+      dot.translatesAutoresizingMaskIntoConstraints = false
+      dot.layer.cornerRadius = 7.0
+      dot.layer.borderWidth = 1.2
+      NSLayoutConstraint.activate([
+        dot.widthAnchor.constraint(equalToConstant: 14.0),
+        dot.heightAnchor.constraint(equalToConstant: 14.0),
+      ])
+      dotsStack.addArrangedSubview(dot)
+      dotViews.append(dot)
+    }
+    contentView.addSubview(dotsStack)
+
+    // 3x4 Liquid Glass Keypad
+    let isCompactHeight = UIScreen.main.bounds.height < 680.0
+    let keySize: CGFloat = isCompactHeight ? 64.0 : 72.0
+    let rowSpacing: CGFloat = isCompactHeight ? 11.0 : 14.0
+    let colSpacing: CGFloat = isCompactHeight ? 18.0 : 22.0
+
+    keypadStack.axis = .vertical
+    keypadStack.alignment = .center
+    keypadStack.spacing = rowSpacing
+    keypadStack.translatesAutoresizingMaskIntoConstraints = false
+
+    let digitRows = [
+      ["1", "2", "3"],
+      ["4", "5", "6"],
+      ["7", "8", "9"],
+    ]
+    for row in digitRows {
+      let rowStack = UIStackView()
+      rowStack.axis = .horizontal
+      rowStack.alignment = .center
+      rowStack.spacing = colSpacing
+      for digit in row {
+        let btn = makeDigitButton(digit: digit, size: keySize)
+        digitButtons.append(btn)
+        rowStack.addArrangedSubview(btn)
+      }
+      keypadStack.addArrangedSubview(rowStack)
+    }
+
+    // Bottom row: Cancel | 0 | Backspace
+    let bottomRow = UIStackView()
+    bottomRow.axis = .horizontal
+    bottomRow.alignment = .center
+    bottomRow.spacing = colSpacing
+
+    configureCancelButton(size: keySize)
+    let zeroBtn = makeDigitButton(digit: "0", size: keySize)
+    digitButtons.append(zeroBtn)
+    configureBackspaceButton(size: keySize)
+
+    bottomRow.addArrangedSubview(cancelButton)
+    bottomRow.addArrangedSubview(zeroBtn)
+    bottomRow.addArrangedSubview(backspaceButton)
+    keypadStack.addArrangedSubview(bottomRow)
+    contentView.addSubview(keypadStack)
+
+    NSLayoutConstraint.activate([
+      scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+      scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+      scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+
+      contentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+      contentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+      contentView.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor),
+      contentView.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor),
+
+      badgeView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 26.0),
+      badgeView.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+      badgeView.widthAnchor.constraint(equalToConstant: 52.0),
+      badgeView.heightAnchor.constraint(equalToConstant: 52.0),
+
+      badgeIconView.centerXAnchor.constraint(equalTo: badgeView.centerXAnchor),
+      badgeIconView.centerYAnchor.constraint(equalTo: badgeView.centerYAnchor),
+      badgeSpinner.centerXAnchor.constraint(equalTo: badgeView.centerXAnchor),
+      badgeSpinner.centerYAnchor.constraint(equalTo: badgeView.centerYAnchor),
+
+      titleLabel.topAnchor.constraint(equalTo: badgeView.bottomAnchor, constant: 14.0),
+      titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24.0),
+      titleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24.0),
+
+      subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6.0),
+      subtitleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 28.0),
+      subtitleLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -28.0),
+
+      dotsStack.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 20.0),
+      dotsStack.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+
+      keypadStack.topAnchor.constraint(equalTo: dotsStack.bottomAnchor, constant: 24.0),
+      keypadStack.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+      keypadStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -24.0),
+    ])
+
+    refreshUI(animatedDotIndex: nil)
+  }
+
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated)
+    becomeFirstResponder()
+  }
+
+  override func viewDidLayoutSubviews() {
+    super.viewDidLayoutSubviews()
+    badgeGradient.frame = badgeView.bounds
+  }
+
+  private func makeDigitButton(digit: String, size: CGFloat) -> UIButton {
+    let btn = UIButton(type: .system)
+    btn.translatesAutoresizingMaskIntoConstraints = false
+    btn.overrideUserInterfaceStyle = .dark
+    btn.tag = Int(digit) ?? 0
+    btn.accessibilityLabel = digit
+    var titleAttr = AttributedString(digit)
+    titleAttr.font = UIFont.monospacedDigitSystemFont(ofSize: 28.0, weight: .medium)
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      var cfg = UIButton.Configuration.glass()
+      cfg.attributedTitle = titleAttr
+      cfg.baseForegroundColor = .white
+      cfg.cornerStyle = .capsule
+      cfg.contentInsets = .zero
+      btn.configuration = cfg
+    } else {
+      var cfg = UIButton.Configuration.filled()
+      cfg.attributedTitle = titleAttr
+      cfg.baseForegroundColor = .white
+      cfg.baseBackgroundColor = UIColor(white: 0.22, alpha: 0.85)
+      cfg.cornerStyle = .capsule
+      cfg.contentInsets = .zero
+      btn.configuration = cfg
+    }
+    #else
+    var cfg = UIButton.Configuration.filled()
+    cfg.attributedTitle = titleAttr
+    cfg.baseForegroundColor = .white
+    cfg.baseBackgroundColor = UIColor(white: 0.22, alpha: 0.85)
+    cfg.cornerStyle = .capsule
+    cfg.contentInsets = .zero
+    btn.configuration = cfg
+    #endif
+    btn.addTarget(self, action: #selector(digitTapped(_:)), for: .touchUpInside)
+    NSLayoutConstraint.activate([
+      btn.widthAnchor.constraint(equalToConstant: size),
+      btn.heightAnchor.constraint(equalToConstant: size),
+    ])
+    return btn
+  }
+
+  private func configureCancelButton(size: CGFloat) {
+    cancelButton.translatesAutoresizingMaskIntoConstraints = false
+    cancelButton.overrideUserInterfaceStyle = .dark
+    cancelButton.accessibilityLabel = "取消"
+    var titleAttr = AttributedString("取消")
+    titleAttr.font = UIFont.systemFont(ofSize: 16.0, weight: .semibold)
+    var cfg = UIButton.Configuration.plain()
+    cfg.attributedTitle = titleAttr
+    cfg.baseForegroundColor = UIColor.white.withAlphaComponent(0.78)
+    cfg.contentInsets = .zero
+    cancelButton.configuration = cfg
+    cancelButton.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
+    NSLayoutConstraint.activate([
+      cancelButton.widthAnchor.constraint(equalToConstant: size),
+      cancelButton.heightAnchor.constraint(equalToConstant: size),
+    ])
+  }
+
+  private func configureBackspaceButton(size: CGFloat) {
+    backspaceButton.translatesAutoresizingMaskIntoConstraints = false
+    backspaceButton.overrideUserInterfaceStyle = .dark
+    backspaceButton.accessibilityLabel = "删除"
+    let symCfg = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .medium)
+    var cfg = UIButton.Configuration.plain()
+    cfg.image = UIImage(systemName: "delete.left.fill", withConfiguration: symCfg)
+    cfg.baseForegroundColor = UIColor.white.withAlphaComponent(0.84)
+    cfg.contentInsets = .zero
+    backspaceButton.configuration = cfg
+    backspaceButton.addTarget(self, action: #selector(backspaceTapped), for: .touchUpInside)
+    NSLayoutConstraint.activate([
+      backspaceButton.widthAnchor.constraint(equalToConstant: size),
+      backspaceButton.heightAnchor.constraint(equalToConstant: size),
+    ])
+  }
+
+  private func refreshUI(animatedDotIndex: Int?) {
+    titleLabel.text = (mode == "set" && confirming) ? confirmTitle : initialTitle
+    let hasError = !(errorMessage?.isEmpty ?? true)
+    if isBusy {
+      subtitleLabel.text = loadingText
+      subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.92)
+    } else if hasError {
+      subtitleLabel.text = errorMessage
+      subtitleLabel.textColor = UIColor.systemRed
+    } else {
+      subtitleLabel.text = (mode == "set" && confirming) ? confirmSubtitle : initialSubtitle
+      subtitleLabel.textColor = UIColor.white.withAlphaComponent(0.72)
+    }
+
+    badgeIconView.isHidden = isBusy
+    if isBusy {
+      badgeSpinner.startAnimating()
+    } else {
+      badgeSpinner.stopAnimating()
+    }
+
+    let filledColor = hasError
+      ? UIColor.systemRed
+      : UIColor(red: 0.769, green: 0.710, blue: 0.992, alpha: 1.0)
+    let filledBorder = hasError
+      ? UIColor.systemRed
+      : UIColor(red: 0.655, green: 0.545, blue: 0.980, alpha: 1.0)
+    let emptyFill = UIColor.white.withAlphaComponent(0.12)
+    let emptyBorder = UIColor.white.withAlphaComponent(0.32)
+
+    for (idx, dot) in dotViews.enumerated() {
+      let filled = idx < enteredPin.count
+      dot.backgroundColor = filled ? filledColor : emptyFill
+      dot.layer.borderColor = (filled ? filledBorder : emptyBorder).cgColor
+      if filled {
+        dot.layer.shadowColor = (hasError ? UIColor.systemRed : UIColor(red: 0.545, green: 0.361, blue: 0.965, alpha: 1.0)).cgColor
+        dot.layer.shadowOpacity = 0.65
+        dot.layer.shadowRadius = 7.0
+        dot.layer.shadowOffset = .zero
+      } else {
+        dot.layer.shadowOpacity = 0.0
+      }
+      if animatedDotIndex == idx {
+        dot.transform = CGAffineTransform(scaleX: 1.32, y: 1.32)
+        UIView.animate(
+          withDuration: 0.22,
+          delay: 0,
+          usingSpringWithDamping: 0.62,
+          initialSpringVelocity: 0.7,
+          options: [.allowUserInteraction],
+          animations: { dot.transform = .identity },
+          completion: nil
+        )
+      }
+    }
+
+    backspaceButton.alpha = (enteredPin.isEmpty || isBusy) ? 0.35 : 1.0
+    backspaceButton.isEnabled = !enteredPin.isEmpty && !isBusy
+    for btn in digitButtons {
+      btn.isEnabled = !isBusy
+    }
+  }
+
+  private func shakeDots() {
+    let anim = CAKeyframeAnimation(keyPath: "transform.translation.x")
+    anim.timingFunction = CAMediaTimingFunction(name: .linear)
+    anim.duration = 0.36
+    anim.values = [-12.0, 12.0, -9.0, 9.0, -5.0, 5.0, 0.0]
+    dotsStack.layer.add(anim, forKey: "marcoPinShake")
+  }
+
+  @objc private func handleDigitKeyCommand(_ cmd: UIKeyCommand) {
+    guard let input = cmd.input else { return }
+    appendDigit(input)
+  }
+
+  @objc private func digitTapped(_ sender: UIButton) {
+    appendDigit("\(sender.tag)")
+  }
+
+  private func appendDigit(_ digit: String) {
+    guard !isBusy, !resolved, enteredPin.count < pinLength else { return }
+    resetWorkItem?.cancel()
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    errorMessage = nil
+    enteredPin.append(digit)
+    refreshUI(animatedDotIndex: enteredPin.count - 1)
+
+    guard enteredPin.count == pinLength else { return }
+    let completedPin = enteredPin
+
+    if mode == "set" {
+      if !confirming {
+        isBusy = true
+        let work = DispatchWorkItem { [weak self] in
+          guard let self = self, !self.resolved else { return }
+          self.isBusy = false
+          self.firstPin = completedPin
+          self.enteredPin = ""
+          self.confirming = true
+          UIView.transition(
+            with: self.contentView,
+            duration: 0.22,
+            options: [.transitionCrossDissolve, .allowUserInteraction],
+            animations: { self.refreshUI(animatedDotIndex: nil) },
+            completion: nil
+          )
+        }
+        resetWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14, execute: work)
+        return
+      }
+      if completedPin != firstPin {
+        triggerError(mismatchError, resetToFirstStep: true)
+        return
+      }
+    }
+
+    submitPinToFlutter(completedPin)
+  }
+
+  private func submitPinToFlutter(_ pin: String) {
+    guard let channel = MarcoLiquidGlassSupport.bridgeChannel else {
+      finish(succeeded: false)
+      dismiss(animated: true, completion: nil)
+      return
+    }
+    isBusy = true
+    errorMessage = nil
+    refreshUI(animatedDotIndex: nil)
+
+    channel.invokeMethod(
+      "privacyPinCallback",
+      arguments: [
+        "sessionId": sessionId,
+        "mode": mode,
+        "pin": pin,
+      ]
+    ) { [weak self] response in
+      DispatchQueue.main.async {
+        guard let self = self, !self.resolved else { return }
+        let dict = response as? [String: Any]
+        let ok = (dict?["ok"] as? Bool) ?? false
+        if ok {
+          UINotificationFeedbackGenerator().notificationOccurred(.success)
+          self.finish(succeeded: true)
+          self.dismiss(animated: true, completion: nil)
+        } else {
+          let errText = (dict?["error"] as? String) ?? "密码错误，请重新输入"
+          self.triggerError(errText, resetToFirstStep: self.mode == "set")
+        }
+      }
+    }
+  }
+
+  private func triggerError(_ message: String, resetToFirstStep: Bool) {
+    UINotificationFeedbackGenerator().notificationOccurred(.error)
+    isBusy = false
+    errorMessage = message
+    refreshUI(animatedDotIndex: nil)
+    shakeDots()
+
+    resetWorkItem?.cancel()
+    let work = DispatchWorkItem { [weak self] in
+      guard let self = self, !self.resolved else { return }
+      self.enteredPin = ""
+      if resetToFirstStep {
+        self.firstPin = ""
+        self.confirming = false
+      }
+      self.refreshUI(animatedDotIndex: nil)
+    }
+    resetWorkItem = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.36, execute: work)
+  }
+
+  @objc private func backspaceTapped() {
+    guard !isBusy, !enteredPin.isEmpty else { return }
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    errorMessage = nil
+    enteredPin.removeLast()
+    refreshUI(animatedDotIndex: nil)
+  }
+
+  @objc private func cancelTapped() {
+    finish(succeeded: false)
+    dismiss(animated: true, completion: nil)
+  }
+
+  func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+    finish(succeeded: false)
+  }
+
+  private func finish(succeeded: Bool) {
+    guard !resolved else { return }
+    resolved = true
+    let cb = completion
+    completion = nil
+    cb?(succeeded)
+  }
+}
+
+// MARK: - 1. Native iOS 26 Floating Liquid Glass Dock (Full 62pt 4+1 & Scroll-Collapsed Logo Menu)
 
 private final class MarcoNativeDockFactory: NSObject, FlutterPlatformViewFactory {
   private let messenger: FlutterBinaryMessenger
@@ -698,8 +1287,309 @@ private final class MarcoNativeDockFactory: NSObject, FlutterPlatformViewFactory
   }
 }
 
+/// Full-height (62pt) native iOS 26 Liquid Glass 4-tab capsule using `UIGlassEffect`
+/// directly so it matches the 62pt trailing search circle and Apple's iOS 26
+/// floating tab bar proportions (instead of standalone `UITabBar`'s 48pt cap).
+private final class MarcoNativeLiquidTabCapsuleView: UIView {
+  struct TabSpec {
+    let label: String
+    let symbol: String
+    let selectedSymbol: String
+  }
+
+  private final class SlotView: UIView {
+    let iconView = UIImageView()
+    let titleLabel = UILabel()
+    private let stack = UIStackView()
+
+    override init(frame: CGRect) {
+      super.init(frame: frame)
+      isUserInteractionEnabled = false
+      isAccessibilityElement = true
+      accessibilityTraits = .button
+
+      iconView.contentMode = .scaleAspectFit
+      iconView.tintColor = .white
+
+      titleLabel.font = UIFont.systemFont(ofSize: 10.5, weight: .medium)
+      titleLabel.textAlignment = .center
+      titleLabel.lineBreakMode = .byTruncatingTail
+      titleLabel.textColor = UIColor.white.withAlphaComponent(0.84)
+
+      stack.axis = .vertical
+      stack.alignment = .center
+      stack.spacing = 3.0
+      stack.isUserInteractionEnabled = false
+      stack.translatesAutoresizingMaskIntoConstraints = false
+      stack.addArrangedSubview(iconView)
+      stack.addArrangedSubview(titleLabel)
+      addSubview(stack)
+
+      NSLayoutConstraint.activate([
+        stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+        stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+        stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 4.0),
+        stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4.0),
+      ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+      fatalError("init(coder:) has not been implemented")
+    }
+  }
+
+  private let effectView: UIVisualEffectView
+  private let selectionLensView = UIView()
+  private let slotsStack = UIStackView()
+  private var slotViews: [SlotView] = []
+  private var specs: [TabSpec] = []
+  private(set) var selectedIndex: Int = 0
+  private var highlightedIndex: Int = 0
+  private var isScrubbing: Bool = false
+  private var scrubContinuousSlot: CGFloat?
+  private let selectionFeedback = UISelectionFeedbackGenerator()
+
+  var onSelect: ((Int) -> Void)?
+
+  override init(frame: CGRect) {
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      let glass = UIGlassEffect(style: .regular)
+      glass.isInteractive = true
+      effectView = UIVisualEffectView(effect: glass)
+    } else {
+      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+    }
+    #else
+    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+    #endif
+    super.init(frame: frame)
+    backgroundColor = .clear
+    isOpaque = false
+    clipsToBounds = false
+    isMultipleTouchEnabled = false
+    isExclusiveTouch = true
+    overrideUserInterfaceStyle = .dark
+
+    effectView.overrideUserInterfaceStyle = .dark
+    effectView.isUserInteractionEnabled = false
+    effectView.translatesAutoresizingMaskIntoConstraints = false
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      effectView.cornerConfiguration = .capsule()
+    } else {
+      effectView.layer.cornerCurve = .continuous
+      effectView.clipsToBounds = true
+    }
+    #else
+    effectView.layer.cornerCurve = .continuous
+    effectView.clipsToBounds = true
+    #endif
+    addSubview(effectView)
+
+    selectionLensView.backgroundColor = UIColor.white.withAlphaComponent(0.16)
+    selectionLensView.layer.cornerCurve = .continuous
+    selectionLensView.layer.borderWidth = 0.5
+    selectionLensView.layer.borderColor = UIColor.white.withAlphaComponent(0.18).cgColor
+    selectionLensView.isUserInteractionEnabled = false
+    effectView.contentView.addSubview(selectionLensView)
+
+    slotsStack.axis = .horizontal
+    slotsStack.alignment = .fill
+    slotsStack.distribution = .fillEqually
+    slotsStack.spacing = 0.0
+    slotsStack.isUserInteractionEnabled = false
+    slotsStack.translatesAutoresizingMaskIntoConstraints = false
+    effectView.contentView.addSubview(slotsStack)
+
+    NSLayoutConstraint.activate([
+      effectView.topAnchor.constraint(equalTo: topAnchor),
+      effectView.bottomAnchor.constraint(equalTo: bottomAnchor),
+      effectView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      effectView.trailingAnchor.constraint(equalTo: trailingAnchor),
+
+      slotsStack.topAnchor.constraint(equalTo: effectView.contentView.topAnchor, constant: 4.0),
+      slotsStack.bottomAnchor.constraint(equalTo: effectView.contentView.bottomAnchor, constant: -4.0),
+      slotsStack.leadingAnchor.constraint(equalTo: effectView.contentView.leadingAnchor, constant: 4.0),
+      slotsStack.trailingAnchor.constraint(equalTo: effectView.contentView.trailingAnchor, constant: -4.0),
+    ])
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  func setItems(_ items: [TabSpec]) {
+    specs = items
+    for old in slotViews {
+      slotsStack.removeArrangedSubview(old)
+      old.removeFromSuperview()
+    }
+    slotViews.removeAll()
+    for spec in items {
+      let slot = SlotView()
+      slot.titleLabel.text = spec.label
+      slot.accessibilityLabel = spec.label
+      slotsStack.addArrangedSubview(slot)
+      slotViews.append(slot)
+    }
+    if selectedIndex >= items.count {
+      selectedIndex = max(0, items.count - 1)
+    }
+    highlightedIndex = selectedIndex
+    applySlotAppearances(activeIndex: selectedIndex)
+    setNeedsLayout()
+  }
+
+  func setSelectedIndex(_ index: Int, animated: Bool) {
+    guard index >= 0, index < specs.count else { return }
+    let changed = selectedIndex != index
+    selectedIndex = index
+    if !isScrubbing {
+      highlightedIndex = index
+      applySlotAppearances(activeIndex: index)
+      positionLens(slotPosition: CGFloat(index), animated: animated && changed, lifted: false)
+    }
+  }
+
+  private func applySlotAppearances(activeIndex: Int) {
+    let normalCfg = UIImage.SymbolConfiguration(pointSize: 20.5, weight: .medium)
+    let selectedCfg = UIImage.SymbolConfiguration(pointSize: 20.5, weight: .semibold)
+    for (idx, slot) in slotViews.enumerated() where idx < specs.count {
+      let spec = specs[idx]
+      let isSelected = idx == activeIndex
+      let symName = isSelected ? spec.selectedSymbol : spec.symbol
+      slot.iconView.image = UIImage(systemName: symName, withConfiguration: isSelected ? selectedCfg : normalCfg)
+      slot.iconView.tintColor = isSelected ? .white : UIColor.white.withAlphaComponent(0.84)
+      slot.titleLabel.textColor = isSelected ? .white : UIColor.white.withAlphaComponent(0.84)
+      slot.titleLabel.font = UIFont.systemFont(ofSize: 10.5, weight: isSelected ? .semibold : .medium)
+      slot.accessibilityTraits = isSelected ? [.button, .selected] : [.button]
+    }
+  }
+
+  private func lensMetrics(for slotPosition: CGFloat) -> (bounds: CGRect, center: CGPoint)? {
+    let count = specs.count
+    guard count > 0, bounds.width > 8.0, bounds.height > 8.0 else { return nil }
+    let inset: CGFloat = 4.0
+    let innerW = bounds.width - inset * 2.0
+    let slotW = innerW / CGFloat(count)
+    let lensH = bounds.height - inset * 2.0
+    let clampedPos = max(0.0, min(slotPosition, CGFloat(count - 1)))
+    let centerX = inset + slotW * (clampedPos + 0.5)
+    let centerY = bounds.height * 0.5
+    return (CGRect(x: 0, y: 0, width: slotW, height: lensH), CGPoint(x: centerX, y: centerY))
+  }
+
+  private func positionLens(slotPosition: CGFloat, animated: Bool, lifted: Bool) {
+    guard let metrics = lensMetrics(for: slotPosition) else { return }
+    selectionLensView.layer.cornerRadius = metrics.bounds.height * 0.5
+    let apply = {
+      self.selectionLensView.bounds = metrics.bounds
+      self.selectionLensView.center = metrics.center
+      self.selectionLensView.transform = lifted
+        ? CGAffineTransform(scaleX: 1.045, y: 1.045)
+        : .identity
+      self.selectionLensView.backgroundColor = UIColor.white.withAlphaComponent(lifted ? 0.22 : 0.16)
+    }
+    if animated {
+      UIView.animate(
+        withDuration: lifted ? 0.14 : 0.34,
+        delay: 0,
+        usingSpringWithDamping: lifted ? 0.85 : 0.78,
+        initialSpringVelocity: 0.6,
+        options: [.beginFromCurrentState, .allowUserInteraction],
+        animations: apply,
+        completion: nil
+      )
+    } else {
+      apply()
+    }
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      // Handled natively via cornerConfiguration = .capsule().
+    } else {
+      effectView.layer.cornerRadius = bounds.height * 0.5
+    }
+    #else
+    effectView.layer.cornerRadius = bounds.height * 0.5
+    #endif
+    let slotPos = scrubContinuousSlot ?? CGFloat(selectedIndex)
+    positionLens(slotPosition: slotPos, animated: false, lifted: isScrubbing)
+  }
+
+  private func indexForX(_ x: CGFloat) -> (discrete: Int, continuous: CGFloat) {
+    let count = max(specs.count, 1)
+    let inset: CGFloat = 4.0
+    let innerW = max(bounds.width - inset * 2.0, 1.0)
+    let slotW = innerW / CGFloat(count)
+    let relative = x - inset
+    let discrete = max(0, min(Int(floor(relative / slotW)), count - 1))
+    let continuous = max(0.0, min((relative - slotW * 0.5) / slotW, CGFloat(count - 1)))
+    return (discrete, continuous)
+  }
+
+  override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+    super.touchesBegan(touches, with: event)
+    guard let touch = touches.first, !specs.isEmpty else { return }
+    selectionFeedback.prepare()
+    let pt = touch.location(in: self)
+    let (idx, _) = indexForX(pt.x)
+    isScrubbing = true
+    highlightedIndex = idx
+    scrubContinuousSlot = CGFloat(idx)
+    applySlotAppearances(activeIndex: idx)
+    positionLens(slotPosition: CGFloat(idx), animated: true, lifted: true)
+  }
+
+  override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+    super.touchesMoved(touches, with: event)
+    guard isScrubbing, let touch = touches.first, !specs.isEmpty else { return }
+    let pt = touch.location(in: self)
+    let (idx, continuous) = indexForX(pt.x)
+    scrubContinuousSlot = continuous
+    if idx != highlightedIndex {
+      highlightedIndex = idx
+      selectionFeedback.selectionChanged()
+      applySlotAppearances(activeIndex: idx)
+    }
+    positionLens(slotPosition: continuous, animated: false, lifted: true)
+  }
+
+  override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+    super.touchesEnded(touches, with: event)
+    guard isScrubbing else { return }
+    let target = highlightedIndex
+    isScrubbing = false
+    scrubContinuousSlot = nil
+    let changed = target != selectedIndex
+    selectedIndex = target
+    applySlotAppearances(activeIndex: target)
+    positionLens(slotPosition: CGFloat(target), animated: true, lifted: false)
+    if changed {
+      UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+    onSelect?(target)
+  }
+
+  override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+    super.touchesCancelled(touches, with: event)
+    guard isScrubbing else { return }
+    isScrubbing = false
+    scrubContinuousSlot = nil
+    highlightedIndex = selectedIndex
+    applySlotAppearances(activeIndex: selectedIndex)
+    positionLens(slotPosition: CGFloat(selectedIndex), animated: true, lifted: false)
+  }
+}
+
 private final class MarcoDockContainerView: UIView {
-  let tabBar = UITabBar(frame: .zero)
+  let tabCapsule = MarcoNativeLiquidTabCapsuleView(frame: .zero)
   let searchButton = UIButton(type: .system)
   let logoButton = UIButton(type: .system)
 
@@ -710,7 +1600,6 @@ private final class MarcoDockContainerView: UIView {
     }
   }
   private(set) var isCollapsed: Bool = false
-  private var lastSearchIconHeight: CGFloat = 0.0
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -720,17 +1609,11 @@ private final class MarcoDockContainerView: UIView {
     insetsLayoutMarginsFromSafeArea = false
     overrideUserInterfaceStyle = .dark
 
-    tabBar.overrideUserInterfaceStyle = .dark
-    tabBar.isTranslucent = true
-    tabBar.insetsLayoutMarginsFromSafeArea = false
-    tabBar.preservesSuperviewLayoutMargins = false
-    tabBar.tintColor = .white
-    tabBar.unselectedItemTintColor = UIColor.white.withAlphaComponent(0.78)
-    addSubview(tabBar)
+    addSubview(tabCapsule)
 
     searchButton.overrideUserInterfaceStyle = .dark
     searchButton.accessibilityLabel = "搜索"
-    configureSearchButton(diameter: 50.0)
+    configureSearchButton()
     addSubview(searchButton)
 
     logoButton.overrideUserInterfaceStyle = .dark
@@ -748,14 +1631,8 @@ private final class MarcoDockContainerView: UIView {
     fatalError("init(coder:) has not been implemented")
   }
 
-  private func configureSearchButton(diameter: CGFloat) {
-    let clamped = min(max(diameter, 44.0), 64.0)
-    if abs(clamped - lastSearchIconHeight) < 0.8 && searchButton.configuration != nil {
-      return
-    }
-    lastSearchIconHeight = clamped
-    let symSize = max(16.0, min(21.0, clamped * 0.38))
-    let symbolConfig = UIImage.SymbolConfiguration(pointSize: symSize, weight: .medium)
+  private func configureSearchButton() {
+    let symbolConfig = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .medium)
     let icon = UIImage(systemName: "magnifyingglass", withConfiguration: symbolConfig)
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
@@ -803,54 +1680,22 @@ private final class MarcoDockContainerView: UIView {
     searchButton.isHidden = !showSearchButton && !isCollapsed
   }
 
-  /// Measures the real visible Liquid Glass capsule platter inside `UITabBar`
-  /// (in `tabBar`'s untransformed coordinate space) so the trailing circular
-  /// search button matches its top, bottom, and height with 0.0pt error even
-  /// during spring animations.
-  private func measureTabBarLocalPlatterRect(expectedWidth: CGFloat, fallbackHeight: CGFloat) -> CGRect {
-    var best: CGRect?
-    func inspect(_ view: UIView, depth: Int) {
-      guard depth <= 3 else { return }
-      for sub in view.subviews {
-        if sub.isHidden || sub.alpha < 0.01 { continue }
-        let local = sub.convert(sub.bounds, to: tabBar)
-        if local.width >= expectedWidth * 0.62 &&
-           local.height >= 36.0 &&
-           local.height <= bounds.height + 6.0 {
-          if let existing = best {
-            if local.height < existing.height && local.height >= 42.0 {
-              best = local
-            }
-          } else {
-            best = local
-          }
-        }
-        inspect(sub, depth: depth + 1)
-      }
-    }
-    inspect(tabBar, depth: 0)
-    if let rect = best {
-      return rect
-    }
-    return CGRect(x: 0, y: 0, width: expectedWidth, height: fallbackHeight)
-  }
-
   func setCollapsed(_ collapsed: Bool, animated: Bool) {
     guard collapsed != isCollapsed else { return }
     isCollapsed = collapsed
     let targetCenterX = logoButton.center.x
-    let tabShift = targetCenterX - tabBar.center.x
+    let tabShift = targetCenterX - tabCapsule.center.x
     let apply = {
       if collapsed {
-        self.tabBar.alpha = 0.0
-        self.tabBar.transform = CGAffineTransform(translationX: tabShift * 0.42, y: 0).scaledBy(x: 0.45, y: 0.45)
+        self.tabCapsule.alpha = 0.0
+        self.tabCapsule.transform = CGAffineTransform(translationX: tabShift * 0.42, y: 0).scaledBy(x: 0.45, y: 0.45)
         self.searchButton.alpha = 0.0
         self.searchButton.transform = CGAffineTransform(scaleX: 0.45, y: 0.45)
         self.logoButton.alpha = 1.0
         self.logoButton.transform = .identity
       } else {
-        self.tabBar.alpha = 1.0
-        self.tabBar.transform = .identity
+        self.tabCapsule.alpha = 1.0
+        self.tabCapsule.transform = .identity
         self.searchButton.alpha = self.showSearchButton ? 1.0 : 0.0
         self.searchButton.transform = .identity
         self.logoButton.alpha = 0.0
@@ -858,7 +1703,7 @@ private final class MarcoDockContainerView: UIView {
       }
     }
 
-    tabBar.isUserInteractionEnabled = !collapsed
+    tabCapsule.isUserInteractionEnabled = !collapsed
     searchButton.isUserInteractionEnabled = !collapsed && showSearchButton
     logoButton.isUserInteractionEnabled = collapsed
 
@@ -884,63 +1729,41 @@ private final class MarcoDockContainerView: UIView {
     guard totalW > 0, totalH > 0 else { return }
 
     let outerMargin: CGFloat = 16.0
-    let logoSize: CGFloat = min(max(totalH - 14.0, 50.0), 54.0)
+    let gap: CGFloat = 10.0
+    // Match V1's full 62pt search button & Apple's iOS 26 floating tab bar height.
+    let dockSize: CGFloat = min(62.0, totalH)
 
-    // When collapsed into a narrow right-aligned container, keep logoButton anchored
-    // at the trailing edge without corrupting tabBar geometry.
+    // When collapsed into the narrow right-aligned container, keep logoButton anchored
+    // at the trailing edge without disturbing tabCapsule's untransformed geometry.
     if isCollapsed && totalW < 150.0 {
-      logoButton.bounds = CGRect(x: 0, y: 0, width: logoSize, height: logoSize)
-      logoButton.center = CGPoint(x: totalW - outerMargin - logoSize * 0.5, y: totalH * 0.5)
+      logoButton.bounds = CGRect(x: 0, y: 0, width: dockSize, height: dockSize)
+      logoButton.center = CGPoint(x: totalW - outerMargin - dockSize * 0.5, y: totalH * 0.5)
       bringSubviewToFront(logoButton)
       return
     }
 
     let maxRowWidth: CGFloat = min(totalW, 440.0)
     let rowX = (totalW - maxRowWidth) * 0.5
-
-    // Ask UITabBar for its natural capsule height (avoid forcing an oversized frame
-    // that causes standalone UITabBar to treat extra height as bottom safe area).
-    let fittedTab = tabBar.sizeThatFits(CGSize(width: maxRowWidth, height: totalH))
-    let naturalBarH = min(max(fittedTab.height, 48.0), min(totalH, 64.0))
+    let centerY = totalH * 0.5
 
     // Use bounds + center (never frame) so active collapsed transforms stay safe.
-    let initialCircleSize = naturalBarH
-    let circleCenterX = rowX + maxRowWidth - outerMargin - initialCircleSize * 0.5
+    let rightCenterX = rowX + maxRowWidth - outerMargin - dockSize * 0.5
+    logoButton.bounds = CGRect(x: 0, y: 0, width: dockSize, height: dockSize)
+    logoButton.center = CGPoint(x: rightCenterX, y: centerY)
 
     if showSearchButton {
-      // Standalone iOS 26 UITabBar keeps ~14-16pt built-in horizontal inset on each side.
-      // Extending tabBar slightly toward searchButton produces balanced 16pt outer margins
-      // and a crisp ~10pt visual gap between the capsule and the circular search button.
-      let tabX = rowX
-      let tabW = max((circleCenterX - initialCircleSize * 0.5 + 6.0) - tabX, 180.0)
-      tabBar.bounds = CGRect(x: 0, y: 0, width: tabW, height: naturalBarH)
-      tabBar.center = CGPoint(x: tabX + tabW * 0.5, y: totalH * 0.5)
-      tabBar.layoutIfNeeded()
+      searchButton.bounds = CGRect(x: 0, y: 0, width: dockSize, height: dockSize)
+      searchButton.center = CGPoint(x: rightCenterX, y: centerY)
 
-      let localPlatter = measureTabBarLocalPlatterRect(expectedWidth: tabW, fallbackHeight: naturalBarH)
-      let offsetInsideBar = localPlatter.midY - tabBar.bounds.midY
-      if abs(offsetInsideBar) > 0.25 && abs(offsetInsideBar) < 16.0 {
-        tabBar.center = CGPoint(x: tabBar.center.x, y: totalH * 0.5 - offsetInsideBar)
-      }
-
-      let exactCircleSize = min(max(localPlatter.height, 44.0), min(totalH, 64.0))
-      configureSearchButton(diameter: exactCircleSize)
-      let exactCircleCenterX = rowX + maxRowWidth - outerMargin - exactCircleSize * 0.5
-      searchButton.bounds = CGRect(x: 0, y: 0, width: exactCircleSize, height: exactCircleSize)
-      searchButton.center = CGPoint(x: exactCircleCenterX, y: totalH * 0.5)
-
-      let effectiveLogoSize = min(max(exactCircleSize, 50.0), 56.0)
-      logoButton.bounds = CGRect(x: 0, y: 0, width: effectiveLogoSize, height: effectiveLogoSize)
-      logoButton.center = CGPoint(x: rowX + maxRowWidth - outerMargin - effectiveLogoSize * 0.5, y: totalH * 0.5)
+      let tabX = rowX + outerMargin
+      let tabW = max((rightCenterX - dockSize * 0.5 - gap) - tabX, 180.0)
+      tabCapsule.bounds = CGRect(x: 0, y: 0, width: tabW, height: dockSize)
+      tabCapsule.center = CGPoint(x: tabX + tabW * 0.5, y: centerY)
     } else {
-      let tabX = rowX
-      let tabW = max(maxRowWidth, 180.0)
-      tabBar.bounds = CGRect(x: 0, y: 0, width: tabW, height: naturalBarH)
-      tabBar.center = CGPoint(x: tabX + tabW * 0.5, y: totalH * 0.5)
-      tabBar.layoutIfNeeded()
-
-      logoButton.bounds = CGRect(x: 0, y: 0, width: logoSize, height: logoSize)
-      logoButton.center = CGPoint(x: rowX + maxRowWidth - outerMargin - logoSize * 0.5, y: totalH * 0.5)
+      let tabX = rowX + outerMargin
+      let tabW = max(maxRowWidth - outerMargin * 2.0, 180.0)
+      tabCapsule.bounds = CGRect(x: 0, y: 0, width: tabW, height: dockSize)
+      tabCapsule.center = CGPoint(x: tabX + tabW * 0.5, y: centerY)
     }
 
     bringSubviewToFront(searchButton)
@@ -948,10 +1771,9 @@ private final class MarcoDockContainerView: UIView {
   }
 }
 
-private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView, UITabBarDelegate {
+private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView {
   private let container: MarcoDockContainerView
   private let channel: FlutterMethodChannel
-  private var tabItems: [UITabBarItem] = []
   private var rawItemDicts: [[String: Any]] = []
   private var currentSelectedIndex: Int = 0
 
@@ -968,7 +1790,12 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView, 
     )
     super.init()
 
-    container.tabBar.delegate = self
+    container.tabCapsule.onSelect = { [weak self] idx in
+      guard let self = self else { return }
+      self.currentSelectedIndex = idx
+      self.rebuildLogoMenu()
+      self.channel.invokeMethod("onSelect", arguments: idx)
+    }
     container.searchButton.addTarget(self, action: #selector(searchTapped), for: .touchUpInside)
 
     if let args = args {
@@ -989,7 +1816,7 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView, 
           result(nil)
         case "setSelectedIndex":
           if let idx = call.arguments as? Int {
-            self.selectTab(index: idx)
+            self.selectTab(index: idx, animated: true)
           }
           result(nil)
         case "setCollapsed":
@@ -1030,23 +1857,20 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView, 
     }
     if let rawItems = args["items"] as? [[String: Any]], !rawItems.isEmpty {
       rawItemDicts = rawItems
-      let symbolConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .medium)
-      var built: [UITabBarItem] = []
-      for (idx, item) in rawItems.enumerated() {
+      let specs = rawItems.map { item -> MarcoNativeLiquidTabCapsuleView.TabSpec in
         let title = (item["label"] as? String) ?? ""
         let symbol = (item["symbol"] as? String) ?? "circle"
         let selectedSymbol = (item["selectedSymbol"] as? String) ?? symbol
-        let image = UIImage(systemName: symbol, withConfiguration: symbolConfig)
-        let selectedImage = UIImage(systemName: selectedSymbol, withConfiguration: symbolConfig)
-        let tabItem = UITabBarItem(title: title, image: image, selectedImage: selectedImage)
-        tabItem.tag = idx
-        built.append(tabItem)
+        return MarcoNativeLiquidTabCapsuleView.TabSpec(
+          label: title,
+          symbol: symbol,
+          selectedSymbol: selectedSymbol
+        )
       }
-      tabItems = built
-      container.tabBar.items = built
+      container.tabCapsule.setItems(specs)
     }
     if let selectedIndex = args["selectedIndex"] as? Int {
-      selectTab(index: selectedIndex)
+      selectTab(index: selectedIndex, animated: animated)
     } else {
       rebuildLogoMenu()
     }
@@ -1056,12 +1880,10 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView, 
     container.setNeedsLayout()
   }
 
-  private func selectTab(index: Int) {
-    guard index >= 0, index < tabItems.count else { return }
+  private func selectTab(index: Int, animated: Bool) {
+    guard index >= 0, index < rawItemDicts.count else { return }
     currentSelectedIndex = index
-    if container.tabBar.selectedItem !== tabItems[index] {
-      container.tabBar.selectedItem = tabItems[index]
-    }
+    container.tabCapsule.setSelectedIndex(index, animated: animated)
     rebuildLogoMenu()
   }
 
@@ -1091,7 +1913,7 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView, 
         state: isSelected ? .on : .off
       ) { [weak self] _ in
         guard let self = self else { return }
-        self.selectTab(index: idx)
+        self.selectTab(index: idx, animated: true)
         self.channel.invokeMethod("onSelect", arguments: idx)
       }
       navActions.append(action)
@@ -1109,12 +1931,6 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView, 
     sections.append(UIMenu(title: "", options: .displayInline, children: [topAction]))
 
     container.logoButton.menu = UIMenu(title: "", children: sections)
-  }
-
-  func tabBar(_ tabBar: UITabBar, didSelect item: UITabBarItem) {
-    currentSelectedIndex = item.tag
-    rebuildLogoMenu()
-    channel.invokeMethod("onSelect", arguments: item.tag)
   }
 
   @objc private func searchTapped() {
@@ -1435,7 +2251,10 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
         circleButton.showsMenuAsPrimaryAction = false
       }
       let symCfg = UIImage.SymbolConfiguration(pointSize: symbolSize, weight: .semibold)
-      let image = symbol.flatMap { UIImage(systemName: $0, withConfiguration: symCfg) }
+      let rawImage = symbol.flatMap { UIImage(systemName: $0, withConfiguration: symCfg) }
+      let image = MarcoLiquidGlassSupport.isNearWhite(fgColor)
+        ? rawImage
+        : rawImage?.withTintColor(fgColor, renderingMode: .alwaysOriginal)
       #if compiler(>=6.2)
       if #available(iOS 26.0, *) {
         var config = (tintColor != nil) ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()

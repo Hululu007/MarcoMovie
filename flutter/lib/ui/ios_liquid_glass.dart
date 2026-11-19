@@ -22,6 +22,11 @@ class IosLiquidGlassBridge {
   static final ValueNotifier<bool> available = ValueNotifier<bool>(false);
   static bool _initialized = false;
   static bool? _testOverride;
+  static bool _incomingHandlerInstalled = false;
+  static int _pinSessionCounter = 0;
+  static final Map<String, Future<Map<String, dynamic>> Function(String pin)>
+      _pinCallbacks =
+      <String, Future<Map<String, dynamic>> Function(String pin)>{};
 
   static bool get isAvailable {
     if (_testOverride != null) return _testOverride!;
@@ -29,7 +34,42 @@ class IosLiquidGlassBridge {
     return available.value;
   }
 
+  static void _ensureIncomingHandler() {
+    if (_incomingHandlerInstalled) return;
+    _incomingHandlerInstalled = true;
+    channel.setMethodCallHandler((call) async {
+      if (call.method == 'privacyPinCallback' && call.arguments is Map) {
+        final args = Map<String, dynamic>.from(call.arguments as Map);
+        final sessionId = args['sessionId'] as String?;
+        final pin = args['pin'] as String?;
+        if (sessionId == null || pin == null) {
+          return <String, dynamic>{'ok': false, 'error': '参数无效'};
+        }
+        final handler = _pinCallbacks[sessionId];
+        if (handler == null) {
+          return <String, dynamic>{'ok': false, 'error': '会话已失效'};
+        }
+        return handler(pin);
+      }
+      return null;
+    });
+  }
+
+  static String _registerPinCallback(
+    Future<Map<String, dynamic>> Function(String pin) handler,
+  ) {
+    _ensureIncomingHandler();
+    final id = 'pin_${++_pinSessionCounter}';
+    _pinCallbacks[id] = handler;
+    return id;
+  }
+
+  static void _unregisterPinCallback(String id) {
+    _pinCallbacks.remove(id);
+  }
+
   static Future<bool> ensureInitialized() async {
+    _ensureIncomingHandler();
     if (_testOverride != null) {
       available.value = _testOverride!;
       return _testOverride!;
@@ -62,6 +102,7 @@ class IosLiquidGlassBridge {
     available.value = value ?? false;
     if (value == null) {
       _initialized = false;
+      _pinCallbacks.clear();
     }
   }
 }
@@ -92,6 +133,7 @@ class IosNativeMenuItem {
   final bool checked;
   final bool destructive;
   final int section;
+  final String? sectionTitle;
 
   const IosNativeMenuItem({
     required this.id,
@@ -101,6 +143,7 @@ class IosNativeMenuItem {
     this.checked = false,
     this.destructive = false,
     this.section = 0,
+    this.sectionTitle,
   });
 
   Map<String, dynamic> toMap() => <String, dynamic>{
@@ -111,6 +154,8 @@ class IosNativeMenuItem {
         'checked': checked,
         'destructive': destructive,
         'section': section,
+        if (sectionTitle != null && sectionTitle!.isNotEmpty)
+          'sectionTitle': sectionTitle,
       };
 
   @override
@@ -122,16 +167,26 @@ class IosNativeMenuItem {
       other.symbol == symbol &&
       other.checked == checked &&
       other.destructive == destructive &&
-      other.section == section;
+      other.section == section &&
+      other.sectionTitle == sectionTitle;
 
   @override
-  int get hashCode =>
-      Object.hash(id, title, subtitle, symbol, checked, destructive, section);
+  int get hashCode => Object.hash(
+        id,
+        title,
+        subtitle,
+        symbol,
+        checked,
+        destructive,
+        section,
+        sectionTitle,
+      );
 }
 
-/// Hosts the native iOS 26 floating `UITabBar` + height-matched circular Liquid
-/// Glass search button (`UIButton.Configuration.glass()`), and smoothly morphs
-/// into a bottom-right Brand Logo circular Liquid Glass button with native
+/// Hosts the native iOS 26 full-height (62pt) floating Liquid Glass 4-tab
+/// capsule (`UIGlassEffect`) + height-matched 62pt circular Liquid Glass search
+/// button (`UIButton.Configuration.glass()`), and smoothly morphs into a
+/// bottom-right 62pt Brand Logo circular Liquid Glass button with native
 /// `UIMenu` when [collapsed] is `true`.
 class IosNativeDockView extends StatefulWidget {
   final int selectedIndex;
@@ -154,7 +209,7 @@ class IosNativeDockView extends StatefulWidget {
     this.showSearch = true,
     this.hidden = false,
     this.collapsed = false,
-    this.height = 68,
+    this.height = 72,
   });
 
   @override
@@ -254,7 +309,7 @@ class _IosNativeDockViewState extends State<IosNativeDockView> {
       alignment: Alignment.centerRight,
       heightFactor: 1,
       child: SizedBox(
-        width: _compactHitBox ? 88.0 : double.infinity,
+        width: _compactHitBox ? 94.0 : double.infinity,
         height: widget.height,
         child: UiKitView(
           viewType: 'marco_movie/ios26_dock',
@@ -409,14 +464,16 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
         if (!IosLiquidGlassBridge.isAvailable) {
           return widget.fallback;
         }
-        return SizedBox(
-          width: _resolvedWidth(context),
-          height: widget.height,
-          child: UiKitView(
-            viewType: 'marco_movie/ios26_glass_button',
-            creationParams: _buildParams(),
-            creationParamsCodec: const StandardMessageCodec(),
-            onPlatformViewCreated: _onViewCreated,
+        return RepaintBoundary(
+          child: SizedBox(
+            width: _resolvedWidth(context),
+            height: widget.height,
+            child: UiKitView(
+              viewType: 'marco_movie/ios26_glass_button',
+              creationParams: _buildParams(),
+              creationParamsCodec: const StandardMessageCodec(),
+              onPlatformViewCreated: _onViewCreated,
+            ),
           ),
         );
       },
@@ -622,14 +679,16 @@ class _IosNativeSegmentedControlState extends State<IosNativeSegmentedControl> {
         if (!IosLiquidGlassBridge.isAvailable) {
           return widget.fallback;
         }
-        return SizedBox(
-          width: double.infinity,
-          height: widget.height,
-          child: UiKitView(
-            viewType: 'marco_movie/ios26_segmented_control',
-            creationParams: _buildParams(),
-            creationParamsCodec: const StandardMessageCodec(),
-            onPlatformViewCreated: _onViewCreated,
+        return RepaintBoundary(
+          child: SizedBox(
+            width: double.infinity,
+            height: widget.height,
+            child: UiKitView(
+              viewType: 'marco_movie/ios26_segmented_control',
+              creationParams: _buildParams(),
+              creationParamsCodec: const StandardMessageCodec(),
+              onPlatformViewCreated: _onViewCreated,
+            ),
           ),
         );
       },
@@ -709,6 +768,65 @@ Future<IosNativeFilterResult?> showAppleNativeFilterSheet({
     return null;
   } catch (_) {
     return null;
+  }
+}
+
+/// Presents a genuine iOS 26 Liquid Glass `UISheetPresentationController`
+/// privacy passcode modal (`verify` or `set` two-step confirmation mode) with
+/// native `UIButton.Configuration.glass()` numeric keypad, haptic feedback,
+/// spring shake on wrong PIN, and async verification/save callback to Dart.
+///
+/// Returns:
+/// - `true` if PIN was verified or saved successfully
+/// - `false` if cancelled / dismissed by the user
+/// - `null` if native iOS 26 Liquid Glass bridge is unavailable (caller should
+///   fall back to Flutter's `_buildGlassPinPadCard`).
+Future<bool?> showAppleNativePrivacyPin({
+  required String mode,
+  required String title,
+  required String subtitle,
+  String confirmTitle = '再次输入确认密码',
+  String confirmSubtitle = '请再次输入刚才设置的 4 位数字密码',
+  int pinLength = 4,
+  String? loadingText,
+  String mismatchError = '两次输入的密码不一致，请重新设置',
+  required Future<({bool ok, String? error})> Function(String pin) onSubmit,
+}) async {
+  if (!IosLiquidGlassBridge.isAvailable) return null;
+  final sessionId = IosLiquidGlassBridge._registerPinCallback((pin) async {
+    try {
+      final res = await onSubmit(pin);
+      return <String, dynamic>{
+        'ok': res.ok,
+        if (res.error != null && res.error!.isNotEmpty) 'error': res.error,
+      };
+    } catch (_) {
+      return <String, dynamic>{'ok': false, 'error': '操作失败，请重试'};
+    }
+  });
+  try {
+    final result = await IosLiquidGlassBridge.channel.invokeMethod<bool>(
+      'showPrivacyPin',
+      <String, dynamic>{
+        'sessionId': sessionId,
+        'mode': mode,
+        'title': title,
+        'subtitle': subtitle,
+        'confirmTitle': confirmTitle,
+        'confirmSubtitle': confirmSubtitle,
+        'pinLength': pinLength,
+        if (loadingText != null && loadingText.isNotEmpty)
+          'loadingText': loadingText,
+        'mismatchError': mismatchError,
+      },
+    );
+    return result;
+  } on MissingPluginException {
+    return null;
+  } catch (_) {
+    return null;
+  } finally {
+    IosLiquidGlassBridge._unregisterPinCallback(sessionId);
   }
 }
 

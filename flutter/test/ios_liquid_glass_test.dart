@@ -9,6 +9,7 @@ import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:marco_movie/ui/apple_theme.dart';
 import 'package:marco_movie/ui/ios_liquid_glass.dart';
 import 'package:marco_movie/ui/ios_settings.dart';
+import 'package:marco_movie/ui/netdisk_sheet.dart';
 import 'test_storage_helper.dart';
 
 void main() {
@@ -364,6 +365,183 @@ void main() {
       expect((menuItems.first as Map)['id'], '__all__');
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'Home source and depot native UIMenus include ALL routes without a 20-item cap and group multi-group sources',
+    (tester) async {
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final storage = await initTestStorage();
+      final sitesJson = List.generate(
+        28,
+        (i) =>
+            '{"key":"s$i","name":"线路 $i","type":1,"api":"https://s$i.example/api","group":"${i < 14 ? '主线路' : '备用线路'}"}',
+      ).join(',');
+      final depotsJson = List.generate(
+        25,
+        (i) => '{"name":"子仓库 $i","url":"https://d$i.example/tv.json"}',
+      ).join(',');
+      await storage.saveConfig(
+        '{"sites":[$sitesJson],"urls":[$depotsJson]}',
+      );
+      final client = CmsClient(
+        client: MockClient(
+          (_) async => http.Response('{"class":[],"list":[]}', 200),
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AdaptiveShell(storage: storage, client: client),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+
+      final menuButtons = tester
+          .widgetList<UiKitView>(find.byType(UiKitView))
+          .where((v) =>
+              v.viewType == 'marco_movie/ios26_glass_button' &&
+              (v.creationParams as Map<dynamic, dynamic>)['menuItems'] != null)
+          .toList();
+      expect(menuButtons.length, greaterThanOrEqualTo(1));
+
+      final sourceButton = menuButtons.firstWhere(
+        (v) =>
+            ((v.creationParams as Map)['menuItems'] as List)
+                .first['id'] ==
+            '__all__',
+      );
+      final sourceItems =
+          ((sourceButton.creationParams as Map)['menuItems'] as List)
+              .cast<Map<dynamic, dynamic>>();
+      // 1 search/manage entry + all 28 routes (no 20-item truncation)
+      expect(sourceItems.length, 29);
+      // Verify multi-group section titles are propagated.
+      final sectionTitles = sourceItems
+          .map((m) => m['sectionTitle'])
+          .where((t) => t != null)
+          .toSet();
+      expect(sectionTitles.length, greaterThanOrEqualTo(2));
+
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'showAppleNativePrivacyPin dispatches showPrivacyPin and handles bidirectional privacyPinCallback',
+    (tester) async {
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      final seenCallbacks = <Map<String, dynamic>>[];
+      MethodCall? showCall;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(IosLiquidGlassBridge.channel, (call) async {
+        if (call.method == 'showPrivacyPin') {
+          showCall = call;
+          final sessionId = (call.arguments as Map)['sessionId'] as String;
+          const codec = StandardMethodCodec();
+          // Simulate native sending wrong PIN first, then correct PIN.
+          for (final pin in ['0000', '1234']) {
+            final envelope = codec.encodeMethodCall(
+              MethodCall('privacyPinCallback', <String, dynamic>{
+                'sessionId': sessionId,
+                'mode': 'verify',
+                'pin': pin,
+              }),
+            );
+            ByteData? reply;
+            await TestDefaultBinaryMessengerBinding
+                .instance.defaultBinaryMessenger
+                .handlePlatformMessage(
+              IosLiquidGlassBridge.channel.name,
+              envelope,
+              (data) => reply = data,
+            );
+            final decoded = Map<String, dynamic>.from(
+              codec.decodeEnvelope(reply!) as Map,
+            );
+            seenCallbacks.add(decoded);
+          }
+          return true;
+        }
+        return null;
+      });
+
+      final res = await showAppleNativePrivacyPin(
+        mode: 'verify',
+        title: '解锁隐私空间',
+        subtitle: '输入设置的密码',
+        pinLength: 4,
+        onSubmit: (pin) async {
+          if (pin == '1234') return (ok: true, error: null);
+          return (ok: false, error: '密码错误，请重新输入');
+        },
+      );
+
+      expect(showCall?.method, 'showPrivacyPin');
+      expect(res, isTrue);
+      expect(seenCallbacks.length, 2);
+      expect(seenCallbacks[0]['ok'], isFalse);
+      expect(seenCallbacks[0]['error'], '密码错误，请重新输入');
+      expect(seenCallbacks[1]['ok'], isTrue);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'Netdisk iOS 26 page keeps native UISegmentedControl pinned outside SingleChildScrollView with zero BackdropFilter collisions',
+    (tester) async {
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final storage = await initTestStorage();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (ctx) => CupertinoButton(
+              onPressed: () => showNetdiskAccountSheet(ctx, storage),
+              child: const Text('打开云盘'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('打开云盘'));
+      await tester.pumpAndSettle();
+
+      // Native segmented control & header glass buttons are mounted.
+      final segmentedFinder = find.byType(IosNativeSegmentedControl);
+      expect(segmentedFinder, findsOneWidget);
+      // Segmented control must NOT be inside SingleChildScrollView.
+      expect(
+        find.ancestor(
+          of: segmentedFinder,
+          matching: find.byType(SingleChildScrollView),
+        ),
+        findsNothing,
+      );
+      // No AppleGlassSurface (BackdropFilter) or GlassworkBackdrop on the page.
+      expect(find.byType(AppleGlassSurface), findsNothing);
+      expect(find.byType(GlassworkBackdrop), findsNothing);
+      // No UiKitView nested inside SingleChildScrollView.
+      expect(
+        find.descendant(
+          of: find.byType(SingleChildScrollView),
+          matching: find.byType(UiKitView),
+        ),
+        findsNothing,
+      );
+      expect(tester.takeException(), isNull);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );

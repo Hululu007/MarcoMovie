@@ -275,7 +275,7 @@ class IosSettingsScaffold extends StatelessWidget {
               child: SafeArea(
                 top: false,
                 bottom: false,
-                child: body,
+                child: RepaintBoundary(child: body),
               ),
             ),
           ],

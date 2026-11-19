@@ -1333,35 +1333,76 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final prioritized = widget.storage.prioritizeSites(filtered);
     final prefKey = widget.storage.preferredSiteKey;
     final activeKey = _activeSite?.key ?? '';
-    final quickList = <CmsSite>[];
+    final defaultGroupName = inPrivacyMode ? '隐私分组' : '默认分组';
+
+    // Include ALL available routes (no 20-item cap); group into native inline
+    // sections when routes span multiple groups so long menus stay easy to scan.
+    final orderedSites = <CmsSite>[];
+    final seenKeys = <String>{};
     if (_activeSite != null &&
         prioritized.any((s) => s.key == _activeSite!.key)) {
-      quickList.add(_activeSite!);
+      orderedSites.add(_activeSite!);
+      seenKeys.add(_activeSite!.key);
     }
     for (final s in prioritized) {
-      if (quickList.length >= 20) break;
-      if (quickList.any((e) => e.key == s.key)) continue;
-      quickList.add(s);
+      if (seenKeys.add(s.key)) {
+        orderedSites.add(s);
+      }
     }
-    return [
+
+    final groupBuckets = <String, List<CmsSite>>{};
+    for (final s in orderedSites) {
+      final g = s.group.trim().isEmpty ? defaultGroupName : s.group.trim();
+      groupBuckets.putIfAbsent(g, () => <CmsSite>[]).add(s);
+    }
+    final useGroupSections = groupBuckets.length > 1;
+
+    final items = <IosNativeMenuItem>[
       IosNativeMenuItem(
         id: '__all__',
         title: inPrivacyMode ? '搜索与管理隐私片源…' : '搜索与管理全部片源…',
-        subtitle: '共 ${filtered.length} 个可用源',
+        subtitle: '共 ${orderedSites.length} 条可用线路',
         symbol: 'magnifyingglass',
         section: 0,
       ),
-      for (final s in quickList)
-        IosNativeMenuItem(
-          id: 'site:${s.key}',
-          title: s.name,
-          symbol: (!inPrivacyMode && s.key == prefKey)
-              ? 'star.fill'
-              : (inPrivacyMode ? 'lock.shield' : 'play.tv'),
-          checked: s.key == activeKey,
-          section: 1,
-        ),
     ];
+
+    if (useGroupSections) {
+      var sectionIdx = 1;
+      for (final entry in groupBuckets.entries) {
+        final groupTitle = '${entry.key} (${entry.value.length})';
+        for (final s in entry.value) {
+          items.add(
+            IosNativeMenuItem(
+              id: 'site:${s.key}',
+              title: s.name,
+              symbol: (!inPrivacyMode && s.key == prefKey)
+                  ? 'star.fill'
+                  : (inPrivacyMode ? 'lock.shield' : 'play.tv'),
+              checked: s.key == activeKey,
+              section: sectionIdx,
+              sectionTitle: groupTitle,
+            ),
+          );
+        }
+        sectionIdx++;
+      }
+    } else {
+      for (final s in orderedSites) {
+        items.add(
+          IosNativeMenuItem(
+            id: 'site:${s.key}',
+            title: s.name,
+            symbol: (!inPrivacyMode && s.key == prefKey)
+                ? 'star.fill'
+                : (inPrivacyMode ? 'lock.shield' : 'play.tv'),
+            checked: s.key == activeKey,
+            section: 1,
+          ),
+        );
+      }
+    }
+    return items;
   }
 
   void _onHomeSourceMenuSelected(String id) {
@@ -1386,13 +1427,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   List<IosNativeMenuItem> _buildHomeDepotMenuItems(List<CmsDepot> depots) {
     final subs = widget.storage.getSubscriptions();
     return [
-      const IosNativeMenuItem(
+      IosNativeMenuItem(
         id: '__manage__',
         title: '查看与管理全部仓库…',
+        subtitle: '共 ${depots.length} 个子仓库',
         symbol: 'archivebox',
         section: 0,
       ),
-      for (var i = 0; i < depots.length && i < 20; i++) ...[
+      for (var i = 0; i < depots.length; i++) ...[
         () {
           final d = depots[i];
           final owners = subs.where((sub) => sub.id == d.subscriptionId);
@@ -1740,7 +1782,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   label: sourceLabel,
                   symbolSize: 13.5,
                   height: 36,
-                  maxWidth: compactHeader ? 168 : 220,
+                  maxWidth: compactHeader ? (depots.isEmpty ? 196 : 164) : 220,
                   accessibilityLabel: '切换片源 $sourceLabel',
                   menuTitle: _privateSessionUnlocked ? '隐私片源' : '切换片源',
                   menuItems: _buildHomeSourceMenuItems(),
@@ -4274,6 +4316,50 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     String subtitle = '请输入 4 位数字作为隐私分组访问密码',
     VoidCallback? onSuccess,
   }) {
+    if (IosLiquidGlassBridge.isAvailable) {
+      unawaited(() async {
+        final nativeResult = await showAppleNativePrivacyPin(
+          mode: 'set',
+          title: title,
+          subtitle: subtitle,
+          confirmTitle: '再次输入确认密码',
+          confirmSubtitle: '请再次输入刚才设置的 4 位数字密码',
+          pinLength: 4,
+          loadingText: '正在加密保存密码…',
+          mismatchError: '两次输入的密码不一致，请重新设置',
+          onSubmit: (pin) async {
+            await widget.storage.setPrivacyPassword(pin);
+            return (ok: true, error: null);
+          },
+        );
+        if (!mounted) return;
+        if (nativeResult == true) {
+          onSuccess?.call();
+          return;
+        }
+        if (nativeResult == false) {
+          return;
+        }
+        _showSetPrivacyPasswordFallbackDialog(
+          title: title,
+          subtitle: subtitle,
+          onSuccess: onSuccess,
+        );
+      }());
+      return;
+    }
+    _showSetPrivacyPasswordFallbackDialog(
+      title: title,
+      subtitle: subtitle,
+      onSuccess: onSuccess,
+    );
+  }
+
+  void _showSetPrivacyPasswordFallbackDialog({
+    String title = '设置隐私数字密码',
+    String subtitle = '请输入 4 位数字作为隐私分组访问密码',
+    VoidCallback? onSuccess,
+  }) {
     String firstPin = '';
     String currentPin = '';
     bool confirming = false;
@@ -4377,6 +4463,41 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
 
   void _showVerifyPrivacyPasswordDialog({required VoidCallback onSuccess}) {
+    final targetLen = widget.storage.privacyPasswordLength;
+    if (IosLiquidGlassBridge.isAvailable) {
+      unawaited(() async {
+        final nativeResult = await showAppleNativePrivacyPin(
+          mode: 'verify',
+          title: '解锁隐私空间',
+          subtitle: '输入设置的密码即可直接进入隐私分组模式',
+          pinLength: targetLen,
+          loadingText: '正在验证密码…',
+          onSubmit: (pin) async {
+            final verified = await widget.storage.verifyPrivacyPassword(pin);
+            return (
+              ok: verified,
+              error: verified ? null : '密码错误，请重新输入',
+            );
+          },
+        );
+        if (!mounted) return;
+        if (nativeResult == true) {
+          onSuccess();
+          return;
+        }
+        if (nativeResult == false) {
+          return;
+        }
+        _showVerifyPrivacyPasswordFallbackDialog(onSuccess: onSuccess);
+      }());
+      return;
+    }
+    _showVerifyPrivacyPasswordFallbackDialog(onSuccess: onSuccess);
+  }
+
+  void _showVerifyPrivacyPasswordFallbackDialog({
+    required VoidCallback onSuccess,
+  }) {
     final targetLen = widget.storage.privacyPasswordLength;
     String currentPin = '';
     bool isBusy = false;

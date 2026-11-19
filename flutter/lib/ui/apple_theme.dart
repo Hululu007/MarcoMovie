@@ -859,7 +859,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
   }
 
   Widget _buildCollapsedLogoButton(BuildContext context) {
-    const size = 54.0;
+    const size = 62.0;
     return Align(
       key: const ValueKey('dock-collapsed-logo-wrap'),
       alignment: Alignment.centerRight,
@@ -877,7 +877,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
             saturation: 1.8,
             child: const Center(
               child: MarcoBrandLogo(
-                iconSize: 28,
+                iconSize: 32,
                 showWordmark: false,
               ),
             ),
@@ -892,7 +892,7 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
     final safeBottom = MediaQuery.paddingOf(context).bottom;
     final dockBottom =
         safeBottom > 0 ? math.max(safeBottom - 14.0, 10.0) : 12.0;
-    final bottomOffset = dockBottom + 54.0 + 12.0;
+    final bottomOffset = dockBottom + 62.0 + 12.0;
     final chosen = await showGeneralDialog<String>(
       context: context,
       barrierDismissible: true,
@@ -1622,6 +1622,7 @@ class AppleCapsuleButton extends StatelessWidget {
   final bool primary;
   final bool destructive;
   final bool compact;
+  final bool useBackdrop;
   const AppleCapsuleButton({
     super.key,
     required this.label,
@@ -1630,6 +1631,7 @@ class AppleCapsuleButton extends StatelessWidget {
     this.primary = false,
     this.destructive = false,
     this.compact = false,
+    this.useBackdrop = true,
   });
   @override
   Widget build(BuildContext context) {
@@ -1721,7 +1723,7 @@ class AppleCapsuleButton extends StatelessWidget {
           child: labelRow,
         ),
       );
-      buttonBody = _isWindowsDesktop
+      buttonBody = (_isWindowsDesktop || !useBackdrop)
           ? surface
           : GlassworkBackdrop(radius: 999, child: surface);
     }
