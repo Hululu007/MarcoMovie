@@ -1,8 +1,9 @@
 package com.pilipala.marcomovie;
 
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
 
-/** TV-only bridge to existing detail loading, favorites, line selection and bookmark playback. */
+/** TV-only bridge to existing detail loading, favorites, line/episode popup and bookmark playback. */
 final class TvDetailHost {
     interface Valid {
         boolean get();
@@ -45,6 +46,101 @@ final class TvDetailHost {
         return new int[] {line, page};
     }
 
+    static String formatHistoryCaption(
+            MainActivity a, WatchHistory.Entry bookmark, String episodeFileCaption) {
+        if (bookmark == null) return "";
+        String progress =
+                bookmark.complete()
+                        ? "已看完"
+                        : PlaybackController.formatTime(bookmark.position)
+                                + (bookmark.duration > 0
+                                        ? " / " + PlaybackController.formatTime(bookmark.duration)
+                                        : "");
+        String ep = bookmark.episode == null ? "" : bookmark.episode.trim();
+        if (!ep.isEmpty() && episodeFileCaption != null && episodeFileCaption.contains(ep)) {
+            return "上次观看进度 · " + progress;
+        }
+        return "上次观看 · " + a.historyLabel(bookmark);
+    }
+
+    private static Cms.Episode resolveActiveEpisode(Cms.Line line, WatchHistory.Entry bookmark) {
+        if (line == null || line.episodes == null || line.episodes.isEmpty()) return null;
+        if (bookmark != null && line.name.equals(bookmark.line) && bookmark.episode != null) {
+            for (Cms.Episode ep : line.episodes) {
+                if (bookmark.episode.equals(ep.name)) return ep;
+            }
+        }
+        return line.episodes.get(0);
+    }
+
+    private static String buildEpisodesButtonLabel(Cms.Video video, int lineIdx) {
+        if (video == null || video.lines.isEmpty()) return "☰ 选集";
+        Cms.Line line = video.lines.get(Math.max(0, Math.min(lineIdx, video.lines.size() - 1)));
+        int epCount = line.episodes.size();
+        int lineCount = video.lines.size();
+        if (epCount <= 1 && lineCount > 1) return "☰ 选线路 (" + lineCount + ")";
+        if (epCount > 1 && lineCount > 1) return "☰ 选集与线路 · " + epCount + " 集";
+        if (epCount > 1) return "☰ 选集 · " + epCount + " 集";
+        return "☰ 线路与片源";
+    }
+
+    private static void showEpisodesPopup(
+            MainActivity a,
+            Cms.Site site,
+            Cms.Video video,
+            WatchHistory.Entry bookmark,
+            MainActivity.Screen screen,
+            TvV17DetailScreen ui) {
+        if (video == null || video.lines.isEmpty()) {
+            a.toast("该来源没有可播放线路");
+            return;
+        }
+        int[] selection =
+                initialSelection(
+                        video,
+                        bookmark,
+                        a.prefs.getString(Prefs.PREFERRED_LINE, ""),
+                        screen.selection,
+                        a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false));
+
+        LinearLayout host = a.vertical();
+        host.setTag("detail-episodes");
+        host.setClipChildren(false);
+        host.setClipToPadding(false);
+        host.setPadding(a.dp(6), a.dp(6), a.dp(6), a.dp(10));
+        if (video.lines.get(selection[0]).episodes.size() > 16) {
+            host.setMinimumHeight(Math.max(a.dp(280), a.windowHeight() - a.dp(220)));
+        }
+
+        DetailScreen.renderEpisodes(a, site, video, selection[0], selection[1], host, null);
+
+        AppDialog dialog =
+                new AppDialog.Builder(a)
+                        .setTitle("选线路与选集")
+                        .setWide(true)
+                        .setView(host)
+                        .setNegativeButton("关闭", null)
+                        .create();
+        dialog.setOnDismissListener(
+                d -> {
+                    int[] updated =
+                            initialSelection(
+                                    video,
+                                    bookmark,
+                                    a.prefs.getString(Prefs.PREFERRED_LINE, ""),
+                                    screen.selection,
+                                    a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false));
+                    Cms.Line activeLine = video.lines.get(updated[0]);
+                    Cms.Episode activeEp = resolveActiveEpisode(activeLine, bookmark);
+                    ui.updateEpisodeCaption(
+                            TvV17DetailScreen.formatEpisodeFileCaption(activeLine, activeEp),
+                            buildEpisodesButtonLabel(video, updated[0]));
+                });
+        dialog.show();
+        android.view.View firstEp = host.findViewWithTag("detail-line:" + selection[0]);
+        if (firstEp != null) firstEp.requestFocus();
+    }
+
     static void show(MainActivity a, Cms.Site site, Cms.Video listing, Cms.Video ready) {
         a.renderPage(listing.title == null ? "详情" : listing.title, "");
         a.addButton(a.body, a.navButton("‹ 返回", "detail-back", a::onBackPressed));
@@ -85,8 +181,6 @@ final class TvDetailHost {
                         video.remarks = listing.remarks;
                     if (video.doubanScore == null || video.doubanScore.isEmpty())
                         video.doubanScore = listing.doubanScore;
-                    // Same empty-line exclusion as the existing detail route; keep original line
-                    // objects.
                     for (java.util.Iterator<Cms.Line> it = video.lines.iterator(); it.hasNext(); )
                         if (it.next().episodes.isEmpty()) it.remove();
                     WatchHistory.Entry found = null;
@@ -96,6 +190,23 @@ final class TvDetailHost {
                             break;
                         }
                     final WatchHistory.Entry bookmark = found;
+                    int[] initialSel =
+                            video.lines.isEmpty()
+                                    ? new int[] {0, 0}
+                                    : initialSelection(
+                                            video,
+                                            bookmark,
+                                            a.prefs.getString(Prefs.PREFERRED_LINE, ""),
+                                            screen.selection,
+                                            a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false));
+                    Cms.Line activeLine =
+                            video.lines.isEmpty() ? null : video.lines.get(initialSel[0]);
+                    Cms.Episode activeEpisode = resolveActiveEpisode(activeLine, bookmark);
+                    String episodeFileCaption =
+                            TvV17DetailScreen.formatEpisodeFileCaption(activeLine, activeEpisode);
+                    String historyCaption = formatHistoryCaption(a, bookmark, episodeFileCaption);
+                    String episodesBtnLabel = buildEpisodesButtonLabel(video, initialSel[0]);
+
                     if (displayed[0] != null) a.capture();
                     final TvV17DetailScreen[] current = new TvV17DetailScreen[1];
                     TvV17DetailScreen ui =
@@ -109,7 +220,10 @@ final class TvDetailHost {
                                             site.key,
                                             video.id),
                                     !video.lines.isEmpty(),
-                                    bookmark == null ? "► 开始播放" : "► 继续播放 · " + bookmark.episode,
+                                    bookmark == null ? "► 开始播放" : "► 继续播放",
+                                    episodesBtnLabel,
+                                    episodeFileCaption,
+                                    historyCaption,
                                     new TvV17DetailScreen.Actions() {
                                         public void back() {
                                             if (valid.get()) a.onBackPressed();
@@ -117,16 +231,34 @@ final class TvDetailHost {
 
                                         public void play() {
                                             if (!valid.get() || video.lines.isEmpty()) return;
-                                            if (bookmark != null)
+                                            int[] sel =
+                                                    initialSelection(
+                                                            video,
+                                                            bookmark,
+                                                            a.prefs.getString(
+                                                                    Prefs.PREFERRED_LINE, ""),
+                                                            screen.selection,
+                                                            a.prefs.getBoolean(
+                                                                    Prefs.EPISODES_DESCENDING,
+                                                                    false));
+                                            if (bookmark != null
+                                                    && (!screen.selection.selected
+                                                            || video.lines
+                                                                    .get(sel[0])
+                                                                    .name
+                                                                    .equals(bookmark.line))) {
                                                 a.playBookmark(site, video, bookmark);
-                                            else {
-                                                Cms.Line line =
-                                                        video.lines.get(
-                                                                SourcePreferences.lineIndex(
-                                                                        a, video));
+                                            } else {
+                                                Cms.Line line = video.lines.get(sel[0]);
                                                 a.resolvePlayer(
                                                         site, video, line, line.episodes.get(0));
                                             }
+                                        }
+
+                                        public void episodes() {
+                                            if (!valid.get()) return;
+                                            showEpisodesPopup(
+                                                    a, site, video, bookmark, screen, current[0]);
                                         }
 
                                         public void favorite() {
@@ -147,18 +279,6 @@ final class TvDetailHost {
                                                         .show();
                                         }
                                     });
-                    if (bookmark != null) {
-                        android.widget.TextView history =
-                                a.text(
-                                        "上次观看 · " + a.historyLabel(bookmark),
-                                        13,
-                                        MainActivity.MUTED);
-                        history.setTag("detail-history");
-                        ui.content.addView(history, ui.content.indexOfChild(ui.seasonHost));
-                    }
-                    android.widget.TextView status = a.text("", 14, MainActivity.MUTED);
-                    status.setTag("detail-loading");
-                    ui.content.addView(status, ui.content.indexOfChild(ui.seasonHost));
                     current[0] = ui;
                     if (displayed[0] == null) a.root.removeView(a.scroll);
                     else a.root.removeView(displayed[0].view);
@@ -167,19 +287,11 @@ final class TvDetailHost {
                     a.scroll = ui.scroll;
                     a.body = ui.content;
                     if (video.lines.isEmpty()) {
-                        ui.episodeHost.addView(a.text("该来源没有返回可播放线路", 16, MainActivity.MUTED));
+                        ui.statusView.setText("该来源没有返回可播放线路");
+                        ui.statusView.setVisibility(android.view.View.VISIBLE);
                         screen.focus = "detail-favorite";
                     } else {
-                        int[] selection =
-                                initialSelection(
-                                        video,
-                                        bookmark,
-                                        a.prefs.getString(Prefs.PREFERRED_LINE, ""),
-                                        screen.selection,
-                                        a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false));
                         DetailScreen.populateTvRelatedSeasons(a, site, video, ui.seasonHost);
-                        DetailScreen.renderEpisodes(
-                                a, site, video, selection[0], selection[1], ui.episodeHost, null);
                         if (screen.focus == null || "detail-back".equals(screen.focus))
                             screen.focus = "detail-play";
                     }
@@ -207,8 +319,10 @@ final class TvDetailHost {
                 if (!a.reduced
                         && (listing.description == null || listing.description.trim().isEmpty())) {
                     android.view.View state = a.root.findViewWithTag("detail-loading");
-                    if (state instanceof android.widget.TextView)
+                    if (state instanceof android.widget.TextView) {
+                        state.setVisibility(android.view.View.VISIBLE);
                         ((android.widget.TextView) state).setText("正在补全详情…");
+                    }
                     a.loadDetail(site, listing.id, present);
                 }
             } else a.loadDetail(site, listing.id, present);

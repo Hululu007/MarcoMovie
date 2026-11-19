@@ -116,73 +116,39 @@ final class HomeScreen {
         boolean tvLeftDock = a.homeDock != null && a.homeDock.tvLeft;
         boolean bottomDock = !tvLeftDock && a.useBottomDock();
         int rightPadDp =
-                tvLeftDock || a.useTopDock() ? 34 : Math.max(100, Math.round(56 * navScale) + 44);
+                tvLeftDock || a.useTopDock() ? 48 : Math.max(106, Math.round(56 * navScale) + 50);
         int bottomPadDp = Math.max(86, Math.round(50 * navScale) + 36);
+        int leftPadDp = tvLeftDock ? Math.max(92, Math.round(56 * navScale) + 38) : 44;
         if (bottomDock) {
             a.body.setPadding(a.dp(18), a.dp(16), a.dp(18), a.dp(bottomPadDp));
         } else {
-            a.body.setPadding(
-                    a.dp(tvLeftDock ? Math.max(80, Math.round(56 * navScale) + 30) : 34),
-                    a.dp(18),
-                    a.dp(rightPadDp),
-                    a.dp(36));
+            a.body.setPadding(a.dp(leftPadDp), a.dp(28), a.dp(rightPadDp), a.dp(48));
         }
         a.body.setClipChildren(false);
         a.body.setClipToPadding(false);
         a.scroll.setClipChildren(false);
         float width = a.windowWidth() / a.getResources().getDisplayMetrics().density;
-        int marginDp =
-                bottomDock
-                        ? 36
-                        : ((tvLeftDock ? Math.max(80, Math.round(56 * navScale) + 30) : 34)
-                                + rightPadDp);
-        posterWidth = Math.max(48, (int) ((width - marginDp - (COLUMNS - 1) * 14) / COLUMNS) - 8);
-        boolean separateHome = tvLeftDock;
-        if (separateHome) {
-            homeHost = a.vertical();
-            homeHost.setClipChildren(false);
-            homeHost.setClipToPadding(false);
-            a.body.addView(homeHost, new LinearLayout.LayoutParams(-1, -2));
+        int marginDp = bottomDock ? 36 : (leftPadDp + rightPadDp);
+        posterWidth = Math.max(48, (int) ((width - marginDp - (COLUMNS - 1) * 18) / COLUMNS) - 8);
+        boolean separateHome = false;
+        if (tvLeftDock) {
             TextView homeTitle = a.text("首页", 28, MainActivity.WHITE);
             homeTitle.setTypeface(null, Typeface.BOLD);
-            homeHost.addView(homeTitle);
-            a.gap(homeHost, 16);
-            heroHost = a.vertical();
-            heroHost.setClipChildren(false);
-            homeHost.addView(heroHost);
-            refreshHero();
+            a.body.addView(homeTitle);
+            a.gap(a.body, 18);
         }
         historyHost = a.vertical();
         historyHost.setClipChildren(false);
         historyHost.setClipToPadding(false);
-        (separateHome ? homeHost : a.body)
-                .addView(historyHost, new LinearLayout.LayoutParams(-1, -2));
+        a.body.addView(historyHost, new LinearLayout.LayoutParams(-1, -2));
         historySection();
-        if (separateHome) {
-            LinearLayout homeHeading = a.row();
-            homeHeading.setGravity(Gravity.CENTER_VERTICAL);
-            TextView headingTitle = a.text("我的片库", 21, MainActivity.WHITE);
-            headingTitle.setTypeface(null, Typeface.BOLD);
-            homeHeading.addView(headingTitle, new LinearLayout.LayoutParams(0, -2, 1));
-            openLibrary = pill("查看全部  ›", "home-open-library", () -> showSection(true));
-            homeHeading.addView(openLibrary, new LinearLayout.LayoutParams(-2, a.dp(40)));
-            homeHost.addView(homeHeading);
-            a.gap(homeHost, 8);
-            previewHost = a.vertical();
-            previewHost.setClipChildren(false);
-            previewHost.setClipToPadding(false);
-            homeHost.addView(previewHost);
-            libraryHost = a.vertical();
-            libraryHost.setClipChildren(false);
-            libraryHost.setClipToPadding(false);
-            a.body.addView(libraryHost, new LinearLayout.LayoutParams(-1, -2));
-        }
-        LinearLayout libraryParent = separateHome ? libraryHost : a.body;
+        LinearLayout libraryParent = a.body;
         LinearLayout heading = a.row();
+        heading.setGravity(Gravity.CENTER_VERTICAL);
         heading.setClipChildren(false);
         heading.setClipToPadding(false);
-        heading.setPadding(0, a.dp(6), 0, a.dp(6));
-        TextView title = a.text("发现", 22, MainActivity.WHITE);
+        heading.setPadding(0, a.dp(6), 0, a.dp(10));
+        TextView title = a.text(a.isTvDevice() ? "片库" : "发现", 22, MainActivity.WHITE);
         title.setTypeface(null, Typeface.BOLD);
         heading.addView(title, new LinearLayout.LayoutParams(-2, -2));
         source = pill(site.name, "source-switcher", a::chooseSources);
@@ -467,7 +433,11 @@ final class HomeScreen {
                     Prefs.NAV_SCALE_PERCENT,
                     Prefs.TV_DOCK_POSITION,
                     Prefs.TV_NAVIGATION_MODE,
-                    Prefs.TV_AMBIENT_PERCENT
+                    Prefs.TV_AMBIENT_PERCENT,
+                    Prefs.TV_BG_MODE,
+                    Prefs.TV_GLOW_PRESET,
+                    Prefs.TV_GLOW_COLOR_LEFT,
+                    Prefs.TV_GLOW_COLOR_RIGHT
                 }) values.put(key, prefs.get(key));
         return values;
     }
@@ -494,7 +464,6 @@ final class HomeScreen {
         a.homeDock = retainedDock;
         a.homeAmbient = ambient;
         a.setContentView(retainedRoot);
-        refreshHero();
         historySection();
         applySectionVisibility();
         int drawn = state.windowStart;
@@ -749,7 +718,7 @@ final class HomeScreen {
         LinearLayout heading = a.row();
         heading.setClipChildren(false);
         heading.setClipToPadding(false);
-        TextView historyTitle = a.text(homeHost != null ? "继续观看" : "历史记录", 17, MainActivity.WHITE);
+        TextView historyTitle = a.text(a.isTvDevice() ? "继续观看" : "历史记录", 17, MainActivity.WHITE);
         historyTitle.setTag("home-history-title");
         historyTitle.setTypeface(null, Typeface.BOLD);
         heading.addView(historyTitle, new LinearLayout.LayoutParams(0, -2, 1));
@@ -761,7 +730,7 @@ final class HomeScreen {
         heading.addView(
                 allHistory, new LinearLayout.LayoutParams(-2, a.dp(Math.round(30 * navScale))));
         section.addView(heading, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(section, 6);
+        a.gap(section, a.isTvDevice() ? 10 : 6);
         LinearLayout recent = compactStack ? a.vertical() : a.row();
         if (!compactStack) recent.setWeightSum(4);
         recent.setTag("home-history-list");
@@ -779,33 +748,38 @@ final class HomeScreen {
             cell.bottomMargin = a.dp(compactStack && !last ? 10 : 0);
             final WatchHistory.Entry e = entries.get(i);
             LinearLayout card = a.row();
-            card.setPadding(a.dp(9), a.dp(6), a.dp(12), a.dp(6));
-            card.setBackground(a.bg(0xff222228, 14));
+            card.setPadding(a.dp(10), a.dp(7), a.dp(14), a.dp(7));
+            int cardResting = a.isTvDevice() ? 0xa4191f2b : 0xff222228;
+            card.setBackground(
+                    a.isTvDevice()
+                            ? TvV17Surface.rounded(cardResting, a.dp(16), 0x24ffffff, a.dp(1))
+                            : a.bg(cardResting, 14));
             ImageView image = new AmbientPoster();
             image.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            image.setBackground(a.bg(0xff303038, 7));
+            image.setBackground(a.bg(0xff303038, 8));
             image.setClipToOutline(true);
-            LinearLayout.LayoutParams art = new LinearLayout.LayoutParams(a.dp(40), a.dp(60));
+            LinearLayout.LayoutParams art = new LinearLayout.LayoutParams(a.dp(42), a.dp(60));
             art.rightMargin = a.dp(12);
             card.addView(image, art);
             a.poster(e.poster, image);
             LinearLayout info = a.vertical();
             info.setGravity(Gravity.CENTER_VERTICAL);
             card.addView(info, new LinearLayout.LayoutParams(0, -1, 1));
-            TextView name = a.text(e.title, 14, MainActivity.WHITE);
+            TextView name = a.text(e.title, 14.5f, MainActivity.WHITE);
+            name.setTypeface(null, Typeface.BOLD);
             single(name);
             info.addView(name);
-            a.gap(info, 6);
-            TextView detail = a.text(a.historyLabel(e), 11, MainActivity.MUTED);
+            a.gap(info, 5);
+            TextView detail = a.text(a.historyLabel(e), 11.5f, MainActivity.MUTED);
             single(detail);
             info.addView(detail);
-            a.gap(info, 9);
+            a.gap(info, 8);
             FrameLayout track = new FrameLayout(a);
-            track.setBackground(a.bg(0xff45454e, 2));
+            track.setBackground(a.bg(0x38ffffff, 2));
             track.setClipToOutline(true);
             info.addView(track, new LinearLayout.LayoutParams(-1, a.dp(3)));
             View progress = new View(a);
-            progress.setBackgroundColor(0xffededf2);
+            progress.setBackgroundColor(0xff0a84ff);
             float fraction =
                     e.duration > 0 ? Math.max(0, Math.min(1, e.position / (float) e.duration)) : 0;
             track.addView(progress, new FrameLayout.LayoutParams(0, -1));
@@ -819,12 +793,12 @@ final class HomeScreen {
                         }
                     });
             focusable(card, "home-history:" + i);
-            outline(card, false, 14, 0xff222228);
+            outline(card, false, a.isTvDevice() ? 16 : 14, cardResting);
             card.setContentDescription(e.title + "，" + a.historyLabel(e));
             card.setOnClickListener(v -> a.resumeHistory(e));
             card.setOnFocusChangeListener(
                     (v, f) -> {
-                        outline(card, f, 14, 0xff222228);
+                        outline(card, f, a.isTvDevice() ? 16 : 14, cardResting);
                         if (f && ambient != null) ambient.follow(image);
                         if (f && !a.reduced && a.config != null) {
                             v.postDelayed(
@@ -852,15 +826,15 @@ final class HomeScreen {
             recent.addView(card, cell);
             historyCards.add(card);
         }
-        a.gap(historyHost, 4);
+        a.gap(historyHost, a.isTvDevice() ? 22 : 4);
     }
 
     void refreshHero() {
-        if (heroHost == null) return;
-        List<WatchHistory.Entry> entries = a.watchHistory();
-        continueHero =
-                TvV17LibraryScreen.hero(a, heroHost, entries.isEmpty() ? null : entries.get(0));
-        heroHost.setPadding(0, 0, 0, continueHero == null ? 0 : a.dp(18));
+        continueHero = null;
+        if (heroHost != null) {
+            heroHost.removeAllViews();
+            heroHost.setVisibility(View.GONE);
+        }
     }
 
     void renderPreview() {
@@ -902,12 +876,7 @@ final class HomeScreen {
         }
         buildTabs();
         if (first && a.current != null && a.current.focus == null) {
-            View initial =
-                    homeHost != null && !state.library
-                            ? (continueHero != null
-                                    ? continueHero
-                                    : !historyCards.isEmpty() ? historyCards.get(0) : openLibrary)
-                            : selectedTab();
+            View initial = !historyCards.isEmpty() ? historyCards.get(0) : selectedTab();
             a.current.focus = String.valueOf(initial.getTag());
             restoreFocus();
         }
@@ -1886,8 +1855,14 @@ final class HomeScreen {
             if (allHistory != null) allHistory.setNextFocusUpId(continueHero.getId());
         }
         if (a.homeDock != null) a.homeDock.leftEdge(openLibrary, false);
-        for (View card : historyCards) card.setNextFocusDownId(openLibrary.getId());
-        if (allHistory != null) allHistory.setNextFocusDownId(openLibrary.getId());
+        for (View card : historyCards) {
+            card.setNextFocusUpId(card.getId());
+            card.setNextFocusDownId(openLibrary.getId());
+        }
+        if (allHistory != null) {
+            allHistory.setNextFocusUpId(allHistory.getId());
+            allHistory.setNextFocusDownId(openLibrary.getId());
+        }
     }
 
     void wireNavigation() {
@@ -2055,17 +2030,17 @@ final class HomeScreen {
             }
         }
         if (tvLeftDock) {
-            a.homeDock.leftEdge(source, true);
+            a.homeDock.leftEdge(source, false);
             if (!historyCards.isEmpty()) a.homeDock.leftEdge(historyCards.get(0), false);
             for (List<View> line : filters.lines)
-                if (!line.isEmpty()) a.homeDock.leftEdge(line.get(0), true);
+                if (!line.isEmpty()) a.homeDock.leftEdge(line.get(0), false);
             if (inlineExpanded) {
                 for (List<View> line : inlineFilters.rows)
-                    if (!line.isEmpty()) a.homeDock.leftEdge(line.get(0), true);
-            } else if (inlineSummary) a.homeDock.leftEdge(inlineFilters.expandButton, true);
-            for (List<View> row : rows) if (!row.isEmpty()) a.homeDock.leftEdge(row.get(0), true);
-            a.homeDock.leftEdge(earlier, true);
-            a.homeDock.leftEdge(more, true);
+                    if (!line.isEmpty()) a.homeDock.leftEdge(line.get(0), false);
+            } else if (inlineSummary) a.homeDock.leftEdge(inlineFilters.expandButton, false);
+            for (List<View> row : rows) if (!row.isEmpty()) a.homeDock.leftEdge(row.get(0), false);
+            a.homeDock.leftEdge(earlier, false);
+            a.homeDock.leftEdge(more, false);
         }
         if (homeHost != null && !state.library) wireHomeNavigation();
         int aboveGridId =

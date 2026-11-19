@@ -20,6 +20,10 @@ final class Prefs {
     static final String TV_DOCK_POSITION = "tv_dock_position";
     static final String TV_NAVIGATION_MODE = "tv_navigation_mode";
     static final String TV_AMBIENT_PERCENT = "tv_ambient_percent";
+    static final String TV_BG_MODE = "tv_bg_mode";
+    static final String TV_GLOW_PRESET = "tv_glow_preset";
+    static final String TV_GLOW_COLOR_LEFT = "tv_glow_color_left";
+    static final String TV_GLOW_COLOR_RIGHT = "tv_glow_color_right";
     static final String TV_PLAYER_STYLE = "tv_player_style";
     static final String STARTUP_ANIMATION = "startup_animation";
     static final String SHOW_HERO_BANNER = "show_hero_banner";
@@ -59,11 +63,17 @@ final class Prefs {
     static final String SEARCH_THREADS = "search_threads";
     static final String SEARCH_TIMEOUT = "search_timeout";
     static final String EPISODES_DESCENDING = "episodes_descending";
+    static final String LIVE_HIGH_QUALITY = "live_high_quality";
+    static final String LIVE_MERGE_SOURCES = "live_merge_sources";
 
     // Runtime state & user data keys (excluded from settings-only reset/restore).
     static final String ORIGIN = "origin";
     static final String LIVE_URL = "live_url";
     static final String LIVE_NAME = "live_name";
+    static final String LIVE_SOURCES_JSON = "live_sources_json";
+    static final String LIVE_UDPXY_URL = "live_udpxy_url";
+    static final String LIVE_EPG_URL = "live_epg_url";
+    static final String LIVE_STREAM_METRICS = "live_stream_metrics";
     static final String SELECTED_SITE = "selected_site";
     static final String PREFERRED_SITE = "preferred_site_identity";
     static final String PREFERRED_LINE = "preferred_line";
@@ -108,6 +118,10 @@ final class Prefs {
         TV_DOCK_POSITION,
         TV_NAVIGATION_MODE,
         TV_AMBIENT_PERCENT,
+        TV_BG_MODE,
+        TV_GLOW_PRESET,
+        TV_GLOW_COLOR_LEFT,
+        TV_GLOW_COLOR_RIGHT,
         TV_PLAYER_STYLE,
         STARTUP_ANIMATION,
         SHOW_HERO_BANNER,
@@ -142,7 +156,9 @@ final class Prefs {
         AUDIO_EFFECT,
         SEARCH_THREADS,
         SEARCH_TIMEOUT,
-        EPISODES_DESCENDING
+        EPISODES_DESCENDING,
+        LIVE_HIGH_QUALITY,
+        LIVE_MERGE_SOURCES
     };
 
     private static final Set<String> BOOLEAN_KEYS =
@@ -160,7 +176,9 @@ final class Prefs {
                                     SOFTWARE_AUDIO,
                                     PREFER_AAC,
                                     TUNNELED_PLAYBACK,
-                                    EPISODES_DESCENDING)));
+                                    EPISODES_DESCENDING,
+                                    LIVE_HIGH_QUALITY,
+                                    LIVE_MERGE_SOURCES)));
 
     private static final Map<String, int[]> INT_RANGES;
 
@@ -171,6 +189,10 @@ final class Prefs {
         ranges.put(TV_DOCK_POSITION, new int[] {0, 1});
         ranges.put(TV_NAVIGATION_MODE, new int[] {0, 1});
         ranges.put(TV_AMBIENT_PERCENT, new int[] {0, 100});
+        ranges.put(TV_BG_MODE, new int[] {0, 3});
+        ranges.put(TV_GLOW_PRESET, new int[] {0, 6});
+        ranges.put(TV_GLOW_COLOR_LEFT, new int[] {0, 0xFFFFFF});
+        ranges.put(TV_GLOW_COLOR_RIGHT, new int[] {0, 0xFFFFFF});
         ranges.put(TV_PLAYER_STYLE, new int[] {0, 1});
         ranges.put(HOME_ROWS, new int[] {1, 4});
         ranges.put(HOME_SECTIONS, new int[] {0, 5});
@@ -204,6 +226,34 @@ final class Prefs {
 
     static float tvAmbientStrength(int percent) {
         return Math.max(0, Math.min(100, percent)) / 100f;
+    }
+
+    static final int BG_MODE_ADAPTIVE = 0;
+    static final int BG_MODE_GRADIENT = 1;
+    static final int BG_MODE_WALLPAPER = 2;
+    static final int BG_MODE_DARK = 3;
+
+    static int clampBgMode(int mode) {
+        return Math.max(BG_MODE_ADAPTIVE, Math.min(BG_MODE_DARK, mode));
+    }
+
+    static int clampGlowPreset(int preset) {
+        return Math.max(0, Math.min(6, preset));
+    }
+
+    static int clampRgb24(int rgb) {
+        return rgb & 0xFFFFFF;
+    }
+
+    /** Resolves effective TV background mode with backward compatibility for legacy flags. */
+    static int resolveTvBgMode(
+            boolean hasExplicitMode,
+            int explicitMode,
+            boolean wallpaperEnabled,
+            boolean homeAmbient) {
+        if (hasExplicitMode) return clampBgMode(explicitMode);
+        if (wallpaperEnabled) return BG_MODE_WALLPAPER;
+        return homeAmbient ? BG_MODE_ADAPTIVE : BG_MODE_DARK;
     }
 
     /**
@@ -336,6 +386,26 @@ final class Prefs {
         if (SELECTED_SITE.equals(key)) {
             return text.length() <= 256 ? text : null;
         }
+        if (LIVE_UDPXY_URL.equals(key)) {
+            if (text.isEmpty()) return "";
+            return sanitizeUdpxyBase(text);
+        }
+        if (LIVE_EPG_URL.equals(key)) {
+            if (text.isEmpty()) return "";
+            return sanitizeHttpUrl(text);
+        }
+        if (LIVE_URL.equals(key)) {
+            if (text.isEmpty()) return "";
+            return sanitizeHttpUrl(text);
+        }
+        if (LIVE_NAME.equals(key)) {
+            return text.length() <= 120 ? text : null;
+        }
+        if (LIVE_SOURCES_JSON.equals(key)) {
+            if (text.isEmpty()) return "[]";
+            if (text.startsWith("[") && text.endsWith("]") && text.length() <= 65536) return text;
+            return null;
+        }
         if (WATCH_HISTORY.equals(key)
                 || FAVORITES.equals(key)
                 || GLOBAL_SEARCH_HISTORY.equals(key)) {
@@ -344,5 +414,40 @@ final class Prefs {
             return null;
         }
         return null;
+    }
+
+    private static String sanitizeHttpUrl(String raw) {
+        if (raw == null || raw.length() > 2048) return null;
+        String lower = raw.toLowerCase(java.util.Locale.ROOT);
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) return null;
+        try {
+            java.net.URI uri = java.net.URI.create(raw);
+            String host = uri.getHost();
+            if (host == null || host.trim().isEmpty()) return null;
+            return uri.toASCIIString();
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static String sanitizeUdpxyBase(String raw) {
+        if (raw == null || raw.length() > 512) return null;
+        String candidate = raw.trim();
+        String lower = candidate.toLowerCase(java.util.Locale.ROOT);
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
+            if (candidate.contains("://")) return null;
+            candidate = "http://" + candidate;
+        }
+        while (candidate.endsWith("/")) {
+            candidate = candidate.substring(0, candidate.length() - 1);
+        }
+        try {
+            java.net.URI uri = java.net.URI.create(candidate);
+            String host = uri.getHost();
+            if (host == null || host.trim().isEmpty()) return null;
+            return candidate;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 }

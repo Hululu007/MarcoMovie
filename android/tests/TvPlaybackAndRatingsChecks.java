@@ -247,6 +247,99 @@ public final class TvPlaybackAndRatingsChecks {
         check(
                 emptyRatings.douban == 0.0 && emptyRatings.rtPercent == -1,
                 "extractImmediateRatings returns 0.0/-1 when unrated (hides badges cleanly)");
+
+        // Official Douban subject + credits JSON parsing for TV detail facts and circular cast
+        // avatars
+        String subjectJson =
+                "{\"year\":\"2023\",\"countries\":[\"中国大陆\"],\"episodes_count\":30,"
+                        + "\"genres\":[\"剧情\",\"科幻\",\"悬疑\"],\"intro\":\"纳米科学家汪淼进入三体世界。\","
+                        + "\"rating\":{\"value\":8.7},\"pic\":{\"large\":\"https://img1.doubanio.com/view/photo/l/p1.jpg\"}}";
+        String creditsJson =
+                "{\"items\":["
+                        + "{\"name\":\"杨磊\",\"category\":\"导演\",\"avatar\":{\"normal\":\"https://img2.doubanio.com/d1.jpg\"}},"
+                        + "{\"name\":\"张鲁一\",\"category\":\"演员\",\"character\":\"饰 汪淼\",\"avatar\":{\"normal\":\"https://img3.doubanio.com/a1.jpg\"}},"
+                        + "{\"name\":\"于和伟\",\"category\":\"演员\",\"character\":\"饰 史强\",\"avatar\":{\"normal\":\"https://img1.doubanio.com/a2.jpg\"}}"
+                        + "]}";
+        ImmersivePoster.SubjectDetails details =
+                ImmersivePoster.parseDoubanSubjectJson(subjectJson, creditsJson);
+        check(
+                "2023".equals(details.year)
+                        && "中国大陆".equals(details.countries)
+                        && details.episodesCount == 30
+                        && Math.abs(details.doubanScore - 8.7) < 0.001
+                        && details.cast.size() == 3
+                        && "张鲁一".equals(details.cast.get(1).name)
+                        && "汪淼".equals(details.cast.get(1).role)
+                        && details.cast.get(1).avatarUrl.startsWith("https://img3.doubanio.com/"),
+                "parseDoubanSubjectJson extracts official year, region, episode count, rating, and cast portraits");
+
+        Cms.Video tvShow = new Cms.Video();
+        tvShow.title = "三体";
+        tvShow.year = "2023";
+        tvShow.area = "内地";
+        tvShow.remarks = "更新至12集";
+        String officialFactLine = ImmersivePoster.formatOfficialFactLine(tvShow, details);
+        check(
+                officialFactLine.contains("2023")
+                        && officialFactLine.contains("中国大陆")
+                        && officialFactLine.contains("全 30 集"),
+                "formatOfficialFactLine prefers verified official region and total episode count");
+
+        java.util.List<ImmersivePoster.CastMember> fallbackCast =
+                ImmersivePoster.parseCastNamesFallback("克里斯托弗·诺兰", "基里安·墨菲, 艾米莉·布朗特 / 马特·达蒙");
+        check(
+                fallbackCast.size() == 4
+                        && fallbackCast.get(0).director
+                        && "克里斯托弗·诺兰".equals(fallbackCast.get(0).name)
+                        && "基里安·墨菲".equals(fallbackCast.get(1).name),
+                "parseCastNamesFallback splits director and actor names cleanly before network credits arrive");
+
+        // Single-episode filename extraction from line/episode & URL
+        Cms.Line panLine = new Cms.Line();
+        panLine.name = "夸克4K";
+        Cms.Episode fileEp = new Cms.Episode();
+        fileEp.name = "三体.S01E01.2160p.WEB-DL.mkv";
+        fileEp.url = "https://cdn.example.test/index.m3u8";
+        check(
+                "夸克4K  ·  三体.S01E01.2160p.WEB-DL.mkv"
+                        .equals(TvV17DetailScreen.formatEpisodeFileCaption(panLine, fileEp)),
+                "formatEpisodeFileCaption displays active line and descriptive episode filename");
+
+        Cms.Episode urlFileEp = new Cms.Episode();
+        urlFileEp.name = "高清";
+        urlFileEp.url = "https://cdn.example.test/media/Dune.Part.Two.2024.2160p.mkv";
+        check(
+                TvV17DetailScreen.formatEpisodeFileCaption(panLine, urlFileEp)
+                                .contains("Dune.Part.Two.2024.2160p.mkv")
+                        && ""
+                                .equals(
+                                        TvV17DetailScreen.extractFilenameFromUrl(
+                                                "https://cdn.example.test/hls/index.m3u8")),
+                "extractFilenameFromUrl extracts real media filename and ignores generic index.m3u8");
+
+        // Detail history caption avoids repeating long episode filename already shown above it
+        WatchHistory.Entry bm = new WatchHistory.Entry();
+        bm.episode = "[759.86MB]The.Silent.Storm.2026.S01E28.2160p.WEB-DL.mkv";
+        bm.position = 1998000;
+        bm.duration = 2725000;
+        String dedupHistory =
+                TvDetailHost.formatHistoryCaption(
+                        null,
+                        bm,
+                        "嘟嘟无限2  ·  [759.86MB]The.Silent.Storm.2026.S01E28.2160p.WEB-DL.mkv");
+        check(
+                "上次观看进度 · 33:18 / 45:25".equals(dedupHistory),
+                "formatHistoryCaption omits duplicate long filename already shown in episode caption");
+
+        // HotTitleCatalog Douban trending JSON parsing
+        String hotJson =
+                "{\"subject_collection_items\":[{\"title\":\"藏海传\"},{\"title\":\"大奉打更人\"},{\"title\":\" \"},{\"title\":\"藏海传\"}]}";
+        List<String> parsedHot = HotTitleCatalog.parseDoubanCollectionJson(hotJson);
+        check(
+                parsedHot.size() == 2
+                        && "藏海传".equals(parsedHot.get(0))
+                        && "大奉打更人".equals(parsedHot.get(1)),
+                "HotTitleCatalog parses and deduplicates Douban trending titles");
     }
 
     private static void testTvHudAndModernControlInvariants() {

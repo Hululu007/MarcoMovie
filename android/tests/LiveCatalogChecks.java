@@ -1,7 +1,13 @@
+import com.pilipala.emby.EmbyLibrary;
 import com.pilipala.marcomovie.LiveCatalog;
+import com.pilipala.marcomovie.LiveEpgService;
+import com.pilipala.marcomovie.LiveQualityPolicy;
+import java.io.*;
+import java.net.URL;
 import java.nio.file.*;
 import java.util.*;
-import java.io.*;
+import java.util.zip.GZIPOutputStream;
+import org.json.*;
 
 public final class LiveCatalogChecks {
     static int count;
@@ -280,6 +286,212 @@ public final class LiveCatalogChecks {
             }
             check(failed, "redirect loop bounded");
         }
+        // High-definition live TV quality policy & udpxy checks
+        check(
+                LiveQualityPolicy.canonicalChannelName("CCTV-1 综合 [1080P]").equals("CCTV-1")
+                        && LiveQualityPolicy.canonicalChannelName("CCTV01高清").equals("CCTV-1")
+                        && LiveQualityPolicy.canonicalChannelName("CCTV-5+ 体育赛事").equals("CCTV-5+")
+                        && LiveQualityPolicy.canonicalChannelName("CCTV4K 超高清").equals("CCTV-4K")
+                        && LiveQualityPolicy.canonicalChannelName("CCTV-16 奥林匹克").equals("CCTV-16")
+                        && LiveQualityPolicy.canonicalChannelName("湖南卫视 FHD").equals("湖南卫视"),
+                "channel name normalization merges HD variants while preserving distinct channels");
+        check(
+                LiveQualityPolicy.normalizeUdpxyBase("udpxy.test:4022/udp/")
+                                .equals("http://udpxy.test:4022")
+                        && LiveQualityPolicy.rewriteMulticastUrl(
+                                        "rtp://@239.253.64.120:5140", "http://udpxy.test:4022")
+                                .equals("http://udpxy.test:4022/rtp/239.253.64.120:5140")
+                        && LiveQualityPolicy.rewriteMulticastUrl(
+                                        "udp://239.0.0.1:8000", "udpxy.test:4022")
+                                .equals("http://udpxy.test:4022/udp/239.0.0.1:8000"),
+                "udpxy multicast-to-unicast URL rewriting");
+        String ipv6Sample = "http://" + "[2001:db8::1]/cctv1.m3u8$IPV6-1080P";
+        LiveCatalog.Catalog subLow =
+                LiveCatalog.parse(
+                        "央视,#genre#\nCCTV-1综合,http://v4.example.test/cctv1_720p.m3u8$720P#"
+                                + ipv6Sample
+                                + "\n",
+                        null,
+                        inherited);
+        LiveCatalog.Catalog subMulticast =
+                LiveCatalog.parse(
+                        "#EXTM3U\n#EXTINF:-1 group-title=\"电信组播\",CCTV1HD\nrtp://239.9.9.1:5140\n",
+                        null,
+                        inherited);
+        List<LiveQualityPolicy.NamedCatalog> toMerge =
+                Arrays.asList(
+                        new LiveQualityPolicy.NamedCatalog("订阅源", subLow),
+                        new LiveQualityPolicy.NamedCatalog("组播源", subMulticast));
+        LiveCatalog.Catalog mergedNoUdpxy =
+                LiveQualityPolicy.mergeCatalogs(toMerge, "", true, Collections.emptyMap(), true);
+        LiveCatalog.Channel mergedCctv1 = first(mergedNoUdpxy);
+        check(
+                mergedCctv1.name.equals("CCTV-1")
+                        && mergedCctv1.streams.size() == 3
+                        && mergedCctv1.streams.get(0).url.contains("[2001:db8::1]")
+                        && mergedCctv1.streams.get(2).url.startsWith("rtp://"),
+                "IPv6 1080P stream ranked ahead of 720P and unconfigured multicast");
+        LiveCatalog.Catalog mergedNoV6 =
+                LiveQualityPolicy.mergeCatalogs(toMerge, "", false, Collections.emptyMap(), true);
+        check(
+                first(mergedNoV6).streams.get(0).url.contains("v4.example.test"),
+                "unreachable IPv6 literal demoted on IPv4-only network");
+        LiveCatalog.Catalog mergedWithUdpxy =
+                LiveQualityPolicy.mergeCatalogs(
+                        toMerge, "http://udpxy.test:4022", true, Collections.emptyMap(), true);
+        check(
+                first(mergedWithUdpxy).streams.get(0).url.startsWith("rtp://")
+                        && LiveQualityPolicy.formatStreamDisplayLabel(
+                                        0,
+                                        first(mergedWithUdpxy).streams.get(0),
+                                        "http://udpxy.test:4022",
+                                        Collections.emptyMap())
+                                .contains("组播单播"),
+                "configured udpxy multicast stream prioritized with unicast badge");
+        String metricsJson =
+                LiveQualityPolicy.recordStreamSuccess(
+                        "{}",
+                        "http://v4.example.test/cctv1_720p.m3u8?token=abc123",
+                        3840,
+                        2160,
+                        420,
+                        System.currentTimeMillis());
+        Map<String, LiveQualityPolicy.Metrics> parsedMetrics =
+                LiveQualityPolicy.parseMetrics(metricsJson);
+        LiveCatalog.Catalog mergedMeasured =
+                LiveQualityPolicy.mergeCatalogs(toMerge, "", true, parsedMetrics, true);
+        check(
+                first(mergedMeasured).streams.get(0).url.contains("v4.example.test")
+                        && LiveQualityPolicy.formatStreamDisplayLabel(
+                                        0, first(mergedMeasured).streams.get(0), "", parsedMetrics)
+                                .contains("实测4K"),
+                "measured 4K resolution cached and prioritized across token changes");
+        LiveCatalog.Catalog queryBadgeCat =
+                LiveCatalog.parse(
+                        "A,http://live.example.test/play.php?id=cctv1$IPV6-1080P", null, inherited);
+        check(
+                first(queryBadgeCat).streams.get(0).label.equals("IPV6-1080P")
+                        && first(queryBadgeCat)
+                                .streams
+                                .get(0)
+                                .url
+                                .equals("http://live.example.test/play.php?id=cctv1"),
+                "quality badge suffix after query extracted cleanly");
+        String dashM3u =
+                "#EXTM3U\n"
+                        + "#EXTINF:-1 group-title=\"高清DASH\",CCTV-1\n"
+                        + "#KODIPROP:inputstream.adaptive.manifest_type=mpd\n"
+                        + "#KODIPROP:inputstream.adaptive.license_type=org.w3.clearkey\n"
+                        + "#KODIPROP:inputstream.adaptive.license_key=0123456789abcdef0123456789abcdef:fedcba9876543210fedcba9876543210\n"
+                        + "https://dash.example.test/cctv1/index.mpd\n";
+        LiveCatalog.Catalog dashCat = LiveCatalog.parse(dashM3u, null, inherited);
+        LiveCatalog.Stream dashStream = first(dashCat).streams.get(0);
+        JSONObject kodiDrm = LiveQualityPolicy.buildDrmFromKodiProps(dashStream.options);
+        check(
+                LiveQualityPolicy.mimeFromKodiProps(dashStream.options)
+                                .equals("application/dash+xml")
+                        && kodiDrm != null
+                        && "clearkey".equals(kodiDrm.optString("scheme"))
+                        && kodiDrm.optString("clearKeyJson").contains("\"kty\":\"oct\"")
+                        && !kodiDrm.optString("clearKeyJson").contains("="),
+                "KODIPROP ClearKey kid:key normalized to Base64URL JWK without padding");
+        if (args.length > 1) {
+            String base = args[1];
+            JSONObject embySess =
+                    new JSONObject()
+                            .put("base", base)
+                            .put("user", "u1")
+                            .put("token", "tok-secret")
+                            .put("device", "dev-1");
+            EmbyLibrary embyLib = new EmbyLibrary(embySess);
+            JSONArray embyChannels = embyLib.liveChannels();
+            check(
+                    embyChannels.length() == 2
+                            && embyChannels.getJSONObject(0).getString("epg").equals("新闻联播")
+                            && embyChannels.getJSONObject(1).getString("epg").equals("纪录片 · 第一集")
+                            && embyChannels
+                                    .getJSONObject(0)
+                                    .getString("url")
+                                    .startsWith(EmbyLibrary.LIVE_PLAY_PREFIX),
+                    "Emby Live TV fetches channels with CurrentProgram EPG");
+            JSONObject directRes =
+                    embyLib.resolveLiveChannel(
+                            embyChannels.getJSONObject(0).getString("url"), false);
+            check(
+                    directRes
+                                    .getString("url")
+                                    .contains("/emby/LiveTv/LiveStreamFiles/ls-101/stream.ts")
+                            && !directRes.getString("url").contains("api_key=")
+                            && directRes
+                                    .getJSONObject("header")
+                                    .getString("X-Emby-Token")
+                                    .equals("tok-secret")
+                            && directRes
+                                    .getJSONObject("embySession")
+                                    .getString("LiveStreamId")
+                                    .equals("ls-101"),
+                    "Emby Live TV direct stream resolves cleanly with token in header");
+            JSONObject openedRes =
+                    embyLib.resolveLiveChannel(
+                            embyChannels.getJSONObject(1).getString("url"), true);
+            check(
+                    openedRes.getString("url").contains("/emby/Videos/ch2/live.m3u8")
+                            && openedRes
+                                    .getJSONObject("embySession")
+                                    .getString("LiveStreamId")
+                                    .equals("ls-202"),
+                    "Emby Live TV RequiresOpening fallback calls LiveStreams/Open");
+            embyLib.report(directRes.getJSONObject("embySession"), "Stop", 0, false, true);
+            String closedResp;
+            try (InputStream in = new URL(base + "emby/closed-live-streams").openStream()) {
+                ByteArrayOutputStream buf = new ByteArrayOutputStream();
+                byte[] b = new byte[1024];
+                int n;
+                while ((n = in.read(b)) != -1) buf.write(b, 0, n);
+                closedResp = buf.toString("UTF-8");
+            }
+            check(
+                    closedResp.contains("ls-101"),
+                    "Emby Live TV stop closes LiveStreamId to release tuner");
+        }
+        long sampleNow = LiveEpgService.parseXmltvTime("20261119191500 +0800");
+        String sampleXml =
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><tv>"
+                        + "<channel id=\"c1\"><display-name>CCTV-1</display-name></channel>"
+                        + "<programme start=\"20261119180000 +0800\" stop=\"20261119190000 +0800\" channel=\"c1\"><title>共同关注</title></programme>"
+                        + "<programme start=\"20261119190000 +0800\" stop=\"20261119193000 +0800\" channel=\"c1\"><title>新闻联播</title></programme>"
+                        + "<programme start=\"20261119193000 +0800\" stop=\"20261119200000 +0800\" channel=\"c1\"><title>焦点访谈</title></programme>"
+                        + "</tv>";
+        ByteArrayOutputStream gzBuf = new ByteArrayOutputStream();
+        try (GZIPOutputStream gz = new GZIPOutputStream(gzBuf)) {
+            gz.write(sampleXml.getBytes("UTF-8"));
+        }
+        LiveEpgService.Guide guide = LiveEpgService.parseXmltv(gzBuf.toByteArray(), sampleNow);
+        LiveEpgService.Program curProg = guide.currentProgram("", "", "CCTV1综合 [1080P]", sampleNow);
+        List<LiveEpgService.Program> pastProgs =
+                guide.pastPrograms("", "", "CCTV1综合 [1080P]", sampleNow, 7);
+        List<LiveEpgService.Program> nextProgs =
+                guide.upcomingPrograms("", "", "CCTV1综合 [1080P]", sampleNow, 3);
+        check(
+                curProg != null
+                        && curProg.title.equals("新闻联播")
+                        && pastProgs.size() == 1
+                        && pastProgs.get(0).title.equals("共同关注")
+                        && nextProgs.size() == 1
+                        && nextProgs.get(0).title.equals("焦点访谈"),
+                "gzipped XMLTV EPG matches canonical CCTV channel for live, past, and upcoming programs");
+        String catchupBuilt =
+                LiveEpgService.buildCatchupUrl(
+                        "http://live.example.test/cctv1.m3u8?fmt=hls",
+                        "append",
+                        "?playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}",
+                        pastProgs.get(0).startMs,
+                        pastProgs.get(0).stopMs,
+                        TimeZone.getTimeZone("GMT+08:00"));
+        check(
+                catchupBuilt.equals(
+                        "http://live.example.test/cctv1.m3u8?fmt=hls&playseek=20261119180000-20261119190000"),
+                "IPTV catchup append template expands start/end timestamps cleanly");
         System.out.println("OK " + count + " live checks");
     }
 

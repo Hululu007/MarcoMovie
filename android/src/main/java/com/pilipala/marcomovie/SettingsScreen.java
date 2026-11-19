@@ -51,128 +51,291 @@ final class SettingsScreen {
         }
     }
 
-    /** The screen stack still owns return and focus; the right column owns existing rows. */
+    /** Apple tvOS-style split-view settings shell. Right pane hosts grouped focus-lifted cards. */
+    private View tvActiveCategoryButton;
+
+    private View tvFirstRightControl;
+
     void tvPage(String title, String note) {
-        LinearLayout outer = a.body;
-        TextView heading = a.text("设置", 28, TvV17Theme.TEXT);
+        tvActiveCategoryButton = null;
+        tvFirstRightControl = null;
+
+        // Replace outer page scroll with a fixed full-screen Apple tvOS split container so the
+        // left primary navigation pane stays pinned while the right settings pane scrolls cleanly.
+        if (a.scroll != null) a.root.removeView(a.scroll);
+
+        LinearLayout shell = a.vertical();
+        shell.setClipChildren(false);
+        shell.setClipToPadding(false);
+        shell.setPadding(a.dp(56), a.dp(32), a.dp(56), a.dp(24));
+        a.root.addView(shell, new FrameLayout.LayoutParams(-1, -1));
+
+        // Fixed Top Apple tvOS Header Row (Title + Live Clock)
+        LinearLayout headerBar = a.row();
+        headerBar.setGravity(Gravity.CENTER_VERTICAL);
+        TextView heading = a.text("设置", 32, TvV17Theme.TEXT);
         heading.setTypeface(null, Typeface.BOLD);
-        outer.addView(heading);
-        a.gap(outer, 18);
+        headerBar.addView(heading, new LinearLayout.LayoutParams(0, -2, 1f));
+        String clockText =
+                new java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
+                        .format(new java.util.Date());
+        TextView clock = a.text(clockText, 16, 0xb8ebebf5);
+        clock.setTypeface(null, Typeface.BOLD);
+        headerBar.addView(clock);
+        shell.addView(headerBar, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(shell, 26);
 
         LinearLayout columns = a.row();
         columns.setGravity(Gravity.TOP);
         columns.setClipChildren(false);
+        columns.setClipToPadding(false);
+        shell.addView(columns, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        // Left Fixed Primary Sidebar (never scrolls when navigating right settings list)
         LinearLayout navigation = a.vertical();
         navigation.setClipChildren(false);
-        LinearLayout.LayoutParams navSize = new LinearLayout.LayoutParams(a.dp(220), -2);
-        navSize.rightMargin = a.dp(28);
+        navigation.setClipToPadding(false);
+        navigation.setPadding(a.dp(2), a.dp(4), a.dp(2), a.dp(12));
+        LinearLayout.LayoutParams navSize = new LinearLayout.LayoutParams(a.dp(266), -1);
+        navSize.rightMargin = a.dp(52);
         columns.addView(navigation, navSize);
+
+        // Right Independent Scrollable Content Pane
+        TvScrollView rightScroll = new TvScrollView(a);
+        rightScroll.readingMode = true;
+        rightScroll.setFillViewport(true);
+        rightScroll.setVerticalScrollBarEnabled(false);
+        rightScroll.setClipChildren(false);
+        rightScroll.setClipToPadding(false);
+        a.scroll = rightScroll;
+
         LinearLayout content = a.vertical();
         content.setClipChildren(false);
-        columns.addView(content, new LinearLayout.LayoutParams(0, -2, 1f));
-        outer.addView(columns, new LinearLayout.LayoutParams(-1, -2));
+        content.setClipToPadding(false);
+        content.setPadding(a.dp(8), a.dp(4), a.dp(16), a.dp(56));
+        rightScroll.addView(content, new ScrollView.LayoutParams(-1, -2));
+        columns.addView(rightScroll, new LinearLayout.LayoutParams(0, -1, 1f));
 
-        tvCategory(
-                navigation,
-                "播放与字幕",
-                "settings-playback",
-                this::playback,
-                title.equals("播放与字幕") || title.equals("解码组件"));
-        tvCategory(
-                navigation,
-                "显示与操作",
-                "settings-appearance",
-                this::appearance,
-                title.equals("首页与壁纸") || title.equals("首页壁纸"));
-        tvCategory(navigation, "内容与连接", "settings-content", this::content, title.equals("内容与连接"));
-        tvCategory(
-                navigation, "数据与备份", "settings-backup-page", this::backup, title.equals("数据与备份"));
-        tvCategory(
-                navigation, "关于与更新", "settings-updates", () -> new UpdateScreen(a).show(), false);
+        boolean isAppearance =
+                title.equals("首页与壁纸") || title.equals("首页壁纸") || title.equals("外观与壁纸");
+        boolean isPlayback = title.equals("播放与字幕") || title.equals("解码组件");
+        boolean isContent = title.equals("内容与连接") || title.equals("片源与直播");
+        boolean isBackup = title.equals("数据与备份");
+
+        tvCategory(navigation, "外观与壁纸", "settings-appearance", this::appearance, isAppearance);
+        tvCategory(navigation, "播放与字幕", "settings-playback", this::playback, isPlayback);
+        tvCategory(navigation, "片源与直播", "settings-content", this::content, isContent);
+        tvCategory(navigation, "数据与备份", "settings-backup-page", this::backup, isBackup);
+        tvCategory(navigation, "软件更新", "settings-updates", () -> new UpdateScreen(a).show(), false);
+
+        View navSpacer = new View(a);
+        navigation.addView(navSpacer, new LinearLayout.LayoutParams(1, 0, 1f));
+
+        LinearLayout brandFoot = a.vertical();
+        brandFoot.setPadding(a.dp(16), a.dp(14), a.dp(16), a.dp(14));
+        brandFoot.setBackground(TvV17Surface.rounded(0x4d141822, a.dp(16), 0x1cffffff, a.dp(1)));
+        TextView brandTitle =
+                a.text("Marco Movie  " + UpdateManager.installedVersion(a), 13, 0xd8f5f5f7);
+        brandTitle.setTypeface(null, Typeface.BOLD);
+        brandFoot.addView(brandTitle);
+        TextView hint = a.text("←→ 切换区域 · OK 确认 · 返回退出", 11.5f, 0x99ebebf5);
+        hint.setPadding(0, a.dp(5), 0, 0);
+        brandFoot.addView(hint);
+        navigation.addView(brandFoot, new LinearLayout.LayoutParams(-1, -2));
 
         a.body = content;
-        TextView section = a.text(title, 23, TvV17Theme.TEXT);
+        TextView section = a.text(title, 26, TvV17Theme.TEXT);
         section.setTypeface(null, Typeface.BOLD);
         content.addView(section);
-        a.gap(content, 12);
         if (!note.isEmpty()) {
-            content.addView(a.text(note, 13, TvV17Theme.MUTED));
-            a.gap(content, 10);
+            TextView noteView = a.text(note, 13.5f, 0xa8ebebf5);
+            noteView.setLineSpacing(a.dp(2), 1.12f);
+            noteView.setPadding(0, a.dp(8), 0, a.dp(22));
+            content.addView(noteView);
+        } else {
+            a.gap(content, 20);
+        }
+    }
+
+    private void registerTvRightControl(View control) {
+        if (!a.isTvDevice() || control == null) return;
+        if (control.getId() == View.NO_ID) control.setId(View.generateViewId());
+        if (tvActiveCategoryButton != null) {
+            control.setNextFocusLeftId(tvActiveCategoryButton.getId());
+        }
+        if (tvFirstRightControl == null) {
+            tvFirstRightControl = control;
+            if (tvActiveCategoryButton != null) {
+                tvActiveCategoryButton.setNextFocusRightId(control.getId());
+            }
         }
     }
 
     void tvCategory(
             LinearLayout parent, String title, String tag, Runnable destination, boolean selected) {
-        Button button = a.navButton(title, tag, () -> open(destination));
-        button.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
-        button.setTextSize(16);
-        int resting = selected ? 0xff3b4653 : 0xff222a34;
-        button.setBackground(TvV17Surface.rounded(resting, a.dp(12), 0x40ffffff, a.dp(1)));
-        button.setOnFocusChangeListener(
-                (view, focused) ->
-                        FocusMotion.style(
-                                a,
-                                button,
-                                focused,
-                                resting,
-                                TvV17Theme.FOCUS,
-                                12,
-                                TvV17Theme.TEXT,
-                                MainActivity.DARK,
-                                false,
-                                1.02f));
-        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, a.dp(52));
-        size.bottomMargin = a.dp(8);
-        parent.addView(button, size);
+        LinearLayout row = a.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(a.dp(14), a.dp(11), a.dp(16), a.dp(11));
+        row.setTag(tag);
+        row.setId(View.generateViewId());
+        row.setFocusable(true);
+        row.setFocusableInTouchMode(true);
+        row.setClickable(true);
+        a.pressFeedback(row);
+
+        MobileShell.SettingIconView icon =
+                new MobileShell.SettingIconView(
+                        a, MobileShell.SettingIconView.kindForSetting(tag, title));
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(a.dp(30), a.dp(30));
+        iconLp.rightMargin = a.dp(12);
+        row.addView(icon, iconLp);
+
+        final TextView label = a.text(title, 15.5f, selected ? MainActivity.WHITE : 0xd0f2f4f5);
+        label.setTypeface(null, selected ? Typeface.BOLD : Typeface.NORMAL);
+        label.setSingleLine(true);
+        row.addView(label, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        final int restingBg =
+                selected
+                        ? 0x36ffffff
+                        : (a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
+                                ? 0xee1c212b
+                                : 0x661a1f29);
+        final int restingStroke = selected ? 0x55ffffff : 0x1affffff;
+        Runnable applyResting =
+                () -> {
+                    row.setBackground(
+                            TvV17Surface.rounded(restingBg, a.dp(14), restingStroke, a.dp(1)));
+                    label.setTextColor(selected ? MainActivity.WHITE : 0xd4f2f4f5);
+                    row.setElevation(0);
+                    row.animate().scaleX(1f).scaleY(1f).setDuration(a.reduced ? 0 : 120).start();
+                };
+        applyResting.run();
+        row.setOnFocusChangeListener(
+                (v, focused) -> {
+                    FocusMotion.unclipAncestors(row);
+                    if (focused) {
+                        row.setBackground(
+                                TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(1)));
+                        label.setTextColor(0xff101013);
+                        row.setElevation(a.dp(8));
+                        row.animate()
+                                .scaleX(1.03f)
+                                .scaleY(1.03f)
+                                .setDuration(a.reduced ? 0 : 130)
+                                .start();
+                    } else {
+                        applyResting.run();
+                    }
+                });
+        row.setOnClickListener(v -> a.open(new MainActivity.Screen(destination), false));
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, a.dp(58));
+        size.bottomMargin = a.dp(12);
+        parent.addView(row, size);
+        if (selected) tvActiveCategoryButton = row;
     }
 
     void link(String title, String detail, String key, Runnable action) {
         boolean tv = a.isTvDevice();
         LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(a.dp(20), a.dp(15), a.dp(20), a.dp(15));
+        row.setPadding(
+                a.dp(tv ? 22 : 18), a.dp(tv ? 18 : 14), a.dp(tv ? 22 : 18), a.dp(tv ? 18 : 14));
         MobileShell.SettingIconView icon =
                 new MobileShell.SettingIconView(
                         a, MobileShell.SettingIconView.kindForSetting(key, title));
-        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(a.dp(38), a.dp(38));
-        iconLp.rightMargin = a.dp(14);
+        LinearLayout.LayoutParams iconLp =
+                new LinearLayout.LayoutParams(a.dp(tv ? 36 : 38), a.dp(tv ? 36 : 38));
+        iconLp.rightMargin = a.dp(tv ? 16 : 14);
         row.addView(icon, iconLp);
+
+        boolean inlineValue = tv && detail != null && !detail.isEmpty() && detail.length() <= 20;
         LinearLayout copy = a.vertical();
-        copy.addView(a.text(title, 17, MainActivity.WHITE));
-        TextView caption = a.text(detail, 12, MainActivity.MUTED);
-        caption.setPadding(0, a.dp(4), 0, 0);
-        if (!detail.isEmpty()) copy.addView(caption);
+        final TextView titleView = a.text(title, tv ? 16 : 17, MainActivity.WHITE);
+        titleView.setTypeface(null, Typeface.BOLD);
+        copy.addView(titleView);
+        final TextView caption;
+        if (!inlineValue && detail != null && !detail.isEmpty()) {
+            caption = a.text(detail, 12.5f, 0xa8ebebf5);
+            caption.setPadding(0, a.dp(3), 0, 0);
+            copy.addView(caption);
+        } else {
+            caption = null;
+        }
         row.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
-        row.addView(a.text("›", 23, MainActivity.MUTED));
+
+        final TextView rightValue;
+        if (inlineValue) {
+            rightValue = a.text(detail, 14, 0xb8ebebf5);
+            rightValue.setSingleLine(true);
+            rightValue.setPadding(a.dp(10), 0, a.dp(8), 0);
+            row.addView(rightValue);
+        } else {
+            rightValue = null;
+        }
+        final TextView chevron = a.text("›", 22, 0x88ebebf5);
+        row.addView(chevron);
         row.setTag(key);
         row.setId(View.generateViewId());
         row.setFocusable(tv);
         row.setFocusableInTouchMode(tv);
         row.setClickable(true);
-        int surface =
+        final int surface =
                 tv && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
-                        ? TvV17Theme.OPAQUE_SURFACE
-                        : TvV17Theme.SURFACE;
+                        ? 0xee1c212b
+                        : 0xbf1a1f29;
         row.setBackground(
                 tv
-                        ? TvV17Surface.rounded(surface, a.dp(14), 0x2affffff, a.dp(1))
+                        ? TvV17Surface.rounded(surface, a.dp(14), 0x22ffffff, a.dp(1))
                         : a.bg(0xff222226, 14));
         row.setOnFocusChangeListener(
                 (v, f) -> {
-                    FocusMotion.style(
-                            a,
-                            row,
-                            f,
-                            tv ? surface : 0xff222226,
-                            tv ? 0xff46515e : 0xff37373e,
-                            14,
-                            MainActivity.WHITE,
-                            MainActivity.WHITE,
-                            true,
-                            1.008f);
+                    if (!tv) {
+                        FocusMotion.style(
+                                a,
+                                row,
+                                f,
+                                0xff222226,
+                                0xff37373e,
+                                14,
+                                MainActivity.WHITE,
+                                MainActivity.WHITE,
+                                true,
+                                1.008f);
+                        return;
+                    }
+                    FocusMotion.unclipAncestors(row);
+                    if (f) {
+                        row.setBackground(
+                                TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(1)));
+                        titleView.setTextColor(0xff101013);
+                        if (caption != null) caption.setTextColor(0xff48484a);
+                        if (rightValue != null) rightValue.setTextColor(0xff3a3a3c);
+                        chevron.setTextColor(0xff636366);
+                        row.setElevation(a.dp(8));
+                        row.animate()
+                                .scaleX(1.016f)
+                                .scaleY(1.016f)
+                                .setDuration(a.reduced ? 0 : 125)
+                                .start();
+                    } else {
+                        row.setBackground(
+                                TvV17Surface.rounded(surface, a.dp(14), 0x22ffffff, a.dp(1)));
+                        titleView.setTextColor(MainActivity.WHITE);
+                        if (caption != null) caption.setTextColor(0xa8ebebf5);
+                        if (rightValue != null) rightValue.setTextColor(0xb8ebebf5);
+                        chevron.setTextColor(0x88ebebf5);
+                        row.setElevation(0);
+                        row.animate()
+                                .scaleX(1f)
+                                .scaleY(1f)
+                                .setDuration(a.reduced ? 0 : 120)
+                                .start();
+                    }
                 });
         if (tv) {
             a.pressFeedback(row);
+            registerTvRightControl(row);
         } else {
             MobileShell.bindCardTouchFeedback(a, row, a.bg(0xff222226, 14), a.bg(0xff303038, 14));
         }
@@ -188,7 +351,7 @@ final class SettingsScreen {
 
     void show() {
         if (a.isTvDevice()) {
-            playback();
+            appearance();
             return;
         }
         page("设置", "");
@@ -581,7 +744,15 @@ final class SettingsScreen {
     }
 
     void appearance() {
-        page("首页与壁纸", "界面按屏幕分辨率自动适配，海报保持 2:3 比例。");
+        page("外观与壁纸", "界面按屏幕分辨率自动适配，支持首页封面自适应柔光、自定义柔光渐变与扫码上传壁纸。");
+        link(
+                "首页壁纸与柔光主题",
+                HomeAmbient.activeBackgroundSummary(a),
+                "settings-wallpaper",
+                () -> open(this::wallpaper));
+        if (a.isTvDevice()) {
+            addTvBackgroundStudioInline(true);
+        }
         link(
                 "界面大小",
                 TvLayoutPolicy.percent(a.prefs.getInt(Prefs.UI_SCALE_PERCENT, 100))
@@ -653,15 +824,9 @@ final class SettingsScreen {
                 new String[] {"最多 5 张 · 舒展", "最多 6 张", "最多 7 张", "最多 8 张"},
                 new int[] {5, 6, 7, 8},
                 5);
-        link(
-                "首页壁纸",
-                a.prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false)
-                        ? "自定义壁纸"
-                        : a.prefs.getBoolean(Prefs.HOME_AMBIENT, true) ? "海报配色柔光" : "纯深色",
-                "settings-wallpaper",
-                () -> open(this::wallpaper));
         if (!a.isTvDevice()) {
             toggle("首页推荐卡片", Prefs.SHOW_HERO_BANNER, true, null);
+            toggle("海报配色柔光", Prefs.HOME_AMBIENT, true, null);
         }
         toggle(
                 "减少透明效果",
@@ -669,14 +834,6 @@ final class SettingsScreen {
                 false,
                 () -> com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root));
         toggle("开屏动画", Prefs.STARTUP_ANIMATION, true, null);
-        toggle("海报配色柔光", Prefs.HOME_AMBIENT, true, null);
-        if (a.isTvDevice())
-            ints(
-                    "柔光强度",
-                    Prefs.TV_AMBIENT_PERCENT,
-                    new String[] {"0%", "25%", "50%", "75%", "100%"},
-                    new int[] {0, 25, 50, 75, 100},
-                    100);
         toggle(
                 "减少动态效果",
                 Prefs.REDUCED,
@@ -684,33 +841,493 @@ final class SettingsScreen {
                 () -> a.reduced = a.prefs.getBoolean(Prefs.REDUCED, false));
     }
 
+    private void applyTvBackgroundMode(int mode) {
+        int clamped = Prefs.clampBgMode(mode);
+        android.content.SharedPreferences.Editor edit =
+                a.prefs
+                        .edit()
+                        .putInt(Prefs.TV_BG_MODE, clamped)
+                        .putBoolean(Prefs.WALLPAPER_ENABLED, clamped == Prefs.BG_MODE_WALLPAPER)
+                        .putBoolean(
+                                Prefs.HOME_AMBIENT,
+                                clamped == Prefs.BG_MODE_ADAPTIVE
+                                        || clamped == Prefs.BG_MODE_GRADIENT);
+        edit.apply();
+        a.refresh();
+    }
+
+    private Button makeStudioPill(String label, String tag, boolean active, Runnable onClick) {
+        final Button b = a.button(label, tag, onClick);
+        b.setSingleLine(true);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setTextSize(13.5f);
+        b.setTypeface(null, active ? Typeface.BOLD : Typeface.NORMAL);
+        b.setMinHeight(a.dp(40));
+        b.setMinimumHeight(a.dp(40));
+        b.setPadding(a.dp(16), a.dp(8), a.dp(16), a.dp(8));
+        final int restBg = active ? 0xff0a84ff : 0x70262c38;
+        final int restStroke = active ? 0x9980c2ff : 0x26ffffff;
+        b.setBackground(TvV17Surface.rounded(restBg, a.dp(20), restStroke, a.dp(1)));
+        b.setTextColor(MainActivity.WHITE);
+        b.setOnFocusChangeListener(
+                (v, focused) -> {
+                    FocusMotion.unclipAncestors(b);
+                    if (focused) {
+                        b.setBackground(
+                                TvV17Surface.rounded(0xfff5f5f7, a.dp(20), 0xffffffff, a.dp(1)));
+                        b.setTextColor(0xff101013);
+                        b.setElevation(a.dp(6));
+                        b.animate()
+                                .scaleX(1.04f)
+                                .scaleY(1.04f)
+                                .setDuration(a.reduced ? 0 : 120)
+                                .start();
+                    } else {
+                        b.setBackground(
+                                TvV17Surface.rounded(restBg, a.dp(20), restStroke, a.dp(1)));
+                        b.setTextColor(MainActivity.WHITE);
+                        b.setElevation(0);
+                        b.animate().scaleX(1f).scaleY(1f).setDuration(a.reduced ? 0 : 120).start();
+                    }
+                });
+        return b;
+    }
+
+    private void addTvBackgroundStudioInline(boolean compact) {
+        final int mode = HomeAmbient.effectiveBgMode(a);
+        final int currentPreset = Prefs.clampGlowPreset(a.prefs.getInt(Prefs.TV_GLOW_PRESET, 0));
+        final int currentStrength = a.prefs.getInt(Prefs.TV_AMBIENT_PERCENT, 75);
+
+        // Card 1: Background Mode Selector + Strength Controls
+        LinearLayout studioCard = a.vertical();
+        studioCard.setClipChildren(false);
+        studioCard.setClipToPadding(false);
+        studioCard.setPadding(a.dp(18), a.dp(16), a.dp(18), a.dp(16));
+        studioCard.setBackground(TvV17Surface.rounded(0x991a1f29, a.dp(18), 0x24ffffff, a.dp(1)));
+
+        TextView modeHeader = a.text("背景渲染模式", 15, MainActivity.WHITE);
+        modeHeader.setTypeface(null, Typeface.BOLD);
+        studioCard.addView(modeHeader);
+        TextView modeSub = a.text("选择封面自适应柔光、自定义柔光渐变或手机扫码上传壁纸，切换即时生效", 12, 0xa6ebebf5);
+        modeSub.setPadding(0, a.dp(4), 0, a.dp(12));
+        studioCard.addView(modeSub);
+
+        LinearLayout modeRow = a.row();
+        modeRow.setClipChildren(false);
+        modeRow.setClipToPadding(false);
+        String[] modeLabels = {"封面自适应柔光", "自定义柔光渐变", "图片壁纸", "纯深色"};
+        int[] modeValues = {
+            Prefs.BG_MODE_ADAPTIVE,
+            Prefs.BG_MODE_GRADIENT,
+            Prefs.BG_MODE_WALLPAPER,
+            Prefs.BG_MODE_DARK
+        };
+        for (int i = 0; i < modeLabels.length; i++) {
+            final int targetMode = modeValues[i];
+            Button pill =
+                    makeStudioPill(
+                            modeLabels[i],
+                            "tv-bg-mode:" + targetMode,
+                            mode == targetMode,
+                            () -> {
+                                if (targetMode == Prefs.BG_MODE_WALLPAPER
+                                        && !new File(a.getFilesDir(), "wallpaper.jpg").exists()) {
+                                    new WallpaperUploadDialog(a, a::refresh).show();
+                                    return;
+                                }
+                                applyTvBackgroundMode(targetMode);
+                            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(40));
+            if (i > 0) lp.leftMargin = a.dp(10);
+            modeRow.addView(pill, lp);
+            if (i == 0) registerTvRightControl(pill);
+        }
+        studioCard.addView(modeRow, new LinearLayout.LayoutParams(-1, -2));
+
+        // Strength pills when glow is active
+        if (mode == Prefs.BG_MODE_ADAPTIVE || mode == Prefs.BG_MODE_GRADIENT) {
+            a.gap(studioCard, 14);
+            LinearLayout strengthRow = a.row();
+            strengthRow.setClipChildren(false);
+            strengthRow.setClipToPadding(false);
+            TextView sLabel = a.text("柔光浓度", 13.5f, 0xc8ebebf5);
+            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
+            slp.rightMargin = a.dp(14);
+            strengthRow.addView(sLabel, slp);
+            String[] sLabels = {"柔和微光", "标准柔光", "浓郁流光"};
+            int[] sVals = {35, 75, 100};
+            int activeIdx = currentStrength <= 50 ? 0 : (currentStrength <= 85 ? 1 : 2);
+            for (int i = 0; i < sLabels.length; i++) {
+                final int val = sVals[i];
+                Button sb =
+                        makeStudioPill(
+                                sLabels[i],
+                                "tv-glow-strength:" + val,
+                                activeIdx == i,
+                                () -> {
+                                    a.prefs.edit().putInt(Prefs.TV_AMBIENT_PERCENT, val).apply();
+                                    if (a.homeAmbient != null) {
+                                        a.homeAmbient.setStrength(Prefs.tvAmbientStrength(val));
+                                    }
+                                    a.refresh();
+                                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(36));
+                if (i > 0) lp.leftMargin = a.dp(8);
+                strengthRow.addView(sb, lp);
+                if (i == 0) registerTvRightControl(sb);
+            }
+            studioCard.addView(strengthRow, new LinearLayout.LayoutParams(-1, -2));
+        }
+
+        LinearLayout.LayoutParams studioLp = new LinearLayout.LayoutParams(-1, -2);
+        studioLp.bottomMargin = a.dp(20);
+        a.body.addView(studioCard, studioLp);
+
+        // Card 2: Apple TV Soft Glow Preset Grid (2x3) + Custom Color Tuner
+        if (!compact || mode == Prefs.BG_MODE_GRADIENT) {
+            LinearLayout themeCard = a.vertical();
+            themeCard.setClipChildren(false);
+            themeCard.setClipToPadding(false);
+            themeCard.setPadding(a.dp(22), a.dp(20), a.dp(22), a.dp(20));
+            themeCard.setBackground(
+                    TvV17Surface.rounded(0x991a1f29, a.dp(18), 0x24ffffff, a.dp(1)));
+
+            LinearLayout themeHead = a.row();
+            themeHead.setGravity(Gravity.CENTER_VERTICAL);
+            TextView themeTitle = a.text("客厅全局渐变柔光主题", 15.5f, MainActivity.WHITE);
+            themeTitle.setTypeface(null, Typeface.BOLD);
+            themeHead.addView(themeTitle, new LinearLayout.LayoutParams(0, -2, 1f));
+            Button customBtn =
+                    makeStudioPill(
+                            "自定义颜色调节",
+                            "tv-glow-custom-tuner",
+                            mode == Prefs.BG_MODE_GRADIENT
+                                    && currentPreset == HomeAmbient.PRESET_CUSTOM,
+                            this::showCustomGlowTunerDialog);
+            themeHead.addView(customBtn, new LinearLayout.LayoutParams(-2, a.dp(38)));
+            themeCard.addView(themeHead, new LinearLayout.LayoutParams(-1, -2));
+            a.gap(themeCard, 16);
+
+            for (int r = 0; r < 2; r++) {
+                LinearLayout gridRow = a.row();
+                gridRow.setClipChildren(false);
+                gridRow.setClipToPadding(false);
+                for (int c = 0; c < 3; c++) {
+                    final int idx = r * 3 + c;
+                    final boolean isSelected =
+                            mode == Prefs.BG_MODE_GRADIENT && currentPreset == idx;
+                    LinearLayout swatch =
+                            buildGlowPresetCard(
+                                    idx,
+                                    HomeAmbient.PRESET_NAMES[idx],
+                                    HomeAmbient.PRESET_SUBTITLES[idx],
+                                    HomeAmbient.PRESET_LEFT[idx],
+                                    HomeAmbient.PRESET_RIGHT[idx],
+                                    isSelected);
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1f);
+                    if (c < 2) lp.rightMargin = a.dp(14);
+                    gridRow.addView(swatch, lp);
+                    if (c == 0) registerTvRightControl(swatch);
+                }
+                LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(-1, -2);
+                if (r == 0) rowLp.bottomMargin = a.dp(14);
+                themeCard.addView(gridRow, rowLp);
+            }
+
+            LinearLayout.LayoutParams themeLp = new LinearLayout.LayoutParams(-1, -2);
+            themeLp.bottomMargin = a.dp(20);
+            a.body.addView(themeCard, themeLp);
+        }
+    }
+
+    private LinearLayout buildGlowPresetCard(
+            final int index,
+            String name,
+            String subtitle,
+            final int leftColor,
+            final int rightColor,
+            final boolean selected) {
+        final LinearLayout card = a.vertical();
+        card.setClipChildren(false);
+        card.setClipToPadding(false);
+        card.setPadding(a.dp(12), a.dp(12), a.dp(12), a.dp(12));
+        card.setTag("tv-glow-preset:" + index);
+        card.setId(View.generateViewId());
+        card.setFocusable(true);
+        card.setFocusableInTouchMode(true);
+        card.setClickable(true);
+        a.pressFeedback(card);
+
+        // Two-tone gradient preview bar
+        FrameLayout previewBox = new FrameLayout(a);
+        android.graphics.drawable.GradientDrawable grad =
+                new android.graphics.drawable.GradientDrawable(
+                        android.graphics.drawable.GradientDrawable.Orientation.LEFT_RIGHT,
+                        new int[] {leftColor, rightColor});
+        grad.setCornerRadius(a.dp(10));
+        previewBox.setBackground(grad);
+        if (selected) {
+            TextView badge = a.text("✓ 当前", 10.5f, MainActivity.WHITE);
+            badge.setTypeface(null, Typeface.BOLD);
+            badge.setPadding(a.dp(8), a.dp(2), a.dp(8), a.dp(2));
+            badge.setBackground(a.bg(0xbb101318, 10));
+            FrameLayout.LayoutParams blp =
+                    new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+            blp.topMargin = a.dp(6);
+            blp.rightMargin = a.dp(6);
+            previewBox.addView(badge, blp);
+        }
+        card.addView(previewBox, new LinearLayout.LayoutParams(-1, a.dp(50)));
+        a.gap(card, 9);
+
+        LinearLayout titleRow = a.row();
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        View dot1 = new View(a);
+        dot1.setBackground(a.bg(leftColor, 6));
+        LinearLayout.LayoutParams d1 = new LinearLayout.LayoutParams(a.dp(9), a.dp(9));
+        d1.rightMargin = a.dp(5);
+        titleRow.addView(dot1, d1);
+        View dot2 = new View(a);
+        dot2.setBackground(a.bg(rightColor, 6));
+        LinearLayout.LayoutParams d2 = new LinearLayout.LayoutParams(a.dp(9), a.dp(9));
+        d2.rightMargin = a.dp(8);
+        titleRow.addView(dot2, d2);
+        final TextView titleView = a.text(name, 14, MainActivity.WHITE);
+        titleView.setTypeface(null, Typeface.BOLD);
+        titleView.setSingleLine(true);
+        titleRow.addView(titleView);
+        card.addView(titleRow);
+
+        final TextView subView = a.text(subtitle, 11, 0xa8ebebf5);
+        subView.setSingleLine(true);
+        subView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        subView.setPadding(0, a.dp(3), 0, 0);
+        card.addView(subView);
+
+        final int restBg = selected ? 0x36ffffff : 0x5512161f;
+        final int restStroke = selected ? 0x9980c2ff : 0x22ffffff;
+        card.setBackground(TvV17Surface.rounded(restBg, a.dp(14), restStroke, a.dp(1)));
+        card.setOnFocusChangeListener(
+                (v, focused) -> {
+                    FocusMotion.unclipAncestors(card);
+                    if (focused) {
+                        card.setBackground(
+                                TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(2)));
+                        titleView.setTextColor(0xff101013);
+                        subView.setTextColor(0xff48484a);
+                        card.setElevation(a.dp(8));
+                        card.animate()
+                                .scaleX(1.035f)
+                                .scaleY(1.035f)
+                                .setDuration(a.reduced ? 0 : 125)
+                                .start();
+                        if (a.homeAmbient != null) {
+                            a.homeAmbient.previewCustomColors(leftColor, rightColor);
+                        }
+                    } else {
+                        card.setBackground(
+                                TvV17Surface.rounded(restBg, a.dp(14), restStroke, a.dp(1)));
+                        titleView.setTextColor(MainActivity.WHITE);
+                        subView.setTextColor(0xa8ebebf5);
+                        card.setElevation(0);
+                        card.animate()
+                                .scaleX(1f)
+                                .scaleY(1f)
+                                .setDuration(a.reduced ? 0 : 120)
+                                .start();
+                    }
+                });
+        card.setOnClickListener(
+                v -> {
+                    a.prefs
+                            .edit()
+                            .putInt(Prefs.TV_BG_MODE, Prefs.BG_MODE_GRADIENT)
+                            .putInt(Prefs.TV_GLOW_PRESET, index)
+                            .putBoolean(Prefs.WALLPAPER_ENABLED, false)
+                            .putBoolean(Prefs.HOME_AMBIENT, true)
+                            .apply();
+                    a.refresh();
+                });
+        return card;
+    }
+
+    private void showCustomGlowTunerDialog() {
+        int[] active = HomeAmbient.activeGradientColors(a);
+        final float[] leftHsv = new float[3];
+        final float[] rightHsv = new float[3];
+        Color.colorToHSV(active[0], leftHsv);
+        Color.colorToHSV(active[1], rightHsv);
+        if (leftHsv[1] < 0.15f) leftHsv[1] = 0.55f;
+        if (leftHsv[2] < 0.25f) leftHsv[2] = 0.48f;
+        if (rightHsv[1] < 0.15f) rightHsv[1] = 0.55f;
+        if (rightHsv[2] < 0.25f) rightHsv[2] = 0.48f;
+
+        LinearLayout panel = a.vertical();
+        panel.setPadding(a.dp(6), a.dp(4), a.dp(6), a.dp(4));
+
+        final View previewBar = new View(a);
+        LinearLayout.LayoutParams pLp = new LinearLayout.LayoutParams(-1, a.dp(64));
+        pLp.bottomMargin = a.dp(14);
+        panel.addView(previewBar, pLp);
+
+        final TextView leftHueVal = a.text("", 13, 0xd8ebebf5);
+        final TextView leftSatVal = a.text("", 13, 0xd8ebebf5);
+        final TextView rightHueVal = a.text("", 13, 0xd8ebebf5);
+        final TextView rightSatVal = a.text("", 13, 0xd8ebebf5);
+
+        Runnable syncPreview =
+                () -> {
+                    int lc = Color.HSVToColor(leftHsv);
+                    int rc = Color.HSVToColor(rightHsv);
+                    android.graphics.drawable.GradientDrawable gd =
+                            new android.graphics.drawable.GradientDrawable(
+                                    android.graphics.drawable.GradientDrawable.Orientation
+                                            .LEFT_RIGHT,
+                                    new int[] {lc, rc});
+                    gd.setCornerRadius(a.dp(14));
+                    gd.setStroke(a.dp(1), 0x44ffffff);
+                    previewBar.setBackground(gd);
+                    leftHueVal.setText(Math.round(leftHsv[0]) + "°");
+                    leftSatVal.setText(Math.round(leftHsv[1] * 100) + "%");
+                    rightHueVal.setText(Math.round(rightHsv[0]) + "°");
+                    rightSatVal.setText(Math.round(rightHsv[1] * 100) + "%");
+                    if (a.homeAmbient != null) {
+                        a.homeAmbient.previewCustomColors(lc, rc);
+                    }
+                };
+
+        addColorAdjustRow(
+                panel,
+                "左上主光 · 色相",
+                leftHueVal,
+                () -> {
+                    leftHsv[0] = (leftHsv[0] + 345f) % 360f;
+                    syncPreview.run();
+                },
+                () -> {
+                    leftHsv[0] = (leftHsv[0] + 15f) % 360f;
+                    syncPreview.run();
+                });
+        addColorAdjustRow(
+                panel,
+                "左上主光 · 饱和度",
+                leftSatVal,
+                () -> {
+                    leftHsv[1] = Math.max(0.15f, leftHsv[1] - 0.1f);
+                    syncPreview.run();
+                },
+                () -> {
+                    leftHsv[1] = Math.min(0.85f, leftHsv[1] + 0.1f);
+                    syncPreview.run();
+                });
+        addColorAdjustRow(
+                panel,
+                "右下辅光 · 色相",
+                rightHueVal,
+                () -> {
+                    rightHsv[0] = (rightHsv[0] + 345f) % 360f;
+                    syncPreview.run();
+                },
+                () -> {
+                    rightHsv[0] = (rightHsv[0] + 15f) % 360f;
+                    syncPreview.run();
+                });
+        addColorAdjustRow(
+                panel,
+                "右下辅光 · 饱和度",
+                rightSatVal,
+                () -> {
+                    rightHsv[1] = Math.max(0.15f, rightHsv[1] - 0.1f);
+                    syncPreview.run();
+                },
+                () -> {
+                    rightHsv[1] = Math.min(0.85f, rightHsv[1] + 0.1f);
+                    syncPreview.run();
+                });
+
+        syncPreview.run();
+
+        new AppDialog.Builder(a)
+                .setTitle("自定义柔光双色")
+                .setView(panel)
+                .setNegativeButton(
+                        "取消",
+                        (d, w) -> {
+                            if (a.homeAmbient != null) a.homeAmbient.applyFromPrefs(true);
+                        })
+                .setPositiveButton(
+                        "应用此柔光配色",
+                        (d, w) -> {
+                            int lc = Color.HSVToColor(leftHsv) & 0xFFFFFF;
+                            int rc = Color.HSVToColor(rightHsv) & 0xFFFFFF;
+                            a.prefs
+                                    .edit()
+                                    .putInt(Prefs.TV_BG_MODE, Prefs.BG_MODE_GRADIENT)
+                                    .putInt(Prefs.TV_GLOW_PRESET, HomeAmbient.PRESET_CUSTOM)
+                                    .putInt(Prefs.TV_GLOW_COLOR_LEFT, lc)
+                                    .putInt(Prefs.TV_GLOW_COLOR_RIGHT, rc)
+                                    .putBoolean(Prefs.WALLPAPER_ENABLED, false)
+                                    .putBoolean(Prefs.HOME_AMBIENT, true)
+                                    .apply();
+                            a.refresh();
+                            a.toast("自定义柔光配色已保存");
+                        })
+                .show();
+    }
+
+    private void addColorAdjustRow(
+            LinearLayout parent,
+            String label,
+            TextView valueText,
+            Runnable onMinus,
+            Runnable onPlus) {
+        LinearLayout row = a.row();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, a.dp(4), 0, a.dp(4));
+        TextView lbl = a.text(label, 14, MainActivity.WHITE);
+        row.addView(lbl, new LinearLayout.LayoutParams(0, -2, 1f));
+        Button minus = a.navButton("－", "tuner-minus-" + label, onMinus);
+        LinearLayout.LayoutParams ml = new LinearLayout.LayoutParams(a.dp(46), a.dp(36));
+        row.addView(minus, ml);
+        valueText.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams vl = new LinearLayout.LayoutParams(a.dp(62), -2);
+        row.addView(valueText, vl);
+        Button plus = a.navButton("＋", "tuner-plus-" + label, onPlus);
+        LinearLayout.LayoutParams pl = new LinearLayout.LayoutParams(a.dp(46), a.dp(36));
+        row.addView(plus, pl);
+        parent.addView(row, new LinearLayout.LayoutParams(-1, -2));
+    }
+
     void wallpaper() {
-        page("首页壁纸", "壁纸只影响应用背景，不会更改电视桌面。图片以居中裁切显示，自动缩小以减少电视内存占用。");
+        page("首页壁纸", "支持手机扫码上传本地高清图片、Apple TV 柔光渐变主题、自定义双色调节与剧集封面色调自适应。");
+        if (a.isTvDevice()) {
+            addTvBackgroundStudioInline(false);
+            link(
+                    "手机扫码上传替换壁纸",
+                    "同一 Wi-Fi 下手机扫码，直接从相册选图传到电视",
+                    "wallpaper-qr-upload",
+                    () -> new WallpaperUploadDialog(a, a::refresh).show());
+        }
         link("选择本地图片", "JPG、PNG、WebP", "wallpaper-file", () -> pick(44, "image/*", false));
         link("从图片地址导入", "输入你自己的 HTTP / HTTPS 图片地址", "wallpaper-url", this::wallpaperUrl);
         ints(
-                "背景压暗",
+                "壁纸压暗",
                 Prefs.WALLPAPER_DIM,
                 new String[] {"轻 · 40%", "适中 · 60%", "深 · 80%"},
                 new int[] {40, 60, 80},
                 60);
         link(
-                "恢复默认背景",
-                "保留图片文件，随时可以重新启用",
+                "切换为封面自适应柔光",
+                "跟随首页选中的剧集封面主色调自动渲染柔光背景",
                 "wallpaper-reset",
-                () -> {
-                    a.prefs.edit().putBoolean(Prefs.WALLPAPER_ENABLED, false).apply();
-                    a.refresh();
-                });
+                () -> applyTvBackgroundMode(Prefs.BG_MODE_ADAPTIVE));
         if (new File(a.getFilesDir(), "wallpaper.jpg").exists())
             link(
-                    "启用已保存的壁纸",
-                    "使用上次导入的图片",
+                    "启用已保存的图片壁纸",
+                    "使用上次上传或导入的图片",
                     "wallpaper-enable",
-                    () -> {
-                        a.prefs.edit().putBoolean(Prefs.WALLPAPER_ENABLED, true).apply();
-                        a.refresh();
-                    });
+                    () -> applyTvBackgroundMode(Prefs.BG_MODE_WALLPAPER));
     }
 
     void playback() {
@@ -891,9 +1508,27 @@ final class SettingsScreen {
         }
         link(
                 "导入或管理电视直播源",
-                "支持 M3U、TXT (#genre#)、JSON 及本地直播文件",
+                "支持叠加多份 M3U / TXT / JSON 源与组播单播配置",
                 "settings-live-import",
                 () -> SourceController.showLiveImportDialog(a));
+        String udpxyAddr = a.prefs.getString(Prefs.LIVE_UDPXY_URL, "");
+        link(
+                "组播转单播网关 (udpxy)",
+                udpxyAddr.isEmpty()
+                        ? "配置路由器 udpxy / rtp2httpd 地址播放原画 1080i50 / 4K 组播源"
+                        : "当前：" + udpxyAddr,
+                "settings-live-udpxy",
+                () -> SourceController.showUdpxyDialog(a));
+        String epgAddr = a.prefs.getString(Prefs.LIVE_EPG_URL, "");
+        link(
+                "自定义 XMLTV 节目单 (EPG)",
+                epgAddr.isEmpty()
+                        ? "支持 .xml / .xml.gz 节目单与回看时移（默认读取列表 x-tvg-url）"
+                        : "当前：" + epgAddr,
+                "settings-live-epg",
+                () -> SourceController.showEpgDialog(a));
+        toggle("直播优先最高画质与 IPv6", Prefs.LIVE_HIGH_QUALITY, true, null);
+        toggle("跨源同名频道智能聚合", Prefs.LIVE_MERGE_SOURCES, true, null);
         if (a.config != null && a.config.depots.length() > 1) {
             link(
                     "切换影视仓线路",
@@ -1029,23 +1664,32 @@ final class SettingsScreen {
         boolean initial = a.prefs.getBoolean(key, defaultValue);
         LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(a.dp(20), a.dp(15), a.dp(20), a.dp(15));
+        row.setPadding(
+                a.dp(tv ? 22 : 18), a.dp(tv ? 18 : 14), a.dp(tv ? 22 : 18), a.dp(tv ? 18 : 14));
         MobileShell.SettingIconView icon =
                 new MobileShell.SettingIconView(
                         a, MobileShell.SettingIconView.kindForSetting(key, title));
-        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(a.dp(38), a.dp(38));
-        iconLp.rightMargin = a.dp(14);
+        LinearLayout.LayoutParams iconLp =
+                new LinearLayout.LayoutParams(a.dp(tv ? 36 : 38), a.dp(tv ? 36 : 38));
+        iconLp.rightMargin = a.dp(tv ? 16 : 14);
         row.addView(icon, iconLp);
         LinearLayout copy = a.vertical();
-        copy.addView(a.text(title, 17, MainActivity.WHITE));
-        final TextView caption = a.text(initial ? "开启" : "关闭", 12, MainActivity.MUTED);
-        caption.setPadding(0, a.dp(4), 0, 0);
-        copy.addView(caption);
+        final TextView titleView = a.text(title, tv ? 16 : 17, MainActivity.WHITE);
+        titleView.setTypeface(null, Typeface.BOLD);
+        copy.addView(titleView);
+        final TextView caption = a.text(initial ? "开启" : "关闭", 12.5f, 0xa8ebebf5);
+        caption.setPadding(0, a.dp(3), 0, 0);
+        if (!tv) copy.addView(caption);
         row.addView(copy, new LinearLayout.LayoutParams(0, -2, 1));
+
+        if (tv) {
+            caption.setPadding(a.dp(10), 0, a.dp(8), 0);
+            row.addView(caption);
+        }
 
         final MobileShell.IosSwitchView toggleSwitch = new MobileShell.IosSwitchView(a, initial);
         LinearLayout.LayoutParams switchLp = new LinearLayout.LayoutParams(a.dp(50), a.dp(30));
-        switchLp.leftMargin = a.dp(12);
+        switchLp.leftMargin = a.dp(8);
         row.addView(toggleSwitch, switchLp);
 
         row.setTag("setting-" + key);
@@ -1053,29 +1697,58 @@ final class SettingsScreen {
         row.setFocusable(tv);
         row.setFocusableInTouchMode(tv);
         row.setClickable(true);
-        int surface =
+        final int surface =
                 tv && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
-                        ? TvV17Theme.OPAQUE_SURFACE
-                        : TvV17Theme.SURFACE;
+                        ? 0xee1c212b
+                        : 0xbf1a1f29;
         row.setBackground(
                 tv
-                        ? TvV17Surface.rounded(surface, a.dp(14), 0x2affffff, a.dp(1))
+                        ? TvV17Surface.rounded(surface, a.dp(14), 0x22ffffff, a.dp(1))
                         : a.bg(0xff222226, 14));
         row.setOnFocusChangeListener(
-                (v, f) ->
+                (v, f) -> {
+                    if (!tv) {
                         FocusMotion.style(
                                 a,
                                 row,
                                 f,
-                                tv ? surface : 0xff222226,
-                                tv ? 0xff46515e : 0xff37373e,
+                                0xff222226,
+                                0xff37373e,
                                 14,
                                 MainActivity.WHITE,
                                 MainActivity.WHITE,
                                 true,
-                                1.008f));
+                                1.008f);
+                        return;
+                    }
+                    FocusMotion.unclipAncestors(row);
+                    if (f) {
+                        row.setBackground(
+                                TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(1)));
+                        titleView.setTextColor(0xff101013);
+                        caption.setTextColor(0xff48484a);
+                        row.setElevation(a.dp(8));
+                        row.animate()
+                                .scaleX(1.016f)
+                                .scaleY(1.016f)
+                                .setDuration(a.reduced ? 0 : 125)
+                                .start();
+                    } else {
+                        row.setBackground(
+                                TvV17Surface.rounded(surface, a.dp(14), 0x22ffffff, a.dp(1)));
+                        titleView.setTextColor(MainActivity.WHITE);
+                        caption.setTextColor(0xa8ebebf5);
+                        row.setElevation(0);
+                        row.animate()
+                                .scaleX(1f)
+                                .scaleY(1f)
+                                .setDuration(a.reduced ? 0 : 120)
+                                .start();
+                    }
+                });
         if (tv) {
             a.pressFeedback(row);
+            registerTvRightControl(row);
         } else {
             MobileShell.bindCardTouchFeedback(a, row, a.bg(0xff222226, 14), a.bg(0xff303038, 14));
         }
@@ -1233,7 +1906,11 @@ final class SettingsScreen {
             image.recycle();
             temporary.delete();
         }
-        a.prefs.edit().putBoolean(Prefs.WALLPAPER_ENABLED, true).apply();
+        a.prefs
+                .edit()
+                .putInt(Prefs.TV_BG_MODE, Prefs.BG_MODE_WALLPAPER)
+                .putBoolean(Prefs.WALLPAPER_ENABLED, true)
+                .apply();
     }
 
     static final String[] KEYS = Prefs.KEYS;
@@ -1275,13 +1952,26 @@ final class SettingsScreen {
                             for (String dataKey :
                                     new String[] {
                                         Prefs.SELECTED_SITE,
+                                        Prefs.LIVE_UDPXY_URL,
+                                        Prefs.LIVE_EPG_URL,
+                                        Prefs.LIVE_SOURCES_JSON,
                                         Prefs.WATCH_HISTORY,
                                         Prefs.FAVORITES,
                                         Prefs.GLOBAL_SEARCH_HISTORY
                                     }) {
                                 if (a.prefs.contains(dataKey)) {
-                                    settings.put(dataKey, a.prefs.getString(dataKey, ""));
+                                    String clean =
+                                            Prefs.sanitizeUserData(
+                                                    dataKey, a.prefs.getString(dataKey, ""));
+                                    if (clean != null) settings.put(dataKey, clean);
                                 }
+                            }
+                            String savedLiveUrl = a.prefs.getString(Prefs.LIVE_URL, "");
+                            if (Cms.isHttp(savedLiveUrl)) {
+                                settings.put(Prefs.LIVE_URL, Cms.normalizeHttp(savedLiveUrl));
+                                settings.put(
+                                        Prefs.LIVE_NAME,
+                                        a.prefs.getString(Prefs.LIVE_NAME, "自定义直播源"));
                             }
                             try {
                                 ConfigLibrary lib = new ConfigLibrary(a.configStore.directory);
@@ -1477,7 +2167,16 @@ final class SettingsScreen {
             else if (clean instanceof Integer) edit.putInt(key, (Integer) clean);
         }
         for (String dataKey :
-                new String[] {Prefs.SELECTED_SITE, Prefs.FAVORITES, Prefs.GLOBAL_SEARCH_HISTORY}) {
+                new String[] {
+                    Prefs.SELECTED_SITE,
+                    Prefs.LIVE_UDPXY_URL,
+                    Prefs.LIVE_EPG_URL,
+                    Prefs.LIVE_SOURCES_JSON,
+                    Prefs.LIVE_URL,
+                    Prefs.LIVE_NAME,
+                    Prefs.FAVORITES,
+                    Prefs.GLOBAL_SEARCH_HISTORY
+                }) {
             if (settings.has(dataKey)) {
                 String cleanData = Prefs.sanitizeUserData(dataKey, settings.opt(dataKey));
                 if (cleanData != null) {

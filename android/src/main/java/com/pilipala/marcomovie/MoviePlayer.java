@@ -762,6 +762,14 @@ public class MoviePlayer {
             mediaSourceFactory =
                     new DefaultMediaSourceFactory(data, wrapDisguisedMp3Extractors(extractors));
             subtitleDataSourceFactory = data;
+            boolean forceHighest =
+                    options.optBoolean("live", false)
+                            && options.optBoolean("livePreferHighQuality", true);
+            exo.setTrackSelectionParameters(
+                    exo.getTrackSelectionParameters()
+                            .buildUpon()
+                            .setForceHighestSupportedBitrate(forceHighest)
+                            .build());
             exo.setMediaSource(playbackSource(address));
             exo.prepare();
         } catch (Exception error) {
@@ -1235,6 +1243,10 @@ public class MoviePlayer {
         return onMain(() -> released ? 0 : exo.getAudioSessionId());
     }
 
+    public long getFirstFrameMs() {
+        return firstFrameMs;
+    }
+
     public void setCuesListener(CueListener listener) {
         onMain(
                 () -> {
@@ -1243,9 +1255,44 @@ public class MoviePlayer {
                 });
     }
 
+    private String resolveLocalClearKeyJson() {
+        org.json.JSONObject drm = options == null ? null : options.optJSONObject("drm");
+        if (drm != null) {
+            String explicit = drm.optString("clearKeyJson", "").trim();
+            if (!explicit.isEmpty()) return explicit;
+        }
+        String scheme =
+                drm == null
+                        ? (options == null ? "" : options.optString("drmScheme"))
+                        : drm.optString("scheme", drm.optString("type"));
+        if (!LiveQualityPolicy.isClearKeyScheme(scheme)) return null;
+        String rawLicense =
+                drm == null
+                        ? (options == null ? "" : options.optString("drmLicenseUrl"))
+                        : drm.optString(
+                                "licenseUrl",
+                                drm.optString("licenseUri", drm.optString("licenseKey")));
+        return LiveQualityPolicy.normalizeClearKeyJwkJson(rawLicense);
+    }
+
     private androidx.media3.exoplayer.source.MediaSource playbackSource(Uri address)
             throws Exception {
-        MediaItem item = mediaItem(address);
+        String localClearKeyJson = resolveLocalClearKeyJson();
+        if (localClearKeyJson != null && !localClearKeyJson.isEmpty()) {
+            androidx.media3.exoplayer.drm.LocalMediaDrmCallback callback =
+                    new androidx.media3.exoplayer.drm.LocalMediaDrmCallback(
+                            localClearKeyJson.getBytes("UTF-8"));
+            final androidx.media3.exoplayer.drm.DefaultDrmSessionManager drmManager =
+                    new androidx.media3.exoplayer.drm.DefaultDrmSessionManager.Builder()
+                            .setUuidAndExoMediaDrmProvider(
+                                    C.CLEARKEY_UUID,
+                                    androidx.media3.exoplayer.drm.FrameworkMediaDrm
+                                            .DEFAULT_PROVIDER)
+                            .setMultiSession(false)
+                            .build(callback);
+            mediaSourceFactory.setDrmSessionManagerProvider(unused -> drmManager);
+        }
+        MediaItem item = mediaItem(address, localClearKeyJson != null);
         androidx.media3.exoplayer.source.MediaSource video =
                 televisionSubtitles
                         ? androidx.media3.exoplayer.source.TvSubtitleSource.create(
@@ -1258,7 +1305,7 @@ public class MoviePlayer {
                 true, video, mediaSourceFactory.createMediaSource(MediaItem.fromUri(audio)));
     }
 
-    private MediaItem mediaItem(Uri address) throws Exception {
+    private MediaItem mediaItem(Uri address, boolean usingLocalClearKey) throws Exception {
         MediaItem.Builder item = new MediaItem.Builder().setUri(address);
         if (mediaMime != null
                 && (MimeTypes.APPLICATION_M3U8.equalsIgnoreCase(mediaMime)
@@ -1291,27 +1338,29 @@ public class MoviePlayer {
                                 .build());
             }
         item.setSubtitleConfigurations(tracks);
-        org.json.JSONObject drm = options.optJSONObject("drm");
-        String scheme =
-                drm == null
-                        ? options.optString("drmScheme")
-                        : drm.optString("scheme", drm.optString("type"));
-        String license =
-                drm == null
-                        ? options.optString("drmLicenseUrl")
-                        : drm.optString("licenseUrl", drm.optString("licenseUri"));
-        if (!scheme.isEmpty()) {
-            java.util.UUID uuid = Util.getDrmUuid(scheme);
-            if (uuid == null || !Cms.isHttp(license))
-                throw new IllegalArgumentException("来源缺少有效DRM许可配置");
-            java.util.Map<String, String> licenseHeaders = new LinkedHashMap<>();
-            if (drm != null && drm.optJSONObject("headers") != null)
-                MediaOptions.headers(licenseHeaders, drm.optJSONObject("headers"));
-            item.setDrmConfiguration(
-                    new MediaItem.DrmConfiguration.Builder(uuid)
-                            .setLicenseUri(license)
-                            .setLicenseRequestHeaders(licenseHeaders)
-                            .build());
+        if (!usingLocalClearKey) {
+            org.json.JSONObject drm = options.optJSONObject("drm");
+            String scheme =
+                    drm == null
+                            ? options.optString("drmScheme")
+                            : drm.optString("scheme", drm.optString("type"));
+            String license =
+                    drm == null
+                            ? options.optString("drmLicenseUrl")
+                            : drm.optString("licenseUrl", drm.optString("licenseUri"));
+            if (!scheme.isEmpty()) {
+                java.util.UUID uuid = Util.getDrmUuid(scheme);
+                if (uuid == null || !Cms.isHttp(license))
+                    throw new IllegalArgumentException("来源缺少有效DRM许可配置");
+                java.util.Map<String, String> licenseHeaders = new LinkedHashMap<>();
+                if (drm != null && drm.optJSONObject("headers") != null)
+                    MediaOptions.headers(licenseHeaders, drm.optJSONObject("headers"));
+                item.setDrmConfiguration(
+                        new MediaItem.DrmConfiguration.Builder(uuid)
+                                .setLicenseUri(license)
+                                .setLicenseRequestHeaders(licenseHeaders)
+                                .build());
+            }
         }
         return item.build();
     }

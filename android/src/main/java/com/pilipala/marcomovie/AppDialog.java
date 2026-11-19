@@ -93,8 +93,11 @@ final class AppDialog extends Dialog {
                 if (checked || selected == null) selected = item;
             }
         int marginH = a.isTvDevice() ? a.dp(72) : a.dp(32);
-        int width = Math.min(a.dp(spec.view == null ? 500 : 680), a.windowWidth() - marginH);
-        int maxHeight = Math.max(a.dp(140), a.windowHeight() - a.dp(200));
+        int width =
+                Math.min(
+                        a.dp(spec.wide ? 860 : (spec.view == null ? 500 : 680)),
+                        a.windowWidth() - marginH);
+        int maxHeight = Math.max(a.dp(140), a.windowHeight() - a.dp(spec.wide ? 140 : 200));
         content.measure(
                 View.MeasureSpec.makeMeasureSpec(width - a.dp(48), View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
@@ -196,6 +199,7 @@ final class AppDialog extends Dialog {
     static final class Builder {
         final MainActivity a;
         boolean wrapChoices;
+        boolean wide;
         String title, message;
         String[] labels;
         int selected = -1;
@@ -226,6 +230,11 @@ final class AppDialog extends Dialog {
 
         Builder wrapChoices() {
             wrapChoices = true;
+            return this;
+        }
+
+        Builder setWide(boolean value) {
+            wide = value;
             return this;
         }
 

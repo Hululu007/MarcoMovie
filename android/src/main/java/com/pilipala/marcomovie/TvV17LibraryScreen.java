@@ -99,7 +99,14 @@ final class TvV17LibraryScreen {
             card.setClickable(true);
             card.setContentDescription(video.title);
             a.pressFeedback(card);
-            ImageView image = new ImageView(a);
+            ImageView image =
+                    new ImageView(a) {
+                        @Override
+                        public void setImageBitmap(android.graphics.Bitmap bm) {
+                            super.setImageBitmap(bm);
+                            if (a.homeAmbient != null) a.homeAmbient.posterReady(this);
+                        }
+                    };
             TvV17PosterCard.artwork(a, image);
             card.addView(image, new LinearLayout.LayoutParams(a.dp(widthDp), a.dp(widthDp * 1.5f)));
             if (video.poster != null && !video.poster.isEmpty()) a.poster(video.poster, image);
@@ -114,6 +121,12 @@ final class TvV17LibraryScreen {
                         TvV17PosterCard.focus(a, card, title, focused);
                         if (focused && a.homeAmbient != null) a.homeAmbient.follow(image);
                     });
+            if (i == 0
+                    && a.homeAmbient != null
+                    && (a.homeAmbient.wanted == null
+                            || !a.homeAmbient.wanted.isAttachedToWindow())) {
+                a.homeAmbient.follow(image);
+            }
             card.setOnClickListener(v -> a.openListing(site, video));
             LinearLayout.LayoutParams cell = new LinearLayout.LayoutParams(0, -2, 1);
             cell.rightMargin = a.dp(i == columns - 1 ? 0 : 14);

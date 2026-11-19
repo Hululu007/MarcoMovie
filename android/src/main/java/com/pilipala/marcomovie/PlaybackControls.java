@@ -1114,25 +1114,50 @@ final class PlaybackControls {
                         ? resolved.media.optJSONArray("qualities")
                         : null;
         int qCount = qualities != null && qualities.length() > 1 ? qualities.length() : 0;
+        List<String> videoTracks =
+                (a.player != null && a.prepared)
+                        ? a.player.trackLabels(2)
+                        : Collections.emptyList();
+        int vTrackMenuCount = videoTracks.size() > 1 ? videoTracks.size() + 1 : 0;
+        boolean isLiveMode = "live".equals(site.key);
         boolean canCrossSearch =
                 video != null
                         && video.title != null
                         && !video.title.trim().isEmpty()
-                        && !"live".equals(site.key);
-        if (video.lines.isEmpty() && qCount == 0 && !canCrossSearch) {
+                        && !isLiveMode;
+        boolean canEpg = isLiveMode && a.liveSession != null && a.liveSession.index >= 0;
+        if (video.lines.isEmpty()
+                && qCount == 0
+                && vTrackMenuCount == 0
+                && !canCrossSearch
+                && !canEpg) {
             message("此内容只有当前地址。");
             return;
         }
         List<String> items = new ArrayList<>();
+        final int epgIndex = canEpg ? items.size() : -1;
+        if (canEpg) {
+            items.add("📅 节目单与回看 (EPG)");
+        }
+        final int vTrackStart = items.size();
+        if (vTrackMenuCount > 0) {
+            items.add("视频子轨 · 自动优选画质");
+            for (String vt : videoTracks) {
+                items.add("视频子轨 · " + vt);
+            }
+        }
+        final int qStart = items.size();
         int currentQualityIdx =
                 resolved != null && resolved.media != null
                         ? resolved.media.optInt("_qualityIdx", 0)
                         : 0;
+        String qPrefix = isLiveMode ? "直播源 · " : "画质 · ";
         for (int q = 0; q < qCount; q++) {
             org.json.JSONObject qObj = qualities.optJSONObject(q);
-            String qName = qObj != null ? qObj.optString("name", "画质 " + (q + 1)) : "画质 " + (q + 1);
-            items.add("画质 · " + qName + (q == currentQualityIdx ? "（当前）" : ""));
+            String qName = qObj != null ? qObj.optString("name", "线路 " + (q + 1)) : "线路 " + (q + 1);
+            items.add(qPrefix + qName + (q == currentQualityIdx ? "（当前）" : ""));
         }
+        final int lineStart = items.size();
         for (int i = 0; i < video.lines.size(); i++) {
             items.add((qCount > 0 ? "线路 · " : "") + video.lines.get(i).name);
         }
@@ -1140,39 +1165,64 @@ final class PlaybackControls {
         if (canCrossSearch) {
             items.add("搜索同名其他片源 · " + video.title);
         }
-        int selected = qCount > 0 ? currentQualityIdx : lineIndex();
+        int selected =
+                qCount > 0
+                        ? (qStart + currentQualityIdx)
+                        : (vTrackMenuCount > 0 ? vTrackStart : (canEpg ? 0 : lineIndex()));
+        final int finalVTrackMenuCount = vTrackMenuCount;
         final int finalQCount = qCount;
         final org.json.JSONArray finalQualities = qualities;
         choose(
-                qCount > 0 ? "选择画质或播放线路" : "换源 · 选择线路或片源",
+                qCount > 0 || vTrackMenuCount > 0 || canEpg ? "选择画质、线路或节目单" : "换源 · 选择线路或片源",
                 items.toArray(new String[0]),
                 selected,
                 i -> {
+                    if (epgIndex >= 0 && i == epgIndex) {
+                        LiveController.showEpgAndCatchupDialog(a);
+                        return;
+                    }
                     if (crossSearchIndex >= 0 && i == crossSearchIndex) {
                         a.leavePlayback();
                         a.crossSearch(Cms.searchTitle(video));
                         return;
                     }
-                    if (i < finalQCount && finalQualities != null) {
-                        org.json.JSONObject qObj = finalQualities.optJSONObject(i);
+                    if (finalVTrackMenuCount > 0
+                            && i >= vTrackStart
+                            && i < vTrackStart + finalVTrackMenuCount) {
+                        int vtChoice = i - vTrackStart;
+                        if (a.player != null && a.prepared) {
+                            a.player.selectTrack(2, vtChoice == 0 ? -1 : vtChoice - 1);
+                            a.toast(vtChoice == 0 ? "已切换为自动优选画质" : "已锁定所选视频画质轨道");
+                        }
+                        return;
+                    }
+                    int qChoice = i - qStart;
+                    if (qChoice >= 0 && qChoice < finalQCount && finalQualities != null) {
+                        org.json.JSONObject qObj = finalQualities.optJSONObject(qChoice);
                         if (qObj != null) {
                             String nextUrl = qObj.optString("url", "");
                             if (!nextUrl.isEmpty()) {
                                 try {
-                                    resolved.media.put("_qualityIdx", i);
+                                    resolved.media.put("_qualityIdx", qChoice);
                                 } catch (Exception ignored) {
                                 }
-                                resolved.url = LocalProxy.rewrite(nextUrl);
+                                PlaybackController.applyCandidateHeaders(site, resolved, qObj);
                                 a.resumeAt =
-                                        a.prepared && a.player != null
+                                        !isLiveMode && a.prepared && a.player != null
                                                 ? a.player.getCurrentPosition()
                                                 : 0;
-                                a.playerPage(site, video, resolved);
+                                if (LiveQualityPolicy.isEmbyLiveUrl(nextUrl)) {
+                                    LiveController.playEmbyLiveAsync(
+                                            a, site, video, resolved, nextUrl);
+                                } else {
+                                    resolved.url = LocalProxy.rewrite(nextUrl);
+                                    a.playerPage(site, video, resolved);
+                                }
                             }
                         }
                         return;
                     }
-                    int lineIdx = i - finalQCount;
+                    int lineIdx = i - lineStart;
                     if (lineIdx >= 0 && lineIdx < video.lines.size()) {
                         Cms.Line line = video.lines.get(lineIdx);
                         if (!line.episodes.isEmpty()) {

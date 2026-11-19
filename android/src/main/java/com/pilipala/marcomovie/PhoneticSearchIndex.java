@@ -33,6 +33,7 @@ public final class PhoneticSearchIndex {
     final Map<Character, List<Entry>> words = new HashMap<>();
     final List<Entry> entries = new ArrayList<>();
     final LinkedHashMap<String, List<Entry>> titles = new LinkedHashMap<>();
+    final LinkedHashMap<String, List<Entry>> hotTitles = new LinkedHashMap<>();
     private final LinkedHashMap<String, List<Entry>> dictionaryTitles = new LinkedHashMap<>();
     final List<String> preferred = new ArrayList<>();
     private boolean learningAllowed = true;
@@ -154,6 +155,18 @@ public final class PhoneticSearchIndex {
         while (titles.size() > 2000) titles.remove(titles.keySet().iterator().next());
     }
 
+    /** Registers live trending hot titles for initials/pinyin suggestions (public mode only). */
+    public synchronized void learnHotTitles(Collection<String> incoming) {
+        if (!learningAllowed || incoming == null || incoming.isEmpty()) return;
+        for (String raw : incoming) {
+            if (raw == null) continue;
+            String title = raw.trim();
+            if (title.isEmpty() || title.length() > 60 || hotTitles.containsKey(title)) continue;
+            hotTitles.put(title, titleEntries(title));
+            if (hotTitles.size() >= 400) break;
+        }
+    }
+
     private List<Entry> titleEntries(String title) {
         List<String> variants = new ArrayList<>();
         variants.add("");
@@ -201,23 +214,14 @@ public final class PhoneticSearchIndex {
         while (preferred.size() > 20) preferred.remove(preferred.size() - 1);
     }
 
-    /** Actual indexed titles only: never present arbitrary pinyin decoding as a movie. */
+    /** Actual indexed & trending titles only: never present arbitrary pinyin decoding as a movie. */
     public synchronized List<String> suggestTitles(String query, int limit) {
         String q = normalize(query);
         if (q.isEmpty() || limit <= 0) return Collections.emptyList();
         Map<String, Integer> ranks = new HashMap<>();
-        for (Map.Entry<String, List<Entry>> title : titles.entrySet()) {
-            String literal = normalize(title.getKey());
-            int rank =
-                    literal.equals(q)
-                            ? 12000
-                            : literal.startsWith(q) ? 3000 : literal.contains(q) ? 500 : 0;
-            for (Entry e : title.getValue()) {
-                if (e.full.equals(q) || e.initials.equals(q)) rank = Math.max(rank, 11000);
-                else if (e.full.startsWith(q)) rank = Math.max(rank, 2000);
-                else if (e.initials.startsWith(q)) rank = Math.max(rank, 1000);
-            }
-            if (rank > 0) ranks.put(title.getKey(), rank - title.getKey().length());
+        scoreTitleMap(titles, q, 0, ranks);
+        if (learningAllowed && !hotTitles.isEmpty()) {
+            scoreTitleMap(hotTitles, q, 600, ranks);
         }
         List<String> out = new ArrayList<>(ranks.keySet());
         Collections.sort(
@@ -229,6 +233,29 @@ public final class PhoneticSearchIndex {
         return new ArrayList<>(out.subList(0, Math.min(out.size(), Math.min(8, limit))));
     }
 
+    private void scoreTitleMap(
+            Map<String, List<Entry>> source, String q, int bonus, Map<String, Integer> ranks) {
+        for (Map.Entry<String, List<Entry>> title : source.entrySet()) {
+            String literal = normalize(title.getKey());
+            int rank =
+                    literal.equals(q)
+                            ? 12000
+                            : literal.startsWith(q) ? 3000 : literal.contains(q) ? 500 : 0;
+            for (Entry e : title.getValue()) {
+                if (e.full.equals(q) || e.initials.equals(q)) rank = Math.max(rank, 11000);
+                else if (e.full.startsWith(q)) rank = Math.max(rank, 2000);
+                else if (e.initials.startsWith(q)) rank = Math.max(rank, 1000);
+            }
+            if (rank > 0) {
+                int finalScore = rank + bonus - title.getKey().length();
+                Integer prev = ranks.get(title.getKey());
+                if (prev == null || finalScore > prev) {
+                    ranks.put(title.getKey(), finalScore);
+                }
+            }
+        }
+    }
+
     public synchronized List<String> expand(String query) {
         String q = normalize(query);
         LinkedHashSet<String> out = new LinkedHashSet<>();
@@ -237,23 +264,10 @@ public final class PhoneticSearchIndex {
             return new ArrayList<>(out);
         }
         Map<String, Integer> ranks = new HashMap<>();
-        for (List<Entry> values : titles.values())
-            for (Entry e : values)
-                if (e.full.startsWith(q) || e.initials.startsWith(q)) {
-                    int rank =
-                            (e.full.equals(q)
-                                            ? 12000
-                                            : e.initials.equals(q)
-                                                    ? 11000
-                                                    : e.full.startsWith(q) ? 1000 : 500)
-                                    - e.text.length();
-                    int recent = preferred.indexOf(e.text);
-                    if (recent >= 0) rank += 1000 - recent;
-                    Integer prevRank = ranks.get(e.text);
-                    ranks.put(
-                            e.text,
-                            Math.max(rank, prevRank != null ? prevRank : Integer.MIN_VALUE));
-                }
+        collectExpandRanks(titles, q, 0, ranks);
+        if (learningAllowed && !hotTitles.isEmpty()) {
+            collectExpandRanks(hotTitles, q, 500, ranks);
+        }
         List<String> ranked = new ArrayList<>(ranks.keySet());
         Collections.sort(
                 ranked,
@@ -280,6 +294,28 @@ public final class PhoneticSearchIndex {
         }
         out.add(query.trim());
         return new ArrayList<>(out);
+    }
+
+    private void collectExpandRanks(
+            Map<String, List<Entry>> source, String q, int bonus, Map<String, Integer> ranks) {
+        for (List<Entry> values : source.values())
+            for (Entry e : values)
+                if (e.full.startsWith(q) || e.initials.startsWith(q)) {
+                    int rank =
+                            (e.full.equals(q)
+                                            ? 12000
+                                            : e.initials.equals(q)
+                                                    ? 11000
+                                                    : e.full.startsWith(q) ? 1000 : 500)
+                                    + bonus
+                                    - e.text.length();
+                    int recent = preferred.indexOf(e.text);
+                    if (recent >= 0) rank += 1000 - recent;
+                    Integer prevRank = ranks.get(e.text);
+                    ranks.put(
+                            e.text,
+                            Math.max(rank, prevRank != null ? prevRank : Integer.MIN_VALUE));
+                }
     }
 
     /** Bound expanded requests while always preserving literal English/number/acronym searches. */

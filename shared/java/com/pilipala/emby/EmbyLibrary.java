@@ -8,8 +8,45 @@ import org.json.*;
 /** Emby REST client shared by Android standard and API 14 Lite. */
 public final class EmbyLibrary {
     public static final String PREFIX = "emby://account/";
+    public static final String LIVE_CATALOG_PREFIX = "mmemby://live-catalog?account=";
+    public static final String LIVE_PLAY_PREFIX = "mmemby://live?";
     private static final int PAGE_SIZE = 40;
     private final String base, user, token, device, account;
+
+    public String accountId() {
+        return account;
+    }
+
+    public static String parseLiveAccount(String url) {
+        if (url == null) return "";
+        try {
+            URI u = new URI(url.trim());
+            if (!"mmemby".equalsIgnoreCase(u.getScheme())) return "";
+            String host = u.getHost();
+            if (!"live".equalsIgnoreCase(host) && !"live-catalog".equalsIgnoreCase(host)) {
+                return "";
+            }
+            Map<String, String> q = query(u.getRawQuery());
+            return q.containsKey("account") ? q.get("account").trim() : "";
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    public static String parseLiveChannelId(String url) {
+        if (url == null) return "";
+        try {
+            URI u = new URI(url.trim());
+            if (!"mmemby".equalsIgnoreCase(u.getScheme())
+                    || !"live".equalsIgnoreCase(u.getHost())) {
+                return "";
+            }
+            Map<String, String> q = query(u.getRawQuery());
+            return q.containsKey("id") ? q.get("id").trim() : "";
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
 
     public static String accountKey(JSONObject session) throws Exception {
         String identity = normalize(session.getString("base")) + "\n" + session.getString("user");
@@ -279,7 +316,308 @@ public final class EmbyLibrary {
                         .put("IsPaused", paused)
                         .put("EventName", event);
         String suffix = stopped ? "/Stopped" : event.equals("Start") ? "" : "/Progress";
-        request(base + "/Sessions/Playing" + suffix, device, token, body);
+        try {
+            request(base + "/Sessions/Playing" + suffix, device, token, body);
+        } finally {
+            if (stopped) {
+                String liveStreamId = metadata.optString("LiveStreamId", "").trim();
+                if (liveStreamId.length() > 0) {
+                    try {
+                        request(
+                                base + "/LiveTv/LiveStreams/Close",
+                                device,
+                                token,
+                                new JSONObject().put("LiveStreamId", liveStreamId));
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        }
+    }
+
+    /** Fetches Live TV channels (with CurrentProgram EPG) from Emby or Jellyfin. */
+    public JSONArray liveChannels() throws Exception {
+        JSONArray out = new JSONArray();
+        int start = 0;
+        final int limit = 200;
+        while (start < 2000) {
+            String path =
+                    "/LiveTv/Channels?UserId="
+                            + user
+                            + "&AddCurrentProgram=true&EnableUserData=false&Limit="
+                            + limit
+                            + "&StartIndex="
+                            + start;
+            JSONObject resp = get(path);
+            JSONArray items = resp.optJSONArray("Items");
+            if (items == null || items.length() == 0) break;
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject row = items.optJSONObject(i);
+                if (row == null) continue;
+                String rawId = row.optString("Id", "").trim();
+                if (rawId.length() == 0) continue;
+                String id = segment(rawId);
+                String name = row.optString("Name", "").trim();
+                if (name.length() == 0) name = "频道 " + (out.length() + 1);
+                String number = row.optString("Number", row.optString("ChannelNumber", "")).trim();
+                String tag =
+                        row.optJSONObject("ImageTags") == null
+                                ? ""
+                                : row.optJSONObject("ImageTags").optString("Primary", "");
+                String logo =
+                        tag.length() > 0
+                                ? base
+                                        + "/Items/"
+                                        + id
+                                        + "/Images/Primary?maxWidth=300&tag="
+                                        + encode(tag)
+                                        + "#mm-emby="
+                                        + account
+                                : "";
+                String epg = "";
+                JSONObject prog = row.optJSONObject("CurrentProgram");
+                if (prog != null) {
+                    String pName = prog.optString("Name", "").trim();
+                    String pEp = prog.optString("EpisodeTitle", "").trim();
+                    if (pName.length() > 0) {
+                        epg =
+                                pEp.length() > 0 && !pEp.equalsIgnoreCase(pName)
+                                        ? pName + " · " + pEp
+                                        : pName;
+                    }
+                }
+                String group = "";
+                JSONArray tags = row.optJSONArray("Tags");
+                if (tags != null && tags.length() > 0) {
+                    group = tags.optString(0, "").trim();
+                }
+                out.put(
+                        new JSONObject()
+                                .put("id", id)
+                                .put("name", name)
+                                .put("number", number)
+                                .put("logo", logo)
+                                .put("epg", epg)
+                                .put("group", group)
+                                .put(
+                                        "url",
+                                        LIVE_PLAY_PREFIX
+                                                + "account="
+                                                + encode(account)
+                                                + "&id="
+                                                + encode(id)));
+            }
+            start += items.length();
+            int total = resp.optInt("TotalRecordCount", start);
+            if (items.length() < limit || start >= total) break;
+        }
+        return out;
+    }
+
+    /** Resolves an Emby / Jellyfin Live TV channel into a playable stream URL with live session metadata. */
+    public JSONObject resolveLiveChannel(String rawIdOrUri, boolean legacyPlayer) throws Exception {
+        String id = rawIdOrUri == null ? "" : rawIdOrUri.trim();
+        if (id.startsWith(LIVE_PLAY_PREFIX)) {
+            String acct = parseLiveAccount(id);
+            if (acct.length() > 0 && !acct.equals(account)) {
+                throw new IOException("Emby 直播频道与当前账户不匹配");
+            }
+            id = parseLiveChannelId(id);
+        }
+        id = segment(id);
+        JSONObject profile =
+                new JSONObject()
+                        .put("Name", "Marco Movie Live")
+                        .put("MaxStreamingBitrate", 80000000)
+                        .put(
+                                "DirectPlayProfiles",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put("Type", "Video")
+                                                        .put(
+                                                                "Container",
+                                                                legacyPlayer
+                                                                        ? "ts,mp4,m3u8"
+                                                                        : "ts,mpegts,mp4,m4v,mkv,hls,m3u8")
+                                                        .put(
+                                                                "VideoCodec",
+                                                                legacyPlayer
+                                                                        ? "h264"
+                                                                        : "h264,hevc,h265,mpeg2video")
+                                                        .put(
+                                                                "AudioCodec",
+                                                                legacyPlayer
+                                                                        ? "aac,mp3"
+                                                                        : "aac,mp3,mp2,ac3,eac3")))
+                        .put(
+                                "TranscodingProfiles",
+                                new JSONArray()
+                                        .put(
+                                                new JSONObject()
+                                                        .put("Type", "Video")
+                                                        .put("Container", "ts")
+                                                        .put("Protocol", "hls")
+                                                        .put("VideoCodec", "h264")
+                                                        .put("AudioCodec", "aac")
+                                                        .put("Context", "Streaming")
+                                                        .put("MaxAudioChannels", "2")
+                                                        .put("MinSegments", 1)));
+        JSONObject body =
+                new JSONObject()
+                        .put("UserId", user)
+                        .put("IsPlayback", true)
+                        .put("AutoOpenLiveStream", true)
+                        .put("EnableDirectPlay", true)
+                        .put("EnableDirectStream", true)
+                        .put("EnableTranscoding", true)
+                        .put("MaxStreamingBitrate", 80000000)
+                        .put("DeviceProfile", profile);
+        JSONObject info = request(base + "/Items/" + id + "/PlaybackInfo", device, token, body);
+        if (!info.optString("ErrorCode").isEmpty()) {
+            throw new IOException("Emby 无法打开此直播频道（" + info.optString("ErrorCode") + "）");
+        }
+        JSONArray sources = info.optJSONArray("MediaSources");
+        if (sources == null || sources.length() == 0) {
+            throw new IOException("Emby 未返回可用的直播流来源");
+        }
+        JSONObject source = sources.optJSONObject(0);
+        String session = info.optString("PlaySessionId", "");
+        if (source == null) throw new IOException("Emby 直播流信息无效");
+        String liveStreamId = source.optString("LiveStreamId", "").trim();
+        if (liveStreamId.length() == 0
+                && source.optBoolean("RequiresOpening", false)
+                && source.optString("OpenToken", "").trim().length() > 0) {
+            JSONObject openReq =
+                    new JSONObject()
+                            .put("OpenToken", source.optString("OpenToken").trim())
+                            .put("UserId", user)
+                            .put("PlaySessionId", session)
+                            .put("ItemId", id)
+                            .put("EnableDirectPlay", true)
+                            .put("EnableDirectStream", true)
+                            .put("DeviceProfile", profile);
+            JSONObject opened = request(base + "/LiveTv/LiveStreams/Open", device, token, openReq);
+            JSONObject openedSource = opened.optJSONObject("MediaSource");
+            if (openedSource != null) {
+                source = openedSource;
+                liveStreamId = source.optString("LiveStreamId", "").trim();
+            }
+        }
+        String sourceId = source.optString("Id", id);
+        boolean direct =
+                source.optBoolean("SupportsDirectStream", false)
+                        || source.optBoolean("SupportsDirectPlay", false);
+        String directRel = source.optString("DirectStreamUrl", "").trim();
+        String transRel = source.optString("TranscodingUrl", "").trim();
+        String rawPath = source.optString("Path", "").trim();
+
+        String streamUrl;
+        Map<String, String> outHeaders = new LinkedHashMap<String, String>();
+        String playMethod;
+        if (direct && directRel.length() > 0) {
+            streamUrl = resolveSameOriginLiveUrl(directRel, sourceId, session, liveStreamId);
+            outHeaders.put("X-Emby-Token", token);
+            playMethod = "DirectStream";
+        } else if (!direct && transRel.length() > 0) {
+            streamUrl = resolveSameOriginLiveUrl(transRel, sourceId, session, liveStreamId);
+            outHeaders.put("X-Emby-Token", token);
+            playMethod = "Transcode";
+        } else if (direct && liveStreamId.length() > 0) {
+            Map<String, String> params = new LinkedHashMap<String, String>();
+            params.put("Static", "true");
+            params.put("MediaSourceId", sourceId);
+            params.put("LiveStreamId", liveStreamId);
+            if (session.length() > 0) params.put("PlaySessionId", session);
+            params.put("DeviceId", device);
+            streamUrl = base + "/Videos/" + id + "/stream?" + queryString(params);
+            outHeaders.put("X-Emby-Token", token);
+            playMethod = "DirectStream";
+        } else if (transRel.length() > 0) {
+            streamUrl = resolveSameOriginLiveUrl(transRel, sourceId, session, liveStreamId);
+            outHeaders.put("X-Emby-Token", token);
+            playMethod = "Transcode";
+        } else if (direct
+                && (rawPath.regionMatches(true, 0, "http://", 0, 7)
+                        || rawPath.regionMatches(true, 0, "https://", 0, 8))) {
+            streamUrl = rawPath;
+            playMethod = "DirectPlay";
+            JSONObject reqHeaders = source.optJSONObject("RequiredHttpHeaders");
+            if (reqHeaders != null) {
+                Iterator<String> keys = reqHeaders.keys();
+                while (keys.hasNext()) {
+                    String k = keys.next();
+                    String val = reqHeaders.optString(k, "");
+                    if (val.length() > 0) outHeaders.put(k, val);
+                }
+            }
+            if (isSameOriginUrl(rawPath)) {
+                outHeaders.put("X-Emby-Token", token);
+            }
+        } else {
+            throw new IOException("Emby 直播频道没有可用的直连或转码地址");
+        }
+        JSONObject metadata =
+                new JSONObject()
+                        .put("ItemId", id)
+                        .put("MediaSourceId", sourceId)
+                        .put("PlaySessionId", session)
+                        .put("PlayMethod", playMethod)
+                        .put("CanSeek", false);
+        if (liveStreamId.length() > 0) {
+            metadata.put("LiveStreamId", liveStreamId);
+        }
+        return new JSONObject()
+                .put("parse", 0)
+                .put("url", streamUrl)
+                .put("header", new JSONObject(outHeaders))
+                .put("embySession", metadata);
+    }
+
+    private boolean isSameOriginUrl(String candidate) {
+        try {
+            URI server = new URI(base);
+            URI target = new URI(candidate);
+            return server.getScheme().equalsIgnoreCase(target.getScheme())
+                    && server.getAuthority().equalsIgnoreCase(target.getAuthority());
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private String resolveSameOriginLiveUrl(
+            String relOrAbs, String sourceId, String session, String liveStreamId)
+            throws Exception {
+        URI target = new URL(new URL(base + "/"), relOrAbs).toURI().normalize();
+        URI server = new URI(base);
+        if (!server.getScheme().equalsIgnoreCase(target.getScheme())
+                || !server.getAuthority().equalsIgnoreCase(target.getAuthority())
+                || target.getUserInfo() != null) {
+            throw new IOException("Emby 直播流地址与服务器不匹配");
+        }
+        Map<String, String> params = new LinkedHashMap<String, String>();
+        params.putAll(query(target.getRawQuery()));
+        for (String key : new ArrayList<String>(params.keySet())) {
+            if (key.equalsIgnoreCase("api_key") || key.equalsIgnoreCase("x-emby-token")) {
+                params.remove(key);
+            }
+        }
+        if (sourceId.length() > 0 && !params.containsKey("MediaSourceId")) {
+            params.put("MediaSourceId", sourceId);
+        }
+        if (session.length() > 0 && !params.containsKey("PlaySessionId")) {
+            params.put("PlaySessionId", session);
+        }
+        if (liveStreamId.length() > 0 && !params.containsKey("LiveStreamId")) {
+            params.put("LiveStreamId", liveStreamId);
+        }
+        if (!params.containsKey("DeviceId")) {
+            params.put("DeviceId", device);
+        }
+        String cleanPath =
+                new URI(target.getScheme(), target.getAuthority(), target.getPath(), null, null)
+                        .toString();
+        return params.isEmpty() ? cleanPath : cleanPath + "?" + queryString(params);
     }
 
     public Reporter track(JSONObject metadata) {
