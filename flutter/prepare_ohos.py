@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 DEFAULT_ICON_SOURCE = REPO_ROOT / "docs" / "images" / "app-icon-512.png"
 
-DEFAULT_OHOS_VERSION_NAME = "0.1.0"
-DEFAULT_OHOS_VERSION_CODE = 1000001
+DEFAULT_OHOS_VERSION_NAME = "0.1.1"
+DEFAULT_OHOS_VERSION_CODE = 1000002
 
 NON_OHOS_PACKAGES = {
     "media_kit_libs_video",

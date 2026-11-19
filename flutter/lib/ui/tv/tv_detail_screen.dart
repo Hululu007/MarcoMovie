@@ -15,6 +15,7 @@ import '../apple_theme.dart';
 import '../netdisk_sheet.dart';
 import '../player_screen.dart';
 import '../poster_image.dart';
+import 'tv_ambient_theme.dart';
 import 'tv_focus_widgets.dart';
 
 /// 10-foot living-room Immersive Series Detail & Episode screen for HarmonyOS Smart Screen / TV.
@@ -483,6 +484,8 @@ class _TvDetailScreenState extends State<TvDetailScreen> {
                   title: widget.site.isEffectivelyPrivate ? '' : _video.title,
                   year: _video.year,
                   baseColor: bgColor,
+                  themeId: widget.storage.tvAmbientTheme,
+                  intensity: widget.storage.tvAmbientIntensity,
                   scrollOffset: _scrollOffset,
                   onBytesLoaded: _updateAmbientFromBytes,
                 ),
@@ -946,6 +949,30 @@ class _TvDetailScreenState extends State<TvDetailScreen> {
                                               ),
                                             ),
                                           ),
+                                        ] else ...[
+                                          const SizedBox(width: 8),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 7,
+                                              vertical: 2,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0x3834C759),
+                                              borderRadius:
+                                                  BorderRadius.circular(6),
+                                              border: Border.all(
+                                                color: const Color(0x8834C759),
+                                              ),
+                                            ),
+                                            child: const Text(
+                                              'HLS',
+                                              style: TextStyle(
+                                                color: Color(0xFF7CF0A4),
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                          ),
                                         ],
                                       ],
                                     ),
@@ -1218,6 +1245,8 @@ class _ImmersiveTvBackdrop extends StatelessWidget {
   final String title;
   final String year;
   final Color baseColor;
+  final String themeId;
+  final String intensity;
   final ValueNotifier<double> scrollOffset;
   final ValueChanged<Uint8List>? onBytesLoaded;
   final bool softened;
@@ -1227,53 +1256,18 @@ class _ImmersiveTvBackdrop extends StatelessWidget {
     required this.title,
     required this.year,
     required this.baseColor,
+    this.themeId = 'aurora',
+    this.intensity = 'standard',
     required this.scrollOffset,
     this.onBytesLoaded,
     this.softened = false,
   });
 
   Widget _fallbackAmbientOrbs() {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color.lerp(baseColor, const Color(0xFF0E293B), 0.72)!,
-            baseColor,
-            Color.lerp(baseColor, const Color(0xFF19183A), 0.65)!,
-          ],
-        ),
-      ),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: RadialGradient(
-                center: const Alignment(0.65, -0.55),
-                radius: 0.95,
-                colors: [
-                  const Color(0xFF1A9E96).withValues(alpha: 0.34),
-                  Colors.transparent,
-                ],
-              ),
-            ),
-          ),
-          DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: RadialGradient(
-                center: const Alignment(-0.7, 0.75),
-                radius: 0.95,
-                colors: [
-                  const Color(0xFF3A5CE6).withValues(alpha: 0.28),
-                  Colors.transparent,
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
+    return TvAmbientSoftGlowBackground(
+      themeId: themeId,
+      intensity: intensity,
+      posterSync: false,
     );
   }
 
@@ -1686,6 +1680,8 @@ class _TvImmersiveEpisodeSheetState extends State<_TvImmersiveEpisodeSheet> {
               title: widget.site.isEffectivelyPrivate ? '' : widget.video.title,
               year: widget.video.year,
               baseColor: widget.baseColor,
+              themeId: widget.storage.tvAmbientTheme,
+              intensity: widget.storage.tvAmbientIntensity,
               scrollOffset: _scrollOffset,
               softened: true,
             ),
@@ -1888,6 +1884,47 @@ class _TvImmersiveEpisodeSheetState extends State<_TvImmersiveEpisodeSheet> {
                                                               style: TextStyle(
                                                                 color: Color(
                                                                   0xFFFFD166,
+                                                                ),
+                                                                fontSize: 11,
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w700,
+                                                              ),
+                                                            ),
+                                                          ),
+                                                        ] else ...[
+                                                          const SizedBox(
+                                                            width: 8,
+                                                          ),
+                                                          Container(
+                                                            padding:
+                                                                const EdgeInsets
+                                                                    .symmetric(
+                                                              horizontal: 7,
+                                                              vertical: 2,
+                                                            ),
+                                                            decoration:
+                                                                BoxDecoration(
+                                                              color: const Color(
+                                                                0x3834C759,
+                                                              ),
+                                                              borderRadius:
+                                                                  BorderRadius
+                                                                      .circular(
+                                                                6,
+                                                              ),
+                                                              border: Border.all(
+                                                                color:
+                                                                    const Color(
+                                                                  0x8834C759,
+                                                                ),
+                                                              ),
+                                                            ),
+                                                            child: const Text(
+                                                              'HLS',
+                                                              style: TextStyle(
+                                                                color: Color(
+                                                                  0xFF7CF0A4,
                                                                 ),
                                                                 fontSize: 11,
                                                                 fontWeight:

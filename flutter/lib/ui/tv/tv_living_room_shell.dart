@@ -16,6 +16,8 @@ import '../apple_theme.dart';
 import '../cloud_sync_panel.dart';
 import '../netdisk_sheet.dart';
 import '../player_screen.dart';
+import '../poster_image.dart';
+import 'tv_ambient_theme.dart';
 import 'tv_detail_screen.dart';
 import 'tv_focus_widgets.dart';
 
@@ -66,11 +68,36 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
   String _searchQuery = '';
   bool _searching = false;
   bool _searchPerformed = false;
+  String _searchSelectedSiteKey = '__all__';
   final List<(CmsSite, CmsVideo)> _searchResults = <(CmsSite, CmsVideo)>[];
   int _searchEpoch = 0;
 
   // Library state (0: 观看历史, 1: 我的收藏)
   int _librarySegment = 0;
+
+  // Settings sidebar state (0: 外观与柔光, 1: 订阅与片源, 2: 4K网盘加速, 3: WebDAV云同步, 4: 播放与跳过, 5: 备份与存储)
+  int _settingsSection = 0;
+
+  // Dynamic focused-poster ambient tint for `海报色彩氛围联动`
+  Color? _focusedPosterTint;
+  String _focusedPosterUrl = '';
+
+  void _syncAmbientFromPoster(String posterUrl) {
+    final url = posterUrl.trim();
+    if (!widget.storage.tvAmbientPosterSync ||
+        url.isEmpty ||
+        url == _focusedPosterUrl) {
+      return;
+    }
+    _focusedPosterUrl = url;
+    final cached = PosterLoader.peekMemory(url);
+    if (cached == null || cached.isEmpty) return;
+    unawaited(() async {
+      final color = await PosterLoader.extractEdgeAmbientColor(cached);
+      if (!mounted || _focusedPosterUrl != url) return;
+      setState(() => _focusedPosterTint = color);
+    }());
+  }
 
   @override
   void initState() {
@@ -276,6 +303,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
     setState(() {
       _searching = true;
       _searchPerformed = true;
+      _searchSelectedSiteKey = '__all__';
       _searchResults.clear();
     });
     unawaited(widget.storage.addSearchKeyword(kw));
@@ -384,9 +412,13 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
       context: context,
       builder: (dialogCtx) {
         return Dialog(
-          backgroundColor: const Color(0xFF181A22),
+          backgroundColor: const Color(0xEB101928),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(24),
+            borderRadius: BorderRadius.circular(26),
+            side: const BorderSide(
+              color: TvAmbientColors.glassStroke,
+              width: 1.2,
+            ),
           ),
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 760, maxHeight: 620),
@@ -826,99 +858,102 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
 
   @override
   Widget build(BuildContext context) {
-    const tabs = <(IconData, String)>[
-      (CupertinoIcons.play_rectangle_fill, '主页'),
-      (CupertinoIcons.dot_radiowaves_left_right, '直播'),
-      (CupertinoIcons.search, '搜索'),
-      (CupertinoIcons.square_favorites_alt_fill, '片库'),
-      (CupertinoIcons.gear_alt_fill, '设置'),
-    ];
+    final themeId = widget.storage.tvAmbientTheme;
+    final intensity = widget.storage.tvAmbientIntensity;
+    final posterSync = widget.storage.tvAmbientPosterSync;
 
     return Focus(
       onKeyEvent: _handleRootKey,
       child: Scaffold(
-        backgroundColor: const Color(0xFF0A0C12),
-        body: SafeArea(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Top 10-foot living-room navigation bar
-              Padding(
-                padding: const EdgeInsets.fromLTRB(36, 20, 36, 12),
-                child: Row(
-                  children: [
-                    const MarcoBrandLogo(iconSize: 38, fontSize: 22),
-                    const SizedBox(width: 28),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: Row(
-                          children: [
-                            for (var i = 0; i < tabs.length; i++)
-                              Padding(
-                                padding: const EdgeInsets.only(right: 10),
-                                child: TvFocusPill(
-                                  autofocus: i == 0 && _activeSite == null,
-                                  selected: _tabIndex == i,
-                                  onSelect: () => setState(() => _tabIndex = i),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(
-                                        tabs[i].$1,
-                                        size: 16,
-                                        color: Colors.white,
-                                      ),
-                                      const SizedBox(width: 7),
-                                      Text(
-                                        tabs[i].$2,
-                                        style: const TextStyle(fontSize: 15),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    TvFocusPill(
-                      onSelect: _showSitePickerDialog,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 9,
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            CupertinoIcons.layers_alt_fill,
-                            size: 15,
-                            color: Colors.white,
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            _activeSite?.name ?? '导入 / 切源',
-                            style: const TextStyle(fontSize: 14),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+        backgroundColor: TvAmbientColors.background,
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            TvAmbientSoftGlowBackground(
+              themeId: themeId,
+              intensity: intensity,
+              posterAmbientColor: _focusedPosterTint,
+              posterSync: posterSync,
+            ),
+            SafeArea(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildFloatingTopBar(),
+                  Expanded(
+                    child: switch (_tabIndex) {
+                      1 => _buildLiveView(),
+                      2 => _buildSearchView(),
+                      3 => _buildLibraryView(),
+                      4 => _buildSettingsView(),
+                      _ => _buildHomeView(),
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFloatingTopBar() {
+    const tabs = <(IconData, String)>[
+      (CupertinoIcons.tv, '发现'),
+      (CupertinoIcons.dot_radiowaves_left_right, '直播'),
+      (CupertinoIcons.search, '搜索'),
+      (CupertinoIcons.collections, '片库'),
+      (CupertinoIcons.gear_alt, '设置'),
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(56, 28, 56, 18),
+      child: SizedBox(
+        height: 62,
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: MarcoBrandLogo(iconSize: 42, fontSize: 23),
+            ),
+            // Centered Apple TV-parity floating frosted-glass capsule tab bar
+            Container(
+              padding: const EdgeInsets.all(5),
+              decoration: BoxDecoration(
+                color: const Color(0x880B1320),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.16),
+                  width: 1.1,
                 ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.34),
+                    blurRadius: 24,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
               ),
-              Expanded(
-                child: switch (_tabIndex) {
-                  1 => _buildLiveView(),
-                  2 => _buildSearchView(),
-                  3 => _buildLibraryView(),
-                  4 => _buildSettingsView(),
-                  _ => _buildHomeView(),
-                },
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var i = 0; i < tabs.length; i++)
+                    Padding(
+                      padding: EdgeInsets.only(right: i == tabs.length - 1 ? 0 : 4),
+                      child: _TvFloatingNavTab(
+                        icon: tabs[i].$1,
+                        label: tabs[i].$2,
+                        selected: _tabIndex == i,
+                        autofocus: i == 0 && _activeSite == null,
+                        onSelect: () => setState(() => _tabIndex = i),
+                      ),
+                    ),
+                ],
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -928,55 +963,70 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
     if (_activeSite == null) {
       return Center(
         child: Container(
-          constraints: const BoxConstraints(maxWidth: 640),
-          padding: const EdgeInsets.all(36),
+          constraints: const BoxConstraints(maxWidth: 720),
+          padding: const EdgeInsets.all(40),
           decoration: BoxDecoration(
-            color: const Color(0xFF151821),
-            borderRadius: BorderRadius.circular(26),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+            color: Colors.white.withValues(alpha: 0.085),
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(color: TvAmbientColors.glassStroke, width: 1.2),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const MarcoBrandLogo(iconSize: 64, fontSize: 28, stacked: true),
+              const MarcoBrandLogo(iconSize: 76, fontSize: 36, stacked: true),
               const SizedBox(height: 18),
               const Text(
-                '欢迎使用 Marco Movie 大屏版',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 24,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 10),
-              const Text(
-                '本应用不内置任何影视内容。请使用同一局域网手机扫码一键推送您自行合法获取的配置，或通过地址/本地文件导入。',
+                '本软件仅提供通用媒体目录解析与本地播放能力，不内置、不提供、不托管任何影视或直播内容。',
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: AppleColors.labelSecondary,
-                  fontSize: 14,
+                  color: TvAmbientColors.secondaryText,
+                  fontSize: 16,
                   height: 1.5,
                 ),
               ),
-              const SizedBox(height: 26),
+              const SizedBox(height: 28),
               Wrap(
-                spacing: 14,
+                spacing: 16,
                 runSpacing: 12,
                 alignment: WrapAlignment.center,
                 children: [
                   TvFocusPill(
                     autofocus: true,
-                    selected: true,
+                    prominent: true,
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 13),
                     onSelect: _showQrSyncDialog,
-                    child: const Text('📱 手机扫码推送配置'),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(CupertinoIcons.qrcode_viewfinder, size: 18),
+                        SizedBox(width: 8),
+                        Text('手机扫码推送配置', style: TextStyle(fontSize: 16)),
+                      ],
+                    ),
                   ),
                   TvFocusPill(
+                    padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 13),
                     onSelect: _showUrlImportDialog,
-                    child: const Text('🔗 输入地址 / 剪贴板导入'),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(CupertinoIcons.link, size: 17),
+                        SizedBox(width: 8),
+                        Text('输入地址 / 剪贴板导入', style: TextStyle(fontSize: 16)),
+                      ],
+                    ),
                   ),
                   TvFocusPill(
+                    padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 13),
                     onSelect: () => _importLocalConfigOrBackup(isBackup: false),
-                    child: const Text('📂 本地文件导入'),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(CupertinoIcons.folder_fill, size: 17),
+                        SizedBox(width: 8),
+                        Text('本地文件导入', style: TextStyle(fontSize: 16)),
+                      ],
+                    ),
                   ),
                 ],
               ),
@@ -991,44 +1041,101 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
         widget.storage.showContinueWatching &&
         _selectedCategoryId.isEmpty &&
         history.isNotEmpty;
+    final screenW = MediaQuery.sizeOf(context).width;
+    final gridCols = screenW >= 1500 ? 6 : (screenW >= 1100 ? 5 : 4);
 
     return CustomScrollView(
       controller: _homeScrollController,
       slivers: [
-        if (_categories.isNotEmpty)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(36, 6, 36, 14),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(right: 10),
-                      child: TvFocusPill(
-                        selected: _selectedCategoryId.isEmpty,
-                        onSelect: () => _selectCategory(''),
-                        child: const Text('精选推荐'),
-                      ),
-                    ),
-                    for (final cat in _categories)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 10),
-                        child: TvFocusPill(
-                          selected: _selectedCategoryId == cat.id,
-                          onSelect: () => _selectCategory(cat.id),
-                          child: Text(cat.name),
+        // Sub-toolbar: left glass category pills, right site switcher + LAN QR push
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(56, 8, 56, 22),
+            child: Row(
+              children: [
+                Expanded(
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(right: 12),
+                          child: TvFocusPill(
+                            selected: _selectedCategoryId.isEmpty,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 22,
+                              vertical: 11,
+                            ),
+                            onSelect: () => _selectCategory(''),
+                            child: const Text(
+                              '精选推荐',
+                              style: TextStyle(fontSize: 17),
+                            ),
+                          ),
                         ),
-                      ),
-                  ],
+                        for (final cat in _categories)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 12),
+                            child: TvFocusPill(
+                              selected: _selectedCategoryId == cat.id,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 22,
+                                vertical: 11,
+                              ),
+                              onSelect: () => _selectCategory(cat.id),
+                              child: Text(
+                                cat.name,
+                                style: const TextStyle(fontSize: 17),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
+                const SizedBox(width: 16),
+                TvFocusPill(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 11,
+                  ),
+                  onSelect: _showSitePickerDialog,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(CupertinoIcons.layers_alt_fill, size: 16),
+                      const SizedBox(width: 8),
+                      Text(
+                        _activeSite?.name ?? '切换片源',
+                        style: const TextStyle(fontSize: 16),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                TvFocusPill(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 11,
+                  ),
+                  onSelect: _showQrSyncDialog,
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(CupertinoIcons.qrcode, size: 16),
+                      SizedBox(width: 8),
+                      Text('扫码快传', style: TextStyle(fontSize: 16)),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
+        ),
         if (showContinue)
           SliverToBoxAdapter(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(36, 4, 36, 20),
+              padding: const EdgeInsets.fromLTRB(56, 0, 56, 26),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1036,17 +1143,18 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                     '继续观看',
                     style: TextStyle(
                       color: Colors.white,
-                      fontSize: 18,
+                      fontSize: 22,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 14),
                   SizedBox(
-                    height: 220,
+                    height: 214,
                     child: ListView.separated(
                       scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(vertical: 4),
                       itemCount: history.take(12).length,
-                      separatorBuilder: (_, __) => const SizedBox(width: 16),
+                      separatorBuilder: (_, __) => const SizedBox(width: 24),
                       itemBuilder: (context, idx) {
                         final item = history[idx];
                         final site = (_config?.publicAvailableSites ?? const [])
@@ -1059,20 +1167,30 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                           poster: item.poster,
                           remarks: item.episode,
                         );
-                        return SizedBox(
-                          width: 132,
-                          child: TvFocusablePosterCard(
-                            autofocus: idx == 0,
-                            video: vid,
-                            subtitleBadge: item.episode,
-                            progressFraction: item.progressFraction,
-                            onSelect: () => _openDetail(site, vid),
-                          ),
+                        return TvWideContinueCard(
+                          autofocus: idx == 0,
+                          entry: item,
+                          onFocusGained: () => _syncAmbientFromPoster(item.poster),
+                          onSelect: () => _openDetail(site, vid),
                         );
                       },
                     ),
                   ),
                 ],
+              ),
+            ),
+          ),
+        if (showContinue && !_homeLoading && _homeVideos.isNotEmpty)
+          const SliverToBoxAdapter(
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(56, 0, 56, 16),
+              child: Text(
+                '精选片库',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
           ),
@@ -1090,12 +1208,23 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                 children: [
                   Text(
                     '加载内容失败：$_homeError',
-                    style: const TextStyle(color: AppleColors.systemRed),
+                    style: const TextStyle(color: Colors.orangeAccent, fontSize: 16),
                   ),
-                  const SizedBox(height: 14),
-                  TvFocusPill(
-                    onSelect: () => _loadSiteHome(_activeSite!),
-                    child: const Text('重试加载'),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TvFocusPill(
+                        prominent: true,
+                        onSelect: () => _loadSiteHome(_activeSite!),
+                        child: const Text('重试加载'),
+                      ),
+                      const SizedBox(width: 14),
+                      TvFocusPill(
+                        onSelect: _showSitePickerDialog,
+                        child: const Text('切换其他片源'),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -1103,13 +1232,13 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
           )
         else
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(36, 8, 36, 36),
+            padding: const EdgeInsets.fromLTRB(56, 4, 56, 44),
             sliver: SliverGrid(
-              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-                maxCrossAxisExtent: 210,
-                mainAxisSpacing: 22,
-                crossAxisSpacing: 20,
-                childAspectRatio: 0.60,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: gridCols,
+                mainAxisSpacing: 28,
+                crossAxisSpacing: 24,
+                childAspectRatio: 0.56,
               ),
               delegate: SliverChildBuilderDelegate(
                 (context, index) {
@@ -1117,6 +1246,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                   return TvFocusablePosterCard(
                     autofocus: index == 0 && !showContinue,
                     video: video,
+                    onFocusGained: () => _syncAmbientFromPoster(video.poster),
                     onSelect: () => _openDetail(_activeSite!, video),
                   );
                 },
@@ -1127,7 +1257,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
         if (_loadingMore)
           const SliverToBoxAdapter(
             child: Padding(
-              padding: EdgeInsets.only(bottom: 28),
+              padding: EdgeInsets.only(bottom: 32),
               child: Center(child: CupertinoActivityIndicator(radius: 14)),
             ),
           ),
@@ -1142,12 +1272,22 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              '当前配置未包含可用的直播列表',
-              style: TextStyle(color: AppleColors.labelSecondary, fontSize: 16),
+            const Icon(
+              CupertinoIcons.tv,
+              size: 48,
+              color: TvAmbientColors.mutedText,
             ),
             const SizedBox(height: 14),
+            const Text(
+              '当前配置未包含可用的直播列表',
+              style: TextStyle(
+                color: TvAmbientColors.secondaryText,
+                fontSize: 17,
+              ),
+            ),
+            const SizedBox(height: 18),
             TvFocusPill(
+              prominent: true,
               onSelect: _showQrSyncDialog,
               child: const Text('扫码导入直播源'),
             ),
@@ -1155,6 +1295,7 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
         ),
       );
     }
+
     final activeSource = lives[_selectedLiveSourceIdx.clamp(0, lives.length - 1)];
     final safeGroupIdx = _liveGroups.isEmpty
         ? 0
@@ -1167,138 +1308,117 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
     );
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(36, 8, 36, 28),
+      padding: const EdgeInsets.fromLTRB(56, 8, 56, 32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (lives.length > 1)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    for (var i = 0; i < lives.length; i++)
-                      Padding(
-                        padding: const EdgeInsets.only(right: 10),
-                        child: TvFocusPill(
-                          selected: i == _selectedLiveSourceIdx,
-                          onSelect: () {
-                            setState(() => _selectedLiveSourceIdx = i);
-                            unawaited(_loadLiveSource(lives[i]));
-                          },
-                          child: Text(lives[i].name),
+          Focus(
+            onKeyEvent: (_, event) {
+              if (event is KeyDownEvent && _liveGroups.length > 1) {
+                if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+                  _stepLiveGroup(-1);
+                  return KeyEventResult.handled;
+                }
+                if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+                  _stepLiveGroup(1);
+                  return KeyEventResult.handled;
+                }
+              }
+              return KeyEventResult.ignored;
+            },
+            child: Row(
+              children: [
+                const Text(
+                  '电视直播',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                if (lives.length > 1) ...[
+                  const SizedBox(width: 18),
+                  for (var i = 0; i < lives.length; i++)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 10),
+                      child: TvFocusPill(
+                        selected: i == _selectedLiveSourceIdx,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 7,
+                        ),
+                        onSelect: () {
+                          setState(() => _selectedLiveSourceIdx = i);
+                          unawaited(_loadLiveSource(lives[i]));
+                        },
+                        child: Text(
+                          lives[i].name,
+                          style: const TextStyle(fontSize: 14),
                         ),
                       ),
-                  ],
-                ),
-              ),
-            ),
-          if (!_liveLoading && _liveError == null && activeGroup != null)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 14),
-              child: Focus(
-                onKeyEvent: (_, event) {
-                  if (event is KeyDownEvent && _liveGroups.length > 1) {
-                    if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
-                      _stepLiveGroup(-1);
-                      return KeyEventResult.handled;
-                    }
-                    if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
-                      _stepLiveGroup(1);
-                      return KeyEventResult.handled;
-                    }
-                  }
-                  return KeyEventResult.ignored;
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 18,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF151822),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.09),
+                    ),
+                ],
+                if (!_liveLoading && _liveError == null && activeGroup != null) ...[
+                  const SizedBox(width: 16),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                        color: TvAmbientColors.glassStroke,
+                        width: 0.9,
+                      ),
+                    ),
+                    child: Text(
+                      '${activeSource.name} · ${_liveGroups.length} 组 / 共 $totalChannels 频道',
+                      style: const TextStyle(
+                        color: TvAmbientColors.secondaryText,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
-                  child: Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 5,
-                        ),
-                        decoration: BoxDecoration(
-                          color: AppleColors.systemBlue.withValues(alpha: 0.18),
-                          borderRadius: BorderRadius.circular(999),
-                          border: Border.all(
-                            color: AppleColors.systemBlue.withValues(
-                              alpha: 0.55,
-                            ),
-                          ),
-                        ),
-                        child: Text(
-                          '📡 ${activeSource.name} · ${_liveGroups.length} 组 / 共 $totalChannels 频道',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
+                  const SizedBox(width: 10),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: TvAmbientColors.accent.withValues(alpha: 0.22),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(
+                        color: TvAmbientColors.accent.withValues(alpha: 0.55),
+                        width: 0.9,
                       ),
-                      const SizedBox(width: 10),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 5,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.08),
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                        child: Text(
-                          '当前分组：${activeGroup.name} (${channels.length} 台)',
-                          style: const TextStyle(
-                            color: AppleColors.labelPrimary,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
+                    ),
+                    child: Text(
+                      '当前分组：${activeGroup.name} (${channels.length} 台)',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
                       ),
-                      const Spacer(),
-                      if (_liveGroups.length > 1) ...[
-                        TvFocusPill(
-                          autofocus: true,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 7,
-                          ),
-                          onSelect: () => _stepLiveGroup(-1),
-                          child: const Text(
-                            '◀ 上一组',
-                            style: TextStyle(fontSize: 13),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        TvFocusPill(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 7,
-                          ),
-                          onSelect: () => _stepLiveGroup(1),
-                          child: const Text(
-                            '下一组 ▶',
-                            style: TextStyle(fontSize: 13),
-                          ),
-                        ),
-                      ],
-                    ],
+                    ),
+                  ),
+                ],
+                const Spacer(),
+                const Text(
+                  '全屏播放时按遥控器上 / 下方向键即可快速换台',
+                  style: TextStyle(
+                    color: TvAmbientColors.mutedText,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
-              ),
+              ],
             ),
+          ),
+          const SizedBox(height: 22),
           Expanded(
             child: _liveLoading
                 ? const Center(child: CupertinoActivityIndicator(radius: 16))
@@ -1309,10 +1429,11 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                           children: [
                             Text(
                               '直播列表读取失败：$_liveError',
-                              style: const TextStyle(color: AppleColors.systemRed),
+                              style: const TextStyle(color: Colors.orangeAccent),
                             ),
-                            const SizedBox(height: 12),
+                            const SizedBox(height: 14),
                             TvFocusPill(
+                              prominent: true,
                               onSelect: () => _loadLiveSource(activeSource),
                               child: const Text('重试'),
                             ),
@@ -1320,18 +1441,24 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                         ),
                       )
                     : Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           SizedBox(
-                            width: 240,
+                            width: 268,
                             child: ListView.separated(
                               itemCount: _liveGroups.length,
                               separatorBuilder: (_, __) =>
-                                  const SizedBox(height: 8),
+                                  const SizedBox(height: 10),
                               itemBuilder: (_, idx) {
                                 final g = _liveGroups[idx];
                                 return TvFocusPill(
+                                  autofocus: idx == safeGroupIdx,
                                   selected: idx == safeGroupIdx,
-                                  borderRadius: 12,
+                                  borderRadius: 14,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 18,
+                                    vertical: 14,
+                                  ),
                                   onSelect: () => setState(
                                     () => _selectedLiveGroupIdx = idx,
                                   ),
@@ -1342,13 +1469,14 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                                           g.name,
                                           maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(fontSize: 17),
                                         ),
                                       ),
                                       Text(
                                         '${g.channels.length}',
                                         style: const TextStyle(
-                                          fontSize: 12,
-                                          color: AppleColors.labelSecondary,
+                                          fontSize: 14,
+                                          color: TvAmbientColors.secondaryText,
                                         ),
                                       ),
                                     ],
@@ -1357,21 +1485,23 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                               },
                             ),
                           ),
-                          const SizedBox(width: 24),
+                          const SizedBox(width: 28),
                           Expanded(
                             child: GridView.builder(
                               itemCount: channels.length,
                               gridDelegate:
-                                  const SliverGridDelegateWithMaxCrossAxisExtent(
-                                    maxCrossAxisExtent: 260,
-                                    mainAxisSpacing: 12,
-                                    crossAxisSpacing: 12,
-                                    childAspectRatio: 3.2,
+                                  const SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: 3,
+                                    mainAxisSpacing: 16,
+                                    crossAxisSpacing: 16,
+                                    childAspectRatio: 4.5,
                                   ),
                               itemBuilder: (_, idx) {
                                 final ch = channels[idx];
                                 return TvFocusPill(
-                                  borderRadius: 14,
+                                  borderRadius: 16,
+                                  preserveColorsOnFocus: true,
+                                  padding: const EdgeInsets.all(14),
                                   onSelect: () => _openLiveGroupPlayer(
                                     activeSource,
                                     _liveGroups[safeGroupIdx],
@@ -1379,17 +1509,51 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
                                   ),
                                   child: Row(
                                     children: [
-                                      const Icon(
-                                        CupertinoIcons.tv,
-                                        size: 16,
-                                        color: Colors.white70,
+                                      Container(
+                                        width: 48,
+                                        height: 48,
+                                        decoration: BoxDecoration(
+                                          color: TvAmbientColors.accent
+                                              .withValues(alpha: 0.22),
+                                          borderRadius:
+                                              BorderRadius.circular(11),
+                                        ),
+                                        alignment: Alignment.center,
+                                        child: const Icon(
+                                          CupertinoIcons.tv_fill,
+                                          size: 20,
+                                          color: TvAmbientColors.accent,
+                                        ),
                                       ),
-                                      const SizedBox(width: 10),
+                                      const SizedBox(width: 14),
                                       Expanded(
-                                        child: Text(
-                                          ch.name,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
+                                        child: Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              ch.name,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 17,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 3),
+                                            Text(
+                                              '可用线路 ${ch.episodes.length} 条',
+                                              style: const TextStyle(
+                                                color: TvAmbientColors
+                                                    .secondaryText,
+                                                fontSize: 13.5,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       ),
                                     ],
@@ -1407,77 +1571,154 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
   }
 
   Widget _buildSearchView() {
+    final siteCounts = <String, (CmsSite, int)>{};
+    for (final (site, _) in _searchResults) {
+      final prev = siteCounts[site.key];
+      siteCounts[site.key] = (site, (prev?.$2 ?? 0) + 1);
+    }
+    final filteredResults = _searchSelectedSiteKey == '__all__'
+        ? _searchResults
+        : _searchResults
+            .where((entry) => entry.$1.key == _searchSelectedSiteKey)
+            .toList(growable: false);
+
     return Padding(
-      padding: const EdgeInsets.fromLTRB(36, 8, 36, 28),
+      padding: const EdgeInsets.fromLTRB(56, 8, 56, 28),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(
-            width: 340,
+            width: 444,
             child: SingleChildScrollView(
               child: TvRemoteGridKeyboard(
                 query: _searchQuery,
                 history: widget.storage.getSearchHistory(),
                 onQueryChanged: (next) => setState(() => _searchQuery = next),
                 onSubmit: _runGlobalSearch,
+                onClearHistory: () async {
+                  await widget.storage.clearSearchHistory();
+                  if (mounted) setState(() {});
+                },
               ),
             ),
           ),
-          const SizedBox(width: 28),
+          const SizedBox(width: 34),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Text(
-                      _searchPerformed
-                          ? '并发检索结果（${_searchResults.length}）'
-                          : '跨站点全局搜索',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
+                if (_searchResults.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 18),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.only(right: 12),
+                            child: TvFocusPill(
+                              selected: _searchSelectedSiteKey == '__all__',
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 20,
+                                vertical: 10,
+                              ),
+                              onSelect: () => setState(
+                                () => _searchSelectedSiteKey = '__all__',
+                              ),
+                              child: Text(
+                                '全部结果 (${_searchResults.length})',
+                                style: const TextStyle(fontSize: 16),
+                              ),
+                            ),
+                          ),
+                          for (final entry in siteCounts.values)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 12),
+                              child: TvFocusPill(
+                                selected:
+                                    _searchSelectedSiteKey == entry.$1.key,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 20,
+                                  vertical: 10,
+                                ),
+                                onSelect: () => setState(
+                                  () => _searchSelectedSiteKey = entry.$1.key,
+                                ),
+                                child: Text(
+                                  '${entry.$1.name} (${entry.$2})',
+                                  style: const TextStyle(fontSize: 16),
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
                     ),
-                    if (_searching) ...[
-                      const SizedBox(width: 12),
-                      const CupertinoActivityIndicator(radius: 10),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: 14),
+                  )
+                else if (_searching)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: Row(
+                      children: [
+                        const CupertinoActivityIndicator(radius: 11),
+                        const SizedBox(width: 12),
+                        Text(
+                          '正在多站并发搜索「$_searchQuery」…',
+                          style: const TextStyle(
+                            color: TvAmbientColors.secondaryText,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 Expanded(
                   child: !_searchPerformed
                       ? const Center(
-                          child: Text(
-                            '使用左侧遥控网格键盘输入首拼或片名关键词，并发检索全部可用片源',
-                            style: TextStyle(color: AppleColors.labelSecondary),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                CupertinoIcons.search,
+                                size: 48,
+                                color: TvAmbientColors.mutedText,
+                              ),
+                              SizedBox(height: 14),
+                              Text(
+                                '在左侧输入关键词或拼音首字母，即可跨全部可用片源并发检索',
+                                style: TextStyle(
+                                  color: TvAmbientColors.secondaryText,
+                                  fontSize: 16,
+                                ),
+                              ),
+                            ],
                           ),
                         )
-                      : (_searchResults.isEmpty && !_searching)
+                      : (filteredResults.isEmpty && !_searching)
                           ? const Center(
                               child: Text(
-                                '未找到匹配结果，请尝试更换首拼或简短关键词',
+                                '未找到匹配的影视内容，可尝试缩短关键词',
                                 style: TextStyle(
-                                  color: AppleColors.labelSecondary,
+                                  color: TvAmbientColors.secondaryText,
+                                  fontSize: 16,
                                 ),
                               ),
                             )
                           : GridView.builder(
-                              itemCount: _searchResults.length,
+                              itemCount: filteredResults.length,
                               gridDelegate:
-                                  const SliverGridDelegateWithMaxCrossAxisExtent(
-                                    maxCrossAxisExtent: 195,
-                                    mainAxisSpacing: 18,
-                                    crossAxisSpacing: 16,
-                                    childAspectRatio: 0.58,
+                                  const SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: 5,
+                                    mainAxisSpacing: 24,
+                                    crossAxisSpacing: 22,
+                                    childAspectRatio: 0.54,
                                   ),
                               itemBuilder: (_, idx) {
-                                final (site, video) = _searchResults[idx];
+                                final (site, video) = filteredResults[idx];
                                 return TvFocusablePosterCard(
                                   video: video,
-                                  subtitleBadge: site.name,
+                                  sourceSubtitle: site.name,
+                                  onFocusGained: () =>
+                                      _syncAmbientFromPoster(video.poster),
                                   onSelect: () => _openDetail(site, video),
                                 );
                               },
@@ -1495,19 +1736,19 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
     final history = widget.storage.getWatchHistory();
     final favorites = widget.storage.getFavorites();
     final availableSites = _config?.publicAvailableSites ?? const <CmsSite>[];
+    final screenW = MediaQuery.sizeOf(context).width;
+    final gridCols = screenW >= 1500 ? 6 : 4;
 
     CmsSite resolveSite(String siteKey) {
       for (final s in availableSites) {
-        if (s.key == siteKey) {
-          return s;
-        }
+        if (s.key == siteKey) return s;
       }
       return _activeSite ??
           CmsSite(key: siteKey, name: siteKey, type: 1, api: '');
     }
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(36, 8, 36, 28),
+      padding: const EdgeInsets.fromLTRB(56, 8, 56, 28),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1515,93 +1756,177 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
             children: [
               TvFocusPill(
                 selected: _librarySegment == 0,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 22, vertical: 11),
                 onSelect: () => setState(() => _librarySegment = 0),
-                child: Text('观看历史 (${history.length})'),
+                child: const Text('观看历史', style: TextStyle(fontSize: 17)),
               ),
               const SizedBox(width: 12),
               TvFocusPill(
                 selected: _librarySegment == 1,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 22, vertical: 11),
                 onSelect: () => setState(() => _librarySegment = 1),
-                child: Text('我的收藏 (${favorites.length})'),
+                child: const Text('我的收藏', style: TextStyle(fontSize: 17)),
               ),
               const Spacer(),
               if (_librarySegment == 0 && history.isNotEmpty)
                 TvFocusPill(
+                  destructive: true,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
                   onSelect: () async {
                     await widget.storage.clearWatchHistory();
-                    if (mounted) {
-                      setState(() {});
-                    }
+                    if (mounted) setState(() {});
                   },
-                  child: const Text('清空历史'),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(CupertinoIcons.trash, size: 15),
+                      SizedBox(width: 6),
+                      Text('清空观看历史', style: TextStyle(fontSize: 14)),
+                    ],
+                  ),
                 ),
             ],
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 22),
           Expanded(
             child: _librarySegment == 0
                 ? (history.isEmpty
                     ? const Center(
                         child: Text(
                           '暂无观看记录',
-                          style: TextStyle(color: AppleColors.labelSecondary),
+                          style: TextStyle(
+                            color: TvAmbientColors.secondaryText,
+                            fontSize: 17,
+                          ),
                         ),
                       )
                     : GridView.builder(
                         itemCount: history.length,
-                        gridDelegate:
-                            const SliverGridDelegateWithMaxCrossAxisExtent(
-                              maxCrossAxisExtent: 205,
-                              mainAxisSpacing: 20,
-                              crossAxisSpacing: 18,
-                              childAspectRatio: 0.60,
-                            ),
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: gridCols,
+                          mainAxisSpacing: 26,
+                          crossAxisSpacing: 24,
+                          childAspectRatio: 0.50,
+                        ),
                         itemBuilder: (_, idx) {
                           final h = history[idx];
+                          final pct =
+                              (h.progressFraction * 100).round().clamp(0, 100);
+                          final badge = h.episode.isEmpty
+                              ? '$pct%'
+                              : '${h.episode} · $pct%';
                           final vid = CmsVideo(
                             id: h.id,
                             title: h.title,
                             poster: h.poster,
-                            remarks: h.episode,
+                            remarks: badge,
                           );
-                          return TvFocusablePosterCard(
-                            video: vid,
-                            subtitleBadge: h.episode,
-                            progressFraction: h.progressFraction,
-                            onSelect: () =>
-                                _openDetail(resolveSite(h.site), vid),
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: TvFocusablePosterCard(
+                                  video: vid,
+                                  subtitleBadge: badge,
+                                  onFocusGained: () =>
+                                      _syncAmbientFromPoster(h.poster),
+                                  onSelect: () =>
+                                      _openDetail(resolveSite(h.site), vid),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              TvFocusPill(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 6,
+                                ),
+                                onSelect: () async {
+                                  await widget.storage
+                                      .removeWatchHistoryItem(h.site, h.id);
+                                  if (mounted) setState(() {});
+                                },
+                                child: const Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(CupertinoIcons.xmark_circle, size: 14),
+                                    SizedBox(width: 5),
+                                    Text(
+                                      '移除记录',
+                                      style: TextStyle(fontSize: 13),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
                           );
                         },
                       ))
                 : (favorites.isEmpty
                     ? const Center(
                         child: Text(
-                          '暂无收藏内容',
-                          style: TextStyle(color: AppleColors.labelSecondary),
+                          '暂无收藏影片',
+                          style: TextStyle(
+                            color: TvAmbientColors.secondaryText,
+                            fontSize: 17,
+                          ),
                         ),
                       )
                     : GridView.builder(
                         itemCount: favorites.length,
-                        gridDelegate:
-                            const SliverGridDelegateWithMaxCrossAxisExtent(
-                              maxCrossAxisExtent: 205,
-                              mainAxisSpacing: 20,
-                              crossAxisSpacing: 18,
-                              childAspectRatio: 0.60,
-                            ),
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: gridCols,
+                          mainAxisSpacing: 26,
+                          crossAxisSpacing: 24,
+                          childAspectRatio: 0.50,
+                        ),
                         itemBuilder: (_, idx) {
                           final fav = favorites[idx];
+                          final site = resolveSite(fav.site);
                           final vid = CmsVideo(
                             id: fav.id,
                             title: fav.title,
                             poster: fav.poster,
                             remarks: fav.remarks,
                           );
-                          return TvFocusablePosterCard(
-                            video: vid,
-                            subtitleBadge: fav.remarks,
-                            onSelect: () =>
-                                _openDetail(resolveSite(fav.site), vid),
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: TvFocusablePosterCard(
+                                  video: vid,
+                                  subtitleBadge: fav.remarks,
+                                  onFocusGained: () =>
+                                      _syncAmbientFromPoster(fav.poster),
+                                  onSelect: () => _openDetail(site, vid),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              TvFocusPill(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 6,
+                                ),
+                                onSelect: () async {
+                                  await widget.storage
+                                      .toggleFavorite(site, vid);
+                                  if (mounted) setState(() {});
+                                },
+                                child: const Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(CupertinoIcons.heart_slash, size: 14),
+                                    SizedBox(width: 5),
+                                    Text(
+                                      '取消收藏',
+                                      style: TextStyle(fontSize: 13),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
                           );
                         },
                       )),
@@ -1611,190 +1936,948 @@ class _TvLivingRoomShellState extends State<TvLivingRoomShell> {
     );
   }
 
-  Widget _buildSettingsView() {
-    final uiMode = widget.storage.tvUiMode;
-    final speed = widget.storage.playSpeed;
-    const speeds = <double>[1.0, 1.25, 1.5, 2.0];
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(36, 12, 36, 40),
+  Widget _settingsGlassCard({required List<Widget> children}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(26),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.085),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: TvAmbientColors.glassStroke, width: 1.1),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        children: children,
+      ),
+    );
+  }
+
+  Widget _buildSettingsView() {
+    const sections = <(IconData, String)>[
+      (CupertinoIcons.paintbrush_fill, '外观与柔光'),
+      (CupertinoIcons.layers_alt_fill, '订阅与片源'),
+      (CupertinoIcons.cloud_download_fill, '4K 网盘加速'),
+      (CupertinoIcons.cloud_upload_fill, 'WebDAV 云同步'),
+      (CupertinoIcons.slider_horizontal_3, '播放与跳过'),
+      (CupertinoIcons.archivebox_fill, '备份与存储'),
+    ];
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(56, 8, 56, 28),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            '配置导入与多端同步',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
+          SizedBox(
+            width: 328,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(10, 0, 10, 14),
+                  child: Text(
+                    '系统设置',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                for (var i = 0; i < sections.length; i++)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: TvFocusPill(
+                      selected: _settingsSection == i,
+                      borderRadius: 14,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 14,
+                      ),
+                      onSelect: () => setState(() => _settingsSection = i),
+                      child: Row(
+                        children: [
+                          Icon(sections[i].$1, size: 17),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              sections[i].$2,
+                              style: const TextStyle(fontSize: 17),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                const Spacer(),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(10, 0, 10, 6),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      MarcoBrandLogo(iconSize: 28, fontSize: 17),
+                      SizedBox(height: 6),
+                      Text(
+                        'HarmonyOS 客厅原画端 · HUKS 安全存储',
+                        style: TextStyle(
+                          color: TvAmbientColors.secondaryText,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 14),
-          Wrap(
-            spacing: 14,
-            runSpacing: 14,
-            children: [
-              TvFocusPill(
-                selected: true,
-                onSelect: _showQrSyncDialog,
-                child: const Text('📱 手机扫码推送配置 / 局域网同步'),
-              ),
-              TvFocusPill(
-                onSelect: _showUrlImportDialog,
-                child: const Text('🔗 输入地址 / 剪贴板导入'),
-              ),
-              TvFocusPill(
-                onSelect: () => _importLocalConfigOrBackup(isBackup: false),
-                child: const Text('📂 选择本地配置文件'),
-              ),
-              TvFocusPill(
-                onSelect: _showSitePickerDialog,
-                child: const Text('🗂️ 管理订阅源与切换仓库'),
-              ),
-              TvFocusPill(
-                onSelect: () => showNetdiskAccountSheet(
-                  context,
-                  widget.storage,
-                  onChanged: () {
-                    if (mounted) {
-                      setState(() {});
-                    }
-                  },
-                ),
-                child: const Text('🗂️ 网盘 4K 账号扫码授权（夸克/UC/百度/阿里）'),
-              ),
-              TvFocusPill(
-                onSelect: () => showCloudSyncSheet(
-                  context,
-                  widget.storage,
-                  onSynced: ({required bool subscriptionsChanged}) {
-                    if (subscriptionsChanged) {
-                      _reloadConfigAndFetch();
-                    } else if (mounted) {
-                      setState(() {});
-                    }
-                  },
-                ),
-                child: const Text('☁️ WebDAV 云端同步设置'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 28),
-          const Text(
-            '跨端备份互通（marco-movie-backup）',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
+          const SizedBox(width: 32),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.only(bottom: 24),
+              child: switch (_settingsSection) {
+                0 => _buildSettingsAppearanceSection(),
+                1 => _buildSettingsSourcesSection(),
+                2 => _buildSettingsNetdiskSection(),
+                3 => _buildSettingsWebdavSection(),
+                4 => _buildSettingsPlaybackSection(),
+                _ => _buildSettingsBackupSection(),
+              },
             ),
-          ),
-          const SizedBox(height: 14),
-          Wrap(
-            spacing: 14,
-            runSpacing: 14,
-            children: [
-              TvFocusPill(
-                onSelect: _exportBackup,
-                child: const Text('📤 导出备份文件 / 复制 JSON'),
-              ),
-              TvFocusPill(
-                onSelect: () => _importLocalConfigOrBackup(isBackup: true),
-                child: const Text('📥 从本地备份文件恢复'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 28),
-          const Text(
-            '播放与界面模式',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 14),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              const Text(
-                '默认倍速：',
-                style: TextStyle(color: AppleColors.labelSecondary),
-              ),
-              for (final s in speeds)
-                TvFocusPill(
-                  selected: (speed - s).abs() < 0.01,
-                  onSelect: () async {
-                    await widget.storage.setPlaySpeed(s);
-                    if (mounted) {
-                      setState(() {});
-                    }
-                  },
-                  child: Text('${s}x'),
-                ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              const Text(
-                '线路优选：',
-                style: TextStyle(color: AppleColors.labelSecondary),
-              ),
-              TvFocusPill(
-                selected: widget.storage.preferredQuality == '4k_netdisk',
-                onSelect: () async {
-                  await widget.storage.setPreferredQuality('4k_netdisk');
-                  if (mounted) {
-                    setState(() {});
-                  }
-                },
-                child: const Text('4K 原画网盘优先'),
-              ),
-              TvFocusPill(
-                selected: widget.storage.preferredQuality == 'auto',
-                onSelect: () async {
-                  await widget.storage.setPreferredQuality('auto');
-                  if (mounted) {
-                    setState(() {});
-                  }
-                },
-                child: const Text('默认直链顺序'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              const Text(
-                '界面形态：',
-                style: TextStyle(color: AppleColors.labelSecondary),
-              ),
-              TvFocusPill(
-                selected: uiMode == 'auto',
-                onSelect: () => widget.storage.setTvUiMode('auto'),
-                child: const Text('自动识别（手机/平板/智慧屏）'),
-              ),
-              TvFocusPill(
-                selected: uiMode == 'tv',
-                onSelect: () => widget.storage.setTvUiMode('tv'),
-                child: const Text('强制大屏遥控模式'),
-              ),
-              TvFocusPill(
-                selected: uiMode == 'standard',
-                onSelect: () => widget.storage.setTvUiMode('standard'),
-                child: const Text('标准触控 / 桌面模式'),
-              ),
-            ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSettingsAppearanceSection() {
+    final currentTheme = widget.storage.tvAmbientTheme;
+    final currentPreset = TvAmbientPreset.forId(currentTheme);
+    final intensity = widget.storage.tvAmbientIntensity;
+    final posterSync = widget.storage.tvAmbientPosterSync;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _settingsGlassCard(
+          children: [
+            const Text(
+              '客厅全局渐变柔光主题',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              '自由定制大屏背景柔光色彩，切换即时生效并持久化保存（当前：${currentPreset.name}）',
+              style: const TextStyle(
+                color: TvAmbientColors.secondaryText,
+                fontSize: 14.5,
+              ),
+            ),
+            const SizedBox(height: 18),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: TvAmbientPreset.allPresets.length,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                mainAxisSpacing: 16,
+                crossAxisSpacing: 16,
+                childAspectRatio: 2.05,
+              ),
+              itemBuilder: (_, idx) {
+                final preset = TvAmbientPreset.allPresets[idx];
+                final selected = currentTheme == preset.id;
+                return TvFocusPill(
+                  selected: false,
+                  preserveColorsOnFocus: true,
+                  borderRadius: 18,
+                  backgroundColor: selected
+                      ? preset.accent.withValues(alpha: 0.24)
+                      : Colors.white.withValues(alpha: 0.08),
+                  padding: const EdgeInsets.all(14),
+                  onSelect: () async {
+                    await widget.storage.setTvAmbientTheme(preset.id);
+                    if (mounted) setState(() {});
+                  },
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TvAmbientPresetSwatch(
+                        preset: preset,
+                        selected: selected,
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Container(
+                            width: 11,
+                            height: 11,
+                            decoration: BoxDecoration(
+                              color: preset.orbPrimary,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Container(
+                            width: 11,
+                            height: 11,
+                            decoration: BoxDecoration(
+                              color: preset.orbSecondary,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              preset.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 17,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        preset.subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: TvAmbientColors.secondaryText,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        _settingsGlassCard(
+          children: [
+            const Text(
+              '柔光氛围浓度与动态联动',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                const SizedBox(
+                  width: 96,
+                  child: Text(
+                    '柔光浓度',
+                    style: TextStyle(
+                      color: TvAmbientColors.secondaryText,
+                      fontSize: 16,
+                    ),
+                  ),
+                ),
+                for (final item in const [
+                  ('soft', '柔和微光'),
+                  ('standard', '标准柔光'),
+                  ('vivid', '浓郁流光'),
+                ])
+                  Padding(
+                    padding: const EdgeInsets.only(right: 12),
+                    child: TvFocusPill(
+                      selected: intensity == item.$1,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 20,
+                        vertical: 11,
+                      ),
+                      onSelect: () async {
+                        await widget.storage.setTvAmbientIntensity(item.$1);
+                        if (mounted) setState(() {});
+                      },
+                      child: Text(item.$2, style: const TextStyle(fontSize: 16)),
+                    ),
+                  ),
+                const Spacer(),
+                TvFocusPill(
+                  selected: posterSync,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 11,
+                  ),
+                  onSelect: () async {
+                    await widget.storage.setTvAmbientPosterSync(!posterSync);
+                    if (mounted) {
+                      setState(() {
+                        if (posterSync) _focusedPosterTint = null;
+                      });
+                    }
+                  },
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        posterSync
+                            ? CupertinoIcons.checkmark_alt_circle_fill
+                            : CupertinoIcons.circle,
+                        size: 16,
+                      ),
+                      const SizedBox(width: 8),
+                      const Text(
+                        '海报色彩氛围联动',
+                        style: TextStyle(fontSize: 15.5),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsSourcesSection() {
+    final availableCount =
+        (_config?.publicAvailableSites ?? const <CmsSite>[]).length;
+    final totalCount = (_config?.publicSupportedSites ?? const <CmsSite>[]).length;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _settingsGlassCard(
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '订阅配置导入（推荐手机扫码快传）',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      SizedBox(height: 5),
+                      Text(
+                        '支持一键推送多仓、TVBox JSON、M3U/TXT 直播列表及 marco-movie-backup.json',
+                        style: TextStyle(
+                          color: TvAmbientColors.secondaryText,
+                          fontSize: 14.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                TvFocusPill(
+                  prominent: true,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+                  onSelect: _showQrSyncDialog,
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(CupertinoIcons.qrcode_viewfinder, size: 17),
+                      SizedBox(width: 8),
+                      Text('手机扫码推送配置', style: TextStyle(fontSize: 16)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 18),
+            Wrap(
+              spacing: 14,
+              runSpacing: 12,
+              children: [
+                TvFocusPill(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  onSelect: _showUrlImportDialog,
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(CupertinoIcons.link, size: 16),
+                      SizedBox(width: 8),
+                      Text('输入地址 / 剪贴板导入', style: TextStyle(fontSize: 15.5)),
+                    ],
+                  ),
+                ),
+                TvFocusPill(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  onSelect: () => _importLocalConfigOrBackup(isBackup: false),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(CupertinoIcons.folder_fill, size: 16),
+                      SizedBox(width: 8),
+                      Text('选择本地配置文件', style: TextStyle(fontSize: 15.5)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        _settingsGlassCard(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '多仓管理与活动片源',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        '当前片源：${_activeSite?.name ?? "未配置"} · 可用 $availableCount / 共 $totalCount 个站点',
+                        style: const TextStyle(
+                          color: TvAmbientColors.secondaryText,
+                          fontSize: 14.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                TvFocusPill(
+                  selected: true,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  onSelect: _showSitePickerDialog,
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(CupertinoIcons.layers_alt_fill, size: 16),
+                      SizedBox(width: 8),
+                      Text('管理订阅源与切换仓库', style: TextStyle(fontSize: 15.5)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsNetdiskSection() {
+    const drives = <(String, String, String, String)>[
+      ('quark', '我的夸父', '夸克网盘', '夸父 4K'),
+      ('uc', '我的优汐', 'UC 网盘', '优汐 4K'),
+      ('baidu', '我的嘟嘟', '百度网盘', '嘟嘟 4K'),
+      ('ali', '我的阿狸', '阿里云盘', '阿狸 4K'),
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _settingsGlassCard(
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '4K 网盘扫码授权与 6 线程分片加速',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      SizedBox(height: 5),
+                      Text(
+                        '会话凭据仅保存在本机鸿蒙 HUKS 安全存储，绝不写入公开备份文件',
+                        style: TextStyle(
+                          color: TvAmbientColors.secondaryText,
+                          fontSize: 14.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                TvFocusPill(
+                  prominent: true,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+                  onSelect: () => showNetdiskAccountSheet(
+                    context,
+                    widget.storage,
+                    onChanged: () {
+                      if (mounted) setState(() {});
+                    },
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(CupertinoIcons.qrcode, size: 17),
+                      SizedBox(width: 8),
+                      Text('打开 4K 扫码授权', style: TextStyle(fontSize: 16)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 18),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: drives.length,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 2,
+                mainAxisSpacing: 14,
+                crossAxisSpacing: 14,
+                childAspectRatio: 4.1,
+              ),
+              itemBuilder: (_, idx) {
+                final (key, alias, realName, badge) = drives[idx];
+                final loggedIn = widget.storage.isNetdiskLoggedIn(key);
+                return TvFocusPill(
+                  borderRadius: 16,
+                  preserveColorsOnFocus: true,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 14,
+                  ),
+                  onSelect: () => showNetdiskAccountSheet(
+                    context,
+                    widget.storage,
+                    initialDriveKey: key,
+                    onChanged: () {
+                      if (mounted) setState(() {});
+                    },
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              alias,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 17,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              '$realName · $badge',
+                              style: const TextStyle(
+                                color: TvAmbientColors.secondaryText,
+                                fontSize: 13.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 11,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: loggedIn
+                              ? const Color(0x3834C759)
+                              : Colors.white.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Text(
+                          loggedIn ? '已授权' : '未登录',
+                          style: TextStyle(
+                            color: loggedIn
+                                ? const Color(0xFF6EE798)
+                                : TvAmbientColors.secondaryText,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        _settingsGlassCard(
+          children: [
+            const Text(
+              '云盘线路优选策略',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                TvFocusPill(
+                  selected: widget.storage.preferredQuality == '4k_netdisk',
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
+                  onSelect: () async {
+                    await widget.storage.setPreferredQuality('4k_netdisk');
+                    if (mounted) setState(() {});
+                  },
+                  child: const Text('4K 原画网盘优先', style: TextStyle(fontSize: 15.5)),
+                ),
+                TvFocusPill(
+                  selected: widget.storage.preferredQuality == 'auto',
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
+                  onSelect: () async {
+                    await widget.storage.setPreferredQuality('auto');
+                    if (mounted) setState(() {});
+                  },
+                  child: const Text('默认直链顺序', style: TextStyle(fontSize: 15.5)),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsWebdavSection() {
+    return _settingsGlassCard(
+      children: [
+        const Text(
+          'WebDAV 云端双向同步（marco-movie-sync v2）',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          '与手机、平板、macOS、Windows 及 Apple TV 无缝同步观看进度、收藏与订阅列表',
+          style: TextStyle(
+            color: TvAmbientColors.secondaryText,
+            fontSize: 14.5,
+          ),
+        ),
+        const SizedBox(height: 20),
+        TvFocusPill(
+          prominent: true,
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 13),
+          onSelect: () => showCloudSyncSheet(
+            context,
+            widget.storage,
+            onSynced: ({required bool subscriptionsChanged}) {
+              if (subscriptionsChanged) {
+                _reloadConfigAndFetch();
+              } else if (mounted) {
+                setState(() {});
+              }
+            },
+          ),
+          child: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(CupertinoIcons.cloud_upload_fill, size: 17),
+              SizedBox(width: 8),
+              Text('配置 WebDAV 并立即同步', style: TextStyle(fontSize: 16)),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsPlaybackSection() {
+    final uiMode = widget.storage.tvUiMode;
+    final speed = widget.storage.playSpeed;
+    const speeds = <double>[0.75, 1.0, 1.25, 1.5, 2.0];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _settingsGlassCard(
+          children: [
+            const Text(
+              '默认播放倍速与硬件解码',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                for (final s in speeds)
+                  TvFocusPill(
+                    selected: (speed - s).abs() < 0.01,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 11,
+                    ),
+                    onSelect: () async {
+                      await widget.storage.setPlaySpeed(s);
+                      if (mounted) setState(() {});
+                    },
+                    child: Text('${s}x', style: const TextStyle(fontSize: 16)),
+                  ),
+              ],
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        _settingsGlassCard(
+          children: [
+            const Text(
+              '多形态界面切换（HarmonyOS 通用包）',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              '默认根据设备类型自动切换手机/平板触控界面与智慧屏 10 英尺遥控界面',
+              style: TextStyle(
+                color: TvAmbientColors.secondaryText,
+                fontSize: 14.5,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                TvFocusPill(
+                  selected: uiMode == 'auto',
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
+                  onSelect: () => widget.storage.setTvUiMode('auto'),
+                  child: const Text(
+                    '自动识别（手机/平板/智慧屏）',
+                    style: TextStyle(fontSize: 15.5),
+                  ),
+                ),
+                TvFocusPill(
+                  selected: uiMode == 'tv',
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
+                  onSelect: () => widget.storage.setTvUiMode('tv'),
+                  child: const Text('强制大屏遥控模式', style: TextStyle(fontSize: 15.5)),
+                ),
+                TvFocusPill(
+                  selected: uiMode == 'standard',
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
+                  onSelect: () => widget.storage.setTvUiMode('standard'),
+                  child: const Text(
+                    '标准触控 / 桌面模式',
+                    style: TextStyle(fontSize: 15.5),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSettingsBackupSection() {
+    return _settingsGlassCard(
+      children: [
+        const Text(
+          '跨端备份互通（marco-movie-backup）与缓存',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '当前海报内存缓存：${PosterLoader.memoryCacheSizeLabel}',
+          style: const TextStyle(
+            color: TvAmbientColors.secondaryText,
+            fontSize: 14.5,
+          ),
+        ),
+        const SizedBox(height: 20),
+        Wrap(
+          spacing: 14,
+          runSpacing: 14,
+          children: [
+            TvFocusPill(
+              prominent: true,
+              padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+              onSelect: _exportBackup,
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(CupertinoIcons.share_up, size: 16),
+                  SizedBox(width: 8),
+                  Text('导出备份文件 / 复制 JSON', style: TextStyle(fontSize: 15.5)),
+                ],
+              ),
+            ),
+            TvFocusPill(
+              padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+              onSelect: () => _importLocalConfigOrBackup(isBackup: true),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(CupertinoIcons.arrow_down_doc_fill, size: 16),
+                  SizedBox(width: 8),
+                  Text('从本地备份文件恢复', style: TextStyle(fontSize: 15.5)),
+                ],
+              ),
+            ),
+            TvFocusPill(
+              destructive: true,
+              padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+              onSelect: () async {
+                await PosterLoader.clearCache();
+                if (mounted) {
+                  setState(() {});
+                  _showToast('已清理本地海报缓存');
+                }
+              },
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(CupertinoIcons.trash, size: 16),
+                  SizedBox(width: 8),
+                  Text('清理海报缓存', style: TextStyle(fontSize: 15.5)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// Apple TV-parity floating capsule navigation tab inside the centered frosted dock.
+class _TvFloatingNavTab extends StatefulWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final bool autofocus;
+  final VoidCallback onSelect;
+
+  const _TvFloatingNavTab({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.autofocus,
+    required this.onSelect,
+  });
+
+  @override
+  State<_TvFloatingNavTab> createState() => _TvFloatingNavTabState();
+}
+
+class _TvFloatingNavTabState extends State<_TvFloatingNavTab> {
+  bool _focused = false;
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final active = widget.selected || _focused || _hovered;
+    final fg = active ? TvAmbientColors.darkInk : Colors.white.withValues(alpha: 0.86);
+    final bg = widget.selected
+        ? const Color(0xECEAECEF)
+        : (_focused || _hovered
+            ? Colors.white.withValues(alpha: 0.88)
+            : Colors.transparent);
+
+    return Focus(
+      autofocus: widget.autofocus,
+      onFocusChange: (f) => setState(() => _focused = f),
+      onKeyEvent: (_, event) {
+        if (event is KeyDownEvent && isTvActivationKey(event.logicalKey)) {
+          widget.onSelect();
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onSelect,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            curve: Curves.easeOutCubic,
+            padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 11),
+            decoration: BoxDecoration(
+              color: bg,
+              borderRadius: BorderRadius.circular(999),
+              boxShadow: widget.selected || _focused
+                  ? [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.28),
+                        blurRadius: 14,
+                        offset: const Offset(0, 4),
+                      ),
+                    ]
+                  : null,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(widget.icon, size: 18, color: fg),
+                const SizedBox(width: 8),
+                Text(
+                  widget.label,
+                  style: TextStyle(
+                    color: fg,
+                    fontSize: 18,
+                    fontWeight: active ? FontWeight.w700 : FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

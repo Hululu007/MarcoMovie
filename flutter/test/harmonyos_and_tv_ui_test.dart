@@ -1015,5 +1015,76 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump(const Duration(seconds: 5));
     });
+
+    testWidgets('TvLivingRoomShell Apple TV parity: 6 ambient themes, intensity, poster sync & settings studio', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final storage = await StorageService.init();
+      final configJson = jsonEncode({
+        'sites': [
+          {
+            'key': 'local_cms',
+            'name': '家庭影院主源',
+            'type': 1,
+            'api': 'http://127.0.0.1:18080/api.php/provide/vod/',
+            'searchable': 1,
+          },
+        ],
+      });
+      await storage.saveConfig(configJson);
+
+      tester.view.physicalSize = const Size(1920, 1080);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      OhosRuntime.debugIsOhosOverride = true;
+      OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+      final client = CmsClient(client: _FakeCmsHttpClient());
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TvLivingRoomShell(storage: storage, client: client),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump(const Duration(milliseconds: 250));
+
+      // Floating centered Apple TV-parity nav bar has `发现` + right `扫码快传`
+      expect(find.text('发现'), findsOneWidget);
+      expect(find.text('扫码快传'), findsOneWidget);
+
+      // Navigate to Settings -> 外观与柔光
+      await tester.tap(find.text('设置'));
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(find.text('系统设置'), findsOneWidget);
+      expect(find.text('客厅全局渐变柔光主题'), findsOneWidget);
+      expect(find.text('极光青翠'), findsOneWidget);
+      expect(find.text('暮色流光'), findsOneWidget);
+      expect(find.text('暖金影院'), findsOneWidget);
+
+      // Switch theme to 暮色流光 & intensity to 浓郁流光 and verify persistence
+      await tester.tap(find.text('暮色流光'));
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(storage.tvAmbientTheme, 'twilight');
+      expect(find.textContaining('当前：暮色流光'), findsOneWidget);
+
+      await tester.tap(find.text('浓郁流光'));
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(storage.tvAmbientIntensity, 'vivid');
+
+      // Toggle 海报色彩氛围联动 off
+      await tester.tap(find.text('海报色彩氛围联动'));
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(storage.tvAmbientPosterSync, isFalse);
+
+      // Switch settings sidebar to 播放与跳过 & verify UI mode options
+      await tester.tap(find.text('播放与跳过'));
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(find.text('自动识别（手机/平板/智慧屏）'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(seconds: 5));
+    });
   });
 }

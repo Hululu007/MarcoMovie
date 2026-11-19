@@ -817,13 +817,24 @@ def generate_xcodeproj() -> Path:
             },
         )
 
+    editions_path = REPO_ROOT / "flutter" / "edition-versions.json"
+    atv_ver = "0.1.1"
+    atv_build = "2"
+    if editions_path.is_file():
+        try:
+            ed = json.loads(editions_path.read_text(encoding="utf-8")).get("appletv", {})
+            atv_ver = str(ed.get("versionName") or atv_ver)
+            atv_build = str(ed.get("buildNumber") or atv_build)
+        except Exception:
+            pass
+
     proj_common = {
         "ALWAYS_SEARCH_USER_PATHS": "NO",
         "CLANG_ENABLE_MODULES": "YES",
         "CLANG_ENABLE_OBJC_ARC": "YES",
-        "CURRENT_PROJECT_VERSION": "1",
+        "CURRENT_PROJECT_VERSION": atv_build,
         "GCC_C_LANGUAGE_STANDARD": "gnu11",
-        "MARKETING_VERSION": "0.1.0",
+        "MARKETING_VERSION": atv_ver,
         "SDKROOT": "appletvos",
         "SWIFT_VERSION": "5.0",
         "TARGETED_DEVICE_FAMILY": "3",
