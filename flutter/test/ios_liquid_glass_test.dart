@@ -216,4 +216,155 @@ void main() {
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
   );
+
+  testWidgets(
+    'scrolling Home collapses 4+1 Dock to bottom-right brand logo bubble and restores on scroll back to top',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final storage = await initTestStorage();
+      await storage.saveConfig(
+        '{"sites":[{"key":"test","name":"测试源","type":1,"api":"https://source.example/api"}]}',
+      );
+      final videos = List.generate(
+        24,
+        (i) => '{"vod_id":"v$i","vod_name":"测试影片 $i","vod_pic":"","vod_remarks":"HD"}',
+      ).join(',');
+      final client = CmsClient(
+        client: MockClient(
+          (_) async => http.Response('{"class":[{"type_id":"1","type_name":"电影"}],"list":[$videos]}', 200),
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AdaptiveShell(storage: storage, client: client),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+
+      // At top: 4+1 Dock is visible, collapsed logo button is absent.
+      expect(find.byKey(const ValueKey('home-search-button')), findsOneWidget);
+      expect(find.byKey(const ValueKey('dock-collapsed-logo-button')), findsNothing);
+
+      // Scroll Home downward past logo threshold -> collapses into bottom-right brand logo button.
+      await tester.drag(find.byType(CustomScrollView).first, const Offset(0, -320));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.byKey(const ValueKey('dock-collapsed-logo-button')), findsOneWidget);
+      expect(find.byKey(const ValueKey('home-search-button')), findsNothing);
+
+      // Tapping the collapsed logo button opens the vertical glass bubble menu.
+      await tester.tap(find.byKey(const ValueKey('dock-collapsed-logo-button')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.byKey(const ValueKey('dock-collapsed-bubble-menu')), findsOneWidget);
+      expect(find.text('搜索影片'), findsOneWidget);
+      expect(find.text('回到顶部'), findsOneWidget);
+
+      // Tapping 回到顶部 scrolls back to top and restores the full 4+1 Dock.
+      await tester.tap(find.text('回到顶部'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byKey(const ValueKey('home-search-button')), findsOneWidget);
+      expect(find.byKey(const ValueKey('dock-collapsed-logo-button')), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'showAppleNativeFilterSheet dispatches payload and decodes selected filters on iOS 26+',
+    (tester) async {
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      MethodCall? capturedCall;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(IosLiquidGlassBridge.channel, (call) async {
+        capturedCall = call;
+        return <String, dynamic>{
+          'categoryId': '2',
+          'genreLabel': '',
+          'area': '中国大陆',
+          'year': '2026',
+        };
+      });
+
+      final res = await showAppleNativeFilterSheet(
+        categories: const [
+          IosNativeFilterCategory(id: '', label: '全部', kind: 'all'),
+          IosNativeFilterCategory(id: '2', label: '动作片', kind: 'cat'),
+        ],
+        selectedCategoryId: '',
+        selectedGenreLabel: '',
+        areas: const ['全部', '中国大陆', '美国'],
+        selectedArea: '',
+        years: const ['全部', '2026', '2025'],
+        selectedYear: '',
+      );
+
+      expect(capturedCall?.method, 'showFilterSheet');
+      expect(res, isNotNull);
+      expect(res!.categoryId, '2');
+      expect(res.area, '中国大陆');
+      expect(res.year, '2026');
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'Home mounts native UIMenu source button, netdisk glass button, category segmented control, and filter glass button on iOS 26+',
+    (tester) async {
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final storage = await initTestStorage();
+      await storage.saveConfig(
+        '{"sites":[{"key":"s1","name":"玩偶哥哥 | 4K弹幕","type":1,"api":"https://source.example/api"},{"key":"s2","name":"备用影视","type":1,"api":"https://backup.example/api"}]}',
+      );
+      final client = CmsClient(
+        client: MockClient(
+          (_) async => http.Response('{"class":[],"list":[]}', 200),
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AdaptiveShell(storage: storage, client: client),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 400));
+
+      final views = tester.widgetList<UiKitView>(find.byType(UiKitView)).toList();
+      final types = views.map((v) => v.viewType).toList();
+      expect(types, contains('marco_movie/ios26_dock'));
+      expect(types, contains('marco_movie/ios26_segmented_control'));
+      expect(
+        types.where((t) => t == 'marco_movie/ios26_glass_button').length,
+        greaterThanOrEqualTo(3), // Source UIMenu + Netdisk circle + Filter capsule
+      );
+
+      // Verify the source switcher button passes native UIMenu items.
+      final sourceButton = views.firstWhere((v) {
+        if (v.viewType != 'marco_movie/ios26_glass_button') return false;
+        final params = v.creationParams as Map<dynamic, dynamic>;
+        return params['menuItems'] != null;
+      });
+      final menuItems =
+          (sourceButton.creationParams as Map<dynamic, dynamic>)['menuItems']
+              as List<dynamic>;
+      expect(menuItems.length, greaterThanOrEqualTo(2));
+      expect((menuItems.first as Map)['id'], '__all__');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
 }

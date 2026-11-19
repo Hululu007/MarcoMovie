@@ -16,6 +16,7 @@ import '../core/netdisk_session.dart';
 import '../core/storage_service.dart';
 import '../core/quark_account.dart';
 import 'apple_theme.dart';
+import 'ios_liquid_glass.dart';
 import 'ios_settings.dart';
 import 'local_qr_code.dart';
 import 'quark_library_sheet.dart';
@@ -106,6 +107,7 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
   int? _pollingAttempt;
   bool _foreground = true;
   bool _resumedImmediateRetry = false;
+  int _selectedDriveFilter = 0;
 
   @override
   void initState() {
@@ -749,11 +751,21 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
                       ),
                     ),
                     const SizedBox(width: 8),
-                    AppleCapsuleButton(
-                      icon: CupertinoIcons.refresh,
+                    IosNativeGlassButton(
+                      style: 'capsule',
+                      symbol: 'arrow.triangle.2.circlepath',
                       label: '切换盘序',
-                      compact: true,
-                      onPressed: _rotateDriveOrder,
+                      symbolSize: 13,
+                      height: 32,
+                      maxWidth: 108,
+                      accessibilityLabel: '切换盘序',
+                      onTap: _rotateDriveOrder,
+                      fallback: AppleCapsuleButton(
+                        icon: CupertinoIcons.refresh,
+                        label: '切换盘序',
+                        compact: true,
+                        onPressed: _rotateDriveOrder,
+                      ),
                     ),
                   ],
                 ),
@@ -766,6 +778,16 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
             ),
           ),
           const SizedBox(height: 14),
+          if (IosLiquidGlassBridge.isAvailable) ...[
+            IosNativeSegmentedControl(
+              segments: const ['全部', '夸克', 'UC', '百度', '阿狸'],
+              selectedIndex: _selectedDriveFilter,
+              height: 36,
+              onChanged: (idx) => setState(() => _selectedDriveFilter = idx),
+              fallback: const SizedBox.shrink(),
+            ),
+            const SizedBox(height: 14),
+          ],
 
           // Active QR Code Scanner Box if a drive is selected
           if (_activeQrDriveKey != null) ...[
@@ -773,11 +795,12 @@ class _NetdiskAccountSheetState extends State<_NetdiskAccountSheet>
             const SizedBox(height: 16),
           ],
 
-          // 4 Netdisk Drives List
-          for (final drive in NetdiskService.drives) ...[
-            _buildDriveTile(drive),
-            const SizedBox(height: 10),
-          ],
+          // 4 Netdisk Drives List (filtered when a specific drive segment is active on iOS 26+)
+          for (var i = 0; i < NetdiskService.drives.length; i++)
+            if (_selectedDriveFilter == 0 || _selectedDriveFilter == i + 1) ...[
+              _buildDriveTile(NetdiskService.drives[i]),
+              const SizedBox(height: 10),
+            ],
         ],
       ),
     );

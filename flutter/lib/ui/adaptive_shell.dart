@@ -231,7 +231,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   int _liveEpoch = 0;
   // Favorites / History segmented index
   int _librarySegment = 0;
-  // Desktop horizontal scroll controllers (inline shell views only; sheets own their own)
+  bool _dockCollapsed = false;
+  // Scroll controllers (inline shell views only; sheets own their own)
+  final ScrollController _homeScrollController = ScrollController();
   final ScrollController _continueWatchingScrollController = ScrollController();
   final ScrollController _categoryPillsScrollController = ScrollController();
   final ScrollController _filterCategoryScrollController = ScrollController();
@@ -269,6 +271,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _homeScrollController.addListener(_onHomeScroll);
     _cachedWatchHistory = widget.storage.getWatchHistory();
     if (!kIsWeb &&
         (Platform.isWindows || Platform.isMacOS || Platform.isLinux) &&
@@ -572,6 +575,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     unawaited(CmsClient.closeScriptSessions());
     _searchController.dispose();
     _liveSearchController.dispose();
+    _homeScrollController.removeListener(_onHomeScroll);
+    _homeScrollController.dispose();
     _continueWatchingScrollController.dispose();
     _categoryPillsScrollController.dispose();
     _filterCategoryScrollController.dispose();
@@ -1217,6 +1222,238 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _showImportConfigDialog(initialInput: text, initialError: '剪贴板内容未能直接导入：$e');
     }
   }
+  void _onHomeScroll() {
+    if (!_homeScrollController.hasClients || _tabIndex != 0) return;
+    final offset = _homeScrollController.offset;
+    if (!_dockCollapsed && offset > 72.0) {
+      setState(() => _dockCollapsed = true);
+    } else if (_dockCollapsed && offset < 36.0) {
+      setState(() => _dockCollapsed = false);
+    }
+  }
+
+  void _scrollHomeToTop() {
+    if (_homeScrollController.hasClients) {
+      unawaited(
+        _homeScrollController.animateTo(
+          0,
+          duration: const Duration(milliseconds: 360),
+          curve: Curves.easeOutCubic,
+        ),
+      );
+    }
+    if (_dockCollapsed) {
+      setState(() => _dockCollapsed = false);
+    }
+  }
+
+  void _selectSiteDirect(CmsSite s) {
+    if (s.isCatPaw && Uri.parse(s.api).path == '/api/baseset') {
+      _showCatPawSettings(s);
+      return;
+    }
+    if (_privateSessionUnlocked) {
+      setState(() {
+        _privateSessionUnlocked = true;
+        _selectedPrivateSiteKey = s.key;
+        _activeSite = s;
+      });
+    } else {
+      widget.storage.setSelectedSiteKey(s.key);
+      unawaited(
+        CmsClient.retainScriptSessions(
+          (_config?.scriptOwners ?? const <CmsSite>[])
+              .where((site) => !site.isEffectivelyPrivate),
+        ),
+      );
+      setState(() {
+        _privateSessionUnlocked = false;
+        _activeSite = s;
+      });
+    }
+    _loadSiteHome();
+  }
+
+  Future<void> _switchToDepotDirect(CmsDepot d) async {
+    final depots = _config?.depots ?? const <CmsDepot>[];
+    final owners = widget.storage
+        .getSubscriptions()
+        .where((sub) => sub.id == d.subscriptionId);
+    final owner = owners.isEmpty ? null : owners.first;
+    try {
+      if (owner != null) {
+        final withDirectory = owner.copyWith(
+          depots: depots
+              .where((entry) => entry.subscriptionId == owner.id)
+              .toList(),
+        );
+        final updated = await widget.client.switchSubscriptionDepot(
+          withDirectory,
+          d,
+        );
+        if (!mounted) return;
+        await widget.storage.upsertSubscriptions([updated]);
+      } else {
+        final resolved = await widget.client.resolveConfigInput(
+          urlInput: d.url,
+        );
+        if (!mounted) return;
+        await widget.storage.saveConfig(
+          resolved.rawConfig,
+          origin: resolved.origin,
+          depots: [...depots, ...resolved.depots],
+          activeDepotName: resolved.activeDepotName.isEmpty
+              ? d.name
+              : resolved.activeDepotName,
+        );
+      }
+      if (mounted) _reloadSavedConfig();
+    } catch (e) {
+      if (mounted) _showAppleNotice('切换仓库失败', '$e');
+    }
+  }
+
+  List<IosNativeMenuItem> _buildHomeSourceMenuItems() {
+    final inPrivacyMode = _privateSessionUnlocked;
+    final rawSupported = inPrivacyMode
+        ? (_config?.privateSupportedSites ?? const <CmsSite>[])
+        : (_config?.publicSupportedSites ?? const <CmsSite>[]);
+    final hasRealSupported = rawSupported.any(
+      (s) => !CspBridge.isPickerHiddenUtilitySite(s),
+    );
+    final filtered = hasRealSupported
+        ? rawSupported
+            .where(
+              (s) =>
+                  !CspBridge.isPickerHiddenUtilitySite(s) ||
+                  s.key == _activeSite?.key,
+            )
+            .toList()
+        : List<CmsSite>.from(rawSupported);
+    final prioritized = widget.storage.prioritizeSites(filtered);
+    final prefKey = widget.storage.preferredSiteKey;
+    final activeKey = _activeSite?.key ?? '';
+    final quickList = <CmsSite>[];
+    if (_activeSite != null &&
+        prioritized.any((s) => s.key == _activeSite!.key)) {
+      quickList.add(_activeSite!);
+    }
+    for (final s in prioritized) {
+      if (quickList.length >= 20) break;
+      if (quickList.any((e) => e.key == s.key)) continue;
+      quickList.add(s);
+    }
+    return [
+      IosNativeMenuItem(
+        id: '__all__',
+        title: inPrivacyMode ? '搜索与管理隐私片源…' : '搜索与管理全部片源…',
+        subtitle: '共 ${filtered.length} 个可用源',
+        symbol: 'magnifyingglass',
+        section: 0,
+      ),
+      for (final s in quickList)
+        IosNativeMenuItem(
+          id: 'site:${s.key}',
+          title: s.name,
+          symbol: (!inPrivacyMode && s.key == prefKey)
+              ? 'star.fill'
+              : (inPrivacyMode ? 'lock.shield' : 'play.tv'),
+          checked: s.key == activeKey,
+          section: 1,
+        ),
+    ];
+  }
+
+  void _onHomeSourceMenuSelected(String id) {
+    if (id == '__all__') {
+      _showSitePickerDialog();
+      return;
+    }
+    if (id.startsWith('site:')) {
+      final key = id.substring(5);
+      final pool = _privateSessionUnlocked
+          ? (_config?.privateSupportedSites ?? const <CmsSite>[])
+          : (_config?.publicSupportedSites ?? const <CmsSite>[]);
+      for (final s in pool) {
+        if (s.key == key) {
+          _selectSiteDirect(s);
+          return;
+        }
+      }
+    }
+  }
+
+  List<IosNativeMenuItem> _buildHomeDepotMenuItems(List<CmsDepot> depots) {
+    final subs = widget.storage.getSubscriptions();
+    return [
+      const IosNativeMenuItem(
+        id: '__manage__',
+        title: '查看与管理全部仓库…',
+        symbol: 'archivebox',
+        section: 0,
+      ),
+      for (var i = 0; i < depots.length && i < 20; i++) ...[
+        () {
+          final d = depots[i];
+          final owners = subs.where((sub) => sub.id == d.subscriptionId);
+          final owner = owners.isEmpty ? null : owners.first;
+          final isCurrent =
+              d.url == (owner?.url ?? widget.storage.configOrigin);
+          return IosNativeMenuItem(
+            id: 'depot:$i',
+            title: d.name,
+            symbol: 'shippingbox',
+            checked: isCurrent,
+            section: 1,
+          );
+        }(),
+      ],
+    ];
+  }
+
+  Future<void> _openNativeFilterSheet() async {
+    final subCats = CmsParser.subCategoriesForPrimaryTab(
+      _categories,
+      _primaryTab,
+    );
+    final existingNames = subCats.map((c) => c.name.trim()).toSet();
+    final extraGenres = [
+      for (final g in CmsParser.fallbackGenreTags)
+        if (!existingNames.any((n) => n.contains(g))) g,
+    ];
+    final cats = <IosNativeFilterCategory>[
+      const IosNativeFilterCategory(id: '', label: '全部', kind: 'all'),
+      for (final c in subCats)
+        IosNativeFilterCategory(id: c.id, label: c.name, kind: 'cat'),
+      for (final g in extraGenres)
+        IosNativeFilterCategory(id: g, label: g, kind: 'genre'),
+    ];
+    final picked = await showAppleNativeFilterSheet(
+      title: '多维片库筛选',
+      categories: cats,
+      selectedCategoryId: _filterSubCategoryId,
+      selectedGenreLabel: _filterGenreLabel,
+      areas: CmsParser.filterAreas,
+      selectedArea: _filterArea,
+      years: CmsParser.filterYears,
+      selectedYear: _filterYear,
+    );
+    if (picked == null || !mounted) return;
+    final changed = picked.categoryId != _filterSubCategoryId ||
+        picked.genreLabel != _filterGenreLabel ||
+        picked.area != _filterArea ||
+        picked.year != _filterYear;
+    if (!changed) return;
+    setState(() {
+      _filterSubCategoryId = picked.categoryId;
+      _filterGenreLabel = picked.genreLabel;
+      _filterArea = picked.area;
+      _filterYear = picked.year;
+      _filterExpanded = false;
+    });
+    _reloadFilteredListing(page: 1);
+  }
+
   bool get _isDesktop {
     if (kIsWeb) return false;
     if (OhosRuntime.isOhos &&
@@ -1334,12 +1571,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               heightFactor: 1,
               child: AppleLiquidGlassDock(
                 selectedIndex: safeTabIndex,
-                onSelect: (i) => setState(() => _tabIndex = i),
+                onSelect: (i) => setState(() {
+                  _tabIndex = i;
+                  if (i != 0) _dockCollapsed = false;
+                }),
                 isLandscape: false,
                 items: dockItems,
                 nativeItems: nativeDockItems,
                 onSearch: _showGlobalSearchSheet,
+                onScrollToTop: _scrollHomeToTop,
                 hidden: _privacyPortalAnimating,
+                collapsed: _dockCollapsed && safeTabIndex == 0,
               ),
             ),
       body: Stack(
@@ -1441,27 +1683,79 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       child: LayoutBuilder(
         builder: (context, constraints) {
           final compactHeader = constraints.maxWidth < 600;
+          final depotLabel = compactHeader
+              ? ''
+              : (widget.storage.activeDepotName.isEmpty
+                  ? '切换仓库'
+                  : widget.storage.activeDepotName);
+          final sourceLabel = _activeSite?.name ??
+              (_privateSessionUnlocked ? '选择隐私源' : '选择片源');
           final sourceControls = Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
               if (depots.isNotEmpty) ...[
-                Flexible(child: _buildHeaderCapsule(
-                compact: compactHeader,
-                  icon: CupertinoIcons.archivebox_fill,
-                  label: compactHeader ? '' : (widget.storage.activeDepotName.isEmpty
-                      ? '切换仓库' : widget.storage.activeDepotName),
-                  onTap: _showDepotPickerDialog,
-                )),
+                Flexible(
+                  child: IosNativeGlassButton(
+                    style: compactHeader ? 'circle' : 'capsule',
+                    symbol: 'archivebox.fill',
+                    trailingSymbol: compactHeader ? null : 'chevron.down',
+                    label: depotLabel,
+                    symbolSize: 13.5,
+                    height: 36,
+                    width: compactHeader ? 36 : null,
+                    maxWidth: 148,
+                    accessibilityLabel: depotLabel.isEmpty ? '切换仓库' : depotLabel,
+                    menuTitle: '切换多仓子仓库',
+                    menuItems: _buildHomeDepotMenuItems(depots),
+                    onMenuSelected: (id) {
+                      if (id == '__manage__') {
+                        _showDepotPickerDialog();
+                        return;
+                      }
+                      if (id.startsWith('depot:')) {
+                        final idx = int.tryParse(id.substring(6));
+                        if (idx != null && idx >= 0 && idx < depots.length) {
+                          unawaited(_switchToDepotDirect(depots[idx]));
+                        }
+                      }
+                    },
+                    onTap: _showDepotPickerDialog,
+                    fallback: _buildHeaderCapsule(
+                      compact: compactHeader,
+                      icon: CupertinoIcons.archivebox_fill,
+                      label: depotLabel,
+                      onTap: _showDepotPickerDialog,
+                    ),
+                  ),
+                ),
                 const SizedBox(width: 6),
               ],
-              Flexible(child: _buildHeaderCapsule(
-                compact: compactHeader,
-                icon: _privateSessionUnlocked
-                    ? CupertinoIcons.lock_shield_fill : CupertinoIcons.layers_alt_fill,
-                label: _activeSite?.name ??
-                    (_privateSessionUnlocked ? '选择隐私源' : '选择片源'),
-                onTap: _showSitePickerDialog,
-              )),
+              Flexible(
+                child: IosNativeGlassButton(
+                  style: 'capsule',
+                  symbol: _privateSessionUnlocked
+                      ? 'lock.shield.fill'
+                      : 'square.3.layers.3d',
+                  trailingSymbol: 'chevron.down',
+                  label: sourceLabel,
+                  symbolSize: 13.5,
+                  height: 36,
+                  maxWidth: compactHeader ? 168 : 220,
+                  accessibilityLabel: '切换片源 $sourceLabel',
+                  menuTitle: _privateSessionUnlocked ? '隐私片源' : '切换片源',
+                  menuItems: _buildHomeSourceMenuItems(),
+                  onMenuSelected: _onHomeSourceMenuSelected,
+                  onTap: _showSitePickerDialog,
+                  fallback: _buildHeaderCapsule(
+                    compact: compactHeader,
+                    icon: _privateSessionUnlocked
+                        ? CupertinoIcons.lock_shield_fill
+                        : CupertinoIcons.layers_alt_fill,
+                    label: sourceLabel,
+                    onTap: _showSitePickerDialog,
+                  ),
+                ),
+              ),
             ],
           );
           final maxH =
@@ -1470,6 +1764,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           final s2 = ((topSafePad * 0.78) / maxH).clamp(0.020, 0.085);
           final s3 = ((topSafePad + 16.0) / maxH).clamp(0.038, 0.13);
           final homeScrollView = CustomScrollView(
+              controller: _homeScrollController,
               physics: const BouncingScrollPhysics(
                 parent: AlwaysScrollableScrollPhysics(),
               ),
@@ -1589,17 +1884,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 .where((d) =>
                                     widget.storage.isNetdiskLoggedIn(d.key))
                                 .length;
-                            return ApplePressableScale(
+                            void openNetdisk() => showNetdiskAccountSheet(
+                                  context,
+                                  widget.storage,
+                                  onChanged: () {
+                                    if (mounted) setState(() {});
+                                  },
+                                );
+                            final netdiskLabel = compactHeader
+                                ? ''
+                                : (loggedCount > 0 ? '网盘 · $loggedCount' : '网盘');
+                            final fallback = ApplePressableScale(
                               key: const ValueKey('home-netdisk-button'),
                               pressedScale: 0.93,
                               pressedOpacity: 0.86,
-                              onTap: () => showNetdiskAccountSheet(
-                                context,
-                                widget.storage,
-                                onChanged: () {
-                                  if (mounted) setState(() {});
-                                },
-                              ),
+                              onTap: openNetdisk,
                               child: LiquidGlass(
                                 borderRadius: 999,
                                 elevated: false,
@@ -1626,9 +1925,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     if (!compactHeader) ...[
                                       const SizedBox(width: 4),
                                       Text(
-                                        loggedCount > 0
-                                            ? '网盘 · $loggedCount'
-                                            : '网盘',
+                                        netdiskLabel,
                                         style: const TextStyle(
                                           color: AppleColors.labelPrimary,
                                           fontSize: 12.5,
@@ -1639,6 +1936,23 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                   ],
                                 ),
                               ),
+                            );
+                            return IosNativeGlassButton(
+                              style: compactHeader ? 'circle' : 'capsule',
+                              symbol: loggedCount > 0
+                                  ? 'cloud.fill'
+                                  : 'qrcode.viewfinder',
+                              label: netdiskLabel,
+                              symbolSize: 15,
+                              foregroundColor: loggedCount > 0
+                                  ? AppleColors.systemGreen
+                                  : const Color(0xFF5AC8FA),
+                              width: compactHeader ? 36 : null,
+                              height: 36,
+                              maxWidth: 112,
+                              accessibilityLabel: '我的云盘',
+                              onTap: openNetdisk,
+                              fallback: fallback,
                             );
                           },
                         ),
@@ -1754,73 +2068,107 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           Expanded(
                             child: SizedBox(
                               height: 36,
-                              child: DesktopHorizontalScroller(
-                                controller: _categoryPillsScrollController,
-                                child: ListView.separated(
-                                  controller: _categoryPillsScrollController,
-                                  scrollDirection: Axis.horizontal,
-                                  physics: const BouncingScrollPhysics(),
-                                  itemCount: CmsParser.primaryHomeTabs.length,
-                                  separatorBuilder: (_, __) =>
-                                      const SizedBox(width: 8),
-                                  itemBuilder: (ctx, idx) {
-                                    final (tabKey, tabLabel) =
-                                        CmsParser.primaryHomeTabs[idx];
-                                    return _buildCategoryPill(
-                                      label: tabLabel,
-                                      selected: _primaryTab == tabKey,
-                                      onTap: () => _selectPrimaryTab(tabKey),
+                              child: IosNativeSegmentedControl(
+                                segments: [
+                                  for (final (_, tabLabel)
+                                      in CmsParser.primaryHomeTabs)
+                                    tabLabel,
+                                ],
+                                selectedIndex: CmsParser.primaryHomeTabs
+                                    .indexWhere((t) => t.$1 == _primaryTab)
+                                    .clamp(0, CmsParser.primaryHomeTabs.length - 1),
+                                height: 36,
+                                onChanged: (idx) {
+                                  if (idx >= 0 &&
+                                      idx < CmsParser.primaryHomeTabs.length) {
+                                    _selectPrimaryTab(
+                                      CmsParser.primaryHomeTabs[idx].$1,
                                     );
-                                  },
+                                  }
+                                },
+                                fallback: DesktopHorizontalScroller(
+                                  controller: _categoryPillsScrollController,
+                                  child: ListView.separated(
+                                    controller: _categoryPillsScrollController,
+                                    scrollDirection: Axis.horizontal,
+                                    physics: const BouncingScrollPhysics(),
+                                    itemCount: CmsParser.primaryHomeTabs.length,
+                                    separatorBuilder: (_, __) =>
+                                        const SizedBox(width: 8),
+                                    itemBuilder: (ctx, idx) {
+                                      final (tabKey, tabLabel) =
+                                          CmsParser.primaryHomeTabs[idx];
+                                      return _buildCategoryPill(
+                                        label: tabLabel,
+                                        selected: _primaryTab == tabKey,
+                                        onTap: () => _selectPrimaryTab(tabKey),
+                                      );
+                                    },
+                                  ),
                                 ),
                               ),
                             ),
                           ),
                           const SizedBox(width: 8),
-                          GestureDetector(
-                            key: const ValueKey('home-filter-button'),
-                            onTap: () => setState(
-                              () => _filterExpanded = !_filterExpanded,
-                            ),
-                            child: LiquidGlass(
-                              height: 36,
-                              borderRadius: 999,
-                              elevated: false,
-                              rimStrength:
-                                  (_filterExpanded || activeFilterCount > 0)
-                                      ? 1.05
-                                      : 0.88,
-                              tint: (_filterExpanded || activeFilterCount > 0)
-                                  ? const Color(0xCC0A84FF)
-                                  : const Color(0x241E1E24),
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 13),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    CupertinoIcons.slider_horizontal_3,
-                                    size: 14,
-                                    color: (_filterExpanded ||
-                                            activeFilterCount > 0)
-                                        ? Colors.white
-                                        : AppleColors.labelPrimary,
-                                  ),
-                                  const SizedBox(width: 5),
-                                  Text(
-                                    activeFilterCount > 0
-                                        ? '筛选 · $activeFilterCount'
-                                        : '筛选',
-                                    style: TextStyle(
+                          IosNativeGlassButton(
+                            style: 'capsule',
+                            symbol: 'line.3.horizontal.decrease',
+                            label: activeFilterCount > 0
+                                ? '筛选 · $activeFilterCount'
+                                : '筛选',
+                            symbolSize: 13.5,
+                            tintColor: activeFilterCount > 0
+                                ? AppleColors.systemBlue
+                                : null,
+                            height: 36,
+                            maxWidth: 108,
+                            accessibilityLabel: '片库筛选',
+                            onTap: () => unawaited(_openNativeFilterSheet()),
+                            fallback: GestureDetector(
+                              key: const ValueKey('home-filter-button'),
+                              onTap: () => setState(
+                                () => _filterExpanded = !_filterExpanded,
+                              ),
+                              child: LiquidGlass(
+                                height: 36,
+                                borderRadius: 999,
+                                elevated: false,
+                                rimStrength:
+                                    (_filterExpanded || activeFilterCount > 0)
+                                        ? 1.05
+                                        : 0.88,
+                                tint: (_filterExpanded || activeFilterCount > 0)
+                                    ? const Color(0xCC0A84FF)
+                                    : const Color(0x241E1E24),
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 13),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      CupertinoIcons.slider_horizontal_3,
+                                      size: 14,
                                       color: (_filterExpanded ||
                                               activeFilterCount > 0)
                                           ? Colors.white
                                           : AppleColors.labelPrimary,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w600,
                                     ),
-                                  ),
-                                ],
+                                    const SizedBox(width: 5),
+                                    Text(
+                                      activeFilterCount > 0
+                                          ? '筛选 · $activeFilterCount'
+                                          : '筛选',
+                                      style: TextStyle(
+                                        color: (_filterExpanded ||
+                                                activeFilterCount > 0)
+                                            ? Colors.white
+                                            : AppleColors.labelPrimary,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           ),

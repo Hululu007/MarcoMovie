@@ -8,7 +8,8 @@ import 'package:flutter/services.dart';
 
 /// Runtime bridge to Apple's true iOS 26+ Liquid Glass UIKit primitives
 /// (`UITabBar`, `UIGlassEffect`, `UIButton.Configuration.glass()`,
-/// `UISegmentedControl`, and native `UIAlertController`).
+/// `UIMenu`, `UISegmentedControl`, `UISheetPresentationController`, and native
+/// `UIAlertController`).
 ///
 /// On iOS 15–18, macOS, Windows, Android, HarmonyOS, and widget tests,
 /// [isAvailable] resolves to `false` and every widget / presenter seamlessly
@@ -83,15 +84,64 @@ class IosNativeDockItem {
       };
 }
 
-/// Hosts the native iOS 26 floating `UITabBar` + detached circular Liquid Glass
-/// search button (`UIButton.Configuration.glass()`).
+class IosNativeMenuItem {
+  final String id;
+  final String title;
+  final String? subtitle;
+  final String? symbol;
+  final bool checked;
+  final bool destructive;
+  final int section;
+
+  const IosNativeMenuItem({
+    required this.id,
+    required this.title,
+    this.subtitle,
+    this.symbol,
+    this.checked = false,
+    this.destructive = false,
+    this.section = 0,
+  });
+
+  Map<String, dynamic> toMap() => <String, dynamic>{
+        'id': id,
+        'title': title,
+        if (subtitle != null && subtitle!.isNotEmpty) 'subtitle': subtitle,
+        if (symbol != null && symbol!.isNotEmpty) 'symbol': symbol,
+        'checked': checked,
+        'destructive': destructive,
+        'section': section,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      other is IosNativeMenuItem &&
+      other.id == id &&
+      other.title == title &&
+      other.subtitle == subtitle &&
+      other.symbol == symbol &&
+      other.checked == checked &&
+      other.destructive == destructive &&
+      other.section == section;
+
+  @override
+  int get hashCode =>
+      Object.hash(id, title, subtitle, symbol, checked, destructive, section);
+}
+
+/// Hosts the native iOS 26 floating `UITabBar` + height-matched circular Liquid
+/// Glass search button (`UIButton.Configuration.glass()`), and smoothly morphs
+/// into a bottom-right Brand Logo circular Liquid Glass button with native
+/// `UIMenu` when [collapsed] is `true`.
 class IosNativeDockView extends StatefulWidget {
   final int selectedIndex;
   final List<IosNativeDockItem> items;
   final ValueChanged<int> onSelect;
   final VoidCallback? onSearch;
+  final VoidCallback? onScrollToTop;
   final bool showSearch;
   final bool hidden;
+  final bool collapsed;
   final double height;
 
   const IosNativeDockView({
@@ -100,8 +150,10 @@ class IosNativeDockView extends StatefulWidget {
     required this.items,
     required this.onSelect,
     this.onSearch,
+    this.onScrollToTop,
     this.showSearch = true,
     this.hidden = false,
+    this.collapsed = false,
     this.height = 68,
   });
 
@@ -111,11 +163,20 @@ class IosNativeDockView extends StatefulWidget {
 
 class _IosNativeDockViewState extends State<IosNativeDockView> {
   MethodChannel? _channel;
+  Timer? _hitBoxTimer;
+  bool _compactHitBox = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _compactHitBox = widget.collapsed;
+  }
 
   Map<String, dynamic> _buildParams() => <String, dynamic>{
         'selectedIndex': widget.selectedIndex,
         'showSearch': widget.showSearch && widget.onSearch != null,
         'hidden': widget.hidden,
+        'collapsed': widget.collapsed,
         'items': [for (final item in widget.items) item.toMap()],
       };
 
@@ -129,6 +190,8 @@ class _IosNativeDockViewState extends State<IosNativeDockView> {
         widget.onSelect(call.arguments as int);
       } else if (call.method == 'onSearch') {
         widget.onSearch?.call();
+      } else if (call.method == 'onScrollToTop') {
+        widget.onScrollToTop?.call();
       }
     });
   }
@@ -137,6 +200,26 @@ class _IosNativeDockViewState extends State<IosNativeDockView> {
   void didUpdateWidget(covariant IosNativeDockView oldWidget) {
     super.didUpdateWidget(oldWidget);
     final ch = _channel;
+    if (oldWidget.collapsed != widget.collapsed) {
+      _hitBoxTimer?.cancel();
+      if (widget.collapsed) {
+        if (ch != null) {
+          unawaited(_safeInvoke(ch, 'setCollapsed', true));
+        }
+        _hitBoxTimer = Timer(const Duration(milliseconds: 280), () {
+          if (mounted && widget.collapsed) {
+            setState(() => _compactHitBox = true);
+          }
+        });
+      } else {
+        if (_compactHitBox) {
+          setState(() => _compactHitBox = false);
+        }
+        if (ch != null) {
+          unawaited(_safeInvoke(ch, 'setCollapsed', false));
+        }
+      }
+    }
     if (ch == null) return;
     if (oldWidget.hidden != widget.hidden) {
       unawaited(_safeInvoke(ch, 'setHidden', widget.hidden));
@@ -159,6 +242,7 @@ class _IosNativeDockViewState extends State<IosNativeDockView> {
 
   @override
   void dispose() {
+    _hitBoxTimer?.cancel();
     _channel?.setMethodCallHandler(null);
     _channel = null;
     super.dispose();
@@ -166,22 +250,26 @@ class _IosNativeDockViewState extends State<IosNativeDockView> {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: double.infinity,
-      height: widget.height,
-      child: UiKitView(
-        viewType: 'marco_movie/ios26_dock',
-        creationParams: _buildParams(),
-        creationParamsCodec: const StandardMessageCodec(),
-        onPlatformViewCreated: _onViewCreated,
+    return Align(
+      alignment: Alignment.centerRight,
+      heightFactor: 1,
+      child: SizedBox(
+        width: _compactHitBox ? 88.0 : double.infinity,
+        height: widget.height,
+        child: UiKitView(
+          viewType: 'marco_movie/ios26_dock',
+          creationParams: _buildParams(),
+          creationParamsCodec: const StandardMessageCodec(),
+          onPlatformViewCreated: _onViewCreated,
+        ),
       ),
     );
   }
 }
 
 /// Native iOS 26 Liquid Glass circular icon button or capsule button (leading SF
-/// Symbol + label + optional trailing SF Symbol), with automatic fallback when
-/// running on iOS < 26 or non-iOS platforms.
+/// Symbol + label + optional trailing SF Symbol + optional native `UIMenu`),
+/// with automatic fallback when running on iOS < 26 or non-iOS platforms.
 class IosNativeGlassButton extends StatefulWidget {
   final String style;
   final String? symbol;
@@ -189,10 +277,14 @@ class IosNativeGlassButton extends StatefulWidget {
   final String label;
   final double symbolSize;
   final Color foregroundColor;
+  final Color? tintColor;
   final String? accessibilityLabel;
   final double? width;
   final double maxWidth;
   final double height;
+  final String menuTitle;
+  final List<IosNativeMenuItem>? menuItems;
+  final ValueChanged<String>? onMenuSelected;
   final VoidCallback onTap;
   final Widget fallback;
 
@@ -204,10 +296,14 @@ class IosNativeGlassButton extends StatefulWidget {
     this.label = '',
     this.symbolSize = 17,
     this.foregroundColor = Colors.white,
+    this.tintColor,
     this.accessibilityLabel,
     this.width,
     this.maxWidth = 168,
     this.height = 40,
+    this.menuTitle = '',
+    this.menuItems,
+    this.onMenuSelected,
     required this.onTap,
     required this.fallback,
   });
@@ -227,7 +323,12 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
         'label': widget.label,
         'symbolSize': widget.symbolSize,
         'foregroundColor': widget.foregroundColor.toARGB32(),
+        if (widget.tintColor != null)
+          'tintColor': widget.tintColor!.toARGB32(),
         'accessibilityLabel': widget.accessibilityLabel ?? widget.label,
+        if (widget.menuTitle.isNotEmpty) 'menuTitle': widget.menuTitle,
+        if (widget.menuItems != null && widget.menuItems!.isNotEmpty)
+          'menuItems': [for (final item in widget.menuItems!) item.toMap()],
       };
 
   void _onViewCreated(int id) {
@@ -238,6 +339,8 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
       if (!mounted) return;
       if (call.method == 'onTap') {
         widget.onTap();
+      } else if (call.method == 'onMenuSelected' && call.arguments is String) {
+        widget.onMenuSelected?.call(call.arguments as String);
       }
     });
   }
@@ -253,7 +356,10 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
         oldWidget.label != widget.label ||
         oldWidget.symbolSize != widget.symbolSize ||
         oldWidget.foregroundColor != widget.foregroundColor ||
-        oldWidget.accessibilityLabel != widget.accessibilityLabel) {
+        oldWidget.tintColor != widget.tintColor ||
+        oldWidget.accessibilityLabel != widget.accessibilityLabel ||
+        oldWidget.menuTitle != widget.menuTitle ||
+        !listEquals(oldWidget.menuItems, widget.menuItems)) {
       unawaited(_safeUpdate(ch));
     }
   }
@@ -287,12 +393,12 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
       textDirection: Directionality.of(context),
       textScaler: TextScaler.noScaling,
     )..layout(maxWidth: widget.maxWidth);
-    double extra = 24.0;
+    double extra = 26.0;
     if (widget.symbol != null && widget.symbol!.isNotEmpty) extra += 22.0;
     if (widget.trailingSymbol != null && widget.trailingSymbol!.isNotEmpty) {
       extra += 18.0;
     }
-    return (painter.width + extra).clamp(84.0, widget.maxWidth);
+    return (painter.width + extra).clamp(74.0, widget.maxWidth);
   }
 
   @override
@@ -440,8 +546,8 @@ class _IosNativeGlassPillState extends State<IosNativeGlassPill> {
 }
 
 /// Native iOS 26 `UISegmentedControl` with authentic Liquid Glass translucent
-/// pill track & interactive sliding thumb, falling back to Flutter's
-/// `CupertinoSlidingSegmentedControl` on older iOS / non-iOS.
+/// pill track & interactive sliding thumb, falling back to Flutter widgets on
+/// older iOS / non-iOS.
 class IosNativeSegmentedControl extends StatefulWidget {
   final List<String> segments;
   final int selectedIndex;
@@ -528,6 +634,81 @@ class _IosNativeSegmentedControlState extends State<IosNativeSegmentedControl> {
         );
       },
     );
+  }
+}
+
+class IosNativeFilterCategory {
+  final String id;
+  final String label;
+  final String kind; // 'all' | 'cat' | 'genre'
+
+  const IosNativeFilterCategory({
+    required this.id,
+    required this.label,
+    required this.kind,
+  });
+
+  Map<String, dynamic> toMap() => <String, dynamic>{
+        'id': id,
+        'label': label,
+        'kind': kind,
+      };
+}
+
+class IosNativeFilterResult {
+  final String categoryId;
+  final String genreLabel;
+  final String area;
+  final String year;
+
+  const IosNativeFilterResult({
+    required this.categoryId,
+    required this.genreLabel,
+    required this.area,
+    required this.year,
+  });
+}
+
+/// Presents a native iOS 26 `UISheetPresentationController` Liquid Glass filter
+/// sheet (`类别 / 地区 / 年份`), returning the chosen filter values or `null`
+/// when unavailable.
+Future<IosNativeFilterResult?> showAppleNativeFilterSheet({
+  String title = '多维片库筛选',
+  required List<IosNativeFilterCategory> categories,
+  required String selectedCategoryId,
+  required String selectedGenreLabel,
+  required List<String> areas,
+  required String selectedArea,
+  required List<String> years,
+  required String selectedYear,
+}) async {
+  if (!IosLiquidGlassBridge.isAvailable) return null;
+  try {
+    final result = await IosLiquidGlassBridge.channel
+        .invokeMapMethod<String, dynamic>(
+      'showFilterSheet',
+      <String, dynamic>{
+        'title': title,
+        'categories': [for (final c in categories) c.toMap()],
+        'selectedCategoryId': selectedCategoryId,
+        'selectedGenreLabel': selectedGenreLabel,
+        'areas': areas,
+        'selectedArea': selectedArea,
+        'years': years,
+        'selectedYear': selectedYear,
+      },
+    );
+    if (result == null) return null;
+    return IosNativeFilterResult(
+      categoryId: (result['categoryId'] as String?) ?? '',
+      genreLabel: (result['genreLabel'] as String?) ?? '',
+      area: (result['area'] as String?) ?? '',
+      year: (result['year'] as String?) ?? '',
+    );
+  } on MissingPluginException {
+    return null;
+  } catch (_) {
+    return null;
   }
 }
 

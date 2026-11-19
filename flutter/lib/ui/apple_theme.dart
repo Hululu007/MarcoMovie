@@ -715,7 +715,9 @@ class AppleLiquidGlassDock extends StatefulWidget {
   final List<(IconData, IconData, String)> items;
   final List<IosNativeDockItem>? nativeItems;
   final VoidCallback? onSearch;
+  final VoidCallback? onScrollToTop;
   final bool hidden;
+  final bool collapsed;
 
   const AppleLiquidGlassDock({
     super.key,
@@ -725,7 +727,9 @@ class AppleLiquidGlassDock extends StatefulWidget {
     required this.items,
     this.nativeItems,
     this.onSearch,
+    this.onScrollToTop,
     this.hidden = false,
+    this.collapsed = false,
   });
 
   static const double _dockRadius = 31;
@@ -811,8 +815,10 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
               items: widget.nativeItems!,
               onSelect: widget.onSelect,
               onSearch: widget.onSearch,
+              onScrollToTop: widget.onScrollToTop,
               showSearch: widget.onSearch != null,
               hidden: widget.hidden,
+              collapsed: widget.collapsed,
             ),
           );
         }
@@ -830,7 +836,16 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
               );
         Widget content = Padding(
           padding: margin,
-          child: widget.isLandscape ? _buildVertical() : _buildHorizontal(),
+          child: widget.isLandscape
+              ? _buildVertical()
+              : AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 260),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeInCubic,
+                  child: widget.collapsed
+                      ? _buildCollapsedLogoButton(context)
+                      : _buildHorizontal(),
+                ),
         );
         if (widget.hidden) {
           content = IgnorePointer(
@@ -840,6 +855,176 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
         }
         return content;
       },
+    );
+  }
+
+  Widget _buildCollapsedLogoButton(BuildContext context) {
+    const size = 54.0;
+    return Align(
+      key: const ValueKey('dock-collapsed-logo-wrap'),
+      alignment: Alignment.centerRight,
+      child: GestureDetector(
+        key: const ValueKey('dock-collapsed-logo-button'),
+        behavior: HitTestBehavior.opaque,
+        onTap: () => _showFallbackCollapsedBubble(context),
+        child: RepaintBoundary(
+          child: LiquidGlass(
+            width: size,
+            height: size,
+            borderRadius: size * 0.5,
+            tint: const Color(0x56161414),
+            blur: 20,
+            saturation: 1.8,
+            child: const Center(
+              child: MarcoBrandLogo(
+                iconSize: 28,
+                showWordmark: false,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showFallbackCollapsedBubble(BuildContext context) async {
+    HapticFeedback.lightImpact();
+    final safeBottom = MediaQuery.paddingOf(context).bottom;
+    final dockBottom =
+        safeBottom > 0 ? math.max(safeBottom - 14.0, 10.0) : 12.0;
+    final bottomOffset = dockBottom + 54.0 + 12.0;
+    final chosen = await showGeneralDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: '关闭快捷导航',
+      barrierColor: const Color(0x28000000),
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (dialogCtx, _, __) {
+        return Stack(
+          children: [
+            Positioned(
+              right: 16,
+              bottom: bottomOffset,
+              child: Material(
+                type: MaterialType.transparency,
+                child: LiquidGlass(
+                  key: const ValueKey('dock-collapsed-bubble-menu'),
+                  width: 176,
+                  borderRadius: 24,
+                  tint: const Color(0xA616161C),
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (widget.onSearch != null) ...[
+                        _bubbleMenuRow(
+                          icon: CupertinoIcons.search,
+                          label: '搜索影片',
+                          selected: false,
+                          onTap: () => Navigator.of(dialogCtx).pop('search'),
+                        ),
+                        const Divider(
+                          height: 1,
+                          thickness: 0.5,
+                          color: Color(0x26FFFFFF),
+                        ),
+                      ],
+                      for (var i = 0; i < widget.items.length; i++)
+                        _bubbleMenuRow(
+                          icon: i == _safeIndex
+                              ? widget.items[i].$2
+                              : widget.items[i].$1,
+                          label: widget.items[i].$3,
+                          selected: i == _safeIndex,
+                          onTap: () => Navigator.of(dialogCtx).pop('tab:$i'),
+                        ),
+                      if (widget.onScrollToTop != null) ...[
+                        const Divider(
+                          height: 1,
+                          thickness: 0.5,
+                          color: Color(0x26FFFFFF),
+                        ),
+                        _bubbleMenuRow(
+                          icon: CupertinoIcons.arrow_up_to_line,
+                          label: '回到顶部',
+                          selected: false,
+                          onTap: () => Navigator.of(dialogCtx).pop('top'),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+      transitionBuilder: (_, anim, __, child) {
+        final curved = CurvedAnimation(
+          parent: anim,
+          curve: Curves.easeOutBack,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return FadeTransition(
+          opacity: curved,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.86, end: 1.0).animate(curved),
+            alignment: Alignment.bottomRight,
+            child: child,
+          ),
+        );
+      },
+    );
+    if (chosen == null) return;
+    if (chosen == 'search') {
+      widget.onSearch?.call();
+    } else if (chosen == 'top') {
+      widget.onScrollToTop?.call();
+    } else if (chosen.startsWith('tab:')) {
+      final idx = int.tryParse(chosen.substring(4));
+      if (idx != null) widget.onSelect(idx);
+    }
+  }
+
+  Widget _bubbleMenuRow({
+    required IconData icon,
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        child: Row(
+          children: [
+            Icon(
+              icon,
+              size: 18,
+              color: selected ? Colors.white : const Color(0xD8F5F5F7),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                label,
+                style: TextStyle(
+                  color: selected ? Colors.white : const Color(0xD8F5F5F7),
+                  fontSize: 14,
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+            ),
+            if (selected)
+              const Icon(
+                CupertinoIcons.checkmark_alt,
+                size: 15,
+                color: Colors.white,
+              ),
+          ],
+        ),
+      ),
     );
   }
 

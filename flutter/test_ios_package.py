@@ -109,6 +109,8 @@ class DeploymentChecks(unittest.TestCase):
             self.assertEqual(swift.count('"marco_movie/ios26_glass_button"'), 1)
             self.assertEqual(swift.count('"marco_movie/ios26_glass_pill"'), 1)
             self.assertEqual(swift.count('"marco_movie/ios26_segmented_control"'), 1)
+            self.assertEqual(swift.count('final class MarcoNativeFilterSheetController'), 1)
+            self.assertEqual(swift.count('case "showFilterSheet":'), 1)
             self.assertEqual(swift.count('final class NetdiskWebAuthController'), 1)
             self.assertEqual(swift.count('private final class HeadlessMediaWebSniffer'), 1)
             self.assertEqual(swift.count('{'), swift.count('}'))
