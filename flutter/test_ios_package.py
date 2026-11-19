@@ -113,6 +113,8 @@ class DeploymentChecks(unittest.TestCase):
             self.assertEqual(swift.count('"marco_movie/ios26_slider"'), 1)
             self.assertEqual(swift.count('final class MarcoNativeSwitchFactory'), 1)
             self.assertEqual(swift.count('final class MarcoNativeSliderFactory'), 1)
+            self.assertEqual(swift.count('final class MarcoInteractiveCircleGlassControl'), 1)
+            self.assertEqual(swift.count('static func withoutAnimations'), 1)
             self.assertEqual(swift.count('final class MarcoNativeFilterSheetController'), 1)
             self.assertEqual(swift.count('case "showFilterSheet":'), 1)
             self.assertEqual(swift.count('final class MarcoNativePinSheetController'), 1)

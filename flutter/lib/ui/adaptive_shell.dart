@@ -11441,7 +11441,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         actions: [
                           const AppleNativeAlertAction(
                             id: 'open_extensions',
-                            title: '配置扩展包 / 自建网关',
+                            title: '查看新手教程 / 配置扩展与网关',
                           ),
                           if (unsupportedCount > 1)
                             AppleNativeAlertAction(

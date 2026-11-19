@@ -107,13 +107,13 @@ class IosLiquidGlassBridge {
   }
 }
 
-/// Gates mounting of iOS `UiKitView` platform views so they are ONLY active on
-/// the stationary foreground `ModalRoute` (`isCurrent == true`, primary route
-/// transition completed, secondary route transition dismissed).
+/// Gates mounting of iOS `UiKitView` platform views so strictly at most ONE
+/// route (`ModalRoute.isCurrent == true`) owns live platform views at any moment.
 ///
-/// This prevents Flutter iOS Impeller `FlutterPlatformViewsController` overlay
-/// collisions during `CupertinoPageRoute` parallax push/pop slides and behind
-/// modal sheets (such as the `x = 0..67%` black occlusion artifact).
+/// Handing off immediately on `route.isCurrent` (rather than delaying until
+/// route slide animations complete) both prevents Flutter iOS Impeller
+/// cross-route overlay collisions (`x = 0..67%` black occlusion) AND eliminates
+/// post-transition dark-to-bright flashes and placeholder-swap jumps.
 class IosNativeRouteGate extends StatefulWidget {
   final Widget Function(BuildContext context, bool nativeActive) builder;
 
@@ -125,8 +125,6 @@ class IosNativeRouteGate extends StatefulWidget {
 
 class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
   ModalRoute<dynamic>? _route;
-  Animation<double>? _primaryAnim;
-  Animation<double>? _secondaryAnim;
   bool _ready = false;
 
   @override
@@ -138,46 +136,15 @@ class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final nextRoute = ModalRoute.of(context);
-    if (nextRoute != _route) {
-      _detachAnimations();
-      _route = nextRoute;
-      _primaryAnim = nextRoute?.animation;
-      _secondaryAnim = nextRoute?.secondaryAnimation;
-      _primaryAnim?.addListener(_recheck);
-      _primaryAnim?.addStatusListener(_onStatus);
-      _secondaryAnim?.addListener(_recheck);
-      _secondaryAnim?.addStatusListener(_onStatus);
-    }
+    _route = ModalRoute.of(context);
     _ready = _computeReady();
   }
-
-  void _detachAnimations() {
-    _primaryAnim?.removeListener(_recheck);
-    _primaryAnim?.removeStatusListener(_onStatus);
-    _secondaryAnim?.removeListener(_recheck);
-    _secondaryAnim?.removeStatusListener(_onStatus);
-    _primaryAnim = null;
-    _secondaryAnim = null;
-  }
-
-  void _onStatus(AnimationStatus _) => _recheck();
 
   bool _computeReady() {
     if (!IosLiquidGlassBridge.isAvailable) return false;
     final route = _route;
     if (route == null) return true;
-    if (!route.isCurrent) return false;
-    final primary = _primaryAnim;
-    if (primary != null && (!primary.isCompleted || primary.value < 0.999)) {
-      return false;
-    }
-    final secondary = _secondaryAnim;
-    if (secondary != null &&
-        (!secondary.isDismissed || secondary.value > 0.001)) {
-      return false;
-    }
-    return true;
+    return route.isCurrent;
   }
 
   void _recheck() {
@@ -191,7 +158,6 @@ class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
   @override
   void dispose() {
     IosLiquidGlassBridge.available.removeListener(_recheck);
-    _detachAnimations();
     super.dispose();
   }
 
@@ -321,12 +287,14 @@ class _IosNativeDockViewState extends State<IosNativeDockView> {
     _compactHitBox = widget.collapsed;
   }
 
-  Map<String, dynamic> _buildParams() => <String, dynamic>{
+  Map<String, dynamic> _buildParams({double? initialWidth}) => <String, dynamic>{
         'selectedIndex': widget.selectedIndex,
         'showSearch': widget.showSearch && widget.onSearch != null,
         'hidden': widget.hidden,
         'collapsed': widget.collapsed,
         'items': [for (final item in widget.items) item.toMap()],
+        if (initialWidth != null) 'initialWidth': initialWidth,
+        'initialHeight': widget.height,
       };
 
   void _onViewCreated(int id) {
@@ -399,6 +367,7 @@ class _IosNativeDockViewState extends State<IosNativeDockView> {
 
   @override
   Widget build(BuildContext context) {
+    final screenW = MediaQuery.sizeOf(context).width;
     return Align(
       alignment: Alignment.centerRight,
       heightFactor: 1,
@@ -407,7 +376,9 @@ class _IosNativeDockViewState extends State<IosNativeDockView> {
         height: widget.height,
         child: UiKitView(
           viewType: 'marco_movie/ios26_dock',
-          creationParams: _buildParams(),
+          creationParams: _buildParams(
+            initialWidth: _compactHitBox ? 94.0 : screenW,
+          ),
           creationParamsCodec: const StandardMessageCodec(),
           onPlatformViewCreated: _onViewCreated,
         ),
@@ -464,7 +435,7 @@ class IosNativeGlassButton extends StatefulWidget {
 class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
   MethodChannel? _channel;
 
-  Map<String, dynamic> _buildParams() => <String, dynamic>{
+  Map<String, dynamic> _buildParams({double? initialWidth}) => <String, dynamic>{
         'style': widget.style,
         if (widget.symbol != null) 'symbol': widget.symbol,
         if (widget.trailingSymbol != null)
@@ -478,6 +449,8 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
         if (widget.menuTitle.isNotEmpty) 'menuTitle': widget.menuTitle,
         if (widget.menuItems != null && widget.menuItems!.isNotEmpty)
           'menuItems': [for (final item in widget.menuItems!) item.toMap()],
+        if (initialWidth != null) 'initialWidth': initialWidth,
+        'initialHeight': widget.height,
       };
 
   void _onViewCreated(int id) {
@@ -571,13 +544,14 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
           }
           return widget.fallback;
         }
+        final resolvedW = _resolvedWidth(context);
         return RepaintBoundary(
           child: SizedBox(
-            width: _resolvedWidth(context),
+            width: resolvedW,
             height: widget.height,
             child: UiKitView(
               viewType: 'marco_movie/ios26_glass_button',
-              creationParams: _buildParams(),
+              creationParams: _buildParams(initialWidth: resolvedW),
               creationParamsCodec: const StandardMessageCodec(),
               onPlatformViewCreated: _onViewCreated,
             ),
@@ -629,8 +603,10 @@ class IosNativeGlassPill extends StatefulWidget {
 class _IosNativeGlassPillState extends State<IosNativeGlassPill> {
   MethodChannel? _channel;
 
-  Map<String, dynamic> _buildParams() => <String, dynamic>{
+  Map<String, dynamic> _buildParams({double? initialWidth}) => <String, dynamic>{
         'items': [for (final a in widget.actions) a.toMap()],
+        if (initialWidth != null) 'initialWidth': initialWidth,
+        'initialHeight': widget.height,
       };
 
   void _onViewCreated(int id) {
@@ -706,7 +682,7 @@ class _IosNativeGlassPillState extends State<IosNativeGlassPill> {
             height: widget.height,
             child: UiKitView(
               viewType: 'marco_movie/ios26_glass_pill',
-              creationParams: _buildParams(),
+              creationParams: _buildParams(initialWidth: width),
               creationParamsCodec: const StandardMessageCodec(),
               onPlatformViewCreated: _onViewCreated,
             ),
@@ -744,9 +720,11 @@ class IosNativeSegmentedControl extends StatefulWidget {
 class _IosNativeSegmentedControlState extends State<IosNativeSegmentedControl> {
   MethodChannel? _channel;
 
-  Map<String, dynamic> _buildParams() => <String, dynamic>{
+  Map<String, dynamic> _buildParams({double? initialWidth}) => <String, dynamic>{
         'segments': widget.segments,
         'selectedIndex': widget.selectedIndex,
+        if (initialWidth != null) 'initialWidth': initialWidth,
+        'initialHeight': widget.height,
       };
 
   void _onViewCreated(int id) {
@@ -1099,18 +1077,18 @@ class _Ios26GlassButtonPlaceholder extends StatelessWidget {
         (label.isNotEmpty ||
             (trailingSymbol != null && trailingSymbol!.isNotEmpty));
     final radius = BorderRadius.circular(height * 0.5);
-    final baseBg = tintColor != null
-        ? Color.alphaBlend(
-            tintColor!.withValues(alpha: 0.78),
-            const Color(0xFF1C1C20),
-          )
-        : const Color(0xD626262B);
-    final topBg = tintColor != null
-        ? Color.alphaBlend(
-            const Color(0x22FFFFFF),
-            baseBg,
-          )
-        : const Color(0xDC34343A);
+        final baseBg = tintColor != null
+            ? Color.alphaBlend(
+                tintColor!.withValues(alpha: 0.78),
+                const Color(0xFF28282E),
+              )
+            : const Color(0x6E3A3A42);
+        final topBg = tintColor != null
+            ? Color.alphaBlend(
+                const Color(0x2EFFFFFF),
+                baseBg,
+              )
+            : const Color(0x8250505A);
 
     return GestureDetector(
       key: const ValueKey('ios26-glass-button-transition-placeholder'),
@@ -1219,10 +1197,10 @@ class _Ios26GlassPillPlaceholder extends StatelessWidget {
           gradient: const LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [Color(0xDC34343A), Color(0xD626262B)],
+            colors: [Color(0x8250505A), Color(0x6E3A3A42)],
           ),
           border: Border.all(
-            color: Colors.white.withValues(alpha: 0.18),
+            color: Colors.white.withValues(alpha: 0.24),
             width: 0.65,
           ),
         ),
@@ -1291,9 +1269,9 @@ class _Ios26SegmentedPlaceholder extends StatelessWidget {
       child: DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(height * 0.5),
-          color: const Color(0xCC222227),
+          color: const Color(0x6634343C),
           border: Border.all(
-            color: Colors.white.withValues(alpha: 0.14),
+            color: Colors.white.withValues(alpha: 0.18),
             width: 0.6,
           ),
         ),

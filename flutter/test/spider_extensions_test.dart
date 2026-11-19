@@ -449,6 +449,19 @@ void main() {
 
       expect(storage.spiderGatewayConfig.normalizedBaseUrl, 'http://127.0.0.1:9981');
       expect(storage.spiderGatewayConfig.token, 'demo-token');
+
+      // Built-in plain-Chinese beginner guide opens directly from the top card.
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('spider-open-guide-row')),
+      );
+      await tester.tap(find.byKey(const ValueKey('spider-open-guide-row')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('spider-extensions-guide-page')),
+        findsOneWidget,
+      );
+      expect(find.text('使用教程与帮助'), findsOneWidget);
+      expect(find.textContaining('为什么有些线路显示'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),

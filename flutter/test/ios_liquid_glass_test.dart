@@ -588,7 +588,11 @@ void main() {
       expect(sourceMenuItems.any((m) => m['id'] == 'site:ok1'), isTrue);
       expect(sourceMenuItems.any((m) => m['id'] == 'site:so1'), isFalse);
 
-      // Push Netdisk page on top of Home; mid-transition BOTH routes must have 0 UiKitViews.
+      // Push secondary page on top of Home; ownership hands off IMMEDIATELY on
+      // route.isCurrent so Home unmounts its 5 background UiKitViews on frame 0
+      // (preventing Impeller cross-route black occlusion) while the incoming
+      // page mounts its 2 native UiKitViews immediately (zero dark-to-bright swap
+      // or icon bounce at transition end).
       final navState = tester.state<NavigatorState>(find.byType(Navigator));
       navState.push<void>(
         buildApplePageRoute<void>(
@@ -605,11 +609,22 @@ void main() {
       );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
-      // Mid-transition: zero live UiKitViews across both routes!
-      expect(find.byType(UiKitView), findsNothing);
+      // Mid-transition: strictly ONLY the foreground route's 2 UiKitViews exist
+      // (zero background Home/Dock UiKitViews).
+      final midPushViews =
+          tester.widgetList<UiKitView>(find.byType(UiKitView)).toList();
+      expect(midPushViews.length, 2);
+      expect(
+        midPushViews.any((v) => v.viewType == 'marco_movie/ios26_dock'),
+        isFalse,
+      );
+      final backBtnParams = midPushViews
+          .firstWhere((v) => v.viewType == 'marco_movie/ios26_glass_button')
+          .creationParams as Map<dynamic, dynamic>;
+      expect(backBtnParams['initialWidth'], 40.0);
+      expect(backBtnParams['initialHeight'], 40.0);
 
-      // After push settles: only the foreground route's UiKitViews mount (back + segmented = 2),
-      // while Home's 5 background UiKitViews stay cleanly unmounted.
+      // After push settles: same 2 foreground UiKitViews remain mounted seamlessly.
       await tester.pumpAndSettle();
       expect(find.byType(UiKitView), findsNWidgets(2));
       expect(
@@ -619,8 +634,17 @@ void main() {
         isFalse,
       );
 
-      // Pop back to Home: Home's native Dock and controls cleanly remount.
+      // Pop back to Home: Home's native Dock and controls remount immediately on
+      // frame 0 while the exiting route's UiKitViews unmount.
       navState.pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(
+        tester
+            .widgetList<UiKitView>(find.byType(UiKitView))
+            .any((v) => v.viewType == 'marco_movie/ios26_dock'),
+        isTrue,
+      );
       await tester.pumpAndSettle();
       expect(
         tester

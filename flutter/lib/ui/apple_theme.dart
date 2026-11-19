@@ -893,15 +893,15 @@ class _AppleLiquidGlassDockState extends State<AppleLiquidGlassDock> {
           gradient: const LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [Color(0xDC303036), Color(0xD4202026)],
+            colors: [Color(0x804E4E58), Color(0x6E34343C)],
           ),
           border: Border.all(
-            color: Colors.white.withValues(alpha: 0.18),
+            color: Colors.white.withValues(alpha: 0.24),
             width: 0.65,
           ),
           boxShadow: const [
             BoxShadow(
-              color: Color(0x42000000),
+              color: Color(0x36000000),
               blurRadius: 16,
               offset: Offset(0, 6),
             ),

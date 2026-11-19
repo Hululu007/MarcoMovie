@@ -147,6 +147,29 @@ private enum MarcoLiquidGlassSupport {
     return true
   }
 
+  static func withoutAnimations(_ block: () -> Void) {
+    UIView.performWithoutAnimation {
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      block()
+      CATransaction.commit()
+    }
+  }
+
+  static func resolvedInitialFrame(
+    _ frame: CGRect,
+    args: [String: Any]?,
+    defaultWidth: CGFloat,
+    defaultHeight: CGFloat
+  ) -> CGRect {
+    if frame.width >= 1.0 && frame.height >= 1.0 {
+      return frame
+    }
+    let w = CGFloat((args?["initialWidth"] as? NSNumber)?.doubleValue ?? Double(defaultWidth))
+    let h = CGFloat((args?["initialHeight"] as? NSNumber)?.doubleValue ?? Double(defaultHeight))
+    return CGRect(x: frame.origin.x, y: frame.origin.y, width: max(w, 1.0), height: max(h, 1.0))
+  }
+
   static func buildMenu(
     title: String = "",
     rawItems: [[String: Any]],
@@ -1662,10 +1685,150 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   }
 }
 
+/// Genuine iOS 26 circular Liquid Glass control (`UIGlassEffect(style: .regular)`
+/// with `isInteractive = true` and `cornerConfiguration = .capsule()`) hosting a
+/// fixed-size centered `UIImageView` + optional transparent `UIMenu` overlay.
+/// Avoids `UIButton.Configuration.glass()`'s iOS 26 frame-resize icon scale bounce
+/// inside Flutter `UiKitView`.
+private final class MarcoInteractiveCircleGlassControl: UIControl {
+  private let effectView: UIVisualEffectView
+  private let iconView = UIImageView()
+  let menuOverlayButton = UIButton(type: .system)
+  private var configuredTintARGB: UInt64?
+  private var hasConfiguredEffect = false
+
+  override init(frame: CGRect) {
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      let glass = UIGlassEffect(style: .regular)
+      glass.isInteractive = true
+      effectView = UIVisualEffectView(effect: glass)
+    } else {
+      effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+    }
+    #else
+    effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterialDark))
+    #endif
+    super.init(frame: frame)
+    backgroundColor = .clear
+    isOpaque = false
+    clipsToBounds = false
+    overrideUserInterfaceStyle = .dark
+
+    effectView.overrideUserInterfaceStyle = .dark
+    effectView.isUserInteractionEnabled = false
+    effectView.translatesAutoresizingMaskIntoConstraints = false
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      effectView.cornerConfiguration = .capsule()
+    } else {
+      effectView.layer.cornerCurve = .continuous
+      effectView.clipsToBounds = true
+    }
+    #else
+    effectView.layer.cornerCurve = .continuous
+    effectView.clipsToBounds = true
+    #endif
+    addSubview(effectView)
+
+    iconView.contentMode = .scaleAspectFit
+    iconView.tintColor = .white
+    iconView.isUserInteractionEnabled = false
+    iconView.translatesAutoresizingMaskIntoConstraints = false
+    effectView.contentView.addSubview(iconView)
+
+    menuOverlayButton.backgroundColor = .clear
+    menuOverlayButton.overrideUserInterfaceStyle = .dark
+    menuOverlayButton.showsMenuAsPrimaryAction = true
+    menuOverlayButton.isHidden = true
+    menuOverlayButton.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(menuOverlayButton)
+
+    NSLayoutConstraint.activate([
+      effectView.topAnchor.constraint(equalTo: topAnchor),
+      effectView.bottomAnchor.constraint(equalTo: bottomAnchor),
+      effectView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      effectView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      iconView.centerXAnchor.constraint(equalTo: effectView.contentView.centerXAnchor),
+      iconView.centerYAnchor.constraint(equalTo: effectView.contentView.centerYAnchor),
+      menuOverlayButton.topAnchor.constraint(equalTo: topAnchor),
+      menuOverlayButton.bottomAnchor.constraint(equalTo: bottomAnchor),
+      menuOverlayButton.leadingAnchor.constraint(equalTo: leadingAnchor),
+      menuOverlayButton.trailingAnchor.constraint(equalTo: trailingAnchor),
+    ])
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *) {
+      return
+    }
+    #endif
+    effectView.layer.cornerRadius = bounds.height * 0.5
+  }
+
+  override var isHighlighted: Bool {
+    didSet {
+      UIView.animate(
+        withDuration: 0.14,
+        delay: 0,
+        options: [.allowUserInteraction, .beginFromCurrentState]
+      ) {
+        self.transform = self.isHighlighted
+          ? CGAffineTransform(scaleX: 0.93, y: 0.93)
+          : .identity
+      }
+    }
+  }
+
+  func configure(
+    image: UIImage?,
+    foregroundColor: UIColor,
+    tintColor: UIColor?,
+    tintARGB: UInt64?,
+    menu: UIMenu?
+  ) {
+    MarcoLiquidGlassSupport.withoutAnimations {
+      #if compiler(>=6.2)
+      if #available(iOS 26.0, *) {
+        if !self.hasConfiguredEffect || self.configuredTintARGB != tintARGB {
+          self.hasConfiguredEffect = true
+          self.configuredTintARGB = tintARGB
+          let glass = UIGlassEffect(style: .regular)
+          glass.isInteractive = true
+          glass.tintColor = tintColor
+          self.effectView.effect = glass
+        }
+      }
+      #endif
+      if MarcoLiquidGlassSupport.isNearWhite(foregroundColor) {
+        self.iconView.image = image
+        self.iconView.tintColor = foregroundColor
+      } else {
+        self.iconView.image = image?.withTintColor(foregroundColor, renderingMode: .alwaysOriginal)
+        self.iconView.tintColor = foregroundColor
+      }
+      if let menu = menu {
+        self.menuOverlayButton.menu = menu
+        self.menuOverlayButton.isHidden = false
+      } else {
+        self.menuOverlayButton.menu = nil
+        self.menuOverlayButton.isHidden = true
+      }
+    }
+  }
+}
+
 private final class MarcoDockContainerView: UIView {
   let tabCapsule = MarcoNativeLiquidTabCapsuleView(frame: .zero)
-  let searchButton = UIButton(type: .system)
-  let logoButton = UIButton(type: .system)
+  let searchButton = MarcoInteractiveCircleGlassControl(frame: .zero)
+  let logoButton = MarcoInteractiveCircleGlassControl(frame: .zero)
 
   var showSearchButton: Bool = true {
     didSet {
@@ -1685,14 +1848,12 @@ private final class MarcoDockContainerView: UIView {
 
     addSubview(tabCapsule)
 
-    searchButton.overrideUserInterfaceStyle = .dark
     searchButton.accessibilityLabel = "搜索"
     configureSearchButton()
     addSubview(searchButton)
 
-    logoButton.overrideUserInterfaceStyle = .dark
     logoButton.accessibilityLabel = "快捷导航"
-    logoButton.showsMenuAsPrimaryAction = true
+    logoButton.menuOverlayButton.accessibilityLabel = "快捷导航"
     logoButton.alpha = 0.0
     logoButton.isUserInteractionEnabled = false
     logoButton.transform = CGAffineTransform(scaleX: 0.55, y: 0.55)
@@ -1708,46 +1869,24 @@ private final class MarcoDockContainerView: UIView {
   private func configureSearchButton() {
     let symbolConfig = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .medium)
     let icon = UIImage(systemName: "magnifyingglass", withConfiguration: symbolConfig)
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      var config = UIButton.Configuration.glass()
-      config.image = icon
-      config.baseForegroundColor = .white
-      config.cornerStyle = .capsule
-      config.contentInsets = .zero
-      searchButton.configuration = config
-      return
-    }
-    #endif
-    var config = UIButton.Configuration.filled()
-    config.image = icon
-    config.baseForegroundColor = .white
-    config.baseBackgroundColor = UIColor(white: 0.16, alpha: 0.85)
-    config.cornerStyle = .capsule
-    config.contentInsets = .zero
-    searchButton.configuration = config
+    searchButton.configure(
+      image: icon,
+      foregroundColor: .white,
+      tintColor: nil,
+      tintARGB: nil,
+      menu: nil
+    )
   }
 
   private func configureLogoButton() {
     let logo = MarcoLiquidGlassSupport.brandLogoImage
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      var config = UIButton.Configuration.glass()
-      config.image = logo
-      config.baseForegroundColor = .white
-      config.cornerStyle = .capsule
-      config.contentInsets = .zero
-      logoButton.configuration = config
-      return
-    }
-    #endif
-    var config = UIButton.Configuration.filled()
-    config.image = logo
-    config.baseForegroundColor = .white
-    config.baseBackgroundColor = UIColor(white: 0.16, alpha: 0.85)
-    config.cornerStyle = .capsule
-    config.contentInsets = .zero
-    logoButton.configuration = config
+    logoButton.configure(
+      image: logo,
+      foregroundColor: .white,
+      tintColor: nil,
+      tintARGB: nil,
+      menu: nil
+    )
   }
 
   private func updateVisibilityState() {
@@ -1857,7 +1996,13 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView {
     arguments args: [String: Any]?,
     messenger: FlutterBinaryMessenger
   ) {
-    self.container = MarcoDockContainerView(frame: frame)
+    let initialFrame = MarcoLiquidGlassSupport.resolvedInitialFrame(
+      frame,
+      args: args,
+      defaultWidth: UIScreen.main.bounds.width,
+      defaultHeight: 72.0
+    )
+    self.container = MarcoDockContainerView(frame: initialFrame)
     self.channel = FlutterMethodChannel(
       name: "marco_movie/ios26_dock_\(viewId)",
       binaryMessenger: messenger
@@ -1873,7 +2018,10 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView {
     container.searchButton.addTarget(self, action: #selector(searchTapped), for: .touchUpInside)
 
     if let args = args {
-      applyState(args, animated: false)
+      MarcoLiquidGlassSupport.withoutAnimations {
+        self.applyState(args, animated: false)
+        self.container.layoutIfNeeded()
+      }
     }
 
     channel.setMethodCallHandler { [weak self] call, result in
@@ -2004,7 +2152,8 @@ private final class MarcoNativeDockPlatformView: NSObject, FlutterPlatformView {
     }
     sections.append(UIMenu(title: "", options: .displayInline, children: [topAction]))
 
-    container.logoButton.menu = UIMenu(title: "", children: sections)
+    container.logoButton.menuOverlayButton.menu = UIMenu(title: "", children: sections)
+    container.logoButton.menuOverlayButton.isHidden = false
   }
 
   @objc private func searchTapped() {
@@ -2049,6 +2198,8 @@ private final class MarcoInteractiveCapsuleGlassControl: UIControl {
   private let titleLabel = UILabel()
   private let trailingIcon = UIImageView()
   let menuOverlayButton = UIButton(type: .system)
+  private var configuredTintARGB: UInt64?
+  private var hasConfiguredEffect = false
 
   override init(frame: CGRect) {
     #if compiler(>=6.2)
@@ -2167,53 +2318,65 @@ private final class MarcoInteractiveCapsuleGlassControl: UIControl {
     trailingSymbol: String?,
     foregroundColor: UIColor,
     tintColor: UIColor?,
+    tintARGB: UInt64?,
     symbolSize: CGFloat,
     menu: UIMenu?
   ) {
-    #if compiler(>=6.2)
-    if #available(iOS 26.0, *) {
-      let glass = UIGlassEffect(style: .regular)
-      glass.isInteractive = true
-      glass.tintColor = tintColor
-      effectView.effect = glass
-    }
-    #endif
+    MarcoLiquidGlassSupport.withoutAnimations {
+      #if compiler(>=6.2)
+      if #available(iOS 26.0, *) {
+        if !self.hasConfiguredEffect || self.configuredTintARGB != tintARGB {
+          self.hasConfiguredEffect = true
+          self.configuredTintARGB = tintARGB
+          let glass = UIGlassEffect(style: .regular)
+          glass.isInteractive = true
+          glass.tintColor = tintColor
+          self.effectView.effect = glass
+        }
+      }
+      #endif
 
-    titleLabel.text = label
-    titleLabel.textColor = foregroundColor
-    titleLabel.isHidden = label.isEmpty
+      self.titleLabel.text = label
+      self.titleLabel.textColor = foregroundColor
+      self.titleLabel.isHidden = label.isEmpty
 
-    if let symbol = symbol, !symbol.isEmpty {
-      let cfg = UIImage.SymbolConfiguration(pointSize: symbolSize, weight: .semibold)
-      leadingIcon.image = UIImage(systemName: symbol, withConfiguration: cfg)
-      leadingIcon.tintColor = foregroundColor
-      leadingIcon.isHidden = false
-    } else {
-      leadingIcon.isHidden = true
-    }
+      if let symbol = symbol, !symbol.isEmpty {
+        let cfg = UIImage.SymbolConfiguration(pointSize: symbolSize, weight: .semibold)
+        let raw = UIImage(systemName: symbol, withConfiguration: cfg)
+        if MarcoLiquidGlassSupport.isNearWhite(foregroundColor) {
+          self.leadingIcon.image = raw
+        } else {
+          self.leadingIcon.image = raw?.withTintColor(foregroundColor, renderingMode: .alwaysOriginal)
+        }
+        self.leadingIcon.tintColor = foregroundColor
+        self.leadingIcon.isHidden = false
+      } else {
+        self.leadingIcon.isHidden = true
+      }
 
-    if let trailing = trailingSymbol, !trailing.isEmpty {
-      let cfg = UIImage.SymbolConfiguration(pointSize: max(symbolSize - 3.0, 11.0), weight: .semibold)
-      trailingIcon.image = UIImage(systemName: trailing, withConfiguration: cfg)
-      trailingIcon.tintColor = foregroundColor.withAlphaComponent(0.82)
-      trailingIcon.isHidden = false
-    } else {
-      trailingIcon.isHidden = true
-    }
+      if let trailing = trailingSymbol, !trailing.isEmpty {
+        let cfg = UIImage.SymbolConfiguration(pointSize: max(symbolSize - 3.0, 11.0), weight: .semibold)
+        self.trailingIcon.image = UIImage(systemName: trailing, withConfiguration: cfg)
+        self.trailingIcon.tintColor = foregroundColor.withAlphaComponent(0.82)
+        self.trailingIcon.isHidden = false
+      } else {
+        self.trailingIcon.isHidden = true
+      }
 
-    if let menu = menu {
-      menuOverlayButton.menu = menu
-      menuOverlayButton.isHidden = false
-    } else {
-      menuOverlayButton.menu = nil
-      menuOverlayButton.isHidden = true
+      if let menu = menu {
+        self.menuOverlayButton.menu = menu
+        self.menuOverlayButton.isHidden = false
+      } else {
+        self.menuOverlayButton.menu = nil
+        self.menuOverlayButton.isHidden = true
+      }
     }
   }
 }
 
 private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let hostView = UIView(frame: .zero)
-  private let circleButton = UIButton(type: .system)
+  private let circleControl = MarcoInteractiveCircleGlassControl(frame: .zero)
   private let capsuleControl = MarcoInteractiveCapsuleGlassControl(frame: .zero)
   private let channel: FlutterMethodChannel
   private var isCapsuleMode = false
@@ -2230,34 +2393,42 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
     )
     super.init()
 
-    hostView.frame = frame
-    hostView.backgroundColor = .clear
-    hostView.isOpaque = false
-    hostView.clipsToBounds = false
-    hostView.overrideUserInterfaceStyle = .dark
+    let initialFrame = MarcoLiquidGlassSupport.resolvedInitialFrame(
+      frame,
+      args: args,
+      defaultWidth: 40.0,
+      defaultHeight: 40.0
+    )
+    MarcoLiquidGlassSupport.withoutAnimations {
+      self.hostView.frame = initialFrame
+      self.hostView.backgroundColor = .clear
+      self.hostView.isOpaque = false
+      self.hostView.clipsToBounds = false
+      self.hostView.overrideUserInterfaceStyle = .dark
 
-    circleButton.overrideUserInterfaceStyle = .dark
-    circleButton.translatesAutoresizingMaskIntoConstraints = false
-    circleButton.addTarget(self, action: #selector(handleTap), for: .touchUpInside)
-    hostView.addSubview(circleButton)
+      self.circleControl.translatesAutoresizingMaskIntoConstraints = false
+      self.circleControl.addTarget(self, action: #selector(self.handleTap), for: .touchUpInside)
+      self.hostView.addSubview(self.circleControl)
 
-    capsuleControl.translatesAutoresizingMaskIntoConstraints = false
-    capsuleControl.addTarget(self, action: #selector(handleTap), for: .touchUpInside)
-    hostView.addSubview(capsuleControl)
+      self.capsuleControl.translatesAutoresizingMaskIntoConstraints = false
+      self.capsuleControl.addTarget(self, action: #selector(self.handleTap), for: .touchUpInside)
+      self.hostView.addSubview(self.capsuleControl)
 
-    NSLayoutConstraint.activate([
-      circleButton.topAnchor.constraint(equalTo: hostView.topAnchor),
-      circleButton.bottomAnchor.constraint(equalTo: hostView.bottomAnchor),
-      circleButton.leadingAnchor.constraint(equalTo: hostView.leadingAnchor),
-      circleButton.trailingAnchor.constraint(equalTo: hostView.trailingAnchor),
-      capsuleControl.topAnchor.constraint(equalTo: hostView.topAnchor),
-      capsuleControl.bottomAnchor.constraint(equalTo: hostView.bottomAnchor),
-      capsuleControl.leadingAnchor.constraint(equalTo: hostView.leadingAnchor),
-      capsuleControl.trailingAnchor.constraint(equalTo: hostView.trailingAnchor),
-    ])
+      NSLayoutConstraint.activate([
+        self.circleControl.topAnchor.constraint(equalTo: self.hostView.topAnchor),
+        self.circleControl.bottomAnchor.constraint(equalTo: self.hostView.bottomAnchor),
+        self.circleControl.leadingAnchor.constraint(equalTo: self.hostView.leadingAnchor),
+        self.circleControl.trailingAnchor.constraint(equalTo: self.hostView.trailingAnchor),
+        self.capsuleControl.topAnchor.constraint(equalTo: self.hostView.topAnchor),
+        self.capsuleControl.bottomAnchor.constraint(equalTo: self.hostView.bottomAnchor),
+        self.capsuleControl.leadingAnchor.constraint(equalTo: self.hostView.leadingAnchor),
+        self.capsuleControl.trailingAnchor.constraint(equalTo: self.hostView.trailingAnchor),
+      ])
 
-    if let args = args {
-      apply(args)
+      if let args = args {
+        self.apply(args)
+      }
+      self.hostView.layoutIfNeeded()
     }
 
     channel.setMethodCallHandler { [weak self] call, result in
@@ -2291,6 +2462,7 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
     let label = (args["label"] as? String) ?? ""
     let symbolSize = CGFloat((args["symbolSize"] as? NSNumber)?.doubleValue ?? 17.0)
     let fgColor = MarcoLiquidGlassSupport.colorFromARGB(args["foregroundColor"]) ?? .white
+    let tintARGB = (args["tintColor"] as? NSNumber)?.uint64Value
     let tintColor = MarcoLiquidGlassSupport.colorFromARGB(args["tintColor"])
     let a11yLabel = (args["accessibilityLabel"] as? String) ?? label
     let menuTitle = (args["menuTitle"] as? String) ?? ""
@@ -2300,7 +2472,7 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
     }
 
     isCapsuleMode = (style == "capsule" && (!label.isEmpty || (trailingSymbol != nil && !trailingSymbol!.isEmpty)))
-    circleButton.isHidden = isCapsuleMode
+    circleControl.isHidden = isCapsuleMode
     capsuleControl.isHidden = !isCapsuleMode
 
     if isCapsuleMode {
@@ -2312,44 +2484,22 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
         trailingSymbol: trailingSymbol,
         foregroundColor: fgColor,
         tintColor: tintColor,
+        tintARGB: tintARGB,
         symbolSize: symbolSize,
         menu: menu
       )
     } else {
-      circleButton.accessibilityLabel = a11yLabel
-      if let menu = menu {
-        circleButton.menu = menu
-        circleButton.showsMenuAsPrimaryAction = true
-      } else {
-        circleButton.menu = nil
-        circleButton.showsMenuAsPrimaryAction = false
-      }
+      circleControl.accessibilityLabel = a11yLabel
+      circleControl.menuOverlayButton.accessibilityLabel = a11yLabel
       let symCfg = UIImage.SymbolConfiguration(pointSize: symbolSize, weight: .semibold)
       let rawImage = symbol.flatMap { UIImage(systemName: $0, withConfiguration: symCfg) }
-      let image = MarcoLiquidGlassSupport.isNearWhite(fgColor)
-        ? rawImage
-        : rawImage?.withTintColor(fgColor, renderingMode: .alwaysOriginal)
-      #if compiler(>=6.2)
-      if #available(iOS 26.0, *) {
-        var config = (tintColor != nil) ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()
-        config.image = image
-        config.baseForegroundColor = fgColor
-        if let tint = tintColor {
-          config.baseBackgroundColor = tint
-        }
-        config.cornerStyle = .capsule
-        config.contentInsets = .zero
-        circleButton.configuration = config
-        return
-      }
-      #endif
-      var config = UIButton.Configuration.filled()
-      config.image = image
-      config.baseForegroundColor = fgColor
-      config.baseBackgroundColor = tintColor ?? UIColor(white: 0.16, alpha: 0.85)
-      config.cornerStyle = .capsule
-      config.contentInsets = .zero
-      circleButton.configuration = config
+      circleControl.configure(
+        image: rawImage,
+        foregroundColor: fgColor,
+        tintColor: tintColor,
+        tintARGB: tintARGB,
+        menu: menu
+      )
     }
   }
 
@@ -2471,7 +2621,13 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
     arguments args: [String: Any]?,
     messenger: FlutterBinaryMessenger
   ) {
-    self.hostView = MarcoGlassPillHostView(frame: frame)
+    let initialFrame = MarcoLiquidGlassSupport.resolvedInitialFrame(
+      frame,
+      args: args,
+      defaultWidth: 128.0,
+      defaultHeight: 40.0
+    )
+    self.hostView = MarcoGlassPillHostView(frame: initialFrame)
     self.channel = FlutterMethodChannel(
       name: "marco_movie/ios26_glass_pill_\(viewId)",
       binaryMessenger: messenger
@@ -2479,7 +2635,10 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
     super.init()
 
     if let args = args {
-      apply(args)
+      MarcoLiquidGlassSupport.withoutAnimations {
+        self.apply(args)
+        self.hostView.layoutIfNeeded()
+      }
     }
 
     channel.setMethodCallHandler { [weak self] call, result in
@@ -2616,41 +2775,50 @@ private final class MarcoNativeSegmentedControlPlatformView: NSObject, FlutterPl
     )
     super.init()
 
-    hostView.frame = frame
-    hostView.backgroundColor = .clear
-    hostView.isOpaque = false
-    hostView.clipsToBounds = false
-    hostView.overrideUserInterfaceStyle = .dark
-
-    control.overrideUserInterfaceStyle = .dark
-    control.apportionsSegmentWidthsByContent = false
-    control.translatesAutoresizingMaskIntoConstraints = false
-    control.setTitleTextAttributes(
-      [
-        .foregroundColor: UIColor.white.withAlphaComponent(0.76),
-        .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
-      ],
-      for: .normal
+    let initialFrame = MarcoLiquidGlassSupport.resolvedInitialFrame(
+      frame,
+      args: args,
+      defaultWidth: 280.0,
+      defaultHeight: 36.0
     )
-    control.setTitleTextAttributes(
-      [
-        .foregroundColor: UIColor.white,
-        .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
-      ],
-      for: .selected
-    )
-    control.addTarget(self, action: #selector(valueChanged), for: .valueChanged)
-    hostView.addSubview(control)
+    MarcoLiquidGlassSupport.withoutAnimations {
+      self.hostView.frame = initialFrame
+      self.hostView.backgroundColor = .clear
+      self.hostView.isOpaque = false
+      self.hostView.clipsToBounds = false
+      self.hostView.overrideUserInterfaceStyle = .dark
 
-    NSLayoutConstraint.activate([
-      control.topAnchor.constraint(equalTo: hostView.topAnchor),
-      control.bottomAnchor.constraint(equalTo: hostView.bottomAnchor),
-      control.leadingAnchor.constraint(equalTo: hostView.leadingAnchor),
-      control.trailingAnchor.constraint(equalTo: hostView.trailingAnchor),
-    ])
+      self.control.overrideUserInterfaceStyle = .dark
+      self.control.apportionsSegmentWidthsByContent = false
+      self.control.translatesAutoresizingMaskIntoConstraints = false
+      self.control.setTitleTextAttributes(
+        [
+          .foregroundColor: UIColor.white.withAlphaComponent(0.76),
+          .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
+        ],
+        for: .normal
+      )
+      self.control.setTitleTextAttributes(
+        [
+          .foregroundColor: UIColor.white,
+          .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
+        ],
+        for: .selected
+      )
+      self.control.addTarget(self, action: #selector(self.valueChanged), for: .valueChanged)
+      self.hostView.addSubview(self.control)
 
-    if let args = args {
-      apply(args)
+      NSLayoutConstraint.activate([
+        self.control.topAnchor.constraint(equalTo: self.hostView.topAnchor),
+        self.control.bottomAnchor.constraint(equalTo: self.hostView.bottomAnchor),
+        self.control.leadingAnchor.constraint(equalTo: self.hostView.leadingAnchor),
+        self.control.trailingAnchor.constraint(equalTo: self.hostView.trailingAnchor),
+      ])
+
+      if let args = args {
+        self.apply(args)
+      }
+      self.hostView.layoutIfNeeded()
     }
 
     channel.setMethodCallHandler { [weak self] call, result in
@@ -2755,25 +2923,34 @@ private final class MarcoNativeSwitchPlatformView: NSObject, FlutterPlatformView
     )
     super.init()
 
-    hostView.frame = frame
-    hostView.backgroundColor = .clear
-    hostView.isOpaque = false
-    hostView.clipsToBounds = false
-    hostView.overrideUserInterfaceStyle = .dark
+    let initialFrame = MarcoLiquidGlassSupport.resolvedInitialFrame(
+      frame,
+      args: args,
+      defaultWidth: 51.0,
+      defaultHeight: 31.0
+    )
+    MarcoLiquidGlassSupport.withoutAnimations {
+      self.hostView.frame = initialFrame
+      self.hostView.backgroundColor = .clear
+      self.hostView.isOpaque = false
+      self.hostView.clipsToBounds = false
+      self.hostView.overrideUserInterfaceStyle = .dark
 
-    toggle.overrideUserInterfaceStyle = .dark
-    toggle.onTintColor = UIColor.systemGreen
-    toggle.translatesAutoresizingMaskIntoConstraints = false
-    toggle.addTarget(self, action: #selector(valueChanged), for: .valueChanged)
-    hostView.addSubview(toggle)
+      self.toggle.overrideUserInterfaceStyle = .dark
+      self.toggle.onTintColor = UIColor.systemGreen
+      self.toggle.translatesAutoresizingMaskIntoConstraints = false
+      self.toggle.addTarget(self, action: #selector(self.valueChanged), for: .valueChanged)
+      self.hostView.addSubview(self.toggle)
 
-    NSLayoutConstraint.activate([
-      toggle.centerXAnchor.constraint(equalTo: hostView.centerXAnchor),
-      toggle.centerYAnchor.constraint(equalTo: hostView.centerYAnchor),
-    ])
+      NSLayoutConstraint.activate([
+        self.toggle.centerXAnchor.constraint(equalTo: self.hostView.centerXAnchor),
+        self.toggle.centerYAnchor.constraint(equalTo: self.hostView.centerYAnchor),
+      ])
 
-    if let args = args {
-      apply(args, animated: false)
+      if let args = args {
+        self.apply(args, animated: false)
+      }
+      self.hostView.layoutIfNeeded()
     }
 
     channel.setMethodCallHandler { [weak self] call, result in
@@ -2865,29 +3042,38 @@ private final class MarcoNativeSliderPlatformView: NSObject, FlutterPlatformView
     )
     super.init()
 
-    hostView.frame = frame
-    hostView.backgroundColor = .clear
-    hostView.isOpaque = false
-    hostView.clipsToBounds = false
-    hostView.overrideUserInterfaceStyle = .dark
+    let initialFrame = MarcoLiquidGlassSupport.resolvedInitialFrame(
+      frame,
+      args: args,
+      defaultWidth: 320.0,
+      defaultHeight: 36.0
+    )
+    MarcoLiquidGlassSupport.withoutAnimations {
+      self.hostView.frame = initialFrame
+      self.hostView.backgroundColor = .clear
+      self.hostView.isOpaque = false
+      self.hostView.clipsToBounds = false
+      self.hostView.overrideUserInterfaceStyle = .dark
 
-    slider.overrideUserInterfaceStyle = .dark
-    slider.minimumTrackTintColor = UIColor.systemBlue
-    slider.maximumTrackTintColor = UIColor.white.withAlphaComponent(0.22)
-    slider.isContinuous = true
-    slider.translatesAutoresizingMaskIntoConstraints = false
-    slider.addTarget(self, action: #selector(valueChanged), for: .valueChanged)
-    slider.addTarget(self, action: #selector(touchEnded), for: [.touchUpInside, .touchUpOutside, .touchCancel])
-    hostView.addSubview(slider)
+      self.slider.overrideUserInterfaceStyle = .dark
+      self.slider.minimumTrackTintColor = UIColor.systemBlue
+      self.slider.maximumTrackTintColor = UIColor.white.withAlphaComponent(0.22)
+      self.slider.isContinuous = true
+      self.slider.translatesAutoresizingMaskIntoConstraints = false
+      self.slider.addTarget(self, action: #selector(self.valueChanged), for: .valueChanged)
+      self.slider.addTarget(self, action: #selector(self.touchEnded), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+      self.hostView.addSubview(self.slider)
 
-    NSLayoutConstraint.activate([
-      slider.leadingAnchor.constraint(equalTo: hostView.leadingAnchor),
-      slider.trailingAnchor.constraint(equalTo: hostView.trailingAnchor),
-      slider.centerYAnchor.constraint(equalTo: hostView.centerYAnchor),
-    ])
+      NSLayoutConstraint.activate([
+        self.slider.leadingAnchor.constraint(equalTo: self.hostView.leadingAnchor),
+        self.slider.trailingAnchor.constraint(equalTo: self.hostView.trailingAnchor),
+        self.slider.centerYAnchor.constraint(equalTo: self.hostView.centerYAnchor),
+      ])
 
-    if let args = args {
-      apply(args)
+      if let args = args {
+        self.apply(args)
+      }
+      self.hostView.layoutIfNeeded()
     }
 
     channel.setMethodCallHandler { [weak self] call, result in
