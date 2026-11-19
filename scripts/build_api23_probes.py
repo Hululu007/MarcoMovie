@@ -89,7 +89,8 @@ def main(phone=False):
     run(exe(JDK / "bin", "javac"), "-encoding", "UTF-8", "-source", "8", "-target", "8", "-Xlint:-options",
         "-classpath", str(ANDROID) + os.pathsep + str(app_classes), "-d", OUT / "classes",
         *(ROOT / ("android/tests/device/" + name + ".java") for name in PROBES),
-        ROOT / "android/tests/device/HttpT4Checks.java")
+        ROOT / "android/tests/device/HttpT4Checks.java",
+        *([ROOT / "android/tests/device/HomeRenderDiagnostics.java"] if "HomeProbe" in PROBES else []))
     with zipfile.ZipFile(OUT / "classes.jar", "w") as jar:
         for compiled in (OUT / "classes").rglob("*.class"):
             jar.write(compiled, compiled.relative_to(OUT / "classes").as_posix())

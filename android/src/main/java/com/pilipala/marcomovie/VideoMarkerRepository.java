@@ -20,6 +20,16 @@ final class VideoMarkerRepository {
     }
 
     private static final Object LOCK = new Object();
+    private static volatile boolean clearing;
+
+    static boolean clearing() {
+        return clearing;
+    }
+
+    static void finishClear() {
+        clearing = false;
+    }
+
     private static String privateDocument = "";
     private static long privateEpoch;
     final VideoMarkerStore.Identity identity;
@@ -44,7 +54,7 @@ final class VideoMarkerRepository {
 
     VideoMarkerStore.Document read() throws IOException {
         synchronized (LOCK) {
-            if (!valid.get()) throw new IOException("播放上下文已失效");
+            if (clearing || !valid.get()) throw new IOException("播放上下文已失效");
             String raw = backend.read();
             try {
                 return VideoMarkerStore.read(raw);
@@ -61,10 +71,10 @@ final class VideoMarkerRepository {
 
     long write(long revision, boolean intro, VideoMarkerStore.Field value) throws IOException {
         synchronized (LOCK) {
-            if (!valid.get()) throw new IOException("播放上下文已失效");
+            if (clearing || !valid.get()) throw new IOException("播放上下文已失效");
             read(); // Corrupt/unsupported documents are preserved, never replaced by an empty one.
             String next = VideoMarkerStore.update(backend.read(), revision, identity, intro, value);
-            if (!valid.get()) throw new IOException("播放上下文已失效");
+            if (clearing || !valid.get()) throw new IOException("播放上下文已失效");
             backend.write(next); // Must succeed before the transaction may resume playback.
             return revision + 1;
         }
@@ -221,6 +231,7 @@ final class VideoMarkerRepository {
 
     static int count(MainActivity a) {
         synchronized (LOCK) {
+            if (clearing) return -1;
             try {
                 return VideoMarkerStore.read(
                                 a.privateMode
@@ -234,12 +245,14 @@ final class VideoMarkerRepository {
         }
     }
 
-    static void clearAll(MainActivity a) throws IOException {
+    // Capture only the already selected public directory on UI; never consult Activity on worker.
+    static MarkerClearTask.Write preparePublicClear(File directory) {
         synchronized (LOCK) {
-            if (a.markerHost != null) a.markerHost.abort();
-            if (a.privateMode) clearPrivate();
-            else {
-                Backend backend = publicBackend(a.getFilesDir());
+            if (clearing) return null;
+            final Backend backend = publicBackend(directory);
+            clearing = true;
+            return () -> {
+                MarkerClearTask.requireWorker();
                 String raw = backend.read();
                 long revision;
                 try {
@@ -250,8 +263,7 @@ final class VideoMarkerRepository {
                 }
                 if (revision == Long.MAX_VALUE) throw new IOException("标记版本已达上限，原文件已保留");
                 backend.write("{\"schema\":2,\"revision\":" + (revision + 1) + ",\"records\":[]}");
-            }
-            if (a.playbackControls != null) a.playbackControls.resetMarkers();
+            };
         }
     }
 

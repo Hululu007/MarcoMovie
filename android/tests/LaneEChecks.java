@@ -429,6 +429,13 @@ public final class LaneEChecks {
         return name;
     }
 
+    private static boolean workerCommit(CommitSite site) {
+        return "MarkerLegacyCommit.clear".equals(site.classAndMethod)
+                && site.methodBody.indexOf("MarkerClearTask.requireWorker();") >= 0
+                && site.methodBody.indexOf("MarkerClearTask.requireWorker();")
+                        < site.methodBody.indexOf(".commit()");
+    }
+
     private static List<String> auditCommitSites(List<CommitSite> sites) {
         List<String> violations = new ArrayList<>();
         for (CommitSite site : sites) {
@@ -436,7 +443,8 @@ public final class LaneEChecks {
                     && site.methodBody.contains("LOADING_SITE")) {
                 continue;
             }
-            if (WHITELISTED_SECURE_STORAGE_METHODS.contains(site.classAndMethod)) {
+            if (workerCommit(site)
+                    || WHITELISTED_SECURE_STORAGE_METHODS.contains(site.classAndMethod)) {
                 continue;
             }
             violations.add(site.classAndMethod + ":" + site.lineNumber + " -> " + site.lineText);
@@ -469,7 +477,8 @@ public final class LaneEChecks {
                             && site.methodBody.contains("LOADING_SITE")) {
                         allowedCrashMarkerCount++;
                         matchedCrashMethods.add(site.classAndMethod);
-                    } else if (WHITELISTED_SECURE_STORAGE_METHODS.contains(site.classAndMethod)) {
+                    } else if (workerCommit(site)
+                            || WHITELISTED_SECURE_STORAGE_METHODS.contains(site.classAndMethod)) {
                         allowedSecureStorageCount++;
                     } else {
                         violations.add(
@@ -497,6 +506,32 @@ public final class LaneEChecks {
                 violations.isEmpty(),
                 "E1: Zero unwhitelisted .commit() violations across android/src/main/java: "
                         + violations);
+
+        String guarded =
+                "final class MarkerLegacyCommit { static void clear() { MarkerClearTask.requireWorker(); prefs.edit().commit(); } }";
+        check(
+                auditCommitSites(findCommitSitesByMethod("MarkerLegacyCommit.java", guarded))
+                        .isEmpty(),
+                "storage commit requires enforced worker guard");
+        check(
+                auditCommitSites(
+                                        findCommitSitesByMethod(
+                                                "MarkerLegacyCommit.java",
+                                                guarded.replace(
+                                                        "MarkerClearTask.requireWorker();", "")))
+                                .size()
+                        == 1,
+                "missing worker guard remains forbidden");
+        check(
+                auditCommitSites(
+                                        findCommitSitesByMethod(
+                                                "MarkerLegacyCommit.java",
+                                                guarded.replace(
+                                                        "MarkerClearTask.requireWorker(); prefs.edit().commit();",
+                                                        "prefs.edit().commit(); MarkerClearTask.requireWorker();")))
+                                .size()
+                        == 1,
+                "late worker guard remains forbidden");
 
         // 6f verification: shifting line numbers by +250 lines still passes method-name check,
         // while placing .commit() in an unwhitelisted method (e.g. MainActivity.onCreate) fails

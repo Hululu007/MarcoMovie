@@ -17,7 +17,7 @@ with tempfile.TemporaryDirectory(prefix='lane-e-checks-') as tmp:
     runtime_cp = compile_real_android_sources(
         classes_dir=classes_dir,
         work_dir=work_dir,
-        test_sources=[ROOT / 'android/tests/LaneEChecks.java'],
+        test_sources=[ROOT / 'android/tests/LaneEChecks.java', ROOT / 'android/tests/MarkerClearChecks.java'],
     )
     run_cp = os.pathsep.join(str(p) for p in runtime_cp)
     subprocess.run([
@@ -26,3 +26,5 @@ with tempfile.TemporaryDirectory(prefix='lane-e-checks-') as tmp:
         '-cp', run_cp,
         'com.pilipala.marcomovie.LaneEChecks',
     ], cwd=ROOT, check=True)
+
+    subprocess.run([str(JDK / ("java" + SUFFIX)), "-Dfile.encoding=UTF-8", "-cp", run_cp, "com.pilipala.marcomovie.MarkerClearChecks"], cwd=ROOT, check=True)

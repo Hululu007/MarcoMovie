@@ -2426,6 +2426,10 @@ final class PlaybackControls {
     static void setVideoSkip(
             MainActivity a, Cms.Site site, Cms.Video video, boolean intro, int seconds) {
         if (a == null) return;
+        if (a.isTvDevice() && !a.privateMode && VideoMarkerRepository.clearing()) {
+            a.toast("正在保存清除结果，请稍候");
+            return;
+        }
         String siteKey = site == null ? "" : site.key;
         String videoId = VideoSkipStore.videoKeyFrom(video, a.activeEpisode);
         if (a.privateMode) {
@@ -2451,28 +2455,71 @@ final class PlaybackControls {
         return VideoSkipStore.countRecords(a.prefs.getString(Prefs.VIDEO_SKIP_RECORDS, "[]"));
     }
 
-    static boolean clearVideoSkipRecords(MainActivity a) {
-        if (a == null) return false;
-        if (a.isTvDevice()) {
-            try {
-                VideoMarkerRepository.clearAll(a);
-            } catch (java.io.IOException failed) {
-                a.notice("新标记清除未确认，旧记录保留：" + failed.getMessage());
-                return false;
-            }
+    static void clearVideoSkipRecords(MainActivity a, Runnable onChanged) {
+        if (a == null || a.switchingPrivacy || a.isDestroyed()) return;
+        if (!a.isTvDevice()) {
+            if (a.privateMode) VideoSkipStore.clearPrivateRecords();
+            else if (a.prefs != null) a.prefs.edit().remove(Prefs.VIDEO_SKIP_RECORDS).apply();
+            else return;
+            a.toast("已清除全部影片的片头片尾记录");
+            if (onChanged != null) onChanged.run();
+            return;
         }
+        if (VideoMarkerRepository.clearing()) {
+            a.toast("正在保存清除结果，请稍候");
+            return;
+        }
+        if (a.markerHost != null) a.markerHost.abort();
+        if (a.playbackControls != null) a.playbackControls.resetMarkers();
         if (a.privateMode) {
+            VideoMarkerRepository.clearPrivate();
             VideoSkipStore.clearPrivateRecords();
-            return true;
+            a.toast("已清除当前空间的片头片尾记录");
+            if (onChanged != null) onChanged.run();
+            return;
         }
-        if (a.prefs == null) return false;
-        if (a.isTvDevice()) {
-            boolean cleared = a.prefs.edit().remove(Prefs.VIDEO_SKIP_RECORDS).commit();
-            if (!cleared) a.notice("新标记已清空；旧记录写入未确认，请重新检查");
-            return cleared;
+        final android.content.SharedPreferences capturedPrefs = a.prefs;
+        if (capturedPrefs == null) return;
+        final int generation = a.generation;
+        final TvSearchContext context = new TvSearchContext(a.config, a.privateMode, a.engineEpoch);
+        final MarkerClearTask.Write clear =
+                VideoMarkerRepository.preparePublicClear(a.getFilesDir());
+        if (clear == null) return;
+        a.toast("正在清除当前空间的记录");
+        try {
+            MarkerClearTask.submit(
+                    clear,
+                    () -> MarkerLegacyCommit.clear(capturedPrefs),
+                    (newer, failure) -> {
+                        // Release even if the old Activity is destroyed and its UI queue is
+                        // discarded.
+                        VideoMarkerRepository.finishClear();
+                        a.ui.post(
+                                () -> {
+                                    if (a.isFinishing()
+                                            || a.isDestroyed()
+                                            || a.switchingPrivacy
+                                            || a.generation != generation
+                                            || a.prefs != capturedPrefs
+                                            || !context.matches(
+                                                    a.config, a.privateMode, a.engineEpoch)) return;
+                                    if (a.playbackControls != null)
+                                        a.playbackControls.resetMarkers();
+                                    if (failure != null) {
+                                        a.notice(
+                                                newer
+                                                        ? "新标记已清空，旧记录写盘未确认，请重新检查"
+                                                        : "新标记清除未确认，旧记录保留：" + failure.getMessage());
+                                        return;
+                                    }
+                                    a.toast("已清除当前空间的片头片尾记录");
+                                    if (onChanged != null) onChanged.run();
+                                });
+                    });
+        } catch (RuntimeException rejected) {
+            VideoMarkerRepository.finishClear();
+            a.notice("清除任务未启动，原记录保留");
         }
-        a.prefs.edit().remove(Prefs.VIDEO_SKIP_RECORDS).apply();
-        return true;
     }
 
     void skip(boolean intro) {
@@ -2518,9 +2565,7 @@ final class PlaybackControls {
             b.setPositiveButton(
                     "清空全部记录",
                     (d, w) -> {
-                        if (!clearVideoSkipRecords(a)) return;
-                        a.toast("已清空全部影片的片头片尾记录");
-                        if (onChanged != null) onChanged.run();
+                        clearVideoSkipRecords(a, onChanged);
                     });
         }
         b.show();

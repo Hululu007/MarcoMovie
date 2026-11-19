@@ -28,7 +28,8 @@ final class TvMarkerHost {
     }
 
     boolean valid() {
-        return a.playbackControls == controls
+        return !VideoMarkerRepository.clearing()
+                && a.playbackControls == controls
                 && a.activeLine == line
                 && a.activeEpisode == episode
                 && !a.isFinishing()
