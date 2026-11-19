@@ -11,7 +11,7 @@ final class TvScrollView extends ScrollView {
     final Rect tempRect = new Rect();
     MotionLoop.Step motion;
     boolean focusing, layingOut;
-    boolean readingMode, readingFocus;
+    boolean readingMode;
     long lastReadingStep;
     int goal;
 
@@ -102,7 +102,6 @@ final class TvScrollView extends ScrollView {
         else if (area.bottom > bottom)
             y = area.bottom - getHeight() + Math.max(margin, (getHeight() - area.height()) / 3);
         else return;
-        if (readingMode) y = Math.max(reference - a.dp(48), Math.min(reference + a.dp(48), y));
         moveTo(y);
     }
 
@@ -114,7 +113,7 @@ final class TvScrollView extends ScrollView {
         } finally {
             focusing = false;
         }
-        if (!readingFocus) reveal(focused);
+        reveal(focused);
     }
 
     @Override
@@ -122,8 +121,6 @@ final class TvScrollView extends ScrollView {
         if (focusing) return;
         if (layingOut) {
             if (motion != null) return;
-            if (readingMode)
-                y = Math.max(getScrollY() - a.dp(48), Math.min(getScrollY() + a.dp(48), y));
             super.scrollTo(x, y);
             spring.snap(getScrollY());
             return;
@@ -172,27 +169,32 @@ final class TvScrollView extends ScrollView {
         lastReadingStep = event.getEventTime();
         int reference = motion == null ? getScrollY() : goal;
         int top = reference + a.dp(12), bottom = reference + getHeight() - a.dp(12);
-        if (next != null && next != this && next != focused) {
-            Rect area = new Rect(0, 0, next.getWidth(), next.getHeight());
-            offsetDescendantRectToMyCoords(next, area);
-            boolean visible =
-                    area.height() > getHeight() - a.dp(24)
-                            ? area.top < bottom && area.bottom > top
-                            : area.top >= top && area.bottom <= bottom;
-            if (visible) {
-                readingFocus = true;
-                try {
-                    next.requestFocus(direction);
-                } finally {
-                    readingFocus = false;
-                }
+        // A focusable prose block (e.g. release notes) keeps reading until its edge.
+        // Action rows move focus immediately even when the next row is off-screen.
+        boolean readingText = focused instanceof android.widget.TextView && !focused.isClickable();
+        boolean moreText = false;
+        if (readingText) {
+            Rect area = new Rect(0, 0, focused.getWidth(), focused.getHeight());
+            offsetDescendantRectToMyCoords(focused, area);
+            moreText = direction == FOCUS_DOWN ? area.bottom > bottom : area.top < top;
+        }
+        if (!moreText && next != null && next != this && next != focused) {
+            if (next.requestFocus(direction)) {
+                Rect area = new Rect(0, 0, next.getWidth(), next.getHeight());
+                offsetDescendantRectToMyCoords(next, area);
+                if (direction == FOCUS_UP && area.height() > getHeight() - a.dp(28))
+                    moveTo(area.bottom - getHeight() + a.dp(14));
+                else reveal(next);
                 return true;
             }
         }
-        int step = a.dp(48) * (direction == FOCUS_UP ? -1 : 1);
+        int lineHeight =
+                readingText ? ((android.widget.TextView) focused).getLineHeight() : a.dp(24);
+        int distance = TvReadingScrollPolicy.step(getHeight() - a.dp(24), lineHeight, a.dp(48));
+        int step = distance * (direction == FOCUS_UP ? -1 : 1);
         // Limit queued travel while a remote sends rapid repeat events.
         int end = bound(reference + step);
-        end = Math.max(getScrollY() - a.dp(96), Math.min(getScrollY() + a.dp(96), end));
+        end = Math.max(getScrollY() - distance, Math.min(getScrollY() + distance, end));
         moveTo(end);
         return true;
     }

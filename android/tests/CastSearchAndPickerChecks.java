@@ -471,7 +471,55 @@ public final class CastSearchAndPickerChecks {
     }
 
     public static void main(String[] args) throws Exception {
-        check(Prefs.KEYS.length == 38, "Prefs.KEYS length preserved at 38");
+        // Frozen 55799fd backup/reset contract, plus the two reviewed V17 preferences.
+        // Compare identities, not just a count: a removed legacy key must fail too.
+        List<String> expectedKeys =
+                Arrays.asList(
+                        "ui_scale_percent",
+                        "nav_scale_percent",
+                        "tv_dock_position",
+                        "tv_player_style",
+                        "startup_animation",
+                        "show_hero_banner",
+                        "home_ambient",
+                        "home_columns",
+                        "home_rows",
+                        "home_sections",
+                        "wallpaper_enabled",
+                        "wallpaper_dim",
+                        "reduced",
+                        "reduced_transparency",
+                        "player_engine",
+                        "video_output",
+                        "decoder_mode",
+                        "software_audio",
+                        "prefer_aac",
+                        "tunneled_playback",
+                        "aspect",
+                        "buffer_seconds",
+                        "play_speed",
+                        "auto_next",
+                        "repeat_mode",
+                        "skip_intro",
+                        "skip_outro",
+                        "subtitle_size",
+                        "subtitle_bottom",
+                        "subtitle_style",
+                        "subtitle_weight",
+                        "subtitle_offset_x",
+                        "danmaku_default",
+                        "picture_effect",
+                        "audio_effect",
+                        "search_threads",
+                        "search_timeout",
+                        "episodes_descending",
+                        "tv_navigation_mode",
+                        "tv_ambient_percent");
+        java.util.Set<String> actualKeys = new java.util.HashSet<>(Arrays.asList(Prefs.KEYS));
+        check(actualKeys.size() == Prefs.KEYS.length, "preference export/reset keys are unique");
+        check(
+                actualKeys.equals(new java.util.HashSet<>(expectedKeys)),
+                "legacy preference identities preserved with only reviewed V17 additions");
         testSourcePickerEdits();
         testSearchInputServer();
         testCastServiceDlnaAndWeb();

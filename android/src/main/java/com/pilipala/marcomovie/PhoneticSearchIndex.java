@@ -33,7 +33,47 @@ public final class PhoneticSearchIndex {
     final Map<Character, List<Entry>> words = new HashMap<>();
     final List<Entry> entries = new ArrayList<>();
     final LinkedHashMap<String, List<Entry>> titles = new LinkedHashMap<>();
+    private final LinkedHashMap<String, List<Entry>> dictionaryTitles = new LinkedHashMap<>();
     final List<String> preferred = new ArrayList<>();
+    private boolean learningAllowed = true;
+
+    /** Copy an assets-only dictionary; learned titles never cross Activity/space sessions. */
+    public synchronized PhoneticSearchIndex newSession(boolean publicSpace) {
+        PhoneticSearchIndex session = new PhoneticSearchIndex();
+        session.readings.putAll(readings);
+        session.words.putAll(words);
+        session.entries.addAll(entries);
+        session.dictionaryTitles.putAll(dictionaryTitles);
+        session.titles.putAll(dictionaryTitles);
+        session.learningAllowed = publicSpace;
+        return session;
+    }
+
+    private PhoneticSearchIndex() {}
+
+    static final class PreparedTitles {
+        private final Map<String, List<Entry>> values = new LinkedHashMap<>();
+    }
+
+    /** Compute pronunciations on the worker without changing any visible/session state. */
+    PreparedTitles prepareTitles(Collection<String> pending) {
+        PreparedTitles result = new PreparedTitles();
+        if (!learningAllowed) return result;
+        for (String title : pending) {
+            if (title == null || title.trim().isEmpty() || title.length() > 100) continue;
+            result.values.put(title, titleEntries(title));
+            if (result.values.size() >= 400) break;
+        }
+        return result;
+    }
+
+    /** Caller validates its space on the UI thread; only bounded map updates happen here. */
+    synchronized void learnPrepared(PreparedTitles prepared) {
+        if (!learningAllowed) return;
+        for (Map.Entry<String, List<Entry>> title : prepared.values.entrySet())
+            if (!titles.containsKey(title.getKey())) titles.put(title.getKey(), title.getValue());
+        while (titles.size() > 2000) titles.remove(titles.keySet().iterator().next());
+    }
 
     public PhoneticSearchIndex(InputStream characters, InputStream phrases) throws IOException {
         this(characters, phrases, null);
@@ -101,13 +141,20 @@ public final class PhoneticSearchIndex {
                     if (!line.isEmpty() && !line.startsWith("#")) learn(line);
                 }
             }
+        dictionaryTitles.putAll(titles);
     }
 
     public synchronized void learn(String title) {
-        if (title == null
+        if (!learningAllowed
+                || title == null
                 || title.trim().isEmpty()
                 || title.length() > 100
                 || titles.containsKey(title)) return;
+        titles.put(title, titleEntries(title));
+        while (titles.size() > 2000) titles.remove(titles.keySet().iterator().next());
+    }
+
+    private List<Entry> titleEntries(String title) {
         List<String> variants = new ArrayList<>();
         variants.add("");
         String text = title.replaceAll("[\\s\\p{Punct}，。！？·《》【】（）]", "").toLowerCase(Locale.ROOT);
@@ -129,15 +176,17 @@ public final class PhoneticSearchIndex {
         }
         List<Entry> values = new ArrayList<>();
         for (String variant : variants) values.add(new Entry(title, variant, 1000000));
-        titles.put(title, values);
-        while (titles.size() > 2000) titles.remove(titles.keySet().iterator().next());
+        return values;
     }
 
     public synchronized boolean matches(String title, String query) {
+        if (title == null) return false;
         String q = normalize(query);
         if (title.toLowerCase(Locale.ROOT).contains(q)) return true;
-        learn(title);
+        if (title.length() > 100) return false;
+        // Matching private results must not populate suggestions or future request expansion.
         List<Entry> titleEntries = titles.get(title);
+        if (titleEntries == null) titleEntries = titleEntries(title);
         if (titleEntries != null)
             for (Entry e : titleEntries)
                 if (e.full.contains(q) || e.initials.contains(q)) return true;
@@ -145,11 +194,39 @@ public final class PhoneticSearchIndex {
     }
 
     public synchronized void prefer(String title) {
-        if (title == null || !title.matches(".*[\\u3400-\\u9fff].*")) return;
+        if (!learningAllowed || title == null || !title.matches(".*[\\u3400-\\u9fff].*")) return;
         learn(title);
         preferred.remove(title);
         preferred.add(0, title);
         while (preferred.size() > 20) preferred.remove(preferred.size() - 1);
+    }
+
+    /** Actual indexed titles only: never present arbitrary pinyin decoding as a movie. */
+    public synchronized List<String> suggestTitles(String query, int limit) {
+        String q = normalize(query);
+        if (q.isEmpty() || limit <= 0) return Collections.emptyList();
+        Map<String, Integer> ranks = new HashMap<>();
+        for (Map.Entry<String, List<Entry>> title : titles.entrySet()) {
+            String literal = normalize(title.getKey());
+            int rank =
+                    literal.equals(q)
+                            ? 12000
+                            : literal.startsWith(q) ? 3000 : literal.contains(q) ? 500 : 0;
+            for (Entry e : title.getValue()) {
+                if (e.full.equals(q) || e.initials.equals(q)) rank = Math.max(rank, 11000);
+                else if (e.full.startsWith(q)) rank = Math.max(rank, 2000);
+                else if (e.initials.startsWith(q)) rank = Math.max(rank, 1000);
+            }
+            if (rank > 0) ranks.put(title.getKey(), rank - title.getKey().length());
+        }
+        List<String> out = new ArrayList<>(ranks.keySet());
+        Collections.sort(
+                out,
+                (x, y) -> {
+                    int rank = Integer.compare(ranks.get(y), ranks.get(x));
+                    return rank != 0 ? rank : x.compareTo(y);
+                });
+        return new ArrayList<>(out.subList(0, Math.min(out.size(), Math.min(8, limit))));
     }
 
     public synchronized List<String> expand(String query) {

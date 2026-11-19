@@ -23,7 +23,7 @@ import java.util.List;
  *
  * <p>Instead of shrinking the video into an awkward floating rectangle in the middle of the page,
  * keeps the live playing video surface full-bleed across the upper hero backdrop window with a
- * smooth lower gradient transition into the centered hero stage and full-width episode grid.
+ * smooth lower gradient transition into the hero stage and full-width episode grid.
  */
 final class MiniDetails {
     final MainActivity a;
@@ -110,9 +110,9 @@ final class MiniDetails {
         videoTouchZone.setOnClickListener(v -> a.expandPlayback());
         content.addView(videoTouchZone, new LinearLayout.LayoutParams(-1, a.dp(videoShowcaseDp)));
 
-        // 3. Centered Hero Stage over the Live Video Gradient Feather Zone
+        // 3. Hero stage over the live video gradient feather zone
         LinearLayout hero = a.vertical();
-        hero.setGravity(Gravity.CENTER_HORIZONTAL);
+        hero.setGravity(Gravity.LEFT);
         hero.setClipChildren(false);
         hero.setClipToPadding(false);
         hero.setPadding(a.dp(48), a.dp(2), a.dp(48), a.dp(8));
@@ -124,7 +124,8 @@ final class MiniDetails {
                         ? controls.resolved.name
                         : (a.activeEpisode != null ? a.activeEpisode.name : "");
         if (!currentEpName.isEmpty()) {
-            TextView liveBadge = a.text("● 正在播放 · " + currentEpName, 12, 0xff90caf9);
+            TextView liveBadge =
+                    a.text((a.playing ? "● 正在播放 · " : "Ⅱ 已暂停 · ") + currentEpName, 12, 0xff90caf9);
             liveBadge.setSingleLine(true);
             liveBadge.setEllipsize(TextUtils.TruncateAt.END);
             liveBadge.setMaxWidth(a.dp(620));
@@ -135,23 +136,23 @@ final class MiniDetails {
             badgeBg.setStroke(Math.max(1, a.dp(1)), 0x5564b5f6);
             liveBadge.setBackground(badgeBg);
             LinearLayout.LayoutParams badgeLp = new LinearLayout.LayoutParams(-2, -2);
-            badgeLp.gravity = Gravity.CENTER_HORIZONTAL;
+            badgeLp.gravity = Gravity.LEFT;
             badgeLp.bottomMargin = a.dp(6);
             hero.addView(liveBadge, badgeLp);
         }
 
         TextView title = a.text(video.title, 28, MainActivity.WHITE);
         title.setTypeface(null, Typeface.BOLD);
-        title.setGravity(Gravity.CENTER);
+        title.setGravity(Gravity.LEFT);
         title.setMaxLines(2);
         title.setEllipsize(TextUtils.TruncateAt.END);
         title.setShadowLayer(a.dp(12), 0, a.dp(3), 0xcc000000);
         LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(-2, -2);
-        titleLp.gravity = Gravity.CENTER_HORIZONTAL;
+        titleLp.gravity = Gravity.LEFT;
         hero.addView(title, titleLp);
 
         LinearLayout metaRow = a.row();
-        metaRow.setGravity(Gravity.CENTER);
+        metaRow.setGravity(Gravity.LEFT);
         List<String> pills = DetailScreen.collectMetaPills(video);
         for (int i = 0; i < pills.size(); i++) {
             TextView pill = DetailScreen.makeGlassMetaPill(a, pills.get(i));
@@ -161,22 +162,22 @@ final class MiniDetails {
         }
         if (metaRow.getChildCount() > 0) {
             LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(-2, -2);
-            metaLp.gravity = Gravity.CENTER_HORIZONTAL;
+            metaLp.gravity = Gravity.LEFT;
             metaLp.topMargin = a.dp(7);
             hero.addView(metaRow, metaLp);
         }
 
         LinearLayout ratingRow = DetailScreen.buildRatingAndCastRow(a, site, video);
         LinearLayout.LayoutParams ratingLp = new LinearLayout.LayoutParams(-2, -2);
-        ratingLp.gravity = Gravity.CENTER_HORIZONTAL;
+        ratingLp.gravity = Gravity.LEFT;
         ratingLp.topMargin = a.dp(6);
         hero.addView(ratingRow, ratingLp);
 
         if (video.description != null && !video.description.isEmpty()) {
             LinearLayout synopsisRow = a.vertical();
-            synopsisRow.setGravity(Gravity.CENTER_HORIZONTAL);
+            synopsisRow.setGravity(Gravity.LEFT);
             TextView synopsis = a.text(video.description, 14, 0xdcebebf5);
-            synopsis.setGravity(Gravity.CENTER);
+            synopsis.setGravity(Gravity.LEFT);
             synopsis.setLineSpacing(a.dp(2), 1.04f);
             synopsis.setMaxLines(2);
             synopsis.setEllipsize(TextUtils.TruncateAt.END);
@@ -206,16 +207,16 @@ final class MiniDetails {
             synopsisRow.addView(moreBtn, moreLp);
 
             LinearLayout.LayoutParams synLp = new LinearLayout.LayoutParams(-2, -2);
-            synLp.gravity = Gravity.CENTER_HORIZONTAL;
+            synLp.gravity = Gravity.LEFT;
             synLp.topMargin = a.dp(6);
             hero.addView(synopsisRow, synLp);
         }
 
-        // Centered Prominent White Stadium Button to return to full-screen playback
+        // Return to full-screen playback without replacing the player or its output.
         Button expand =
                 DetailScreen.heroPlayButton(a, "►  返回全屏播放", "mini-expand", a::expandPlayback);
         LinearLayout.LayoutParams expandLp = new LinearLayout.LayoutParams(-2, a.dp(46));
-        expandLp.gravity = Gravity.CENTER_HORIZONTAL;
+        expandLp.gravity = Gravity.LEFT;
         expandLp.topMargin = a.dp(10);
         hero.addView(expand, expandLp);
         hit = expand;
@@ -236,7 +237,7 @@ final class MiniDetails {
         episodes.setTag("detail-episodes");
         LinearLayout.LayoutParams epLp = new LinearLayout.LayoutParams(-1, -2);
         epLp.topMargin = a.dp(8);
-        info.addView(episodes, epLp);
+        info.addView(TvV17EpisodePanel.wrap(a, episodes), epLp);
 
         if (!video.lines.isEmpty()) {
             int line = Math.max(0, video.lines.indexOf(a.activeLine));

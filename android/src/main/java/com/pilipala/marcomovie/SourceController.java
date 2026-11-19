@@ -61,10 +61,17 @@ final class SourceController {
     }
 
     static SourceEngine engine(MainActivity a, Cms.Site s) throws Exception {
+        return engine(a, s, null);
+    }
+
+    static SourceEngine engine(MainActivity a, Cms.Site s, TvSearchContext context)
+            throws Exception {
         if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
         final Cms.Config snapshot;
         final int epoch;
         synchronized (a) {
+            if (context != null && !context.matches(a.config, a.privateMode, a.engineEpoch))
+                throw new IOException("搜索上下文已失效");
             SourceEngine existing = a.engines.get(s.key);
             if (existing instanceof QueuedSourceEngine
                     && ((QueuedSourceEngine) existing).isWedged()) {
@@ -80,6 +87,9 @@ final class SourceController {
                 () -> {
                     synchronized (a) {
                         if (epoch != a.engineEpoch) throw new IOException("配置已更改，请重新选择来源");
+                        if (context != null
+                                && !context.matches(a.config, a.privateMode, a.engineEpoch))
+                            throw new IOException("搜索上下文已失效");
                         SourceEngine existing = a.engines.get(s.key);
                         if (existing != null) return existing;
                     }
@@ -122,7 +132,10 @@ final class SourceController {
                     } else throw new IOException("来源需要尚未启用的扩展引擎");
                     SourceEngine created = new QueuedSourceEngine(raw);
                     synchronized (a) {
-                        if (epoch == a.engineEpoch) {
+                        if (epoch == a.engineEpoch
+                                && (context == null
+                                        || context.matches(
+                                                a.config, a.privateMode, a.engineEpoch))) {
                             if (raw instanceof JsEngine) ((JsEngine) raw).activate();
                             a.engines.put(s.key, created);
                             return created;
@@ -140,6 +153,8 @@ final class SourceController {
     }
 
     static void closeEngines(MainActivity a) {
+        if (a.markerHost != null) a.markerHost.abort();
+        GlobalSearchScreen.invalidateContext(a);
         a.liveSession = null;
         CspEngine.resetActiveProxy();
         if (a.detailPrefetch != null) a.detailPrefetch.cancel(true);
@@ -307,6 +322,8 @@ final class SourceController {
     static void loadDetail(
             MainActivity a, Cms.Site site, String id, MainActivity.Done<Cms.Video> done) {
         final int ticket = a.generation, epoch = a.engineEpoch;
+        final TvSearchContext detailContext =
+                new TvSearchContext(a.config, a.privateMode, a.engineEpoch);
         final String key = epoch + ":" + site.key.length() + ":" + site.key + id;
         final DetailRequest timing = new DetailRequest();
         Future<?> request =
@@ -325,7 +342,8 @@ final class SourceController {
                                                     () -> {
                                                         String cached = a.detailCache.get(key);
                                                         if (cached != null) return cached;
-                                                        SourceEngine source = a.engine(site);
+                                                        SourceEngine source =
+                                                                engine(a, site, detailContext);
                                                         timing.engineReady =
                                                                 SystemClock.elapsedRealtime();
                                                         String fetched =
@@ -346,7 +364,9 @@ final class SourceController {
                                 Cms.Listing listing = Cms.listing(raw);
                                 if (listing.videos.isEmpty()) throw new IOException("来源没有返回影片详情");
                                 timing.parsed = SystemClock.elapsedRealtime();
-                                if (!timing.cached && epoch == a.engineEpoch)
+                                if (!timing.cached
+                                        && detailContext.matches(
+                                                a.config, a.privateMode, a.engineEpoch))
                                     a.detailCache.put(key, raw);
                                 Cms.Video video = listing.videos.get(0);
                                 if ((video.id == null || video.id.trim().isEmpty()) && id != null) {
@@ -354,7 +374,11 @@ final class SourceController {
                                 }
                                 a.ui.post(
                                         () -> {
-                                            if (a.isFinishing() || ticket != a.generation) return;
+                                            if (a.isFinishing()
+                                                    || ticket != a.generation
+                                                    || !detailContext.matches(
+                                                            a.config, a.privateMode, a.engineEpoch))
+                                                return;
                                             try {
                                                 done.accept(video);
                                                 a.root.postOnAnimation(timing::ready);
@@ -366,7 +390,11 @@ final class SourceController {
                                 if (Thread.currentThread().isInterrupted()) return;
                                 a.ui.post(
                                         () -> {
-                                            if (a.isFinishing() || ticket != a.generation) return;
+                                            if (a.isFinishing()
+                                                    || ticket != a.generation
+                                                    || !detailContext.matches(
+                                                            a.config, a.privateMode, a.engineEpoch))
+                                                return;
                                             View state = a.root.findViewWithTag("detail-loading");
                                             if (state instanceof TextView)
                                                 ((TextView) state).setText(a.message(error));
@@ -446,7 +474,7 @@ final class SourceController {
     }
 
     static void learnTitles(MainActivity a, List<Cms.Video> videos) {
-        if (a.privateMode) return;
+        if (a.privateMode || a.switchingPrivacy) return;
         if (a.phonetic == null || videos == null || videos.isEmpty()) return;
         for (Cms.Video video : videos)
             if (video.title != null && !video.title.isEmpty()) a.pendingTitles.add(video.title);
@@ -461,28 +489,46 @@ final class SourceController {
         a.pendingTitles.clear();
         final PhoneticSearchIndex index = a.phonetic;
         final android.content.SharedPreferences target = a.prefs;
-        if (index == null || titles.isEmpty()) return;
+        if (index == null || titles.isEmpty() || a.privateMode || a.switchingPrivacy) return;
+        final TvSearchContext context = new TvSearchContext(a.config, a.privateMode, a.engineEpoch);
         a.phoneticWork.execute(
                 () -> {
-                    LinkedHashSet<String> values = new LinkedHashSet<>();
-                    try {
-                        org.json.JSONArray previous =
-                                new org.json.JSONArray(
-                                        target.getString(Prefs.PHONETIC_TITLES, "[]"));
-                        for (int i = 0; i < previous.length(); i++)
-                            values.add(previous.optString(i));
-                    } catch (Exception ignored) {
-                    }
-                    for (String title : titles) {
-                        index.learn(title);
-                        values.add(title);
-                    }
-                    while (values.size() > 400) values.remove(values.iterator().next());
-                    target.edit()
-                            .putString(
-                                    Prefs.PHONETIC_TITLES,
-                                    new org.json.JSONArray(values).toString())
-                            .apply();
+                    if (!context.matches(a.config, a.privateMode, a.engineEpoch)) return;
+                    final PhoneticSearchIndex.PreparedTitles prepared = index.prepareTitles(titles);
+                    if (!context.matches(a.config, a.privateMode, a.engineEpoch)) return;
+                    // Commit on the UI thread with the space switch, not between worker checks.
+                    // A stale worker may finish parsing, but cannot mutate an index or persist it.
+                    a.ui.post(
+                            () -> {
+                                if (a.isDestroyed()
+                                        || a.isFinishing()
+                                        || a.switchingPrivacy
+                                        || a.phonetic != index
+                                        || !context.matches(a.config, a.privateMode, a.engineEpoch))
+                                    return;
+                                // Merge with the latest committed cache here. Multiple workers can
+                                // finish
+                                // before either UI commit; a worker's earlier snapshot would lose a
+                                // batch.
+                                LinkedHashSet<String> values = new LinkedHashSet<>();
+                                try {
+                                    org.json.JSONArray previous =
+                                            new org.json.JSONArray(
+                                                    target.getString(
+                                                            Prefs.PHONETIC_PUBLIC_TITLES_V2, "[]"));
+                                    for (int i = 0; i < previous.length(); i++)
+                                        values.add(previous.optString(i));
+                                } catch (Exception ignored) {
+                                }
+                                values.addAll(titles);
+                                while (values.size() > 400) values.remove(values.iterator().next());
+                                index.learnPrepared(prepared);
+                                target.edit()
+                                        .putString(
+                                                Prefs.PHONETIC_PUBLIC_TITLES_V2,
+                                                new org.json.JSONArray(values).toString())
+                                        .apply();
+                            });
                 });
     }
 

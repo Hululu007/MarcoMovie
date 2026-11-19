@@ -20,6 +20,8 @@ final class HomeAmbient extends View {
     float fraction = 1;
     int left = 0xff354553, right = 0xff403847;
     int applied;
+    volatile float strength = 1f;
+    int appearanceRevision;
 
     HomeAmbient(MainActivity host) {
         super(host);
@@ -60,12 +62,15 @@ final class HomeAmbient extends View {
                             transition(cached[0], cached[1]);
                         } else {
                             final int c0 = cached[0], c1 = cached[1];
+                            final int revision = appearanceRevision;
                             a.artwork.execute(
                                     () -> {
                                         Bitmap nextField = field(c0, c1);
                                         post(
                                                 () -> {
-                                                    if (image == wanted && isAttachedToWindow())
+                                                    if (image == wanted
+                                                            && isAttachedToWindow()
+                                                            && revision == appearanceRevision)
                                                         transitionReady(c0, c1, nextField);
                                                 });
                                     });
@@ -78,6 +83,7 @@ final class HomeAmbient extends View {
                         transition(target[0], target[1]);
                         return;
                     }
+                    final int revision = appearanceRevision;
                     a.artwork.execute(
                             () -> {
                                 if (bitmap.isRecycled()) return;
@@ -87,7 +93,9 @@ final class HomeAmbient extends View {
                                 final Bitmap nextField = field(c0, c1);
                                 post(
                                         () -> {
-                                            if (image == wanted && isAttachedToWindow())
+                                            if (image == wanted
+                                                    && isAttachedToWindow()
+                                                    && revision == appearanceRevision)
                                                 transitionReady(c0, c1, nextField);
                                         });
                             });
@@ -134,7 +142,24 @@ final class HomeAmbient extends View {
                 Math.round(Color.blue(from) + (Color.blue(to) - Color.blue(from)) * f));
     }
 
+    /** Called by the host when its persisted TV appearance setting changes. */
+    void setStrength(float value) {
+        float next = Math.max(0f, Math.min(1f, value));
+        if (strength == next) return;
+        strength = next;
+        appearanceRevision++;
+        cancelAnimation();
+        from = null;
+        to = field(left, right);
+        fraction = 1;
+        invalidate();
+        com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
+        if (wanted != null) posterReady(wanted);
+    }
+
     Bitmap field(int first, int second) {
+        first = mix(0xff191c22, first, strength);
+        second = mix(0xff101013, second, strength);
         Bitmap b = Bitmap.createBitmap(240, 135, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(b);
         Paint p = new Paint(3);

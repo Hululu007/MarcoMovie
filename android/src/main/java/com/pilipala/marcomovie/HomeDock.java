@@ -4,35 +4,59 @@ import android.graphics.*;
 import android.view.*;
 import android.widget.*;
 
-/** Home-only right/top rail. Content keeps its own scroll and return focus. */
+/** Home rail. TV uses a compact left rail; mobile retains its existing placement. */
 final class HomeDock {
     final MainActivity a;
     final LinearLayout rail;
     final TextView hint;
-    final View[] items = new View[7];
+    TextView brandText;
+    View edgeShade;
+    final View[] items;
     final GlassSelection selection;
-    final String[] labels = {"首页", "搜索", "直播", "收藏", "网盘", "投屏", "设置"};
-    final String[] keys = {
-        "nav-home",
-        "nav-search",
-        "nav-live",
-        "nav-favorites",
-        "nav-accounts",
-        "nav-cast",
-        "nav-settings"
-    };
+    final String[] labels;
+    final String[] keys;
 
-    final boolean bottomMode, topMode, horizontal;
+    final boolean bottomMode, topMode, horizontal, tvLeft;
+    final TvV17Navigation navigation = new TvV17Navigation();
+    boolean expanded;
     final float navScale, fitScale;
     final int crossDp, mainDp, cellDp, hintHeightDp;
 
     HomeDock(MainActivity host) {
         a = host;
-        bottomMode = a.useBottomDock();
-        topMode = a.useTopDock();
+        tvLeft = a.useLeftDock();
+        labels =
+                tvLeft
+                        ? new String[] {"首页", "片库", "搜索", "直播", "我的", "网盘", "投屏", "设置"}
+                        : new String[] {"首页", "搜索", "直播", "收藏", "网盘", "投屏", "设置"};
+        keys =
+                tvLeft
+                        ? new String[] {
+                            "nav-home",
+                            "nav-library",
+                            "nav-search",
+                            "nav-live",
+                            "nav-favorites",
+                            "nav-accounts",
+                            "nav-cast",
+                            "nav-settings"
+                        }
+                        : new String[] {
+                            "nav-home",
+                            "nav-search",
+                            "nav-live",
+                            "nav-favorites",
+                            "nav-accounts",
+                            "nav-cast",
+                            "nav-settings"
+                        };
+        items = new View[labels.length];
+        bottomMode = !tvLeft && a.useBottomDock();
+        topMode = !tvLeft && a.useTopDock();
         horizontal = bottomMode || topMode;
         navScale = Prefs.clampNavScale(a.prefs.getInt(Prefs.NAV_SCALE_PERCENT, 100)) / 100f;
-        int rawMainBase = a.isTvDevice() ? (horizontal ? 374 : 368) : (horizontal ? 342 : 338);
+        int rawMainBase =
+                a.isTvDevice() ? (horizontal ? 374 : tvLeft ? 418 : 368) : (horizontal ? 342 : 338);
         float density = Math.max(0.5f, a.getResources().getDisplayMetrics().density);
         int windowMainDp =
                 Math.max(
@@ -40,9 +64,15 @@ final class HomeDock {
                         Math.round((horizontal ? a.windowWidth() : a.windowHeight()) / density)
                                 - 32);
         fitScale =
-                Math.round(rawMainBase * navScale) > windowMainDp
-                        ? Math.min(navScale, windowMainDp / (float) rawMainBase)
-                        : navScale;
+                tvLeft
+                        ? TvRailMetrics.fit(
+                                navScale,
+                                Math.max(1, a.windowHeight() - a.dp(32)),
+                                density,
+                                items.length)
+                        : Math.round(rawMainBase * navScale) > windowMainDp
+                                ? Math.min(navScale, windowMainDp / (float) rawMainBase)
+                                : navScale;
         cellDp = Math.round((a.isTvDevice() ? 42 : 38) * fitScale);
         crossDp = Math.round((a.isTvDevice() ? 56 : 50) * fitScale);
         mainDp = Math.round(rawMainBase * fitScale);
@@ -62,7 +92,7 @@ final class HomeDock {
                     }
                 };
         rail.setOrientation(horizontal ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
-        selection = new GlassSelection(a, rail, 10.5f * fitScale, true);
+        selection = new GlassSelection(a, rail, 10.5f * fitScale, true, tvLeft);
         rail.setTag("home-dock");
         rail.setGravity(Gravity.CENTER);
         rail.setClipChildren(false);
@@ -72,8 +102,23 @@ final class HomeDock {
                 a.dp(Math.round((horizontal ? 6 : 8) * fitScale)),
                 a.dp(Math.round((horizontal ? 10 : 6) * fitScale)),
                 a.dp(Math.round((horizontal ? 6 : 8) * fitScale)));
-        a.glass(rail, Math.round(25 * fitScale));
-        rail.setElevation(a.dp(8));
+        if (tvLeft) {
+            TvV17Theme theme =
+                    new TvV17Theme(
+                            navScale,
+                            1f,
+                            a.reduced,
+                            a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false));
+            edgeShade = new View(a);
+            edgeShade.setTag("home-navigation-edge");
+            edgeShade.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            edgeShade.setBackground(TvV17Surface.navigationEdge(theme));
+            a.root.addView(
+                    edgeShade,
+                    new FrameLayout.LayoutParams(
+                            a.dp(crossDp + 42), -1, Gravity.LEFT | Gravity.TOP));
+        } else a.glass(rail, Math.round(25 * fitScale));
+        rail.setElevation(tvLeft ? 0 : a.dp(8));
         FrameLayout.LayoutParams size =
                 horizontal
                         ? new FrameLayout.LayoutParams(
@@ -83,11 +128,16 @@ final class HomeDock {
                                         | Gravity.CENTER_HORIZONTAL)
                         : new FrameLayout.LayoutParams(
                                 a.dp(crossDp),
-                                a.dp(mainDp),
-                                Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+                                tvLeft ? a.windowHeight() - a.dp(32) : a.dp(mainDp),
+                                tvLeft
+                                        ? Gravity.LEFT | Gravity.TOP
+                                        : Gravity.RIGHT | Gravity.CENTER_VERTICAL);
         if (bottomMode) size.bottomMargin = a.dp(14);
         else if (topMode) size.topMargin = a.dp(16);
-        else size.rightMargin = a.dp(20);
+        else if (tvLeft) {
+            size.leftMargin = a.dp(12);
+            size.topMargin = a.dp(16);
+        } else size.rightMargin = a.dp(20);
         a.root.addView(rail, size);
         if (topMode) {
             FrameLayout.LayoutParams viewport =
@@ -105,23 +155,65 @@ final class HomeDock {
         hint.setVisibility(View.INVISIBLE);
         FrameLayout.LayoutParams tip =
                 new FrameLayout.LayoutParams(-2, a.dp(hintHeightDp), Gravity.RIGHT | Gravity.TOP);
-        tip.rightMargin = a.dp(crossDp + 28);
+        if (tvLeft) {
+            tip.gravity = Gravity.LEFT | Gravity.TOP;
+            tip.leftMargin = a.dp(crossDp + 20);
+        } else tip.rightMargin = a.dp(crossDp + 28);
         a.root.addView(hint, tip);
-        Runnable[] actions = {
-            () -> {
-                if (a.scroll != null) a.smoothHomeScroll(0);
-                View target = a.root.findViewWithTag("home-history:0");
-                if (target == null) target = a.root.findViewWithTag("home-tab:0");
-                if (target == null) target = a.root.findViewWithTag("primary");
-                if (target != null) target.requestFocus();
-            },
-            a::globalSearchDialog,
-            () -> a.open(new MainActivity.Screen(a::liveSources), true),
-            () -> a.open(new MainActivity.Screen(() -> new FavoritesScreen(a).show()), true),
-            () -> AccountPanel.show(a, items[4]),
-            () -> a.open(new MainActivity.Screen(a::castScreen), true),
-            () -> a.open(new MainActivity.Screen(a::settings), true)
-        };
+        if (tvLeft) {
+            addBrand();
+            rail.addView(new View(a), new LinearLayout.LayoutParams(1, 0, 1));
+        }
+        Runnable homeAction =
+                () -> {
+                    if (tvLeft && a.current != null && a.current.retainedHome != null) {
+                        a.current.retainedHome.showSection(false);
+                        return;
+                    }
+                    if (a.scroll != null) a.smoothHomeScroll(0);
+                    View target = a.root.findViewWithTag("home-history:0");
+                    if (target == null) target = a.root.findViewWithTag("home-tab:0");
+                    if (target == null) target = a.root.findViewWithTag("primary");
+                    if (target != null) target.requestFocus();
+                };
+        Runnable libraryAction =
+                () -> {
+                    if (a.current != null && a.current.retainedHome != null)
+                        a.current.retainedHome.showSection(true);
+                    else a.chooseSources();
+                };
+        Runnable searchAction = a::globalSearchDialog;
+        Runnable liveAction = () -> a.open(new MainActivity.Screen(a::liveSources), true);
+        Runnable favoriteAction =
+                () ->
+                        a.open(
+                                new MainActivity.Screen(
+                                        tvLeft ? a::minePage : () -> new FavoritesScreen(a).show()),
+                                true);
+        Runnable accountAction = () -> AccountPanel.show(a, items[tvLeft ? 5 : 4]);
+        Runnable castAction = () -> a.open(new MainActivity.Screen(a::castScreen), true);
+        Runnable settingsAction = () -> a.open(new MainActivity.Screen(a::settings), true);
+        Runnable[] actions =
+                tvLeft
+                        ? new Runnable[] {
+                            homeAction,
+                            libraryAction,
+                            searchAction,
+                            liveAction,
+                            favoriteAction,
+                            accountAction,
+                            castAction,
+                            settingsAction
+                        }
+                        : new Runnable[] {
+                            homeAction,
+                            searchAction,
+                            liveAction,
+                            favoriteAction,
+                            accountAction,
+                            castAction,
+                            settingsAction
+                        };
         for (int i = 0; i < items.length; i++) {
             final int index = i;
             Icon icon = new Icon(i);
@@ -162,7 +254,7 @@ final class HomeDock {
                                 1.04f);
                         icon.setBackground(null);
                         if (focused) selection.select(icon);
-                        if (focused && !bottomMode) showLabel(index);
+                        if (focused && !bottomMode && !tvLeft) showLabel(index);
                         else {
                             hint.animate().cancel();
                             hint.animate()
@@ -177,6 +269,7 @@ final class HomeDock {
                         }
                     });
         }
+        if (tvLeft) rail.addView(new View(a), new LinearLayout.LayoutParams(1, 0, 1));
         for (int i = 0; i < items.length; i++) {
             if (horizontal) {
                 items[i].setNextFocusLeftId(items[Math.max(0, i - 1)].getId());
@@ -184,7 +277,8 @@ final class HomeDock {
             } else {
                 items[i].setNextFocusUpId(items[Math.max(0, i - 1)].getId());
                 items[i].setNextFocusDownId(items[Math.min(items.length - 1, i + 1)].getId());
-                items[i].setNextFocusRightId(items[i].getId());
+                if (tvLeft) items[i].setNextFocusLeftId(items[i].getId());
+                else items[i].setNextFocusRightId(items[i].getId());
             }
         }
         a.root.getViewTreeObserver()
@@ -194,15 +288,105 @@ final class HomeDock {
                                     && oldFocus != null
                                     && !contains(oldFocus)
                                     && oldFocus.getTag() instanceof String
-                                    && a.current != null)
+                                    && a.current != null) {
                                 a.current.homeReturnFocus = (String) oldFocus.getTag();
+                                navigation.remember(oldFocus);
+                            }
+                            if (tvLeft && contains(oldFocus) != contains(newFocus))
+                                setExpanded(contains(newFocus));
                             if (newFocus != null
                                     && !contains(newFocus)
                                     && contains(oldFocus)
                                     && newFocus.getRootView() == a.root.getRootView())
-                                selection.select(items[0]);
+                                selection.select(
+                                        items[
+                                                tvLeft
+                                                                && a.current != null
+                                                                && a.current.retainedHome != null
+                                                                && a.current
+                                                                        .retainedHome
+                                                                        .state
+                                                                        .library
+                                                        ? 1
+                                                        : 0]);
                         });
         selection.select(items[0]);
+    }
+
+    void selectSection(boolean library) {
+        if (!tvLeft) return;
+        items[0].setSelected(!library);
+        items[1].setSelected(library);
+        items[0].invalidate();
+        items[1].invalidate();
+        if (!contains(a.getCurrentFocus())) selection.select(items[library ? 1 : 0]);
+    }
+
+    void setExpanded(boolean value) {
+        if (!tvLeft || expanded == value) return;
+        expanded = value;
+        FrameLayout.LayoutParams railSize = (FrameLayout.LayoutParams) rail.getLayoutParams();
+        railSize.width = a.dp(value ? Math.round(164 * fitScale) : crossDp);
+        rail.setLayoutParams(railSize);
+        TvV17Theme theme =
+                new TvV17Theme(
+                        navScale,
+                        1f,
+                        a.reduced,
+                        a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false));
+        // Both states grow from the screen edge. Only the selected row is a rounded lens.
+        rail.setBackground(null);
+        rail.setElevation(0);
+        if (edgeShade != null) {
+            FrameLayout.LayoutParams edgeSize =
+                    (FrameLayout.LayoutParams) edgeShade.getLayoutParams();
+            edgeSize.width = railSize.width + a.dp(value ? 96 : 42);
+            edgeShade.setLayoutParams(edgeSize);
+            edgeShade.setBackground(TvV17Surface.navigationEdge(theme, value));
+        }
+        if (brandText != null) brandText.setVisibility(value ? View.VISIBLE : View.INVISIBLE);
+        for (View item : items) {
+            LinearLayout.LayoutParams cell = (LinearLayout.LayoutParams) item.getLayoutParams();
+            // The focus plate spans the available row; only the rail's edge inset remains.
+            cell.width = value ? ViewGroup.LayoutParams.MATCH_PARENT : a.dp(cellDp);
+            item.setLayoutParams(cell);
+            item.invalidate();
+        }
+        rail.post(() -> selection.refresh());
+    }
+
+    private void addBrand() {
+        FrameLayout brand = new FrameLayout(a);
+        brand.setTag("home-brand");
+        brand.setFocusable(false);
+        brand.setClickable(false);
+        brand.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        brand.setContentDescription("Marco Movie");
+        LinearLayout.LayoutParams header =
+                new LinearLayout.LayoutParams(-1, a.dp(Math.round(44 * fitScale)));
+        header.bottomMargin = a.dp(Math.round(8 * fitScale));
+        rail.addView(brand, header);
+        ImageView mark = new ImageView(a);
+        mark.setTag("home-brand-mark");
+        mark.setImageResource(R.drawable.logo_mark);
+        mark.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        int side = a.dp(32 * fitScale);
+        FrameLayout.LayoutParams icon =
+                new FrameLayout.LayoutParams(side, side, Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        // The header fills the rail. Its left edge/padding never changes when expanded.
+        icon.leftMargin = (a.dp(crossDp) - side) / 2 - rail.getPaddingLeft();
+        brand.addView(mark, icon);
+        brandText = a.text("MARCO MOVIE", 14 * fitScale, MainActivity.WHITE);
+        brandText.setTag("home-brand-word");
+        brandText.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, a.dp(14 * fitScale));
+        brandText.setTypeface(null, Typeface.BOLD);
+        brandText.setIncludeFontPadding(false);
+        brandText.setSingleLine(true);
+        brandText.setGravity(Gravity.CENTER_VERTICAL);
+        brandText.setVisibility(View.INVISIBLE);
+        FrameLayout.LayoutParams label = new FrameLayout.LayoutParams(-1, -1);
+        label.leftMargin = a.dp(48 * fitScale) - rail.getPaddingLeft();
+        brand.addView(brandText, label);
     }
 
     boolean contains(View view) {
@@ -255,13 +439,21 @@ final class HomeDock {
     }
 
     void rightEdge(View view) {
-        if (view != null && !horizontal) view.setNextFocusRightId(items[0].getId());
+        if (view != null && !horizontal && !tvLeft) view.setNextFocusRightId(items[0].getId());
+    }
+
+    void leftEdge(View view, boolean library) {
+        if (view != null && tvLeft) view.setNextFocusLeftId(items[library ? 1 : 0].getId());
     }
 
     boolean key(KeyEvent event) {
         View focused = a.getCurrentFocus();
         if (!contains(focused)) return false;
         int key = event.getKeyCode();
+        if (tvLeft && key == KeyEvent.KEYCODE_BACK) {
+            if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) returnToContent();
+            return true;
+        }
         if (horizontal
                 && (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT)) {
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
@@ -280,21 +472,35 @@ final class HomeDock {
         int exit =
                 topMode
                         ? KeyEvent.KEYCODE_DPAD_DOWN
-                        : bottomMode ? KeyEvent.KEYCODE_DPAD_UP : KeyEvent.KEYCODE_DPAD_LEFT;
+                        : bottomMode
+                                ? KeyEvent.KEYCODE_DPAD_UP
+                                : tvLeft ? KeyEvent.KEYCODE_DPAD_RIGHT : KeyEvent.KEYCODE_DPAD_LEFT;
         if (key != exit)
             return horizontal
                     && (key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN);
         if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
-            View target =
-                    a.current == null || a.current.homeReturnFocus == null
-                            ? null
-                            : a.root.findViewWithTag(a.current.homeReturnFocus);
-            if (target == null || !target.isShown())
-                target = a.root.findViewWithTag("source-switcher");
-            if (target == null) target = a.root.findViewWithTag("primary");
-            if (target != null) target.requestFocus();
+            returnToContent();
         }
         return true;
+    }
+
+    void returnToContent() {
+        View target =
+                a.current == null || a.current.homeReturnFocus == null
+                        ? null
+                        : a.root.findViewWithTag(a.current.homeReturnFocus);
+        if (target == null
+                || !target.isAttachedToWindow()
+                || !target.isShown()
+                || !target.isFocusable()
+                || !target.isEnabled()) {
+            View fallback = a.root.findViewWithTag("home-open-library");
+            if (fallback == null || !fallback.isShown())
+                fallback = a.root.findViewWithTag("source-switcher");
+            target = navigation.restore(a.root, fallback);
+        }
+        if (target == null) target = a.root.findViewWithTag("primary");
+        if (target != null && target.isShown() && target.isFocusable()) target.requestFocus();
     }
 
     final class LabelBubble extends android.graphics.drawable.Drawable {
@@ -387,7 +593,10 @@ final class HomeDock {
             if (w <= 0 || h <= 0) return;
             float size = a.dp((a.isTvDevice() ? 25f : 22f) * fitScale);
             float r = size * 0.5f;
-            float cx = w * 0.5f + (!horizontal && isSelected() ? a.dp(1f) : 0f);
+            float cx =
+                    tvLeft && expanded
+                            ? a.dp(cellDp / 2f)
+                            : w * 0.5f + (!horizontal && isSelected() ? a.dp(1f) : 0f);
             float cy = h * 0.5f - (horizontal && isSelected() ? a.dp(1.2f) : 0f);
             int strokePx =
                     Math.max(2, Math.round(a.dp((a.isTvDevice() ? 2.0f : 1.75f) * fitScale)));
@@ -400,7 +609,8 @@ final class HomeDock {
             p.setStrokeCap(Paint.Cap.ROUND);
             p.setStrokeJoin(Paint.Join.ROUND);
 
-            switch (kind) {
+            int drawingKind = tvLeft && kind == 1 ? 7 : tvLeft && kind > 1 ? kind - 1 : kind;
+            switch (drawingKind) {
                 case 0:
                     {
                         path.reset();
@@ -571,6 +781,18 @@ final class HomeDock {
                                 p);
                         break;
                     }
+                case 7:
+                    {
+                        box.set(cx - r * .78f, cy - r * .72f, cx + r * .68f, cy + r * .8f);
+                        c.drawRoundRect(box, r * .16f, r * .16f, p);
+                        path.reset();
+                        path.moveTo(cx - r * .18f, cy - r * .35f);
+                        path.lineTo(cx + r * .38f, cy);
+                        path.lineTo(cx - r * .18f, cy + r * .35f);
+                        path.close();
+                        c.drawPath(path, p);
+                        break;
+                    }
                 case 6:
                     {
                         float xLeft = snap(cx - r * 0.82f, strokePx);
@@ -595,6 +817,14 @@ final class HomeDock {
                         }
                         break;
                     }
+            }
+            if (tvLeft && expanded) {
+                p.setStyle(Paint.Style.FILL);
+                p.setColor(hasFocus() ? MainActivity.WHITE : 0xffc5ced8);
+                p.setTextSize(a.dp(15f * fitScale));
+                p.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.NORMAL));
+                c.drawText(
+                        labels[kind], a.dp(48 * fitScale), cy - (p.ascent() + p.descent()) / 2, p);
             }
             if (isSelected()) {
                 p.setStyle(Paint.Style.FILL);

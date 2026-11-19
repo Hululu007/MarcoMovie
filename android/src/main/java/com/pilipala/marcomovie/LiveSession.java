@@ -16,6 +16,16 @@ final class LiveSession {
                 if (!channel.streams.isEmpty()) channels.add(channel);
     }
 
+    static LiveSession forChannel(
+            LiveCatalog.Source source, LiveCatalog.Catalog catalog, LiveCatalog.Channel channel) {
+        if (source == null || catalog == null || channel == null)
+            throw new IllegalArgumentException("直播目录已失效");
+        LiveSession session = new LiveSession(source, catalog);
+        session.index = session.channels.indexOf(channel);
+        if (session.index < 0) throw new IllegalArgumentException("频道不在当前直播目录中");
+        return session;
+    }
+
     int step(int direction) {
         if (channels.isEmpty()) return -1;
         if (index < 0) return direction < 0 ? channels.size() - 1 : 0;

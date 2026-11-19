@@ -67,6 +67,12 @@ if (!isMainThread) {
   let loadQueue = Promise.resolve();
   let rebindQueue = Promise.resolve();
   let bootstrap = null;
+  let idleBootstrapWorker = null;
+  async function dropIdleBootstrapWorker() {
+    const w = idleBootstrapWorker;
+    idleBootstrapWorker = null;
+    if (w) { try { await w.terminate(); } catch (_) {} }
+  }
   let server = null;
   let writeCounter = 0;
   let lastRebindSeq = 0;
@@ -126,26 +132,54 @@ if (!isMainThread) {
       const imports = path.join(root, 'imports');
       try { if (fs.lstatSync(imports).isSymbolicLink() || !fs.lstatSync(imports).isDirectory()) throw Error(); }
       catch (_) { throw Error('guard_artifact_invalid'); }
-      const worker = task.worker = new Worker(path.join(__dirname, 'drpy-bootstrap-worker.cjs'), {
-        workerData: { file: path.join(imports, body.artifactHash + '.jar'), hash: body.artifactHash, adapter: body.adapter, extension: body.extension },
-        resourceLimits: { maxOldGenerationSizeMb: 96, maxYoungGenerationSizeMb: 16, stackSizeMb: 2 },
-        stdout: true, stderr: true,
-      });
-      worker.stdout.resume(); worker.stderr.resume();
+      const job = { file: path.join(imports, body.artifactHash + '.jar'), hash: body.artifactHash, adapter: body.adapter, extension: body.extension, reusable: true };
+      let worker = idleBootstrapWorker;
+      const reused = Boolean(worker);
+      idleBootstrapWorker = null;
+      if (!worker) {
+        worker = new Worker(path.join(__dirname, 'drpy-bootstrap-worker.cjs'), {
+          workerData: job,
+          resourceLimits: { maxOldGenerationSizeMb: 96, maxYoungGenerationSizeMb: 16, stackSizeMb: 2 },
+          stdout: true, stderr: true,
+        });
+        worker.stdout.resume(); worker.stderr.resume();
+      }
+      task.worker = worker;
+      let keepWarm = false;
       const result = await new Promise((resolve, reject) => {
         let settled = false;
+        const cleanupListeners = () => {
+          worker.off('message', onMsg);
+          worker.off('error', onErr);
+          worker.off('exit', onExit);
+        };
         const done = (error, value) => {
           if (settled) return; settled = true; clearTimeout(timer); task.cancel = null;
+          cleanupListeners();
           if (error) reject(error); else resolve(value);
         };
+        const onMsg = value => done(null, value);
+        const onErr = () => done(Error('guard_artifact_invalid'));
+        const onExit = () => done(Error('guard_artifact_invalid'));
         const timer = setTimeout(() => done(Error('bootstrap_timeout')), 3800);
         task.cancel = () => done(Error('bootstrap_cancelled'));
-        worker.once('message', value => done(null, value));
-        worker.on('error', () => done(Error('guard_artifact_invalid')));
-        worker.once('exit', () => done(Error('guard_artifact_invalid')));
+        worker.once('message', onMsg);
+        worker.once('error', onErr);
+        worker.once('exit', onExit);
+        if (reused) worker.postMessage(job);
       });
+      if (result && result.reusable && !closing && !resetting) {
+        keepWarm = true;
+        delete result.reusable;
+      }
       if (result.error) throw Error(result.error);
       payload = result;
+      if (keepWarm && task.worker === worker) {
+        worker.once('exit', () => { if (idleBootstrapWorker === worker) idleBootstrapWorker = null; });
+        worker.once('error', () => { if (idleBootstrapWorker === worker) idleBootstrapWorker = null; });
+        idleBootstrapWorker = worker;
+        task.worker = null;
+      }
     } catch (error) {
       const code = ['guard_artifact_unsupported', 'guard_artifact_integrity', 'guard_artifact_invalid', 'bootstrap_timeout', 'bootstrap_request'].includes(error.message) ? error.message : 'guard_artifact_invalid';
       status = code === 'bootstrap_request' ? 400 : code === 'bootstrap_timeout' ? 504 : 422;
@@ -413,6 +447,7 @@ if (!isMainThread) {
         try {
           const pendingBootstrap=bootstrap;
           pendingBootstrap?.cancel?.();
+          await dropIdleBootstrapWorker();
           for(const hash of new Set([...runtimes.keys(),...loading.keys()]))releases.set(hash,(releases.get(hash)||0)+1);
           const instances=[...runtimes.values()];runtimes.clear();
           await Promise.all(instances.map(stop));
@@ -832,6 +867,7 @@ if (!isMainThread) {
     clearInterval(monitor);
     try { watcher?.close(); } catch (_) {}
     bootstrap?.cancel?.();
+    await dropIdleBootstrapWorker();
     try { server?.close(); server?.closeAllConnections?.(); } catch (_) {}
     await Promise.allSettled([...runtimes.values()].map(stop));
     try { fs.unlinkSync(readyFile); } catch (_) { }

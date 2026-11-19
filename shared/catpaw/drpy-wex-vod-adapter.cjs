@@ -14,7 +14,12 @@ function installWexVod() {
   }
   var lastSoftChallenge = false;
   function hasVodMarkup(t) {
-    return /(?:\/voddetail\/|\/vodplay\/|\/vod\/detail\/|module-item|vod-item|vodlist|myui-vodlist|stui-vodlist|video-info|"vod_id"\s*:|"vodId"\s*:|"source_list_source"\s*:)/i.test(t);
+    return /(?:\/voddetail\/|\/vodplay\/|\/vod\/detail\/|module-item|vod-item|vodlist|myui-vodlist|stui-vodlist|video-info|"vod_id"\s*:|"vodId"\s*:|"source_list_source"\s*:|"code"\s*:\s*1\b[\s\S]{0,160}"list"\s*:\s*\[)/i.test(t);
+  }
+  function cleanDetailTitle(v) {
+    return stripHtml(v)
+      .replace(/\s*(?:更新至|更至|连载至|全集|共\d+集|第\d+(?:-\d+)?集|全\d+集|已完结|完结)[^\s|/_-]*$/g, '')
+      .trim();
   }
   function isChallengeBody(body, statusCode) {
     var t = str(body);
@@ -43,7 +48,7 @@ function installWexVod() {
   }
   function safePic(pic, base) {
     var c = str(pic).trim();
-    if (!c || /(?:sogoucdn\.com|imagehub\.cc)/i.test(c)) return '';
+    if (!c || /^data:/i.test(c) || /(?:sogoucdn\.com|imagehub\.cc|\/loading\.|\/lazyload\.|\/nopic|\/none\.|\/blank\.|\/default_pic)/i.test(c)) return '';
     if (c.indexOf('//') === 0) c = 'https:' + c;
     try {
       var u = joinUrl(base || (cfg.origin + '/'), c);
@@ -166,43 +171,50 @@ function installWexVod() {
   }
   var memRemoteCfg = null;
   var memRemoteTriedAt = 0;
-  function loadRemoteWexConfig() {
-    if (memRemoteCfg && (str(memRemoteCfg.siteUrl) || (isObj(memRemoteCfg.siteConfig) && Object.keys(memRemoteCfg.siteConfig).length))) {
+  function loadRemoteWexConfig(needSiteUrl) {
+    var hasMemSite = memRemoteCfg && str(memRemoteCfg.siteUrl);
+    var hasMemCfg = memRemoteCfg && isObj(memRemoteCfg.siteConfig) && Object.keys(memRemoteCfg.siteConfig).length > 0;
+    if (memRemoteCfg && (needSiteUrl ? hasMemSite : (hasMemCfg || hasMemSite))) {
       return memRemoteCfg;
     }
     var cached = local.get('wex-remote', 'cfg_v1');
-    if (isObj(cached) && Number(cached.exp) > Date.now() && str(cached.siteUrl)) {
+    var validCached = isObj(cached) && Number(cached.exp) > Date.now();
+    var hasCachedSite = validCached && str(cached.siteUrl);
+    var hasCachedCfg = validCached && isObj(cached.siteConfig) && Object.keys(cached.siteConfig).length > 0;
+    if (validCached && (needSiteUrl ? hasCachedSite : hasCachedCfg)) {
       memRemoteCfg = cached;
       return cached;
     }
-    if (memRemoteTriedAt && Date.now() - memRemoteTriedAt < 3 * 60 * 1000) {
-      return { siteUrl: '', mySiteUrl: '', siteConfig: {}, exp: 0 };
+    if (memRemoteTriedAt && Date.now() - memRemoteTriedAt < 8000) {
+      return validCached ? cached : { siteUrl: '', mySiteUrl: '', siteConfig: {}, exp: 0 };
     }
     memRemoteTriedAt = Date.now();
     var startedAt = Date.now();
     var rHeaders = { 'User-Agent': str(cfg.remoteUa || cfg.userAgent || 'Mozilla/5.0'), Accept: 'application/json,text/plain,*/*' };
-    var apiUrls = [cfg.apiTxt0, cfg.apiTxt1, cfg.apiTxt2, cfg.apiTxt3].map(str).filter(Boolean);
-    var siteUrl = '';
-    for (var i = 0; i < apiUrls.length; i++) {
-      if (Date.now() - startedAt > 4500) break;
-      var r = httpReqSoft(apiUrls[i], { headers: rHeaders, timeout: 1800 });
-      if (r && r.code >= 200 && r.code < 300) {
-        var dec = decryptRemoteText(r.content).split(/[\r\n]+/)[0].trim().replace(/\/+$/, '');
-        if (/^https?:\/\//i.test(dec)) { siteUrl = dec; break; }
+    var siteUrl = hasCachedSite ? str(cached.siteUrl) : (hasMemSite ? str(memRemoteCfg.siteUrl) : '');
+    if (needSiteUrl && !siteUrl) {
+      var apiUrls = [cfg.apiTxt0, cfg.apiTxt1, cfg.apiTxt2, cfg.apiTxt3].map(str).filter(Boolean);
+      for (var i = 0; i < apiUrls.length; i++) {
+        if (Date.now() - startedAt > 7500) break;
+        var r = httpReqSoft(apiUrls[i], { headers: rHeaders, timeout: 3500 });
+        if (r && r.code >= 200 && r.code < 300) {
+          var dec = decryptRemoteText(r.content).split(/[\r\n]+/)[0].trim().replace(/\/+$/, '');
+          if (/^https?:\/\//i.test(dec)) { siteUrl = dec; break; }
+        }
       }
     }
-    var siteConfig = isObj(cached) && Number(cached.exp) > Date.now() && isObj(cached.siteConfig) ? cached.siteConfig : {};
-    if (!Object.keys(siteConfig).length) {
+    var siteConfig = hasCachedCfg ? cached.siteConfig : (hasMemCfg ? memRemoteCfg.siteConfig : {});
+    if (!Object.keys(siteConfig).length && (!needSiteUrl || Date.now() - startedAt <= 4500)) {
       var itemUrls = [cfg.itemTxt0, cfg.itemTxt1, cfg.itemTxt2].map(str).filter(Boolean);
       for (var j = 0; j < itemUrls.length; j++) {
-        if (Date.now() - startedAt > 5500) break;
-        var ir = httpReqSoft(itemUrls[j], { headers: rHeaders, timeout: 1800 });
+        if (Date.now() - startedAt > 8500) break;
+        var ir = httpReqSoft(itemUrls[j], { headers: rHeaders, timeout: 3500 });
         if (ir && ir.code >= 200 && ir.code < 300) {
           var itemObj = parseJsonSafe(decryptRemoteText(ir.content));
           if (isObj(itemObj)) {
             var csUrl = str(itemObj.config_site).trim();
-            if (/^https?:\/\//i.test(csUrl) && Date.now() - startedAt <= 5500) {
-              var sr = httpReqSoft(csUrl, { headers: rHeaders, timeout: 2200 });
+            if (/^https?:\/\//i.test(csUrl) && Date.now() - startedAt <= 8500) {
+              var sr = httpReqSoft(csUrl, { headers: rHeaders, timeout: 4000 });
               if (sr && sr.code >= 200 && sr.code < 300) {
                 var sc = parseJsonSafe(decryptRemoteText(sr.content));
                 if (isObj(sc)) siteConfig = sc;
@@ -225,7 +237,7 @@ function installWexVod() {
     }
     return out;
   }
-  function pickSiteHosts(siteKey, fallbacks) {
+  function pickSiteHosts(siteKeys, fallbacks) {
     var list = [];
     function pushHost(u) {
       var v = str(u).trim().replace(/\/+$/, '');
@@ -238,14 +250,20 @@ function installWexVod() {
       var parts = str(cfg.extText).split(/[|,;\s]+/);
       for (var p = 0; p < parts.length; p++) pushHost(parts[p]);
     }
-    if (siteKey && cfg.apiTxt0) {
-      var rc = loadRemoteWexConfig();
-      var entry = rc && isObj(rc.siteConfig) ? rc.siteConfig[siteKey] : null;
-      if (Array.isArray(entry)) {
-        for (var k = 0; k < entry.length; k++) pushHost(entry[k]);
-      } else if (typeof entry === 'string') {
-        var ep = entry.split(/[|,;\s]+/);
-        for (var m = 0; m < ep.length; m++) pushHost(ep[m]);
+    var keys = Array.isArray(siteKeys) ? siteKeys : (siteKeys ? [siteKeys] : []);
+    if (keys.length && cfg.apiTxt0) {
+      var rc = loadRemoteWexConfig(false);
+      var sc = rc && isObj(rc.siteConfig) ? rc.siteConfig : null;
+      if (sc) {
+        for (var ki = 0; ki < keys.length; ki++) {
+          var entry = sc[keys[ki]];
+          if (Array.isArray(entry)) {
+            for (var k = 0; k < entry.length; k++) pushHost(entry[k]);
+          } else if (typeof entry === 'string') {
+            var ep = entry.split(/[|,;\s]+/);
+            for (var m = 0; m < ep.length; m++) pushHost(ep[m]);
+          }
+        }
       }
     }
     if (Array.isArray(fallbacks)) {
@@ -280,7 +298,7 @@ function installWexVod() {
       if (!configKey) configKey = 'AppV7Dsx';
       var cryptoUrl = str(extObj.crypto || nested.crypto).trim();
       if (!/^https?:\/\//i.test(cryptoUrl)) {
-        var rc = loadRemoteWexConfig();
+        var rc = loadRemoteWexConfig(true);
         if (!rc.mySiteUrl) fail('drpy_source_unavailable');
         cryptoUrl = rc.mySiteUrl.replace(/\/+$/, '') + '/appv7/crypto.php';
       }
@@ -522,8 +540,20 @@ function installWexVod() {
   // 2. wexguazi-v1 (WexAiGuaZi — 瓜子|秒播)
   // =========================================================================
   if (cfg.adapter === 'wexguazi-v1') {
-    var gzHosts = pickSiteHosts('guazi', [cfg.defaultHost, cfg.host1, cfg.host2, cfg.host3, cfg.host4]);
-    var gzHost = gzHosts[0];
+    var gzHosts = null;
+    var gzHost = str(cfg.defaultHost || cfg.host1 || cfg.origin).replace(/\/+$/, '');
+    function gzGetHosts() {
+      if (!gzHosts || (!memRemoteCfg && cfg.apiTxt0)) {
+        gzHosts = pickSiteHosts('guazi', [cfg.defaultHost, cfg.host1, cfg.host2, cfg.host3, cfg.host4]);
+        if ((!gzHost || gzHosts.indexOf(gzHost) < 0) && gzHosts.length) gzHost = gzHosts[0];
+      }
+      var ordered = [];
+      if (gzHost && gzHosts.indexOf(gzHost) >= 0) ordered.push(gzHost);
+      for (var gi = 0; gi < gzHosts.length; gi++) {
+        if (ordered.indexOf(gzHosts[gi]) < 0) ordered.push(gzHosts[gi]);
+      }
+      return ordered;
+    }
     function gzRand16() { return randomHex(16).toUpperCase(); }
     function gzJavaHash(text) {
       var n = 0;
@@ -581,13 +611,14 @@ function installWexVod() {
         lang: 'zh_cn', Referer: str(cfg.defaultRef), 'Content-Type': 'application/x-www-form-urlencoded'
       };
       var sawChallenge = false;
-      for (var i = 0; i < gzHosts.length; i++) {
-        var r = httpReqSoft(gzHosts[i] + path, { method: 'POST', body: body, headers: hdrs, timeout: 6500 });
+      var activeGzHosts = gzGetHosts();
+      for (var i = 0; i < activeGzHosts.length; i++) {
+        var r = httpReqSoft(activeGzHosts[i] + path, { method: 'POST', body: body, headers: hdrs, timeout: 6500 });
         if (lastSoftChallenge) sawChallenge = true;
         if (r && r.code === 200) {
           var doc = parseJsonSafe(r.content);
           if (isObj(doc) && Number(doc.code) === 200) {
-            gzHost = gzHosts[i];
+            gzHost = activeGzHosts[i];
             return gzDecode(doc);
           }
         }
@@ -1025,19 +1056,37 @@ function installWexVod() {
   // 5. wexfengye-v1 (WexFengYe4K — 小枫|秒播)
   // =========================================================================
   if (cfg.adapter === 'wexfengye-v1') {
-    var fyHosts = pickSiteHosts('', [cfg.defaultHost, cfg.host0, cfg.host1]);
-    var fyHost = fyHosts[0];
+    var fyHosts = null;
+    var fyHost = str(cfg.defaultHost || cfg.host0 || cfg.host1 || cfg.origin).replace(/\/+$/, '');
     var fyHeaders = { 'User-Agent': str(cfg.userAgent), Referer: fyHost + '/' };
-    function fyGet(path) {
+    function fyGetHosts() {
+      if (!fyHosts || (!memRemoteCfg && cfg.apiTxt0)) {
+        fyHosts = pickSiteHosts(['fengye', 'xfy', 'xiaofeng'], [cfg.defaultHost, cfg.host0, cfg.host1]);
+        if ((!fyHost || fyHosts.indexOf(fyHost) < 0) && fyHosts.length) {
+          fyHost = fyHosts[0];
+          fyHeaders.Referer = fyHost + '/';
+        }
+      }
+      var ordered = [];
+      if (fyHost && fyHosts.indexOf(fyHost) >= 0) ordered.push(fyHost);
+      for (var fi = 0; fi < fyHosts.length; fi++) {
+        if (ordered.indexOf(fyHosts[fi]) < 0) ordered.push(fyHosts[fi]);
+      }
+      return ordered;
+    }
+    function fyGet(path, soft) {
       var sawChallenge = false;
-      for (var i = 0; i < fyHosts.length; i++) {
-        var r = httpReqSoft(fyHosts[i] + path, { headers: { 'User-Agent': str(cfg.userAgent), Referer: fyHosts[i] + '/' }, timeout: 6000 });
+      var activeFyHosts = fyGetHosts();
+      for (var i = 0; i < activeFyHosts.length; i++) {
+        var r = httpReqSoft(activeFyHosts[i] + path, { headers: { 'User-Agent': str(cfg.userAgent), Referer: activeFyHosts[i] + '/' }, timeout: 6500 });
         if (lastSoftChallenge) sawChallenge = true;
         if (r && r.code >= 200 && r.code < 400 && str(r.content)) {
-          fyHost = fyHosts[i];
+          fyHost = activeFyHosts[i];
+          fyHeaders.Referer = fyHost + '/';
           return r.content;
         }
       }
+      if (soft) return '';
       fail(sawChallenge ? 'drpy_verification_required' : 'drpy_source_unavailable');
     }
     function fyParseHtmlCards(html) {
@@ -1100,8 +1149,8 @@ function installWexVod() {
     __drpy.search = function (wd, quick, pg) {
       var kw = str(wd).trim();
       if (!kw) return { page: 1, pagecount: 1, limit: 20, total: 0, list: [] };
-      var raw = fyGet('/index.php/ajax/suggest?mid=1&wd=' + encodeURIComponent(kw) + '&limit=30');
-      var doc = parseJsonSafe(raw);
+      var raw = fyGet('/index.php/ajax/suggest?mid=1&wd=' + encodeURIComponent(kw) + '&limit=30', true);
+      var doc = raw ? parseJsonSafe(raw) : null;
       var list = [];
       if (isObj(doc) && Array.isArray(doc.list)) {
         list = doc.list.map(function (it) {
@@ -1109,13 +1158,31 @@ function installWexVod() {
           return { vod_id: str(it.id), vod_name: str(it.name), vod_pic: safePic(it.pic, fyHost + '/'), vod_remarks: '' };
         }).filter(Boolean);
       }
+      if (!list.length) {
+        var sHtml = fyGet('/search/-------------.html?wd=' + encodeURIComponent(kw), true) ||
+          fyGet('/vodsearch/-------------.html?wd=' + encodeURIComponent(kw));
+        list = fyParseHtmlCards(sHtml);
+      }
       return { page: 1, pagecount: 1, limit: 30, total: list.length, list: list };
     };
     __drpy.detail = function (vid) {
       var idNum = str(vid).replace(/\D+/g, '') || str(vid);
       var html = fyGet('/detail/' + idNum + '.html');
-      var title = stripHtml(pdfh(html, 'h1&&Text') || pdfh(html, 'title&&Text'));
-      var pic = safePic(pdfh(html, '.lazyload&&data-original') || pdfh(html, 'img&&data-src') || pdfh(html, 'img&&src'), fyHost + '/');
+      var title = cleanDetailTitle(pdfh(html, 'h1--span--small--em&&Text') || pdfh(html, 'h1&&Text') || pdfh(html, 'title&&Text'));
+      var pic = safePic(
+        pdfh(html, '.module-item-pic img&&data-original') ||
+        pdfh(html, '.module-item-pic img&&data-src') ||
+        pdfh(html, '.module-item-pic img&&src') ||
+        pdfh(html, '.detail-pic img&&data-original') ||
+        pdfh(html, '.detail-pic img&&data-src') ||
+        pdfh(html, '.detail-pic img&&src') ||
+        pdfh(html, '.vod-pic img&&data-original') ||
+        pdfh(html, '.vod-pic img&&data-src') ||
+        pdfh(html, '.vod-pic img&&src') ||
+        pdfh(html, '.lazyload&&data-original') ||
+        pdfh(html, 'meta[property="og:image"]&&content'),
+        fyHost + '/'
+      );
       var tabNames = pdfa(html, '.module-tab-item, .nav-tabs li a').map(function (t) { return stripHtml(t); }).filter(Boolean);
       var groups = {};
       var order = [];
@@ -1671,8 +1738,14 @@ function installWexVod() {
       return {
         list: [{
           vod_id: str(vid),
-          vod_name: stripHtml(pdfh(html, 'h1&&Text') || pdfh(html, 'title&&Text')),
-          vod_pic: safePic(pdfh(html, '.pic img&&src') || pdfh(html, 'img&&src'), bbHost + '/'),
+          vod_name: cleanDetailTitle(pdfh(html, 'h1--span--small--em&&Text') || pdfh(html, 'h1&&Text') || pdfh(html, 'title&&Text')),
+          vod_pic: safePic(
+            pdfh(html, '.pic img&&data-original') ||
+            pdfh(html, '.pic img&&data-src') ||
+            pdfh(html, '.pic img&&src') ||
+            pdfh(html, 'meta[property="og:image"]&&content'),
+            bbHost + '/'
+          ),
           vod_content: stripHtml(pdfh(html, '.txtDesc&&Text')),
           vod_play_from: fromM ? str(fromM[1]) : '默认线路',
           vod_play_url: urlM ? unescape(str(urlM[1])) : ''
@@ -1684,7 +1757,7 @@ function installWexVod() {
       if (isDirectMedia(raw)) return { parse: 0, url: address(raw, bbHost + '/').url, header: bbHeaders };
       var target = '';
       if (raw.indexOf('dJj') === 0) {
-        var rc = loadRemoteWexConfig();
+        var rc = loadRemoteWexConfig(true);
         if (rc.mySiteUrl) target = rc.mySiteUrl.replace(/\/+$/, '') + str(cfg.boboParsePath) + '?url=' + encodeURIComponent(raw);
       } else if (raw.indexOf('bFWBFI09Z7X3J1pHYeWlwlvocW') === 0) {
         target = str(cfg.parseUrlB) + encodeURIComponent(raw);

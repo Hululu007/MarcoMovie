@@ -9,10 +9,10 @@ const { WEX_ADAPTERS, VOD_WEX_ADAPTERS, extractWex } = require('./drpy-wex-extra
 const VOD_FTY = new Set(['jpys-v1', 'jpj-v1', 'nmyswv-v1', 'hmys-v1', 'app99-v1', 'appsx-v1', 'newcz-v1', 'libvio-v1', 'ygp-v1', 'jumitv-v1']);
 const LIVE_FTY = new Set(['kanqiu-v1', 'doubao-v1', 'livegz-v1', 'alllive-v1', 'tingshu275-v1', 'yueting-v1']);
 const VOD_WEX = new Set(VOD_WEX_ADAPTERS);
-try {
-  const stat = fs.lstatSync(workerData.file);
+function runBootstrapJob(job) {
+  const stat = fs.lstatSync(job.file);
   if (!stat.isFile() || stat.isSymbolicLink() || !stat.size || stat.size > MAX) throw Error('invalid_artifact');
-  const descriptor = fs.openSync(workerData.file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  const descriptor = fs.openSync(job.file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   let data;
   try {
     const opened = fs.fstatSync(descriptor);
@@ -22,15 +22,15 @@ try {
     while (offset < data.length) { const read = fs.readSync(descriptor, data, offset, data.length - offset, offset); if (!read) throw Error('guard_artifact_integrity'); offset += read; }
     if (fs.readSync(descriptor, Buffer.alloc(1), 0, 1, offset)) throw Error('guard_artifact_integrity');
   } finally { fs.closeSync(descriptor); }
-  if (crypto.createHash('sha256').update(data).digest('hex') !== workerData.hash) throw Error('guard_artifact_integrity');
-  const adapter = workerData.adapter;
+  if (crypto.createHash('sha256').update(data).digest('hex') !== job.hash) throw Error('guard_artifact_integrity');
+  const adapter = job.adapter;
   const isFty = FTY_ADAPTERS.includes(adapter);
   const isWex = WEX_ADAPTERS.includes(adapter);
   if (!isFty && !isWex && !['dm84-v1', 'auete-v1', 'bttwoo-v1', 'appgz-v1', 't4-v1', 'apptt-v1', 'fy-v1'].includes(adapter)) throw Error('invalid_artifact');
-  const config = isFty ? extractFty(data, adapter, workerData.extension) :
-    isWex ? extractWex(data, adapter, workerData.extension) :
-    adapter === 't4-v1' ? require('./drpy-t4-extractor.cjs').extractT4(data, workerData.extension) :
-    adapter === 'apptt-v1' ? require('./drpy-apptt-extractor.cjs').extractAppTT(data, workerData.extension) :
+  const config = isFty ? extractFty(data, adapter, job.extension) :
+    isWex ? extractWex(data, adapter, job.extension) :
+    adapter === 't4-v1' ? require('./drpy-t4-extractor.cjs').extractT4(data, job.extension) :
+    adapter === 'apptt-v1' ? require('./drpy-apptt-extractor.cjs').extractAppTT(data, job.extension) :
     adapter === 'fy-v1' ? require('./drpy-fy-extractor.cjs').extractFy(data) : extractKnownPlugin(data, adapter);
   const factory = isFty
     ? (VOD_FTY.has(adapter) ? './drpy-fty-vod-adapter.cjs' : LIVE_FTY.has(adapter) ? './drpy-fty-live-adapter.cjs' : './drpy-fty-pan-adapter.cjs')
@@ -38,7 +38,32 @@ try {
       ? (VOD_WEX.has(adapter) ? './drpy-wex-vod-adapter.cjs' : './drpy-wex-pan-adapter.cjs')
       : { 'dm84-v1': './drpy-dm84-adapter.cjs', 'auete-v1': './drpy-auete-adapter.cjs', 'bttwoo-v1': './drpy-bttwoo-adapter.cjs', 'appgz-v1': './drpy-appgz-adapter.cjs', 't4-v1': './drpy-t4-adapter.cjs', 'apptt-v1': './drpy-apptt-adapter.cjs', 'fy-v1':'./drpy-fy-adapter.cjs' }[adapter];
   const rule = require(factory)(config);
-  parentPort.postMessage({ version: 1, rule, origin: config.origin });
-} catch (error) {
-  parentPort.postMessage({ error: ['guard_artifact_unsupported', 'guard_artifact_integrity'].includes(error.message) ? error.message : 'guard_artifact_invalid' });
+  return { version: 1, rule, origin: config.origin };
+}
+
+function handleJob(job, tagReusable) {
+  try {
+    const out = runBootstrapJob(job);
+    parentPort.postMessage(tagReusable ? { ...out, reusable: true } : out);
+  } catch (error) {
+    const code = ['guard_artifact_unsupported', 'guard_artifact_integrity'].includes(error.message) ? error.message : 'guard_artifact_invalid';
+    parentPort.postMessage(tagReusable ? { error: code, reusable: true } : { error: code });
+  }
+}
+
+if (workerData && workerData.reusable) {
+  let idleTimer = null;
+  const resetIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => process.exit(0), 30000);
+    idleTimer.unref?.();
+  };
+  parentPort.on('message', job => {
+    resetIdle();
+    handleJob(job, true);
+  });
+  resetIdle();
+  handleJob(workerData, true);
+} else {
+  handleJob(workerData, false);
 }

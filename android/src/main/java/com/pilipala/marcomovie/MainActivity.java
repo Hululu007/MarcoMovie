@@ -55,7 +55,8 @@ public final class MainActivity extends Activity {
     GlobalSearchScreen searchScreen;
     Dialog sourceDialog, accountDialog;
     MagnetStream magnetStream;
-    static volatile PhoneticSearchIndex sharedPhonetic;
+    // Assets only. Never publish an Activity's learned/private index into this template.
+    private static volatile PhoneticSearchIndex sharedPhoneticDictionary;
     volatile PhoneticSearchIndex phonetic;
     final CountDownLatch phoneticReady = new CountDownLatch(1);
     ConfigStore configStore;
@@ -67,6 +68,7 @@ public final class MainActivity extends Activity {
     LocalProxy localProxy;
     WebResolver webResolver;
     PlaybackControls playbackControls;
+    TvMarkerHost markerHost;
     Cms.Line activeLine;
     Cms.Episode activeEpisode;
     int resumeAt;
@@ -452,7 +454,14 @@ public final class MainActivity extends Activity {
     }
 
     boolean useTopDock() {
-        return isTvDevice() && prefs.getInt(Prefs.TV_DOCK_POSITION, 0) == 1;
+        return isTvDevice() && !useLeftDock() && prefs.getInt(Prefs.TV_DOCK_POSITION, 0) == 1;
+    }
+
+    boolean useLeftDock() {
+        return Prefs.useTvLeftDock(
+                isTvDevice(),
+                prefs.contains(Prefs.TV_DOCK_POSITION),
+                prefs.getInt(Prefs.TV_NAVIGATION_MODE, -1));
     }
 
     void applyMobileSystemBars(boolean fullscreenPlayer) {
@@ -617,39 +626,7 @@ public final class MainActivity extends Activity {
         }
         // Phone / tablet only: restore the offline download queue (never started on TV).
         if (!isTvDevice()) DownloadManager.get(this);
-        if (sharedPhonetic != null) {
-            phonetic = sharedPhonetic;
-            phoneticReady.countDown();
-        } else {
-            worker.execute(
-                    () -> {
-                        try {
-                            PhoneticSearchIndex index =
-                                    new PhoneticSearchIndex(
-                                            getAssets().open("search/pinyin-characters.tsv"),
-                                            getAssets().open("search/pinyin-phrases.dict.yaml"),
-                                            getAssets().open("search/title-phrases.txt"));
-                            try {
-                                org.json.JSONArray old =
-                                        new org.json.JSONArray(
-                                                prefs.getString(Prefs.PHONETIC_TITLES, "[]"));
-                                for (int i = 0; i < old.length(); i++)
-                                    index.learn(old.optString(i));
-                                org.json.JSONArray history =
-                                        new org.json.JSONArray(
-                                                prefs.getString(Prefs.GLOBAL_SEARCH_HISTORY, "[]"));
-                                for (int i = history.length() - 1; i >= 0; i--)
-                                    index.prefer(history.optString(i));
-                            } catch (Throwable ignored) {
-                            }
-                            sharedPhonetic = index;
-                            phonetic = index;
-                        } catch (Throwable ignored) {
-                        } finally {
-                            phoneticReady.countDown();
-                        }
-                    });
-        }
+        initializePhonetic();
         layoutIntro = b == null || b.getBoolean("layout_initial_launch", false);
         root = new FrameLayout(this);
         root.setBackgroundColor(DARK);
@@ -1004,6 +981,9 @@ public final class MainActivity extends Activity {
                 && prefs.getBoolean(Prefs.HOME_AMBIENT, true)
                 && !prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false)) {
             homeAmbient = new HomeAmbient(this);
+            if (isTvDevice())
+                homeAmbient.setStrength(
+                        Prefs.tvAmbientStrength(prefs.getInt(Prefs.TV_AMBIENT_PERCENT, 100)));
             root.addView(homeAmbient, new FrameLayout.LayoutParams(-1, -1));
         }
         if (navigation) root.addView(homeGradient(), new FrameLayout.LayoutParams(-1, -1));
@@ -1030,45 +1010,60 @@ public final class MainActivity extends Activity {
                 body.setPadding(dp(18), statusBarHeight() + dp(14), dp(18), dp(86));
             } else if (useTopDock()) {
                 body.setPadding(dp(34), dp(18), dp(34), dp(36));
+            } else if (useLeftDock()) {
+                int left =
+                        Math.max(
+                                80,
+                                Math.round(
+                                                56
+                                                        * Prefs.clampNavScale(
+                                                                prefs.getInt(
+                                                                        Prefs.NAV_SCALE_PERCENT,
+                                                                        100))
+                                                        / 100f)
+                                        + 30);
+                body.setPadding(dp(left), dp(18), dp(34), dp(36));
             } else {
                 body.setPadding(dp(34), dp(18), dp(100), dp(36));
             }
             homeDock = new HomeDock(this);
-            LinearLayout brandRow = row();
-            brandRow.setTag("home-brand");
-            brandRow.setGravity(Gravity.CENTER_VERTICAL);
-            ImageView brandMark = new ImageView(this);
-            brandMark.setImageResource(R.drawable.logo_mark);
-            LinearLayout.LayoutParams brandSize = new LinearLayout.LayoutParams(dp(30), dp(30));
-            brandSize.rightMargin = dp(10);
-            brandRow.addView(brandMark, brandSize);
-            TextView brand = text("MARCO MOVIE", 14, WHITE);
-            brand.setIncludeFontPadding(false);
-            brand.setSingleLine(true);
-            brand.setLetterSpacing(.10f);
-            brand.setTypeface(null, Typeface.BOLD);
-            brandRow.addView(brand);
-            if (homeDock.topMode) {
-                int dockLeftPx = Math.max(0, (windowWidth() - dp(homeDock.mainDp)) / 2);
-                int maxBrandWidth = dockLeftPx - dp(34 + 14);
-                if (maxBrandWidth < dp(90)) {
-                    brand.setVisibility(View.GONE);
+            if (!homeDock.tvLeft) {
+                LinearLayout brandRow = row();
+                brandRow.setTag("home-brand");
+                brandRow.setGravity(Gravity.CENTER_VERTICAL);
+                ImageView brandMark = new ImageView(this);
+                brandMark.setImageResource(R.drawable.logo_mark);
+                LinearLayout.LayoutParams brandSize = new LinearLayout.LayoutParams(dp(30), dp(30));
+                brandSize.rightMargin = dp(10);
+                brandRow.addView(brandMark, brandSize);
+                TextView brand = text("MARCO MOVIE", 14, WHITE);
+                brand.setIncludeFontPadding(false);
+                brand.setSingleLine(true);
+                brand.setLetterSpacing(.10f);
+                brand.setTypeface(null, Typeface.BOLD);
+                brandRow.addView(brand);
+                if (homeDock.topMode) {
+                    int dockLeftPx = Math.max(0, (windowWidth() - dp(homeDock.mainDp)) / 2);
+                    int maxBrandWidth = dockLeftPx - dp(34 + 14);
+                    if (maxBrandWidth < dp(90)) {
+                        brand.setVisibility(View.GONE);
+                    } else {
+                        brand.setMaxWidth(Math.max(dp(50), maxBrandWidth - dp(40)));
+                        brand.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                    }
+                    FrameLayout.LayoutParams brandLayout =
+                            new FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                                    dp(homeDock.crossDp),
+                                    Gravity.LEFT | Gravity.TOP);
+                    brandLayout.leftMargin = dp(34);
+                    brandLayout.topMargin = dp(16);
+                    root.addView(brandRow, brandLayout);
+                    if (!title.isEmpty()) gap(body, 14);
                 } else {
-                    brand.setMaxWidth(Math.max(dp(50), maxBrandWidth - dp(40)));
-                    brand.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                    body.addView(brandRow);
+                    gap(body, title.isEmpty() ? 14 : 22);
                 }
-                FrameLayout.LayoutParams brandLayout =
-                        new FrameLayout.LayoutParams(
-                                ViewGroup.LayoutParams.WRAP_CONTENT,
-                                dp(homeDock.crossDp),
-                                Gravity.LEFT | Gravity.TOP);
-                brandLayout.leftMargin = dp(34);
-                brandLayout.topMargin = dp(16);
-                root.addView(brandRow, brandLayout);
-                if (!title.isEmpty()) gap(body, 14);
-            } else {
-                body.addView(brandRow);
-                gap(body, title.isEmpty() ? 14 : 22);
             }
         }
         if (!title.isEmpty()) {
@@ -1157,6 +1152,9 @@ public final class MainActivity extends Activity {
                     if (scroll != null) scroll.scrollTo(0, s.scroll);
                     if (!isTvDevice()) return;
                     View target = s.focus == null ? null : root.findViewWithTag(s.focus);
+                    if (target != null
+                            && (!target.isShown() || !target.isFocusable() || !target.isEnabled()))
+                        target = null;
                     if (target != null) {
                         target.requestFocus();
                         autoFocus = target;
@@ -1164,9 +1162,13 @@ public final class MainActivity extends Activity {
                         View first = root.findViewWithTag("primary");
                         if (first == null) first = root.findViewWithTag("detail-play");
                         if (first == null && s.home) {
-                            first = root.findViewWithTag("home-tab:0");
+                            first = s.retainedHome == null ? null : s.retainedHome.topTarget();
+                            if (first == null) first = root.findViewWithTag("home-tab:0");
                             if (first == null) first = root.findViewWithTag("source-switcher");
                         }
+                        if (first != null
+                                && (!first.isShown() || !first.isFocusable() || !first.isEnabled()))
+                            first = null;
                         if (first == null) first = root.findViewWithTag("nav-home");
                         if (first == null) {
                             ArrayList<View> available = new ArrayList<>();
@@ -1194,6 +1196,10 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (markerHost != null) {
+            markerHost.cancel();
+            return;
+        }
         if (current != null && current.player && !miniMode && playerLocked) {
             PlaybackController.revealLockedHint(this);
             return;
@@ -1443,6 +1449,55 @@ public final class MainActivity extends Activity {
 
     void learnTitles(List<Cms.Video> videos) {
         SourceController.learnTitles(this, videos);
+    }
+
+    void initializePhonetic() {
+        final boolean publicSpace = !privateMode;
+        final SharedPreferences target = prefs;
+        worker.execute(
+                () -> {
+                    try {
+                        PhoneticSearchIndex dictionary;
+                        synchronized (MainActivity.class) {
+                            if (sharedPhoneticDictionary == null)
+                                sharedPhoneticDictionary =
+                                        new PhoneticSearchIndex(
+                                                getAssets().open("search/pinyin-characters.tsv"),
+                                                getAssets().open("search/pinyin-phrases.dict.yaml"),
+                                                getAssets().open("search/title-phrases.txt"));
+                            dictionary = sharedPhoneticDictionary;
+                        }
+                        final PhoneticSearchIndex index = dictionary.newSession(publicSpace);
+                        // Old cache/history stay byte-for-byte intact. They have no learning
+                        // provenance,
+                        // so rebuild suggestions from newly observed public titles instead of
+                        // importing.
+                        if (publicSpace)
+                            try {
+                                org.json.JSONArray saved =
+                                        new org.json.JSONArray(
+                                                target.getString(
+                                                        Prefs.PHONETIC_PUBLIC_TITLES_V2, "[]"));
+                                for (int i = 0; i < saved.length(); i++)
+                                    index.learn(saved.optString(i));
+                            } catch (Exception ignored) {
+                            }
+                        ui.post(
+                                () -> {
+                                    try {
+                                        if (!isDestroyed()
+                                                && !isFinishing()
+                                                && !switchingPrivacy
+                                                && publicSpace == !privateMode
+                                                && prefs == target) phonetic = index;
+                                    } finally {
+                                        phoneticReady.countDown();
+                                    }
+                                });
+                    } catch (Exception ignored) {
+                        phoneticReady.countDown();
+                    }
+                });
     }
 
     void sourceAction(Cms.Site site, String action) {
@@ -1705,6 +1760,11 @@ public final class MainActivity extends Activity {
         openSearch(keyword);
     }
 
+    void minePage() {
+        if (isTvDevice()) new TvV17MineScreen(this).show();
+        else new FavoritesScreen(this).show();
+    }
+
     void stopMagnet() {
         PlaybackController.stopMagnet(this);
     }
@@ -1889,11 +1949,15 @@ public final class MainActivity extends Activity {
 
     void jumpHomeTop() {
         if (current == null || !current.home || scroll == null) return;
-        View target = root.findViewWithTag("home-history:0");
+        View target = current.retainedHome == null ? null : current.retainedHome.topTarget();
+        if (target == null) target = root.findViewWithTag("home-history:0");
         if (target == null) target = root.findViewWithTag("home-tab:0");
         if (target == null) target = root.findViewWithTag("source-switcher");
         if (target == null) target = root.findViewWithTag("primary");
-        if (target != null) target.requestFocus();
+        if (target != null && target.isShown() && target.isFocusable() && target.isEnabled()) {
+            target.requestFocus();
+            current.focus = String.valueOf(target.getTag());
+        }
         current.scroll = 0;
         smoothHomeScroll(0);
     }
@@ -1922,7 +1986,9 @@ public final class MainActivity extends Activity {
             return true;
         }
 
-        if (shortcutScreen != current) {
+        if (markerHost != null && markerHost.key(event)) return true;
+
+        if (!isTvDevice() && shortcutScreen != current) {
             homeKeys.reset();
             shortcutScreen = current;
         }
@@ -1933,7 +1999,8 @@ public final class MainActivity extends Activity {
                 if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) chooseSources();
                 return true;
             }
-            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            // TV directional taps always follow focus; the legacy non-TV shortcut is unchanged.
+            if (!isTvDevice() && event.getAction() == KeyEvent.ACTION_DOWN) {
                 if (key == KeyEvent.KEYCODE_DPAD_UP) {
                     if (homeKeys.up(event.getEventTime(), event.getRepeatCount())) {
                         jumpHomeTop();
@@ -1955,6 +2022,7 @@ public final class MainActivity extends Activity {
     public void onWindowFocusChanged(boolean focus) {
         super.onWindowFocusChanged(focus);
         if (!focus) {
+            if (markerHost != null) markerHost.abort();
             finishSeek(false);
             PluginDialogStyler.watch(this);
         }
@@ -2006,6 +2074,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (markerHost != null) markerHost.abort();
         savePlaybackHistory(true);
         super.onPause();
     }
@@ -2056,9 +2125,11 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         CloudSyncDialog.cancel(this);
+        if (isTvDevice() && privateMode && !switchingPrivacy) VideoMarkerRepository.clearPrivate();
         if (privateMode && isFinishing() && !switchingPrivacy) {
             MobileShell.clearSearchSession();
             VideoSkipStore.clearPrivateRecords();
+            VideoMarkerRepository.clearPrivate();
             PrivacySpace.active = false;
         }
         if (activeActivity == this) activeActivity = null;

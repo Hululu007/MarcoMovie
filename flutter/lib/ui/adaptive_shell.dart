@@ -584,7 +584,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _liveGroupsScrollController.dispose();
     super.dispose();
   }
-  void _reloadSavedConfig() {
+  void _reloadSavedConfig({bool bypassHomeSnapshot = false}) {
     // A deleted source may still have catalogue/live/search requests in flight.
     // Invalidate them before exposing the new registry, including an empty one.
     _cancelCatalogue();
@@ -632,7 +632,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       if (_privateSessionUnlocked) {
         _selectedPrivateSiteKey = _activeSite!.key;
       }
-      _loadSiteHome();
+      _loadSiteHome(bypassSnapshot: bypassHomeSnapshot);
     } else {
       _activeSite = null;
       _categories = const [];
@@ -653,22 +653,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     if (mounted) setState(() {});
   }
-  Future<void> _loadSiteHome() async {
+  Future<void> _loadSiteHome({bool bypassSnapshot = false}) async {
     final site = _activeSite;
     if (site == null) return;
     _cancelCatalogue();
     final abort = _homeAbort = Completer<void>();
     final epoch = ++_homeEpoch;
     ++_categoryEpoch;
+    final cached = bypassSnapshot ? null : widget.storage.getCachedSiteHome(site);
+    final hadCached = cached != null && cached.listing.videos.isNotEmpty;
     setState(() {
-      _homeVideos = const [];
-      _windowsRecommendedVideos = const [];
-      _rawCategoryVideos = const [];
-      _categories = const [];
-      _homeLoading = true;
-      _loadingMore = false;
-      _homeError = null;
-      _loadMoreError = null;
       _primaryTab = 'recommend';
       _filterExpanded = false;
       _selectedCategoryId = '';
@@ -676,17 +670,50 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _filterGenreLabel = '';
       _filterArea = '';
       _filterYear = '';
-      _currentPage = 1;
+      if (hadCached) {
+        _categories = cached.categories;
+        _rawCategoryVideos = cached.listing.videos;
+        _homeVideos = cached.listing.sourceFiltered
+            ? cached.listing.videos
+            : CmsParser.filterVideos(cached.listing.videos, const CmsFilter());
+        _windowsRecommendedVideos = List.of(_homeVideos);
+        _currentPage = cached.listing.page;
+        _pageCount = cached.listing.pageCount;
+        _homeLoading = false;
+      } else {
+        _homeVideos = const [];
+        _windowsRecommendedVideos = const [];
+        _rawCategoryVideos = const [];
+        _categories = const [];
+        _homeLoading = true;
+        _currentPage = 1;
+      }
+      _loadingMore = false;
+      _homeError = null;
+      _loadMoreError = null;
     });
     try {
-      final (cats, listing) = await widget.client.runSourceOperation(
-        () => widget.client.fetchHome(site), cancellation: abort,
+      final homeFuture = widget.client.runSourceOperation(
+        () => widget.client.fetchHome(site),
+        cancellation: abort,
       );
+      final (cats, listing) = !kIsWeb &&
+              !Platform.environment.containsKey('FLUTTER_TEST')
+          ? await homeFuture.timeout(const Duration(seconds: 15))
+          : await homeFuture;
       if (!mounted || epoch != _homeEpoch || _activeSite?.key != site.key) {
         return;
       }
+      if (listing.videos.isNotEmpty && !site.isEffectivelyPrivate) {
+        unawaited(widget.storage.saveCachedSiteHome(site, cats, listing));
+      }
+      if (hadCached && listing.videos.isEmpty && cats.isEmpty) {
+        return;
+      }
       setState(() {
-        _categories = cats;
+        if (cats.isNotEmpty || !hadCached) {
+          _categories = cats;
+        }
         _rawCategoryVideos = listing.videos;
         _homeVideos = listing.sourceFiltered
             ? listing.videos
@@ -701,13 +728,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       if (!mounted || epoch != _homeEpoch || _activeSite?.key != site.key) {
         return;
       }
+      if (hadCached && !CmsClient.needsSourceVerification(site, e)) {
+        setState(() {
+          _homeLoading = false;
+          _loadingMore = false;
+        });
+        return;
+      }
       setState(() {
         _homeLoading = false;
         _loadingMore = false;
         _homeError =
             '读取片源「${site.name}」失败：${CmsClient.cleanErrorMessage(e)}';
         _homeErrorCause = e;
-        _retryHomeError = _loadSiteHome;
+        _retryHomeError = () => _loadSiteHome(bypassSnapshot: true);
       });
     }
   }
@@ -718,7 +752,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _filterGenreLabel.isEmpty &&
         _filterArea.isEmpty &&
         _filterYear.isEmpty) {
-      await _loadSiteHome();
+      await _loadSiteHome(bypassSnapshot: true);
       return;
     }
     await _reloadFilteredListing(page: 1);
@@ -3625,59 +3659,98 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     ),
                                   ),
                                 if (_searchNotices.isNotEmpty)
-                                  ConstrainedBox(
-                                    constraints: BoxConstraints(
-                                      maxHeight: (size.height * 0.18)
-                                          .clamp(68.0, 144.0),
-                                    ),
-                                    child: SingleChildScrollView(
-                                      padding:
-                                          const EdgeInsets.only(bottom: 10),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            _searchNotices.values.join('\n'),
-                                            key: const ValueKey(
-                                                'search-source-notices'),
-                                            style: const TextStyle(
-                                              color: AppleColors.labelSecondary,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                          for (final site
-                                              in _searchVerificationSites
-                                                  .values)
-                                            Padding(
-                                              padding:
-                                                  const EdgeInsets.only(top: 8),
-                                              child: Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  Text(
-                                                    site.name,
-                                                    style: const TextStyle(
-                                                      color: AppleColors
-                                                          .labelSecondary,
-                                                      fontSize: 12,
-                                                    ),
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 10),
+                                    child: Container(
+                                      key: const ValueKey(
+                                        'search-source-notices-box',
+                                      ),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 6,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0x361A1A20),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(
+                                          color: AppleColors.glassBorder,
+                                          width: 0.5,
+                                        ),
+                                      ),
+                                      child: ConstrainedBox(
+                                        constraints: const BoxConstraints(
+                                          maxHeight: 54.0,
+                                        ),
+                                        child: _SheetOwnedScrollController(
+                                          builder: (ctx, noticeScrollCtrl) =>
+                                              CupertinoScrollbar(
+                                                controller: noticeScrollCtrl,
+                                                child: SingleChildScrollView(
+                                                  controller: noticeScrollCtrl,
+                                                  primary: false,
+                                                  physics:
+                                                      const BouncingScrollPhysics(),
+                                                  child: Column(
+                                                    crossAxisAlignment:
+                                                        CrossAxisAlignment.start,
+                                                    children: [
+                                                      Text(
+                                                        _searchNotices.values
+                                                            .join('\n'),
+                                                        key: const ValueKey(
+                                                          'search-source-notices',
+                                                        ),
+                                                        style: const TextStyle(
+                                                          color: AppleColors
+                                                              .labelSecondary,
+                                                          fontSize: 12,
+                                                          height: 1.45,
+                                                        ),
+                                                      ),
+                                                      for (final site
+                                                          in _searchVerificationSites
+                                                              .values)
+                                                        Padding(
+                                                          padding:
+                                                              const EdgeInsets.only(
+                                                                top: 8,
+                                                              ),
+                                                          child: Column(
+                                                            crossAxisAlignment:
+                                                                CrossAxisAlignment
+                                                                    .start,
+                                                            children: [
+                                                              Text(
+                                                                site.name,
+                                                                style: const TextStyle(
+                                                                  color: AppleColors
+                                                                      .labelSecondary,
+                                                                  fontSize: 12,
+                                                                ),
+                                                              ),
+                                                              const SizedBox(
+                                                                height: 4,
+                                                              ),
+                                                              SourceVerificationButton(
+                                                                key: ValueKey(
+                                                                  '$_searchEpoch:${site.subscriptionId}:${site.key}',
+                                                                ),
+                                                                client:
+                                                                    widget.client,
+                                                                site: site,
+                                                                onVerified: () =>
+                                                                    _retryVerifiedSearch(
+                                                                      site,
+                                                                    ),
+                                                              ),
+                                                            ],
+                                                          ),
+                                                        ),
+                                                    ],
                                                   ),
-                                                  const SizedBox(height: 4),
-                                                  SourceVerificationButton(
-                                                    key: ValueKey(
-                                                        '$_searchEpoch:${site.subscriptionId}:${site.key}'),
-                                                    client: widget.client,
-                                                    site: site,
-                                                    onVerified: () =>
-                                                        _retryVerifiedSearch(
-                                                            site),
-                                                  ),
-                                                ],
+                                                ),
                                               ),
-                                            ),
-                                        ],
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -3686,6 +3759,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                           !_searching
                                       ? Center(
                                           child: SingleChildScrollView(
+                                            primary: false,
                                             child: Column(
                                               mainAxisSize: MainAxisSize.min,
                                               children: [
@@ -3827,7 +3901,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     setState(() {
       _privateSessionUnlocked = false;
     });
-    _reloadSavedConfig();
+    _reloadSavedConfig(bypassHomeSnapshot: true);
   }
 
   void _openPrivateSpaceWithAuth() {
@@ -6803,7 +6877,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       SettingsPane(
         'appearance',
         '外观',
-        '',
+        '主题壁纸、流光光晕与毛玻璃质感',
         CupertinoIcons.sparkles,
         AppleColors.systemPurple,
         sectionGroup: 'core',
@@ -6812,13 +6886,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'wallpaper',
             '壁纸与氛围',
-            '',
+            '切换影院底色、呼吸光晕或自定义高清壁纸',
             CupertinoIcons.photo_fill,
             AppleColors.systemPurple,
             trailingText: _wallpaperPresetLabel,
             content: stack([
               _buildIosWallpaperSection(refresh),
-              const SizedBox(height: 20),
+              const SizedBox(height: 24),
               IosSettingsGroup(
                 header: '动态氛围与自定义壁纸',
                 footer: '呼吸式流光随主题呈现柔和影院光晕；也可指定高清图片 URL 或本地路径。',
@@ -6852,7 +6926,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'glass',
             '液态玻璃',
-            '',
+            '调节全局面板折射通透度与磨砂档位',
             CupertinoIcons.drop_fill,
             AppleColors.systemBlue,
             trailingText: '${(storage.glassBlurStrength * 100).round()}%',
@@ -6860,10 +6934,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               IosSettingsGroup(
                 header: '毛玻璃折射强度',
                 footer: '支持 0%–100% 连续调节，调至 0% 即切换为不透明实色面板。',
-                dividerIndent: 16,
+                dividerIndent: 18,
                 children: [
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+                    padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
                     child: ValueListenableBuilder<double>(
                       valueListenable: GlassworkBackdrop.intensity,
                       builder: (_, value, __) => Column(
@@ -6876,20 +6950,21 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 '玻璃强度',
                                 style: TextStyle(
                                   color: AppleColors.labelPrimary,
-                                  fontSize: 16,
+                                  fontSize: 16.5,
+                                  fontWeight: FontWeight.w500,
                                 ),
                               ),
                               Text(
                                 '${(value * 100).round()}%',
                                 style: const TextStyle(
                                   color: AppleColors.systemBlue,
-                                  fontSize: 15,
+                                  fontSize: 15.5,
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 6),
+                          const SizedBox(height: 10),
                           SizedBox(
                             width: double.infinity,
                             child: CupertinoSlider(
@@ -6914,7 +6989,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ],
               ),
-              const SizedBox(height: 20),
+              const SizedBox(height: 24),
               choices(
                 '玻璃预设',
                 storage.glassBlurLevel,
@@ -6937,7 +7012,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       SettingsPane(
         'browsing',
         '浏览',
-        '',
+        '海报网格密度、副标题与主页模块',
         CupertinoIcons.square_grid_2x2_fill,
         AppleColors.systemBlue,
         sectionGroup: 'core',
@@ -6946,7 +7021,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'cards',
             '海报与卡片',
-            '',
+            '设置单行海报尺寸密度与副标题信息',
             CupertinoIcons.rectangle_grid_2x2_fill,
             AppleColors.systemBlue,
             trailingText: _gridDensityLabel,
@@ -6977,7 +7052,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'home',
             '首页模块',
-            '',
+            '自定义主页顶部横幅与观看进度栏',
             CupertinoIcons.house_fill,
             AppleColors.systemOrange,
             content: IosSettingsGroup(
@@ -7006,7 +7081,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       SettingsPane(
         'playback',
         '播放',
-        '',
+        '默认优选画质、倍速与片头片尾跳过',
         CupertinoIcons.play_circle_fill,
         AppleColors.systemOrange,
         sectionGroup: 'core',
@@ -7015,7 +7090,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'picture',
             '画质与画面',
-            '',
+            '设置默认起播画质、画面比例与解码策略',
             CupertinoIcons.tv_fill,
             AppleColors.systemPurple,
             trailingText: _defaultAspectLabel,
@@ -7055,7 +7130,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'episodes',
             '倍速与选集',
-            '',
+            '起播倍速、剧集排序、连播与时钟显示',
             CupertinoIcons.speedometer,
             AppleColors.systemOrange,
             trailingText: speedLabel,
@@ -7102,14 +7177,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'skip',
             '片头与片尾',
-            '',
+            '设置点播剧集自动跳过片头片尾秒数',
             CupertinoIcons.forward_fill,
             AppleColors.systemIndigo,
             trailingText: _skipIntroOutroSummary,
             content: IosSettingsGroup(
               header: '自动跳过时长',
               footer: '仅对点播剧集生效，电视直播频道将自动保持实时播放。',
-              dividerIndent: 16,
+              dividerIndent: 18,
               children: [
                 _buildSkipIntroOutroDrawerBody(onStateChanged: refresh),
               ],
@@ -7120,7 +7195,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       SettingsPane(
         'sources',
         '订阅与账号',
-        '',
+        '点播直播源管理与 4K 网盘扫码授权',
         CupertinoIcons.layers_alt_fill,
         AppleColors.systemGreen,
         sectionGroup: 'account',
@@ -7169,7 +7244,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
             ],
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 24),
           IosSettingsGroup(
             header: '云盘账号与扩展',
             footer: '绑定夸克、UC、百度或阿里云盘后，自动解锁对应 4K 原画直连线路。',
@@ -7204,7 +7279,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       SettingsPane(
         'data',
         '数据',
-        '',
+        'WebDAV 云同步、备份恢复与缓存清理',
         CupertinoIcons.tray_fill,
         AppleColors.systemTeal,
         sectionGroup: 'account',
@@ -7232,7 +7307,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'backup',
             '备份与恢复',
-            '',
+            '导入或导出跨平台 JSON 备份文件',
             CupertinoIcons.arrow_2_circlepath,
             AppleColors.systemGreen,
             content: _IosBackupRestorePanel(
@@ -7247,7 +7322,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           SettingsPane(
             'cache',
             '缓存与搜索记录',
-            '',
+            '查看并清理海报缓存与本地搜索历史',
             CupertinoIcons.trash_fill,
             AppleColors.systemRed,
             trailingText: PosterLoader.memoryCacheSizeLabel,
@@ -7271,9 +7346,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ],
               ),
-              const SizedBox(height: 20),
+              const SizedBox(height: 24),
               IosSettingsGroup(
-                dividerIndent: 16,
+                dividerIndent: 18,
                 children: [
                   IosSettingsRow(
                     key: const ValueKey('ios-clear-cache-row'),
@@ -7310,20 +7385,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       SettingsPane(
         'about',
         '关于与更新',
-        '',
+        '版本信息、更新检查与脱敏诊断日志',
         CupertinoIcons.info_circle_fill,
         AppleColors.systemIndigo,
         sectionGroup: 'about',
         content: stack([
           const Padding(
-            padding: EdgeInsets.only(top: 6, bottom: 20),
+            padding: EdgeInsets.only(top: 8, bottom: 24),
             child: Center(
               child: MarcoBrandLogo(iconSize: 52, fontSize: 22),
             ),
           ),
           IosSettingsGroup(
             header: '关于本机应用',
-            dividerIndent: 16,
+            dividerIndent: 18,
             children: [
               const IosSettingsRow(
                 title: '应用名称',
@@ -7341,7 +7416,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
             ],
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 24),
           IosUpdateSheet(
             installedVersion: _currentAppVersion,
             embedded: true,

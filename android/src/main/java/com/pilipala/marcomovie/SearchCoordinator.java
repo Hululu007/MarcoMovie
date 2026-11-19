@@ -70,6 +70,7 @@ public final class SearchCoordinator implements AutoCloseable {
     private final long requestMs, sessionMs;
     private final Runner runner;
     private final Listener listener;
+    private final int resultLimit;
     private volatile boolean closed;
     private ScheduledFuture<?> deadline;
     private int nextJob, inFlight;
@@ -79,10 +80,16 @@ public final class SearchCoordinator implements AutoCloseable {
     }
 
     SearchCoordinator(Runner runner, Listener listener, long requestMs, long sessionMs) {
+        this(runner, listener, requestMs, sessionMs, 24);
+    }
+
+    SearchCoordinator(
+            Runner runner, Listener listener, long requestMs, long sessionMs, int resultLimit) {
         this.runner = runner;
         this.listener = listener;
         this.requestMs = requestMs;
         this.sessionMs = sessionMs;
+        this.resultLimit = Math.max(1, resultLimit);
     }
 
     static synchronized void configureThreads(int count) {
@@ -222,7 +229,7 @@ public final class SearchCoordinator implements AutoCloseable {
                                 && !v.id.startsWith("msearch:")
                                 && seen.add(v.id)) {
                             videos.add(v);
-                            if (videos.size() == 24) break;
+                            if (videos.size() == resultLimit) break;
                         }
                 finish(videos, videos.isEmpty() ? Outcome.EMPTY : Outcome.RESULT);
             } catch (Exception error) {

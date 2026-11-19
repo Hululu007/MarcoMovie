@@ -48,6 +48,43 @@ final class PlaybackControls {
     View menuAnchor;
     String lastSubtitle = "";
     boolean dialogOpen, transitioning;
+    private TvMarkerHost markerState;
+    private final TvMarkerTailGate markerTail = new TvMarkerTailGate();
+    private MoviePlayer markerObservedPlayer;
+
+    TvMarkerHost markers() {
+        if (markerState == null) markerState = new TvMarkerHost(a, this);
+        return markerState;
+    }
+
+    void resetMarkers() {
+        if (markerState != null) markerState.abort();
+        markerState = null;
+        markerTail.reset();
+    }
+
+    void refreshMarkerPlaybackMode() {
+        if (a.isTvDevice() && a.player != null && a.prepared && !a.isLive() && !a.isCast())
+            a.player.setRepeatOne(
+                    a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1
+                            && outroPosition(a.player.getDuration()) == 0);
+    }
+
+    private int introPosition(int duration) {
+        int legacy = getVideoIntro(a, site, video) * 1000;
+        return a.isTvDevice() && !a.isLive() && !a.isCast()
+                ? (int) Math.min(Integer.MAX_VALUE, markers().effective(true, duration, legacy))
+                : legacy;
+    }
+
+    private long outroPosition(int duration) {
+        int tail = getVideoOutro(a, site, video) * 1000;
+        long legacy = tail > 0 && tail < duration ? duration - tail : 0;
+        return a.isTvDevice() && !a.isLive() && !a.isCast()
+                ? markers().effective(false, a.player == null ? 0 : a.player.getDuration(), legacy)
+                : legacy;
+    }
+
     boolean touchSeeking, sliderSeeking;
     long lastSeekTimeMs;
     int lastSeekTargetMs = -1;
@@ -849,7 +886,7 @@ final class PlaybackControls {
                     }
                 case ICON_SKIP_INTRO:
                     {
-                        boolean active = getVideoIntro(a, site, video) > 0;
+                        boolean active = !a.isTvDevice() && getVideoIntro(a, site, video) > 0;
                         float sw = Math.max(1.75f, r * .092f);
                         p.setStyle(Paint.Style.STROKE);
                         p.setStrokeWidth(sw);
@@ -873,7 +910,7 @@ final class PlaybackControls {
                     }
                 case ICON_SKIP_OUTRO:
                     {
-                        boolean active = getVideoOutro(a, site, video) > 0;
+                        boolean active = !a.isTvDevice() && getVideoOutro(a, site, video) > 0;
                         float sw = Math.max(1.75f, r * .092f);
                         p.setStyle(Paint.Style.STROKE);
                         p.setStrokeWidth(sw);
@@ -1354,6 +1391,10 @@ final class PlaybackControls {
     }
 
     void close() {
+        if (markerObservedPlayer != null) markerObservedPlayer.setOnSeekPositionListener(null);
+        markerObservedPlayer = null;
+        resetMarkers(); // Drop unidentified-media session markers with their owning player
+        // controls.
         surface.setFrameAdvancing(false);
         if (activeDialog != null) {
             activeDialog.dismiss();
@@ -2385,6 +2426,10 @@ final class PlaybackControls {
     static void setVideoSkip(
             MainActivity a, Cms.Site site, Cms.Video video, boolean intro, int seconds) {
         if (a == null) return;
+        if (a.isTvDevice() && !a.privateMode && VideoMarkerRepository.clearing()) {
+            a.toast("正在保存清除结果，请稍候");
+            return;
+        }
         String siteKey = site == null ? "" : site.key;
         String videoId = VideoSkipStore.videoKeyFrom(video, a.activeEpisode);
         if (a.privateMode) {
@@ -2410,18 +2455,78 @@ final class PlaybackControls {
         return VideoSkipStore.countRecords(a.prefs.getString(Prefs.VIDEO_SKIP_RECORDS, "[]"));
     }
 
-    static void clearVideoSkipRecords(MainActivity a) {
-        if (a == null) return;
-        if (a.privateMode) {
-            VideoSkipStore.clearPrivateRecords();
+    static void clearVideoSkipRecords(MainActivity a, Runnable onChanged) {
+        if (a == null || a.switchingPrivacy || a.isDestroyed()) return;
+        if (!a.isTvDevice()) {
+            if (a.privateMode) VideoSkipStore.clearPrivateRecords();
+            else if (a.prefs != null) a.prefs.edit().remove(Prefs.VIDEO_SKIP_RECORDS).apply();
+            else return;
+            a.toast("已清除全部影片的片头片尾记录");
+            if (onChanged != null) onChanged.run();
             return;
         }
-        if (a.prefs != null) {
-            a.prefs.edit().remove(Prefs.VIDEO_SKIP_RECORDS).apply();
+        if (VideoMarkerRepository.clearing()) {
+            a.toast("正在保存清除结果，请稍候");
+            return;
+        }
+        if (a.markerHost != null) a.markerHost.abort();
+        if (a.playbackControls != null) a.playbackControls.resetMarkers();
+        if (a.privateMode) {
+            VideoMarkerRepository.clearPrivate();
+            VideoSkipStore.clearPrivateRecords();
+            a.toast("已清除当前空间的片头片尾记录");
+            if (onChanged != null) onChanged.run();
+            return;
+        }
+        final android.content.SharedPreferences capturedPrefs = a.prefs;
+        if (capturedPrefs == null) return;
+        final int generation = a.generation;
+        final TvSearchContext context = new TvSearchContext(a.config, a.privateMode, a.engineEpoch);
+        final MarkerClearTask.Write clear =
+                VideoMarkerRepository.preparePublicClear(a.getFilesDir());
+        if (clear == null) return;
+        a.toast("正在清除当前空间的记录");
+        try {
+            MarkerClearTask.submit(
+                    clear,
+                    () -> MarkerLegacyCommit.clear(capturedPrefs),
+                    (newer, failure) -> {
+                        // Release even if the old Activity is destroyed and its UI queue is
+                        // discarded.
+                        VideoMarkerRepository.finishClear();
+                        a.ui.post(
+                                () -> {
+                                    if (a.isFinishing()
+                                            || a.isDestroyed()
+                                            || a.switchingPrivacy
+                                            || a.generation != generation
+                                            || a.prefs != capturedPrefs
+                                            || !context.matches(
+                                                    a.config, a.privateMode, a.engineEpoch)) return;
+                                    if (a.playbackControls != null)
+                                        a.playbackControls.resetMarkers();
+                                    if (failure != null) {
+                                        a.notice(
+                                                newer
+                                                        ? "新标记已清空，旧记录写盘未确认，请重新检查"
+                                                        : "新标记清除未确认，旧记录保留：" + failure.getMessage());
+                                        return;
+                                    }
+                                    a.toast("已清除当前空间的片头片尾记录");
+                                    if (onChanged != null) onChanged.run();
+                                });
+                    });
+        } catch (RuntimeException rejected) {
+            VideoMarkerRepository.finishClear();
+            a.notice("清除任务未启动，原记录保留");
         }
     }
 
     void skip(boolean intro) {
+        if (a.isTvDevice() && !a.isLive() && !a.isCast()) {
+            markers().manage(intro);
+            return;
+        }
         int curPos = a.player != null && a.prepared ? a.player.getCurrentPosition() : 0;
         int curDur = a.player != null && a.prepared ? a.player.getDuration() : 0;
         showSkipAdjuster(a, site, video, intro, curPos, curDur, this::updateLabels);
@@ -2439,23 +2544,28 @@ final class PlaybackControls {
     static void showVideoSkipRecordsDialog(MainActivity a, Runnable onChanged) {
         if (a == null) return;
         int count = countVideoSkipRecords(a);
+        int v2Count = a.isTvDevice() ? VideoMarkerRepository.count(a) : 0;
         AppDialog.Builder b =
                 new AppDialog.Builder(a)
                         .setTitle("片头片尾独立记录")
                         .setMessage(
-                                "每部影片在播放页面点击「片头」或「片尾」按钮时，会优先默认记录当前播放时间，并支持按秒微调。\n\n"
-                                        + "记录仅对当前影片独立生效，不会全局同步影响其他影视。\n"
-                                        + "当前本机已保存："
-                                        + count
-                                        + " 部影片记录。")
+                                a.isTvDevice()
+                                        ? "旧记录为片头持续秒数/片尾剩余秒数；新标记为本集本线路绝对毫秒节点，互不改写。\n旧记录："
+                                                + count
+                                                + "，新标记："
+                                                + (v2Count < 0 ? "读取失败，原文件保留" : v2Count)
+                                                + "。\n清空将删除本空间两代记录及当前会话标记；不影响另一空间或远端。"
+                                        : "每部影片在播放页面点击「片头」或「片尾」按钮时，会优先默认记录当前播放时间，并支持按秒微调。\n\n"
+                                                + "记录仅对当前影片独立生效，不会全局同步影响其他影视。\n"
+                                                + "当前本机已保存："
+                                                + count
+                                                + " 部影片记录。")
                         .setNegativeButton("关闭", null);
-        if (count > 0) {
+        if (count > 0 || a.isTvDevice()) {
             b.setPositiveButton(
                     "清空全部记录",
                     (d, w) -> {
-                        clearVideoSkipRecords(a);
-                        a.toast("已清空全部影片的片头片尾记录");
-                        if (onChanged != null) onChanged.run();
+                        clearVideoSkipRecords(a, onChanged);
                     });
         }
         b.show();
@@ -2497,7 +2607,11 @@ final class PlaybackControls {
         String rawTitle = video.title != null ? video.title.trim() : "";
         String movieLabel = rawTitle.isEmpty() ? "当前影片" : "《" + rawTitle + "》";
         TextView title =
-                a.text((intro ? "设置本片跳过片头" : "设置本片跳过片尾") + " · 独立记录", 17, MainActivity.WHITE);
+                a.text(
+                        (intro ? "设置本片跳过片头" : "设置本片跳过片尾")
+                                + (a.isTvDevice() ? " · 旧记录（秒）" : " · 独立记录"),
+                        17,
+                        MainActivity.WHITE);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         card.addView(title);
         a.gap(card, 6);
@@ -2530,8 +2644,11 @@ final class PlaybackControls {
                     currentSecRef[0] = clamped;
                     setVideoSkip(a, site, video, intro, clamped);
                     if (!intro && a.player != null && !"live".equals(site.key)) {
-                        a.player.setRepeatOne(
-                                a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1 && clamped == 0);
+                        if (a.isTvDevice() && a.playbackControls != null)
+                            a.playbackControls.refreshMarkerPlaybackMode();
+                        else
+                            a.player.setRepeatOne(
+                                    a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1 && clamped == 0);
                     }
                     if (bar.getProgress() != clamped) bar.setProgress(clamped);
                     valueLabel.setText(
@@ -2691,7 +2808,11 @@ final class PlaybackControls {
                 i -> {
                     a.prefs.edit().putInt(Prefs.REPEAT_MODE, i).apply();
                     if (a.player != null)
-                        a.player.setRepeatOne(i == 1 && getVideoOutro(a, site, video) == 0);
+                        a.player.setRepeatOne(
+                                i == 1
+                                        && (a.isTvDevice()
+                                                ? outroPosition(a.player.getDuration()) == 0
+                                                : getVideoOutro(a, site, video) == 0));
                     updateLabels();
                 });
     }
@@ -2813,8 +2934,14 @@ final class PlaybackControls {
                             choose(
                                     "本片自动跳过（独立记录）",
                                     new String[] {
-                                        "本片片头 · " + skipLabel(getVideoIntro(a, site, video)),
-                                        "本片片尾 · " + skipLabel(getVideoOutro(a, site, video))
+                                        a.isTvDevice()
+                                                ? "片头 · 标记与旧记录"
+                                                : "本片片头 · "
+                                                        + skipLabel(getVideoIntro(a, site, video)),
+                                        a.isTvDevice()
+                                                ? "片尾 · 标记与旧记录"
+                                                : "本片片尾 · "
+                                                        + skipLabel(getVideoOutro(a, site, video))
                                     },
                                     -1,
                                     n -> skip(n == 0));
@@ -2873,7 +3000,11 @@ final class PlaybackControls {
             }
         }
         Button introBtn = buttons.get("skip-intro-tool");
-        if (introBtn != null) {
+        if (introBtn != null && a.isTvDevice()) {
+            introBtn.setContentDescription("片头标记与旧记录");
+            if (!(introBtn instanceof ModernIconButton)) introBtn.setText("片头标记");
+            introBtn.invalidate();
+        } else if (introBtn != null) {
             int s = getVideoIntro(a, site, video);
             if (introBtn instanceof ModernIconButton) {
                 introBtn.setContentDescription(s > 0 ? "片头 " + s + "s" : "片头");
@@ -2883,7 +3014,11 @@ final class PlaybackControls {
             }
         }
         Button outroBtn = buttons.get("skip-outro-tool");
-        if (outroBtn != null) {
+        if (outroBtn != null && a.isTvDevice()) {
+            outroBtn.setContentDescription("片尾标记与旧记录");
+            if (!(outroBtn instanceof ModernIconButton)) outroBtn.setText("片尾标记");
+            outroBtn.invalidate();
+        } else if (outroBtn != null) {
             int s = getVideoOutro(a, site, video);
             if (outroBtn instanceof ModernIconButton) {
                 outroBtn.setContentDescription(s > 0 ? "片尾 " + s + "s" : "片尾");
@@ -2939,6 +3074,18 @@ final class PlaybackControls {
     }
 
     void prepared() {
+        if (a.isTvDevice() && !a.isLive() && !a.isCast()) {
+            markerObservedPlayer = a.player;
+            final MoviePlayer owner = markerObservedPlayer;
+            owner.setOnSeekPositionListener(
+                    (player, actualPosition) -> {
+                        if (a.playbackControls == this
+                                && a.player == owner
+                                && player == owner
+                                && markerObservedPlayer == owner)
+                            markerTail.observe(actualPosition);
+                    });
+        }
         if (a.player == null) return;
         if (resolved.media.optString("danmaku").isEmpty()) {
             String recentDm = CspEngine.consumeRecentPluginDanmaku(25000L);
@@ -2980,7 +3127,7 @@ final class PlaybackControls {
         int seek =
                 ("live".equals(site.key) || explicitRestart)
                         ? 0
-                        : historyResume ? a.resumeAt : getVideoIntro(a, site, video) * 1000;
+                        : historyResume ? a.resumeAt : introPosition(a.player.getDuration());
         a.resumeAt = 0;
         if (seek > 0) {
             if (duration > 0) {
@@ -3003,13 +3150,16 @@ final class PlaybackControls {
             a.player.setSpeed(a.prefs.getFloat(Prefs.PLAY_SPEED, 1));
             a.player.setRepeatOne(
                     a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1
-                            && getVideoOutro(a, site, video) == 0);
+                            && (a.isTvDevice()
+                                    ? outroPosition(duration) == 0
+                                    : getVideoOutro(a, site, video) == 0));
         }
         syncModernActionVisibility();
         refreshPlayPauseGlyph();
     }
 
     void tick() {
+        if (a.isTvDevice() && (a.markerHost != null || a.seekGesture.active)) return;
         if ("live".equals(site.key)) return;
         if (a.player == null || !a.prepared || isUserSeeking()) return;
         int duration = a.player.getDuration();
@@ -3025,7 +3175,8 @@ final class PlaybackControls {
                 a.player.seekTo(target);
             }
         }
-        int position = displayPosition(a.player.getCurrentPosition());
+        int actualPosition = a.player.getCurrentPosition();
+        int position = displayPosition(actualPosition);
         if (duration > 0) {
             timeline.setEnabled(true);
             timeline.setMax(Math.max(duration, position));
@@ -3035,16 +3186,23 @@ final class PlaybackControls {
             timeline.setMax(100);
             timeline.setProgress(0);
         }
-        int tail = getVideoOutro(a, site, video) * 1000;
+        long tailNode = outroPosition(duration);
+        markerTail.node(tailNode);
+        markerTail.observe(actualPosition);
         if (!transitioning
                 && a.playing
                 && duration > 0
-                && tail > 0
-                && tail < duration
-                && position >= duration - tail) {
-            if (a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1)
-                a.player.seekTo(getVideoIntro(a, site, video) * 1000);
-            else if (!step(1)) {
+                && tailNode > 0
+                && tailNode < duration
+                && (a.isTvDevice() ? markerTail.take(actualPosition) : position >= tailNode)) {
+            if (a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1) {
+                int target = introPosition(a.player.getDuration());
+                if (a.isTvDevice()) {
+                    if (target >= tailNode) target = 0;
+                    recordUserSeek(target);
+                }
+                a.player.seekTo(target);
+            } else if (!step(1)) {
                 transitioning = true;
                 a.player.pause();
                 a.playing = false;

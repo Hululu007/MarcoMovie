@@ -14,13 +14,23 @@ function installFtyPan() {
       .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ')
       .replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   }
-  function checkChallenge(body) {
+  function hasVodMarkup(t) {
+    return /(?:\/voddetail\/|\/vodplay\/|\/vod\/detail\/|module-item|module-search-item|module-card-item|vod-item|"merged_by_type"\s*:|"disk_id"\s*:)/i.test(t);
+  }
+  function isChallengeBody(body, statusCode) {
     var t = str(body);
-    if (!t) return;
-    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|Checking your browser|系统安全验证|正在验证您的浏览器|人机验证|verify you are human|验证码不正确|请完成滑块验证|verifySlider|challenges\.cloudflare\.com|<title>\s*Just a moment\.\.\.\s*<\/title>|Attention Required!\s*\|\s*Cloudflare|cf-turnstile)/i.test(t) ||
-        /<input[^>]+(?:name|id)=["']?(?:verify|validate|captcha)/i.test(t)) {
-      fail('drpy_verification_required');
+    if (!t) return false;
+    if (/(?:SafeLineChallenge|__cdn_pow|sl-challenge-jwt|<title>\s*Just a moment\.\.\.\s*<\/title>|Attention Required!\s*\|\s*Cloudflare|Checking your browser|正在验证您的浏览器|系统安全验证|verify you are human|请完成滑块验证|verifySlider|验证码不正确)/i.test(t)) {
+      return true;
     }
+    var code = Number(statusCode) || 0;
+    var blockedStatus = code === 401 || code === 403 || code === 429 || code === 503;
+    if (!blockedStatus && (t.length >= 24000 || hasVodMarkup(t))) return false;
+    return /(?:challenges\.cloudflare\.com|cf-turnstile|人机验证)/i.test(t) ||
+      /<input[^>]+(?:name|id)=["']?(?:verify|validate|captcha)/i.test(t);
+  }
+  function checkChallenge(body, statusCode) {
+    if (isChallengeBody(body, statusCode)) fail('drpy_verification_required');
   }
   function address(value, base) {
     var v = str(value).trim();
@@ -34,7 +44,7 @@ function installFtyPan() {
   }
   function safePic(pic, base) {
     var c = str(pic).trim();
-    if (!c || /(?:sogoucdn\.com|imagehub\.cc)/i.test(c)) return '';
+    if (!c || /^data:/i.test(c) || /(?:sogoucdn\.com|imagehub\.cc|\/loading\.|\/lazyload\.|\/nopic|\/none\.|\/blank\.|\/default_pic)/i.test(c)) return '';
     if (c.indexOf('//') === 0) c = 'https:' + c;
     try {
       var u = joinUrl(base || (cfg.origin + '/'), c);
@@ -51,10 +61,13 @@ function installFtyPan() {
   }
   function httpReq(url, opts) {
     var target = address(url).url;
-    var res = req(target, opts || {});
-    var body = res && typeof res.content === 'string' ? res.content : '';
-    checkChallenge(body);
-    return { body: body, headers: (res && res.headers) || {}, code: (res && res.code) || 0 };
+    var res;
+    try { res = req(target, Object.assign({ timeout: 9000 }, opts || {})); }
+    catch (e) { fail(/^drpy_[a-z_]+$/.test(e && e.message) ? e.message : 'drpy_source_unavailable'); }
+    if (!res || typeof res.content !== 'string') fail('drpy_source_unavailable');
+    var body = res.content;
+    checkChallenge(body, res.code);
+    return { body: body, headers: res.headers || {}, code: res.code || 0 };
   }
   function parseJsonSafe(raw) {
     var t = str(raw).trim();

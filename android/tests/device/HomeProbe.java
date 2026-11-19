@@ -10,12 +10,17 @@ import java.io.*;
 import java.util.concurrent.*;
 import org.json.*;
 
-/** Synthetic source with a separate preference file; never writes user playback records. */
+/** Synthetic source probe. Requires an explicitly provisioned, empty test installation. */
 public final class HomeProbe extends Instrumentation {
     MainActivity a;
+    String fixtureNamespace;
+    SharedPreferences fixturePrefs;
+    boolean isolatedTarget;
     volatile boolean failAnimeCategory;
     final CountDownLatch launched = new CountDownLatch(1);
     final JSONObject result = new JSONObject();
+    SectionFixture activeSectionFixture;
+    String sectionWait = "not-started";
     final java.util.concurrent.atomic.AtomicInteger homeRequests =
             new java.util.concurrent.atomic.AtomicInteger();
     final java.util.concurrent.atomic.AtomicInteger categoryRequests =
@@ -33,17 +38,40 @@ public final class HomeProbe extends Instrumentation {
                         activity,
                         new ContextWrapper(base) {
                             public SharedPreferences getSharedPreferences(String name, int mode) {
+                                if (name.equals("movie") || name.equals("movie-private"))
+                                    return fixturePrefs;
                                 return super.getSharedPreferences(
-                                        name.equals("movie") ? "detail_layout_bootstrap" : name,
-                                        mode);
+                                        fixtureNamespace + "_" + name, mode);
                             }
 
                             public java.io.File getFilesDir() {
                                 java.io.File file =
                                         new java.io.File(
-                                                super.getCacheDir(), "detail-layout-empty");
+                                                super.getCacheDir(), fixtureNamespace + "/files");
                                 file.mkdirs();
                                 return file;
+                            }
+
+                            public java.io.File getCacheDir() {
+                                java.io.File file =
+                                        new java.io.File(
+                                                super.getCacheDir(), fixtureNamespace + "/cache");
+                                file.mkdirs();
+                                return file;
+                            }
+
+                            public java.io.File getExternalFilesDir(String type) {
+                                java.io.File base = super.getExternalFilesDir(type);
+                                java.io.File file =
+                                        new java.io.File(
+                                                base == null ? getCacheDir() : base,
+                                                fixtureNamespace);
+                                file.mkdirs();
+                                return file;
+                            }
+
+                            public Context getApplicationContext() {
+                                return this;
                             }
                         });
             } catch (Exception e) {
@@ -70,6 +98,8 @@ public final class HomeProbe extends Instrumentation {
     @Override
     public void onCreate(Bundle args) {
         super.onCreate(args);
+        isolatedTarget = args != null && "true".equals(args.getString("isolated_target"));
+        fixtureNamespace = "home_probe_v17_" + SystemClock.elapsedRealtime();
         start();
     }
 
@@ -204,33 +234,31 @@ public final class HomeProbe extends Instrumentation {
 
     @Override
     public void onStart() {
-        Cms.Config original = null;
-        String history = null, selected = null;
-        Integer columns = null;
-        boolean hadHistory = false, hadSelected = false;
         try {
             Context context = getTargetContext();
-            SharedPreferences before = context.getSharedPreferences("movie", 0);
-            Bundle inspection = new Bundle();
-            inspection.putInt(
-                    "history_entries_before",
-                    WatchHistory.read(before.getString("watch_history", "[]")).size());
-            inspection.putBoolean(
-                    "synthetic_selected_before",
-                    before.getString("selected_site", "").equals("home-fixture"));
-            sendStatus(1, inspection);
-            // Exercise a separate preference file; a process crash cannot overwrite user records.
-            SharedPreferences fixture = context.getSharedPreferences("home_probe_fixture", 0);
-            SharedPreferences.Editor copy = fixture.edit().clear();
-            for (java.util.Map.Entry<String, ?> e : before.getAll().entrySet()) {
-                Object value = e.getValue();
-                if (value instanceof String) copy.putString(e.getKey(), (String) value);
-                else if (value instanceof Integer) copy.putInt(e.getKey(), (Integer) value);
-                else if (value instanceof Boolean) copy.putBoolean(e.getKey(), (Boolean) value);
-                else if (value instanceof Long) copy.putLong(e.getKey(), (Long) value);
-                else if (value instanceof Float) copy.putFloat(e.getKey(), (Float) value);
-            }
-            copy.commit();
+            // Context wrapping begins after attachBaseContext/Application creation. It cannot
+            // isolate every process-global service: never run this on a user's installation.
+            if (!isolatedTarget
+                    || PrivacySpace.active
+                    || !context.getSharedPreferences("movie", 0).getAll().isEmpty()
+                    || !context.getSharedPreferences("movie-private", 0).getAll().isEmpty()
+                    || new File(context.getFilesDir(), "config.json").exists())
+                throw new AssertionError(
+                        "HomeProbe requires -e isolated_target true and an empty dedicated test target; do not clear a user installation");
+            SharedPreferences fixture = context.getSharedPreferences(fixtureNamespace, 0);
+            fixturePrefs = fixture;
+            check(
+                    "fixture_defaults_written",
+                    fixture.edit()
+                            .putInt(Prefs.TV_NAVIGATION_MODE, 0)
+                            .putInt(Prefs.TV_DOCK_POSITION, 0)
+                            .putBoolean(Prefs.CAST_ENABLED, false)
+                            .putBoolean(Prefs.STARTUP_ANIMATION, false)
+                            .commit());
+            result.put("fixture_namespace", fixtureNamespace);
+            result.put("sdk_int", Build.VERSION.SDK_INT);
+            result.put("device", Build.MANUFACTURER + "/" + Build.MODEL);
+            result.put("input_scope", "instrumentation-injected keys; no physical remote claim");
             context.startActivity(
                     new Intent(context, MainActivity.class)
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
@@ -240,12 +268,6 @@ public final class HomeProbe extends Instrumentation {
                         a.prefs = fixture;
                         if (a.startupIntro != null) a.startupIntro.cancel();
                     });
-            original = a.config;
-            history = a.prefs.getString("watch_history", "[]");
-            selected = a.prefs.getString("selected_site", "");
-            hadHistory = a.prefs.contains("watch_history");
-            hadSelected = a.prefs.contains("selected_site");
-            if (a.prefs.contains("home_columns")) columns = a.prefs.getInt("home_columns", 5);
             Cms.Site site = new Cms.Site();
             site.key = "home-fixture";
             site.name = "测试片库";
@@ -818,27 +840,13 @@ public final class HomeProbe extends Instrumentation {
             SystemClock.sleep(300);
             check("top_up_keeps_logo_visible", ui(() -> a.scroll.getScrollY() == 0));
             frame("history-top");
-            runOnMainSync(
-                    () -> {
-                        tag("home-video:14").requestFocus();
-                        a.homeKeys.reset();
-                    });
-            SystemClock.sleep(350);
-            fastUp();
-            fastUp();
-            fastUp();
-            await(() -> a.scroll.getScrollY() == 0);
-            check(
-                    "triple_up_returns_to_absolute_top",
-                    ui(() -> a.scroll.getScrollY() == 0 && tag("home-history:0").hasFocus()));
             runOnMainSync(() -> tag("nav-settings").requestFocus());
             fastUp();
             fastUp();
             fastUp();
-            await(() -> a.scroll.getScrollY() == 0);
             check(
-                    "triple_up_also_works_from_dock",
-                    ui(() -> a.scroll.getScrollY() == 0 && tag("home-history:0").hasFocus()));
+                    "tv_three_up_follows_three_navigation_rows",
+                    ui(() -> tag("nav-favorites").hasFocus()));
             key(KeyEvent.KEYCODE_MENU);
             check(
                     "menu_opens_source_chooser",
@@ -1121,18 +1129,13 @@ public final class HomeProbe extends Instrumentation {
             for (int i = 0; i < 5; i++) pacedUp();
             SystemClock.sleep(400);
             check("no_history_up_reveals_logo", ui(() -> a.scroll.getScrollY() == 0));
-            runOnMainSync(
-                    () -> {
-                        tag("home-video:11").requestFocus();
-                        a.homeKeys.reset();
-                    });
+            runOnMainSync(() -> tag("nav-settings").requestFocus());
             fastUp();
             fastUp();
             fastUp();
-            await(() -> a.scroll.getScrollY() == 0);
             check(
-                    "triple_up_without_history_targets_recommended",
-                    ui(() -> tag("home-tab:0").hasFocus() && a.scroll.getScrollY() == 0));
+                    "tv_no_history_three_up_keeps_navigation_focus",
+                    ui(() -> tag("nav-favorites").hasFocus()));
             frame("no-history");
             runOnMainSync(
                     () -> {
@@ -1205,38 +1208,27 @@ public final class HomeProbe extends Instrumentation {
                     });
             glassNavigation();
             readingScroll();
+            sectionPagingRegression();
             result.put("passed", true);
         } catch (Throwable e) {
             try {
-                result.put("passed", false).put("error", e.toString());
+                result.put("passed", false)
+                        .put("error", e.toString())
+                        .put("error_stack", android.util.Log.getStackTraceString(e));
             } catch (Exception ignored) {
             }
+            if (activeSectionFixture != null) captureSectionFailure();
         } finally {
-            if (a != null && history != null) {
-                String h = history, s = selected;
-                boolean hh = hadHistory, hs = hadSelected;
-                Integer c = columns;
-                Cms.Config cfg = original;
+            if (a != null) {
                 runOnMainSync(
                         () -> {
                             if (a.sourceDialog != null) a.sourceDialog.dismiss();
                             if (a.appDialog != null) a.appDialog.dismiss();
-                            SharedPreferences.Editor edit = a.prefs.edit();
-                            if (hh) edit.putString("watch_history", h);
-                            else edit.remove("watch_history");
-                            if (hs) edit.putString("selected_site", s);
-                            else edit.remove("selected_site");
-                            if (c != null) edit.putInt("home_columns", c);
-                            else edit.remove("home_columns");
-                            edit.commit();
                             a.ui.removeCallbacks(a.learnPendingTitles);
                             a.pendingTitles.clear();
-                            a.prefs = getTargetContext().getSharedPreferences("movie", 0);
-                            a.config = cfg;
-                            a.engines.remove("home-fixture");
-                            a.homeData.remove("home-fixture");
-                            a.back.clear();
-                            a.open(new MainActivity.Screen(a::home), false);
+                            a.cancelArtwork();
+                            a.finish(); // Keep fixture prefs through onStop/onDestroy; never
+                            // reopen user home.
                         });
             }
         }
@@ -1244,6 +1236,631 @@ public final class HomeProbe extends Instrumentation {
         report.putString("result", result.toString());
         sendStatus(0, report);
         finish(Activity.RESULT_OK, new Bundle());
+    }
+
+    // Cms.listing accepts at most 500 items per response. Keep the 2001-item case
+    // cumulative: all five pages must pass through the real parser and HomeScreen.
+    String sectionListing(boolean wide, int page) throws Exception {
+        if (!wide) return listing("section", page == 1 ? 40 : 5, page);
+        if (page < 1 || page > 5) throw new IOException("unexpected section window page: " + page);
+        return new JSONObject(listing("section", page < 5 ? 500 : 1, page))
+                .put("pagecount", 5)
+                .toString();
+    }
+
+    void verifySectionPageContract() throws Exception {
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        JSONArray sizes = new JSONArray();
+        for (int page = 1; page <= 5; page++) {
+            Cms.Listing parsed = Cms.listing(sectionListing(true, page));
+            sizes.put(parsed.videos.size());
+            check(
+                    "section_window_page_" + page + "_valid_cms_response",
+                    parsed.page == page
+                            && parsed.pageCount == 5
+                            && parsed.videos.size() == (page < 5 ? 500 : 1));
+            for (Cms.Video video : parsed.videos)
+                if (!ids.add(video.id))
+                    throw new AssertionError("duplicate section fixture id: " + video.id);
+        }
+        result.put("section_window_response_sizes", sizes);
+        check("section_window_fixture_has_2001_unique_items", ids.size() == 2001);
+    }
+
+    /** Real HomeScreen + SourceEngine boundary; native reruns remain required after fixture changes. */
+    final class SectionFixture implements SourceEngine {
+        final boolean wide;
+        final java.util.concurrent.atomic.AtomicInteger requests =
+                new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.List<String> trace =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+        volatile CountDownLatch hold;
+        volatile boolean failNext;
+
+        SectionFixture(boolean wide) {
+            this.wide = wide;
+        }
+
+        public String home() throws Exception {
+            return new JSONObject(listing("section-home", 12, 1))
+                    .put("pagecount", 1)
+                    .put(
+                            "class",
+                            new JSONArray()
+                                    .put(
+                                            new JSONObject()
+                                                    .put("type_id", "section")
+                                                    .put("type_name", "分页夹具")))
+                    .toString();
+        }
+
+        public String category(String id, int page) throws Exception {
+            requests.incrementAndGet();
+            trace.add(SystemClock.uptimeMillis() + ":request:" + id + ":" + page);
+            CountDownLatch wait = hold;
+            if (wait != null && !wait.await(10, TimeUnit.SECONDS))
+                throw new IOException("section fixture release timeout");
+            if (failNext) {
+                failNext = false;
+                trace.add(SystemClock.uptimeMillis() + ":failure:" + page);
+                throw new IOException("section paging intentional failure");
+            }
+            trace.add(SystemClock.uptimeMillis() + ":response:" + page);
+            return sectionListing(wide, page);
+        }
+
+        public String detail(String id) {
+            return "{\"list\":[]}";
+        }
+
+        public String search(String query, int page) {
+            return "{\"list\":[]}";
+        }
+
+        public boolean requiresExternalRuntime() {
+            return false;
+        }
+    }
+
+    HomeScreen retained() {
+        return a.current.retainedHome;
+    }
+
+    // Diagnostic-only reads: never repair focus, pump paging or change a timeout here.
+    JSONObject sectionViewDiagnostic(View view) throws Exception {
+        JSONObject out = new JSONObject().put("present", view != null);
+        if (view == null) return out;
+        Rect rect = new Rect(), screen = new Rect();
+        if (a.root != null) a.root.getGlobalVisibleRect(screen);
+        boolean visible = view.getGlobalVisibleRect(rect);
+        Rect intersection = new Rect(rect);
+        return out.put("tag", String.valueOf(view.getTag()))
+                .put("id", view.getId())
+                .put("shown", view.isShown())
+                .put("enabled", view.isEnabled())
+                .put("focusable", view.isFocusable())
+                .put("has_focus", view.hasFocus())
+                .put("attached", view.isAttachedToWindow())
+                .put("laid_out", view.isLaidOut())
+                .put("width", view.getWidth())
+                .put("height", view.getHeight())
+                .put("alpha", view.getAlpha())
+                .put("rect", rect.toShortString())
+                .put("intersects_screen", visible && intersection.intersect(screen))
+                .put("next_down_id", view.getNextFocusDownId());
+    }
+
+    void captureSectionFailure() {
+        // Preserve the original failure even when diagnostic collection itself fails.
+        JSONObject diagnostic = new JSONObject();
+        try {
+            diagnostic
+                    .put("stage", result.optString("section_stage"))
+                    .put("wait", sectionWait)
+                    .put("uptime_ms", SystemClock.uptimeMillis());
+            runOnMainSync(
+                    () -> {
+                        try {
+                            diagnostic.put("activity_present", a != null);
+                            if (a == null) return;
+                            diagnostic
+                                    .put("generation", a.generation)
+                                    .put("window_focus", a.hasWindowFocus())
+                                    .put("layout_ready", a.layoutReady)
+                                    .put("focus", sectionViewDiagnostic(a.getCurrentFocus()));
+                            HomeScreen h = a.current == null ? null : a.current.retainedHome;
+                            diagnostic.put("retained_home_present", h != null);
+                            if (h == null || h.state == null) return;
+                            diagnostic
+                                    .put("library", h.state.library)
+                                    .put("category", h.state.category)
+                                    .put("page", h.state.page)
+                                    .put("pages", h.state.pages)
+                                    .put("items", h.state.videos.size())
+                                    .put("ready", h.state.ready)
+                                    .put("busy", h.busy)
+                                    .put("window_start", h.state.windowStart)
+                                    .put("window_end", h.windowEnd())
+                                    .put("grid_epoch", h.gridEpoch)
+                                    .put("pending_grid", h.pendingGrid != null)
+                                    .put("rows", h.rows.size())
+                                    .put(
+                                            "pending_focus",
+                                            h.pendingFocus == null
+                                                    ? JSONObject.NULL
+                                                    : h.pendingFocus);
+                            int cards = 0;
+                            for (java.util.List<View> row : h.rows) cards += row.size();
+                            diagnostic
+                                    .put("rendered_cards", cards)
+                                    .put(
+                                            "last_card",
+                                            sectionViewDiagnostic(
+                                                    tag("home-video:" + (h.windowEnd() - 1))))
+                                    .put(
+                                            "status",
+                                            h.status == null ? "" : h.status.getText().toString());
+                            if (a.scroll != null)
+                                diagnostic
+                                        .put("scroll_y", a.scroll.getScrollY())
+                                        .put("scroll_height", a.scroll.getHeight());
+                            diagnostic.put(
+                                    "category_requests", activeSectionFixture.requests.get());
+                            synchronized (activeSectionFixture.trace) {
+                                diagnostic.put(
+                                        "request_trace", new JSONArray(activeSectionFixture.trace));
+                            }
+                        } catch (Exception error) {
+                            try {
+                                diagnostic.put("state_error", error.toString());
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    });
+            Bitmap image = getUiAutomation().takeScreenshot();
+            if (image == null) throw new IOException("failure screenshot unavailable");
+            try {
+                File file =
+                        new File(
+                                a.getExternalFilesDir(null), "home-v17-section-failure-native.png");
+                try (FileOutputStream stream = new FileOutputStream(file)) {
+                    if (!image.compress(Bitmap.CompressFormat.PNG, 100, stream))
+                        throw new IOException("failure screenshot compression failed");
+                }
+                diagnostic.put("native_screenshot", file.getAbsolutePath());
+            } finally {
+                image.recycle();
+            }
+        } catch (Throwable error) {
+            try {
+                diagnostic.put("capture_error", error.toString());
+            } catch (Exception ignored) {
+            }
+        }
+        try {
+            result.put("section_failure_diagnostic", diagnostic);
+            Bundle progress = new Bundle();
+            progress.putString("section_failure_diagnostic", diagnostic.toString());
+            sendStatus(2, progress);
+        } catch (Exception ignored) {
+        }
+    }
+
+    void readySection() throws Exception {
+        await(
+                () ->
+                        a.current != null
+                                && retained() != null
+                                && !retained().busy
+                                && a.current.homeState.ready
+                                && a.current.homeState.category.equals("section"));
+    }
+
+    void sectionState(String label, SectionFixture engine, boolean screenshot) throws Exception {
+        JSONObject state = new JSONObject();
+        runOnMainSync(
+                () -> {
+                    try {
+                        HomeScreen.State s = a.current.homeState;
+                        View focus = a.getCurrentFocus();
+                        Rect visible = new Rect(), screen = new Rect();
+                        a.root.getGlobalVisibleRect(screen);
+                        boolean intersects =
+                                focus != null
+                                        && focus.getGlobalVisibleRect(visible)
+                                        && visible.intersect(screen);
+                        float alpha = 1f;
+                        View ancestor = focus;
+                        while (ancestor != null) {
+                            alpha *= ancestor.getAlpha();
+                            ancestor =
+                                    ancestor.getParent() instanceof View
+                                            ? (View) ancestor.getParent()
+                                            : null;
+                        }
+                        state.put("uptime_ms", SystemClock.uptimeMillis())
+                                .put("generation", a.generation)
+                                .put("library", s.library)
+                                .put("category", s.category)
+                                .put("page", s.page)
+                                .put("window_start", s.windowStart)
+                                .put("items", s.videos.size())
+                                .put("busy", retained().busy)
+                                .put("scroll_y", a.scroll.getScrollY())
+                                .put("category_requests", engine.requests.get())
+                                .put(
+                                        "focus_tag",
+                                        focus == null
+                                                ? JSONObject.NULL
+                                                : String.valueOf(focus.getTag()))
+                                .put("focus_id", focus == null ? View.NO_ID : focus.getId())
+                                .put("global_visible_rect", visible.toShortString())
+                                .put("root_visible_rect", screen.toShortString())
+                                .put("intersects_screen", intersects)
+                                .put("ancestor_alpha_product", alpha);
+                        synchronized (engine.trace) {
+                            state.put("request_trace", new JSONArray(engine.trace));
+                        }
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+        result.put("section_" + label, state);
+        Bundle progress = new Bundle();
+        progress.putString("section_state", state.toString());
+        sendStatus(2, progress); // Preserve the snapshot even if the following assertion fails.
+        check(
+                label + "_focus_has_visible_screen_intersection",
+                state.getBoolean("intersects_screen")
+                        && state.getDouble("ancestor_alpha_product") > 0);
+        if (screenshot) {
+            Bitmap image = getUiAutomation().takeScreenshot();
+            if (image == null) throw new AssertionError("native screenshot unavailable: " + label);
+            File path = new File(a.getExternalFilesDir(null), "home-v17-" + label + "-native.png");
+            try (FileOutputStream stream = new FileOutputStream(path)) {
+                if (!image.compress(Bitmap.CompressFormat.PNG, 100, stream))
+                    throw new IOException("native screenshot compression failed");
+            } finally {
+                image.recycle();
+            }
+            state.put("native_screenshot", path.getAbsolutePath());
+        }
+    }
+
+    void previewDownBurst() {
+        long time = SystemClock.uptimeMillis();
+        for (int repeat = 0; repeat < 4; repeat++) {
+            sendKeySync(
+                    new KeyEvent(
+                            time,
+                            SystemClock.uptimeMillis(),
+                            KeyEvent.ACTION_DOWN,
+                            KeyEvent.KEYCODE_DPAD_DOWN,
+                            repeat));
+            SystemClock.sleep(25);
+        }
+        sendKeySync(
+                new KeyEvent(
+                        time,
+                        SystemClock.uptimeMillis(),
+                        KeyEvent.ACTION_UP,
+                        KeyEvent.KEYCODE_DPAD_DOWN,
+                        0));
+        SystemClock.sleep(400);
+    }
+
+    void lastCardDown() throws Exception {
+        sectionWait = "await-last-card-created";
+        result.put(
+                "last_card_dispatch",
+                new JSONObject().put("attempt_stage", result.optString("section_stage")));
+        HomeRenderDiagnostics.awaitLastCard(
+                this,
+                a,
+                this::retained,
+                () -> tag("home-video:" + (retained().windowEnd() - 1)) != null,
+                result,
+                result.optString("section_stage"));
+        sectionWait = "last-card-focus-and-dispatch";
+        runOnMainSync(
+                () -> {
+                    HomeScreen h = retained();
+                    if (h.busy) throw new AssertionError("paging precondition busy");
+                    // Position focus without the existing near-end onFocus prefetch winning the
+                    // race.
+                    // Only this setup toggles busy; the subsequent activity dispatch uses ready
+                    // state.
+                    h.busy = true;
+                    try {
+                        View target = tag("home-video:" + (h.windowEnd() - 1));
+                        JSONObject drive =
+                                new JSONObject()
+                                        .put("target_before", sectionViewDiagnostic(target));
+                        result.put("last_card_dispatch", drive);
+                        drive.put("focus_request_accepted", target.requestFocus())
+                                .put(
+                                        "actual_focus_after_request",
+                                        sectionViewDiagnostic(a.getCurrentFocus()))
+                                .put("target_after_focus", sectionViewDiagnostic(target));
+                        View next = a.root.findViewById(target.getNextFocusDownId());
+                        drive.put("down_target", sectionViewDiagnostic(next));
+                    } catch (Exception error) {
+                        throw new RuntimeException(error);
+                    } finally {
+                        h.busy = false;
+                    }
+                    long time = SystemClock.uptimeMillis();
+                    boolean downHandled =
+                            a.dispatchKeyEvent(
+                                    new KeyEvent(
+                                            time,
+                                            time,
+                                            KeyEvent.ACTION_DOWN,
+                                            KeyEvent.KEYCODE_DPAD_DOWN,
+                                            0));
+                    boolean upHandled =
+                            a.dispatchKeyEvent(
+                                    new KeyEvent(
+                                            time,
+                                            time + 1,
+                                            KeyEvent.ACTION_UP,
+                                            KeyEvent.KEYCODE_DPAD_DOWN,
+                                            0));
+                    try {
+                        result.getJSONObject("last_card_dispatch")
+                                .put("down_handled", downHandled)
+                                .put("up_handled", upHandled)
+                                .put("window_start_after_dispatch", h.state.windowStart)
+                                .put("busy_after_dispatch", h.busy)
+                                .put(
+                                        "focus_after_dispatch",
+                                        sectionViewDiagnostic(a.getCurrentFocus()));
+                    } catch (Exception error) {
+                        throw new RuntimeException(error);
+                    }
+                });
+        sectionWait = "last-card-dispatched";
+    }
+
+    void accumulateSectionWindow(String name, SectionFixture engine) throws Exception {
+        // Build the large retained list using visible last-card DOWN events. Do not
+        // seed State.videos or bypass Cms.listing with a pre-parsed category cache.
+        for (int step = 0; !ui(() -> a.current.homeState.page == 5); step++) {
+            if (step >= 20)
+                throw new AssertionError(name + " cumulative paging did not reach page 5");
+            final int[] before = new int[4];
+            runOnMainSync(
+                    () -> {
+                        before[0] = a.current.homeState.page;
+                        before[1] = a.current.homeState.windowStart;
+                        before[2] = a.current.homeState.videos.size();
+                        before[3] = retained().windowEnd();
+                    });
+            final int requests = engine.requests.get();
+            final boolean bufferedWindow = before[3] < before[2];
+            result.put("section_stage", name + "-accumulate-step-" + step);
+            lastCardDown();
+            sectionWait =
+                    bufferedWindow ? "await-buffered-window-advanced" : "await-next-page-loaded";
+            await(
+                    () ->
+                            !retained().busy
+                                    && (bufferedWindow
+                                            ? a.current.homeState.windowStart > before[1]
+                                            : a.current.homeState.page == before[0] + 1));
+            check(
+                    name + "_accumulate_step_" + step,
+                    ui(
+                            () ->
+                                    bufferedWindow
+                                            ? a.current.homeState.page == before[0]
+                                                    && a.current.homeState.videos.size()
+                                                            == before[2]
+                                                    && a.current.homeState.windowStart
+                                                            == before[1] + retained().windowSize()
+                                                    && engine.requests.get() == requests
+                                            : a.current.homeState.page == before[0] + 1
+                                                    && a.current.homeState.videos.size()
+                                                            == Math.min(2001, (before[0] + 1) * 500)
+                                                    && engine.requests.get() == requests + 1));
+        }
+        check(
+                name + "_retains_2001_items_from_five_pages",
+                ui(
+                        () ->
+                                a.current.homeState.videos.size() == 2001
+                                        && a.current.homeState.pages == 5
+                                        && engine.requests.get() == 5));
+        sectionState(name + "-accumulated", engine, true);
+        lastCardDown();
+        check(name + "_accumulated_tail_does_not_request_extra", engine.requests.get() == 5);
+        while (ui(() -> a.current.homeState.windowStart > 0)) {
+            final int[] target = new int[1];
+            runOnMainSync(
+                    () ->
+                            target[0] =
+                                    Math.max(
+                                            0,
+                                            a.current.homeState.windowStart
+                                                    - retained().windowSize()));
+            click("home-earlier");
+            await(() -> a.current.homeState.windowStart == target[0]);
+        }
+        check(
+                name + "_returns_to_first_loaded_window",
+                ui(
+                        () ->
+                                a.current.homeState.windowStart == 0
+                                        && a.current.homeState.page == 5
+                                        && a.current.homeState.videos.size() == 2001
+                                        && engine.requests.get() == 5));
+    }
+
+    void sectionPagingRegression() throws Exception {
+        verifySectionPageContract();
+        // Keep every old right/top assertion above; add independent explicit layouts here.
+        for (int layout = 0; layout < 3; layout++) {
+            for (boolean wide : new boolean[] {false, true}) {
+                final int selectedLayout = layout;
+                String name =
+                        (layout == 0 ? "left" : layout == 1 ? "right" : "top")
+                                + (wide ? "-window" : "-page");
+                SectionFixture engine = new SectionFixture(wide);
+                activeSectionFixture = engine;
+                sectionWait = "scenario-setup";
+                Cms.Site source = new Cms.Site();
+                source.key = "home-section-" + name;
+                source.name = "独立分页夹具";
+                source.type = 1;
+                source.api = "https://fixture.test/section";
+                runOnMainSync(
+                        () -> {
+                            a.prefs
+                                    .edit()
+                                    .putInt(Prefs.TV_NAVIGATION_MODE, selectedLayout == 0 ? 1 : 0)
+                                    .putInt(Prefs.TV_DOCK_POSITION, selectedLayout == 2 ? 1 : 0)
+                                    .putInt(Prefs.NAV_SCALE_PERCENT, 100)
+                                    .putInt(Prefs.HOME_COLUMNS, 5)
+                                    .putString("watch_history", "[]")
+                                    .putString(Prefs.SELECTED_SITE, source.key)
+                                    .putBoolean(Prefs.REDUCED, true)
+                                    .commit();
+                            a.reduced = true;
+                            Cms.Config config = new Cms.Config();
+                            config.raw = "{}";
+                            config.sites.add(source);
+                            a.config = config;
+                            a.engines.put(source.key, engine);
+                            a.back.clear();
+                            a.open(new MainActivity.Screen(a::home), false);
+                        });
+                await(() -> tag("home-tab:1") != null && a.current.homeState.ready);
+                if (layout == 0) click("nav-library");
+                result.put("section_stage", name + "-first-page");
+                sectionWait = "await-first-page-ready";
+                click("home-tab:1");
+                readySection();
+                check(
+                        name + "_fixture_first_page",
+                        ui(
+                                () ->
+                                        a.current.homeState.page == 1
+                                                && a.current.homeState.videos.size()
+                                                        == (wide ? 500 : 40)));
+                if (wide) accumulateSectionWindow(name, engine);
+                result.put("section_stage", name + "-section-navigation");
+                if (layout == 0) {
+                    click("nav-home");
+                    await(() -> tag("home-preview:0") != null && tag("home-preview:0").isShown());
+                    runOnMainSync(() -> tag("home-preview:0").requestFocus());
+                    SystemClock.sleep(300);
+                    final int beforeRequests = engine.requests.get();
+                    final int[] before = new int[3];
+                    runOnMainSync(
+                            () -> {
+                                before[0] = a.current.homeState.page;
+                                before[1] = a.current.homeState.windowStart;
+                                before[2] = a.current.homeState.videos.size();
+                            });
+                    sectionState(name + "-before-down", engine, true);
+                    previewDownBurst();
+                    sectionState(name + "-after-down", engine, true);
+                    check(
+                            name + "_home_down_preserves_hidden_library",
+                            ui(
+                                    () ->
+                                            engine.requests.get() == beforeRequests
+                                                    && !retained().busy
+                                                    && a.current.homeState.page == before[0]
+                                                    && a.current.homeState.windowStart == before[1]
+                                                    && a.current.homeState.videos.size()
+                                                            == before[2]
+                                                    && tag("home-preview:0").hasFocus()));
+                    key(KeyEvent.KEYCODE_DPAD_LEFT);
+                    check(
+                            name + "_left_recalls_dock",
+                            ui(() -> a.homeDock.contains(a.getCurrentFocus())));
+                    key(KeyEvent.KEYCODE_DPAD_RIGHT);
+                    check(
+                            name + "_right_restores_preview",
+                            ui(() -> tag("home-preview:0").hasFocus()));
+                    key(KeyEvent.KEYCODE_DPAD_LEFT);
+                    key(KeyEvent.KEYCODE_BACK);
+                    check(
+                            name + "_back_restores_preview",
+                            ui(() -> tag("home-preview:0").hasFocus()));
+                    click("nav-library");
+                }
+                final int beforeVisible = engine.requests.get();
+                if (!wide) {
+                    engine.hold = new CountDownLatch(1);
+                    engine.failNext = true;
+                }
+                try {
+                    lastCardDown();
+                    if (wide) {
+                        await(() -> a.current.homeState.windowStart > 0);
+                        check(
+                                name + "_visible_advances_window_without_request",
+                                ui(
+                                        () ->
+                                                a.current.homeState.windowStart
+                                                                == retained().windowSize()
+                                                        && engine.requests.get() == beforeVisible));
+                        click("home-earlier");
+                        await(() -> a.current.homeState.windowStart == 0);
+                    } else {
+                        await(() -> engine.requests.get() == beforeVisible + 1 && retained().busy);
+                        previewDownBurst();
+                        check(
+                                name + "_busy_deduplicates",
+                                engine.requests.get() == beforeVisible + 1);
+                        runOnMainSync(
+                                () -> {
+                                    tag("home-tab:1").requestFocus();
+                                    a.scroll.scrollTo(0, 0);
+                                });
+                        engine.hold.countDown();
+                        readySection();
+                        check(
+                                name + "_failure_preserves_page_and_retry",
+                                ui(
+                                        () ->
+                                                a.current.homeState.page == 1
+                                                        && a.current.homeState.videos.size() == 40
+                                                        && tag("home-load-more").isShown()
+                                                        && engine.requests.get()
+                                                                == beforeVisible + 1));
+                        sectionState(name + "-failure", engine, true);
+                        engine.hold = new CountDownLatch(1);
+                        click("home-load-more");
+                        await(() -> engine.requests.get() == beforeVisible + 2 && retained().busy);
+                        if (layout == 0) {
+                            click("nav-home");
+                            runOnMainSync(() -> tag("home-preview:0").requestFocus());
+                        }
+                        engine.hold.countDown();
+                        readySection();
+                        check(
+                                name + "_inflight_completion_allowed",
+                                ui(
+                                        () ->
+                                                a.current.homeState.page == 2
+                                                        && a.current.homeState.videos.size()
+                                                                == 45));
+                        if (layout == 0) previewDownBurst();
+                        else lastCardDown();
+                        check(
+                                name + "_tail_does_not_request_extra",
+                                engine.requests.get() == beforeVisible + 2);
+                    }
+                    sectionState(name + "-finished", engine, true);
+                } finally {
+                    if (engine.hold != null) engine.hold.countDown();
+                    engine.hold = null;
+                }
+            }
+        }
     }
 
     void readingScroll() throws Exception {
@@ -1279,20 +1896,25 @@ public final class HomeProbe extends Instrumentation {
                 });
         key(KeyEvent.KEYCODE_DPAD_DOWN);
         TvScrollView scroll = (TvScrollView) a.scroll;
+        int readingStep =
+                TvReadingScrollPolicy.step(
+                        scroll.getHeight() - a.dp(24),
+                        ((TextView) tag("update-notes")).getLineHeight(),
+                        a.dp(48));
         check(
-                "long_update_down_scrolls_one_small_step",
+                "long_update_down_scrolls_one_reading_page",
                 ui(
                         () ->
                                 scroll.readingMode
                                         && scroll.goal > 0
-                                        && scroll.goal <= a.dp(48)
+                                        && scroll.goal <= readingStep
                                         && tag("update-notes").hasFocus()));
         await(() -> scroll.motion == null);
         check(
                 "reading_step_does_not_skip_to_bottom",
                 ui(
                         () ->
-                                scroll.getScrollY() <= a.dp(48)
+                                scroll.getScrollY() <= readingStep
                                         && scroll.getScrollY() < scroll.limit() / 4));
         check(
                 "held_remote_does_not_queue_large_reading_jump",
@@ -1308,14 +1930,14 @@ public final class HomeProbe extends Instrumentation {
                                                 KeyEvent.ACTION_DOWN,
                                                 KeyEvent.KEYCODE_DPAD_DOWN,
                                                 n));
-                            return scroll.goal <= before + a.dp(48);
+                            return scroll.goal <= before + readingStep;
                         }));
         await(() -> scroll.motion == null);
         int beforeUp = scroll.getScrollY();
         key(KeyEvent.KEYCODE_DPAD_UP);
         check(
-                "reading_up_reverses_by_one_small_step",
-                ui(() -> scroll.goal < beforeUp && beforeUp - scroll.goal <= a.dp(48)));
+                "reading_up_reverses_by_one_reading_page",
+                ui(() -> scroll.goal < beforeUp && beforeUp - scroll.goal <= readingStep));
         frame("long-update-reading");
         runOnMainSync(
                 () -> {

@@ -15,7 +15,12 @@ function installWexPan() {
   }
   var lastSoftChallenge = false;
   function hasVodMarkup(t) {
-    return /(?:\/voddetail\/|\/vodplay\/|\/vod\/detail\/|\/vod\/type\/id\/|\/vod\/show\/id\/|\/vodshow\/|module-item|module-search|vod-item|vodlist|myui-vodlist|stui-vodlist|video-info|content-list|posts-item|"vod_id"\s*:|<title>[^<]*搜索结果|pan\.quark\.cn|drive\.uc\.cn|pan\.baidu\.com|aliyundrive\.com|alipan\.com)/i.test(t);
+    return /(?:\/voddetail\/|\/vodplay\/|\/vod\/detail\/|\/vod\/type\/id\/|\/vod\/show\/id\/|\/vodshow\/|module-item|module-search|vod-item|vodlist|myui-vodlist|stui-vodlist|video-info|content-list|posts-item|"vod_id"\s*:|"code"\s*:\s*1\b[\s\S]{0,160}"list"\s*:\s*\[|<title>[^<]*搜索结果|pan\.quark\.cn|drive\.uc\.cn|pan\.baidu\.com|aliyundrive\.com|alipan\.com)/i.test(t);
+  }
+  function cleanDetailTitle(rawTitle) {
+    var s = stripHtml(rawTitle);
+    if (!s) return '';
+    return s.replace(/[\s·\-—:：]*(?:更新至|更至|更新到|连载至|全\s*\d+\s*[集期话篇章]|共\s*\d+\s*[集期话篇章]|已完结|完结).*$/, '').trim() || s;
   }
   function isChallengeBody(body, statusCode) {
     var t = str(body);
@@ -48,7 +53,7 @@ function installWexPan() {
   }
   function safePic(pic, base) {
     var c = str(pic).trim();
-    if (!c || /(?:sogoucdn\.com|imagehub\.cc)/i.test(c)) return '';
+    if (!c || /(?:sogoucdn\.com|imagehub\.cc|^data:|\/(?:loading|lazyload|load|nopic|no-pic|default_pic|blank|none)\.(?:gif|png|jpe?g|webp|svg)(?:[?#]|$))/i.test(c)) return '';
     if (c.indexOf('//') === 0) c = 'https:' + c;
     try {
       var u = joinUrl(base || (cfg.origin + '/'), c);
@@ -142,7 +147,7 @@ function installWexPan() {
       memRemoteCfg = cached;
       return cached;
     }
-    if (memRemoteTriedAt && Date.now() - memRemoteTriedAt < 3 * 60 * 1000) {
+    if (memRemoteTriedAt && Date.now() - memRemoteTriedAt < 8000) {
       return { siteUrl: '', mySiteUrl: '', siteConfig: {}, exp: 0 };
     }
     memRemoteTriedAt = Date.now();
@@ -152,14 +157,14 @@ function installWexPan() {
     var siteConfig = {};
     var itemUrls = [cfg.itemTxt0, cfg.itemTxt1, cfg.itemTxt2].map(str).filter(Boolean);
     for (var j = 0; j < itemUrls.length; j++) {
-      if (Date.now() - startedAt > 4500) break;
-      var ir = httpReqSoft(itemUrls[j], { headers: rHeaders, timeout: 1800 });
+      if (Date.now() - startedAt > 8500) break;
+      var ir = httpReqSoft(itemUrls[j], { headers: rHeaders, timeout: 3500 });
       if (ir && ir.code >= 200 && ir.code < 300) {
         var itemObj = parseJsonSafe(decryptRemoteText(ir.body));
         if (isObj(itemObj)) {
           var csUrl = str(itemObj.config_site).trim();
-          if (/^https?:\/\//i.test(csUrl) && Date.now() - startedAt <= 4500) {
-            var sr = httpReqSoft(csUrl, { headers: rHeaders, timeout: 2200 });
+          if (/^https?:\/\//i.test(csUrl) && Date.now() - startedAt <= 8500) {
+            var sr = httpReqSoft(csUrl, { headers: rHeaders, timeout: 4000 });
             if (sr && sr.code >= 200 && sr.code < 300) {
               var sc = parseJsonSafe(decryptRemoteText(sr.body));
               if (isObj(sc)) siteConfig = sc;
@@ -215,27 +220,29 @@ function installWexPan() {
     return list;
   }
   function expandHostCandidates(hosts) {
-    var out = [], seen = Object.create(null);
-    function add(h) {
+    var primary = [], secondary = [], seen = Object.create(null);
+    function addTo(targetArr, h) {
       var v = str(h).trim().replace(/\/+$/, '');
-      if (/^https?:\/\/[^/?#@]+$/i.test(v) && !seen[v]) { seen[v] = 1; out.push(v); }
+      if (/^https?:\/\/[^/?#@]+$/i.test(v) && !seen[v]) { seen[v] = 1; targetArr.push(v); }
     }
     var arr = Array.isArray(hosts) ? hosts : [];
     for (var i = 0; i < arr.length; i++) {
-      add(arr[i]);
-      var hm = /^(https?:)\/\/([^/?#:]+)(:\d+)?(?:[/?#]|$)/i.exec(str(arr[i]).trim());
+      addTo(primary, arr[i]);
+    }
+    for (var j = 0; j < arr.length; j++) {
+      var hm = /^(https?:)\/\/([^/?#:]+)(:\d+)?(?:[/?#]|$)/i.exec(str(arr[j]).trim());
       if (hm) {
         var proto = hm[1];
         var host = hm[2];
         var portPart = hm[3] || '';
         if (host.indexOf('www.') === 0) {
-          add(proto + '//' + host.slice(4) + portPart);
+          addTo(secondary, proto + '//' + host.slice(4) + portPart);
         } else if (!/^\d+\.\d+\.\d+\.\d+$/.test(host) && host.indexOf(':') < 0 && host.split('.').length === 2) {
-          add(proto + '//www.' + host + portPart);
+          addTo(secondary, proto + '//www.' + host + portPart);
         }
       }
     }
-    return out;
+    return primary.concat(secondary);
   }
   function reqFromHosts(state, pathOrUrl, opts) {
     var list = state.getHosts();
@@ -251,9 +258,9 @@ function installWexPan() {
     for (var i = 0; i < list.length; i++) {
       if (order.indexOf(list[i]) < 0) order.push(list[i]);
     }
-    var requestedTimeout = (opts && opts.timeout) || 6500;
-    var perHostCap = order.length > 2 ? 2800 : (order.length > 1 ? 4000 : 6500);
-    var deadline = Date.now() + 9500;
+    var requestedTimeout = (opts && opts.timeout) || 7500;
+    var perHostCap = order.length > 2 ? 4500 : (order.length > 1 ? 5500 : 7500);
+    var deadline = Date.now() + 12500;
     var sawChallenge = false;
     for (var j = 0; j < order.length; j++) {
       var rem = deadline - Date.now();
@@ -459,7 +466,7 @@ function installWexPan() {
     var mpState = {
       current: '',
       getHosts: function () {
-        if (!mpHostList) {
+        if (!mpHostList || (!memRemoteCfg && cfg.apiTxt0)) {
           mpHostList = expandHostCandidates(pickSiteHosts(mpSiteKeys, [cfg.defaultHost]));
           if (!mpState.current && mpHostList.length) mpState.current = mpHostList[0];
         }
@@ -622,23 +629,38 @@ function installWexPan() {
       if (!kw) return { page: 1, pagecount: 1, limit: 20, total: 0, list: [] };
       var page = Math.max(1, Number(pg) || 1);
       mpState.getHosts();
-      if (cfg.adapter === 'wexhuajuan-v1' && page === 1) {
-        var sug = httpReqSoft(mpState.current + '/index.php/ajax/suggest?mid=1&wd=' + encodeURIComponent(kw) + '&limit=50', { headers: { 'User-Agent': ua, Referer: mpState.current + '/' } });
-        var sj = sug ? parseJsonSafe(sug.body) : null;
+      if (page === 1 && cfg.adapter !== 'wexwogg-v1') {
+        var sugRes = reqFromHosts(mpState, '/index.php/ajax/suggest?mid=1&wd=' + encodeURIComponent(kw) + '&limit=50', { timeout: 5500, softFail: true });
+        var sj = sugRes ? parseJsonSafe(sugRes.body) : null;
         if (isObj(sj) && Array.isArray(sj.list) && sj.list.length) {
           var sList = sj.list.map(function (it) {
             if (!isObj(it) || !it.id || !it.name) return null;
-            return { vod_id: '/index.php/vod/detail/id/' + it.id + '.html', vod_name: str(it.name), vod_pic: safePic(it.pic, mpState.current + '/'), vod_remarks: '' };
+            return { vod_id: '/index.php/vod/detail/id/' + it.id + '.html', vod_name: str(it.name), vod_pic: safePic(it.pic, (sugRes.host || mpState.current) + '/'), vod_remarks: '' };
           }).filter(Boolean);
           if (sList.length) return { page: 1, pagecount: 1, limit: 50, total: sList.length, list: sList };
         }
       }
       var paths = cfg.adapter === 'wexwogg-v1'
-        ? ['/index.php/vodsearch/' + encodeURIComponent(kw) + '----------' + page + '---.html']
-        : ['/index.php/vod/search/page/' + page + '/wd/' + encodeURIComponent(kw) + '.html', '/index.php/vodsearch/' + encodeURIComponent(kw) + '----------' + page + '---.html'];
+        ? (page === 1
+            ? [
+                '/vodsearch/-------------.html?wd=' + encodeURIComponent(kw),
+                '/index.php/vodsearch/-------------.html?wd=' + encodeURIComponent(kw),
+                '/index.php/vodsearch/' + encodeURIComponent(kw) + '----------' + page + '---.html'
+              ]
+            : ['/index.php/vodsearch/' + encodeURIComponent(kw) + '----------' + page + '---.html'])
+        : (page === 1
+            ? [
+                '/vodsearch/-------------.html?wd=' + encodeURIComponent(kw),
+                '/index.php/vod/search/page/' + page + '/wd/' + encodeURIComponent(kw) + '.html',
+                '/index.php/vodsearch/' + encodeURIComponent(kw) + '----------' + page + '---.html'
+              ]
+            : [
+                '/index.php/vod/search/page/' + page + '/wd/' + encodeURIComponent(kw) + '.html',
+                '/index.php/vodsearch/' + encodeURIComponent(kw) + '----------' + page + '---.html'
+              ]);
       var list = [];
       for (var i = 0; i < paths.length && !list.length; i++) {
-        var sr = reqFromHosts(mpState, paths[i], { timeout: 8500, softFail: i > 0 });
+        var sr = reqFromHosts(mpState, paths[i], { timeout: 8500, softFail: i < paths.length - 1 });
         if (sr && str(sr.body)) {
           list = mpParseCards(sr.body);
           if (list.length || /<title>[^<]*搜索/i.test(sr.body)) break;
@@ -651,11 +673,32 @@ function installWexPan() {
       var vPath = /^\d+$/.test(rawVid) ? ('/index.php/vod/detail/id/' + rawVid + '.html') : mpNormalizeDetailHref(rawVid);
       var html = mpHtml(vPath);
       var tabs = groupShareTabs(extractSharesFromHtml(html));
+      var cleanName = cleanDetailTitle(
+        pdfh(html, 'h1.page-title--span--small--em&&Text') ||
+        pdfh(html, '.video-info-header h1--span--small--em&&Text') ||
+        pdfh(html, 'h1--span--small--em&&Text') ||
+        pdfh(html, 'h1.page-title&&Text') ||
+        pdfh(html, '.video-info-header h1&&Text') ||
+        pdfh(html, 'h1&&Text')
+      );
+      var cleanPic = safePic(
+        pdfh(html, '.module-item-pic img&&data-original') ||
+        pdfh(html, '.module-item-pic img&&data-src') ||
+        pdfh(html, '.module-item-pic img&&src') ||
+        pdfh(html, '.detail-poster img&&data-original') ||
+        pdfh(html, '.detail-poster img&&data-src') ||
+        pdfh(html, '.detail-poster img&&src') ||
+        pdfh(html, '.vod-pic img&&data-original') ||
+        pdfh(html, '.vod-pic img&&data-src') ||
+        pdfh(html, '.vod-pic img&&src') ||
+        pdfh(html, 'meta[property="og:image"]&&content'),
+        mpState.current + '/'
+      );
       return {
         list: [{
           vod_id: vPath || rawVid,
-          vod_name: stripHtml(pdfh(html, 'h1.page-title&&Text') || pdfh(html, '.video-info-header h1&&Text') || pdfh(html, 'h1&&Text')),
-          vod_pic: safePic(pdfh(html, '.module-item-pic img&&data-src') || pdfh(html, '.lazyload&&data-src') || pdfh(html, 'img&&src'), mpState.current + '/'),
+          vod_name: cleanName,
+          vod_pic: cleanPic,
           vod_content: stripHtml(pdfh(html, '.video-info-content&&Text') || pdfh(html, '.vod_content&&Text')),
           vod_play_from: tabs.froms.join('$$$'),
           vod_play_url: tabs.urls.join('$$$')
@@ -674,9 +717,9 @@ function installWexPan() {
     var jtState = {
       current: '',
       getHosts: function () {
-        if (!jtHostList) {
+        if (!jtHostList || (!memRemoteCfg && cfg.apiTxt0)) {
           jtHostList = expandHostCandidates(pickSiteHosts(str(cfg.siteKey || 'jutou'), [cfg.defaultHost]));
-          if (!jtState.current && jtHostList.length) jtState.current = jtHostList[0];
+          if ((!jtState.current || jtHostList.indexOf(jtState.current) < 0) && jtHostList.length) jtState.current = jtHostList[0];
         }
         return jtHostList;
       }
@@ -736,8 +779,8 @@ function installWexPan() {
       return {
         list: [{
           vod_id: str(vid),
-          vod_name: stripHtml(pdfh(html, 'main article h1&&Text') || pdfh(html, 'h1&&Text')),
-          vod_pic: safePic(pdfh(html, 'article img&&src'), res.host + '/'),
+          vod_name: cleanDetailTitle(pdfh(html, 'main article h1--span--small--em&&Text') || pdfh(html, 'main article h1&&Text') || pdfh(html, 'h1&&Text')),
+          vod_pic: safePic(pdfh(html, 'article img&&data-original') || pdfh(html, 'article img&&data-src') || pdfh(html, 'article img&&src') || pdfh(html, 'meta[property="og:image"]&&content'), res.host + '/'),
           vod_content: stripHtml(pdfh(html, 'article p&&Text')),
           vod_play_from: tabs.froms.join('$$$'),
           vod_play_url: tabs.urls.join('$$$')
@@ -819,7 +862,7 @@ function installWexPan() {
       return {
         list: [{
           vod_id: str(vid),
-          vod_name: stripHtml(pdfh(html, 'h1&&Text') || pdfh(html, 'title&&Text')),
+          vod_name: cleanDetailTitle(pdfh(html, 'h1--span--small--em&&Text') || pdfh(html, 'h1&&Text') || pdfh(html, 'title&&Text')),
           vod_pic: safePic(pdfh(html, '.book-cover img&&data-src') || pdfh(html, '.book-cover img&&src'), res.host + '/'),
           vod_content: stripHtml(pdfh(html, '.post-content&&Text')),
           vod_play_from: tabs.froms.join('$$$'),
@@ -839,9 +882,9 @@ function installWexPan() {
     var wnState = {
       current: '',
       getHosts: function () {
-        if (!wnHostList) {
+        if (!wnHostList || (!memRemoteCfg && cfg.apiTxt0)) {
           wnHostList = expandHostCandidates(pickSiteHosts(str(cfg.siteKey || 'woniu4k'), [cfg.defaultHost]));
-          if (!wnState.current && wnHostList.length) wnState.current = wnHostList[0];
+          if ((!wnState.current || wnHostList.indexOf(wnState.current) < 0) && wnHostList.length) wnState.current = wnHostList[0];
         }
         return wnHostList;
       }
@@ -901,8 +944,17 @@ function installWexPan() {
       return {
         list: [{
           vod_id: str(vid),
-          vod_name: stripHtml(pdfh(html, '.premium-title&&Text') || pdfh(html, 'h1&&Text') || pdfh(html, 'title&&Text')),
-          vod_pic: safePic(pdfh(html, '.premium-poster img&&data-src') || pdfh(html, '.premium-poster img&&src') || pdfh(html, 'img.lazyload&&data-original') || pdfh(html, 'img&&src'), res.host + '/'),
+          vod_name: cleanDetailTitle(pdfh(html, '.premium-title--span--small--em&&Text') || pdfh(html, 'h1--span--small--em&&Text') || pdfh(html, '.premium-title&&Text') || pdfh(html, 'h1&&Text') || pdfh(html, 'title&&Text')),
+          vod_pic: safePic(
+            pdfh(html, '.premium-poster img&&data-original') ||
+            pdfh(html, '.premium-poster img&&data-src') ||
+            pdfh(html, '.premium-poster img&&src') ||
+            pdfh(html, '.vod-pic img&&data-original') ||
+            pdfh(html, '.vod-pic img&&data-src') ||
+            pdfh(html, '.vod-pic img&&src') ||
+            pdfh(html, 'meta[property="og:image"]&&content'),
+            res.host + '/'
+          ),
           vod_content: stripHtml(pdfh(html, '#detailDescText&&Text') || pdfh(html, '.vod_content&&Text') || pdfh(html, '.content&&Text')),
           vod_play_from: tabs.froms.join('$$$'),
           vod_play_url: tabs.urls.join('$$$')
@@ -921,9 +973,9 @@ function installWexPan() {
     var pkState = {
       current: '',
       getHosts: function () {
-        if (!pkHostList) {
+        if (!pkHostList || (!memRemoteCfg && cfg.apiTxt0)) {
           pkHostList = expandHostCandidates(pickSiteHosts([str(cfg.siteKey), str(cfg.siteKeyAlt)], [cfg.defaultHost]));
-          if (!pkState.current && pkHostList.length) pkState.current = pkHostList[0];
+          if ((!pkState.current || pkHostList.indexOf(pkState.current) < 0) && pkHostList.length) pkState.current = pkHostList[0];
         }
         return pkHostList;
       }
@@ -1056,8 +1108,22 @@ function installWexPan() {
       return {
         list: [{
           vod_id: str(vid),
-          vod_name: stripHtml(pdfh(html, 'h1&&Text') || pdfh(html, 'title&&Text')),
-          vod_pic: safePic(pdfh(html, '.vod-pic img&&src') || pdfh(html, 'img&&src'), activeHost + '/'),
+          vod_name: cleanDetailTitle(
+            pdfh(html, 'h1--span--small--em&&Text') ||
+            pdfh(html, '.vod-title--span--small--em&&Text') ||
+            pdfh(html, 'h1&&Text') ||
+            pdfh(html, 'title&&Text')
+          ),
+          vod_pic: safePic(
+            pdfh(html, '.vod-pic img&&data-original') ||
+            pdfh(html, '.vod-pic img&&data-src') ||
+            pdfh(html, '.vod-pic img&&src') ||
+            pdfh(html, '.module-item-pic img&&data-original') ||
+            pdfh(html, '.module-item-pic img&&data-src') ||
+            pdfh(html, '.module-item-pic img&&src') ||
+            pdfh(html, 'meta[property="og:image"]&&content'),
+            activeHost + '/'
+          ),
           vod_content: stripHtml(pdfh(html, '.vod-desc&&Text')),
           vod_play_from: tabs.froms.join('$$$'),
           vod_play_url: tabs.urls.join('$$$')
@@ -1096,9 +1162,9 @@ function installWexPan() {
     var qwState = {
       current: '',
       getHosts: function () {
-        if (!qwHostList) {
+        if (!qwHostList || (!memRemoteCfg && cfg.apiTxt0)) {
           qwHostList = expandHostCandidates(pickSiteHosts(str(cfg.siteKey || 'qiwei'), [cfg.defaultHost]));
-          if (!qwState.current && qwHostList.length) qwState.current = qwHostList[0];
+          if ((!qwState.current || qwHostList.indexOf(qwState.current) < 0) && qwHostList.length) qwState.current = qwHostList[0];
         }
         return qwHostList;
       }
@@ -1115,7 +1181,7 @@ function installWexPan() {
         out.push({
           vod_id: href,
           vod_name: name,
-          vod_pic: safePic(pdfh(r, 'img&&data-original') || pdfh(r, 'img&&src'), base),
+          vod_pic: safePic(pdfh(r, 'img&&data-original') || pdfh(r, 'img&&data-src') || pdfh(r, 'img&&src'), base),
           vod_remarks: stripHtml(pdfh(r, '.bottom&&Text'))
         });
       }
@@ -1144,14 +1210,22 @@ function installWexPan() {
     __drpy.search = function (wd) {
       var kw = str(wd).trim();
       if (!kw) return { page: 1, pagecount: 1, limit: 20, total: 0, list: [] };
-      var res = reqFromHosts(qwState, '/index.php/ajax/suggest?mid=1&limit=30&wd=' + encodeURIComponent(kw));
-      var doc = res ? parseJsonSafe(res.body) : null;
       var list = [];
+      var res = reqFromHosts(qwState, '/index.php/ajax/suggest?mid=1&limit=30&wd=' + encodeURIComponent(kw), { timeout: 6500, softFail: true });
+      var doc = res ? parseJsonSafe(res.body) : null;
       if (isObj(doc) && Array.isArray(doc.list)) {
         list = doc.list.map(function (it) {
           if (!isObj(it) || !it.id || !it.name) return null;
           return { vod_id: '/mv/' + it.id + '.html', vod_name: str(it.name), vod_pic: safePic(it.pic, res.host + '/'), vod_remarks: '' };
         }).filter(Boolean);
+      }
+      if (!list.length) {
+        var vsRes = reqFromHosts(qwState, '/vs/-------------.html?wd=' + encodeURIComponent(kw), { timeout: 8000, softFail: true });
+        if (vsRes) list = qwCards(vsRes.body, vsRes.host);
+      }
+      if (!list.length) {
+        var vsFallback = reqFromHosts(qwState, '/vs/' + encodeURIComponent(kw) + '----------1---.html');
+        list = qwCards(vsFallback.body, vsFallback.host);
       }
       return { page: 1, pagecount: 1, limit: 30, total: list.length, list: list };
     };
@@ -1178,8 +1252,19 @@ function installWexPan() {
       return {
         list: [{
           vod_id: str(vid),
-          vod_name: stripHtml(pdfh(html, '.main-ui-meta h1&&Text') || pdfh(html, 'h1&&Text')),
-          vod_pic: safePic(pdfh(html, '.imgblock img&&src') || pdfh(html, 'img&&src'), res.host + '/'),
+          vod_name: cleanDetailTitle(
+            pdfh(html, '.main-ui-meta h1--span--small--em&&Text') ||
+            pdfh(html, '.main-ui-meta h1&&Text') ||
+            pdfh(html, 'h1--span--small--em&&Text') ||
+            pdfh(html, 'h1&&Text')
+          ),
+          vod_pic: safePic(
+            pdfh(html, '.imgblock img&&data-original') ||
+            pdfh(html, '.imgblock img&&data-src') ||
+            pdfh(html, '.imgblock img&&src') ||
+            pdfh(html, 'meta[property="og:image"]&&content'),
+            res.host + '/'
+          ),
           vod_content: stripHtml(pdfh(html, '.zkjj_a&&Text') || pdfh(html, '.sqjj_a&&Text')),
           vod_play_from: froms.join('$$$'),
           vod_play_url: urls.join('$$$')

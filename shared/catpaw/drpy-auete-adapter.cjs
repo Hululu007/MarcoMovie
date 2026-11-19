@@ -39,17 +39,31 @@ module.exports = function aueteRule(config) {
       if(!match||match[2].indexOf('@')!==-1)unsupportedFeature('drpy_media_protocol');
       return {url:normalized,origin:match[1].toLowerCase()+'://'+match[2].toLowerCase(),pathname:match[3]||'/'};
     },
+    _activeOrigin:function(){
+      return this._resolvedOrigin||this._address(cfg.origin).origin;
+    },
+    _sameSiteUpgrade:function(fromOrigin,toOrigin){
+      if(fromOrigin===toOrigin)return true;
+      var fm=/^(https?):\/\/([^/:]+)(:\d+)?$/i.exec(fromOrigin);
+      var tm=/^(https?):\/\/([^/:]+)(:\d+)?$/i.exec(toOrigin);
+      if(!fm||!tm||(fm[3]||'')!==(tm[3]||''))return false;
+      // Never downgrade HTTPS to HTTP. Allow HTTP->HTTPS or www<->apex on the exact same domain.
+      if(fm[1].toLowerCase()==='https'&&tm[1].toLowerCase()!=='https')return false;
+      var fh=fm[2].toLowerCase().replace(/^www\./,''),th=tm[2].toLowerCase().replace(/^www\./,'');
+      return fh===th&&fh.indexOf('.')>0;
+    },
     _catalogUrl:function(value){
-      var address=this._address(value);
-      if(address.origin!==this._address(cfg.origin).origin)unsupportedFeature('drpy_source_origin');
-      return address.url;
+      var base=this._activeOrigin();
+      var address=this._address(value,base);
+      if(!this._sameSiteUpgrade(this._address(cfg.origin).origin,address.origin))unsupportedFeature('drpy_source_origin');
+      return address.origin===base?address.url:(base+address.url.slice(address.origin.length));
     },
     _header:function(headers,name){
       var key=Object.keys(headers||{}).find(function(key){return key.toLowerCase()===name;});
       return key?String(headers[key]):'';
     },
     _validCookie:function(c){
-      return c&&c.owner===this._address(cfg.origin).origin&&typeof c.secure==='boolean'&&
+      return c&&(c.owner===this._address(cfg.origin).origin||c.owner===this._activeOrigin())&&typeof c.secure==='boolean'&&
         typeof c.name==='string'&&/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(c.name)&&
         typeof c.value==='string'&&c.value.length<=8192&&!/[\x00-\x20\x7f;,]/.test(c.value)&&
         typeof c.path==='string'&&c.path.startsWith('/')&&c.path.length<=8192&&!/[\x00-\x1f\x7f]/.test(c.path)&&
@@ -100,13 +114,14 @@ module.exports = function aueteRule(config) {
       this._receiveCookies(target,response.headers);
       if([301,302,303,307,308].includes(response.code)){
         var next=this._address(this._header(response.headers,'location'),target.url);
-        if(next.origin!==target.origin||opts.redirected)unsupportedFeature('drpy_source_unavailable');
         // The verification caller reissues its original search after POST. Never
         // replay a submitted code or forward a session to a different origin.
         if(opts.method==='POST'){
-          if(![302,303].includes(response.code)||next.pathname!=='/auete4so.php')unsupportedFeature('drpy_source_unavailable');
+          if(next.origin!==target.origin||opts.redirected||![302,303].includes(response.code)||next.pathname!=='/auete4so.php')unsupportedFeature('drpy_source_unavailable');
           return response;
         }
+        if(opts.redirected||!this._sameSiteUpgrade(target.origin,next.origin))unsupportedFeature('drpy_source_unavailable');
+        if(next.origin!==target.origin)this._resolvedOrigin=next.origin;
         return this._send(next.url,Object.assign({},opts,{redirected:true}));
       }
       if(response.code<200||response.code>=300)unsupportedFeature('drpy_source_unavailable');

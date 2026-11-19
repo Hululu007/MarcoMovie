@@ -733,6 +733,7 @@ final class SourcePicker {
             if (hidden == null) hidden = new org.json.JSONArray();
             java.util.Set<String> hiddenSet = new java.util.LinkedHashSet<>();
             for (int i = 0; i < hidden.length(); i++) hiddenSet.add(hidden.optString(i));
+            GlobalSearchScreen.invalidateContext(a);
             for (Cms.Site s : toRemove) {
                 hiddenSet.add(s.siteId());
                 config.sites.remove(s);
@@ -838,6 +839,7 @@ final class SourcePicker {
                     }
             }
             editor.apply();
+            GlobalSearchScreen.invalidateContext(a);
             config.sites.clear();
             config.sites.addAll(sites);
             a.back.clear();

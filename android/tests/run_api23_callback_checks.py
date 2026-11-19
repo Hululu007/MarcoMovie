@@ -51,7 +51,8 @@ def check_jar(path):
         if "com/pilipala/marcomovie/PlaybackControls.class" not in names:
             raise ValueError("Build does not include PlaybackControls")
         for name in names:
-            if not name.startswith("com/pilipala/marcomovie/") or not name.endswith(".class"):
+            if not name.startswith(("com/pilipala/marcomovie/",
+                                    "androidx/media3/exoplayer/source/TvSubtitleSource")) or not name.endswith(".class"):
                 continue
             inspected += 1
             for value in utf8_constants(jar.read(name)):

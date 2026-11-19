@@ -1180,7 +1180,7 @@ def main() -> None:
                 'CFBundleDisplayName': 'Marco Movie',
                 'CFBundleAllowMixedLocalizations': True,
                 'UIStatusBarStyle': 'UIStatusBarStyleLightContent',
-                'UIViewControllerBasedStatusBarAppearance': False,
+                'UIViewControllerBasedStatusBarAppearance': True,
                 'NSLocalNetworkUsageDescription': '连接你添加的局域网 Emby 服务器及片源。',
                 'UIFileSharingEnabled': True,
                 'LSSupportsOpeningDocumentsInPlace': True,
@@ -1214,6 +1214,15 @@ def main() -> None:
             info['CFBundleURLTypes'] = url_types
             info.setdefault('NSAppTransportSecurity', {})['NSAllowsArbitraryLoads'] = True
             ios_plist.write_bytes(plistlib.dumps(info, sort_keys=False))
+        ios_storyboard = ios_runner / "Base.lproj" / "Main.storyboard"
+        if ios_storyboard.exists():
+            sb_text = ios_storyboard.read_text(encoding="utf-8")
+            if 'customClass="FlutterViewController"' in sb_text:
+                sb_text = sb_text.replace(
+                    'customClass="FlutterViewController"',
+                    'customClass="MarcoFlutterViewController" customModule="Runner" customModuleProvider="target"',
+                )
+                ios_storyboard.write_text(sb_text, encoding="utf-8")
         ios_app_delegate = ios_runner / "AppDelegate.swift"
         if ios_app_delegate.exists():
             ad_text = ios_app_delegate.read_text(encoding="utf-8")
@@ -1239,6 +1248,65 @@ def main() -> None:
                     "      }\n"
                     "    }",
                     1,
+                )
+                ad_changed = True
+            if "marco_movie/system_chrome" not in ad_text and "if let controller = window?.rootViewController as? FlutterViewController {" in ad_text:
+                ad_text = ad_text.replace(
+                    "    if let controller = window?.rootViewController as? FlutterViewController {",
+                    "    if let controller = window?.rootViewController as? FlutterViewController {\n"
+                    "      let systemChromeChannel = FlutterMethodChannel(name: \"marco_movie/system_chrome\", binaryMessenger: controller.binaryMessenger)\n"
+                    "      systemChromeChannel.setMethodCallHandler { [weak controller] call, result in\n"
+                    "        if call.method == \"setImmersive\", let immersive = call.arguments as? Bool {\n"
+                    "          DispatchQueue.main.async {\n"
+                    "            if let marcoVC = controller as? MarcoFlutterViewController {\n"
+                    "              marcoVC.marcoImmersiveMode = immersive\n"
+                    "            } else {\n"
+                    "              controller?.setNeedsStatusBarAppearanceUpdate()\n"
+                    "              if #available(iOS 11.0, *) {\n"
+                    "                controller?.setNeedsUpdateOfHomeIndicatorAutoHidden()\n"
+                    "                controller?.setNeedsUpdateOfScreenEdgesDeferringSystemGestures()\n"
+                    "              }\n"
+                    "            }\n"
+                    "            result(nil)\n"
+                    "          }\n"
+                    "        } else {\n"
+                    "          result(FlutterMethodNotImplemented)\n"
+                    "        }\n"
+                    "      }",
+                    1,
+                )
+                ad_changed = True
+            if "final class MarcoFlutterViewController" not in ad_text:
+                ad_text = (
+                    ad_text.rstrip()
+                    + "\n\n@objc(MarcoFlutterViewController)\n"
+                    "final class MarcoFlutterViewController: FlutterViewController {\n"
+                    "  var marcoImmersiveMode: Bool = false {\n"
+                    "    didSet {\n"
+                    "      guard oldValue != marcoImmersiveMode else { return }\n"
+                    "      setNeedsStatusBarAppearanceUpdate()\n"
+                    "      if #available(iOS 11.0, *) {\n"
+                    "        setNeedsUpdateOfHomeIndicatorAutoHidden()\n"
+                    "        setNeedsUpdateOfScreenEdgesDeferringSystemGestures()\n"
+                    "      }\n"
+                    "    }\n"
+                    "  }\n\n"
+                    "  override var preferredStatusBarStyle: UIStatusBarStyle {\n"
+                    "    return .lightContent\n"
+                    "  }\n\n"
+                    "  override var prefersStatusBarHidden: Bool {\n"
+                    "    return marcoImmersiveMode || super.prefersStatusBarHidden\n"
+                    "  }\n\n"
+                    "  override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {\n"
+                    "    return .fade\n"
+                    "  }\n\n"
+                    "  override var prefersHomeIndicatorAutoHidden: Bool {\n"
+                    "    return marcoImmersiveMode\n"
+                    "  }\n\n"
+                    "  override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge {\n"
+                    "    return marcoImmersiveMode ? [.top, .bottom] : []\n"
+                    "  }\n"
+                    "}\n"
                 )
                 ad_changed = True
             if "marco_movie/netdisk_auth" not in ad_text and "if let controller = window?.rootViewController as? FlutterViewController {" in ad_text:

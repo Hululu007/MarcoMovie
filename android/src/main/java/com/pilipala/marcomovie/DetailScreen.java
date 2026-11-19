@@ -35,6 +35,10 @@ final class DetailScreen {
 
     static void show(MainActivity a, Cms.Site s, Cms.Video listing, Cms.Video ready) {
         if (a.redirectListing(s, listing)) return;
+        if (a.isTvDevice()) {
+            TvDetailHost.show(a, s, listing, ready);
+            return;
+        }
         a.renderPage("", "", false);
         a.body.setPadding(0, 0, 0, 0);
         a.body.setClipChildren(false);
@@ -389,23 +393,26 @@ final class DetailScreen {
         return false;
     }
 
+    static boolean toggleFavorite(MainActivity a, Cms.Site site, Cms.Video video) {
+        a.prefs
+                .edit()
+                .putString(
+                        Prefs.FAVORITES,
+                        Favorites.toggle(a.prefs.getString(Prefs.FAVORITES, "[]"), site.key, video))
+                .apply();
+        boolean selected =
+                Favorites.contains(a.prefs.getString(Prefs.FAVORITES, "[]"), site.key, video.id);
+        CloudSyncDialog.onFavoriteToggled(a, site.key, video.id, selected);
+        return selected;
+    }
+
     static void bindFavoriteAction(MainActivity a, Cms.Site s, Cms.Video v, Button favorite) {
         boolean isFav = Favorites.contains(a.prefs.getString(Prefs.FAVORITES, "[]"), s.key, v.id);
         favorite.setText(isFav ? "♥ 已收藏" : "♡ 加入收藏");
         styleGlassButton(a, favorite, favorite.hasFocus(), isFav);
         favorite.setOnClickListener(
                 view -> {
-                    a.prefs
-                            .edit()
-                            .putString(
-                                    Prefs.FAVORITES,
-                                    Favorites.toggle(
-                                            a.prefs.getString(Prefs.FAVORITES, "[]"), s.key, v))
-                            .apply();
-                    boolean nowFav =
-                            Favorites.contains(
-                                    a.prefs.getString(Prefs.FAVORITES, "[]"), s.key, v.id);
-                    CloudSyncDialog.onFavoriteToggled(a, s.key, v.id, nowFav);
+                    boolean nowFav = toggleFavorite(a, s, v);
                     favorite.setText(nowFav ? "♥ 已收藏" : "♡ 加入收藏");
                     styleGlassButton(a, favorite, favorite.hasFocus(), nowFav);
                 });
