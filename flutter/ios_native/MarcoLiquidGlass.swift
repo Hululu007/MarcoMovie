@@ -3,6 +3,7 @@
 private enum MarcoLiquidGlassSupport {
   static var bridgeChannel: FlutterMethodChannel?
   static var brandLogoImage: UIImage?
+  private static var accessibilityObservers: [NSObjectProtocol] = []
 
   static var isAvailable: Bool {
     #if compiler(>=6.2)
@@ -11,6 +12,10 @@ private enum MarcoLiquidGlassSupport {
     }
     #endif
     return false
+  }
+
+  static var isReduceTransparencyEnabled: Bool {
+    return UIAccessibility.isReduceTransparencyEnabled
   }
 
   static var majorOSVersion: Int {
@@ -25,6 +30,38 @@ private enum MarcoLiquidGlassSupport {
     #endif
   }
 
+  private static func installAccessibilityObservers() {
+    let center = NotificationCenter.default
+    for token in accessibilityObservers {
+      center.removeObserver(token)
+    }
+    accessibilityObservers.removeAll()
+    let notify: (Notification) -> Void = { _ in
+      DispatchQueue.main.async {
+        bridgeChannel?.invokeMethod(
+          "reduceTransparencyChanged",
+          arguments: isReduceTransparencyEnabled
+        )
+      }
+    }
+    accessibilityObservers.append(
+      center.addObserver(
+        forName: UIAccessibility.reduceTransparencyStatusDidChangeNotification,
+        object: nil,
+        queue: .main,
+        using: notify
+      )
+    )
+    accessibilityObservers.append(
+      center.addObserver(
+        forName: UIApplication.willEnterForegroundNotification,
+        object: nil,
+        queue: .main,
+        using: notify
+      )
+    )
+  }
+
   static func register(with registrar: FlutterPluginRegistrar, messenger: FlutterBinaryMessenger) {
     brandLogoImage = loadBrandLogoImage(registrar: registrar)
 
@@ -33,6 +70,7 @@ private enum MarcoLiquidGlassSupport {
       binaryMessenger: messenger
     )
     bridgeChannel = channel
+    installAccessibilityObservers()
     channel.setMethodCallHandler { call, result in
       switch call.method {
       case "capabilities":
@@ -40,6 +78,7 @@ private enum MarcoLiquidGlassSupport {
           "available": isAvailable,
           "majorVersion": majorOSVersion,
           "sdk26": builtWithSDK26,
+          "reduceTransparency": isReduceTransparencyEnabled,
         ])
       case "showAlert":
         guard let args = call.arguments as? [String: Any] else {
@@ -56,6 +95,14 @@ private enum MarcoLiquidGlassSupport {
         }
         DispatchQueue.main.async {
           MarcoNativeAlertPresenter.presentActionSheet(args: args, completion: result)
+        }
+      case "showOptionSheet":
+        guard let args = call.arguments as? [String: Any] else {
+          result(nil)
+          return
+        }
+        DispatchQueue.main.async {
+          MarcoNativeOptionSheetController.present(args: args, completion: result)
         }
       case "showFilterSheet":
         guard let args = call.arguments as? [String: Any] else {
@@ -366,6 +413,223 @@ private enum MarcoNativeAlertPresenter {
     }
 
     host.present(sheet, animated: true, completion: nil)
+  }
+}
+
+// MARK: - Native iOS 26 Liquid Glass Half-Sheet Option Picker (UISheetPresentationController)
+
+private final class MarcoNativeOptionSheetController: UIViewController,
+  UITableViewDataSource,
+  UITableViewDelegate,
+  UIAdaptivePresentationControllerDelegate
+{
+  private struct OptionItem {
+    let id: String
+    let title: String
+    let subtitle: String?
+    let symbol: String?
+    let checked: Bool
+    let destructive: Bool
+  }
+
+  private struct OptionSection {
+    let title: String
+    let items: [OptionItem]
+  }
+
+  private let sheetTitle: String
+  private let sheetSubtitle: String?
+  private let cancelTitle: String
+  private let sections: [OptionSection]
+  private let tableView = UITableView(frame: .zero, style: .insetGrouped)
+
+  private var completion: FlutterResult?
+  private var resolved = false
+
+  static func present(args: [String: Any], completion: @escaping FlutterResult) {
+    guard let host = MarcoLiquidGlassSupport.topPresenter() else {
+      completion(nil)
+      return
+    }
+    let vc = MarcoNativeOptionSheetController(args: args, completion: completion)
+    let nav = UINavigationController(rootViewController: vc)
+    nav.modalPresentationStyle = .pageSheet
+    nav.overrideUserInterfaceStyle = .dark
+    nav.presentationController?.delegate = vc
+    if let sheet = nav.sheetPresentationController {
+      sheet.detents = [.medium(), .large()]
+      sheet.prefersGrabberVisible = true
+      sheet.preferredCornerRadius = 28.0
+      sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+    }
+    host.present(nav, animated: true, completion: nil)
+  }
+
+  init(args: [String: Any], completion: @escaping FlutterResult) {
+    self.sheetTitle = (args["title"] as? String) ?? ""
+    let rawSubtitle = (args["subtitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    self.sheetSubtitle = (rawSubtitle?.isEmpty ?? true) ? nil : rawSubtitle
+    self.cancelTitle = (args["cancelTitle"] as? String) ?? "关闭"
+    let rawItems = (args["items"] as? [[String: Any]]) ?? []
+    var builtSections: [OptionSection] = []
+    var currentKey: Int?
+    var currentTitle = ""
+    var bucket: [OptionItem] = []
+
+    for raw in rawItems {
+      let id = (raw["id"] as? String) ?? ""
+      let title = (raw["title"] as? String) ?? ""
+      let sub = (raw["subtitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+      let sym = (raw["symbol"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+      let checked = (raw["checked"] as? Bool) ?? false
+      let destructive = (raw["destructive"] as? Bool) ?? false
+      let secKey = (raw["section"] as? NSNumber)?.intValue ?? 0
+      let secTitle = (raw["sectionTitle"] as? String) ?? ""
+
+      if let prev = currentKey, prev != secKey, !bucket.isEmpty {
+        builtSections.append(OptionSection(title: currentTitle, items: bucket))
+        bucket = []
+        currentTitle = ""
+      }
+      currentKey = secKey
+      if currentTitle.isEmpty && !secTitle.isEmpty {
+        currentTitle = secTitle
+      }
+      bucket.append(
+        OptionItem(
+          id: id,
+          title: title,
+          subtitle: (sub?.isEmpty ?? true) ? nil : sub,
+          symbol: (sym?.isEmpty ?? true) ? nil : sym,
+          checked: checked,
+          destructive: destructive
+        )
+      )
+    }
+    if !bucket.isEmpty {
+      builtSections.append(OptionSection(title: currentTitle, items: bucket))
+    }
+    self.sections = builtSections
+    self.completion = completion
+    super.init(nibName: nil, bundle: nil)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  deinit {
+    finish(selectedId: nil)
+  }
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    overrideUserInterfaceStyle = .dark
+    let opaqueFallback = UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+    #if compiler(>=6.2)
+    if #available(iOS 26.0, *), !UIAccessibility.isReduceTransparencyEnabled {
+      view.backgroundColor = .clear
+    } else {
+      view.backgroundColor = opaqueFallback
+    }
+    #else
+    view.backgroundColor = opaqueFallback
+    #endif
+
+    navigationItem.title = sheetTitle
+    if let subtitle = sheetSubtitle {
+      navigationItem.prompt = subtitle
+    }
+    navigationItem.rightBarButtonItem = UIBarButtonItem(
+      title: cancelTitle,
+      style: .done,
+      target: self,
+      action: #selector(closeTapped)
+    )
+
+    tableView.translatesAutoresizingMaskIntoConstraints = false
+    tableView.overrideUserInterfaceStyle = .dark
+    tableView.backgroundColor = .clear
+    tableView.separatorColor = UIColor.white.withAlphaComponent(0.12)
+    tableView.dataSource = self
+    tableView.delegate = self
+    tableView.register(UITableViewCell.self, forCellReuseIdentifier: "MarcoOptionCell")
+    view.addSubview(tableView)
+
+    NSLayoutConstraint.activate([
+      tableView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+      tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+      tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+    ])
+  }
+
+  func numberOfSections(in tableView: UITableView) -> Int {
+    return sections.count
+  }
+
+  func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+    return sections[section].items.count
+  }
+
+  func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+    let title = sections[section].title
+    return title.isEmpty ? nil : title
+  }
+
+  func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+    let cell = tableView.dequeueReusableCell(withIdentifier: "MarcoOptionCell", for: indexPath)
+    let item = sections[indexPath.section].items[indexPath.row]
+    var cfg = cell.defaultContentConfiguration()
+    cfg.text = item.title
+    cfg.textProperties.color = item.destructive ? UIColor.systemRed : UIColor.white
+    cfg.textProperties.font = UIFont.systemFont(
+      ofSize: 15.0,
+      weight: item.checked ? .semibold : .regular
+    )
+    if let sub = item.subtitle {
+      cfg.secondaryText = sub
+      cfg.secondaryTextProperties.color = UIColor.white.withAlphaComponent(0.66)
+      cfg.secondaryTextProperties.font = UIFont.systemFont(ofSize: 12.5, weight: .regular)
+    }
+    if let symbol = item.symbol {
+      let symCfg = UIImage.SymbolConfiguration(pointSize: 16.0, weight: .medium)
+      cfg.image = UIImage(systemName: symbol, withConfiguration: symCfg)
+      cfg.imageProperties.tintColor = item.destructive
+        ? UIColor.systemRed
+        : (item.checked ? UIColor.systemBlue : UIColor.white.withAlphaComponent(0.84))
+    }
+    cell.contentConfiguration = cfg
+    cell.accessoryType = item.checked ? .checkmark : .none
+    cell.tintColor = UIColor.systemBlue
+    cell.backgroundColor = UIColor(white: 0.16, alpha: UIAccessibility.isReduceTransparencyEnabled ? 0.96 : 0.72)
+    return cell
+  }
+
+  func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+    tableView.deselectRow(at: indexPath, animated: true)
+    let item = sections[indexPath.section].items[indexPath.row]
+    UISelectionFeedbackGenerator().selectionChanged()
+    finish(selectedId: item.id)
+    dismiss(animated: true, completion: nil)
+  }
+
+  @objc private func closeTapped() {
+    finish(selectedId: nil)
+    dismiss(animated: true, completion: nil)
+  }
+
+  func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+    finish(selectedId: nil)
+  }
+
+  private func finish(selectedId: String?) {
+    guard !resolved else { return }
+    resolved = true
+    let cb = completion
+    completion = nil
+    cb?(selectedId)
   }
 }
 

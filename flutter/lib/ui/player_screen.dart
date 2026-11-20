@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
@@ -28,15 +29,26 @@ import 'desktop_horizontal_scroller.dart';
 import 'desktop_player_window.dart';
 import 'mobile_player_chrome.dart';
 import 'netdisk_sheet.dart';
+import 'player/desktop_player_hud.dart';
+import 'player/gesture_state_machine.dart';
+import 'player/ios_player_chrome.dart';
+import 'player/player_hud_prefs.dart';
+import 'player/skip_countdown.dart';
+import 'player/sleep_timer.dart';
+import 'player/slim_progress_bar.dart';
+import 'player/speed_capsule.dart';
+import 'player/start_spec_overlay.dart';
 import 'source_verification_dialog.dart';
 import 'tv/tv_player_overlay.dart';
 import 'windows_title_bar.dart';
 
-/// Apple AVPlayerViewController / Apple TV+ inspired video player with:
-/// - Large center transport controls (Rewind 15s, Play/Pause, Fast-Forward 15s)
-/// - Dedicated floating Progress Bar capsule (automatically hidden during Live TV)
-/// - Compact scrollable Tool Dock (Bottom horizontal in Portrait, Right edge in Landscape)
-/// - Full-width iOS 27 Liquid Glass Episode & Line Picker sheet.
+/// Apple AVPlayerViewController / iOS 26 Concentric Spatial Cinema video player:
+/// - Unified iOS/iPadOS 26 Liquid Glass HUD (`IosPlayerChrome`) with zero
+///   scattered `UiKitView` overlays over the active video surface
+/// - Deterministic touch & desktop keyboard gesture state machine
+/// - Desktop HUD preserving Windows `winFastGlass` blur-free panels
+/// - Reserved Wave 2 slots for `DanmuLayer`, `FirstPlayGestureHint`, and
+///   `BrandLogoLoader`.
 class PlayerScreen extends StatefulWidget {
   final CmsSite site;
   final CmsVideo video;
@@ -48,10 +60,22 @@ class PlayerScreen extends StatefulWidget {
   final bool embedded;
   final VoidCallback? onEmbeddedClose;
   final VoidCallback? onEmbeddedExpand;
+  /// Wave 2 reserved slot: mounted strictly below subtitles & HUD controls.
+  final Widget? danmuLayer;
+  /// Wave 2 reserved slot: first-play interactive gesture guidance overlay.
+  final Widget? firstPlayGestureHint;
+  /// Wave 2 reserved slot: replaces default spinner with BrandLogoLoader.
+  final Widget? loadingIndicator;
+  /// Wave 2 reserved callbacks & state for danmu controls.
+  final bool danmuEnabled;
+  final VoidCallback? onToggleDanmu;
+  final VoidCallback? onOpenDanmuSettings;
   @visibleForTesting
   final Player? debugPlayer;
   @visibleForTesting
   final Widget? debugVideoSurface;
+  @visibleForTesting
+  final PlayerHudPrefs? debugHudPrefs;
 
   const PlayerScreen({
     super.key,
@@ -65,8 +89,15 @@ class PlayerScreen extends StatefulWidget {
     this.embedded = false,
     this.onEmbeddedClose,
     this.onEmbeddedExpand,
+    this.danmuLayer,
+    this.firstPlayGestureHint,
+    this.loadingIndicator,
+    this.danmuEnabled = false,
+    this.onToggleDanmu,
+    this.onOpenDanmuSettings,
     this.debugPlayer,
     this.debugVideoSurface,
+    this.debugHudPrefs,
   });
 
   /// The resolver already applies origin rules and explicit playback headers.
@@ -182,6 +213,150 @@ class _PlayerScreenState extends State<PlayerScreen>
   final _localMedia = PlayerLocalMediaSession();
   final _startup = PlaybackStartup();
   final _tvSeek = TvRemoteSeekController();
+  late final PlayerHudPrefs _hudPrefs;
+  late final bool _ownsHudPrefs;
+  late final PlayerGestureStateMachine _gestureFsm;
+  final DesktopKeySeekStateMachine _desktopKeySeek =
+      DesktopKeySeekStateMachine();
+  late final SleepTimerController _sleepTimer;
+  final SkipCountdownController _skipCountdown = SkipCountdownController();
+  final StartSpecDisplayController _startSpecController =
+      StartSpecDisplayController();
+  Timer? _gestureTickTimer;
+  Timer? _desktopKeyTickTimer;
+  Timer? _verticalHudClearTimer;
+  int _gestureClockFloorMs = 0;
+  int _desktopKeyClockMs = 0;
+  KeySeekPreview? _activeDesktopScrubPreview;
+  String _extraTrackSpecInfo = '';
+  bool _danmuEnabledLocal = false;
+
+  bool get _useEnhancedHud =>
+      !OhosRuntime.isOhos && !OhosRuntime.shouldUseTvUi(widget.storage.tvUiMode);
+
+  bool get _useIos26PlayerChrome =>
+      _useEnhancedHud &&
+      !kIsWeb &&
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      !widget.embedded;
+
+  bool get _storageReduceTransparency =>
+      widget.storage.glassBlurLevel == 'solid';
+
+  bool get _canUseNativeIosSheet =>
+      _useIos26PlayerChrome &&
+      IosLiquidGlassBridge.isAvailable &&
+      !IosLiquidGlassBridge.reduceTransparency &&
+      !_storageReduceTransparency;
+
+  List<PlayerSpecBadge> get _fusedSpecBadges => MediaSpecFusion.fuse(
+        videoWidth: _videoWidth,
+        videoHeight: _videoHeight,
+        videoCodec: _videoCodec,
+        audioCodec: _audioCodec,
+        extraTrackInfo: _extraTrackSpecInfo,
+        lineName: _currentLine.name,
+        episodeName: _currentEpisode.name,
+        streamUrl: _activeStreamUrl,
+      );
+
+  SpeedCapsuleMode get _speedCapsuleMode {
+    if (!_useEnhancedHud || _screenLocked) return SpeedCapsuleMode.hidden;
+    if (_gestureFsm.isSpeedLockReady) return SpeedCapsuleMode.lockReady;
+    if (_gestureFsm.isSpeedBoosting) return SpeedCapsuleMode.boosting;
+    if (_gestureFsm.isSpeedLocked) return SpeedCapsuleMode.locked;
+    return SpeedCapsuleMode.hidden;
+  }
+
+  TouchGestureConfig _buildGestureConfig() {
+    final prefs = _hudPrefs.data;
+    return TouchGestureConfig(
+      doubleTapCenterAction: prefs.doubleTapCenter,
+      doubleTapSidesAction: prefs.doubleTapSides,
+      longPressRestoreMode: prefs.longPressRestoreMode,
+      enableVerticalDrags: !_desktop,
+      enableLongPressSpeed: !_desktop,
+    );
+  }
+
+  int _nowGestureMs() {
+    final wall = DateTime.now().millisecondsSinceEpoch;
+    if (wall > _gestureClockFloorMs) {
+      _gestureClockFloorMs = wall;
+    }
+    return _gestureClockFloorMs;
+  }
+
+  void _syncGestureTimer() {
+    _gestureTickTimer?.cancel();
+    _gestureTickTimer = null;
+    final deadline = _gestureFsm.nextTimerDeadlineMs;
+    if (deadline == null || !mounted) return;
+    final delayMs = math.max(0, deadline - _nowGestureMs());
+    _gestureTickTimer = Timer(Duration(milliseconds: delayMs), () {
+      _gestureTickTimer = null;
+      if (!mounted) return;
+      if (deadline > _gestureClockFloorMs) {
+        _gestureClockFloorMs = deadline;
+      }
+      final events = _gestureFsm.onTick(_gestureClockFloorMs);
+      _applyGestureEvents(events);
+      _syncGestureTimer();
+    });
+  }
+
+  void _onHudSubstateChanged() {
+    if (!mounted) return;
+    _gestureFsm.config = _buildGestureConfig();
+    setState(() {});
+  }
+
+  void _onReduceTransparencyChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onSleepTimerExpired() {
+    if (!mounted) return;
+    _cancelTransientInteractions(GestureInterruptReason.playbackPaused);
+    _player.pause();
+    PlaybackWakelock.setEnabled(false);
+    _showHud('定时关闭已暂停播放');
+  }
+
+  void _cancelTransientInteractions(GestureInterruptReason reason) {
+    _gestureTickTimer?.cancel();
+    _gestureTickTimer = null;
+    _verticalHudClearTimer?.cancel();
+    _verticalHudClearTimer = null;
+    _cancelDesktopKeyScrub(showToast: false);
+    if (_useEnhancedHud) {
+      final events = _gestureFsm.cancel(reason);
+      _applyGestureEvents(events);
+    }
+  }
+
+  void _cancelDesktopKeyScrub({bool showToast = false}) {
+    _desktopKeyTickTimer?.cancel();
+    _desktopKeyTickTimer = null;
+    final cancelled = _desktopKeySeek.cancel();
+    if (cancelled || _activeDesktopScrubPreview != null) {
+      if (mounted) {
+        setState(() {
+          _activeDesktopScrubPreview = null;
+          _isDraggingSeek = false;
+          if (showToast) {
+            _hudText = '已取消快进预览';
+          }
+        });
+        if (showToast) {
+          _showHud('已取消快进预览');
+        }
+      } else {
+        _activeDesktopScrubPreview = null;
+        _isDraggingSeek = false;
+      }
+    }
+  }
   int _pendingResumeMs = 0;
   int _lastKnownPositionMs = 0;
   int _lastKnownDurationMs = 0;
@@ -251,6 +426,23 @@ class _PlayerScreenState extends State<PlayerScreen>
       isPrivate: widget.site.isEffectivelyPrivate,
     );
     _alwaysShowClock = widget.storage.playerAlwaysShowClock;
+    _danmuEnabledLocal = widget.danmuEnabled;
+    _ownsHudPrefs = widget.debugHudPrefs == null;
+    _hudPrefs = widget.debugHudPrefs ?? PlayerHudPrefs(isDesktop: _desktop);
+    _hudPrefs.addListener(_onHudSubstateChanged);
+    unawaited(_hudPrefs.load());
+    _gestureFsm = PlayerGestureStateMachine(config: _buildGestureConfig());
+    _sleepTimer = SleepTimerController(onTriggered: _onSleepTimerExpired)
+      ..addListener(_onHudSubstateChanged);
+    _skipCountdown.addListener(_onHudSubstateChanged);
+    _startSpecController.addListener(_onHudSubstateChanged);
+    IosLiquidGlassBridge.reduceTransparencyNotifier.addListener(
+      _onReduceTransparencyChanged,
+    );
+    GlassworkBackdrop.reduceTransparency.addListener(
+      _onReduceTransparencyChanged,
+    );
+    GlassworkBackdrop.intensity.addListener(_onReduceTransparencyChanged);
     _clockText = _formatClockNow();
     _clockTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (!mounted || !_alwaysShowClock) return;
@@ -286,20 +478,43 @@ class _PlayerScreenState extends State<PlayerScreen>
     _playerSubscriptions.add(_player.stream.width.listen((w) {
       if (!mounted || w == null || w <= 0 || w == _videoWidth) return;
       setState(() => _videoWidth = w);
+      if (_videoWidth > 0 && _videoHeight > 0) {
+        _startSpecController.onFirstFrameReady(
+          enabled: _hudPrefs.effectiveStartSpecHud,
+          isLive: _isLiveStream,
+        );
+      }
     }));
     _playerSubscriptions.add(_player.stream.height.listen((h) {
       if (!mounted || h == null || h <= 0 || h == _videoHeight) return;
       setState(() => _videoHeight = h);
+      if (_videoWidth > 0 && _videoHeight > 0) {
+        _startSpecController.onFirstFrameReady(
+          enabled: _hudPrefs.effectiveStartSpecHud,
+          isLive: _isLiveStream,
+        );
+      }
     }));
     _playerSubscriptions.add(_player.stream.track.listen((track) {
       if (!mounted || !_allowEvents || !_matchesActiveMedia) return;
       final vCodec = (track.video.codec ?? track.video.decoder ?? '').trim();
       final aCodec = (track.audio.codec ?? track.audio.decoder ?? '').trim();
+      final extraParts = <String>[
+        if ((track.video.title ?? '').trim().isNotEmpty)
+          track.video.title!.trim(),
+        if ((track.audio.title ?? '').trim().isNotEmpty)
+          track.audio.title!.trim(),
+        if ((track.audio.channels ?? '').trim().isNotEmpty)
+          track.audio.channels!.trim(),
+      ];
+      final extra = extraParts.join(' ');
       if ((vCodec.isNotEmpty && vCodec != _videoCodec) ||
-          (aCodec.isNotEmpty && aCodec != _audioCodec)) {
+          (aCodec.isNotEmpty && aCodec != _audioCodec) ||
+          (extra.isNotEmpty && extra != _extraTrackSpecInfo)) {
         setState(() {
           if (vCodec.isNotEmpty) _videoCodec = vCodec;
           if (aCodec.isNotEmpty) _audioCodec = aCodec;
+          if (extra.isNotEmpty) _extraTrackSpecInfo = extra;
         });
       }
     }));
@@ -347,7 +562,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       final nowMs = DateTime.now().millisecondsSinceEpoch;
       final shouldRebuildUi =
           shouldClearLoading ||
-          (_controlsVisible &&
+          ((_controlsVisible || _hudPrefs.effectiveSlimProgress) &&
               !_isDraggingSeek &&
               !_isSliderDragging &&
               (nowMs - _lastPositionUiUpdateMs >= 250 || !_playing));
@@ -380,9 +595,25 @@ class _PlayerScreenState extends State<PlayerScreen>
           pos.inSeconds > 10 &&
           (effectiveDur - pos).inSeconds <= _skipOutroSec) {
         _outroSkippedForSession = true;
-        unawaited(_saveProgress(immediate: true, syncImmediate: false));
-        _showHud('已自动跳过片尾 ${_skipOutroSec}s');
-        _handleEpisodeEnd();
+        final sessionAtTrigger = _playSession;
+        if (_hudPrefs.effectiveSkipCountdown) {
+          _skipCountdown.start(
+            kind: SkipCountdownKind.outro,
+            onConfirm: () {
+              if (!mounted || sessionAtTrigger != _playSession) return;
+              unawaited(_saveProgress(immediate: true, syncImmediate: false));
+              _showHud('已自动跳过片尾 ${_skipOutroSec}s');
+              _handleEpisodeEnd();
+            },
+            onCancel: () {
+              if (mounted) _showHud('已取消跳过片尾');
+            },
+          );
+        } else {
+          unawaited(_saveProgress(immediate: true, syncImmediate: false));
+          _showHud('已自动跳过片尾 ${_skipOutroSec}s');
+          _handleEpisodeEnd();
+        }
       }
     }));
 
@@ -449,9 +680,26 @@ class _PlayerScreenState extends State<PlayerScreen>
           _skipIntroSec > 0 &&
           dur.inSeconds > _skipIntroSec + 30) {
         _introSkippedForSession = true;
-        _startup.reanchor(Duration(seconds: _skipIntroSec));
-        _player.seek(Duration(seconds: _skipIntroSec));
-        _showHud('已自动跳过片头 ${_skipIntroSec}s');
+        final sessionAtTrigger = _playSession;
+        final skipSec = _skipIntroSec;
+        if (_hudPrefs.effectiveSkipCountdown) {
+          _skipCountdown.start(
+            kind: SkipCountdownKind.intro,
+            onConfirm: () {
+              if (!mounted || sessionAtTrigger != _playSession) return;
+              _startup.reanchor(Duration(seconds: skipSec));
+              _player.seek(Duration(seconds: skipSec));
+              _showHud('已自动跳过片头 ${skipSec}s');
+            },
+            onCancel: () {
+              if (mounted) _showHud('已取消跳过片头');
+            },
+          );
+        } else {
+          _startup.reanchor(Duration(seconds: skipSec));
+          _player.seek(Duration(seconds: skipSec));
+          _showHud('已自动跳过片头 ${skipSec}s');
+        }
       }
     }));
 
@@ -572,12 +820,18 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused ||
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
-      _saveProgress(immediate: true);
-      widget.storage.flushPendingHistory();
-      widget.storage.scheduleAutoWebdavSync(immediate: true);
+      _cancelTransientInteractions(GestureInterruptReason.lifecyclePause);
+      if (state == AppLifecycleState.paused ||
+          state == AppLifecycleState.hidden) {
+        _saveProgress(immediate: true);
+        widget.storage.flushPendingHistory();
+        widget.storage.scheduleAutoWebdavSync(immediate: true);
+      }
     } else if (state == AppLifecycleState.resumed) {
+      unawaited(IosLiquidGlassBridge.refreshReduceTransparency());
       _syncMobileSystemBars(force: true);
     }
   }
@@ -607,6 +861,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _handleEpisodeEnd() {
+    if (_sleepTimer.handleEpisodeCompleted()) {
+      return;
+    }
     if (_repeatMode == 'one') {
       if (widget.site.isEmby) {
         _openCurrentEpisode(resumeMs: 0);
@@ -875,6 +1132,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     bool userSelectedQuality = false,
   }) async {
     _startup.reset();
+    _skipCountdown.reset();
+    _startSpecController.resetForNewSession();
+    _cancelTransientInteractions(GestureInterruptReason.episodeSwitch);
     _midPlaybackStallTimer?.cancel();
     _midPlaybackStallEpochsMs.clear();
     if (quality == null) {
@@ -965,6 +1225,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _videoHeight = 0;
         _videoCodec = '';
         _audioCodec = '';
+        _extraTrackSpecInfo = '';
         _activeStreamUrl = _currentEpisode.url;
         _position = _pendingResumeMs > 0
             ? Duration(milliseconds: _pendingResumeMs)
@@ -1209,7 +1470,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _hideTimer?.cancel();
     if (_screenLocked || (isWindowsDesktopUi && _windowsMoreControls)) return;
     final hideDelay = _desktop
-        ? const Duration(milliseconds: 2200)
+        ? const Duration(milliseconds: 2500)
         : const Duration(seconds: 4);
     _hideTimer = Timer(hideDelay, () {
       if (mounted &&
@@ -1268,6 +1529,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     _lockHideTimer?.cancel();
     if (!widget.embedded) WindowsImmersiveFrame.interactionLocked.value = locked;
     if (locked) {
+      _cancelDesktopKeyScrub(showToast: false);
+      if (_useEnhancedHud) {
+        final events = _gestureFsm.setScreenLocked(true);
+        _applyGestureEvents(events);
+      }
       if (_speedBoosting) {
         _player.setRate(_normalSpeed);
       }
@@ -1287,6 +1553,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       _syncMobileSystemBars();
       _scheduleLockHide();
     } else {
+      if (_useEnhancedHud) {
+        _gestureFsm.setScreenLocked(false);
+      }
       setState(() {
         _screenLocked = false;
         _lockButtonVisible = false;
@@ -1368,6 +1637,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       : (isLandscape ? '竖屏' : '全屏');
 
   void _exitPlayer() {
+    _cancelTransientInteractions(GestureInterruptReason.backExit);
     if (widget.embedded) { widget.onEmbeddedClose?.call(); }
     else { Navigator.of(context).maybePop(); }
   }
@@ -1708,6 +1978,26 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!widget.embedded) WindowsImmersiveFrame.interactionLocked.value = false;
     _lockHideTimer?.cancel();
     _hudTimer?.cancel();
+    _gestureTickTimer?.cancel();
+    _desktopKeyTickTimer?.cancel();
+    _verticalHudClearTimer?.cancel();
+    IosLiquidGlassBridge.reduceTransparencyNotifier.removeListener(
+      _onReduceTransparencyChanged,
+    );
+    GlassworkBackdrop.reduceTransparency.removeListener(
+      _onReduceTransparencyChanged,
+    );
+    GlassworkBackdrop.intensity.removeListener(_onReduceTransparencyChanged);
+    _hudPrefs.removeListener(_onHudSubstateChanged);
+    if (_ownsHudPrefs) {
+      _hudPrefs.dispose();
+    }
+    _sleepTimer.removeListener(_onHudSubstateChanged);
+    _sleepTimer.dispose();
+    _skipCountdown.removeListener(_onHudSubstateChanged);
+    _skipCountdown.dispose();
+    _startSpecController.removeListener(_onHudSubstateChanged);
+    _startSpecController.dispose();
     for (final sub in _playerSubscriptions) {
       unawaited(sub.cancel());
     }
@@ -1757,12 +2047,695 @@ class _PlayerScreenState extends State<PlayerScreen>
     super.dispose();
   }
 
+  void _applyGestureEvents(List<TouchGestureEvent> events) {
+    if (!mounted || events.isEmpty) return;
+    for (final event in events) {
+      switch (event) {
+        case ToggleControlsEvent():
+          _toggleControls();
+        case ToggleLockedControlsEvent():
+          _onLockedSurfaceTap();
+        case TogglePlayPauseEvent():
+          if (_playing && _gestureFsm.isSpeedLocked) {
+            final unlock = _gestureFsm.cancel(
+              GestureInterruptReason.playbackPaused,
+            );
+            _applyGestureEvents(unlock);
+          }
+          _player.playOrPause();
+          setState(() => _controlsVisible = true);
+          _scheduleHide();
+        case ToggleFullscreenEvent():
+          unawaited(_toggleOrientation());
+        case DoubleTapSeekEvent():
+          final effectiveDurMs = _duration.inMilliseconds > 0
+              ? _duration.inMilliseconds
+              : _lastKnownDurationMs;
+          if (effectiveDurMs > 0) {
+            final targetMs =
+                (_position.inMilliseconds + event.deltaSec * 1000)
+                    .clamp(0, effectiveDurMs);
+            setState(() => _position = Duration(milliseconds: targetMs));
+            _player.seek(Duration(milliseconds: targetMs));
+            unawaited(_saveProgress(immediate: true, triggerSync: false));
+            final sign = event.totalAccumulatedSec >= 0 ? '+' : '';
+            _showHud(
+              '${event.totalAccumulatedSec >= 0 ? "快进" : "快退"} $sign${event.totalAccumulatedSec}s · ${_formatDuration(Duration(milliseconds: targetMs))}',
+            );
+          }
+        case MultiTapSeekEndEvent():
+          break;
+        case HorizontalSeekStartEvent():
+          setState(() {
+            _isDraggingSeek = true;
+            _dragTargetPosMs = event.startPositionMs;
+          });
+        case HorizontalSeekUpdateEvent():
+          final effectiveDur = _duration.inMilliseconds > 0
+              ? _duration
+              : Duration(milliseconds: _lastKnownDurationMs);
+          setState(() {
+            _isDraggingSeek = true;
+            _dragTargetPosMs = event.previewPositionMs;
+            _hudText =
+                '${event.deltaMs >= 0 ? "快进至" : "快退至"} ${_formatDuration(Duration(milliseconds: event.previewPositionMs))} / ${_formatDuration(effectiveDur)}';
+          });
+        case HorizontalSeekCommitEvent():
+          final effectiveDurMs = _duration.inMilliseconds > 0
+              ? _duration.inMilliseconds
+              : _lastKnownDurationMs;
+          final targetMs = effectiveDurMs > 0
+              ? event.targetPositionMs.clamp(0, effectiveDurMs)
+              : event.targetPositionMs;
+          setState(() {
+            _isDraggingSeek = false;
+            _position = Duration(milliseconds: targetMs);
+            _hudText = '';
+          });
+          _player.seek(Duration(milliseconds: targetMs));
+          unawaited(_saveProgress(immediate: true, triggerSync: false));
+          _scheduleHide();
+        case HorizontalSeekCancelEvent():
+          setState(() {
+            _isDraggingSeek = false;
+            _hudText = '';
+          });
+        case VerticalBrightnessUpdateEvent():
+          _verticalHudClearTimer?.cancel();
+          setState(() {
+            _isVerticalDragging = true;
+            _playerBrightness = event.brightness;
+            _hudText = '亮度 ${(event.brightness * 100).round()}%';
+          });
+        case VerticalBrightnessEndEvent():
+          _isVerticalDragging = false;
+          _scheduleVerticalHudClear();
+        case VerticalVolumeUpdateEvent():
+          _verticalHudClearTimer?.cancel();
+          final nextVol = (event.volume * 100.0).clamp(0.0, 100.0);
+          _player.setVolume(nextVol);
+          setState(() {
+            _isVerticalDragging = true;
+            _hudText = '音量 ${nextVol.round()}%';
+          });
+        case VerticalVolumeEndEvent():
+          _isVerticalDragging = false;
+          _scheduleVerticalHudClear();
+        case SpeedBoostStartEvent():
+          if (event.haptic) HapticFeedback.selectionClick();
+          _player.setRate(event.speed);
+          setState(() {
+            _speedBoosting = true;
+            _hudText = '';
+          });
+        case SpeedBoostChangeEvent():
+          if (event.haptic) HapticFeedback.selectionClick();
+          _player.setRate(event.speed);
+          setState(() => _speedBoosting = true);
+        case SpeedLockReadyChangedEvent():
+          if (event.haptic) HapticFeedback.mediumImpact();
+          setState(() {});
+        case SpeedBoostEndEvent():
+          _player.setRate(event.restoreSpeed);
+          setState(() {
+            _speedBoosting = false;
+            _hudText = '';
+          });
+        case SpeedLockedEvent():
+          if (event.haptic) HapticFeedback.mediumImpact();
+          _player.setRate(event.speed);
+          setState(() {
+            _speedBoosting = false;
+            _hudText = '';
+          });
+        case SpeedUnlockedEvent():
+          if (event.reason != GestureInterruptReason.manualSpeedChange) {
+            _player.setRate(event.restoreSpeed);
+          }
+          setState(() => _speedBoosting = false);
+          if (event.reason == null) {
+            _showHud(
+              '已恢复 ${PlayerSpeedCapsule.formatSpeed(event.restoreSpeed)}× 播放',
+            );
+          }
+        case GestureCancelledEvent():
+          setState(() {
+            _speedBoosting = false;
+            _isDraggingSeek = false;
+            _isVerticalDragging = false;
+          });
+      }
+    }
+  }
+
+  void _scheduleVerticalHudClear() {
+    _verticalHudClearTimer?.cancel();
+    _verticalHudClearTimer = Timer(const Duration(milliseconds: 700), () {
+      if (mounted &&
+          !_isVerticalDragging &&
+          !_speedBoosting &&
+          !_gestureFsm.isSpeedBoosting) {
+        setState(() => _hudText = '');
+      }
+    });
+  }
+
+  void _handleDesktopArrowKeyDown(int direction) {
+    final effectiveDurMs = _duration.inMilliseconds > 0
+        ? _duration.inMilliseconds
+        : _lastKnownDurationMs;
+    if (_isLiveStream || effectiveDurMs <= 0) return;
+
+    final wall = DateTime.now().millisecondsSinceEpoch;
+    if (!_desktopKeySeek.isActive) {
+      _desktopKeyClockMs = wall;
+    } else if (wall > _desktopKeyClockMs) {
+      _desktopKeyClockMs = wall;
+    }
+
+    final preview = _desktopKeySeek.onKeyDownOrRepeat(
+      direction: direction,
+      currentPositionMs: _position.inMilliseconds,
+      durationMs: effectiveDurMs,
+      nowMs: _desktopKeyClockMs,
+    );
+
+    if (preview.isHoldPreview) {
+      setState(() {
+        _isDraggingSeek = true;
+        _dragTargetPosMs = preview.targetMs;
+        _activeDesktopScrubPreview = preview;
+      });
+    }
+
+    _desktopKeyTickTimer ??= Timer.periodic(
+      const Duration(milliseconds: 50),
+      (_) {
+        if (!mounted || !_desktopKeySeek.isActive) {
+          _desktopKeyTickTimer?.cancel();
+          _desktopKeyTickTimer = null;
+          return;
+        }
+        final nowWall = DateTime.now().millisecondsSinceEpoch;
+        _desktopKeyClockMs = math.max(nowWall, _desktopKeyClockMs + 50);
+        final updated = _desktopKeySeek.updatePreview(_desktopKeyClockMs);
+        if (updated.isHoldPreview) {
+          setState(() {
+            _isDraggingSeek = true;
+            _dragTargetPosMs = updated.targetMs;
+            _activeDesktopScrubPreview = updated;
+          });
+        }
+      },
+    );
+  }
+
+  void _handleDesktopArrowKeyUp() {
+    _desktopKeyTickTimer?.cancel();
+    _desktopKeyTickTimer = null;
+    final wall = DateTime.now().millisecondsSinceEpoch;
+    if (wall > _desktopKeyClockMs) {
+      _desktopKeyClockMs = wall;
+    }
+    final wasHold = _desktopKeySeek.isScrubbing;
+    final dir = _desktopKeySeek.direction;
+    final targetMs = _desktopKeySeek.onKeyUp(_desktopKeyClockMs);
+    if (targetMs == null) {
+      if (_activeDesktopScrubPreview != null) {
+        setState(() {
+          _activeDesktopScrubPreview = null;
+          _isDraggingSeek = false;
+        });
+      }
+      return;
+    }
+    setState(() {
+      _activeDesktopScrubPreview = null;
+      _isDraggingSeek = false;
+      _position = Duration(milliseconds: targetMs);
+    });
+    _player.seek(Duration(milliseconds: targetMs));
+    unawaited(_saveProgress(immediate: true, triggerSync: false));
+    final fmt = _formatDuration(Duration(milliseconds: targetMs));
+    _showHud(
+      wasHold ? '跳转至 $fmt' : '${dir >= 0 ? "快进" : "快退"} $fmt',
+    );
+    _scheduleHide();
+  }
+
+  void _cycleDesktopSpeedKey() {
+    if (_isLiveStream) return;
+    final nextSpeed = DesktopKeySeekStateMachine.cycleDesktopSpeed(_normalSpeed);
+    _applyManualSpeed(nextSpeed);
+  }
+
+  void _applyManualSpeed(double newSpeed) {
+    final clamped = double.parse(
+      newSpeed
+          .clamp(StorageService.minPlaySpeed, StorageService.maxPlaySpeed)
+          .toStringAsFixed(2),
+    );
+    if (_useEnhancedHud) {
+      final events = _gestureFsm.onManualSpeedChanged(clamped);
+      _applyGestureEvents(events);
+    }
+    setState(() => _normalSpeed = clamped);
+    _player.setRate(clamped);
+    widget.storage.setPlaySpeed(clamped);
+    final speedLabel = clamped.toString().replaceAll(RegExp(r'\.0$'), '');
+    _showHud('倍速 ${speedLabel}x');
+  }
+
+  void _handleDesktopPointerSignal(PointerSignalEvent event) {
+    if (!_desktop || !_useEnhancedHud || _screenLocked) return;
+    if (event is PointerScrollEvent && event.scrollDelta.dy != 0) {
+      final delta = event.scrollDelta.dy < 0 ? 5.0 : -5.0;
+      final nextVol = (_player.state.volume + delta).clamp(0.0, 100.0);
+      _player.setVolume(nextVol);
+      _showHud('音量 ${nextVol.round()}%');
+    }
+  }
+
+  void _handleDanmuToggle() {
+    if (widget.onToggleDanmu != null) {
+      widget.onToggleDanmu!.call();
+      return;
+    }
+    setState(() => _danmuEnabledLocal = !_danmuEnabledLocal);
+    _showHud(_danmuEnabledLocal ? '弹幕已开启' : '弹幕已关闭');
+  }
+
+  void _handleDanmuSettingsTap() {
+    if (widget.onOpenDanmuSettings != null) {
+      widget.onOpenDanmuSettings!.call();
+      return;
+    }
+    _handleDanmuToggle();
+  }
+
+  String _formatSignedDelta(int deltaMs) {
+    final sign = deltaMs >= 0 ? '+' : '-';
+    final absSec = (deltaMs.abs() / 1000.0).round();
+    final m = absSec ~/ 60;
+    final s = absSec % 60;
+    if (m > 0) {
+      return '$sign$m:${s.toString().padLeft(2, '0')}';
+    }
+    return '$sign${absSec}s';
+  }
+
   @override
   Widget build(BuildContext context) {
+    final viewPadding = MediaQuery.viewPaddingOf(context);
+    final screenSize = MediaQuery.sizeOf(context);
+    final isLandscape = screenSize.width > screenSize.height;
+    final effectiveDurMs = _duration.inMilliseconds > 0
+        ? _duration.inMilliseconds
+        : _lastKnownDurationMs;
+    final speedCapsuleMode = _speedCapsuleMode;
+    final desktopPreview = _activeDesktopScrubPreview;
+    final topOverlayOffset = math.max(16.0, viewPadding.top + 16.0);
+
+    final videoStack = Stack(
+      fit: StackFit.expand,
+      children: [
+        Center(
+          child: RepaintBoundary(
+            child: _videoKernel.buildVideoSurface(
+              fit: _fit,
+              videoWidth: _videoWidth,
+              videoHeight: _videoHeight,
+            ),
+          ),
+        ),
+        if (_playerBrightness < 0.995)
+          IgnorePointer(
+            child: ColoredBox(
+              color: Colors.black.withValues(
+                alpha: ((1.0 - _playerBrightness) * 0.78).clamp(0.0, 0.78),
+              ),
+              child: const SizedBox.expand(),
+            ),
+          ),
+        // Wave 2 reserved DanmuLayer slot: strictly below HUD controls & subtitles.
+        if (widget.danmuLayer != null && !OhosRuntime.isOhos)
+          Positioned.fill(child: IgnorePointer(child: widget.danmuLayer!)),
+        if (_hudText.isNotEmpty &&
+            speedCapsuleMode == SpeedCapsuleMode.hidden &&
+            desktopPreview == null)
+          Align(
+            alignment: const Alignment(0, -0.74),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: (_storageReduceTransparency ||
+                      IosLiquidGlassBridge.reduceTransparency ||
+                      GlassworkBackdrop.reduceTransparency.value ||
+                      GlassworkBackdrop.intensity.value <= 0.02 ||
+                      MediaQuery.highContrastOf(context))
+                  ? Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xF51E1E22),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.45),
+                          width: 0.9,
+                        ),
+                      ),
+                      child: Text(
+                        _hudText,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppleColors.labelPrimary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    )
+                  : AppleGlassSurface(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 10,
+                      ),
+                      borderRadius: BorderRadius.circular(999),
+                      child: Text(
+                        _hudText,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppleColors.labelPrimary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+        if (_loading || _buffering)
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: (_storageReduceTransparency ||
+                      IosLiquidGlassBridge.reduceTransparency ||
+                      GlassworkBackdrop.reduceTransparency.value ||
+                      GlassworkBackdrop.intensity.value <= 0.02 ||
+                      MediaQuery.highContrastOf(context))
+                  ? Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 22,
+                        vertical: 15,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xF51E1E22),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.45),
+                          width: 0.9,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          widget.loadingIndicator ??
+                              const CupertinoActivityIndicator(radius: 11),
+                          const SizedBox(width: 12),
+                          Flexible(
+                            child: Text(
+                              '正在加载 ${_currentEpisode.name}…',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppleColors.labelPrimary,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : AppleGlassSurface(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 22,
+                        vertical: 15,
+                      ),
+                      borderRadius: BorderRadius.circular(999),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          widget.loadingIndicator ??
+                              const CupertinoActivityIndicator(radius: 11),
+                          const SizedBox(width: 12),
+                          Flexible(
+                            child: Text(
+                              '正在加载 ${_currentEpisode.name}…',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: AppleColors.labelPrimary,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+            ),
+          ),
+      ],
+    );
+
+    final Widget surfaceWidget = _useEnhancedHud
+        ? Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (event) {
+              if (event.kind == PointerDeviceKind.mouse &&
+                  (event.buttons & kPrimaryMouseButton) == 0) {
+                return;
+              }
+              final ctx = TouchPointerContext(
+                pointerId: event.pointer,
+                x: event.localPosition.dx,
+                y: event.localPosition.dy,
+                viewportWidth: screenSize.width,
+                viewportHeight: screenSize.height,
+                systemGestureInsetLeft: viewPadding.left,
+                systemGestureInsetRight: viewPadding.right,
+                systemInsetTop: viewPadding.top,
+                systemInsetBottom: viewPadding.bottom,
+                nowMs: _nowGestureMs(),
+                screenLocked: _screenLocked,
+                isLive: _isLiveStream,
+                isPipOrMini: widget.embedded,
+                playing: _playing,
+                durationMs: effectiveDurMs,
+                positionMs: _position.inMilliseconds,
+                userNormalSpeed: _normalSpeed,
+                brightness: _playerBrightness,
+                volume: (_player.state.volume / 100.0).clamp(0.0, 1.0),
+                isTouchPointer: event.kind == PointerDeviceKind.touch ||
+                    event.kind == PointerDeviceKind.stylus,
+              );
+              final events = _gestureFsm.onPointerDown(ctx);
+              _applyGestureEvents(events);
+              _syncGestureTimer();
+            },
+            onPointerMove: (event) {
+              final events = _gestureFsm.onPointerMove(
+                pointerId: event.pointer,
+                x: event.localPosition.dx,
+                y: event.localPosition.dy,
+                nowMs: _nowGestureMs(),
+              );
+              _applyGestureEvents(events);
+              _syncGestureTimer();
+            },
+            onPointerUp: (event) {
+              final events = _gestureFsm.onPointerUp(
+                pointerId: event.pointer,
+                x: event.localPosition.dx,
+                y: event.localPosition.dy,
+                nowMs: _nowGestureMs(),
+              );
+              _applyGestureEvents(events);
+              _syncGestureTimer();
+            },
+            onPointerCancel: (event) {
+              final events = _gestureFsm.cancel(
+                GestureInterruptReason.pointerCancel,
+              );
+              _gestureFsm.onPointerCancelOrRemoved(event.pointer);
+              _applyGestureEvents(events);
+              _syncGestureTimer();
+            },
+            child: videoStack,
+          )
+        : GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _toggleControls,
+            onDoubleTap: _screenLocked
+                ? null
+                : () {
+                    if (_desktop) {
+                      _toggleOrientation();
+                      return;
+                    }
+                    _player.playOrPause();
+                    setState(() => _controlsVisible = true);
+                    _scheduleHide();
+                  },
+            onLongPressStart: _screenLocked
+                ? null
+                : (_) {
+                    if (_isLiveStream) return;
+                    if (_playing && _duration.inMilliseconds > 0) {
+                      setState(() {
+                        _speedBoosting = true;
+                        _hudText = '2.0× 倍速播放中 · 松手恢复';
+                      });
+                      _player.setRate(2.0);
+                    }
+                  },
+            onLongPressEnd: _screenLocked
+                ? null
+                : (_) {
+                    if (_speedBoosting) {
+                      _player.setRate(_normalSpeed);
+                      setState(() {
+                        _speedBoosting = false;
+                        _hudText = '';
+                      });
+                    }
+                  },
+            onHorizontalDragStart: _screenLocked
+                ? null
+                : (details) {
+                    if (_isLiveStream || _duration.inMilliseconds <= 0) return;
+                    _dragStartPosMs = _position.inMilliseconds.toDouble();
+                    _dragStartX = details.localPosition.dx;
+                    _dragTargetPosMs = _position.inMilliseconds;
+                    _isDraggingSeek = true;
+                  },
+            onHorizontalDragUpdate: _screenLocked
+                ? null
+                : (details) {
+                    if (_isLiveStream ||
+                        _duration.inMilliseconds <= 0 ||
+                        !_isDraggingSeek) {
+                      return;
+                    }
+                    final width =
+                        MediaQuery.sizeOf(context).width.clamp(200.0, 4000.0);
+                    final dx = details.localPosition.dx - _dragStartX;
+                    final ratio = (dx.abs() / width).clamp(0.0, 1.0);
+                    final speedScale = 0.55 + 1.35 * ratio;
+                    final spanMs = (_duration.inMilliseconds / 5.0).clamp(
+                      60000.0,
+                      300000.0,
+                    );
+                    final deltaMs = (dx / width) * spanMs * speedScale;
+                    final previewMs = (_dragStartPosMs + deltaMs).round().clamp(
+                      0,
+                      _duration.inMilliseconds,
+                    );
+                    setState(() {
+                      _dragTargetPosMs = previewMs;
+                      _hudText =
+                          '${dx >= 0 ? "快进至" : "快退至"} ${_formatDuration(Duration(milliseconds: previewMs))} / ${_formatDuration(_duration)}';
+                    });
+                  },
+            onHorizontalDragEnd: _screenLocked
+                ? null
+                : (_) {
+                    if (_isLiveStream || !_isDraggingSeek) return;
+                    final targetMs = _dragTargetPosMs.clamp(
+                      0,
+                      _duration.inMilliseconds,
+                    );
+                    setState(() {
+                      _isDraggingSeek = false;
+                      _position = Duration(milliseconds: targetMs);
+                      _hudText = '';
+                    });
+                    _player.seek(Duration(milliseconds: targetMs));
+                    _saveProgress(immediate: true, triggerSync: false);
+                    _scheduleHide();
+                  },
+            onHorizontalDragCancel: _screenLocked
+                ? null
+                : () {
+                    if (!_isDraggingSeek) return;
+                    setState(() {
+                      _isDraggingSeek = false;
+                      _hudText = '';
+                    });
+                  },
+            onVerticalDragStart: (_desktop || _screenLocked)
+                ? null
+                : (details) {
+                    final width = MediaQuery.sizeOf(context).width;
+                    _isVerticalDragging = true;
+                    _isDraggingLeftBrightness =
+                        details.localPosition.dx < width / 2;
+                    _verticalDragStartY = details.localPosition.dy;
+                    _verticalDragStartValue = _isDraggingLeftBrightness
+                        ? _playerBrightness
+                        : (_player.state.volume / 100.0).clamp(0.0, 1.0);
+                  },
+            onVerticalDragUpdate: (_desktop || _screenLocked)
+                ? null
+                : (details) {
+                    if (!_isVerticalDragging) return;
+                    final height =
+                        MediaQuery.sizeOf(context).height.clamp(220.0, 2000.0);
+                    final dy = _verticalDragStartY - details.localPosition.dy;
+                    final delta = dy / (height * 0.72);
+                    if (_isDraggingLeftBrightness) {
+                      final nextBrightness =
+                          (_verticalDragStartValue + delta).clamp(0.08, 1.0);
+                      setState(() {
+                        _playerBrightness = nextBrightness;
+                        _hudText = '亮度 ${(nextBrightness * 100).round()}%';
+                      });
+                    } else {
+                      final nextVolRatio =
+                          (_verticalDragStartValue + delta).clamp(0.0, 1.0);
+                      final nextVol = nextVolRatio * 100.0;
+                      _player.setVolume(nextVol);
+                      setState(() {
+                        _hudText = '音量 ${nextVol.round()}%';
+                      });
+                    }
+                  },
+            onVerticalDragEnd: (_desktop || _screenLocked)
+                ? null
+                : (_) {
+                    if (!_isVerticalDragging) return;
+                    _isVerticalDragging = false;
+                    _scheduleVerticalHudClear();
+                  },
+            onVerticalDragCancel: (_desktop || _screenLocked)
+                ? null
+                : () {
+                    if (!_isVerticalDragging) return;
+                    setState(() {
+                      _isVerticalDragging = false;
+                      _hudText = '';
+                    });
+                  },
+            child: videoStack,
+          );
+
     return PopScope(
       canPop: !_screenLocked,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) {
+          _cancelTransientInteractions(GestureInterruptReason.backExit);
           unawaited(_saveProgress(immediate: true));
           return;
         }
@@ -1775,6 +2748,17 @@ class _PlayerScreenState extends State<PlayerScreen>
       body: Focus(
         focusNode: _playerFocusNode,
         autofocus: true,
+        onFocusChange: (hasFocus) {
+          if (!hasFocus) {
+            _cancelDesktopKeyScrub(showToast: false);
+            if (_gestureFsm.isSpeedBoosting || _isDraggingSeek) {
+              final events = _gestureFsm.cancel(
+                GestureInterruptReason.focusLost,
+              );
+              _applyGestureEvents(events);
+            }
+          }
+        },
         onKeyEvent: (node, event) {
           if (_screenLocked) {
             if (event is KeyDownEvent || event is KeyRepeatEvent) {
@@ -1872,6 +2856,19 @@ class _PlayerScreenState extends State<PlayerScreen>
               return KeyEventResult.handled;
             }
           }
+
+          // Pass KeyUpEvent through for desktop left/right arrow seek commit.
+          if (_useEnhancedHud &&
+              event is KeyUpEvent &&
+              (event.logicalKey == LogicalKeyboardKey.arrowRight ||
+                  event.logicalKey == LogicalKeyboardKey.arrowLeft)) {
+            if (_desktopKeySeek.isActive) {
+              _handleDesktopArrowKeyUp();
+              return KeyEventResult.handled;
+            }
+            return KeyEventResult.ignored;
+          }
+
           if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
             return KeyEventResult.ignored;
           }
@@ -1886,11 +2883,19 @@ class _PlayerScreenState extends State<PlayerScreen>
             return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
-            _seekRelative(15);
+            if (_useEnhancedHud && !_isLiveStream) {
+              _handleDesktopArrowKeyDown(1);
+            } else {
+              _seekRelative(15);
+            }
             return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
-            _seekRelative(-15);
+            if (_useEnhancedHud && !_isLiveStream) {
+              _handleDesktopArrowKeyDown(-1);
+            } else {
+              _seekRelative(-15);
+            }
             return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.arrowUp ||
@@ -1910,21 +2915,22 @@ class _PlayerScreenState extends State<PlayerScreen>
             final delta = event.logicalKey == LogicalKeyboardKey.bracketRight
                 ? 0.25
                 : -0.25;
-            final newSpeed = double.parse(
-              ((_normalSpeed + delta).clamp(
-                StorageService.minPlaySpeed,
-                StorageService.maxPlaySpeed,
-              )).toStringAsFixed(2),
-            );
-            setState(() => _normalSpeed = newSpeed);
-            _player.setRate(newSpeed);
-            widget.storage.setPlaySpeed(newSpeed);
-            final speedLabel =
-                newSpeed.toString().replaceAll(RegExp(r'\.0$'), '');
-            _showHud('倍速 ${speedLabel}x');
+            _applyManualSpeed(_normalSpeed + delta);
             return KeyEventResult.handled;
           }
           if (event is! KeyDownEvent) return KeyEventResult.ignored;
+          if (!isCtrlOrCmd &&
+              _useEnhancedHud &&
+              event.logicalKey == LogicalKeyboardKey.keyS) {
+            _cycleDesktopSpeedKey();
+            return KeyEventResult.handled;
+          }
+          if (!isCtrlOrCmd &&
+              _useEnhancedHud &&
+              event.logicalKey == LogicalKeyboardKey.keyD) {
+            _handleDanmuToggle();
+            return KeyEventResult.handled;
+          }
           if (event.logicalKey == LogicalKeyboardKey.keyM) {
             if (_player.state.volume > 0) {
               _previousVolume = _player.state.volume;
@@ -1961,6 +2967,10 @@ class _PlayerScreenState extends State<PlayerScreen>
             return KeyEventResult.handled;
           }
           if (event.logicalKey == LogicalKeyboardKey.escape) {
+            if (_useEnhancedHud && _desktopKeySeek.isActive) {
+              _cancelDesktopKeyScrub(showToast: true);
+              return KeyEventResult.handled;
+            }
             if (_desktop) {
               _desktopEscape();
             } else {
@@ -1982,6 +2992,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               : SystemMouseCursors.basic,
           onHover: (event) => _onPointerMove(event.delta),
           child: Listener(
+            onPointerSignal: _handleDesktopPointerSignal,
             onPointerMove: (event) {
               if (event.down) _onPointerMove(event.delta);
             },
@@ -2003,11 +3014,15 @@ class _PlayerScreenState extends State<PlayerScreen>
                                             TargetPlatform.macOS &&
                                         !(_desktopWindow?.fullscreen ?? false)
                                     ? 38
-                                    : 12,
+                                    : (_useIos26PlayerChrome &&
+                                            _controlsVisible &&
+                                            !_screenLocked
+                                        ? 58
+                                        : 12),
                                 right: (!_screenLocked &&
                                         _controlsVisible &&
-                                        MediaQuery.sizeOf(context).width >
-                                            MediaQuery.sizeOf(context).height)
+                                        !_useIos26PlayerChrome &&
+                                        isLandscape)
                                     ? 76
                                     : 16,
                               ),
@@ -2044,8 +3059,123 @@ class _PlayerScreenState extends State<PlayerScreen>
                         ),
                       ),
                     ),
+                  // Start-of-playback spec banner: ONLY mounted when controls
+                  // are hidden so it never overlaps the top-left return capsule.
+                  if (_useEnhancedHud && !_screenLocked)
+                    StartSpecOverlay(
+                      badges: _fusedSpecBadges,
+                      highlightActive: _startSpecController.highlightActive,
+                      controlsVisible: _controlsVisible,
+                      concentric: _useIos26PlayerChrome,
+                      reduceTransparency: _storageReduceTransparency,
+                    ),
                   if (_controlsVisible && !_screenLocked)
                     _buildAppleChromeOverlay(context),
+                  // Persistent slim bottom progress bar when HUD is hidden.
+                  if (_useEnhancedHud)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: SlimProgressBar(
+                        visible: !_controlsVisible && !_screenLocked,
+                        enabled: _hudPrefs.effectiveSlimProgress,
+                        isLive: _isLiveStream,
+                        isEmbeddedOrPip: widget.embedded,
+                        positionMs: _position.inMilliseconds,
+                        durationMs: effectiveDurMs,
+                        skipIntroSec: _skipIntroSec,
+                        skipOutroSec: _skipOutroSec,
+                        reduceTransparency: _storageReduceTransparency,
+                      ),
+                    ),
+                  // Top-center long-press speed boost / swipe-up lock capsule.
+                  if (speedCapsuleMode != SpeedCapsuleMode.hidden)
+                    Positioned(
+                      top: topOverlayOffset,
+                      left: 16,
+                      right: 16,
+                      child: Align(
+                        alignment: Alignment.topCenter,
+                        child: PlayerSpeedCapsule(
+                          mode: speedCapsuleMode,
+                          speed: _gestureFsm.activeSpeed,
+                          activeDetentIndex: _gestureFsm.activeDetentIndex,
+                          detents: _gestureFsm.config.speedDetents,
+                          reduceTransparency: _storageReduceTransparency,
+                          onUnlockTap: () {
+                            final events = _gestureFsm.unlockSpeed();
+                            _applyGestureEvents(events);
+                          },
+                        ),
+                      ),
+                    ),
+                  // Top-center desktop keyboard arrow hold scrub preview capsule.
+                  if (desktopPreview != null && !_screenLocked)
+                    Positioned(
+                      top: topOverlayOffset,
+                      left: 16,
+                      right: 16,
+                      child: Align(
+                        alignment: Alignment.topCenter,
+                        child: DesktopScrubPreviewCapsule(
+                          direction: desktopPreview.direction,
+                          targetTimeText: _formatDuration(
+                            Duration(milliseconds: desktopPreview.targetMs),
+                          ),
+                          deltaText: _formatSignedDelta(desktopPreview.deltaMs),
+                          speedSecPerSec: desktopPreview.speedSecPerSec,
+                          isHoldPreview: desktopPreview.isHoldPreview,
+                          reduceTransparency: _storageReduceTransparency,
+                        ),
+                      ),
+                    ),
+                  // Sleep timer 30-second pre-expiry warning banner.
+                  if (_useEnhancedHud &&
+                      !_screenLocked &&
+                      _sleepTimer.showWarningBanner)
+                    Positioned(
+                      top: speedCapsuleMode != SpeedCapsuleMode.hidden
+                          ? topOverlayOffset + 52
+                          : topOverlayOffset,
+                      left: 16,
+                      right: 16,
+                      child: Align(
+                        alignment: Alignment.topCenter,
+                        child: SleepTimerWarningBanner(
+                          remainingSeconds: _sleepTimer.remainingSeconds,
+                          reduceTransparency: _storageReduceTransparency,
+                          onExtend15m: () {
+                            _sleepTimer.extend15Minutes();
+                            _showHud('定时关闭已延长 15 分钟');
+                          },
+                          onCancel: () {
+                            _sleepTimer.cancel();
+                            _showHud('已取消定时关闭');
+                          },
+                        ),
+                      ),
+                    ),
+                  // Cancellable 3-second skip intro/outro countdown card.
+                  if (_useEnhancedHud &&
+                      !_screenLocked &&
+                      _skipCountdown.isActive &&
+                      _skipCountdown.kind != null)
+                    Positioned(
+                      left: math.max(16.0, viewPadding.left + 12.0),
+                      bottom: _controlsVisible
+                          ? (isLandscape ? 132.0 : 152.0)
+                          : math.max(24.0, viewPadding.bottom + 18.0),
+                      child: SkipCountdownOverlay(
+                        kind: _skipCountdown.kind!,
+                        remainingSeconds: _skipCountdown.remainingSeconds,
+                        progress: _skipCountdown.progress,
+                        reduceTransparency: _storageReduceTransparency,
+                        reduceMotion: MediaQuery.disableAnimationsOf(context),
+                        onSkipNow: _skipCountdown.confirmNow,
+                        onCancel: _skipCountdown.cancel,
+                      ),
+                    ),
                   if (_screenLocked && _lockButtonVisible)
                     _buildLockedOverlay(context),
                   if (_playbackError.isNotEmpty && !_screenLocked)
@@ -2101,7 +3231,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   compact: true,
                                   onPressed: () {
                                     _failedLinesForEpisode.clear();
-    _failedLiveEpisodes.clear();
+                                    _failedLiveEpisodes.clear();
                                     _failedQualityUrls.clear();
                                     _openCurrentEpisode();
                                   },
@@ -2132,7 +3262,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                     onChanged: () {
                                       if (mounted) {
                                         _failedLinesForEpisode.clear();
-    _failedLiveEpisodes.clear();
+                                        _failedLiveEpisodes.clear();
                                         _failedQualityUrls.clear();
                                         _openCurrentEpisode();
                                       }
@@ -2145,233 +3275,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                         ),
                       ),
                     ),
+                  // Wave 2 reserved FirstPlayGestureHint slot.
+                  if (widget.firstPlayGestureHint != null &&
+                      !OhosRuntime.isOhos)
+                    Positioned.fill(child: widget.firstPlayGestureHint!),
                 ],
               ),
-              surface: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-          onTap: _toggleControls,
-          onDoubleTap: _screenLocked
-              ? null
-              : () {
-                  if (_desktop) {
-                    _toggleOrientation();
-                    return;
-                  }
-                  _player.playOrPause();
-                  setState(() => _controlsVisible = true);
-                  _scheduleHide();
-                },
-          onLongPressStart: _screenLocked
-              ? null
-              : (_) {
-                  if (_isLiveStream) return;
-                  if (_playing && _duration.inMilliseconds > 0) {
-                    setState(() {
-                      _speedBoosting = true;
-                      _hudText = '2.0× 倍速播放中 · 松手恢复';
-                    });
-                    _player.setRate(2.0);
-                  }
-                },
-          onLongPressEnd: _screenLocked
-              ? null
-              : (_) {
-                  if (_speedBoosting) {
-                    _player.setRate(_normalSpeed);
-                    setState(() {
-                      _speedBoosting = false;
-                      _hudText = '';
-                    });
-                  }
-                },
-          onHorizontalDragStart: _screenLocked
-              ? null
-              : (details) {
-                  if (_isLiveStream || _duration.inMilliseconds <= 0) return;
-                  _dragStartPosMs = _position.inMilliseconds.toDouble();
-                  _dragStartX = details.localPosition.dx;
-                  _dragTargetPosMs = _position.inMilliseconds;
-                  _isDraggingSeek = true;
-                },
-          onHorizontalDragUpdate: _screenLocked
-              ? null
-              : (details) {
-                  if (_isLiveStream ||
-                      _duration.inMilliseconds <= 0 ||
-                      !_isDraggingSeek) {
-                    return;
-                  }
-                  final width =
-                      MediaQuery.sizeOf(context).width.clamp(200.0, 4000.0);
-                  final dx = details.localPosition.dx - _dragStartX;
-                  final ratio = (dx.abs() / width).clamp(0.0, 1.0);
-                  final speedScale = 0.55 + 1.35 * ratio;
-                  final spanMs = (_duration.inMilliseconds / 5.0).clamp(
-                    60000.0,
-                    300000.0,
-                  );
-                  final deltaMs = (dx / width) * spanMs * speedScale;
-                  final previewMs = (_dragStartPosMs + deltaMs).round().clamp(
-                    0,
-                    _duration.inMilliseconds,
-                  );
-                  setState(() {
-                    _dragTargetPosMs = previewMs;
-                    _hudText =
-                        '${dx >= 0 ? "快进至" : "快退至"} ${_formatDuration(Duration(milliseconds: previewMs))} / ${_formatDuration(_duration)}';
-                  });
-                },
-          onHorizontalDragEnd: _screenLocked
-              ? null
-              : (_) {
-                  if (_isLiveStream || !_isDraggingSeek) return;
-                  final targetMs = _dragTargetPosMs.clamp(
-                    0,
-                    _duration.inMilliseconds,
-                  );
-                  setState(() {
-                    _isDraggingSeek = false;
-                    _position = Duration(milliseconds: targetMs);
-                    _hudText = '';
-                  });
-                  _player.seek(Duration(milliseconds: targetMs));
-                  _saveProgress(immediate: true, triggerSync: false);
-                  _scheduleHide();
-                },
-          onHorizontalDragCancel: _screenLocked
-              ? null
-              : () {
-                  if (!_isDraggingSeek) return;
-                  setState(() {
-                    _isDraggingSeek = false;
-                    _hudText = '';
-                  });
-                },
-          onVerticalDragStart: (_desktop || _screenLocked)
-              ? null
-              : (details) {
-                  final width = MediaQuery.sizeOf(context).width;
-                  _isVerticalDragging = true;
-                  _isDraggingLeftBrightness =
-                      details.localPosition.dx < width / 2;
-                  _verticalDragStartY = details.localPosition.dy;
-                  _verticalDragStartValue = _isDraggingLeftBrightness
-                      ? _playerBrightness
-                      : (_player.state.volume / 100.0).clamp(0.0, 1.0);
-                },
-          onVerticalDragUpdate: (_desktop || _screenLocked)
-              ? null
-              : (details) {
-                  if (!_isVerticalDragging) return;
-                  final height =
-                      MediaQuery.sizeOf(context).height.clamp(220.0, 2000.0);
-                  final dy = _verticalDragStartY - details.localPosition.dy;
-                  final delta = dy / (height * 0.72);
-                  if (_isDraggingLeftBrightness) {
-                    final nextBrightness =
-                        (_verticalDragStartValue + delta).clamp(0.08, 1.0);
-                    setState(() {
-                      _playerBrightness = nextBrightness;
-                      _hudText = '亮度 ${(nextBrightness * 100).round()}%';
-                    });
-                  } else {
-                    final nextVolRatio =
-                        (_verticalDragStartValue + delta).clamp(0.0, 1.0);
-                    final nextVol = nextVolRatio * 100.0;
-                    _player.setVolume(nextVol);
-                    setState(() {
-                      _hudText = '音量 ${nextVol.round()}%';
-                    });
-                  }
-                },
-          onVerticalDragEnd: (_desktop || _screenLocked)
-              ? null
-              : (_) {
-                  if (!_isVerticalDragging) return;
-                  _isVerticalDragging = false;
-                  Future.delayed(const Duration(milliseconds: 700), () {
-                    if (mounted && !_isVerticalDragging && !_speedBoosting) {
-                      setState(() => _hudText = '');
-                    }
-                  });
-                },
-          onVerticalDragCancel: (_desktop || _screenLocked)
-              ? null
-              : () {
-                  if (!_isVerticalDragging) return;
-                  setState(() {
-                    _isVerticalDragging = false;
-                    _hudText = '';
-                  });
-                },
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              Center(
-                child: RepaintBoundary(
-                  child: _videoKernel.buildVideoSurface(
-                    fit: _fit,
-                    videoWidth: _videoWidth,
-                    videoHeight: _videoHeight,
-                  ),
-                ),
-              ),
-              if (_playerBrightness < 0.995)
-                IgnorePointer(
-                  child: ColoredBox(
-                    color: Colors.black.withValues(
-                      alpha: ((1.0 - _playerBrightness) * 0.78).clamp(0.0, 0.78),
-                    ),
-                    child: const SizedBox.expand(),
-                  ),
-                ),
-              if (_hudText.isNotEmpty)
-                Align(
-                  alignment: const Alignment(0, -0.74),
-                  child: AppleGlassSurface(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 18,
-                      vertical: 10,
-                    ),
-                    borderRadius: BorderRadius.circular(999),
-                    child: Text(
-                      _hudText,
-                      style: const TextStyle(
-                        color: AppleColors.labelPrimary,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-              if (_loading || _buffering)
-                Center(
-                  child: AppleGlassSurface(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 22,
-                      vertical: 15,
-                    ),
-                    borderRadius: BorderRadius.circular(999),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const CupertinoActivityIndicator(radius: 11),
-                        const SizedBox(width: 12),
-                        Text(
-                          '正在加载 ${_currentEpisode.name}…',
-                          style: const TextStyle(
-                            color: AppleColors.labelPrimary,
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          ),
-              ),
+              surface: surfaceWidget,
             ),
           ),
         ),
@@ -2457,6 +3367,103 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildAppleChromeOverlay(BuildContext context) {
+    if (_useIos26PlayerChrome) {
+      final size = MediaQuery.sizeOf(context);
+      final isLandscape = size.width > size.height;
+      final effectiveDur = _duration.inMilliseconds > 0
+          ? _duration
+          : Duration(milliseconds: _lastKnownDurationMs);
+      final activeSpeed = _gestureFsm.isSpeedLocked
+          ? _gestureFsm.activeSpeed
+          : _normalSpeed;
+      return IosPlayerChrome(
+        title: widget.video.title,
+        episodeName: _currentEpisode.name,
+        lineName: _currentLine.name,
+        isLive: _isLiveStream,
+        playing: _playing,
+        loading: _loading,
+        buffering: _buffering,
+        hasError: _playbackError.isNotEmpty,
+        position: _position,
+        duration: effectiveDur,
+        isScrubbing: _isDraggingSeek || _isSliderDragging,
+        scrubPositionMs:
+            _isSliderDragging ? _sliderDragPosMs.round() : _dragTargetPosMs,
+        playbackSpeed: activeSpeed,
+        skipIntroSec: _skipIntroSec,
+        skipOutroSec: _skipOutroSec,
+        specBadges: _fusedSpecBadges,
+        fallbackSpecsLabel: _videoSpecsLabel,
+        specBadgesExpanded: _startSpecController.highlightActive,
+        isLandscape: isLandscape,
+        danmuEnabled: widget.onToggleDanmu != null
+            ? widget.danmuEnabled
+            : _danmuEnabledLocal,
+        sleepTimerActive: _sleepTimer.isActive,
+        hasMultipleLines: _lines.length > 1,
+        storageReduceTransparency: _storageReduceTransparency,
+        onBack: () async {
+          await _saveProgress(immediate: true);
+          if (context.mounted) {
+            _exitPlayer();
+          }
+        },
+        onPlayPause: () {
+          if (_playing && _gestureFsm.isSpeedLocked) {
+            final unlock = _gestureFsm.cancel(
+              GestureInterruptReason.playbackPaused,
+            );
+            _applyGestureEvents(unlock);
+          }
+          _player.playOrPause();
+          _scheduleHide();
+        },
+        onRewind15: () => _seekRelative(-15),
+        onForward15: () => _seekRelative(15),
+        onScrubStart: (ms) {
+          _hideTimer?.cancel();
+          setState(() {
+            _isSliderDragging = true;
+            _sliderDragPosMs = ms;
+          });
+        },
+        onScrubUpdate: (ms) {
+          setState(() {
+            _isSliderDragging = true;
+            _sliderDragPosMs = ms;
+          });
+        },
+        onScrubEnd: (ms) {
+          final maxMs = effectiveDur.inMilliseconds;
+          final targetMs = maxMs > 0 ? ms.round().clamp(0, maxMs) : 0;
+          setState(() {
+            _isSliderDragging = false;
+            _position = Duration(milliseconds: targetMs);
+          });
+          _player.seek(Duration(milliseconds: targetMs));
+          unawaited(_saveProgress(immediate: true, triggerSync: false));
+          _scheduleHide();
+        },
+        onScrubCancel: () {
+          if (_isSliderDragging) {
+            setState(() => _isSliderDragging = false);
+            _scheduleHide();
+          }
+        },
+        onEpisodesTap: _showEpisodesSheet,
+        onLinesTap: _showLinesSheet,
+        onSpeedTap: _showSpeedSheet,
+        onDanmuToggle: _handleDanmuToggle,
+        onDanmuSettingsTap: _handleDanmuSettingsTap,
+        onAspectAndStrategyTap: _showAspectAndStrategySheet,
+        onAudioSubtitleTap: _showAudioSubtitleQuickSheet,
+        onMoreTap: _showIosMoreMenu,
+        onLockTap: () => _setScreenLocked(true),
+        onFullscreenToggle: _toggleOrientation,
+        onInteraction: _scheduleHide,
+      );
+    }
     if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null) {
       return _buildWindowsChrome(context);
     }
@@ -2562,65 +3569,47 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildWindowsChrome(BuildContext context) {
-    if (widget.embedded) return Stack(children: [
-      Positioned(left: 15, right: 15, top: 12, child: Row(children: [
-        Expanded(child: Text(widget.video.title, maxLines: 1, overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600))),
-        IconButton(tooltip: '停止播放', onPressed: _exitPlayer, icon: const Icon(CupertinoIcons.xmark, color: Colors.white)),
-      ])),
-      if (_windowsMoreControls) Positioned(left: 12, right: 12, bottom: 84,
-        child: _buildScrollableToolDock(isLandscape: false, scale: .8)),
-      Positioned(left: 12, right: 12, bottom: 12, child: WinPanel(dark: true, padding: const EdgeInsets.all(6),
-        child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-          IconButton(tooltip: _playing ? '暂停' : '播放', onPressed: _player.playOrPause,
-            icon: Icon(_playing ? CupertinoIcons.pause_fill : CupertinoIcons.play_fill, color: Colors.white)),
-          IconButton(tooltip: '音量', onPressed: _showWindowsVolume, icon: const Icon(CupertinoIcons.volume_up, color: Colors.white)),
-          IconButton(tooltip: '线路', onPressed: _showEpisodesSheet, icon: const Icon(CupertinoIcons.list_bullet, color: Colors.white)),
-          IconButton(tooltip: '更多', onPressed: () {setState(() => _windowsMoreControls = !_windowsMoreControls); _scheduleHide();}, icon: const Icon(CupertinoIcons.ellipsis, color: Colors.white)),
-          IconButton(tooltip: '展开播放', onPressed: _toggleOrientation, icon: const Icon(CupertinoIcons.arrow_up_left_arrow_down_right, color: Colors.white)),
-        ]))),
-    ]);
-
     final width = MediaQuery.sizeOf(context).width;
     final scale = (width / 1250).clamp(.76, 1.0);
-    Widget control(String label, IconData icon, VoidCallback action) {
-      return TextButton.icon(
-        onPressed: action,
-        style: TextButton.styleFrom(foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12)),
-        icon: Icon(icon, size: 17), label: Text(label, style: const TextStyle(fontSize: 12)),
-      );
-    }
-    return SafeArea(child: Stack(fit: StackFit.expand, children: [
-      Positioned(left: 28, right: 28, top: 20,
-        child: _buildTopHeader(context, true, scale, includeLockButton: true)),
-      if (_windowsMoreControls)
-        Positioned(left: 24, right: 24, bottom: 190,
-          child: Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 1080),
-            child: _buildScrollableToolDock(isLandscape: false, scale: scale)))),
-      Positioned(left: 24, right: 24, bottom: 27, child: Center(
-        child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 1080),
-          child: WinPanel(dark: true, radius: 30, padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              if (!_isLiveStream) _buildProgressBarCapsule(context, true, scale),
-              const SizedBox(height: 8),
-              Row(children: [
-                _buildCenterTransportButtons(.59 * scale),
-                const Spacer(),
-                if (!_isLiveStream && width >= 880) control('${_normalSpeed}×', CupertinoIcons.speedometer, _showSpeedSheet),
-                if (!_isLiveStream && width >= 1000) control('字幕', CupertinoIcons.captions_bubble, _showSubtitleTracksSheet),
-                control(_isLiveStream ? '信号' : '选集', CupertinoIcons.list_bullet, _showEpisodesSheet),
-                if (width >= 780) control('音量', CupertinoIcons.volume_up, _showWindowsVolume),
-                control('更多', CupertinoIcons.ellipsis, () {
-                  setState(() => _windowsMoreControls = !_windowsMoreControls);
-                  if (_windowsMoreControls) { _hideTimer?.cancel(); } else { _scheduleHide(); }
-                }),
-              ]),
-            ]),
-          ),
-        ),
-      )),
-    ]));
+    return DesktopPlayerHud(
+      embedded: widget.embedded,
+      title: widget.video.title,
+      playing: _playing,
+      isLive: _isLiveStream,
+      normalSpeed: _normalSpeed,
+      moreControlsOpen: _windowsMoreControls,
+      sleepTimerActive: _sleepTimer.isActive,
+      sleepTimerLabel: _sleepTimer.shortStatusLabel,
+      topHeader: _buildTopHeader(
+        context,
+        true,
+        scale,
+        includeLockButton: true,
+      ),
+      progressBar:
+          _isLiveStream ? null : _buildProgressBarCapsule(context, true, scale),
+      transportButtons: _buildCenterTransportButtons(.59 * scale),
+      moreToolsDock: _buildScrollableToolDock(
+        isLandscape: false,
+        scale: widget.embedded ? .8 : scale,
+      ),
+      onExit: _exitPlayer,
+      onPlayPause: _player.playOrPause,
+      onVolumeTap: _showWindowsVolume,
+      onEpisodesTap: _showEpisodesSheet,
+      onSpeedTap: _showSpeedSheet,
+      onSubtitlesTap: _showSubtitleTracksSheet,
+      onSleepTimerTap: _showSleepTimerSheet,
+      onToggleMore: () {
+        setState(() => _windowsMoreControls = !_windowsMoreControls);
+        if (_windowsMoreControls && !widget.embedded) {
+          _hideTimer?.cancel();
+        } else {
+          _scheduleHide();
+        }
+      },
+      onToggleExpand: _toggleOrientation,
+    );
   }
 
   Widget _buildTopHeader(
@@ -2687,7 +3676,15 @@ class _PlayerScreenState extends State<PlayerScreen>
                       ),
                     ),
                   ),
-                  if (_videoSpecsLabel.isNotEmpty) ...[
+                  if (_useEnhancedHud && _fusedSpecBadges.isNotEmpty) ...[
+                    SizedBox(width: 8 * scale),
+                    InlineSpecBadgeRow(
+                      badges: _fusedSpecBadges,
+                      expanded: _startSpecController.highlightActive,
+                      concentric: false,
+                      reduceTransparency: _storageReduceTransparency,
+                    ),
+                  ] else if (_videoSpecsLabel.isNotEmpty) ...[
                     SizedBox(width: 8 * scale),
                     AppleGlassSurface(
                       key: const Key('player-video-specs'),
@@ -3154,6 +4151,14 @@ class _PlayerScreenState extends State<PlayerScreen>
         shortLabel: '时间',
         active: _alwaysShowClock,
       ),
+      if (_useEnhancedHud)
+        _PlayerAction(
+          CupertinoIcons.moon_zzz_fill,
+          _sleepTimer.isActive ? '定时·${_sleepTimer.shortStatusLabel}' : '定时关闭',
+          _showSleepTimerSheet,
+          shortLabel: '定时',
+          active: _sleepTimer.isActive,
+        ),
       if (_qualityChoices.length > 1)
         _PlayerAction(CupertinoIcons.slider_horizontal_3, '画质', _showQualityChoices),
       _PlayerAction(CupertinoIcons.speaker_2_fill, '音轨', _showAudioTracksSheet),
@@ -3719,8 +4724,48 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _showAudioTracksSheet() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final tracks = _player.state.tracks.audio;
     final active = _player.state.track.audio;
+    if (_canUseNativeIosSheet) {
+      unawaited(() async {
+        if (tracks.isEmpty) {
+          _showHud('当前片源仅包含单一音轨');
+          return;
+        }
+        final picked = await showAppleNativeOptionSheet<AudioTrack>(
+          context,
+          title: '切换音轨',
+          options: [
+            for (final t in tracks)
+              AppleNativePickerOption<AudioTrack>(
+                value: t,
+                title: (t.title ?? t.language ?? t.id).trim().isEmpty
+                    ? '音轨 ${t.id}'
+                    : (t.title ?? t.language ?? t.id).trim(),
+                symbol: 'speaker.wave.2.fill',
+                checked: t == active,
+              ),
+          ],
+          fallback: () async {
+            _showAudioTracksFallbackSheet(tracks, active);
+            return null;
+          },
+        );
+        if (!mounted || picked == null) return;
+        final label = (picked.title ?? picked.language ?? picked.id).trim();
+        _player.setAudioTrack(picked);
+        _showHud('已切换音轨：${label.isEmpty ? picked.id : label}');
+      }());
+      return;
+    }
+    _showAudioTracksFallbackSheet(tracks, active);
+  }
+
+  void _showAudioTracksFallbackSheet(
+    List<AudioTrack> tracks,
+    AudioTrack active,
+  ) {
     showAppleModalSheet<void>(
       context: context,
       title: '切换音轨',
@@ -3767,8 +4812,54 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _showSubtitleTracksSheet() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final tracks = _player.state.tracks.subtitle;
     final active = _player.state.track.subtitle;
+    if (_canUseNativeIosSheet) {
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<SubtitleTrack>(
+          context,
+          title: '切换字幕',
+          options: [
+            AppleNativePickerOption<SubtitleTrack>(
+              value: SubtitleTrack.no(),
+              title: '关闭内嵌字幕',
+              symbol: 'captions.bubble',
+              checked: active == SubtitleTrack.no(),
+            ),
+            for (final t in tracks)
+              AppleNativePickerOption<SubtitleTrack>(
+                value: t,
+                title: (t.title ?? t.language ?? t.id).trim().isEmpty
+                    ? '字幕 ${t.id}'
+                    : (t.title ?? t.language ?? t.id).trim(),
+                symbol: 'captions.bubble.fill',
+                checked: t == active,
+              ),
+          ],
+          fallback: () async {
+            _showSubtitleTracksFallbackSheet(tracks, active);
+            return null;
+          },
+        );
+        if (!mounted || picked == null) return;
+        _player.setSubtitleTrack(picked);
+        if (picked == SubtitleTrack.no()) {
+          _showHud('已关闭内嵌字幕');
+        } else {
+          final label = (picked.title ?? picked.language ?? picked.id).trim();
+          _showHud('已切换字幕：${label.isEmpty ? picked.id : label}');
+        }
+      }());
+      return;
+    }
+    _showSubtitleTracksFallbackSheet(tracks, active);
+  }
+
+  void _showSubtitleTracksFallbackSheet(
+    List<SubtitleTrack> tracks,
+    SubtitleTrack active,
+  ) {
     showAppleModalSheet<void>(
       context: context,
       title: '切换字幕',
@@ -3820,7 +4911,24 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  Future<void> _selectKernel(String key, String title) async {
+    if (_playerKernel == key) return;
+    final keepPos = _position.inMilliseconds >= 1000
+        ? _position.inMilliseconds
+        : _lastKnownPositionMs;
+    setState(() => _playerKernel = key);
+    await widget.storage.setPlayerKernel(key);
+    _playerConfiguration = _playerConfiguration.then(
+      (_) => _applyPlayerKernel(key),
+    );
+    await _playerConfiguration;
+    if (!mounted) return;
+    _showHud('已切换至 $title');
+    unawaited(_openCurrentEpisode(resumeMs: keepPos));
+  }
+
   void _showKernelSheet() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final kernels = <({String key, String title, String subtitle})>[
       (
         key: 'exo',
@@ -3842,6 +4950,38 @@ class _PlayerScreenState extends State<PlayerScreen>
             : '使用 128 MB 前向缓冲，占用更多内存',
       ),
     ];
+    if (_canUseNativeIosSheet) {
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<
+            ({String key, String title, String subtitle})>(
+          context,
+          title: '切换播放策略',
+          options: [
+            for (final k in kernels)
+              AppleNativePickerOption(
+                value: k,
+                title: k.title,
+                subtitle: k.subtitle,
+                symbol: 'slider.horizontal.3',
+                checked: _playerKernel == k.key,
+              ),
+          ],
+          fallback: () async {
+            _showKernelFallbackSheet(kernels);
+            return null;
+          },
+        );
+        if (!mounted || picked == null) return;
+        await _selectKernel(picked.key, picked.title);
+      }());
+      return;
+    }
+    _showKernelFallbackSheet(kernels);
+  }
+
+  void _showKernelFallbackSheet(
+    List<({String key, String title, String subtitle})> kernels,
+  ) {
     showAppleModalSheet<void>(
       context: context,
       title: '切换播放策略',
@@ -3868,19 +5008,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     : null,
                 onTap: () async {
                   Navigator.of(ctx).pop();
-                  if (_playerKernel == k.key) return;
-                  final keepPos = _position.inMilliseconds >= 1000
-                      ? _position.inMilliseconds
-                      : _lastKnownPositionMs;
-                  setState(() => _playerKernel = k.key);
-                  await widget.storage.setPlayerKernel(k.key);
-                  _playerConfiguration = _playerConfiguration.then(
-                    (_) => _applyPlayerKernel(k.key),
-                  );
-                  await _playerConfiguration;
-                  if (!mounted) return;
-                  _showHud('已切换至 ${k.title}');
-                  unawaited(_openCurrentEpisode(resumeMs: keepPos));
+                  await _selectKernel(k.key, k.title);
                 },
               );
             }).toList(),
@@ -3917,7 +5045,36 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _showSpeedSheet() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+    if (_canUseNativeIosSheet) {
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<double>(
+          context,
+          title: '播放倍速',
+          options: [
+            for (final s in speeds)
+              AppleNativePickerOption<double>(
+                value: s,
+                title: '$s× 倍速',
+                symbol: 'speedometer',
+                checked: (_normalSpeed - s).abs() < 0.01,
+              ),
+          ],
+          fallback: () async {
+            _showSpeedFallbackSheet(speeds);
+            return null;
+          },
+        );
+        if (!mounted || picked == null) return;
+        _applyManualSpeed(picked);
+      }());
+      return;
+    }
+    _showSpeedFallbackSheet(speeds);
+  }
+
+  void _showSpeedFallbackSheet(List<double> speeds) {
     showAppleModalSheet<void>(
       context: context,
       title: '播放倍速',
@@ -3927,7 +5084,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         children: [
           AppleGroupedSection(
             children: speeds.map((s) {
-              final selected = _normalSpeed == s;
+              final selected = (_normalSpeed - s).abs() < 0.01;
               return AppleGroupedTile(
                 icon: CupertinoIcons.speedometer,
                 iconBgColor: selected
@@ -3943,12 +5100,615 @@ class _PlayerScreenState extends State<PlayerScreen>
                     : null,
                 onTap: () {
                   Navigator.of(ctx).pop();
-                  setState(() => _normalSpeed = s);
-                  _player.setRate(s);
-                  widget.storage.setPlaySpeed(s);
+                  _applyManualSpeed(s);
                 },
               );
             }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSleepTimerSheet() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    const modes = SleepTimerMode.values;
+    if (_canUseNativeIosSheet) {
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<SleepTimerMode>(
+          context,
+          title: '定时关闭',
+          subtitle: _sleepTimer.isActive
+              ? '当前：${_sleepTimer.shortStatusLabel}'
+              : '仅在本次播放会话生效',
+          options: [
+            for (final m in modes)
+              AppleNativePickerOption<SleepTimerMode>(
+                value: m,
+                title: m.label,
+                symbol: m == SleepTimerMode.off ? 'moon' : 'moon.zzz.fill',
+                checked: _sleepTimer.mode == m,
+              ),
+          ],
+          fallback: () async {
+            _showSleepTimerFallbackSheet(modes);
+            return null;
+          },
+        );
+        if (!mounted || picked == null) return;
+        _sleepTimer.setMode(picked);
+        _showHud(
+          picked == SleepTimerMode.off
+              ? '已关闭定时关闭'
+              : '定时关闭：${picked.label}',
+        );
+      }());
+      return;
+    }
+    _showSleepTimerFallbackSheet(modes);
+  }
+
+  void _showSleepTimerFallbackSheet(List<SleepTimerMode> modes) {
+    showAppleModalSheet<void>(
+      context: context,
+      title: '定时关闭',
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          AppleGroupedSection(
+            children: modes.map((m) {
+              final selected = _sleepTimer.mode == m;
+              return AppleGroupedTile(
+                icon: CupertinoIcons.moon_zzz_fill,
+                iconBgColor: selected
+                    ? AppleColors.systemBlue
+                    : AppleColors.groupedTertiary,
+                title: m.label,
+                trailing: selected
+                    ? const Icon(
+                        CupertinoIcons.checkmark_alt,
+                        color: AppleColors.systemBlue,
+                        size: 18,
+                      )
+                    : null,
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _sleepTimer.setMode(m);
+                  _showHud(
+                    m == SleepTimerMode.off
+                        ? '已关闭定时关闭'
+                        : '定时关闭：${m.label}',
+                  );
+                },
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAspectAndStrategySheet() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final options = <AppleNativePickerOption<String>>[
+      AppleNativePickerOption<String>(
+        value: 'fit:contain',
+        title: '画面适应（默认）',
+        symbol: 'rectangle.arrowtriangle.2.inward',
+        checked: _fit == BoxFit.contain,
+        section: 0,
+        sectionTitle: '画面比例',
+      ),
+      AppleNativePickerOption<String>(
+        value: 'fit:cover',
+        title: '画面裁切填充',
+        symbol: 'rectangle.arrowtriangle.2.outward',
+        checked: _fit == BoxFit.cover,
+        section: 0,
+      ),
+      AppleNativePickerOption<String>(
+        value: 'fit:fill',
+        title: '画面铺满屏幕',
+        symbol: 'aspectratio',
+        checked: _fit == BoxFit.fill,
+        section: 0,
+      ),
+      AppleNativePickerOption<String>(
+        value: 'kernel:exo',
+        title: '均衡播放（默认）',
+        subtitle: '自动选择解码方式，64 MB 前向缓冲',
+        symbol: 'slider.horizontal.3',
+        checked: _playerKernel == 'exo',
+        section: 1,
+        sectionTitle: '播放策略',
+      ),
+      AppleNativePickerOption<String>(
+        value: 'kernel:ijk',
+        title: '兼容缓冲',
+        subtitle: '硬件解码拷贝输出，增加媒体探测时间',
+        symbol: 'slider.horizontal.3',
+        checked: _playerKernel == 'ijk',
+        section: 1,
+      ),
+      AppleNativePickerOption<String>(
+        value: 'kernel:mpv',
+        title: '大容量缓冲',
+        subtitle: '128 MB 前向缓冲，适合高码率 4K',
+        symbol: 'slider.horizontal.3',
+        checked: _playerKernel == 'mpv',
+        section: 1,
+      ),
+    ];
+
+    void applyChoice(String choice) {
+      if (choice == 'fit:contain') {
+        setState(() => _fit = BoxFit.contain);
+        _showHud('画面：适应屏幕');
+      } else if (choice == 'fit:cover') {
+        setState(() => _fit = BoxFit.cover);
+        _showHud('画面：裁切填充');
+      } else if (choice == 'fit:fill') {
+        setState(() => _fit = BoxFit.fill);
+        _showHud('画面：铺满屏幕');
+      } else if (choice.startsWith('kernel:')) {
+        final key = choice.substring('kernel:'.length);
+        final title = switch (key) {
+          'ijk' => '兼容缓冲',
+          'mpv' => '大容量缓冲',
+          _ => '均衡播放（默认）',
+        };
+        unawaited(_selectKernel(key, title));
+      }
+    }
+
+    if (_canUseNativeIosSheet) {
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<String>(
+          context,
+          title: '画面与播放策略',
+          options: options,
+          fallback: () async {
+            _showAspectAndStrategyFallbackSheet(applyChoice);
+            return null;
+          },
+        );
+        if (!mounted || picked == null) return;
+        applyChoice(picked);
+      }());
+      return;
+    }
+    _showAspectAndStrategyFallbackSheet(applyChoice);
+  }
+
+  void _showAspectAndStrategyFallbackSheet(
+    ValueChanged<String> applyChoice,
+  ) {
+    showAppleModalSheet<void>(
+      context: context,
+      title: '画面与播放策略',
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          AppleGroupedSection(
+            children: [
+              for (final item in const [
+                ('fit:contain', '画面适应（默认）', BoxFit.contain),
+                ('fit:cover', '画面裁切填充', BoxFit.cover),
+                ('fit:fill', '画面铺满屏幕', BoxFit.fill),
+              ])
+                AppleGroupedTile(
+                  icon: CupertinoIcons.play_rectangle,
+                  iconBgColor: _fit == item.$3
+                      ? AppleColors.systemBlue
+                      : AppleColors.groupedTertiary,
+                  title: item.$2,
+                  trailing: _fit == item.$3
+                      ? const Icon(
+                          CupertinoIcons.checkmark_alt,
+                          color: AppleColors.systemBlue,
+                          size: 18,
+                        )
+                      : null,
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    applyChoice(item.$1);
+                  },
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          AppleGroupedSection(
+            children: [
+              for (final item in const [
+                ('kernel:exo', '均衡播放（默认）', 'exo'),
+                ('kernel:ijk', '兼容缓冲', 'ijk'),
+                ('kernel:mpv', '大容量缓冲', 'mpv'),
+              ])
+                AppleGroupedTile(
+                  icon: CupertinoIcons.slider_horizontal_3,
+                  iconBgColor: _playerKernel == item.$3
+                      ? AppleColors.systemBlue
+                      : AppleColors.groupedTertiary,
+                  title: item.$2,
+                  trailing: _playerKernel == item.$3
+                      ? const Icon(
+                          CupertinoIcons.checkmark_alt,
+                          color: AppleColors.systemBlue,
+                          size: 18,
+                        )
+                      : null,
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    applyChoice(item.$1);
+                  },
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAudioSubtitleQuickSheet() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final options = <AppleNativePickerOption<String>>[
+      const AppleNativePickerOption<String>(
+        value: 'audio',
+        title: '切换音轨',
+        symbol: 'speaker.wave.2.fill',
+      ),
+      if (!_isLiveStream)
+        const AppleNativePickerOption<String>(
+          value: 'subtitle',
+          title: '切换内嵌字幕',
+          symbol: 'captions.bubble.fill',
+        ),
+    ];
+    if (_canUseNativeIosSheet) {
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<String>(
+          context,
+          title: '音轨与字幕',
+          options: options,
+          fallback: () async {
+            _showSubtitleTracksSheet();
+            return null;
+          },
+        );
+        if (!mounted || picked == null) return;
+        if (picked == 'audio') {
+          _showAudioTracksSheet();
+        } else {
+          _showSubtitleTracksSheet();
+        }
+      }());
+      return;
+    }
+    showAppleModalSheet<void>(
+      context: context,
+      title: '音轨与字幕',
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          AppleGroupedSection(
+            children: [
+              AppleGroupedTile(
+                icon: CupertinoIcons.speaker_2_fill,
+                title: '切换音轨',
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _showAudioTracksSheet();
+                },
+              ),
+              if (!_isLiveStream)
+                AppleGroupedTile(
+                  icon: CupertinoIcons.captions_bubble_fill,
+                  title: '切换内嵌字幕',
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    _showSubtitleTracksSheet();
+                  },
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDoubleTapSettingsSheet() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final currentSides = _hudPrefs.data.doubleTapSides;
+    final options = <AppleNativePickerOption<String>>[
+      AppleNativePickerOption<String>(
+        value: 'seek_10s',
+        title: '左右侧双击快进/快退 10 秒（默认）',
+        subtitle: '中央双击播放/暂停，侧边支持连击累加',
+        symbol: 'goforward.10',
+        checked: currentSides == 'seek_10s',
+      ),
+      AppleNativePickerOption<String>(
+        value: 'seek_15s',
+        title: '左右侧双击快进/快退 15 秒',
+        symbol: 'goforward.15',
+        checked: currentSides == 'seek_15s',
+      ),
+      AppleNativePickerOption<String>(
+        value: 'seek_5s',
+        title: '左右侧双击快进/快退 5 秒',
+        symbol: 'goforward.5',
+        checked: currentSides == 'seek_5s',
+      ),
+      AppleNativePickerOption<String>(
+        value: 'play_pause',
+        title: '全屏任意区域双击播放/暂停',
+        subtitle: '恢复经典双击暂停行为',
+        symbol: 'playpause.fill',
+        checked: currentSides == 'play_pause',
+      ),
+    ];
+    if (_canUseNativeIosSheet) {
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<String>(
+          context,
+          title: '双击手势行为',
+          options: options,
+          fallback: () async {
+            _showDoubleTapFallbackSheet(options);
+            return null;
+          },
+        );
+        if (!mounted || picked == null) return;
+        await _hudPrefs.setDoubleTapSides(picked);
+        _showHud('已更新双击手势设置');
+      }());
+      return;
+    }
+    _showDoubleTapFallbackSheet(options);
+  }
+
+  void _showDoubleTapFallbackSheet(
+    List<AppleNativePickerOption<String>> options,
+  ) {
+    showAppleModalSheet<void>(
+      context: context,
+      title: '双击手势行为',
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          AppleGroupedSection(
+            children: [
+              for (final opt in options)
+                AppleGroupedTile(
+                  icon: CupertinoIcons.hand_draw_fill,
+                  iconBgColor: opt.checked
+                      ? AppleColors.systemBlue
+                      : AppleColors.groupedTertiary,
+                  title: opt.title,
+                  subtitle: opt.subtitle,
+                  trailing: opt.checked
+                      ? const Icon(
+                          CupertinoIcons.checkmark_alt,
+                          color: AppleColors.systemBlue,
+                          size: 18,
+                        )
+                      : null,
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    unawaited(_hudPrefs.setDoubleTapSides(opt.value));
+                    _showHud('已更新双击手势设置');
+                  },
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showIosMoreMenu() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final live = _isLiveStream;
+    final options = <AppleNativePickerOption<String>>[
+      AppleNativePickerOption<String>(
+        value: 'sleep_timer',
+        title: '定时关闭',
+        subtitle: _sleepTimer.shortStatusLabel,
+        symbol: 'moon.zzz.fill',
+        checked: _sleepTimer.isActive,
+        section: 0,
+        sectionTitle: '播放增强',
+      ),
+      if (_qualityChoices.length > 1)
+        AppleNativePickerOption<String>(
+          value: 'quality',
+          title: '切换画质 (${_qualityChoices.length})',
+          symbol: 'sparkles',
+          section: 0,
+        ),
+      AppleNativePickerOption<String>(
+        value: 'audio',
+        title: '切换音轨',
+        symbol: 'speaker.wave.2.fill',
+        section: 0,
+      ),
+      if (!live)
+        AppleNativePickerOption<String>(
+          value: 'subtitle',
+          title: '切换字幕',
+          symbol: 'captions.bubble.fill',
+          section: 0,
+        ),
+      if (!live) ...[
+        AppleNativePickerOption<String>(
+          value: 'skip_intro',
+          title: _skipIntroSec > 0 ? '跳过片头 (${_skipIntroSec}s)' : '设置跳过片头',
+          symbol: 'forward.fill',
+          checked: _skipIntroSec > 0,
+          section: 1,
+          sectionTitle: '跳过与连播',
+        ),
+        AppleNativePickerOption<String>(
+          value: 'skip_outro',
+          title: _skipOutroSec > 0 ? '跳过片尾 (${_skipOutroSec}s)' : '设置跳过片尾',
+          symbol: 'forward.end.alt.fill',
+          checked: _skipOutroSec > 0,
+          section: 1,
+        ),
+        AppleNativePickerOption<String>(
+          value: 'skip_countdown_toggle',
+          title: '跳过前 3 秒可取消倒计时',
+          subtitle: _hudPrefs.data.skipCountdown ? '已开启' : '静默立即跳过',
+          symbol: 'timer',
+          checked: _hudPrefs.data.skipCountdown,
+          section: 1,
+        ),
+        AppleNativePickerOption<String>(
+          value: 'auto_next',
+          title: '自动连播下一集',
+          subtitle: _autoNext ? '已开启' : '已关闭',
+          symbol: 'repeat',
+          checked: _autoNext,
+          section: 1,
+        ),
+        AppleNativePickerOption<String>(
+          value: 'repeat',
+          title: '循环模式：$_repeatLabel',
+          symbol: 'arrow.2.squarepath',
+          checked: _repeatMode != 'off',
+          section: 1,
+        ),
+      ],
+      AppleNativePickerOption<String>(
+        value: 'clock',
+        title: '播放页常显时间',
+        subtitle: _alwaysShowClock ? '已开启' : '已关闭',
+        symbol: 'clock.fill',
+        checked: _alwaysShowClock,
+        section: 2,
+        sectionTitle: '手势与显示',
+      ),
+      AppleNativePickerOption<String>(
+        value: 'slim_progress',
+        title: '隐藏主控栏时显示底部细进度条',
+        subtitle: _hudPrefs.data.slimProgress ? '已开启' : '已关闭',
+        symbol: 'minus',
+        checked: _hudPrefs.data.slimProgress,
+        section: 2,
+      ),
+      AppleNativePickerOption<String>(
+        value: 'double_tap',
+        title: '双击手势行为',
+        symbol: 'hand.tap.fill',
+        section: 2,
+      ),
+      AppleNativePickerOption<String>(
+        value: 'replay',
+        title: live ? '刷新直播流' : '从头重播本集',
+        symbol: 'arrow.clockwise',
+        section: 2,
+      ),
+    ];
+
+    void handleAction(String action) {
+      switch (action) {
+        case 'sleep_timer':
+          _showSleepTimerSheet();
+        case 'quality':
+          unawaited(_showQualityChoices());
+        case 'audio':
+          _showAudioTracksSheet();
+        case 'subtitle':
+          _showSubtitleTracksSheet();
+        case 'skip_intro':
+          _showSkipIntroSheet();
+        case 'skip_outro':
+          _showSkipOutroSheet();
+        case 'skip_countdown_toggle':
+          final next = !_hudPrefs.data.skipCountdown;
+          unawaited(_hudPrefs.setSkipCountdown(next));
+          _showHud(next ? '已开启跳过 3 秒倒计时' : '已切换为静默立即跳过');
+        case 'auto_next':
+          _toggleAutoNext();
+        case 'repeat':
+          _cycleRepeatMode();
+        case 'clock':
+          _toggleAlwaysShowClock();
+        case 'slim_progress':
+          final next = !_hudPrefs.data.slimProgress;
+          unawaited(_hudPrefs.setSlimProgress(next));
+          _showHud(next ? '已开启底部常驻细进度条' : '已关闭底部常驻细进度条');
+        case 'double_tap':
+          _showDoubleTapSettingsSheet();
+        case 'replay':
+          if (live) {
+            unawaited(_openCurrentEpisode());
+            _showHud('正在刷新直播流…');
+          } else {
+            _player.seek(Duration.zero);
+            _player.play();
+            _showHud('已从头开始播放');
+          }
+      }
+    }
+
+    if (_canUseNativeIosSheet) {
+      unawaited(() async {
+        final picked = await showAppleNativeOptionSheet<String>(
+          context,
+          title: '播放选项',
+          options: options,
+          fallback: () async {
+            _showIosMoreFallbackSheet(options, handleAction);
+            return null;
+          },
+        );
+        if (!mounted || picked == null) return;
+        handleAction(picked);
+      }());
+      return;
+    }
+    _showIosMoreFallbackSheet(options, handleAction);
+  }
+
+  void _showIosMoreFallbackSheet(
+    List<AppleNativePickerOption<String>> options,
+    ValueChanged<String> handleAction,
+  ) {
+    showAppleModalSheet<void>(
+      context: context,
+      title: '播放选项',
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          AppleGroupedSection(
+            children: [
+              for (final opt in options)
+                AppleGroupedTile(
+                  icon: CupertinoIcons.slider_horizontal_3,
+                  iconBgColor: opt.checked
+                      ? AppleColors.systemBlue
+                      : AppleColors.groupedTertiary,
+                  title: opt.title,
+                  subtitle: opt.subtitle,
+                  trailing: opt.checked
+                      ? const Icon(
+                          CupertinoIcons.checkmark_alt,
+                          color: AppleColors.systemBlue,
+                          size: 18,
+                        )
+                      : null,
+                  onTap: () {
+                    Navigator.of(ctx).pop();
+                    handleAction(opt.value);
+                  },
+                ),
+            ],
           ),
         ],
       ),

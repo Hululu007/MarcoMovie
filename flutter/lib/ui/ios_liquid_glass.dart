@@ -20,8 +20,11 @@ class IosLiquidGlassBridge {
   );
 
   static final ValueNotifier<bool> available = ValueNotifier<bool>(false);
+  static final ValueNotifier<bool> reduceTransparencyNotifier =
+      ValueNotifier<bool>(false);
   static bool _initialized = false;
   static bool? _testOverride;
+  static bool? _testReduceTransparencyOverride;
   static bool _incomingHandlerInstalled = false;
   static int _pinSessionCounter = 0;
   static final Map<String, Future<Map<String, dynamic>> Function(String pin)>
@@ -34,10 +37,26 @@ class IosLiquidGlassBridge {
     return available.value;
   }
 
+  /// Mirrors iOS `UIAccessibility.isReduceTransparencyEnabled` (kept fresh on
+  /// accessibility change & foreground return). Always `false` on non-iOS
+  /// unless overridden in tests.
+  static bool get reduceTransparency {
+    if (_testReduceTransparencyOverride != null) {
+      return _testReduceTransparencyOverride!;
+    }
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return false;
+    return reduceTransparencyNotifier.value;
+  }
+
   static void _ensureIncomingHandler() {
     if (_incomingHandlerInstalled) return;
     _incomingHandlerInstalled = true;
     channel.setMethodCallHandler((call) async {
+      if (call.method == 'reduceTransparencyChanged' &&
+          call.arguments is bool) {
+        reduceTransparencyNotifier.value = call.arguments as bool;
+        return null;
+      }
       if (call.method == 'privacyPinCallback' && call.arguments is Map) {
         final args = Map<String, dynamic>.from(call.arguments as Map);
         final sessionId = args['sessionId'] as String?;
@@ -78,6 +97,7 @@ class IosLiquidGlassBridge {
     _initialized = true;
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
       available.value = false;
+      reduceTransparencyNotifier.value = false;
       return false;
     }
     try {
@@ -86,13 +106,36 @@ class IosLiquidGlassBridge {
       );
       final supported = result?['available'] == true;
       available.value = supported;
+      reduceTransparencyNotifier.value = result?['reduceTransparency'] == true;
       return supported;
     } on MissingPluginException {
       available.value = false;
+      reduceTransparencyNotifier.value = false;
       return false;
     } catch (_) {
       available.value = false;
+      reduceTransparencyNotifier.value = false;
       return false;
+    }
+  }
+
+  /// Refreshes `UIAccessibility.isReduceTransparencyEnabled` from native iOS.
+  static Future<bool> refreshReduceTransparency() async {
+    if (_testReduceTransparencyOverride != null) {
+      return _testReduceTransparencyOverride!;
+    }
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return false;
+    try {
+      final result = await channel.invokeMapMethod<String, dynamic>(
+        'capabilities',
+      );
+      final reduced = result?['reduceTransparency'] == true;
+      reduceTransparencyNotifier.value = reduced;
+      return reduced;
+    } on MissingPluginException {
+      return reduceTransparencyNotifier.value;
+    } catch (_) {
+      return reduceTransparencyNotifier.value;
     }
   }
 
@@ -102,8 +145,16 @@ class IosLiquidGlassBridge {
     available.value = value ?? false;
     if (value == null) {
       _initialized = false;
+      _testReduceTransparencyOverride = null;
+      reduceTransparencyNotifier.value = false;
       _pinCallbacks.clear();
     }
+  }
+
+  @visibleForTesting
+  static void setReduceTransparencyForTest(bool? value) {
+    _testReduceTransparencyOverride = value;
+    reduceTransparencyNotifier.value = value ?? false;
   }
 }
 
@@ -119,6 +170,38 @@ class IosNativeRouteGate extends StatefulWidget {
 
   const IosNativeRouteGate({super.key, required this.builder});
 
+  static final ValueNotifier<int> _placeholderDepth = ValueNotifier<int>(0);
+
+  /// `true` while [runWithPlaceholders] is forcing all mounted gates to swap
+  /// native `UiKitView`s for exact-size Flutter placeholders (e.g. before
+  /// capturing a `RepaintBoundary.toImage()` snapshot).
+  static bool get forcePlaceholders => _placeholderDepth.value > 0;
+
+  /// Temporarily swaps every live [IosNativeRouteGate] `UiKitView` to its
+  /// exact-geometry Flutter placeholder for the duration of [action], waiting
+  /// one rendered frame by default so `RepaintBoundary.toImage()` never
+  /// captures black platform-view holes. Guaranteed to restore native views
+  /// via `try/finally` even when [action] throws or is cancelled.
+  static Future<T> runWithPlaceholders<T>(
+    Future<T> Function() action, {
+    bool waitForFrame = true,
+  }) async {
+    _placeholderDepth.value = _placeholderDepth.value + 1;
+    try {
+      if (waitForFrame) {
+        final completer = Completer<void>();
+        WidgetsBinding.instance.scheduleFrame();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!completer.isCompleted) completer.complete();
+        });
+        await completer.future;
+      }
+      return await action();
+    } finally {
+      _placeholderDepth.value = math.max(0, _placeholderDepth.value - 1);
+    }
+  }
+
   @override
   State<IosNativeRouteGate> createState() => _IosNativeRouteGateState();
 }
@@ -131,6 +214,7 @@ class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
   void initState() {
     super.initState();
     IosLiquidGlassBridge.available.addListener(_recheck);
+    IosNativeRouteGate._placeholderDepth.addListener(_recheck);
   }
 
   @override
@@ -142,6 +226,7 @@ class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
 
   bool _computeReady() {
     if (!IosLiquidGlassBridge.isAvailable) return false;
+    if (IosNativeRouteGate.forcePlaceholders) return false;
     final route = _route;
     if (route == null) return true;
     return route.isCurrent;
@@ -158,6 +243,7 @@ class _IosNativeRouteGateState extends State<IosNativeRouteGate> {
   @override
   void dispose() {
     IosLiquidGlassBridge.available.removeListener(_recheck);
+    IosNativeRouteGate._placeholderDepth.removeListener(_recheck);
     super.dispose();
   }
 
@@ -1619,6 +1705,110 @@ Future<T?> showAppleNativeActionSheet<T>(
             isDestructiveAction: opt.isDestructive,
             onPressed: () => Navigator.of(sheetCtx).pop(opt.value),
             child: Text(opt.title),
+          ),
+      ],
+      cancelButton: cancelLabel.isEmpty
+          ? null
+          : CupertinoActionSheetAction(
+              onPressed: () => Navigator.of(sheetCtx).pop(),
+              child: Text(cancelLabel),
+            ),
+    ),
+  );
+}
+
+class AppleNativePickerOption<T> {
+  final T value;
+  final String title;
+  final String? subtitle;
+  final String? symbol;
+  final bool checked;
+  final bool destructive;
+  final int section;
+  final String? sectionTitle;
+
+  const AppleNativePickerOption({
+    required this.value,
+    required this.title,
+    this.subtitle,
+    this.symbol,
+    this.checked = false,
+    this.destructive = false,
+    this.section = 0,
+    this.sectionTitle,
+  });
+}
+
+/// Presents a native iOS 26 `UISheetPresentationController` Liquid Glass
+/// half-sheet option picker (with SF Symbols, subtitles, sections, and native
+/// checkmarks). When running on iOS 15–18, non-iOS platforms, or when system
+/// `reduceTransparency` is enabled, delegates to [fallback] if provided or
+/// falls back cleanly to `CupertinoActionSheet`.
+Future<T?> showAppleNativeOptionSheet<T>(
+  BuildContext context, {
+  required String title,
+  String? subtitle,
+  required List<AppleNativePickerOption<T>> options,
+  String cancelLabel = '关闭',
+  Future<T?> Function()? fallback,
+}) async {
+  if (IosLiquidGlassBridge.isAvailable &&
+      !IosLiquidGlassBridge.reduceTransparency) {
+    try {
+      final pickedId = await IosLiquidGlassBridge.channel.invokeMethod<String>(
+        'showOptionSheet',
+        <String, dynamic>{
+          'title': title,
+          if (subtitle != null && subtitle.isNotEmpty) 'subtitle': subtitle,
+          'cancelTitle': cancelLabel,
+          'items': [
+            for (var i = 0; i < options.length; i++)
+              <String, dynamic>{
+                'id': '$i',
+                'title': options[i].title,
+                if (options[i].subtitle != null &&
+                    options[i].subtitle!.isNotEmpty)
+                  'subtitle': options[i].subtitle,
+                if (options[i].symbol != null && options[i].symbol!.isNotEmpty)
+                  'symbol': options[i].symbol,
+                'checked': options[i].checked,
+                'destructive': options[i].destructive,
+                'section': options[i].section,
+                if (options[i].sectionTitle != null &&
+                    options[i].sectionTitle!.isNotEmpty)
+                  'sectionTitle': options[i].sectionTitle,
+              },
+          ],
+        },
+      );
+      if (pickedId == null) return null;
+      final idx = int.tryParse(pickedId);
+      if (idx != null && idx >= 0 && idx < options.length) {
+        return options[idx].value;
+      }
+      return null;
+    } on MissingPluginException {
+      // Fall through to Flutter fallback below.
+    } catch (_) {
+      // Fall through to Flutter fallback below.
+    }
+  }
+  if (fallback != null) {
+    return fallback();
+  }
+  if (!context.mounted) return null;
+  return showCupertinoModalPopup<T>(
+    context: context,
+    builder: (sheetCtx) => CupertinoActionSheet(
+      title: Text(title),
+      message: subtitle == null || subtitle.isEmpty ? null : Text(subtitle),
+      actions: [
+        for (final opt in options)
+          CupertinoActionSheetAction(
+            isDefaultAction: opt.checked,
+            isDestructiveAction: opt.destructive,
+            onPressed: () => Navigator.of(sheetCtx).pop(opt.value),
+            child: Text(opt.checked ? '✓ ${opt.title}' : opt.title),
           ),
       ],
       cancelButton: cancelLabel.isEmpty

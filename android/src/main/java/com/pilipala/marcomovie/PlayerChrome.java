@@ -2,8 +2,15 @@ package com.pilipala.marcomovie;
 
 import android.graphics.*;
 import android.graphics.drawable.GradientDrawable;
+import android.os.SystemClock;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.*;
 import android.widget.*;
+import com.pilipala.marcomovie.hud.FastForwardScrubCapsule;
+import com.pilipala.marcomovie.hud.PlayerHudPrefs;
+import com.pilipala.marcomovie.hud.SlimProgressBar;
+import com.pilipala.marcomovie.hud.StartSpecBanner;
 
 /** Three independent floating regions with one visibility/focus owner. */
 final class PlayerChrome {
@@ -14,10 +21,19 @@ final class PlayerChrome {
     final View topShade, bottomShade;
     final LinearLayout dock, progress, heading;
     final LinearLayout actionHost, badgeRow;
+    final LinearLayout mobileSpecBadgeRow;
     final LinearLayout loadingPill;
     final LinearLayout centerRow;
     final LinearLayout topActions;
     final LinearLayout tvTopRightHud;
+    final StartSpecBanner startSpecBanner;
+    final SlimProgressBar slimProgressBar;
+    final FastForwardScrubCapsule tvScrubCapsule;
+
+    /** Reserved empty mount slots for Wave 2 (FirstPlayGestureHint & BrandLogoLoader). */
+    final FrameLayout firstPlayGestureHintSlot;
+
+    final FrameLayout loadingIndicatorSlot;
     final TextView hudProgressView;
     final View hudDivider;
     final Button backBtn;
@@ -277,11 +293,18 @@ final class PlayerChrome {
         heading.setTag("player-heading");
         if (!a.isTvDevice()) {
             topActions = a.row();
+            topActions.setGravity(Gravity.CENTER_VERTICAL);
             topActions.setPadding(0, 0, 0, a.dp(8));
             backBtn = a.navButton("‹ 返回", "player-back", a::leavePlayback);
             backBtn.setTextColor(MainActivity.WHITE);
             backBtn.setBackground(chromeSurface(0xcc22222a, 17, 0x33ffffff));
             topActions.addView(backBtn, new LinearLayout.LayoutParams(-2, a.dp(34)));
+            mobileSpecBadgeRow = a.row();
+            mobileSpecBadgeRow.setTag("player-inline-spec-badges");
+            mobileSpecBadgeRow.setGravity(Gravity.CENTER_VERTICAL);
+            LinearLayout.LayoutParams specRowLp = new LinearLayout.LayoutParams(-2, -2);
+            specRowLp.leftMargin = a.dp(10);
+            topActions.addView(mobileSpecBadgeRow, specRowLp);
             View spacer = new View(a);
             topActions.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1));
             // Orientation toggle lives only on the progress row ("全屏横屏 / 退出全屏").
@@ -289,6 +312,7 @@ final class PlayerChrome {
         } else {
             topActions = null;
             backBtn = null;
+            mobileSpecBadgeRow = null;
         }
         LinearLayout titleRow = a.row();
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -624,8 +648,13 @@ final class PlayerChrome {
         loadingPill.setPadding(a.dp(24), a.dp(16), a.dp(24), a.dp(16));
         loadingPill.setBackground(chromeSurface(0xe01c1c22, 24, 0x2affffff));
         UiCompat.setElevation(loadingPill, a.dp(10));
+        loadingIndicatorSlot = new FrameLayout(a);
+        loadingIndicatorSlot.setTag("player-loading-indicator-slot");
+        loadingIndicatorSlot.addView(
+                new PlaybackLoading.Ring(a),
+                new FrameLayout.LayoutParams(a.dp(26), a.dp(26), Gravity.CENTER));
         loadingPill.addView(
-                new PlaybackLoading.Ring(a), new LinearLayout.LayoutParams(a.dp(26), a.dp(26)));
+                loadingIndicatorSlot, new LinearLayout.LayoutParams(a.dp(26), a.dp(26)));
         String epTitle =
                 episode != null && episode.name != null && !episode.name.isEmpty()
                         ? " " + episode.name
@@ -765,6 +794,43 @@ final class PlayerChrome {
 
         a.playerOverlay = overlay;
         a.controlsVisible = true;
+
+        boolean reducedTransparency =
+                a.prefs != null && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        startSpecBanner = new StartSpecBanner(a, a.isTvDevice());
+        startSpecBanner.setAccessibilityFlags(a.reduced, reducedTransparency);
+        FrameLayout.LayoutParams specLp =
+                new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
+        specLp.leftMargin = a.dp(16);
+        specLp.topMargin = a.dp(16);
+        a.playbackLayer.addView(startSpecBanner, specLp);
+
+        slimProgressBar = new SlimProgressBar(a, a.isTvDevice());
+        slimProgressBar.setReducedMotion(a.reduced);
+        a.playbackLayer.addView(
+                slimProgressBar,
+                new FrameLayout.LayoutParams(
+                        -1, SlimProgressBar.preferredHeightPx(a, a.isTvDevice()), Gravity.BOTTOM));
+
+        if (a.isTvDevice()) {
+            tvScrubCapsule = new FastForwardScrubCapsule(a);
+            tvScrubCapsule.setReducedTransparency(reducedTransparency);
+            FrameLayout.LayoutParams scrubLp =
+                    new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            scrubLp.topMargin = vp(a, 54);
+            a.playbackLayer.addView(tvScrubCapsule, scrubLp);
+            bindTvSeekHintObserver();
+        } else {
+            tvScrubCapsule = null;
+        }
+
+        firstPlayGestureHintSlot = new FrameLayout(a);
+        firstPlayGestureHintSlot.setTag("player-first-play-gesture-hint-slot");
+        firstPlayGestureHintSlot.setFocusable(false);
+        firstPlayGestureHintSlot.setClickable(false);
+        firstPlayGestureHintSlot.setVisibility(View.GONE);
+        a.playbackLayer.addView(firstPlayGestureHintSlot, new FrameLayout.LayoutParams(-1, -1));
+
         dock.addOnLayoutChangeListener(
                 (view, l, t, r, b, ol, ot, or, ob) -> {
                     if (b - t != ob - ot) scheduleLayout();
@@ -895,6 +961,13 @@ final class PlayerChrome {
                 uLp.leftMargin = nextLeft;
                 unlockPill.setLayoutParams(uLp);
             }
+        }
+        if (startSpecBanner != null) {
+            int headingBottom = heading != null ? safe.top + heading.getBottom() : safe.top;
+            startSpecBanner.updateSafeLayout(safe.left, safe.top, headingBottom);
+        }
+        if (a.touchPlayerGesture != null) {
+            a.touchPlayerGesture.updateSafeTop(safe.top);
         }
         int width = safe.width(), height = safe.height();
         boolean mobileLandscape = !a.isTvDevice() && !portrait;
@@ -1087,11 +1160,100 @@ final class PlayerChrome {
         view.setLayoutParams(p);
     }
 
+    private void bindTvSeekHintObserver() {
+        if (tvScrubCapsule == null || seekHint == null) return;
+        seekHint.addTextChangedListener(
+                new TextWatcher() {
+                    @Override
+                    public void beforeTextChanged(
+                            CharSequence s, int start, int count, int after) {}
+
+                    @Override
+                    public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+                    @Override
+                    public void afterTextChanged(Editable s) {
+                        syncTvScrubCapsule();
+                    }
+                });
+    }
+
+    void syncTvScrubCapsule() {
+        if (tvScrubCapsule == null) return;
+        if (a.seekGesture.active && a.seekGesture.duration > 0) {
+            long now = SystemClock.uptimeMillis();
+            int curPos =
+                    a.player != null && a.prepared
+                            ? a.player.getCurrentPosition()
+                            : a.seekGesture.initialTarget;
+            tvScrubCapsule.updatePreview(
+                    a.seekGesture.target,
+                    a.seekGesture.duration,
+                    a.seekGesture.target - curPos,
+                    a.seekGesture.direction,
+                    a.seekGesture.speed(now),
+                    a.seekGesture.accelerated(now));
+        } else {
+            tvScrubCapsule.hide();
+        }
+    }
+
+    private void renderMobileInlineSpecBadges(java.util.List<StartSpecBanner.Badge> badges) {
+        if (mobileSpecBadgeRow == null) return;
+        mobileSpecBadgeRow.removeAllViews();
+        if (badges == null || badges.isEmpty()) {
+            mobileSpecBadgeRow.setVisibility(View.GONE);
+            return;
+        }
+        boolean solid = a.prefs != null && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        int limit = Math.min(3, badges.size());
+        for (int i = 0; i < limit; i++) {
+            StartSpecBanner.Badge b = badges.get(i);
+            TextView pill = a.text(b.label, 10.5f, b.textArgb);
+            pill.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+            pill.setSingleLine(true);
+            pill.setIncludeFontPadding(false);
+            pill.setGravity(Gravity.CENTER);
+            pill.setPadding(a.dp(6), a.dp(2), a.dp(6), a.dp(2));
+            GradientDrawable bg = a.bg(solid ? b.solidFillArgb : b.fillArgb, 5);
+            bg.setStroke(Math.max(1, a.dp(1)), b.strokeArgb);
+            pill.setBackground(bg);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+            if (i > 0) lp.leftMargin = a.dp(4);
+            mobileSpecBadgeRow.addView(pill, lp);
+        }
+        mobileSpecBadgeRow.setVisibility(View.VISIBLE);
+    }
+
     void resolution(int width, int height) {
         if (a.player != null && a.prepared) {
             resolution.setText(a.player.videoResolution());
         } else {
             resolution.setText(width > 0 && height > 0 ? width + " × " + height : "分辨率未知");
+        }
+        if (width > 0 && height > 0 && startSpecBanner != null) {
+            java.util.List<String> trackBadges =
+                    a.player != null && a.prepared
+                            ? a.player.mediaBadges()
+                            : java.util.Collections.emptyList();
+            String lineName =
+                    a.activeLine != null && a.activeLine.name != null ? a.activeLine.name : "";
+            String epName =
+                    a.activeEpisode != null && a.activeEpisode.name != null
+                            ? a.activeEpisode.name
+                            : "";
+            boolean specEnabled = PlayerHudPrefs.isStartSpecHudEnabled(a);
+            startSpecBanner.scheduleIfReady(
+                    trackBadges,
+                    width,
+                    height,
+                    lineName,
+                    epName,
+                    specEnabled,
+                    isLiveStream,
+                    a.miniMode,
+                    a.controlsVisible);
+            renderMobileInlineSpecBadges(startSpecBanner.getLatestBadges());
         }
     }
 
@@ -1101,6 +1263,14 @@ final class PlayerChrome {
     }
 
     void switchEpisode(Cms.Episode episode, Cms.Line line) {
+        if (startSpecBanner != null) startSpecBanner.resetEpisode();
+        if (mobileSpecBadgeRow != null) {
+            mobileSpecBadgeRow.removeAllViews();
+            mobileSpecBadgeRow.setVisibility(View.GONE);
+        }
+        if (a.touchPlayerGesture != null) {
+            a.touchPlayerGesture.onEpisodeSwitch();
+        }
         String lineName = line == null || line.name == null ? "" : line.name;
         String epName = episode == null || episode.name == null ? "" : episode.name;
         episodeLabel.setText(epName + (lineName.isEmpty() ? "" : "  ·  " + lineName));
@@ -1116,6 +1286,9 @@ final class PlayerChrome {
     }
 
     void setProgressOnlyMode(boolean progressOnly) {
+        if (progressOnly && !a.isTvDevice() && !PlayerHudPrefs.isSlimProgressEnabled(a)) {
+            progressOnly = false;
+        }
         if (this.progressOnlyMode == progressOnly) return;
         this.progressOnlyMode = progressOnly;
         int otherVis = progressOnly ? View.INVISIBLE : View.VISIBLE;
@@ -1136,6 +1309,10 @@ final class PlayerChrome {
     }
 
     void updatePlaybackHud(int displayPosMs, int durationMs, boolean live) {
+        if (slimProgressBar != null) {
+            slimProgressBar.setProgress(displayPosMs, durationMs);
+            syncSlimProgressVisibility(durationMs, live);
+        }
         if (tvTopRightHud == null || hudProgressView == null) return;
         String elapsed;
         String total;
@@ -1151,6 +1328,19 @@ final class PlayerChrome {
             lastHudProgressKey = key;
             hudProgressView.setText(formatTvHudProgress(elapsed, total));
         }
+    }
+
+    private void syncSlimProgressVisibility(int durationMs, boolean live) {
+        if (slimProgressBar == null) return;
+        slimProgressBar.setReducedMotion(a.reduced);
+        boolean showSlim =
+                !a.controlsVisible
+                        && !a.miniMode
+                        && !live
+                        && a.prepared
+                        && durationMs > 0
+                        && PlayerHudPrefs.isSlimProgressEnabled(a);
+        slimProgressBar.setActiveVisible(showSlim);
     }
 
     void syncClockViews() {
@@ -1201,6 +1391,12 @@ final class PlayerChrome {
     void update() {
         if (a.prepared) loading = false;
         syncClockViews();
+        if (startSpecBanner != null) {
+            startSpecBanner.onControlsVisibilityChanged(a.controlsVisible);
+        }
+        int dur = a.player != null && a.prepared ? a.player.getDuration() : 0;
+        syncSlimProgressVisibility(dur, isLiveStream);
+        syncTvScrubCapsule();
         boolean showSpinner = loading && !a.prepared && a.playbackLoading == null && !a.miniMode;
         if (loadingPill.getVisibility() != (showSpinner ? View.VISIBLE : View.GONE)) {
             loadingPill.setVisibility(showSpinner ? View.VISIBLE : View.GONE);

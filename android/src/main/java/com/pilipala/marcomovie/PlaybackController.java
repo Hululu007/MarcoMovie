@@ -1677,7 +1677,7 @@ final class PlaybackController {
         boolean changed = a.controlsVisible != visible;
         a.controlsVisible = visible;
         if (a.playerChrome != null) {
-            a.playerChrome.setProgressOnlyMode(visible && progressOnly && a.isTvDevice());
+            a.playerChrome.setProgressOnlyMode(visible && progressOnly);
         }
         if (a.playbackControls != null) a.playbackControls.visible(visible);
         if (a.playerChrome != null) a.playerChrome.update();

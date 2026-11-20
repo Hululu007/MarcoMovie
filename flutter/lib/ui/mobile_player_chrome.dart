@@ -14,6 +14,9 @@ class MobilePlayerChrome {
   bool? _lastImmersive;
   Future<void>? _closing;
 
+  /// Latest immersive bar visibility applied by this player route.
+  bool get isImmersive => _lastImmersive ?? false;
+
   Future<void> _notifyIosImmersive(bool immersive) async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return;
     try {
