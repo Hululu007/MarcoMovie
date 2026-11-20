@@ -18,23 +18,34 @@ class DanmuRuleValidationResult {
 class _BranchStats {
   final int unboundedQuants;
   final int varQuants;
+  final int altGroups;
   final int choices;
+  final int maxExpandedLen;
+  final int work;
 
-  const _BranchStats(this.unboundedQuants, this.varQuants, this.choices);
+  const _BranchStats(
+    this.unboundedQuants,
+    this.varQuants,
+    this.altGroups,
+    this.choices,
+    this.maxExpandedLen,
+    this.work,
+  );
 }
 
 class _QuantStats {
-  static const _QuantStats none = _QuantStats(0, 0, 1);
+  static const _QuantStats none = _QuantStats(0, 0, 1, 1);
   final int unbounded;
   final int varQuant;
   final int choices;
+  final int maxLen;
 
-  const _QuantStats(this.unbounded, this.varQuant, this.choices);
+  const _QuantStats(this.unbounded, this.varQuant, this.choices, this.maxLen);
 }
 
 class _SafeRegexValidator {
   static const int _unboundedChoiceCost = 181;
-  static const int _choiceCap = DanmuBlockFilter.maxTotalChoices + 1;
+  static const int _workCap = DanmuBlockFilter.maxTotalWork + 1;
 
   final String expr;
   final int len;
@@ -46,6 +57,11 @@ class _SafeRegexValidator {
   _SafeRegexValidator(this.expr) : len = expr.length;
 
   DanmuRuleValidationResult validate() {
+    for (var i = 0; i < len; i++) {
+      if (_isSurrogateCodeUnit(expr.codeUnitAt(i))) {
+        return DanmuRuleValidationResult.fail('正则表达式不支持代理项或扩展平面字符');
+      }
+    }
     final root = _parseAlternation(isTopLevel: true);
     if (_error != null) {
       return DanmuRuleValidationResult.fail(_error!);
@@ -56,6 +72,9 @@ class _SafeRegexValidator {
     if (root == null || root.choices > DanmuBlockFilter.maxTotalChoices) {
       return DanmuRuleValidationResult.fail('正则表达式总回溯分支复杂度过高');
     }
+    if (root.work > DanmuBlockFilter.maxTotalWork) {
+      return DanmuRuleValidationResult.fail('正则表达式总回溯工作量超过安全上限');
+    }
     return DanmuRuleValidationResult.ok;
   }
 
@@ -63,14 +82,18 @@ class _SafeRegexValidator {
     _error ??= reason;
   }
 
+  static bool _isSurrogateCodeUnit(int codeUnit) {
+    return codeUnit >= 0xD800 && codeUnit <= 0xDFFF;
+  }
+
   static int _satAdd(int a, int b) {
     final s = a + b;
-    return s >= _choiceCap ? _choiceCap : s;
+    return s >= _workCap ? _workCap : s;
   }
 
   static int _satMul(int a, int b) {
     final p = a * b;
-    return p >= _choiceCap ? _choiceCap : p;
+    return p >= _workCap ? _workCap : p;
   }
 
   static bool _isQuantStart(int ch) {
@@ -95,42 +118,84 @@ class _SafeRegexValidator {
   _BranchStats? _parseAlternation({required bool isTopLevel}) {
     final first = _parseBranch();
     if (_error != null || first == null) return null;
-    if (isTopLevel && first.choices > DanmuBlockFilter.maxBranchChoices) {
-      _fail('正则表达式回溯复杂度过高');
-      return null;
-    }
     var maxUnbounded = first.unboundedQuants;
     var maxVar = first.varQuants;
+    var maxAltGroups = first.altGroups;
     var sumChoices = first.choices;
+    var maxExpandedLen = first.maxExpandedLen;
+    var sumWork = first.work;
+    var sumBoundedWork = first.unboundedQuants == 0 ? first.work : 0;
+    var branchCount = 1;
+    if (isTopLevel) {
+      if (!_checkTopLevelTotals(sumChoices, sumBoundedWork, sumWork)) {
+        return null;
+      }
+    }
 
     while (_pos < len && expr.codeUnitAt(_pos) == 0x7C) {
       // '|'
       _pos++;
       final next = _parseBranch();
       if (_error != null || next == null) return null;
-      if (isTopLevel && next.choices > DanmuBlockFilter.maxBranchChoices) {
-        _fail('正则表达式回溯复杂度过高');
-        return null;
-      }
+      branchCount++;
       if (next.unboundedQuants > maxUnbounded) {
         maxUnbounded = next.unboundedQuants;
       }
       if (next.varQuants > maxVar) {
         maxVar = next.varQuants;
       }
+      if (next.altGroups > maxAltGroups) {
+        maxAltGroups = next.altGroups;
+      }
+      if (next.maxExpandedLen > maxExpandedLen) {
+        maxExpandedLen = next.maxExpandedLen;
+      }
       sumChoices = _satAdd(sumChoices, next.choices);
-      if (isTopLevel && sumChoices > DanmuBlockFilter.maxTotalChoices) {
-        _fail('正则表达式总回溯分支复杂度过高');
-        return null;
+      sumWork = _satAdd(sumWork, next.work);
+      if (next.unboundedQuants == 0) {
+        sumBoundedWork = _satAdd(sumBoundedWork, next.work);
+      }
+      if (isTopLevel) {
+        if (!_checkTopLevelTotals(sumChoices, sumBoundedWork, sumWork)) {
+          return null;
+        }
       }
     }
-    return _BranchStats(maxUnbounded, maxVar, sumChoices);
+    final reportedAltGroups =
+        (!isTopLevel && branchCount > 1) ? maxAltGroups + 1 : maxAltGroups;
+    return _BranchStats(
+      maxUnbounded,
+      maxVar,
+      reportedAltGroups,
+      sumChoices,
+      maxExpandedLen,
+      sumWork,
+    );
+  }
+
+  bool _checkTopLevelTotals(int sumChoices, int sumBoundedWork, int sumWork) {
+    if (sumChoices > DanmuBlockFilter.maxTotalChoices) {
+      _fail('正则表达式总回溯分支复杂度过高');
+      return false;
+    }
+    if (sumBoundedWork > DanmuBlockFilter.maxTotalBoundedWork) {
+      _fail('正则表达式总回溯工作量超过安全上限');
+      return false;
+    }
+    if (sumWork > DanmuBlockFilter.maxTotalWork) {
+      _fail('正则表达式总回溯工作量超过安全上限');
+      return false;
+    }
+    return true;
   }
 
   _BranchStats? _parseBranch() {
     var unbounded = 0;
     var varQuants = 0;
+    var altGroups = 0;
     var choices = 1;
+    var maxExpandedLen = 0;
+    var work = 0;
     var atomCount = 0;
 
     while (_pos < len) {
@@ -185,10 +250,13 @@ class _SafeRegexValidator {
           _fail('禁止闭合括号后紧跟量词以防回溯风险');
           return null;
         }
+        work = _satAdd(work, _satMul(choices, inner.work));
         unbounded += inner.unboundedQuants;
         varQuants += inner.varQuants;
+        altGroups += inner.altGroups;
         choices = _satMul(choices, inner.choices);
-        if (!_checkBranchBudget(unbounded, varQuants, choices)) {
+        maxExpandedLen = _satAdd(maxExpandedLen, inner.maxExpandedLen);
+        if (!_checkBranchBudget(unbounded, varQuants, altGroups, choices, work)) {
           return null;
         }
         continue;
@@ -239,10 +307,18 @@ class _SafeRegexValidator {
 
       final q = _parseQuantifier(isDot: isDot);
       if (_error != null || q == null) return null;
+      if (q.unbounded > 0) {
+        work = _satAdd(work, _satMul(choices, _unboundedChoiceCost));
+      } else if (q.varQuant > 0) {
+        work = _satAdd(work, _satMul(choices, _satMul(q.choices, q.maxLen)));
+      } else {
+        work = _satAdd(work, _satMul(choices, q.maxLen));
+      }
       unbounded += q.unbounded;
       varQuants += q.varQuant;
       choices = _satMul(choices, q.choices);
-      if (!_checkBranchBudget(unbounded, varQuants, choices)) {
+      maxExpandedLen = _satAdd(maxExpandedLen, q.maxLen);
+      if (!_checkBranchBudget(unbounded, varQuants, altGroups, choices, work)) {
         return null;
       }
     }
@@ -251,10 +327,23 @@ class _SafeRegexValidator {
       _fail('正则表达式禁止空分支或空分组');
       return null;
     }
-    return _BranchStats(unbounded, varQuants, choices);
+    return _BranchStats(
+      unbounded,
+      varQuants,
+      altGroups,
+      choices,
+      maxExpandedLen,
+      work,
+    );
   }
 
-  bool _checkBranchBudget(int unbounded, int varQuants, int choices) {
+  bool _checkBranchBudget(
+    int unbounded,
+    int varQuants,
+    int altGroups,
+    int choices,
+    int work,
+  ) {
     if (unbounded > DanmuBlockFilter.maxUnboundedPerBranch) {
       _fail('禁止同分支内组合多个无界量词以防回溯风险');
       return false;
@@ -263,11 +352,22 @@ class _SafeRegexValidator {
       _fail('禁止同分支内组合过多可变长量词以防回溯风险');
       return false;
     }
-    final limit = unbounded == 0
+    if (altGroups > DanmuBlockFilter.maxAltGroupsPerBranch) {
+      _fail('禁止同分支内串联过多交替分组以防回溯风险');
+      return false;
+    }
+    final choiceLimit = unbounded == 0
         ? DanmuBlockFilter.maxBoundedBranchChoices
         : DanmuBlockFilter.maxBranchChoices;
-    if (choices > limit) {
+    if (choices > choiceLimit) {
       _fail('正则表达式回溯复杂度过高');
+      return false;
+    }
+    final workLimit = unbounded == 0
+        ? DanmuBlockFilter.maxBoundedBranchWork
+        : DanmuBlockFilter.maxBranchWork;
+    if (work > workLimit) {
+      _fail('正则表达式回溯工作量超过安全上限');
       return false;
     }
     return true;
@@ -293,7 +393,7 @@ class _SafeRegexValidator {
         _fail('禁止堆叠或占有型量词');
         return null;
       }
-      return const _QuantStats(1, 1, _unboundedChoiceCost);
+      return const _QuantStats(1, 1, _unboundedChoiceCost, 1);
     }
     if (q == 0x3F) {
       // '?'
@@ -302,7 +402,7 @@ class _SafeRegexValidator {
         _fail('禁止堆叠或占有型量词');
         return null;
       }
-      return const _QuantStats(0, 1, 2);
+      return const _QuantStats(0, 1, 2, 1);
     }
     if (q == 0x7B) {
       // '{'
@@ -325,7 +425,7 @@ class _SafeRegexValidator {
           _fail('禁止堆叠或占有型量词');
           return null;
         }
-        return _QuantStats.none;
+        return _QuantStats(0, 0, 1, minVal);
       }
       if (sep == 0x2C) {
         // ','
@@ -346,7 +446,12 @@ class _SafeRegexValidator {
             _fail('禁止堆叠或占有型量词');
             return null;
           }
-          return const _QuantStats(1, 1, _unboundedChoiceCost);
+          return _QuantStats(
+            1,
+            1,
+            _unboundedChoiceCost,
+            minVal > 1 ? minVal : 1,
+          );
         }
         final maxVal = _parseBoundedInt();
         if (_error != null) return null;
@@ -368,7 +473,7 @@ class _SafeRegexValidator {
             _fail('禁止堆叠或占有型量词');
             return null;
           }
-          return _QuantStats.none;
+          return _QuantStats(0, 0, 1, maxVal);
         }
         if (_pos < len && expr.codeUnitAt(_pos) == 0x3F) {
           _pos++;
@@ -377,7 +482,7 @@ class _SafeRegexValidator {
           _fail('禁止堆叠或占有型量词');
           return null;
         }
-        return _QuantStats(0, 1, maxVal - minVal + 1);
+        return _QuantStats(0, 1, maxVal - minVal + 1, maxVal);
       }
       _fail('正则表达式量词花括号格式无效');
       return null;
@@ -393,7 +498,7 @@ class _SafeRegexValidator {
       if (d < 0x30 || d > 0x39) break;
       val = val * 10 + (d - 0x30);
       if (val > DanmuBlockFilter.maxQuantifierBound) {
-        _fail('正则表达式量词数值超过 64 上限');
+        _fail('正则表达式量词数值超过 20 上限');
         return -1;
       }
       _pos++;
@@ -474,6 +579,10 @@ class _SafeRegexValidator {
       value = (value << 4) | nibble;
     }
     _pos += digits;
+    if (digits == 4 && _isSurrogateCodeUnit(value)) {
+      _fail('正则表达式不支持代理项或扩展平面字符');
+      return -1;
+    }
     return value;
   }
 
@@ -603,12 +712,17 @@ class DanmuBlockFilter {
   static const int maxRegexLength = 120;
   static const int maxWildcards = 3;
   static const int maxGroupDepth = 6;
-  static const int maxQuantifierBound = 64;
+  static const int maxQuantifierBound = 20;
   static const int maxUnboundedPerBranch = 1;
   static const int maxVarQuantsPerBranch = 2;
-  static const int maxBoundedBranchChoices = 32;
+  static const int maxAltGroupsPerBranch = 2;
+  static const int maxBoundedBranchChoices = 16;
   static const int maxBranchChoices = 550;
   static const int maxTotalChoices = 600;
+  static const int maxBoundedBranchWork = 150;
+  static const int maxTotalBoundedWork = 250;
+  static const int maxBranchWork = 800;
+  static const int maxTotalWork = 1200;
 
   static const DanmuBlockFilter empty = DanmuBlockFilter._(
     <String>[],
@@ -624,8 +738,34 @@ class DanmuBlockFilter {
 
   int get ruleCount => _plainLowerRules.length + _regexRules.length;
 
+  static bool _isRuleWhitespace(int ch) {
+    return ch <= 0x20 ||
+        ch == 0x0085 ||
+        ch == 0x00A0 ||
+        ch == 0x1680 ||
+        (ch >= 0x2000 && ch <= 0x200A) ||
+        ch == 0x2028 ||
+        ch == 0x2029 ||
+        ch == 0x202F ||
+        ch == 0x205F ||
+        ch == 0x3000 ||
+        ch == 0xFEFF;
+  }
+
+  static String _trimRule(String raw) {
+    var start = 0;
+    var end = raw.length;
+    while (start < end && _isRuleWhitespace(raw.codeUnitAt(start))) {
+      start++;
+    }
+    while (end > start && _isRuleWhitespace(raw.codeUnitAt(end - 1))) {
+      end--;
+    }
+    return (start == 0 && end == raw.length) ? raw : raw.substring(start, end);
+  }
+
   static DanmuRuleValidationResult validateRule(String rawRule) {
-    final trimmed = rawRule.trim();
+    final trimmed = _trimRule(rawRule);
     if (trimmed.isEmpty) {
       return DanmuRuleValidationResult.fail('屏蔽规则不能为空');
     }
@@ -659,12 +799,15 @@ class DanmuBlockFilter {
     var accepted = 0;
     for (final raw in rawRules) {
       if (accepted >= maxRules) break;
-      final trimmed = raw.trim();
+      final trimmed = _trimRule(raw);
       if (trimmed.isEmpty) continue;
       final vr = validateRule(trimmed);
       if (!vr.valid) continue;
       if (trimmed.startsWith('re:')) {
-        regexes.add(RegExp(trimmed.substring(3), caseSensitive: false));
+        final compiled = RegExp(trimmed.substring(3), caseSensitive: false);
+        // Trigger Dart VM Irregexp compilation upfront rather than on the first render frame.
+        compiled.hasMatch('');
+        regexes.add(compiled);
       } else {
         plains.add(trimmed.toLowerCase());
       }

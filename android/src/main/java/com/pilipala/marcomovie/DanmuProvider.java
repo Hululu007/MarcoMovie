@@ -191,14 +191,19 @@ public interface DanmuProvider {
         public static final int MAX_REGEX_LENGTH = 120;
         public static final int MAX_WILDCARDS = 3;
         public static final int MAX_GROUP_DEPTH = 6;
-        public static final int MAX_QUANTIFIER_BOUND = 64;
+        public static final int MAX_QUANTIFIER_BOUND = 20;
         public static final int MAX_UNBOUNDED_PER_BRANCH = 1;
         public static final int MAX_VAR_QUANTS_PER_BRANCH = 2;
-        public static final int MAX_BOUNDED_BRANCH_CHOICES = 32;
+        public static final int MAX_ALT_GROUPS_PER_BRANCH = 2;
+        public static final int MAX_BOUNDED_BRANCH_CHOICES = 16;
         public static final int MAX_BRANCH_CHOICES = 550;
         public static final int MAX_TOTAL_CHOICES = 600;
+        public static final int MAX_BOUNDED_BRANCH_WORK = 150;
+        public static final int MAX_TOTAL_BOUNDED_WORK = 250;
+        public static final int MAX_BRANCH_WORK = 800;
+        public static final int MAX_TOTAL_WORK = 1200;
         private static final int UNBOUNDED_CHOICE_COST = 181;
-        private static final int CHOICE_CAP = MAX_TOTAL_CHOICES + 1;
+        private static final int WORK_CAP = MAX_TOTAL_WORK + 1;
         public static final BlockFilter EMPTY = new BlockFilter(new String[0], new Pattern[0]);
 
         public static final class ValidationResult {
@@ -222,25 +227,39 @@ public interface DanmuProvider {
         private static final class BranchStats {
             final int unboundedQuants;
             final int varQuants;
+            final int altGroups;
             final int choices;
+            final int maxExpandedLen;
+            final int work;
 
-            BranchStats(int unboundedQuants, int varQuants, int choices) {
+            BranchStats(
+                    int unboundedQuants,
+                    int varQuants,
+                    int altGroups,
+                    int choices,
+                    int maxExpandedLen,
+                    int work) {
                 this.unboundedQuants = unboundedQuants;
                 this.varQuants = varQuants;
+                this.altGroups = altGroups;
                 this.choices = choices;
+                this.maxExpandedLen = maxExpandedLen;
+                this.work = work;
             }
         }
 
         private static final class QuantStats {
-            static final QuantStats NONE = new QuantStats(0, 0, 1);
+            static final QuantStats NONE = new QuantStats(0, 0, 1, 1);
             final int unbounded;
             final int varQuant;
             final int choices;
+            final int maxLen;
 
-            QuantStats(int unbounded, int varQuant, int choices) {
+            QuantStats(int unbounded, int varQuant, int choices, int maxLen) {
                 this.unbounded = unbounded;
                 this.varQuant = varQuant;
                 this.choices = choices;
+                this.maxLen = maxLen;
             }
         }
 
@@ -258,6 +277,11 @@ public interface DanmuProvider {
             }
 
             ValidationResult validate() {
+                for (int i = 0; i < len; i++) {
+                    if (isSurrogateCodeUnit(expr.charAt(i))) {
+                        return ValidationResult.fail("正则表达式不支持代理项或扩展平面字符");
+                    }
+                }
                 BranchStats root = parseAlternation(true);
                 if (error != null) {
                     return ValidationResult.fail(error);
@@ -268,6 +292,9 @@ public interface DanmuProvider {
                 if (root == null || root.choices > MAX_TOTAL_CHOICES) {
                     return ValidationResult.fail("正则表达式总回溯分支复杂度过高");
                 }
+                if (root.work > MAX_TOTAL_WORK) {
+                    return ValidationResult.fail("正则表达式总回溯工作量超过安全上限");
+                }
                 return ValidationResult.ok();
             }
 
@@ -277,14 +304,18 @@ public interface DanmuProvider {
                 }
             }
 
+            private static boolean isSurrogateCodeUnit(int codeUnit) {
+                return codeUnit >= 0xD800 && codeUnit <= 0xDFFF;
+            }
+
             private static int satAdd(int a, int b) {
                 long s = (long) a + (long) b;
-                return s >= CHOICE_CAP ? CHOICE_CAP : (int) s;
+                return s >= WORK_CAP ? WORK_CAP : (int) s;
             }
 
             private static int satMul(int a, int b) {
                 long p = (long) a * (long) b;
-                return p >= CHOICE_CAP ? CHOICE_CAP : (int) p;
+                return p >= WORK_CAP ? WORK_CAP : (int) p;
             }
 
             private static boolean isQuantStart(char ch) {
@@ -308,40 +339,81 @@ public interface DanmuProvider {
             private BranchStats parseAlternation(boolean isTopLevel) {
                 BranchStats first = parseBranch();
                 if (error != null) return null;
-                if (isTopLevel && first.choices > MAX_BRANCH_CHOICES) {
-                    fail("正则表达式回溯复杂度过高");
-                    return null;
-                }
                 int maxUnbounded = first.unboundedQuants;
                 int maxVar = first.varQuants;
+                int maxAltGroups = first.altGroups;
                 int sumChoices = first.choices;
+                int maxExpandedLen = first.maxExpandedLen;
+                int sumWork = first.work;
+                int sumBoundedWork = first.unboundedQuants == 0 ? first.work : 0;
+                int branchCount = 1;
+                if (isTopLevel) {
+                    if (!checkTopLevelTotals(sumChoices, sumBoundedWork, sumWork)) {
+                        return null;
+                    }
+                }
                 while (pos < len && expr.charAt(pos) == '|') {
                     pos++;
                     BranchStats next = parseBranch();
                     if (error != null) return null;
-                    if (isTopLevel && next.choices > MAX_BRANCH_CHOICES) {
-                        fail("正则表达式回溯复杂度过高");
-                        return null;
-                    }
+                    branchCount++;
                     if (next.unboundedQuants > maxUnbounded) {
                         maxUnbounded = next.unboundedQuants;
                     }
                     if (next.varQuants > maxVar) {
                         maxVar = next.varQuants;
                     }
+                    if (next.altGroups > maxAltGroups) {
+                        maxAltGroups = next.altGroups;
+                    }
+                    if (next.maxExpandedLen > maxExpandedLen) {
+                        maxExpandedLen = next.maxExpandedLen;
+                    }
                     sumChoices = satAdd(sumChoices, next.choices);
-                    if (isTopLevel && sumChoices > MAX_TOTAL_CHOICES) {
-                        fail("正则表达式总回溯分支复杂度过高");
-                        return null;
+                    sumWork = satAdd(sumWork, next.work);
+                    if (next.unboundedQuants == 0) {
+                        sumBoundedWork = satAdd(sumBoundedWork, next.work);
+                    }
+                    if (isTopLevel) {
+                        if (!checkTopLevelTotals(sumChoices, sumBoundedWork, sumWork)) {
+                            return null;
+                        }
                     }
                 }
-                return new BranchStats(maxUnbounded, maxVar, sumChoices);
+                int reportedAltGroups =
+                        (!isTopLevel && branchCount > 1) ? maxAltGroups + 1 : maxAltGroups;
+                return new BranchStats(
+                        maxUnbounded,
+                        maxVar,
+                        reportedAltGroups,
+                        sumChoices,
+                        maxExpandedLen,
+                        sumWork);
+            }
+
+            private boolean checkTopLevelTotals(int sumChoices, int sumBoundedWork, int sumWork) {
+                if (sumChoices > MAX_TOTAL_CHOICES) {
+                    fail("正则表达式总回溯分支复杂度过高");
+                    return false;
+                }
+                if (sumBoundedWork > MAX_TOTAL_BOUNDED_WORK) {
+                    fail("正则表达式总回溯工作量超过安全上限");
+                    return false;
+                }
+                if (sumWork > MAX_TOTAL_WORK) {
+                    fail("正则表达式总回溯工作量超过安全上限");
+                    return false;
+                }
+                return true;
             }
 
             private BranchStats parseBranch() {
                 int unbounded = 0;
                 int varQuants = 0;
+                int altGroups = 0;
                 int choices = 1;
+                int maxExpandedLen = 0;
+                int work = 0;
                 int atomCount = 0;
 
                 while (pos < len) {
@@ -392,10 +464,13 @@ public interface DanmuProvider {
                             fail("禁止闭合括号后紧跟量词以防回溯风险");
                             return null;
                         }
+                        work = satAdd(work, satMul(choices, inner.work));
                         unbounded += inner.unboundedQuants;
                         varQuants += inner.varQuants;
+                        altGroups += inner.altGroups;
                         choices = satMul(choices, inner.choices);
-                        if (!checkBranchBudget(unbounded, varQuants, choices)) {
+                        maxExpandedLen = satAdd(maxExpandedLen, inner.maxExpandedLen);
+                        if (!checkBranchBudget(unbounded, varQuants, altGroups, choices, work)) {
                             return null;
                         }
                         continue;
@@ -441,10 +516,18 @@ public interface DanmuProvider {
 
                     QuantStats q = parseQuantifier(isDot);
                     if (error != null) return null;
+                    if (q.unbounded > 0) {
+                        work = satAdd(work, satMul(choices, UNBOUNDED_CHOICE_COST));
+                    } else if (q.varQuant > 0) {
+                        work = satAdd(work, satMul(choices, satMul(q.choices, q.maxLen)));
+                    } else {
+                        work = satAdd(work, satMul(choices, q.maxLen));
+                    }
                     unbounded += q.unbounded;
                     varQuants += q.varQuant;
                     choices = satMul(choices, q.choices);
-                    if (!checkBranchBudget(unbounded, varQuants, choices)) {
+                    maxExpandedLen = satAdd(maxExpandedLen, q.maxLen);
+                    if (!checkBranchBudget(unbounded, varQuants, altGroups, choices, work)) {
                         return null;
                     }
                 }
@@ -453,10 +536,12 @@ public interface DanmuProvider {
                     fail("正则表达式禁止空分支或空分组");
                     return null;
                 }
-                return new BranchStats(unbounded, varQuants, choices);
+                return new BranchStats(
+                        unbounded, varQuants, altGroups, choices, maxExpandedLen, work);
             }
 
-            private boolean checkBranchBudget(int unbounded, int varQuants, int choices) {
+            private boolean checkBranchBudget(
+                    int unbounded, int varQuants, int altGroups, int choices, int work) {
                 if (unbounded > MAX_UNBOUNDED_PER_BRANCH) {
                     fail("禁止同分支内组合多个无界量词以防回溯风险");
                     return false;
@@ -465,9 +550,18 @@ public interface DanmuProvider {
                     fail("禁止同分支内组合过多可变长量词以防回溯风险");
                     return false;
                 }
-                int limit = unbounded == 0 ? MAX_BOUNDED_BRANCH_CHOICES : MAX_BRANCH_CHOICES;
-                if (choices > limit) {
+                if (altGroups > MAX_ALT_GROUPS_PER_BRANCH) {
+                    fail("禁止同分支内串联过多交替分组以防回溯风险");
+                    return false;
+                }
+                int choiceLimit = unbounded == 0 ? MAX_BOUNDED_BRANCH_CHOICES : MAX_BRANCH_CHOICES;
+                if (choices > choiceLimit) {
                     fail("正则表达式回溯复杂度过高");
+                    return false;
+                }
+                int workLimit = unbounded == 0 ? MAX_BOUNDED_BRANCH_WORK : MAX_BRANCH_WORK;
+                if (work > workLimit) {
+                    fail("正则表达式回溯工作量超过安全上限");
                     return false;
                 }
                 return true;
@@ -492,7 +586,7 @@ public interface DanmuProvider {
                         fail("禁止堆叠或占有型量词");
                         return null;
                     }
-                    return new QuantStats(1, 1, UNBOUNDED_CHOICE_COST);
+                    return new QuantStats(1, 1, UNBOUNDED_CHOICE_COST, 1);
                 }
                 if (q == '?') {
                     pos++;
@@ -500,7 +594,7 @@ public interface DanmuProvider {
                         fail("禁止堆叠或占有型量词");
                         return null;
                     }
-                    return new QuantStats(0, 1, 2);
+                    return new QuantStats(0, 1, 2, 1);
                 }
                 if (q == '{') {
                     pos++;
@@ -521,7 +615,7 @@ public interface DanmuProvider {
                             fail("禁止堆叠或占有型量词");
                             return null;
                         }
-                        return QuantStats.NONE;
+                        return new QuantStats(0, 0, 1, minVal);
                     }
                     if (sep == ',') {
                         pos++;
@@ -541,7 +635,7 @@ public interface DanmuProvider {
                                 fail("禁止堆叠或占有型量词");
                                 return null;
                             }
-                            return new QuantStats(1, 1, UNBOUNDED_CHOICE_COST);
+                            return new QuantStats(1, 1, UNBOUNDED_CHOICE_COST, Math.max(1, minVal));
                         }
                         int maxVal = parseBoundedInt();
                         if (error != null) return null;
@@ -563,7 +657,7 @@ public interface DanmuProvider {
                                 fail("禁止堆叠或占有型量词");
                                 return null;
                             }
-                            return QuantStats.NONE;
+                            return new QuantStats(0, 0, 1, maxVal);
                         }
                         if (pos < len && expr.charAt(pos) == '?') {
                             pos++;
@@ -572,7 +666,7 @@ public interface DanmuProvider {
                             fail("禁止堆叠或占有型量词");
                             return null;
                         }
-                        return new QuantStats(0, 1, maxVal - minVal + 1);
+                        return new QuantStats(0, 1, maxVal - minVal + 1, maxVal);
                     }
                     fail("正则表达式量词花括号格式无效");
                     return null;
@@ -588,7 +682,7 @@ public interface DanmuProvider {
                     if (d < '0' || d > '9') break;
                     val = val * 10 + (d - '0');
                     if (val > MAX_QUANTIFIER_BOUND) {
-                        fail("正则表达式量词数值超过 64 上限");
+                        fail("正则表达式量词数值超过 20 上限");
                         return -1;
                     }
                     pos++;
@@ -663,6 +757,10 @@ public interface DanmuProvider {
                     value = (value << 4) | nibble;
                 }
                 pos += digits;
+                if (digits == 4 && isSurrogateCodeUnit(value)) {
+                    fail("正则表达式不支持代理项或扩展平面字符");
+                    return -1;
+                }
                 return value;
             }
 
@@ -795,9 +893,35 @@ public interface DanmuProvider {
             this.regexRules = regexRules;
         }
 
+        private static boolean isRuleWhitespace(char ch) {
+            return ch <= 0x20
+                    || ch == 0x0085
+                    || ch == 0x00A0
+                    || ch == 0x1680
+                    || (ch >= 0x2000 && ch <= 0x200A)
+                    || ch == 0x2028
+                    || ch == 0x2029
+                    || ch == 0x202F
+                    || ch == 0x205F
+                    || ch == 0x3000
+                    || ch == 0xFEFF;
+        }
+
+        private static String trimRule(String raw) {
+            int start = 0;
+            int end = raw.length();
+            while (start < end && isRuleWhitespace(raw.charAt(start))) {
+                start++;
+            }
+            while (end > start && isRuleWhitespace(raw.charAt(end - 1))) {
+                end--;
+            }
+            return (start == 0 && end == raw.length()) ? raw : raw.substring(start, end);
+        }
+
         public static ValidationResult validateRule(String rawRule) {
             if (rawRule == null) return ValidationResult.fail("屏蔽规则不能为空");
-            String trimmed = rawRule.trim();
+            String trimmed = trimRule(rawRule);
             if (trimmed.isEmpty()) return ValidationResult.fail("屏蔽规则不能为空");
             if (!trimmed.startsWith("re:")) {
                 return ValidationResult.ok();
@@ -827,7 +951,7 @@ public interface DanmuProvider {
             for (String raw : rawRules) {
                 if (accepted >= MAX_RULES) break;
                 if (raw == null) continue;
-                String trimmed = raw.trim();
+                String trimmed = trimRule(raw);
                 if (trimmed.isEmpty()) continue;
                 ValidationResult vr = validateRule(trimmed);
                 if (!vr.valid) continue;

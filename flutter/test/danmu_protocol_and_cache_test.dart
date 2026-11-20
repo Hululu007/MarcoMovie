@@ -102,6 +102,14 @@ void main() {
         ),
         isNull,
       );
+      expect(
+        DandanplayProvider.normalizeOriginOrNull('http://danmu.example/a b'),
+        isNull,
+      );
+      expect(
+        DandanplayProvider.normalizeOriginOrNull('http://bad_host.test'),
+        isNull,
+      );
 
       // Server cap = 8
       const tenUrls = 'https://s1.danmu.test\n'
@@ -196,6 +204,31 @@ void main() {
         r're:(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)z',
         r're:a+z|a+z|a+z|a+z',
         r're:a.*b|c.*d|e.*f|g.*h',
+        // Gate 1 R1 F-1A ({N}/literal suffix amplification & Cartesian alternation)
+        r're:a+a{30}a{30}b|a+a{30}a{30}b|a+a{30}a{30}b',
+        r're:[a-z]{1,5}[a-z]{1,5}a{60}b|[a-z]{1,5}[a-z]{1,5}a{60}b|[a-z]{1,5}[a-z]{1,5}a{60}b|[a-z]{1,5}[a-z]{1,5}a{60}b',
+        r're:([a-z]|[a-z]|[a-z])[a-z]+[a-z]{60}b',
+        r're:[a-z]+[a-z]{1,3}[a-z]{60}b',
+        r're:[a-z]*?[a-z]{1,3}?[a-z]{60}b',
+        r're:(a|a|a)a+a{60}b',
+        're:a+${'a' * 110}b',
+        r're:(a|aa)(a|aa)(a|aa)(a|aa)(a|aa)Z',
+        r're:[^x]*[a-z]{0,2}y',
+        r're:[a-z]{1,5}[a-z]{1,5}z',
+        r're:(a|a|a)[a-z]+z',
+        // Gate 1 R1 F-1B (UTF-16 surrogates / supplementary codepoints parity)
+        're:[\uD83D\uDE00-\\uFFFF]',
+        r're:[\uD83D\uDE00-\uFFFF]',
+        're:[\uD83D\uDE00-\uFF5E]',
+        're:\uD83D\uDE00',
+        // Gate 1 R1 F-1C (Java vs Dart whitespace trimming parity)
+        '\u3000',
+        're:\u3000',
+        '\u3000re:(a|aa)+\$',
+        '\u00A0re:(a|aa)+\$',
+        '\uFEFFre:(a|aa)+\$',
+        '\u0000re:(a|aa)+\$',
+        '\u001Fre:(a|aa)+\$',
         r're:\Qfoo\E',
         r're:[a[b]]',
         r're:[a-z&&[^bc]]',
@@ -230,8 +263,10 @@ void main() {
         () {
       const accepted = <String>[
         '剧透',
+        '\uD83D\uDE00',
         're:剧透|打卡',
         're:第(一|二)章',
+        're:(第|共)(一|二|三)章',
         're:[0-9]{4,}',
         r're:foo\)bar+',
         r're:foo.*bar',
@@ -240,10 +275,11 @@ void main() {
         r're:https?://[a-z0-9.-]+',
         r're:a.*b|c.*d|e.*f',
         r're:^前排|沙发$',
-        r're:[a-z]{1,5}[a-z]{1,5}z',
-        r're:(a|a)(a|a)(a|a)(a|a)(a|a)z',
+        r're:[a-z]{1,4}[0-9]{1,4}',
+        r're:(a|aa)(a|aa)z',
         r're:[a-z]+z|[a-z]+z|[a-z]+z',
-        r're:(a|a|a)[a-z]+z',
+        r're:(a|a)[a-z]+z',
+        r're:[a-z]+[a-z]{2}z',
         r're:(?:foo|bar).*?z',
       ];
       final adversarial180A = 'a' * 180;
@@ -252,19 +288,29 @@ void main() {
         final vr = DanmuBlockFilter.validateRule(rule);
         expect(vr.valid, isTrue, reason: 'Expected valid for $rule: ${vr.error}');
         final single = DanmuBlockFilter.compile(<String>[rule]);
-        // Warm up once, then measure 180-char adversarial mismatch inputs
+        // Benchmark both cold and warm 180-char adversarial mismatch inputs
+        final swCold = Stopwatch()..start();
         single.isBlocked(adversarial180A);
         single.isBlocked(adversarial180Digits);
-        final sw = Stopwatch()..start();
+        swCold.stop();
+        final coldMs = swCold.elapsedMicroseconds / 1000.0;
+
+        final swWarm = Stopwatch()..start();
         single.isBlocked(adversarial180A);
         single.isBlocked(adversarial180Digits);
-        sw.stop();
-        final elapsedMs = sw.elapsedMicroseconds / 1000.0;
+        swWarm.stop();
+        final warmMs = swWarm.elapsedMicroseconds / 1000.0;
         expect(
-          elapsedMs,
+          coldMs,
           lessThan(5.0),
           reason:
-              'Accepted rule took ${elapsedMs.toStringAsFixed(3)}ms on 180-char input: $rule',
+              'Accepted rule cold run took ${coldMs.toStringAsFixed(3)}ms on 180-char input: $rule',
+        );
+        expect(
+          warmMs,
+          lessThan(5.0),
+          reason:
+              'Accepted rule warm run took ${warmMs.toStringAsFixed(3)}ms on 180-char input: $rule',
         );
       }
 

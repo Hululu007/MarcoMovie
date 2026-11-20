@@ -161,6 +161,9 @@ class DandanplayProvider implements DanmuProvider {
   static String? normalizeOriginOrNull(String raw) {
     var trimmed = raw.trim();
     if (trimmed.isEmpty) return null;
+    for (var i = 0; i < trimmed.length; i++) {
+      if (trimmed.codeUnitAt(i) <= 0x20) return null;
+    }
     while (trimmed.endsWith('/')) {
       trimmed = trimmed.substring(0, trimmed.length - 1);
     }
@@ -170,7 +173,7 @@ class DandanplayProvider implements DanmuProvider {
     if (scheme != 'http' && scheme != 'https') return null;
     if (uri.userInfo.isNotEmpty) return null;
     if (uri.hasQuery || uri.hasFragment) return null;
-    if (uri.host.isEmpty) return null;
+    if (uri.host.isEmpty || uri.host.contains('_')) return null;
     var path = uri.path;
     while (path.endsWith('/')) {
       path = path.substring(0, path.length - 1);
@@ -766,7 +769,7 @@ class DandanplayProvider implements DanmuProvider {
         onError: (_) {},
         cancelOnError: true,
       );
-      unawaited(sub.cancel());
+      unawaited(sub.cancel().catchError((_) {}));
     } catch (_) {}
   }
 
@@ -851,7 +854,14 @@ class DandanplayProvider implements DanmuProvider {
 
     final completer = Completer<List<int>>();
     final bytes = <int>[];
-    late final StreamSubscription<List<int>> sub;
+    StreamSubscription<List<int>>? sub;
+
+    void cancelSub() {
+      final active = sub;
+      if (active != null) {
+        unawaited(active.cancel().catchError((_) {}));
+      }
+    }
 
     void triggerAbort() {
       if (!abortCompleter.isCompleted) {
@@ -867,13 +877,13 @@ class DandanplayProvider implements DanmuProvider {
 
     final timer = Timer(readTimeout, () {
       triggerAbort();
-      unawaited(sub.cancel());
+      cancelSub();
       finishError(TimeoutException('Danmu body read timed out', readTimeout));
     });
 
     void onCancel() {
       triggerAbort();
-      unawaited(sub.cancel());
+      cancelSub();
       finishError(const DanmuCancelledException());
     }
 
@@ -882,13 +892,13 @@ class DandanplayProvider implements DanmuProvider {
         if (completer.isCompleted) return;
         if (cancelToken != null && cancelToken.isCancelled) {
           triggerAbort();
-          unawaited(sub.cancel());
+          cancelSub();
           finishError(const DanmuCancelledException());
           return;
         }
         if (bytes.length + chunk.length > maxPayloadBytes) {
           triggerAbort();
-          unawaited(sub.cancel());
+          cancelSub();
           finishError(
             const FormatException('Danmu payload exceeds 8 MB limit'),
           );
@@ -916,6 +926,10 @@ class DandanplayProvider implements DanmuProvider {
       },
       cancelOnError: true,
     );
+
+    if (completer.isCompleted) {
+      cancelSub();
+    }
 
     cancelToken?.onCancel(onCancel);
     try {

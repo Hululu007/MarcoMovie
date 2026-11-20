@@ -182,6 +182,10 @@ public final class DanmuEngineChecks {
                                         "https" + "://u:p@danmu.example")
                                 == null,
                 "Origin normalizer rejects userinfo credentials");
+        check(
+                DandanplayProvider.normalizeOriginOrNull("http://danmu.example/a b") == null
+                        && DandanplayProvider.normalizeOriginOrNull("http://bad_host.test") == null,
+                "Origin normalizer rejects raw spaces and underscore hostnames");
 
         // IPv6 origin normalization & bound episode roundtrip
         String httpProto = "http";
@@ -274,6 +278,31 @@ public final class DanmuEngineChecks {
                     "re:(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)z",
                     "re:a+z|a+z|a+z|a+z",
                     "re:a.*b|c.*d|e.*f|g.*h",
+                    // Gate 1 R1 F-1A ({N}/literal suffix amplification & Cartesian alternation)
+                    "re:a+a{30}a{30}b|a+a{30}a{30}b|a+a{30}a{30}b",
+                    "re:[a-z]{1,5}[a-z]{1,5}a{60}b|[a-z]{1,5}[a-z]{1,5}a{60}b|[a-z]{1,5}[a-z]{1,5}a{60}b|[a-z]{1,5}[a-z]{1,5}a{60}b",
+                    "re:([a-z]|[a-z]|[a-z])[a-z]+[a-z]{60}b",
+                    "re:[a-z]+[a-z]{1,3}[a-z]{60}b",
+                    "re:[a-z]*?[a-z]{1,3}?[a-z]{60}b",
+                    "re:(a|a|a)a+a{60}b",
+                    "re:a+" + repeatChar('a', 110) + "b",
+                    "re:(a|aa)(a|aa)(a|aa)(a|aa)(a|aa)Z",
+                    "re:[^x]*[a-z]{0,2}y",
+                    "re:[a-z]{1,5}[a-z]{1,5}z",
+                    "re:(a|a|a)[a-z]+z",
+                    // Gate 1 R1 F-1B (UTF-16 surrogates / supplementary codepoints parity)
+                    "re:[\uD83D\uDE00-\\uFFFF]",
+                    "re:[\\uD83D\\uDE00-\\uFFFF]",
+                    "re:[\uD83D\uDE00-\uFF5E]",
+                    "re:\uD83D\uDE00",
+                    // Gate 1 R1 F-1C (Java vs Dart whitespace trimming parity)
+                    "\u3000",
+                    "re:\u3000",
+                    "\u3000re:(a|aa)+$",
+                    "\u00A0re:(a|aa)+$",
+                    "\uFEFFre:(a|aa)+$",
+                    "\u0000re:(a|aa)+$",
+                    "\u001Fre:(a|aa)+$",
                     "re:\\Qfoo\\E",
                     "re:[a[b]]",
                     "re:[a-z&&[^bc]]",
@@ -308,8 +337,10 @@ public final class DanmuEngineChecks {
         String[] accepted =
                 new String[] {
                     "剧透",
+                    "\uD83D\uDE00",
                     "re:剧透|打卡",
                     "re:第(一|二)章",
+                    "re:(第|共)(一|二|三)章",
                     "re:[0-9]{4,}",
                     "re:foo\\)bar+",
                     "re:foo.*bar",
@@ -318,10 +349,11 @@ public final class DanmuEngineChecks {
                     "re:https?://[a-z0-9.-]+",
                     "re:a.*b|c.*d|e.*f",
                     "re:^前排|沙发$",
-                    "re:[a-z]{1,5}[a-z]{1,5}z",
-                    "re:(a|a)(a|a)(a|a)(a|a)(a|a)z",
+                    "re:[a-z]{1,4}[0-9]{1,4}",
+                    "re:(a|aa)(a|aa)z",
                     "re:[a-z]+z|[a-z]+z|[a-z]+z",
-                    "re:(a|a|a)[a-z]+z",
+                    "re:(a|a)[a-z]+z",
+                    "re:[a-z]+[a-z]{2}z",
                     "re:(?:foo|bar).*?z"
                 };
         String adversarial180A = repeatChar('a', 180);
@@ -330,17 +362,21 @@ public final class DanmuEngineChecks {
             BlockFilter.ValidationResult vr = BlockFilter.validateRule(rule);
             check(vr.valid, "ReDoS validator accepts safe rule: " + rule + " (" + vr.error + ")");
             BlockFilter single = BlockFilter.compile(Collections.singletonList(rule));
-            // Warm up JIT once, then benchmark 180-char adversarial mismatch inputs (< 5ms)
+            // Benchmark both cold and warm 180-char adversarial mismatch inputs (< 5ms)
+            long tCold0 = System.nanoTime();
             single.isBlocked(adversarial180A);
             single.isBlocked(adversarial180Digits);
-            long t0 = System.nanoTime();
+            double coldMs = (System.nanoTime() - tCold0) / 1_000_000.0;
+            long tWarm0 = System.nanoTime();
             single.isBlocked(adversarial180A);
             single.isBlocked(adversarial180Digits);
-            double elapsedMs = (System.nanoTime() - t0) / 1_000_000.0;
+            double warmMs = (System.nanoTime() - tWarm0) / 1_000_000.0;
             check(
-                    elapsedMs < 5.0,
-                    "Accepted rule completes < 5ms on 180-char adversarial input ("
-                            + String.format(java.util.Locale.US, "%.3f", elapsedMs)
+                    coldMs < 5.0 && warmMs < 5.0,
+                    "Accepted rule completes < 5ms cold & warm on 180-char input (cold="
+                            + String.format(java.util.Locale.US, "%.3f", coldMs)
+                            + "ms, warm="
+                            + String.format(java.util.Locale.US, "%.3f", warmMs)
                             + "ms): "
                             + rule);
         }
