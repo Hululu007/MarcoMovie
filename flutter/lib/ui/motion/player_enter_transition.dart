@@ -936,48 +936,63 @@ Future<T?> pushPlayerRoute<T>({
   PlayerTransitionSnapshot? snapshot;
   ui.FragmentProgram? program;
 
-  if (!reduceMotion && !isOhos && !fastWindows) {
-    program = debugShaderProgram ?? PlayerEnterTransition.cachedProgram;
-    if (program == null && !PlayerEnterTransition.shaderLoadFailed) {
-      // Trigger non-blocking warmup for subsequent entries; fall back to
-      // 220ms scale + fade on the cold frame rather than stalling playback.
-      unawaited(PlayerEnterTransition.prewarmShader());
-    }
-
-    if (program != null && !PlayerEnterTransition.preferFastTransition) {
-      RenderRepaintBoundary? boundary;
-      final boundaryObj = backdropBoundaryKey?.currentContext?.findRenderObject();
-      if (boundaryObj is RenderRepaintBoundary && boundaryObj.hasSize) {
-        boundary = boundaryObj;
+  try {
+    if (!reduceMotion && !isOhos && !fastWindows) {
+      program = debugShaderProgram ?? PlayerEnterTransition.cachedProgram;
+      if (program == null && !PlayerEnterTransition.shaderLoadFailed) {
+        // Trigger non-blocking warmup for subsequent entries; fall back to
+        // 220ms scale + fade on the cold frame rather than stalling playback.
+        unawaited(PlayerEnterTransition.prewarmShader());
       }
-      final posterOrigin = _resolvePosterOriginLogical(
-        posterKey: posterKey,
-        backdropBoundary: boundary,
-      );
-      final shouldUseIosGate = !kIsWeb &&
-          defaultTargetPlatform == TargetPlatform.iOS &&
-          !isOhos;
-      final TransitionCaptureGate<ui.Image?>? gate = captureGateOverride ??
-          (shouldUseIosGate
-              ? (Future<ui.Image?> Function() action) =>
-                  IosNativeRouteGate.runWithPlaceholders<ui.Image?>(action)
-              : null);
 
-      snapshot = await PlayerEnterTransition.captureBackdrop(
-        boundary: boundary,
-        customCapturer: debugCapturer,
-        routeGateWrapper: gate,
-        logicalSize: boundary != null ? boundary.size : viewportSize,
-        devicePixelRatio: dpr,
-        posterOriginLogical: posterOrigin,
-        posterRadiusLogical: posterRadiusLogical,
-        posterImage: posterImage,
-        ownsPoster: ownsPoster,
-        reduceMotion: reduceMotion,
-        useFastWindowsMode: fastWindows,
-        debugElapsedOverride: debugElapsedOverride,
-      );
+      if (program != null && !PlayerEnterTransition.preferFastTransition) {
+        RenderRepaintBoundary? boundary;
+        final boundaryObj =
+            backdropBoundaryKey?.currentContext?.findRenderObject();
+        if (boundaryObj is RenderRepaintBoundary && boundaryObj.hasSize) {
+          boundary = boundaryObj;
+        }
+        final posterOrigin = _resolvePosterOriginLogical(
+          posterKey: posterKey,
+          backdropBoundary: boundary,
+        );
+        final shouldUseIosGate = !kIsWeb &&
+            defaultTargetPlatform == TargetPlatform.iOS &&
+            !isOhos;
+        final TransitionCaptureGate<ui.Image?>? gate = captureGateOverride ??
+            (shouldUseIosGate
+                ? (Future<ui.Image?> Function() action) =>
+                    IosNativeRouteGate.runWithPlaceholders<ui.Image?>(action)
+                : null);
+
+        snapshot = await PlayerEnterTransition.captureBackdrop(
+          boundary: boundary,
+          customCapturer: debugCapturer,
+          routeGateWrapper: gate,
+          logicalSize: boundary != null ? boundary.size : viewportSize,
+          devicePixelRatio: dpr,
+          posterOriginLogical: posterOrigin,
+          posterRadiusLogical: posterRadiusLogical,
+          posterImage: posterImage,
+          ownsPoster: ownsPoster,
+          reduceMotion: reduceMotion,
+          useFastWindowsMode: fastWindows,
+          debugElapsedOverride: debugElapsedOverride,
+        );
+      }
     }
+  } catch (_) {
+    if (snapshot == null && ownsPoster && posterImage != null) {
+      posterImage.dispose();
+    }
+    rethrow;
+  }
+
+  // If capture was skipped (reduceMotion / OHOS / fastWindows / cold shader /
+  // preferFastTransition), release any caller-owned posterImage immediately so
+  // GPU textures never leak on early-exit paths.
+  if (snapshot == null && ownsPoster && posterImage != null) {
+    posterImage.dispose();
   }
 
   if (!context.mounted) {

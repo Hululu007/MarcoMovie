@@ -122,6 +122,7 @@ class Anime4kController extends ChangeNotifier {
   Anime4kPreset _preset = Anime4kPreset.off;
   String? _lastError;
   bool _disposed = false;
+  int _opGen = 0;
 
   Anime4kController({
     this.platformOverride,
@@ -288,37 +289,53 @@ class Anime4kController extends ChangeNotifier {
     if (_disposed || !isAvailableForPlayer(player)) return false;
     final setProp = _resolveSetter(player);
     if (setProp == null) return false;
+    final gen = ++_opGen;
 
     if (next == Anime4kPreset.off) {
       await _applyOffLocked(setProp);
+      if (_disposed || gen != _opGen) return false;
       _preset = Anime4kPreset.off;
       _lastError = null;
-      if (persist) await _savePreset(Anime4kPreset.off);
-      if (!_disposed) notifyListeners();
+      if (persist) {
+        await _savePreset(Anime4kPreset.off);
+        if (_disposed || gen != _opGen) return false;
+      }
+      notifyListeners();
       return true;
     }
 
     try {
       final paths = await ensureCachedShaderPaths(next);
-      if (_disposed) return false;
+      if (_disposed || gen != _opGen) return false;
       final sep = pathSeparatorFor(platformOverride: platformOverride);
       final joined = paths.join(sep);
       if (_isWindows) {
         await setProp('scale', 'spline36');
+        if (_disposed || gen != _opGen) return false;
         await setProp('cscale', 'spline36');
+        if (_disposed || gen != _opGen) return false;
       }
       await setProp('glsl-shaders', joined);
+      if (_disposed || gen != _opGen) return false;
       _preset = next;
       _lastError = null;
-      if (persist) await _savePreset(next);
-      if (!_disposed) notifyListeners();
+      if (persist) {
+        await _savePreset(next);
+        if (_disposed || gen != _opGen) return false;
+      }
+      notifyListeners();
       return true;
     } catch (e) {
+      if (_disposed || gen != _opGen) return false;
       _lastError = e.toString();
       await _applyOffLocked(setProp);
+      if (_disposed || gen != _opGen) return false;
       _preset = Anime4kPreset.off;
-      if (persist) await _savePreset(Anime4kPreset.off);
-      if (!_disposed) notifyListeners();
+      if (persist) {
+        await _savePreset(Anime4kPreset.off);
+        if (_disposed || gen != _opGen) return false;
+      }
+      notifyListeners();
       return false;
     }
   }
@@ -342,12 +359,14 @@ class Anime4kController extends ChangeNotifier {
   /// Windows `scale=bilinear` / `cscale=bilinear`) without touching saved prefs.
   Future<void> resetSession(Player player) async {
     if (_disposed || !isAvailableForPlayer(player)) return;
+    final gen = ++_opGen;
     final setProp = _resolveSetter(player);
     if (setProp != null) {
       await _applyOffLocked(setProp);
     }
+    if (_disposed || gen != _opGen) return;
     _preset = Anime4kPreset.off;
-    if (!_disposed) notifyListeners();
+    notifyListeners();
   }
 
   Future<void> _applyOffLocked(Anime4kPropertySetter setProp) async {
@@ -366,6 +385,7 @@ class Anime4kController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _opGen++;
     _disposed = true;
     super.dispose();
   }

@@ -631,5 +631,141 @@ void main() {
         expect(find.byType(CupertinoActivityIndicator), findsOneWidget);
       },
     );
+
+    testWidgets(
+      'R2 #29-M1: BrandLogoLoader uses WidgetsBindingObserver and survives inactive -> paused -> resumed while PlayerScreen is buffering',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final storage = await initTestStorage();
+        final hudPrefs = PlayerHudPrefs.inMemory(isDesktop: true);
+        addTearDown(hudPrefs.dispose);
+        final player = _LoadingFakePlayer();
+
+        const site = CmsSite(
+          key: 'loader_lc_site',
+          name: '生命周期测试源',
+          type: 1,
+          api: 'https://loader.example/api',
+        );
+        const video = CmsVideo(
+          id: 'loader_lc_vid',
+          title: '生命周期缓冲测试',
+          lines: [
+            CmsLine(
+              name: '主线路',
+              episodes: [CmsEpisode(name: '第01集', url: 'https://loader.example/e1.mp4')],
+            ),
+          ],
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: site,
+              video: video,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              debugPlayer: player,
+              debugVideoSurface: const ColoredBox(color: Colors.black),
+              debugHudPrefs: hudPrefs,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+
+        final loaderFinder = find.byKey(const Key('player-brand-logo-loader'));
+        expect(loaderFinder, findsOneWidget);
+        final loaderState = tester.state<BrandLogoLoaderState>(loaderFinder);
+        expect(loaderState.isAnimating, isTrue);
+
+        // Direct inactive -> paused -> resumed (no intermediate hidden state)
+        // MUST NOT trigger AppLifecycleListener AssertionError!
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expect(loaderState.isAnimating, isFalse);
+
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expect(loaderState.isAnimating, isFalse);
+
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expect(loaderState.isAnimating, isTrue);
+      },
+    );
+
+    testWidgets(
+      'R2 #27-m2: pushPlayerRoute disposes caller-owned posterImage when capture is skipped on early-exit paths',
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      (tester) async {
+        late BuildContext hostContext;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(disableAnimations: true),
+              child: Builder(
+                builder: (ctx) {
+                  hostContext = ctx;
+                  return const Scaffold(body: Text('poster-host'));
+                },
+              ),
+            ),
+          ),
+        );
+
+        // Early-skip path 1: reduceMotion (disableAnimations: true)
+        final poster1 = _createTestImage();
+        unawaited(
+          pushPlayerRoute<void>(
+            context: hostContext,
+            posterImage: poster1,
+            ownsPoster: true,
+            builder: (_) => const Scaffold(body: Text('player-1')),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(poster1.debugDisposed, isTrue);
+
+        // Early-skip path 2: OhosRuntime.isOhos == true
+        Navigator.of(hostContext).pop();
+        await tester.pumpAndSettle();
+        OhosRuntime.debugIsOhosOverride = true;
+        final poster2 = _createTestImage();
+        unawaited(
+          pushPlayerRoute<void>(
+            context: hostContext,
+            posterImage: poster2,
+            ownsPoster: true,
+            builder: (_) => const Scaffold(body: Text('player-2')),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 260));
+        expect(poster2.debugDisposed, isTrue);
+
+        // Early-skip path 3: Windows fast mode
+        OhosRuntime.debugIsOhosOverride = false;
+        Navigator.of(hostContext).pop();
+        await tester.pumpAndSettle();
+        final poster3 = _createTestImage();
+        unawaited(
+          pushPlayerRoute<void>(
+            context: hostContext,
+            posterImage: poster3,
+            ownsPoster: true,
+            useFastWindowsMode: true,
+            builder: (_) => const Scaffold(body: Text('player-3')),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 220));
+        expect(poster3.debugDisposed, isTrue);
+      },
+    );
   });
 }

@@ -643,7 +643,7 @@ class _DanmuLayerState extends State<DanmuLayer>
   }
 
   void _attachCache(DanmuSegmentCache? cache) {
-    if (cache == null) return;
+    if (cache == null || cache.isDisposed) return;
     cache.addListener(_onCacheUpdated);
     cache.setTimeOffsetMs(widget.settings.timeOffsetMs);
     cache.setBlockFilter(_blockFilter);
@@ -669,7 +669,10 @@ class _DanmuLayerState extends State<DanmuLayer>
     var shouldRepaint = false;
 
     if (oldWidget.segmentCache != widget.segmentCache) {
-      oldWidget.segmentCache?.removeListener(_onCacheUpdated);
+      final oldCache = oldWidget.segmentCache;
+      if (oldCache != null && !oldCache.isDisposed) {
+        oldCache.removeListener(_onCacheUpdated);
+      }
       _layoutEngine.reset();
       _attachCache(widget.segmentCache);
       shouldRepaint = true;
@@ -798,7 +801,10 @@ class _DanmuLayerState extends State<DanmuLayer>
 
   @override
   void dispose() {
-    widget.segmentCache?.removeListener(_onCacheUpdated);
+    final cache = widget.segmentCache;
+    if (cache != null && !cache.isDisposed) {
+      cache.removeListener(_onCacheUpdated);
+    }
     if (_lifecycleObserverRegistered) {
       WidgetsBinding.instance.removeObserver(this);
       _lifecycleObserverRegistered = false;

@@ -64,7 +64,7 @@ class AuroraShaderUniforms {
 ///
 /// Intended strictly for onboarding, about, and empty-state screens (never
 /// during active video playback). Stops its [Ticker] immediately when hidden,
-/// occluded by another route, backgrounded via [AppLifecycleListener], running
+/// occluded by another route, backgrounded via [WidgetsBindingObserver], running
 /// under reduce-motion, on HarmonyOS (`OhosRuntime.isOhos`), or on Windows.
 class AuroraBackground extends StatefulWidget {
   static const String shaderAssetPath = 'shaders/aurora.frag';

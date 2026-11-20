@@ -121,8 +121,11 @@ class _Anime4kFakeStream extends Fake implements PlayerStream {
 class _Anime4kFakePlayer extends Fake implements Player {
   final _state = _Anime4kFakeState();
   final _stream = _Anime4kFakeStream();
+  final VoidCallback? onDisposeCallback;
   int openCount = 0;
   bool _disposed = false;
+
+  _Anime4kFakePlayer({this.onDisposeCallback});
 
   @override
   PlatformPlayer? get platform => null;
@@ -156,6 +159,7 @@ class _Anime4kFakePlayer extends Fake implements Player {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    onDisposeCallback?.call();
     await _stream.close();
   }
 }
@@ -586,6 +590,198 @@ void main() {
         expect(find.byKey(const Key('desktop-anime4k-button')), findsNothing);
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
+      },
+    );
+
+    test(
+      'R2 #29-M2/#27-m1: concurrent Quality -> Off race never lets stale Quality overwrite Off + Windows bilinear',
+      () async {
+        final tempDir = await Directory.systemTemp.createTemp('a4k_race_test_');
+        addTearDown(() => tempDir.delete(recursive: true));
+        final props = <(String, String)>[];
+        final player = _Anime4kFakePlayer();
+        addTearDown(player.dispose);
+
+        final gate = Completer<void>();
+        var interceptedOnce = false;
+        final ctrl = Anime4kController(
+          platformOverride: TargetPlatform.windows,
+          isOhosOverride: false,
+          isWebOverride: false,
+          isNativePlayerOverride: true,
+          cacheDirResolver: () async => tempDir,
+          assetLoader: (assetKey) async {
+            if (!interceptedOnce) {
+              interceptedOnce = true;
+              await gate.future;
+            }
+            return loadDiskShader(assetKey);
+          },
+          propertySetterOverride: (k, v) async => props.add((k, v)),
+          persistLocally: false,
+        );
+        addTearDown(ctrl.dispose);
+
+        // Start slow Quality apply (suspends on shader extraction).
+        final staleQualityFuture = ctrl.applyPreset(player, Anime4kPreset.quality);
+        await Future<void>.delayed(Duration.zero);
+
+        // Immediately switch to Off while Quality is still extracting.
+        final offOk = await ctrl.applyPreset(player, Anime4kPreset.off);
+        expect(offOk, isTrue);
+        expect(ctrl.preset, Anime4kPreset.off);
+        expect(
+          props,
+          equals(const [
+            ('glsl-shaders', ''),
+            ('scale', 'bilinear'),
+            ('cscale', 'bilinear'),
+          ]),
+        );
+
+        // Release stale Quality extraction -> MUST abort via _opGen and NOT overwrite Off/bilinear!
+        props.clear();
+        gate.complete();
+        final staleQualityOk = await staleQualityFuture;
+        expect(staleQualityOk, isFalse);
+        expect(ctrl.preset, Anime4kPreset.off);
+        expect(props, isEmpty);
+
+        // Also verify stale error fallback does NOT clobber a newer Performance preset.
+        final failGate = Completer<void>();
+        final errProps = <(String, String)>[];
+        final ctrl2 = Anime4kController(
+          platformOverride: TargetPlatform.windows,
+          isOhosOverride: false,
+          isWebOverride: false,
+          isNativePlayerOverride: true,
+          cacheDirResolver: () async => tempDir,
+          assetLoader: (assetKey) async {
+            if (assetKey.contains('Restore_CNN_VL')) {
+              await failGate.future;
+              throw StateError('stale quality failure');
+            }
+            return loadDiskShader(assetKey);
+          },
+          propertySetterOverride: (k, v) async => errProps.add((k, v)),
+          persistLocally: false,
+        );
+        addTearDown(ctrl2.dispose);
+
+        final staleFailFuture = ctrl2.applyPreset(player, Anime4kPreset.quality);
+        await Future<void>.delayed(Duration.zero);
+        final perfOk = await ctrl2.applyPreset(player, Anime4kPreset.performance);
+        expect(perfOk, isTrue);
+        expect(ctrl2.preset, Anime4kPreset.performance);
+
+        errProps.clear();
+        failGate.complete();
+        expect(await staleFailFuture, isFalse);
+        expect(ctrl2.preset, Anime4kPreset.performance);
+        expect(errProps, isEmpty);
+      },
+    );
+
+    testWidgets(
+      'R2 #29-M2: PlayerScreen.dispose() resets Anime4K and restores Windows bilinear strictly BEFORE _player.dispose()',
+      variant: TargetPlatformVariant.only(TargetPlatform.windows),
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(1280, 720);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final tempDir = Directory.systemTemp.createTempSync('a4k_disp_test_');
+        addTearDown(() {
+          if (tempDir.existsSync()) {
+            tempDir.deleteSync(recursive: true);
+          }
+        });
+        final events = <String>[];
+        final player = _Anime4kFakePlayer(
+          onDisposeCallback: () => events.add('player:dispose'),
+        );
+        final storage = await initTestStorage();
+        final appearance = WindowsAppearance(Directory.systemTemp);
+        addTearDown(appearance.dispose);
+        final hudPrefs = PlayerHudPrefs.inMemory(isDesktop: true);
+        addTearDown(hudPrefs.dispose);
+        final a4k = Anime4kController(
+          platformOverride: TargetPlatform.windows,
+          isOhosOverride: false,
+          isWebOverride: false,
+          isNativePlayerOverride: true,
+          cacheDirResolver: () async => tempDir,
+          assetLoader: loadDiskShader,
+          propertySetterOverride: (k, v) async => events.add('prop:$k=$v'),
+          persistLocally: false,
+        );
+        addTearDown(a4k.dispose);
+
+        const site = CmsSite(
+          key: 'a4k_disp_site',
+          name: '释放测试源',
+          type: 1,
+          api: 'https://a4k.example/api',
+        );
+        const video = CmsVideo(
+          id: 'a4k_disp_vid',
+          title: '释放恢复测试影片',
+          lines: [
+            CmsLine(
+              name: '主线路',
+              episodes: [CmsEpisode(name: '第01集', url: 'https://a4k.example/e1.mp4')],
+            ),
+          ],
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (_, child) =>
+                WindowsAppearanceScope(controller: appearance, child: child!),
+            home: PlayerScreen(
+              site: site,
+              video: video,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              debugPlayer: player,
+              debugVideoSurface: const ColoredBox(color: Colors.black),
+              debugHudPrefs: hudPrefs,
+              debugAnime4kController: a4k,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 200));
+
+        // Activate performance preset -> switches to spline36.
+        await tester.runAsync(
+          () => a4k.applyPreset(player, Anime4kPreset.performance),
+        );
+        await tester.pump();
+        expect(a4k.preset, Anime4kPreset.performance);
+
+        events.clear();
+        // Unmount PlayerScreen -> MUST call resetSession (clear glsl-shaders + restore bilinear)
+        // strictly BEFORE _player.dispose()!
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+
+        expect(a4k.preset, Anime4kPreset.off);
+        final clearIdx = events.indexOf('prop:glsl-shaders=');
+        final scaleIdx = events.indexOf('prop:scale=bilinear');
+        final cscaleIdx = events.indexOf('prop:cscale=bilinear');
+        final disposeIdx = events.indexOf('player:dispose');
+        expect(clearIdx, greaterThanOrEqualTo(0), reason: 'events=$events');
+        expect(scaleIdx, greaterThan(clearIdx), reason: 'events=$events');
+        expect(cscaleIdx, greaterThan(scaleIdx), reason: 'events=$events');
+        expect(disposeIdx, greaterThan(cscaleIdx), reason: 'events=$events');
       },
     );
   });

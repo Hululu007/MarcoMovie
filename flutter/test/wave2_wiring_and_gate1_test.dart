@@ -10,8 +10,10 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:marco_movie/core/cms_client.dart';
 import 'package:marco_movie/core/danmu/block_filter.dart';
+import 'package:marco_movie/core/danmu/dandanplay_provider.dart';
 import 'package:marco_movie/core/danmu/danmu_prefs.dart';
 import 'package:marco_movie/core/danmu/provider.dart';
+import 'package:marco_movie/core/danmu/segment_cache.dart';
 import 'package:marco_movie/core/models.dart';
 import 'package:marco_movie/core/ohos_runtime.dart';
 import 'package:marco_movie/core/storage_service.dart';
@@ -882,4 +884,263 @@ void main() {
       },
     );
   });
+
+  group('Gate R2 follow-up regressions (#27 Major 1-2, Minor 3 & #29 Minor 1)', () {
+    testWidgets(
+      'R2 #27-M1 & #27-M2: live danmu serverUrls edit with owned DandanplayProvider avoids ChangeNotifier use-after-dispose and closes owned providers on rebuild & dispose',
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(844, 390);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        final storage = await initTestStorage();
+        final hudPrefs = PlayerHudPrefs.inMemory(isDesktop: false);
+        addTearDown(hudPrefs.dispose);
+        final player = _W2FakePlayer();
+
+        final createdProviders = <DandanplayProvider>[];
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: testSite,
+              video: testVideo,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              debugPlayer: player,
+              debugVideoSurface: const ColoredBox(color: Colors.black),
+              debugHudPrefs: hudPrefs,
+              debugDanmuSettings: const DanmuSettings(enabled: true),
+              debugDanmuProviderFactory: (settings) {
+                final provider = DandanplayProvider(
+                  multilineServerUrls: settings.serverUrls,
+                  appId: settings.appId,
+                  appSecret: settings.appSecret,
+                  client: MockClient(
+                    (_) async => http.Response('{"matches":[]}', 200),
+                  ),
+                );
+                createdProviders.add(provider);
+                return provider;
+              },
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 200));
+
+        expect(createdProviders, hasLength(1));
+        expect(createdProviders.first.isClosed, isFalse);
+        final initialLayer = tester.widget<DanmuLayer>(find.byType(DanmuLayer));
+        final firstCache = initialLayer.segmentCache!;
+        expect(firstCache.isDisposed, isFalse);
+
+        // Open DanmuSettingsSheet and update serverUrls live (triggers _rebuildDanmuPipeline
+        // on the production debugDanmuProvider == null branch!).
+        await tester.tap(find.byKey(const ValueKey('ios-dock-action-danmu')));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+
+        final serverField = find.descendant(
+          of: find.byType(DanmuSettingsSheet),
+          matching: find.byType(TextField),
+        ).first;
+        await tester.enterText(serverField, 'https://danmu-live.example');
+        await tester.pump();
+
+        final saveBtn = find.text('保存服务配置');
+        await tester.ensureVisible(saveBtn);
+        await tester.tap(saveBtn);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 100));
+
+        // Zero ChangeNotifier use-after-dispose FlutterError!
+        expect(tester.takeException(), isNull);
+        expect(createdProviders, hasLength(2));
+        expect(createdProviders[0].isClosed, isTrue);
+        expect(createdProviders[1].isClosed, isFalse);
+        expect(firstCache.isDisposed, isTrue);
+
+        final updatedLayer = tester.widget<DanmuLayer>(find.byType(DanmuLayer));
+        expect(updatedLayer.segmentCache, isNot(same(firstCache)));
+        expect(updatedLayer.segmentCache!.isDisposed, isFalse);
+
+        // Unmount PlayerScreen -> closes active owned provider & disposes cache cleanly.
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        expect(createdProviders[1].isClosed, isTrue);
+        expect(updatedLayer.segmentCache!.isDisposed, isTrue);
+      },
+    );
+
+    test(
+      'R2 #29-m1: DanmuSegmentCache.cancelPendingRequests cancels armed seek debounce timer and in-flight window fetches',
+      () async {
+        final fetchWindows = <int>[];
+        final fetchTokens = <DanmuCancelToken>[];
+        final inFlightGate = Completer<List<DanmuItem>>();
+        final provider = _CancellableDanmuProvider(
+          onFetchWindow: (w, token) {
+            fetchWindows.add(w);
+            if (token != null) fetchTokens.add(token);
+            return inFlightGate.future;
+          },
+        );
+        final cache = DanmuSegmentCache(
+          provider: provider,
+          seekDebounceMs: 120,
+        );
+        addTearDown(cache.dispose);
+
+        await cache.bindSession('mmdanmu://v1?src=https%3A%2F%2Fdanmu.example&ep=42');
+        expect(cache.currentSession, isNotNull);
+
+        // 1. Arm 120ms seek debounce timer, then cancelPendingRequests() before debounce fires.
+        cache.onSeekChanged(90000);
+        cache.cancelPendingRequests();
+        await Future<void>.delayed(const Duration(milliseconds: 180));
+        expect(fetchWindows, isEmpty);
+
+        // 2. Start an in-flight window fetch, then cancelPendingRequests() -> token cancelled!
+        cache.onPlaybackTick(5000, playing: true);
+        expect(fetchWindows, equals(<int>[0]));
+        expect(fetchTokens.single.isCancelled, isFalse);
+        cache.cancelPendingRequests();
+        expect(fetchTokens.single.isCancelled, isTrue);
+      },
+    );
+
+    testWidgets(
+      'R2 #29-m1: disabling Danmu inside PlayerScreen cancels pending seek debounce fetch',
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+      (tester) async {
+        final storage = await initTestStorage();
+        final hudPrefs = PlayerHudPrefs.inMemory(isDesktop: true);
+        addTearDown(hudPrefs.dispose);
+        final player = _W2FakePlayer();
+        final fetchedWindows = <int>[];
+        final provider = _CancellableDanmuProvider(
+          onFetchWindow: (w, _) async {
+            fetchedWindows.add(w);
+            return const <DanmuItem>[];
+          },
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PlayerScreen(
+              site: testSite,
+              video: testVideo,
+              initialLineIndex: 0,
+              initialEpisodeIndex: 0,
+              storage: storage,
+              debugPlayer: player,
+              debugVideoSurface: const ColoredBox(color: Colors.black),
+              debugHudPrefs: hudPrefs,
+              debugDanmuProvider: provider,
+              debugDanmuSettings: const DanmuSettings(
+                enabled: true,
+                serverUrls: 'https://danmu.example',
+              ),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 200));
+        final layer = tester.widget<DanmuLayer>(find.byType(DanmuLayer));
+        final cache = layer.segmentCache!;
+        expect(cache.currentSession, isNotNull);
+        fetchedWindows.clear();
+
+        // Arm 180ms seek debounce, then immediately toggle Danmu OFF via D key (< 180ms).
+        cache.onSeekChanged(120000);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyD);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(fetchedWindows, isEmpty);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
+
+    testWidgets(
+      'R2 #27-m3: IosDanmuSettingsSection._update does not invoke onChanged after unmount',
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      (tester) async {
+        var onChangedCalls = 0;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: IosDanmuSettingsSection(
+                initialSettingsOverride: const DanmuSettings(enabled: false),
+                onChanged: () => onChangedCalls++,
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        // Tap switch and immediately unmount before async DanmuPrefs.save settles.
+        await tester.tap(find.byKey(const ValueKey('ios-switch-danmu-enabled')));
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(tester.takeException(), isNull);
+        expect(onChangedCalls, 0);
+      },
+    );
+  });
+}
+
+class _CancellableDanmuProvider implements DanmuProvider {
+  final Future<List<DanmuItem>> Function(int windowIndex, DanmuCancelToken? token)
+      onFetchWindow;
+
+  _CancellableDanmuProvider({required this.onFetchWindow});
+
+  @override
+  Future<List<DanmuCandidate>> matchOrSearch(
+    DanmuMatchQuery query, {
+    DanmuCancelToken? cancelToken,
+  }) async =>
+      const <DanmuCandidate>[
+        DanmuCandidate(
+          sourceOrigin: 'https://danmu.example',
+          animeId: '1',
+          animeTitle: '测试影片',
+          boundEpisodeId: 'mmdanmu://v1?src=https%3A%2F%2Fdanmu.example&ep=42',
+          episodeTitle: '第01集',
+          confidence: 0.99,
+        ),
+      ];
+
+  @override
+  Future<List<DanmuCandidate>> listEpisodes(
+    String sourceOrigin,
+    String animeId, {
+    DanmuCancelToken? cancelToken,
+  }) async =>
+      const <DanmuCandidate>[];
+
+  @override
+  Future<DanmuEpisodeSession> openSession(
+    String boundEpisodeId, {
+    DanmuCancelToken? cancelToken,
+  }) async =>
+      DanmuEpisodeSession(
+        boundEpisodeId: boundEpisodeId,
+        segmented: true,
+        segments: const <DanmuSegmentDescriptor>[],
+      );
+
+  @override
+  Future<List<DanmuItem>> fetchWindow(
+    DanmuEpisodeSession session,
+    int windowIndex, {
+    DanmuCancelToken? cancelToken,
+  }) =>
+      onFetchWindow(windowIndex, cancelToken);
 }

@@ -1070,6 +1070,7 @@ class _IosDanmuSettingsSectionState extends State<IosDanmuSettingsSection> {
     if (OhosRuntime.isOhos) return;
     setState(() => _settings = next);
     await DanmuPrefs.save(next);
+    if (!mounted) return;
     widget.onChanged?.call();
   }
 

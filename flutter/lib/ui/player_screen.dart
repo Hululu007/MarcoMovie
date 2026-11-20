@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import '../core/anime4k_controller.dart';
 import '../core/cms_client.dart';
+import '../core/danmu/dandanplay_provider.dart';
 import '../core/danmu/danmu_prefs.dart';
 import '../core/danmu/provider.dart';
 import '../core/danmu/segment_cache.dart';
@@ -91,6 +92,8 @@ class PlayerScreen extends StatefulWidget {
   @visibleForTesting
   final DanmuProvider? debugDanmuProvider;
   @visibleForTesting
+  final DandanplayProvider Function(DanmuSettings)? debugDanmuProviderFactory;
+  @visibleForTesting
   final DanmuSettings? debugDanmuSettings;
   @visibleForTesting
   final OnboardingPrefs? debugOnboardingPrefs;
@@ -120,6 +123,7 @@ class PlayerScreen extends StatefulWidget {
     this.debugSubtitleLayer,
     this.debugHudPrefs,
     this.debugDanmuProvider,
+    this.debugDanmuProviderFactory,
     this.debugDanmuSettings,
     this.debugOnboardingPrefs,
     this.debugAnime4kController,
@@ -262,7 +266,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   String _extraTrackSpecInfo = '';
   DanmuSettings _danmuSettings = const DanmuSettings();
   DanmuProvider? _danmuProvider;
+  bool _ownsDanmuProvider = false;
   DanmuSegmentCache? _danmuCache;
+  final List<DanmuSegmentCache> _deferredDisposedDanmuCaches =
+      <DanmuSegmentCache>[];
   DanmuCancelToken? _danmuMatchToken;
   int _danmuSessionGen = 0;
   bool _danmuBoundForEpisode = false;
@@ -2264,13 +2271,29 @@ class _PlayerScreenState extends State<PlayerScreen>
     _startSpecController.dispose();
     _danmuMatchToken?.cancel();
     _danmuMatchToken = null;
-    _danmuCache?.dispose();
-    _danmuCache = null;
-    _danmuProvider = null;
-    _anime4kController.removeListener(_onHudSubstateChanged);
-    if (_ownsAnime4kController) {
-      _anime4kController.dispose();
+    for (final oldCache in List<DanmuSegmentCache>.of(
+      _deferredDisposedDanmuCaches,
+    )) {
+      if (!oldCache.isDisposed) {
+        oldCache.dispose();
+      }
     }
+    _deferredDisposedDanmuCaches.clear();
+    final activeDanmuCache = _danmuCache;
+    _danmuCache = null;
+    if (activeDanmuCache != null && !activeDanmuCache.isDisposed) {
+      activeDanmuCache.dispose();
+    }
+    final activeDanmuProvider = _danmuProvider;
+    final ownsDanmuProvider = _ownsDanmuProvider;
+    _danmuProvider = null;
+    _ownsDanmuProvider = false;
+    if (ownsDanmuProvider && activeDanmuProvider is DandanplayProvider) {
+      activeDanmuProvider.close();
+    }
+    _anime4kController.removeListener(_onHudSubstateChanged);
+    final anime4kController = _anime4kController;
+    final ownsAnime4kController = _ownsAnime4kController;
     for (final sub in _playerSubscriptions) {
       unawaited(sub.cancel());
     }
@@ -2306,6 +2329,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     final localLease = _localMedia.detach();
     _mediaChanges.whenComplete(() async {
       try {
+        try {
+          if (!OhosRuntime.isOhos &&
+              anime4kController.isAvailableForPlayer(_player)) {
+            await anime4kController.resetSession(_player);
+          }
+        } catch (_) {
+        } finally {
+          if (ownsAnime4kController) {
+            anime4kController.dispose();
+          }
+        }
         await _player.dispose();
       } finally {
         try {
@@ -2674,12 +2708,34 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (OhosRuntime.isOhos) return;
     _danmuMatchToken?.cancel();
     _danmuMatchToken = null;
-    _danmuCache?.dispose();
+    final oldCache = _danmuCache;
     _danmuCache = null;
+    if (oldCache != null && !oldCache.isDisposed) {
+      oldCache.cancelPendingRequests();
+      unawaited(oldCache.bindSession(''));
+      _deferredDisposedDanmuCaches.add(oldCache);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _deferredDisposedDanmuCaches.remove(oldCache);
+        if (!oldCache.isDisposed) {
+          oldCache.dispose();
+        }
+      });
+    }
+    final oldProvider = _danmuProvider;
+    final ownedOldProvider = _ownsDanmuProvider;
+    _danmuProvider = null;
+    _ownsDanmuProvider = false;
+    if (ownedOldProvider && oldProvider is DandanplayProvider) {
+      oldProvider.close();
+    }
     _danmuBoundForEpisode = false;
-    final provider =
-        widget.debugDanmuProvider ?? _danmuSettings.buildProvider();
+    final ownsNextProvider = widget.debugDanmuProvider == null;
+    final DanmuProvider provider = widget.debugDanmuProvider ??
+        (widget.debugDanmuProviderFactory != null
+            ? widget.debugDanmuProviderFactory!(_danmuSettings)
+            : _danmuSettings.buildProvider());
     _danmuProvider = provider;
+    _ownsDanmuProvider = ownsNextProvider;
     final cache = DanmuSegmentCache(provider: provider)
       ..setTimeOffsetMs(_danmuSettings.timeOffsetMs)
       ..setBlockFilter(_danmuSettings.buildBlockFilter());
@@ -2783,6 +2839,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     } else {
       _danmuMatchToken?.cancel();
       _danmuMatchToken = null;
+      _danmuCache?.cancelPendingRequests();
     }
   }
 

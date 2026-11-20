@@ -76,8 +76,18 @@ class DanmuSegmentCache extends ChangeNotifier {
   int get session410RefreshCount => _session410RefreshCount;
   int get cachedWindowCount => _windowCache.length;
   int get totalCachedItemCount => _totalCachedItems;
+  bool get isDisposed => _disposed;
   DanmuEpisodeSession? get currentSession => _activeSession;
   bool isWindowCached(int windowIndex) => _windowCache.containsKey(windowIndex);
+
+  /// Cancels any armed seek debounce timer and in-flight window fetches without
+  /// closing the bound episode session (e.g. when danmu is toggled off).
+  void cancelPendingRequests() {
+    if (_disposed) return;
+    _cancelInFlight(cancelOpen: false);
+    _seeking = false;
+    _checkIdle();
+  }
 
   void setBlockFilter(DanmuBlockFilter filter) {
     _blockFilter = filter;
