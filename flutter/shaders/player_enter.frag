@@ -14,7 +14,7 @@ uniform float uRecedeTilt;     // 3: perspective tilt 0.10 * sin(pi * uProgress)
 uniform vec4 uPosterOrigin;    // 4..7: poster rect (left, top, width, height) in lp
 uniform vec4 uSafePadding;     // 8..11: safe-area insets (left, top, right, bottom) in lp
 uniform float uPosterRadius;   // 12: initial poster corner radius in lp
-uniform float uPosterAvailable;// 13: 1.0 when poster texture is ready, 0.0 for placeholder
+uniform float uPosterAvailable;// 13: 1.0 when poster texture is ready, 0.0 suppresses foreground portal
 uniform float uPosterAspect;   // 14: source poster width / max(height, 1.0)
 
 // Sampler slots 0..1 (2 samplers total)
@@ -32,10 +32,9 @@ vec4 sampleBackdrop(vec2 normUv) {
 }
 
 vec4 samplePoster(vec2 normUv) {
+    // Decoded bitmap texture (instantiateImageCodec / RenderImage.clone):
+    // top-left origin across all backends; NEVER Y-flip under OpenGLES.
     vec2 uv = clamp(normUv, vec2(0.0), vec2(1.0));
-#ifdef IMPELLER_TARGET_OPENGLES
-    uv.y = 1.0 - uv.y;
-#endif
     return texture(uPosterTex, uv);
 }
 
@@ -91,11 +90,9 @@ void main() {
         : vec2(rectAspect / safePosterAspect, 1.0);
     vec2 posterUv = clamp((localUv - 0.5) * coverScale + 0.5, vec2(0.0), vec2(1.0));
     float posterFade = 1.0 - smoothstep(0.45, 0.80, progress);
-    vec4 posterSample = uPosterAvailable > 0.5 ? samplePoster(posterUv) : vec4(0.0);
-    vec3 placeholderRgb = vec3(0.071, 0.071, 0.086) * posterFade;
-    vec3 posterRgb = uPosterAvailable > 0.5
-        ? posterSample.rgb * posterFade
-        : placeholderRgb;
+    float posterReady = step(0.5, uPosterAvailable);
+    vec4 posterSample = posterReady > 0.5 ? samplePoster(posterUv) : vec4(0.0);
+    vec3 posterRgb = posterSample.rgb * posterFade;
 
     // 4) Rounded-rectangle SDF anti-aliased mask + subtle cinema frame rim.
     vec2 rectHalfSize = curSize * 0.5;
@@ -109,7 +106,10 @@ void main() {
         * (1.0 - smoothstep(0.55, 0.85, progress));
     vec3 portalRgb = clamp(posterRgb + vec3(0.16, 0.18, 0.22) * rimBand, vec3(0.0), vec3(1.0));
 
-    float portalPresence = step(1.0, uPosterOrigin.z) * step(1.0, uPosterOrigin.w);
+    // Never occlude uBackdropTex with a solid placeholder slab when poster texture is absent.
+    float portalPresence = step(1.0, uPosterOrigin.z)
+        * step(1.0, uPosterOrigin.w)
+        * posterReady;
     float effectiveMask = mask * portalPresence;
 
     // Premultiplied alpha composition: outPremul = fgPremul + bgPremul * (1.0 - fgPremul.a).

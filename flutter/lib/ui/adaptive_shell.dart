@@ -368,6 +368,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       if (nav.canPop()) nav.pop();
     }
 
+    final initialBlurLevel = widget.storage.glassBlurLevel;
+    final initialBlurStrength = widget.storage.glassBlurStrength;
+    final restoredNonSolidLevel =
+        initialBlurLevel == 'solid' ? 'standard' : initialBlurLevel;
+    final double? restoredNonSolidStrength =
+        initialBlurLevel == 'solid' ? null : initialBlurStrength;
+
     try {
       await Navigator.of(context).push<void>(
         buildApplePageRoute<void>(
@@ -388,10 +395,36 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               reduceTransparency,
               textScale,
             ) {
+              if (OhosRuntime.isOhos) return;
               GlassworkBackdrop.reduceTransparency.value = reduceTransparency;
-              final nextLevel = reduceTransparency ? 'solid' : 'standard';
-              if (widget.storage.glassBlurLevel != nextLevel) {
-                unawaited(widget.storage.setGlassBlurLevel(nextLevel));
+              if (reduceTransparency) {
+                if (widget.storage.glassBlurLevel != 'solid') {
+                  unawaited(widget.storage.setGlassBlurLevel('solid'));
+                }
+                GlassworkBackdrop.intensity.value = 0.0;
+              } else if (widget.storage.glassBlurLevel == 'solid') {
+                // Only write when recovering from 'solid'; preserve any
+                // existing non-solid preference ('light', 'standard', 'deep')
+                // when replaying onboarding to adjust other controls.
+                if (restoredNonSolidStrength != null &&
+                    restoredNonSolidStrength > 0.05) {
+                  unawaited(
+                    widget.storage.setGlassBlurStrength(
+                      restoredNonSolidStrength,
+                    ),
+                  );
+                  GlassworkBackdrop.intensity.value = restoredNonSolidStrength;
+                } else {
+                  unawaited(
+                    widget.storage.setGlassBlurLevel(restoredNonSolidLevel),
+                  );
+                  GlassworkBackdrop.intensity.value = switch (
+                      restoredNonSolidLevel) {
+                    'light' => 0.35,
+                    'deep' => 1.0,
+                    _ => 0.68,
+                  };
+                }
               }
             },
             onImportConfig: (initialAddress) {

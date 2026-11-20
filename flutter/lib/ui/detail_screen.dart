@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
-import 'dart:ui';
+import 'dart:ui' show ImageFilter;
+import 'dart:ui' as ui show FragmentProgram, Image;
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart' show TargetPlatform, defaultTargetPlatform;
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, visibleForTesting;
 import 'package:flutter/material.dart';
 import '../core/cms_client.dart';
 import '../core/cms_parser.dart';
@@ -40,12 +42,31 @@ class DetailScreen extends StatefulWidget {
   final CmsVideo initialVideo;
   final CmsClient client;
   final StorageService storage;
+  @visibleForTesting
+  final Widget Function(
+    BuildContext context,
+    CmsSite site,
+    CmsVideo video,
+    int lineIndex,
+    int episodeIndex,
+    int resumeMs,
+  )? debugPlayerBuilder;
+  @visibleForTesting
+  final BackdropImageCapturer? debugTransitionCapturer;
+  @visibleForTesting
+  final ui.FragmentProgram? debugTransitionShaderProgram;
+  @visibleForTesting
+  final ValueChanged<PlayerTransitionMode>? debugOnTransitionModeResolved;
   const DetailScreen({
     super.key,
     required this.site,
     required this.initialVideo,
     required this.client,
     required this.storage,
+    this.debugPlayerBuilder,
+    this.debugTransitionCapturer,
+    this.debugTransitionShaderProgram,
+    this.debugOnTransitionModeResolved,
   });
 
   static List<CmsSite> selectRelatedSeasonSiblings(
@@ -155,6 +176,8 @@ class _DetailScreenState extends State<DetailScreen> {
   int _detailEpoch = 0;
   final GlobalKey _transitionBackdropKey = GlobalKey();
   final GlobalKey _transitionPosterKey = GlobalKey();
+  Uint8List? _loadedPosterBytes;
+  String _loadedPosterIdentity = '';
 
   static bool _canShowInitialLinesImmediately(CmsSite site, CmsVideo video) {
     if (!video.lines.any((l) => l.episodes.isNotEmpty)) return false;
@@ -230,6 +253,8 @@ class _DetailScreenState extends State<DetailScreen> {
       preferHd: true,
     );
     if (immediateBytes != null) {
+      _loadedPosterBytes = immediateBytes;
+      _loadedPosterIdentity = _currentPosterIdentity;
       _posterAmbientColor = PosterLoader.peekAmbientColor(immediateBytes);
       if (_posterAmbientColor == null) {
         unawaited(_updateAmbientFromBytes(immediateBytes));
@@ -244,6 +269,38 @@ class _DetailScreenState extends State<DetailScreen> {
 
   String get _publicLookupTitle =>
       _activeSite.isEffectivelyPrivate ? '' : _video.title;
+
+  String get _currentPosterIdentity =>
+      '${_activeSite.key}|${_video.id}|${_video.poster}|$_publicLookupTitle|${_video.year}';
+
+  void _onPosterCardBytesLoaded(Uint8List bytes) {
+    _loadedPosterBytes = bytes;
+    _loadedPosterIdentity = _currentPosterIdentity;
+    unawaited(_updateAmbientFromBytes(bytes));
+  }
+
+  Future<ui.Image?> _obtainTransitionPosterImage() async {
+    if (OhosRuntime.isOhos || isWindowsDesktopUi) return null;
+    final currentId = _currentPosterIdentity;
+    final bytes = (_loadedPosterIdentity == currentId
+            ? _loadedPosterBytes
+            : null) ??
+        PosterLoader.peekMemory(
+          _video.poster,
+          title: _publicLookupTitle,
+          year: _video.year,
+          preferHd: true,
+        );
+    if (bytes == null || bytes.isEmpty) {
+      return null;
+    }
+    final cloned =
+        PlayerEnterTransition.cloneRenderedImage(_transitionPosterKey);
+    if (cloned != null) {
+      return cloned;
+    }
+    return PlayerEnterTransition.decodePosterBytes(bytes);
+  }
 
   @override
   void dispose() {
@@ -694,9 +751,13 @@ class _DetailScreenState extends State<DetailScreen> {
     });
     final immediateBytes = PosterLoader.peekMemory(
       _video.poster,
-      title: _video.title,
+      title: _publicLookupTitle,
+      year: _video.year,
       preferHd: true,
     );
+    _loadedPosterBytes = immediateBytes;
+    _loadedPosterIdentity =
+        immediateBytes != null ? _currentPosterIdentity : '';
     if (immediateBytes != null) {
       final cachedColor = PosterLoader.peekAmbientColor(immediateBytes);
       if (cachedColor != null) {
@@ -933,35 +994,79 @@ class _DetailScreenState extends State<DetailScreen> {
       }
     }
     if (!mounted) return;
+    Widget buildPlayer(BuildContext routeCtx) {
+      final debugBuilder = widget.debugPlayerBuilder;
+      if (debugBuilder != null) {
+        return debugBuilder(
+          routeCtx,
+          targetSite,
+          targetVideo,
+          safeLine,
+          safeEp,
+          effectiveResumeMs,
+        );
+      }
+      return PlayerScreen(
+        site: targetSite,
+        video: targetVideo,
+        initialLineIndex: safeLine,
+        initialEpisodeIndex: safeEp,
+        initialPositionMs: effectiveResumeMs,
+        storage: widget.storage,
+      );
+    }
+
     if (OhosRuntime.isOhos) {
       await Navigator.of(context).push(
-        buildApplePageRoute<void>(
-          builder: (_) => PlayerScreen(
-            site: targetSite,
-            video: targetVideo,
-            initialLineIndex: safeLine,
-            initialEpisodeIndex: safeEp,
-            initialPositionMs: effectiveResumeMs,
-            storage: widget.storage,
-          ),
-        ),
+        buildApplePageRoute<void>(builder: buildPlayer),
       );
     } else {
-      await pushPlayerRoute<void>(
-        context: context,
-        backdropBoundaryKey: _transitionBackdropKey,
-        posterKey: _transitionPosterKey,
-        posterRadiusLogical: isWindowsDesktopUi ? 16.0 : 18.0,
-        useFastWindowsMode: isWindowsDesktopUi,
-        builder: (_) => PlayerScreen(
-          site: targetSite,
-          video: targetVideo,
-          initialLineIndex: safeLine,
-          initialEpisodeIndex: safeEp,
-          initialPositionMs: effectiveResumeMs,
-          storage: widget.storage,
-        ),
-      );
+      final hasWindowsAppearance =
+          isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null;
+      final hasIndependentPosterCard =
+          hasWindowsAppearance || MediaQuery.sizeOf(context).width >= 720;
+      final reduceMotion = MediaQuery.disableAnimationsOf(context);
+      final activeProgram = widget.debugTransitionShaderProgram ??
+          PlayerEnterTransition.cachedProgram;
+
+      ui.Image? transitionPoster;
+      bool posterTransferred = false;
+      try {
+        if (hasIndependentPosterCard &&
+            !isWindowsDesktopUi &&
+            !reduceMotion &&
+            activeProgram != null &&
+            !PlayerEnterTransition.preferFastTransition &&
+            !PlayerEnterTransition.shaderLoadFailed) {
+          transitionPoster = await _obtainTransitionPosterImage();
+          if (!mounted) return;
+        }
+        final GlobalKey? activePosterKey =
+            hasIndependentPosterCard ? _transitionPosterKey : null;
+        final ui.Image? passedPoster =
+            activePosterKey != null ? transitionPoster : null;
+        final bool passedOwnsPoster = passedPoster != null;
+        if (passedOwnsPoster) {
+          posterTransferred = true;
+        }
+        await pushPlayerRoute<void>(
+          context: context,
+          backdropBoundaryKey: _transitionBackdropKey,
+          posterKey: activePosterKey,
+          posterRadiusLogical: isWindowsDesktopUi ? 16.0 : 18.0,
+          posterImage: passedPoster,
+          ownsPoster: passedOwnsPoster,
+          useFastWindowsMode: isWindowsDesktopUi,
+          debugCapturer: widget.debugTransitionCapturer,
+          debugShaderProgram: widget.debugTransitionShaderProgram,
+          onModeResolved: widget.debugOnTransitionModeResolved,
+          builder: buildPlayer,
+        );
+      } finally {
+        if (!posterTransferred && transitionPoster != null) {
+          transitionPoster.dispose();
+        }
+      }
     }
     if (mounted) setState(() {});
   }
@@ -1821,18 +1926,15 @@ class _DetailScreenState extends State<DetailScreen> {
                       ],
                     );
                   },
-                  child: KeyedSubtree(
-                    key: _transitionPosterKey,
-                    child: PosterImage(
-                      url: _video.poster,
-                      title: _publicLookupTitle,
-                      year: _video.year,
-                      fit: BoxFit.cover,
-                      alignment: const Alignment(0.0, -0.32),
-                      highRes: true,
-                      onBytesLoaded: _updateAmbientFromBytes,
-                      placeholder: _posterPlaceholder(bgColor),
-                    ),
+                  child: PosterImage(
+                    url: _video.poster,
+                    title: _publicLookupTitle,
+                    year: _video.year,
+                    fit: BoxFit.cover,
+                    alignment: const Alignment(0.0, -0.32),
+                    highRes: true,
+                    onBytesLoaded: _updateAmbientFromBytes,
+                    placeholder: _posterPlaceholder(bgColor),
                   ),
                 ),
               ),
@@ -3667,7 +3769,7 @@ class _DetailScreenState extends State<DetailScreen> {
                 title: _publicLookupTitle,
                 year: _video.year,
                 highRes: true,
-                onBytesLoaded: _updateAmbientFromBytes,
+                onBytesLoaded: _onPosterCardBytesLoaded,
                 placeholder: _posterPlaceholder(bgColor),
               ),
               Positioned.fill(

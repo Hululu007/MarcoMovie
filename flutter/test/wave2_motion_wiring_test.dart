@@ -376,9 +376,10 @@ void main() {
     );
 
     testWidgets(
-      'IosNativeRouteGate.runWithPlaceholders activates during capture, restores on exception via try/finally, and disposes ui.Image on completion',
+      'IosNativeRouteGate.runWithPlaceholders activates during capture on iOS 26+, restores on exception via try/finally, and disposes ui.Image on completion',
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
       (tester) async {
+        IosLiquidGlassBridge.setAvailableForTest(true);
         bool? placeholdersDuringCapture;
         ui.Image? capturedImg;
         PlayerTransitionMode? resolvedMode;
@@ -448,6 +449,58 @@ void main() {
         expect(resolvedMode, PlayerTransitionMode.shaderPortal);
 
         // Advance past 420ms enter animation -> ui.Image must be disposed immediately.
+        await tester.pump(const Duration(milliseconds: 450));
+        expect(capturedImg?.debugDisposed, isTrue);
+      },
+    );
+
+    testWidgets(
+      'L-02: pushPlayerRoute skips IosNativeRouteGate placeholder wait on iOS 15-18 when IosLiquidGlassBridge.isAvailable is false',
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      (tester) async {
+        IosLiquidGlassBridge.setAvailableForTest(false);
+        bool? placeholdersDuringCapture;
+        ui.Image? capturedImg;
+        PlayerTransitionMode? resolvedMode;
+        late BuildContext hostContext;
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Builder(
+              builder: (ctx) {
+                hostContext = ctx;
+                return const Scaffold(body: Text('detail-ios-legacy'));
+              },
+            ),
+          ),
+        );
+
+        final program = await PlayerEnterTransition.prewarmShader();
+        expect(program, isNotNull);
+
+        unawaited(
+          pushPlayerRoute<void>(
+            context: hostContext,
+            debugShaderProgram: program,
+            debugCapturer: (_) async {
+              placeholdersDuringCapture = IosNativeRouteGate.forcePlaceholders;
+              capturedImg = _createTestImage();
+              return capturedImg;
+            },
+            debugElapsedOverride: (_) => const Duration(milliseconds: 4),
+            onModeResolved: (m) => resolvedMode = m,
+            builder: (_) => const Scaffold(body: Text('player-ios-legacy')),
+          ),
+        );
+        // Without IosNativeRouteGate's postFrameCallback wait, capture completes immediately.
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 50));
+
+        expect(placeholdersDuringCapture, isFalse);
+        expect(IosNativeRouteGate.forcePlaceholders, isFalse);
+        expect(resolvedMode, PlayerTransitionMode.shaderPortal);
+        expect(find.text('player-ios-legacy'), findsOneWidget);
+
         await tester.pump(const Duration(milliseconds: 450));
         expect(capturedImg?.debugDisposed, isTrue);
       },

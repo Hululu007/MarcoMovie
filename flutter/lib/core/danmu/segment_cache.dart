@@ -59,6 +59,13 @@ class DanmuSegmentCache extends ChangeNotifier {
   bool _disposed = false;
   int _activeTaskCount = 0;
   Completer<void>? _idleCompleter;
+  int _snapshotDataVersion = 0;
+  int? _cachedPairWindow;
+  int _cachedPairVersion = -1;
+  List<DanmuItem> _cachedPairItems = const <DanmuItem>[];
+  int _cachedSliceStart = -1;
+  int _cachedSliceEnd = -1;
+  List<DanmuItem> _cachedSliceItems = const <DanmuItem>[];
 
   DanmuSegmentCache({
     required this.provider,
@@ -89,13 +96,25 @@ class DanmuSegmentCache extends ChangeNotifier {
     _checkIdle();
   }
 
+  void _invalidateSnapshotCache() {
+    _snapshotDataVersion++;
+    _cachedPairWindow = null;
+    _cachedPairVersion = -1;
+    _cachedPairItems = const <DanmuItem>[];
+    _cachedSliceStart = -1;
+    _cachedSliceEnd = -1;
+    _cachedSliceItems = const <DanmuItem>[];
+  }
+
   void setBlockFilter(DanmuBlockFilter filter) {
     _blockFilter = filter;
+    _invalidateSnapshotCache();
     if (!_disposed) notifyListeners();
   }
 
   void setTimeOffsetMs(int offsetMs) {
     _timeOffsetMs = offsetMs.clamp(-30000, 30000);
+    _invalidateSnapshotCache();
     if (!_disposed) notifyListeners();
   }
 
@@ -116,6 +135,7 @@ class DanmuSegmentCache extends ChangeNotifier {
     _currentPinnedWindow = 0;
     _pendingWindowAfterOpen = null;
     _seeking = false;
+    _invalidateSnapshotCache();
 
     if (_boundEpisodeId.isEmpty) return;
 
@@ -212,49 +232,89 @@ class DanmuSegmentCache extends ChangeNotifier {
     if (effectiveMs < 0) return const <DanmuItem>[];
 
     final w = effectiveMs ~/ windowDurationMs;
-    final prevItems = w > 0 ? _touchWindow(w - 1) : null;
-    final currItems = _touchWindow(w);
-    if ((prevItems == null || prevItems.isEmpty) &&
-        (currItems == null || currItems.isEmpty)) {
-      return const <DanmuItem>[];
+    if (_cachedPairWindow != w || _cachedPairVersion != _snapshotDataVersion) {
+      _rebuildWindowPairCache(w);
     }
+    final pairItems = _cachedPairItems;
+    if (pairItems.isEmpty) return const <DanmuItem>[];
 
     final minTimeMs = effectiveMs - maxCommentLifetimeMs;
-    final merged = <String, DanmuItem>{};
-    _collectVisible(prevItems, minTimeMs, effectiveMs, merged);
-    _collectVisible(currItems, minTimeMs, effectiveMs, merged);
-    if (merged.isEmpty) return const <DanmuItem>[];
-
-    final out = merged.values.toList(growable: false);
-    out.sort(DanmuItem.compareOrder);
-    return out;
-  }
-
-  void _collectVisible(
-    List<DanmuItem>? source,
-    int minTimeMs,
-    int maxTimeMs,
-    Map<String, DanmuItem> dest,
-  ) {
-    if (source == null || source.isEmpty) return;
     var lo = 0;
-    var hi = source.length;
+    var hi = pairItems.length;
     while (lo < hi) {
       final mid = (lo + hi) >>> 1;
-      if (source[mid].timeMs < minTimeMs) {
+      if (pairItems[mid].timeMs < minTimeMs) {
         lo = mid + 1;
       } else {
         hi = mid;
       }
     }
-    final hasFilter = !_blockFilter.isEmpty;
-    for (var i = lo; i < source.length; i++) {
-      final item = source[i];
-      if (item.timeMs > maxTimeMs) break;
-      if (item.timeMs < minTimeMs) continue;
-      if (hasFilter && _blockFilter.isBlocked(item.text)) continue;
-      dest.putIfAbsent(item.id, () => item);
+    final start = lo;
+
+    lo = start;
+    hi = pairItems.length;
+    while (lo < hi) {
+      final mid = (lo + hi) >>> 1;
+      if (pairItems[mid].timeMs <= effectiveMs) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
     }
+    final end = lo;
+
+    if (start >= end) {
+      _cachedSliceStart = start;
+      _cachedSliceEnd = start;
+      _cachedSliceItems = const <DanmuItem>[];
+      return const <DanmuItem>[];
+    }
+    if (start == _cachedSliceStart && end == _cachedSliceEnd) {
+      return _cachedSliceItems;
+    }
+    _cachedSliceStart = start;
+    _cachedSliceEnd = end;
+    _cachedSliceItems = List<DanmuItem>.unmodifiable(
+      pairItems.sublist(start, end),
+    );
+    return _cachedSliceItems;
+  }
+
+  void _rebuildWindowPairCache(int windowIndex) {
+    final prevItems = windowIndex > 0 ? _touchWindow(windowIndex - 1) : null;
+    final currItems = _touchWindow(windowIndex);
+    _cachedPairWindow = windowIndex;
+    _cachedPairVersion = _snapshotDataVersion;
+    _cachedSliceStart = -1;
+    _cachedSliceEnd = -1;
+    _cachedSliceItems = const <DanmuItem>[];
+
+    if ((prevItems == null || prevItems.isEmpty) &&
+        (currItems == null || currItems.isEmpty)) {
+      _cachedPairItems = const <DanmuItem>[];
+      return;
+    }
+
+    final merged = <String, DanmuItem>{};
+    final hasFilter = !_blockFilter.isEmpty;
+    void addAll(List<DanmuItem>? source) {
+      if (source == null || source.isEmpty) return;
+      for (var i = 0; i < source.length; i++) {
+        final item = source[i];
+        if (hasFilter && _blockFilter.isBlocked(item.text)) continue;
+        merged.putIfAbsent(item.id, () => item);
+      }
+    }
+
+    addAll(prevItems);
+    addAll(currItems);
+    if (merged.isEmpty) {
+      _cachedPairItems = const <DanmuItem>[];
+      return;
+    }
+    final sorted = merged.values.toList(growable: false);
+    sorted.sort(DanmuItem.compareOrder);
+    _cachedPairItems = sorted;
   }
 
   List<DanmuItem>? _touchWindow(int windowIndex) {
@@ -415,6 +475,7 @@ class DanmuSegmentCache extends ChangeNotifier {
     }
     _windowCache[windowIndex] = bounded;
     _totalCachedItems += bounded.length;
+    _invalidateSnapshotCache();
     _evictIfNeeded();
   }
 
@@ -426,6 +487,7 @@ class DanmuSegmentCache extends ChangeNotifier {
   }
 
   void _evictIfNeeded() {
+    var evicted = false;
     while (_windowCache.length > maxCachedWindows ||
         _totalCachedItems > maxTotalItems) {
       int? victim;
@@ -439,7 +501,11 @@ class DanmuSegmentCache extends ChangeNotifier {
       final removed = _windowCache.remove(victim);
       if (removed != null) {
         _totalCachedItems -= removed.length;
+        evicted = true;
       }
+    }
+    if (evicted) {
+      _invalidateSnapshotCache();
     }
   }
 
@@ -491,6 +557,7 @@ class DanmuSegmentCache extends ChangeNotifier {
     _cancelInFlight(cancelOpen: true);
     _windowCache.clear();
     _totalCachedItems = 0;
+    _invalidateSnapshotCache();
     final c = _idleCompleter;
     _idleCompleter = null;
     if (c != null && !c.isCompleted) c.complete();

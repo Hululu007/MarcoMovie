@@ -18,6 +18,7 @@ import 'package:marco_movie/core/models.dart';
 import 'package:marco_movie/core/ohos_runtime.dart';
 import 'package:marco_movie/core/storage_service.dart';
 import 'package:marco_movie/ui/adaptive_shell.dart';
+import 'package:marco_movie/ui/apple_theme.dart';
 import 'package:marco_movie/ui/danmu/danmu_layer.dart';
 import 'package:marco_movie/ui/danmu/danmu_settings_sheet.dart';
 import 'package:marco_movie/ui/ios_liquid_glass.dart';
@@ -683,6 +684,119 @@ void main() {
         await tester.pump(const Duration(milliseconds: 300));
         expect(onboardingPrefs.playHintDismissed, isTrue);
         expect(onboardingPrefs.shouldShowFirstPlayHint(), isFalse);
+      },
+    );
+
+    testWidgets(
+      'L-01: replaying onboarding preserves user glassBlurLevel (light / deep) when adjusting text scale or toggling reduceTransparency',
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(390, 844);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+          GlassworkBackdrop.reduceTransparency.value = false;
+          GlassworkBackdrop.intensity.value = 0.68;
+        });
+
+        for (final savedPreset in const <(String, double)>[
+          ('light', 0.35),
+          ('deep', 1.0),
+        ]) {
+          final level = savedPreset.$1;
+          final strength = savedPreset.$2;
+          SharedPreferences.setMockInitialValues(<String, Object>{
+            OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+            StorageService.keyGlassBlurLevel: level,
+            StorageService.keyGlassBlurStrength: strength,
+          });
+          final storage = await StorageService.init();
+          expect(storage.glassBlurLevel, level);
+
+          await tester.pumpWidget(
+            MaterialApp(
+              home: AdaptiveShell(
+                storage: storage,
+                client: CmsClient(
+                  client: MockClient(
+                    (_) async => http.Response('{"class":[],"list":[]}', 200),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(find.byType(OnboardingScreen), findsNothing);
+
+          // Open Settings -> 关于与更新 -> 重新查看新手引导
+          await tester.tap(find.text('设置').last);
+          await tester.pumpAndSettle();
+          final aboutCat = find.byKey(const ValueKey('settings-category-about'));
+          await tester.ensureVisible(aboutCat);
+          await tester.pumpAndSettle();
+          await tester.tap(aboutCat);
+          await tester.pumpAndSettle();
+          final replayEntry = find.byKey(const ValueKey('ios-replay-onboarding'));
+          await tester.ensureVisible(replayEntry);
+          await tester.pumpAndSettle();
+          await tester.tap(replayEntry);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 400));
+          expect(find.byType(OnboardingScreen), findsOneWidget);
+
+          // Advance Acts 1 -> 5 (AuroraBackground runs an active ticker, so pump fixed intervals).
+          for (var i = 0; i < 4; i++) {
+            await tester.tap(find.byKey(const Key('onboarding_next_button')));
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 300));
+          }
+
+          // Adjust text scale slider & Reduce Motion switch while Reduce Transparency is OFF:
+          // MUST NOT overwrite user's existing 'light' or 'deep' glassBlurLevel!
+          final slider = find.byKey(const Key('onboarding_text_scale_slider'));
+          await tester.ensureVisible(slider);
+          await tester.pump();
+          await tester.drag(slider, const Offset(60, 0));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+          expect(storage.glassBlurLevel, level);
+          expect(storage.glassBlurStrength, closeTo(strength, 0.01));
+
+          final motionSwitch =
+              find.byKey(const Key('onboarding_reduce_motion_switch'));
+          await tester.ensureVisible(motionSwitch);
+          await tester.pump();
+          await tester.tap(motionSwitch);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+          expect(storage.glassBlurLevel, level);
+          expect(storage.glassBlurStrength, closeTo(strength, 0.01));
+
+          // Toggling Reduce Transparency ON sets 'solid', and toggling it back OFF
+          // MUST restore the user's original 'light'/'deep' preference (not 'standard').
+          final rtSwitch =
+              find.byKey(const Key('onboarding_reduce_transparency_switch'));
+          await tester.ensureVisible(rtSwitch);
+          await tester.pump();
+          await tester.tap(rtSwitch);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+          expect(storage.glassBlurLevel, 'solid');
+          expect(GlassworkBackdrop.reduceTransparency.value, isTrue);
+
+          await tester.tap(rtSwitch);
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 100));
+          expect(storage.glassBlurLevel, level);
+          expect(storage.glassBlurStrength, closeTo(strength, 0.01));
+          expect(GlassworkBackdrop.reduceTransparency.value, isFalse);
+
+          // Cleanly unmount before second iteration
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+        }
       },
     );
   });
