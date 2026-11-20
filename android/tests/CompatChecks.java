@@ -611,6 +611,7 @@ public final class CompatChecks {
                                 pkg.resolve("TvLayoutPolicy.java").toString(),
                                 pkg.resolve("Prefs.java").toString(),
                                 pkg.resolve("AppLog.java").toString(),
+                                pkg.resolve("LiveQualityPolicy.java").toString(),
                                 pkg.resolve("LiveCatalog.java").toString(),
                                 pkg.resolve("VideoFilters.java").toString(),
                                 pkg.resolve("SourceEngine.java").toString(),
