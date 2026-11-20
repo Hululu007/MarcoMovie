@@ -58,3 +58,5 @@ flutter:
     - assets/logo_mark.png
     - shaders/GLASSWORK-LICENSE.txt
     - assets/ui-spec/badge-rules.json
+    - assets/demo/
+    - assets/shaders/anime4k/

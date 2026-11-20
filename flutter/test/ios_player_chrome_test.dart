@@ -550,6 +550,99 @@ void main() {
       'IosFluidScrubberCapsule tracks active pointerId so second finger cannot jump or prematurely commit scrub',
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
       (tester) async {
+        // 1. Standalone capsule pointerId isolation: while parent keeps
+        // isScrubbing=true, a second finger on the track cannot hijack or
+        // prematurely commit, and lifting pointer 1 commits near 75%.
+        final ends = <double>[];
+        bool scrubbing = false;
+        late StateSetter setHostState;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Center(
+                child: SizedBox(
+                  width: 600,
+                  child: StatefulBuilder(
+                    builder: (context, setState) {
+                      setHostState = setState;
+                      return IosFluidScrubberCapsule(
+                        position: const Duration(minutes: 5),
+                        duration: const Duration(minutes: 30),
+                        isScrubbing: scrubbing,
+                        scrubPositionMs: const Duration(minutes: 5).inMilliseconds,
+                        skipIntroSec: 0,
+                        skipOutroSec: 0,
+                        ios26Visual: true,
+                        reduceTransparency: false,
+                        reduceMotion: true,
+                        onScrubStart: (_) => setHostState(() => scrubbing = true),
+                        onScrubUpdate: (_) {},
+                        onScrubEnd: (ms) {
+                          ends.add(ms);
+                          setHostState(() => scrubbing = false);
+                        },
+                        onScrubCancel: () => setHostState(() => scrubbing = false),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        final standaloneRect = tester.getRect(
+          find.byKey(const Key('ios-fluid-scrubber-hit-area')),
+        );
+        final sp1 = await tester.startGesture(
+          Offset(
+            standaloneRect.left + standaloneRect.width * 0.5,
+            standaloneRect.center.dy,
+          ),
+          kind: PointerDeviceKind.touch,
+          pointer: 11,
+        );
+        await tester.pump();
+        await sp1.moveTo(
+          Offset(
+            standaloneRect.left + standaloneRect.width * 0.75,
+            standaloneRect.center.dy,
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 50));
+
+        // Second finger touches at 10% and lifts -> must NOT commit or reset scrub!
+        final sp2 = await tester.startGesture(
+          Offset(
+            standaloneRect.left + standaloneRect.width * 0.1,
+            standaloneRect.center.dy,
+          ),
+          kind: PointerDeviceKind.touch,
+          pointer: 22,
+        );
+        await tester.pump(const Duration(milliseconds: 30));
+        await sp2.moveTo(
+          Offset(
+            standaloneRect.left + standaloneRect.width * 0.15,
+            standaloneRect.center.dy,
+          ),
+        );
+        await sp2.up();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(ends, isEmpty);
+
+        // Lifting primary finger commits near 75% (~22:30 of 30:00).
+        await sp1.up();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(ends, hasLength(1));
+        expect(
+          ends.single / 1000.0,
+          closeTo(const Duration(minutes: 30).inSeconds * 0.75, 45),
+        );
+
+        // 2. Inside PlayerScreen with S-01 + NEW-L01 multi-touch cancellation:
+        // a second finger triggers parent isScrubbing=false -> capsule clears
+        // _activePointerId so lifting finger 1 NEVER emits a stale seek.
         IosLiquidGlassBridge.setAvailableForTest(true);
         final player = _IosFakePlayer();
         await mountIosPlayer(
@@ -562,11 +655,10 @@ void main() {
         final trackRect = tester.getRect(
           find.byKey(const Key('ios-fluid-scrubber-hit-area')),
         );
-        // Primary finger touches near 50% and drags right to 75%.
         final p1 = await tester.startGesture(
           Offset(trackRect.left + trackRect.width * 0.5, trackRect.center.dy),
           kind: PointerDeviceKind.touch,
-          pointer: 11,
+          pointer: 31,
         );
         await tester.pump();
         await p1.moveTo(
@@ -574,28 +666,16 @@ void main() {
         );
         await tester.pump(const Duration(milliseconds: 50));
 
-        // Second finger touches at 10% and lifts -> must NOT commit or reset scrub!
         final p2 = await tester.startGesture(
           Offset(trackRect.left + trackRect.width * 0.1, trackRect.center.dy),
           kind: PointerDeviceKind.touch,
-          pointer: 22,
+          pointer: 32,
         );
         await tester.pump(const Duration(milliseconds: 30));
-        await p2.moveTo(
-          Offset(trackRect.left + trackRect.width * 0.15, trackRect.center.dy),
-        );
         await p2.up();
-        await tester.pump(const Duration(milliseconds: 50));
-        expect(player.seeks, isEmpty);
-
-        // Lifting primary finger commits near 75% (~22:30 of 30:00).
         await p1.up();
         await tester.pump(const Duration(milliseconds: 50));
-        expect(player.seeks, hasLength(1));
-        expect(
-          player.seeks.single.inSeconds,
-          closeTo(const Duration(minutes: 30).inSeconds * 0.75, 45),
-        );
+        expect(player.seeks, isEmpty);
 
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(milliseconds: 100));

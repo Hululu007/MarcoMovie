@@ -4,10 +4,13 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb, visibleForTesting;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
 import '../../core/ohos_runtime.dart';
+import '../ios_liquid_glass.dart';
 import 'motion_tokens.dart';
 
 /// Resolved execution tier for Detail -> Player transitions.
@@ -480,12 +483,14 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
   PlayerTransitionMode? _lastReportedMode;
   bool _snapshotReleased = false;
   bool _enterCompleted = false;
+  ModalRoute<dynamic>? _route;
   late CurvedAnimation _linearAnimation;
   late CurvedAnimation _scaleFadeAnimation;
   late Animation<double> _scaleTweenAnimation;
 
   PlayerTransitionMode? get lastResolvedMode => _lastReportedMode;
   bool get hasActiveShader => _shader != null;
+  bool get _isRouteOffstage => _route?.offstage ?? false;
 
   @override
   void initState() {
@@ -494,6 +499,20 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
     _initAnimations();
     widget.animation.addStatusListener(_handleAnimationStatus);
     if (!_enterCompleted) {
+      _syncShader();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _route = ModalRoute.of(context);
+    if (!_isRouteOffstage &&
+        _enterCompleted &&
+        !_snapshotReleased &&
+        (widget.animation.status == AnimationStatus.forward ||
+            widget.animation.status == AnimationStatus.dismissed)) {
+      _enterCompleted = false;
       _syncShader();
     }
   }
@@ -565,7 +584,25 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
   }
 
   void _handleAnimationStatus(AnimationStatus status) {
+    // ModalRoute builds its first frame offstage with kAlwaysCompleteAnimation
+    // (for Hero layout) before switching the ProxyAnimation to the real forward
+    // transition controller. Re-arm the shader when transitioning out of that
+    // offstage measurement frame so Navigator.push runs the Cinema Portal shader.
+    if ((status == AnimationStatus.forward ||
+            status == AnimationStatus.dismissed) &&
+        _enterCompleted &&
+        !_snapshotReleased) {
+      _enterCompleted = false;
+      _syncShader();
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
     if (status == AnimationStatus.completed) {
+      if (_isRouteOffstage) {
+        return;
+      }
       final hadActiveOverlay = !_enterCompleted ||
           _shader != null ||
           (widget.disposeSnapshotOnComplete &&
@@ -618,7 +655,9 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
       preferFast: snapshot?.exceededBudget ?? false,
       useFastWindowsMode: widget.useFastWindowsMode,
     );
-    _reportMode(mode);
+    if (!_isRouteOffstage) {
+      _reportMode(mode);
+    }
 
     final bool showPortalOverlay = mode == PlayerTransitionMode.shaderPortal &&
         !_enterCompleted &&
@@ -837,5 +876,130 @@ class PlayerEnterPageRoute<T> extends PageRoute<T> {
     } finally {
       super.dispose();
     }
+  }
+}
+
+Rect _resolvePosterOriginLogical({
+  GlobalKey? posterKey,
+  RenderRepaintBoundary? backdropBoundary,
+}) {
+  final posterCtx = posterKey?.currentContext;
+  if (posterCtx == null) return Rect.zero;
+  final ro = posterCtx.findRenderObject();
+  if (ro is! RenderBox || !ro.hasSize || ro.size.isEmpty) return Rect.zero;
+  try {
+    final origin = backdropBoundary != null && backdropBoundary.attached
+        ? ro.localToGlobal(Offset.zero, ancestor: backdropBoundary)
+        : ro.localToGlobal(Offset.zero);
+    return origin & ro.size;
+  } catch (_) {
+    return Rect.zero;
+  }
+}
+
+/// Unified no-black-hole Detail -> Player route helper combining:
+/// 1. [IosNativeRouteGate.runWithPlaceholders] (strict `try/finally` guarantee
+///    to restore native iOS 26 `UiKitView`s even on exception or cancellation),
+/// 2. Bounded [PlayerEnterTransition.captureBackdrop] (`<= 1280px` longest edge,
+///    `16ms` capture budget -> session `preferFastTransition` latch, immediate
+///    `ui.Image.dispose()` on budget overrun / error / unmount / completion),
+/// 3. Triple automatic degradation:
+///    - Tier 1: `MediaQuery.disableAnimationsOf(context)` -> `150ms` linear fade
+///    - Tier 2: shader failure / `OhosRuntime.isOhos` / Windows fast mode ->
+///      `220ms` (`185ms` Windows fast) scale + fade
+///    - Tier 3: `toImage() > 16ms` -> session `preferFastTransition` scale + fade
+Future<T?> pushPlayerRoute<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+  GlobalKey? backdropBoundaryKey,
+  GlobalKey? posterKey,
+  double posterRadiusLogical = 12.0,
+  ui.Image? posterImage,
+  bool ownsPoster = false,
+  bool? useFastWindowsMode,
+  RouteSettings? settings,
+  bool fullscreenDialog = false,
+  TransitionCaptureGate<ui.Image?>? captureGateOverride,
+  BackdropImageCapturer? debugCapturer,
+  Duration Function(Duration measured)? debugElapsedOverride,
+  ValueChanged<PlayerTransitionMode>? onModeResolved,
+  ui.FragmentProgram? debugShaderProgram,
+}) async {
+  final reduceMotion = MediaQuery.disableAnimationsOf(context);
+  final dpr = MediaQuery.devicePixelRatioOf(context);
+  final viewportSize = MediaQuery.sizeOf(context);
+  final isOhos = OhosRuntime.isOhos;
+  final fastWindows = useFastWindowsMode ??
+      (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows);
+  final navigator = Navigator.of(context);
+
+  PlayerTransitionSnapshot? snapshot;
+  ui.FragmentProgram? program;
+
+  if (!reduceMotion && !isOhos && !fastWindows) {
+    program = debugShaderProgram ?? PlayerEnterTransition.cachedProgram;
+    if (program == null && !PlayerEnterTransition.shaderLoadFailed) {
+      // Trigger non-blocking warmup for subsequent entries; fall back to
+      // 220ms scale + fade on the cold frame rather than stalling playback.
+      unawaited(PlayerEnterTransition.prewarmShader());
+    }
+
+    if (program != null && !PlayerEnterTransition.preferFastTransition) {
+      RenderRepaintBoundary? boundary;
+      final boundaryObj = backdropBoundaryKey?.currentContext?.findRenderObject();
+      if (boundaryObj is RenderRepaintBoundary && boundaryObj.hasSize) {
+        boundary = boundaryObj;
+      }
+      final posterOrigin = _resolvePosterOriginLogical(
+        posterKey: posterKey,
+        backdropBoundary: boundary,
+      );
+      final shouldUseIosGate = !kIsWeb &&
+          defaultTargetPlatform == TargetPlatform.iOS &&
+          !isOhos;
+      final TransitionCaptureGate<ui.Image?>? gate = captureGateOverride ??
+          (shouldUseIosGate
+              ? (Future<ui.Image?> Function() action) =>
+                  IosNativeRouteGate.runWithPlaceholders<ui.Image?>(action)
+              : null);
+
+      snapshot = await PlayerEnterTransition.captureBackdrop(
+        boundary: boundary,
+        customCapturer: debugCapturer,
+        routeGateWrapper: gate,
+        logicalSize: boundary != null ? boundary.size : viewportSize,
+        devicePixelRatio: dpr,
+        posterOriginLogical: posterOrigin,
+        posterRadiusLogical: posterRadiusLogical,
+        posterImage: posterImage,
+        ownsPoster: ownsPoster,
+        reduceMotion: reduceMotion,
+        useFastWindowsMode: fastWindows,
+        debugElapsedOverride: debugElapsedOverride,
+      );
+    }
+  }
+
+  if (!context.mounted) {
+    snapshot?.dispose();
+    return null;
+  }
+
+  final route = PlayerEnterPageRoute<T>(
+    builder: builder,
+    snapshot: snapshot,
+    shaderProgram: program,
+    reduceMotion: reduceMotion,
+    useFastWindowsMode: fastWindows,
+    onModeResolved: onModeResolved,
+    settings: settings,
+    fullscreenDialog: fullscreenDialog,
+  );
+
+  try {
+    return await navigator.push<T>(route);
+  } catch (_) {
+    snapshot?.dispose();
+    rethrow;
   }
 }

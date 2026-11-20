@@ -97,6 +97,13 @@ class DesktopPlayerHud extends StatelessWidget {
   final bool moreControlsOpen;
   final bool sleepTimerActive;
   final String sleepTimerLabel;
+  final bool danmuEnabled;
+  final VoidCallback? onDanmuToggle;
+  final VoidCallback? onDanmuSettingsTap;
+  final bool anime4kVisible;
+  final bool anime4kActive;
+  final String anime4kLabel;
+  final VoidCallback? onAnime4kTap;
   final Widget topHeader;
   final Widget? progressBar;
   final Widget transportButtons;
@@ -121,6 +128,13 @@ class DesktopPlayerHud extends StatelessWidget {
     required this.moreControlsOpen,
     required this.sleepTimerActive,
     required this.sleepTimerLabel,
+    this.danmuEnabled = false,
+    this.onDanmuToggle,
+    this.onDanmuSettingsTap,
+    this.anime4kVisible = false,
+    this.anime4kActive = false,
+    this.anime4kLabel = 'Anime4K',
+    this.onAnime4kTap,
     required this.topHeader,
     required this.progressBar,
     required this.transportButtons,
@@ -310,11 +324,33 @@ class DesktopPlayerHud extends StatelessWidget {
                                 CupertinoIcons.speedometer,
                                 onSpeedTap,
                               ),
-                            if (!isLive && width >= 1000)
+                            if (!isLive &&
+                                width >= 960 &&
+                                onDanmuToggle != null)
+                              control(
+                                danmuEnabled ? '弹幕开' : '弹幕',
+                                danmuEnabled
+                                    ? CupertinoIcons.chat_bubble_text_fill
+                                    : CupertinoIcons.chat_bubble_text,
+                                onDanmuToggle!,
+                                highlighted: danmuEnabled,
+                                key: const Key('desktop-danmu-toggle-button'),
+                              ),
+                            if (!isLive && width >= 1020)
                               control(
                                 '字幕',
                                 CupertinoIcons.captions_bubble,
                                 onSubtitlesTap,
+                              ),
+                            if (anime4kVisible &&
+                                width >= 1180 &&
+                                onAnime4kTap != null)
+                              control(
+                                anime4kLabel,
+                                CupertinoIcons.wand_stars,
+                                onAnime4kTap!,
+                                highlighted: anime4kActive,
+                                key: const Key('desktop-anime4k-button'),
                               ),
                             if (width >= 1120)
                               control(

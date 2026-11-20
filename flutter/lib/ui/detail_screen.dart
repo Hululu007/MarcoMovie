@@ -19,6 +19,7 @@ import 'apple_theme.dart';
 import 'desktop_horizontal_scroller.dart';
 import 'ios_liquid_glass.dart';
 import 'media_badge.dart';
+import 'motion/player_enter_transition.dart';
 import 'netdisk_sheet.dart';
 import 'player_screen.dart';
 import 'poster_image.dart';
@@ -152,6 +153,8 @@ class _DetailScreenState extends State<DetailScreen> {
   Completer<void>? _detailAbort;
   Completer<void>? _seasonAbort;
   int _detailEpoch = 0;
+  final GlobalKey _transitionBackdropKey = GlobalKey();
+  final GlobalKey _transitionPosterKey = GlobalKey();
 
   static bool _canShowInitialLinesImmediately(CmsSite site, CmsVideo video) {
     if (!video.lines.any((l) => l.episodes.isNotEmpty)) return false;
@@ -208,6 +211,9 @@ class _DetailScreenState extends State<DetailScreen> {
       unawaited(MediaBadges.ensureInitialized().then((_) {
         if (mounted) setState(() {});
       }));
+      if (!isWindowsDesktopUi) {
+        unawaited(PlayerEnterTransition.prewarmShader());
+      }
     }
     _isFavorite = widget.storage.isFavorite(
       _activeSite.key,
@@ -927,8 +933,26 @@ class _DetailScreenState extends State<DetailScreen> {
       }
     }
     if (!mounted) return;
-    await Navigator.of(context).push(
-      buildApplePageRoute<void>(
+    if (OhosRuntime.isOhos) {
+      await Navigator.of(context).push(
+        buildApplePageRoute<void>(
+          builder: (_) => PlayerScreen(
+            site: targetSite,
+            video: targetVideo,
+            initialLineIndex: safeLine,
+            initialEpisodeIndex: safeEp,
+            initialPositionMs: effectiveResumeMs,
+            storage: widget.storage,
+          ),
+        ),
+      );
+    } else {
+      await pushPlayerRoute<void>(
+        context: context,
+        backdropBoundaryKey: _transitionBackdropKey,
+        posterKey: _transitionPosterKey,
+        posterRadiusLogical: isWindowsDesktopUi ? 16.0 : 18.0,
+        useFastWindowsMode: isWindowsDesktopUi,
         builder: (_) => PlayerScreen(
           site: targetSite,
           video: targetVideo,
@@ -937,8 +961,8 @@ class _DetailScreenState extends State<DetailScreen> {
           initialPositionMs: effectiveResumeMs,
           storage: widget.storage,
         ),
-      ),
-    );
+      );
+    }
     if (mounted) setState(() {});
   }
 
@@ -1590,15 +1614,21 @@ class _DetailScreenState extends State<DetailScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final Widget screen;
     if (isWindowsDesktopUi && WindowsAppearanceScope.maybeOf(context) != null) {
-      return _buildWindowsDetail(context);
+      screen = _buildWindowsDetail(context);
+    } else {
+      final width = MediaQuery.sizeOf(context).width;
+      final wideLayout = width >= 720;
+      screen = wideLayout
+          ? _buildWideDesktopScreen(context)
+          : _buildPortraitImmersiveScreen(context);
     }
-    final width = MediaQuery.sizeOf(context).width;
-    final wideLayout = width >= 720;
-    if (!wideLayout) {
-      return _buildPortraitImmersiveScreen(context);
-    }
-    return _buildWideDesktopScreen(context);
+    if (OhosRuntime.isOhos) return screen;
+    return RepaintBoundary(
+      key: _transitionBackdropKey,
+      child: screen,
+    );
   }
 
   /// Portrait immersive layout:
@@ -1791,15 +1821,18 @@ class _DetailScreenState extends State<DetailScreen> {
                       ],
                     );
                   },
-                  child: PosterImage(
-                    url: _video.poster,
-                    title: _publicLookupTitle,
-                    year: _video.year,
-                    fit: BoxFit.cover,
-                    alignment: const Alignment(0.0, -0.32),
-                    highRes: true,
-                    onBytesLoaded: _updateAmbientFromBytes,
-                    placeholder: _posterPlaceholder(bgColor),
+                  child: KeyedSubtree(
+                    key: _transitionPosterKey,
+                    child: PosterImage(
+                      url: _video.poster,
+                      title: _publicLookupTitle,
+                      year: _video.year,
+                      fit: BoxFit.cover,
+                      alignment: const Alignment(0.0, -0.32),
+                      highRes: true,
+                      onBytesLoaded: _updateAmbientFromBytes,
+                      placeholder: _posterPlaceholder(bgColor),
+                    ),
                   ),
                 ),
               ),
@@ -3622,6 +3655,7 @@ class _DetailScreenState extends State<DetailScreen> {
         ],
       ),
       child: ClipRRect(
+        key: _transitionPosterKey,
         borderRadius: BorderRadius.circular(18),
         child: AspectRatio(
           aspectRatio: 2 / 3,

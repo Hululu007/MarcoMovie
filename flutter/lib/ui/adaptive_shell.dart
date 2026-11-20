@@ -34,7 +34,11 @@ import 'ios_liquid_glass.dart';
 import 'ios_search_page.dart';
 import 'ios_settings.dart';
 import 'ios_update_sheet.dart';
+import 'motion/aurora_background.dart';
+import 'motion/player_enter_transition.dart';
 import 'netdisk_sheet.dart';
+import 'onboarding/onboarding_prefs.dart';
+import 'onboarding/onboarding_screen.dart';
 import 'player_screen.dart';
 import 'poster_image.dart';
 import 'release_notes_view.dart';
@@ -250,6 +254,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   // Expandable drawer keys in Settings tab
   final Set<String> _expandedSettings = <String>{};
   List<WatchHistoryEntry> _cachedWatchHistory = const [];
+  bool _onboardingRouteOpen = false;
+  bool _startupOnboardingChecked = false;
   bool get _isMacOS => !kIsWeb && Platform.isMacOS;
   CmsFilter get _currentFilter => CmsFilter(
         primaryTab: _primaryTab,
@@ -311,8 +317,109 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _onCredentialMigrationFailure();
     }
     _reloadSavedConfig();
+    if (!OhosRuntime.isOhos) {
+      unawaited(_maybeShowFirstLaunchOnboarding());
+    }
     if (!Platform.environment.containsKey('FLUTTER_TEST')) {
       unawaited(_runStartupWebdavSync());
+    }
+  }
+
+  Future<void> _maybeShowFirstLaunchOnboarding() async {
+    if (_startupOnboardingChecked || OhosRuntime.isOhos || !mounted) return;
+    _startupOnboardingChecked = true;
+    // Only launch first-run guide on fresh installs without existing configs
+    // (never hijack corruption recovery alerts).
+    if (_config != null ||
+        widget.storage.getSubscriptions().isNotEmpty ||
+        widget.storage.isSubscriptionsCorrupted) {
+      return;
+    }
+    final prefs = await OnboardingPrefs.load();
+    if (!mounted || !prefs.shouldShowOnboarding()) return;
+    if (_config != null ||
+        widget.storage.getSubscriptions().isNotEmpty ||
+        widget.storage.isSubscriptionsCorrupted) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _onboardingRouteOpen) return;
+      unawaited(_openOnboardingRoute(preloadedPrefs: prefs));
+    });
+  }
+
+  Future<void> _openOnboardingRoute({
+    bool isReplay = false,
+    OnboardingPrefs? preloadedPrefs,
+  }) async {
+    if (OhosRuntime.isOhos || _onboardingRouteOpen || !mounted) return;
+    final prefs = preloadedPrefs ?? await OnboardingPrefs.load();
+    if (!mounted || _onboardingRouteOpen) return;
+    if (isReplay) {
+      await prefs.resetForReplay();
+      if (!mounted) return;
+    }
+    _onboardingRouteOpen = true;
+    var routePopped = false;
+    void closeRoute() {
+      if (routePopped || !mounted) return;
+      routePopped = true;
+      final nav = Navigator.of(context);
+      if (nav.canPop()) nav.pop();
+    }
+
+    try {
+      await Navigator.of(context).push<void>(
+        buildApplePageRoute<void>(
+          builder: (routeCtx) => OnboardingScreen(
+            prefs: prefs,
+            initialReduceTransparency:
+                widget.storage.glassBlurLevel == 'solid' ||
+                    GlassworkBackdrop.reduceTransparency.value,
+            backgroundBuilder: (bgCtx) {
+              if (isWindowsDesktopUi &&
+                  WindowsAppearanceScope.maybeOf(bgCtx) != null) {
+                return const WindowsBackdrop(child: SizedBox.expand());
+              }
+              return const AuroraBackground();
+            },
+            onPersonalizationChanged: (
+              reduceMotion,
+              reduceTransparency,
+              textScale,
+            ) {
+              GlassworkBackdrop.reduceTransparency.value = reduceTransparency;
+              final nextLevel = reduceTransparency ? 'solid' : 'standard';
+              if (widget.storage.glassBlurLevel != nextLevel) {
+                unawaited(widget.storage.setGlassBlurLevel(nextLevel));
+              }
+            },
+            onImportConfig: (initialAddress) {
+              unawaited(prefs.markOnboardingCompleted());
+              closeRoute();
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted) return;
+                unawaited(
+                  _showImportConfigDialog(initialInput: initialAddress.trim()),
+                );
+              });
+            },
+            onOpenSync: () {
+              unawaited(prefs.markOnboardingCompleted());
+              closeRoute();
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted) return;
+                unawaited(_openCloudSyncCenter());
+              });
+            },
+            onFinished: (_) {
+              closeRoute();
+            },
+          ),
+        ),
+      );
+    } finally {
+      _onboardingRouteOpen = false;
     }
   }
   Future<void> _runStartupWebdavSync() async {
@@ -5017,18 +5124,35 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ),
       ],
     );
-    Navigator.of(context).push(
-      buildApplePageRoute<void>(
-        builder: (_) => PlayerScreen(
-          site: liveSite,
-          video: liveVideo,
-          initialLineIndex: 0,
-          initialEpisodeIndex: lineIdx.clamp(0, ch.urls.length - 1),
-          storage: widget.storage,
-          isLive: true,
+    if (OhosRuntime.isOhos) {
+      Navigator.of(context).push(
+        buildApplePageRoute<void>(
+          builder: (_) => PlayerScreen(
+            site: liveSite,
+            video: liveVideo,
+            initialLineIndex: 0,
+            initialEpisodeIndex: lineIdx.clamp(0, ch.urls.length - 1),
+            storage: widget.storage,
+            isLive: true,
+          ),
         ),
-      ),
-    );
+      );
+    } else {
+      unawaited(
+        pushPlayerRoute<void>(
+          context: context,
+          useFastWindowsMode: isWindowsDesktopUi,
+          builder: (_) => PlayerScreen(
+            site: liveSite,
+            video: liveVideo,
+            initialLineIndex: 0,
+            initialEpisodeIndex: lineIdx.clamp(0, ch.urls.length - 1),
+            storage: widget.storage,
+            isLive: true,
+          ),
+        ),
+      );
+    }
   }
 
   void _showLiveChannelLinesSheet(
@@ -6085,17 +6209,33 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ),
       ],
     );
-    Navigator.of(context).push(
-      buildApplePageRoute<void>(
-        builder: (_) => PlayerScreen(
-          site: site,
-          video: video,
-          initialLineIndex: 0,
-          initialEpisodeIndex: start < 0 ? 0 : start,
-          storage: widget.storage,
+    if (OhosRuntime.isOhos) {
+      Navigator.of(context).push(
+        buildApplePageRoute<void>(
+          builder: (_) => PlayerScreen(
+            site: site,
+            video: video,
+            initialLineIndex: 0,
+            initialEpisodeIndex: start < 0 ? 0 : start,
+            storage: widget.storage,
+          ),
         ),
-      ),
-    );
+      );
+    } else {
+      unawaited(
+        pushPlayerRoute<void>(
+          context: context,
+          useFastWindowsMode: isWindowsDesktopUi,
+          builder: (_) => PlayerScreen(
+            site: site,
+            video: video,
+            initialLineIndex: 0,
+            initialEpisodeIndex: start < 0 ? 0 : start,
+            storage: widget.storage,
+          ),
+        ),
+      );
+    }
   }
   String get _wallpaperPresetLabel => switch (widget.storage.wallpaperPreset) {
         'midnight' => '午夜深蓝',
@@ -6440,6 +6580,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     trailingText: '导出',
                     onTap: () => _exportDiagnosticsBundle(context),
                   ),
+                  if (!OhosRuntime.isOhos)
+                    _buildSettingsQuickActionRow(
+                      icon: CupertinoIcons.sparkles,
+                      iconBgColor: AppleColors.systemBlue,
+                      title: '重新查看新手引导',
+                      subtitle: '回顾自有配置导入、多端同步与播放手势指南',
+                      trailingText: '重看',
+                      onTap: () => _openOnboardingRoute(isReplay: true),
+                    ),
                 ],
               ),
             ],
@@ -7210,6 +7359,24 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ],
             ),
           ),
+          if (!OhosRuntime.isOhos)
+            SettingsPane(
+              'danmu',
+              '弹幕设置',
+              '分片弹幕开关、显示类型、兼容服务源与屏蔽词',
+              CupertinoIcons.chat_bubble_text_fill,
+              AppleColors.systemTeal,
+              content: IosDanmuSettingsSection(onChanged: refresh),
+            ),
+          if (!OhosRuntime.isOhos)
+            SettingsPane(
+              'hud',
+              '播放界面与手势',
+              '起播规格提示、细进度条、跳过倒计时与双击手势',
+              CupertinoIcons.hand_draw_fill,
+              AppleColors.systemBlue,
+              content: IosPlayerHudSettingsSection(onChanged: refresh),
+            ),
         ],
       ),
       SettingsPane(
@@ -7456,6 +7623,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 subtitle: '脱敏系统环境信息与最近异常日志',
                 onTap: () => _exportDiagnosticsBundle(context),
               ),
+              if (!OhosRuntime.isOhos)
+                IosSettingsRow(
+                  key: const ValueKey('ios-replay-onboarding'),
+                  icon: CupertinoIcons.sparkles,
+                  iconColor: AppleColors.systemBlue,
+                  title: '重新查看新手引导',
+                  subtitle: '回顾配置导入、多端同步与播放手势指南',
+                  showChevron: true,
+                  onTap: () => _openOnboardingRoute(isReplay: true),
+                ),
             ],
           ),
           const SizedBox(height: 24),
@@ -7717,6 +7894,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ),
           ],
         ),
+        if (!OhosRuntime.isOhos) ...[
+          const SizedBox(height: 22),
+          IosDanmuSettingsSection(onChanged: refreshBoth),
+          const SizedBox(height: 22),
+          IosPlayerHudSettingsSection(onChanged: refreshBoth),
+        ],
       ],
     );
   }

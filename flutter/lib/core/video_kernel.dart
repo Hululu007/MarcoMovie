@@ -531,6 +531,7 @@ class VideoKernel {
     required BoxFit fit,
     required int videoWidth,
     required int videoHeight,
+    bool externalSubtitleOverlay = false,
   }) {
     if (debugSurface != null) return debugSurface!;
     if (ohosPlatform != null) {
@@ -566,6 +567,26 @@ class VideoKernel {
       controller: mediaKitController!,
       fit: fit,
       controls: NoVideoControls,
+      subtitleViewConfiguration: externalSubtitleOverlay
+          ? const SubtitleViewConfiguration(visible: false)
+          : const SubtitleViewConfiguration(),
+    );
+  }
+
+  /// Renders media_kit subtitles as an independent layer strictly ABOVE
+  /// `DanmuLayer` and BELOW HUD controls when `externalSubtitleOverlay` is enabled.
+  Widget? buildSubtitleOverlay() {
+    if (OhosRuntime.isOhos || debugSurface != null || ohosPlatform != null) {
+      return null;
+    }
+    final ctrl = mediaKitController;
+    if (ctrl == null) return null;
+    if (ctrl.player.platform?.configuration.libass ?? false) {
+      return null;
+    }
+    return SubtitleView(
+      controller: ctrl,
+      configuration: const SubtitleViewConfiguration(),
     );
   }
 }

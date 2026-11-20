@@ -12,6 +12,7 @@ Marco Movie 的作者为 Pilipala。以下第三方组件保留其自身版权�
 | libtorrent / FrostWire jlibtorrent | `android/torrent-dependencies.json` 与 `android/src/main/assets/torrent-third-party-notices.txt` |
 | Rime 简体拼音词典、Unicode Unihan 数据 | `android/src/main/assets/search/` 中许可及 provenance 清单 |
 | Glasswork | [kubai087/glasswork](https://github.com/kubai087/glasswork)，参考提交 `4f0b674`；MIT，许可副本见 `flutter/shaders/GLASSWORK-LICENSE.txt`。Flutter shader 和原生材质为平台适配，不是浏览器实现的直接嵌入。 |
+| Anime4K | [bloc97/Anime4K](https://github.com/bloc97/Anime4K)，上游发布版本 `v4.0.1`（`Anime4K_v4.0.zip`）；MIT，仅用于 Windows/macOS 桌面端可选画质增强，着色器清单与 SHA-256 校验记录见 `flutter/assets/shaders/anime4k/manifest.json`，完整许可副本见 `flutter/assets/shaders/anime4k/ANIME4K-LICENSE.txt` 及下文声明。 |
 | share_plus | [Flutter Community share_plus 10.1.4](https://pub.dev/packages/share_plus/versions/10.1.4)，BSD-3-Clause；用于系统文件分享。依赖版本及摘要固定于 `flutter/pubspec.lock`，上游许可由 Flutter 的依赖许可清单收录。 |
 
 固定依赖版本和摘要用于构建复核，不表示采用各项目最新版本。源码和 APK 都保留第三方许可记录。运行时用户自行载入的内容扩展不随本仓库提供，其权利和行为不由这份组件清单覆盖。
@@ -32,3 +33,31 @@ FFmpeg 6.1.6（本次配置为 LGPL-2.1-or-later）、Media3、libgav1、cpu_fea
 
 - Node.js 22.22.3 for desktop, and nodejs-mobile 18.20.4 for Android/iOS, from their official release archives. Build scripts pin SHA-256 hashes; desktop archives include LICENSE, and mobile notices are included as `shared/catpaw/node-mobile-LICENSE.txt` from the matching upstream tag. The app-owned host and native bridges are GPL-3.0-only. User-imported CatPaw bundles are not redistributed with the app.
 - node-fetch 3.3.2 and its dependencies provide the Fetch API for the iOS no-JIT runtime. Exact package versions and integrity values are in `shared/catpaw/fetch-provenance.json`; their licenses are in `fetch-LICENSE.txt`. The CommonJS build uses esbuild 0.25.12 without functional upstream modifications.
+
+## Desktop Anime4K shaders (Windows & macOS)
+
+Bundled optional real-time GLSL upscaling/restoration shaders under `flutter/assets/shaders/anime4k/` are unmodified upstream files from [bloc97/Anime4K](https://github.com/bloc97/Anime4K) release `v4.0.1` (`Anime4K_v4.0.zip`, SHA-256 `139cd282086457c5adc79caf7b75b8b825091d71c9b54958c18745fea62d7ed7`). Exact per-file SHA-256 digests are recorded in `flutter/assets/shaders/anime4k/manifest.json` and the verbatim license file is kept in `flutter/assets/shaders/anime4k/ANIME4K-LICENSE.txt`:
+
+```text
+MIT License
+
+Copyright (c) 2019 bloc97
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

@@ -1028,6 +1028,12 @@ extension _WindowsShell on _AdaptiveShellState {
               subtitle: '导出脱敏环境信息与最近的运行日志',
               icon: CupertinoIcons.doc_plaintext,
               onTap: () => _exportDiagnosticsBundle(context)),
+          if (!OhosRuntime.isOhos)
+            WinSettingsRow(
+                title: '重新查看新手引导',
+                subtitle: '回顾配置导入、多端同步与桌面快捷键指南',
+                icon: CupertinoIcons.sparkles,
+                onTap: () => _openOnboardingRoute(isReplay: true)),
         ]),
       ]);
     if (_windowsSettings == '内容来源')

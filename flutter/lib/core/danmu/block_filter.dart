@@ -1096,8 +1096,11 @@ class DanmuBlockFilter {
   static const int maxBranchWork = 620;
   static const int maxTotalWork = 900;
 
-  static final String _warmupOneByte = '${'a' * 179}!';
-  static final String _warmupTwoByte = '${'\u4e00' * 179}!';
+  static final String _warmupOneByte = '${'a' * 160}09 _!${'z' * 14}!';
+  static final String _warmupTwoByte =
+      '${'a' * 160}09 _!${'\u4e00' * 10}\u0150\u00e9!';
+  static final String _warmupTwoByteAsciiHeavy = '${'a' * 179}\u4e00';
+  static final String _warmupTwoByteCjk = '${'\u4e00' * 179}!';
 
   static const DanmuBlockFilter empty = DanmuBlockFilter._(
     <String>[],
@@ -1180,11 +1183,13 @@ class DanmuBlockFilter {
       if (!vr.valid) continue;
       if (trimmed.startsWith('re:')) {
         final compiled = RegExp(trimmed.substring(3), caseSensitive: false);
-        // Eagerly warm both OneByte (Latin-1) and TwoByte (UTF-16/CJK) Dart VM Irregexp
-        // native compilation at rule-load time so first-frame UI calls stay < 1ms.
-        for (var w = 0; w < 6; w++) {
+        // Eagerly warm both OneByte (Latin-1) and TwoByte (UTF-16/ASCII+CJK) Dart VM Irregexp
+        // native compilation and JIT tier-up at rule-load time so first-call UI checks stay < 5ms.
+        for (var w = 0; w < 20; w++) {
           compiled.hasMatch(_warmupOneByte);
           compiled.hasMatch(_warmupTwoByte);
+          compiled.hasMatch(_warmupTwoByteAsciiHeavy);
+          compiled.hasMatch(_warmupTwoByteCjk);
         }
         regexes.add(compiled);
       } else {

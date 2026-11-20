@@ -187,62 +187,81 @@ class _FirstPlayGestureHintState extends State<FirstPlayGestureHint> {
           child: Semantics(
             liveRegion: true,
             label: FirstPlayGestureHint.hintCopy(platform, zh: zh),
-            child: Material(
-              type: MaterialType.transparency,
-              child: Container(
-                key: const Key('first_play_gesture_hint_capsule'),
-                constraints: const BoxConstraints(maxWidth: 680),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                decoration: BoxDecoration(
-                  color: bgColor,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: borderColor, width: 1),
-                ),
-                child: Wrap(
-                  alignment: WrapAlignment.center,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 10,
-                  runSpacing: 6,
-                  children: [
-                    Text(
-                      FirstPlayGestureHint.hintCopy(platform, zh: zh),
-                      style: const TextStyle(
-                        color: Color(0xFFF5F5F7),
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    InkWell(
-                      key: const Key('first_play_gesture_hint_dismiss'),
-                      splashFactory: NoSplash.splashFactory,
-                      borderRadius: BorderRadius.circular(14),
-                      onTap: _dismissForever,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 4,
-                        ),
+            child: ConstrainedBox(
+              key: const Key('first_play_gesture_hint_capsule'),
+              constraints: const BoxConstraints(maxWidth: 680),
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
                         decoration: BoxDecoration(
-                          color: const Color(0x2E0A84FF),
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(
-                            color: const Color(0x665AC8FA),
-                            width: 1,
-                          ),
-                        ),
-                        child: Text(
-                          FirstPlayGestureHint.dismissLabel(zh: zh),
-                          style: const TextStyle(
-                            color: Color(0xFF64D2FF),
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                          ),
+                          color: bgColor,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: borderColor, width: 1),
                         ),
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    child: Wrap(
+                      alignment: WrapAlignment.center,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 10,
+                      runSpacing: 6,
+                      children: [
+                        IgnorePointer(
+                          child: Text(
+                            FirstPlayGestureHint.hintCopy(platform, zh: zh),
+                            style: const TextStyle(
+                              color: Color(0xFFF5F5F7),
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w500,
+                              decoration: TextDecoration.none,
+                            ),
+                          ),
+                        ),
+                        Semantics(
+                          button: true,
+                          label: FirstPlayGestureHint.dismissLabel(zh: zh),
+                          child: MouseRegion(
+                            cursor: SystemMouseCursors.click,
+                            child: GestureDetector(
+                              key: const Key('first_play_gesture_hint_dismiss'),
+                              behavior: HitTestBehavior.opaque,
+                              onTap: _dismissForever,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0x2E0A84FF),
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: const Color(0x665AC8FA),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: Text(
+                                  FirstPlayGestureHint.dismissLabel(zh: zh),
+                                  style: const TextStyle(
+                                    color: Color(0xFF64D2FF),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    decoration: TextDecoration.none,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ),
           ),

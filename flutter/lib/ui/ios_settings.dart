@@ -1,8 +1,15 @@
+import 'dart:async';
 import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart' show Colors, Material, MaterialType;
+import '../core/danmu/danmu_prefs.dart';
+import '../core/ohos_runtime.dart';
 import 'apple_theme.dart';
+import 'danmu/danmu_settings_sheet.dart';
 import 'ios_liquid_glass.dart';
+import 'player/player_hud_prefs.dart';
 
 class SettingsPane {
   final String id, title, subtitle;
@@ -1020,4 +1027,235 @@ class SettingsChoices<T> extends StatelessWidget {
           ],
         ),
       );
+}
+
+/// Global Danmaku settings section using [IosSettingsSwitchRow] (`IosNativeSwitch`
+/// on iOS 26+, `CupertinoSwitch` fallback elsewhere). Guarded with `!OhosRuntime.isOhos`.
+class IosDanmuSettingsSection extends StatefulWidget {
+  final DanmuSettings? initialSettingsOverride;
+  final VoidCallback? onChanged;
+
+  const IosDanmuSettingsSection({
+    super.key,
+    this.initialSettingsOverride,
+    this.onChanged,
+  });
+
+  @override
+  State<IosDanmuSettingsSection> createState() =>
+      _IosDanmuSettingsSectionState();
+}
+
+class _IosDanmuSettingsSectionState extends State<IosDanmuSettingsSection> {
+  DanmuSettings _settings = const DanmuSettings();
+
+  @override
+  void initState() {
+    super.initState();
+    if (OhosRuntime.isOhos) return;
+    if (widget.initialSettingsOverride != null) {
+      _settings = widget.initialSettingsOverride!;
+    } else {
+      unawaited(_load());
+    }
+  }
+
+  Future<void> _load() async {
+    final loaded = await DanmuPrefs.load();
+    if (!mounted) return;
+    setState(() => _settings = loaded);
+  }
+
+  Future<void> _update(DanmuSettings next) async {
+    if (OhosRuntime.isOhos) return;
+    setState(() => _settings = next);
+    await DanmuPrefs.save(next);
+    widget.onChanged?.call();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (OhosRuntime.isOhos) return const SizedBox.shrink();
+    final serverCount = _settings.normalizedOrigins.length;
+    return IosSettingsGroup(
+      header: '分片弹幕',
+      footer: '默认服务地址为空，需自行填写兼容弹幕服务地址后启用拉取。',
+      children: [
+        IosSettingsSwitchRow(
+          key: const ValueKey('ios-switch-danmu-enabled'),
+          icon: CupertinoIcons.chat_bubble_text_fill,
+          iconColor: AppleColors.systemTeal,
+          title: '默认开启弹幕',
+          subtitle: '进入点播播放页时自动开启弹幕叠加层',
+          value: _settings.enabled,
+          onChanged: (v) => unawaited(_update(_settings.copyWith(enabled: v))),
+        ),
+        IosSettingsSwitchRow(
+          key: const ValueKey('ios-switch-danmu-scroll'),
+          icon: CupertinoIcons.arrow_left_right,
+          iconColor: AppleColors.systemBlue,
+          title: '滚动弹幕',
+          value: _settings.showScroll,
+          onChanged: (v) =>
+              unawaited(_update(_settings.copyWith(showScroll: v))),
+        ),
+        IosSettingsSwitchRow(
+          key: const ValueKey('ios-switch-danmu-top'),
+          icon: CupertinoIcons.arrow_up_to_line,
+          iconColor: AppleColors.systemIndigo,
+          title: '顶部固定弹幕',
+          value: _settings.showTop,
+          onChanged: (v) => unawaited(_update(_settings.copyWith(showTop: v))),
+        ),
+        IosSettingsSwitchRow(
+          key: const ValueKey('ios-switch-danmu-bottom'),
+          icon: CupertinoIcons.arrow_down_to_line,
+          iconColor: AppleColors.systemPurple,
+          title: '底部固定弹幕',
+          value: _settings.showBottom,
+          onChanged: (v) =>
+              unawaited(_update(_settings.copyWith(showBottom: v))),
+        ),
+        IosSettingsRow(
+          key: const ValueKey('ios-open-danmu-advanced'),
+          icon: CupertinoIcons.slider_horizontal_3,
+          iconColor: AppleColors.systemOrange,
+          title: '弹幕样式、服务地址与屏蔽词',
+          subtitle: '调节透明度、字号、显示区域、兼容服务源与正则屏蔽词',
+          trailingText: serverCount > 0 ? '$serverCount 个服务源' : '未配置',
+          showChevron: true,
+          onTap: () {
+            unawaited(
+              DanmuSettingsSheet.show(
+                context,
+                initialSettings: _settings,
+                onChanged: (updated) {
+                  if (!mounted) return;
+                  setState(() => _settings = updated);
+                  widget.onChanged?.call();
+                },
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+/// Global Player HUD & gesture switches backed by [PlayerHudPrefs] using
+/// [IosSettingsSwitchRow] (`IosNativeSwitch` on iOS). Guarded with `!OhosRuntime.isOhos`.
+class IosPlayerHudSettingsSection extends StatefulWidget {
+  final PlayerHudPrefs? debugHudPrefs;
+  final VoidCallback? onChanged;
+
+  const IosPlayerHudSettingsSection({
+    super.key,
+    this.debugHudPrefs,
+    this.onChanged,
+  });
+
+  @override
+  State<IosPlayerHudSettingsSection> createState() =>
+      _IosPlayerHudSettingsSectionState();
+}
+
+class _IosPlayerHudSettingsSectionState
+    extends State<IosPlayerHudSettingsSection> {
+  late final PlayerHudPrefs _hudPrefs;
+  late final bool _ownsPrefs;
+
+  @override
+  void initState() {
+    super.initState();
+    final isDesktop = !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.windows ||
+            defaultTargetPlatform == TargetPlatform.macOS ||
+            defaultTargetPlatform == TargetPlatform.linux);
+    _ownsPrefs = widget.debugHudPrefs == null;
+    _hudPrefs = widget.debugHudPrefs ?? PlayerHudPrefs(isDesktop: isDesktop);
+    _hudPrefs.addListener(_onPrefsChanged);
+    if (!OhosRuntime.isOhos) {
+      unawaited(_hudPrefs.load());
+    }
+  }
+
+  void _onPrefsChanged() {
+    if (mounted) setState(() {});
+    widget.onChanged?.call();
+  }
+
+  @override
+  void dispose() {
+    _hudPrefs.removeListener(_onPrefsChanged);
+    if (_ownsPrefs) {
+      _hudPrefs.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (OhosRuntime.isOhos) return const SizedBox.shrink();
+    final data = _hudPrefs.data;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        IosSettingsGroup(
+          header: '播放界面与 HUD',
+          footer: '仅保存在本机，不影响跨端配置同步。',
+          children: [
+            IosSettingsSwitchRow(
+              key: const ValueKey('ios-switch-hud-start-spec'),
+              icon: CupertinoIcons.sparkles,
+              iconColor: AppleColors.systemBlue,
+              title: '起播规格提示',
+              subtitle: '首帧就绪后展示 4K / HDR / 杜比等媒体规格徽章',
+              value: data.startSpecHud,
+              onChanged: (v) => unawaited(_hudPrefs.setStartSpecHud(v)),
+            ),
+            IosSettingsSwitchRow(
+              key: const ValueKey('ios-switch-hud-slim-progress'),
+              icon: CupertinoIcons.minus_rectangle_fill,
+              iconColor: AppleColors.systemTeal,
+              title: '隐藏控制栏时显示细进度条',
+              subtitle: '点播播放隐藏主控栏后在底部常驻细进度指示条',
+              value: data.slimProgress,
+              onChanged: (v) => unawaited(_hudPrefs.setSlimProgress(v)),
+            ),
+            IosSettingsSwitchRow(
+              key: const ValueKey('ios-switch-hud-skip-countdown'),
+              icon: CupertinoIcons.forward_end_alt_fill,
+              iconColor: AppleColors.systemIndigo,
+              title: '跳过片头/片尾 3 秒倒计时',
+              subtitle: '关闭后达到跳过点将静默立即跳转',
+              value: data.skipCountdown,
+              onChanged: (v) => unawaited(_hudPrefs.setSkipCountdown(v)),
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        SettingsChoices<String>(
+          title: '两侧双击手势',
+          value: data.doubleTapSides,
+          choices: const [
+            ('seek_10s', '快进 / 快退 10 秒（默认）'),
+            ('seek_15s', '快进 / 快退 15 秒'),
+            ('seek_5s', '快进 / 快退 5 秒'),
+            ('play_pause', '全屏双击播放 / 暂停'),
+          ],
+          onSelected: (v) => _hudPrefs.setDoubleTapSides(v),
+        ),
+        SettingsChoices<String>(
+          title: '长按倍速松手恢复',
+          value: data.longPressRestoreMode,
+          choices: const [
+            ('previous', '恢复长按前常驻倍速（默认）'),
+            ('1.0x', '强制恢复 1.0× 原速'),
+          ],
+          onSelected: (v) => _hudPrefs.setLongPressRestoreMode(v),
+        ),
+      ],
+    );
+  }
 }

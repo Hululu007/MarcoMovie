@@ -8,7 +8,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
+import '../core/anime4k_controller.dart';
 import '../core/cms_client.dart';
+import '../core/danmu/danmu_prefs.dart';
+import '../core/danmu/provider.dart';
+import '../core/danmu/segment_cache.dart';
 import '../core/emby_library.dart';
 import '../core/csp_bridge.dart';
 import '../core/cloud_media_proxy.dart';
@@ -24,7 +28,12 @@ import '../core/wogg_source.dart';
 import 'player_interaction_layers.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
+import 'danmu/danmu_layer.dart';
+import 'danmu/danmu_settings_sheet.dart';
 import 'ios_liquid_glass.dart';
+import 'motion/brand_logo_loader.dart';
+import 'onboarding/first_play_gesture_hint.dart';
+import 'onboarding/onboarding_prefs.dart';
 import 'windows_appearance.dart';
 import 'desktop_horizontal_scroller.dart';
 import 'desktop_player_window.dart';
@@ -76,7 +85,17 @@ class PlayerScreen extends StatefulWidget {
   @visibleForTesting
   final Widget? debugVideoSurface;
   @visibleForTesting
+  final Widget? debugSubtitleLayer;
+  @visibleForTesting
   final PlayerHudPrefs? debugHudPrefs;
+  @visibleForTesting
+  final DanmuProvider? debugDanmuProvider;
+  @visibleForTesting
+  final DanmuSettings? debugDanmuSettings;
+  @visibleForTesting
+  final OnboardingPrefs? debugOnboardingPrefs;
+  @visibleForTesting
+  final Anime4kController? debugAnime4kController;
 
   const PlayerScreen({
     super.key,
@@ -98,7 +117,12 @@ class PlayerScreen extends StatefulWidget {
     this.onOpenDanmuSettings,
     this.debugPlayer,
     this.debugVideoSurface,
+    this.debugSubtitleLayer,
     this.debugHudPrefs,
+    this.debugDanmuProvider,
+    this.debugDanmuSettings,
+    this.debugOnboardingPrefs,
+    this.debugAnime4kController,
   });
 
   /// The resolver already applies origin rules and explicit playback headers.
@@ -236,7 +260,17 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _desktopKeyClockMs = 0;
   KeySeekPreview? _activeDesktopScrubPreview;
   String _extraTrackSpecInfo = '';
-  bool _danmuEnabledLocal = false;
+  DanmuSettings _danmuSettings = const DanmuSettings();
+  DanmuProvider? _danmuProvider;
+  DanmuSegmentCache? _danmuCache;
+  DanmuCancelToken? _danmuMatchToken;
+  int _danmuSessionGen = 0;
+  bool _danmuBoundForEpisode = false;
+  OnboardingPrefs? _onboardingPrefs;
+  bool _hasStartedVodPlayback = false;
+  bool _firstPlayHintDismissedThisSession = false;
+  late final Anime4kController _anime4kController;
+  late final bool _ownsAnime4kController;
 
   bool get _useEnhancedHud =>
       !OhosRuntime.isOhos && !OhosRuntime.shouldUseTvUi(widget.storage.tvUiMode);
@@ -344,7 +378,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             }
             _introSkippedForSession = true;
             _startup.reanchor(Duration(seconds: skipSec));
-            _player.seek(Duration(seconds: skipSec));
+            _seekPlayer(Duration(seconds: skipSec));
             _showHud('已自动跳过片头 ${skipSec}s');
           },
           onCancel: () {
@@ -355,7 +389,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       } else {
         _introSkippedForSession = true;
         _startup.reanchor(Duration(seconds: skipSec));
-        _player.seek(Duration(seconds: skipSec));
+        _seekPlayer(Duration(seconds: skipSec));
         _showHud('已自动跳过片头 ${skipSec}s');
       }
     }
@@ -363,6 +397,10 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _restorePlayerFocusIfCurrent() {
     if (!mounted) return;
+    if (widget.embedded ||
+        FocusManager.instance.primaryFocus?.context?.widget is EditableText) {
+      return;
+    }
     final route = ModalRoute.of(context);
     if (route != null && !route.isCurrent) return;
     if (!_playerFocusNode.hasFocus) {
@@ -595,7 +633,24 @@ class _PlayerScreenState extends State<PlayerScreen>
       isPrivate: widget.site.isEffectivelyPrivate,
     );
     _alwaysShowClock = widget.storage.playerAlwaysShowClock;
-    _danmuEnabledLocal = widget.danmuEnabled;
+    _ownsAnime4kController = widget.debugAnime4kController == null;
+    _anime4kController = widget.debugAnime4kController ?? Anime4kController();
+    _anime4kController.addListener(_onHudSubstateChanged);
+    if (!OhosRuntime.isOhos) {
+      if (widget.debugDanmuSettings != null) {
+        _danmuSettings = widget.debugDanmuSettings!;
+        _rebuildDanmuPipeline();
+      } else {
+        unawaited(_loadDanmuSettings());
+      }
+      if (!_isLiveStream && !widget.embedded) {
+        if (widget.debugOnboardingPrefs != null) {
+          _onboardingPrefs = widget.debugOnboardingPrefs;
+        } else {
+          unawaited(_loadOnboardingPrefs());
+        }
+      }
+    }
     _ownsHudPrefs = widget.debugHudPrefs == null;
     _hudPrefs = widget.debugHudPrefs ?? PlayerHudPrefs(isDesktop: _desktop);
     _hudPrefs.addListener(_onHudSubstateChanged);
@@ -643,6 +698,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     // episode/quality transitions. Release only after the decoder is disposed.
     _releaseSourceSession = _client.pinPlaybackSource(widget.site);
     _playerConfiguration = _applyPlayerKernel(_playerKernel);
+    if (!OhosRuntime.isOhos && _anime4kController.isAvailableForPlayer(_player)) {
+      unawaited(_initAnime4kAfterKernel());
+    }
 
     _playerSubscriptions.add(_player.stream.width.listen((w) {
       if (!mounted || w == null || w <= 0 || w == _videoWidth) return;
@@ -763,6 +821,17 @@ class _PlayerScreenState extends State<PlayerScreen>
         _position = nextPos;
       }
       _embySession?.update(pos.inMilliseconds, !_playing);
+      if (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled) {
+        _danmuCache?.onPlaybackTick(nextPos.inMilliseconds, playing: _playing);
+      }
+      if (!OhosRuntime.isOhos &&
+          !_hasStartedVodPlayback &&
+          !_isLiveStream &&
+          !widget.embedded &&
+          !_loading &&
+          pos > Duration.zero) {
+        setState(() => _hasStartedVodPlayback = true);
+      }
       _maybeEvaluateSkipTriggers(positionOverride: pos);
     }));
 
@@ -811,7 +880,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           setState(() {
             _position = Duration(milliseconds: targetMs);
           });
-          _player.seek(Duration(milliseconds: targetMs));
+          _seekPlayer(Duration(milliseconds: targetMs));
           _showHud(
             '已为您续播至 ${_formatDuration(Duration(milliseconds: targetMs))}',
           );
@@ -819,7 +888,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           Future.delayed(const Duration(milliseconds: 550), () {
             if (!mounted || sessionAtSeek != _playSession) return;
             if (_position.inMilliseconds < targetMs - 3000) {
-              _player.seek(Duration(milliseconds: targetMs));
+              _seekPlayer(Duration(milliseconds: targetMs));
             }
           });
         }
@@ -837,8 +906,19 @@ class _PlayerScreenState extends State<PlayerScreen>
         _startup.updateState(playing: playing);
         setState(() {
           _playing = playing;
-          if (playing) _loading = false;
+          if (playing) {
+            _loading = false;
+            if (!OhosRuntime.isOhos && !_isLiveStream && !widget.embedded) {
+              _hasStartedVodPlayback = true;
+            }
+          }
         });
+        if (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled) {
+          _danmuCache?.onPlaybackTick(
+            _position.inMilliseconds,
+            playing: playing,
+          );
+        }
         PlaybackWakelock.setEnabled(playing);
         if (!playing) {
           _suspendSkipCountdown();
@@ -1023,7 +1103,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _openCurrentEpisode(resumeMs: 0);
         return;
       }
-      _player.seek(Duration.zero);
+      _seekPlayer(Duration.zero);
       _player.play();
       _outroSkippedForSession = false;
       return;
@@ -1288,6 +1368,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _startup.reset();
     _skipCountdown.reset();
     _startSpecController.resetForNewSession();
+    _resetDanmuForEpisode();
     _cancelTransientInteractions(GestureInterruptReason.episodeSwitch);
     _midPlaybackStallTimer?.cancel();
     _midPlaybackStallEpochsMs.clear();
@@ -1870,7 +1951,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _duration.inMilliseconds,
     );
     setState(() => _position = Duration(milliseconds: targetMs));
-    _player.seek(Duration(milliseconds: targetMs));
+    _seekPlayer(Duration(milliseconds: targetMs));
     _saveProgress(immediate: true, triggerSync: false);
     _showHud(
       '${seconds >= 0 ? "快进" : "快退"} ${_formatDuration(Duration(milliseconds: targetMs))}',
@@ -1964,6 +2045,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         await dyn.setProperty('sigmoid-upscaling', 'no');
         await dyn.setProperty('dither-depth', 'no');
         await dyn.setProperty('hdr-compute-peak', 'no');
+        if (!OhosRuntime.isOhos &&
+            _anime4kController.isAvailableForPlayer(_player) &&
+            _anime4kController.preset != Anime4kPreset.off) {
+          await _anime4kController.reapplyActivePreset(_player);
+        }
       }
       await dyn.setProperty('vid', 'auto');
       await dyn.setProperty('audio-display', 'no');
@@ -2176,6 +2262,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     _skipCountdown.dispose();
     _startSpecController.removeListener(_onHudSubstateChanged);
     _startSpecController.dispose();
+    _danmuMatchToken?.cancel();
+    _danmuMatchToken = null;
+    _danmuCache?.dispose();
+    _danmuCache = null;
+    _danmuProvider = null;
+    _anime4kController.removeListener(_onHudSubstateChanged);
+    if (_ownsAnime4kController) {
+      _anime4kController.dispose();
+    }
     for (final sub in _playerSubscriptions) {
       unawaited(sub.cancel());
     }
@@ -2256,7 +2351,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 (_position.inMilliseconds + event.deltaSec * 1000)
                     .clamp(0, effectiveDurMs);
             setState(() => _position = Duration(milliseconds: targetMs));
-            _player.seek(Duration(milliseconds: targetMs));
+            _seekPlayer(Duration(milliseconds: targetMs));
             unawaited(_saveProgress(immediate: true, triggerSync: false));
             final sign = event.totalAccumulatedSec >= 0 ? '+' : '';
             _showHud(
@@ -2292,7 +2387,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             _position = Duration(milliseconds: targetMs);
             _hudText = '';
           });
-          _player.seek(Duration(milliseconds: targetMs));
+          _seekPlayer(Duration(milliseconds: targetMs));
           unawaited(_saveProgress(immediate: true, triggerSync: false));
           _scheduleHide();
         case HorizontalSeekCancelEvent():
@@ -2477,7 +2572,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _isDraggingSeek = false;
       _position = Duration(milliseconds: targetMs);
     });
-    _player.seek(Duration(milliseconds: targetMs));
+    _seekPlayer(Duration(milliseconds: targetMs));
     unawaited(_saveProgress(immediate: true, triggerSync: false));
     final fmt = _formatDuration(Duration(milliseconds: targetMs));
     _showHud(
@@ -2527,21 +2622,298 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  void _seekPlayer(Duration target) {
+    final clampedMs = math.max(0, target.inMilliseconds);
+    _player.seek(Duration(milliseconds: clampedMs));
+    if (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled) {
+      _danmuCache?.onSeekChanged(clampedMs);
+    }
+  }
+
+  Future<void> _loadOnboardingPrefs() async {
+    if (OhosRuntime.isOhos || _isLiveStream || widget.embedded) return;
+    try {
+      final prefs = await OnboardingPrefs.load();
+      if (!mounted) return;
+      setState(() => _onboardingPrefs = prefs);
+    } catch (_) {}
+  }
+
+  Future<void> _initAnime4kAfterKernel() async {
+    if (OhosRuntime.isOhos || !_anime4kController.isAvailableForPlayer(_player)) {
+      return;
+    }
+    try {
+      await _anime4kController.loadSavedPreset();
+      await _playerConfiguration;
+      if (!mounted) return;
+      if (_anime4kController.preset != Anime4kPreset.off) {
+        await _anime4kController.reapplyActivePreset(_player);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _loadDanmuSettings() async {
+    if (OhosRuntime.isOhos) return;
+    try {
+      final loaded = await DanmuPrefs.load();
+      if (!mounted) return;
+      setState(() {
+        _danmuSettings = widget.danmuEnabled && !loaded.enabled
+            ? loaded.copyWith(enabled: true)
+            : loaded;
+      });
+      _rebuildDanmuPipeline();
+      if (_danmuSettings.effectiveEnabled && !_isLiveStream) {
+        _bindDanmuForCurrentEpisode();
+      }
+    } catch (_) {}
+  }
+
+  void _rebuildDanmuPipeline() {
+    if (OhosRuntime.isOhos) return;
+    _danmuMatchToken?.cancel();
+    _danmuMatchToken = null;
+    _danmuCache?.dispose();
+    _danmuCache = null;
+    _danmuBoundForEpisode = false;
+    final provider =
+        widget.debugDanmuProvider ?? _danmuSettings.buildProvider();
+    _danmuProvider = provider;
+    final cache = DanmuSegmentCache(provider: provider)
+      ..setTimeOffsetMs(_danmuSettings.timeOffsetMs)
+      ..setBlockFilter(_danmuSettings.buildBlockFilter());
+    _danmuCache = cache;
+  }
+
+  void _resetDanmuForEpisode() {
+    if (OhosRuntime.isOhos) return;
+    _danmuMatchToken?.cancel();
+    _danmuMatchToken = null;
+    _danmuSessionGen++;
+    _danmuBoundForEpisode = false;
+    final cache = _danmuCache;
+    if (cache != null) {
+      unawaited(cache.bindSession(''));
+    }
+    if (!_isLiveStream && _danmuSettings.effectiveEnabled) {
+      _bindDanmuForCurrentEpisode();
+    }
+  }
+
+  void _bindDanmuForCurrentEpisode() {
+    if (OhosRuntime.isOhos ||
+        _isLiveStream ||
+        !_danmuSettings.effectiveEnabled) {
+      return;
+    }
+    if (widget.debugDanmuProvider == null &&
+        _danmuSettings.normalizedOrigins.isEmpty) {
+      // Default danmu server URL is strictly "" — zero network requests until configured.
+      return;
+    }
+    if (_danmuProvider == null || _danmuCache == null) {
+      _rebuildDanmuPipeline();
+    }
+    final provider = _danmuProvider;
+    final cache = _danmuCache;
+    if (provider == null || cache == null) return;
+
+    _danmuMatchToken?.cancel();
+    final token = DanmuCancelToken();
+    _danmuMatchToken = token;
+    final gen = ++_danmuSessionGen;
+    final effectiveDurMs = _duration.inMilliseconds > 0
+        ? _duration.inMilliseconds
+        : _lastKnownDurationMs;
+    final query = DanmuMatchQuery(
+      title: widget.video.title,
+      episodeTitle: _currentEpisode.name,
+      episodeIndex: _episodeIndex + 1,
+      durationSec: effectiveDurMs > 0 ? effectiveDurMs ~/ 1000 : 0,
+    );
+
+    unawaited(() async {
+      try {
+        final candidates = await provider.matchOrSearch(
+          query,
+          cancelToken: token,
+        );
+        if (!mounted || gen != _danmuSessionGen || token.isCancelled) return;
+        if (candidates.isEmpty) return;
+        var best = candidates.first;
+        for (final c in candidates.skip(1)) {
+          if (c.confidence > best.confidence) best = c;
+        }
+        if (best.boundEpisodeId.trim().isEmpty) return;
+        await cache.bindSession(best.boundEpisodeId);
+        if (!mounted || gen != _danmuSessionGen || token.isCancelled) return;
+        _danmuBoundForEpisode = true;
+        cache.onPlaybackTick(_position.inMilliseconds, playing: _playing);
+      } catch (_) {
+        // Isolated danmu fetch failure must never disturb video playback.
+      }
+    }());
+  }
+
+  void _applyDanmuSettings(DanmuSettings next, {bool persist = true}) {
+    if (OhosRuntime.isOhos) return;
+    final prev = _danmuSettings;
+    final serverChanged = prev.serverUrls != next.serverUrls ||
+        prev.appId != next.appId ||
+        prev.appSecret != next.appSecret;
+    setState(() {
+      _danmuSettings = next;
+    });
+    if (persist) {
+      unawaited(DanmuPrefs.save(next));
+    }
+    if (serverChanged && widget.debugDanmuProvider == null) {
+      _rebuildDanmuPipeline();
+    } else {
+      _danmuCache?.setTimeOffsetMs(next.timeOffsetMs);
+      _danmuCache?.setBlockFilter(next.buildBlockFilter());
+    }
+    if (next.effectiveEnabled && !_isLiveStream) {
+      if (!_danmuBoundForEpisode || serverChanged) {
+        _bindDanmuForCurrentEpisode();
+      } else {
+        _danmuCache?.onPlaybackTick(_position.inMilliseconds, playing: _playing);
+      }
+    } else {
+      _danmuMatchToken?.cancel();
+      _danmuMatchToken = null;
+    }
+  }
+
   void _handleDanmuToggle() {
+    if (OhosRuntime.isOhos) return;
     if (widget.onToggleDanmu != null) {
       widget.onToggleDanmu!.call();
       return;
     }
-    setState(() => _danmuEnabledLocal = !_danmuEnabledLocal);
-    _showHud(_danmuEnabledLocal ? '弹幕已开启' : '弹幕已关闭');
+    final next = _danmuSettings.copyWith(enabled: !_danmuSettings.enabled);
+    _applyDanmuSettings(next, persist: true);
+    _showHud(next.enabled ? '弹幕已开启' : '弹幕已关闭');
   }
 
   void _handleDanmuSettingsTap() {
+    if (OhosRuntime.isOhos) return;
     if (widget.onOpenDanmuSettings != null) {
       widget.onOpenDanmuSettings!.call();
       return;
     }
-    _handleDanmuToggle();
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final session = _playSession;
+    unawaited(
+      DanmuSettingsSheet.show(
+        context,
+        initialSettings: _danmuSettings,
+        onChanged: (updated) {
+          if (!mounted || session != _playSession) return;
+          _applyDanmuSettings(updated, persist: false);
+        },
+      ),
+    );
+  }
+
+  bool get _anime4kAvailable =>
+      !OhosRuntime.isOhos && _anime4kController.isAvailableForPlayer(_player);
+
+  void _showAnime4kSheet() {
+    if (!_anime4kAvailable) return;
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
+    final session = _playSession;
+    final showUltraHdWarning =
+        Anime4kController.shouldShowUltraHdWarning(_videoHeight);
+    showAppleModalSheet<void>(
+      context: context,
+      title: 'Anime4K 画质增强',
+      maxWidth: 480,
+      builder: (ctx) => ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.all(16),
+        children: [
+          if (showUltraHdWarning) ...[
+            Container(
+              key: const Key('anime4k-ultrahd-warning'),
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0x33FF9F0A),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: const Color(0x73FF9F0A),
+                  width: 0.9,
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    CupertinoIcons.exclamationmark_triangle_fill,
+                    color: AppleColors.systemOrange,
+                    size: 16,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      Anime4kController.ultraHdWarningText(zh: true),
+                      style: const TextStyle(
+                        color: AppleColors.labelPrimary,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          AppleGroupedSection(
+            footer: '基于开源 MIT 协议 bloc97/Anime4K v4.0.1，实时热切换不中断当前播放进度。',
+            children: Anime4kPreset.values.map((preset) {
+              final selected = _anime4kController.preset == preset;
+              return AppleGroupedTile(
+                key: ValueKey('anime4k-preset-${preset.id}'),
+                icon: CupertinoIcons.wand_stars,
+                iconBgColor: selected
+                    ? AppleColors.systemBlue
+                    : AppleColors.groupedTertiary,
+                title: preset.labelZh,
+                subtitle: preset.descriptionZh,
+                trailing: selected
+                    ? const Icon(
+                        CupertinoIcons.checkmark_alt,
+                        color: AppleColors.systemBlue,
+                        size: 18,
+                      )
+                    : null,
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  unawaited(() async {
+                    if (!mounted || session != _playSession) return;
+                    final ok = await _anime4kController.applyPreset(
+                      _player,
+                      preset,
+                    );
+                    if (!mounted || session != _playSession) return;
+                    if (ok) {
+                      _showHud(
+                        preset == Anime4kPreset.off
+                            ? 'Anime4K 已关闭'
+                            : 'Anime4K：${preset.labelZh}',
+                      );
+                    } else {
+                      _showHud('Anime4K 着色器加载失败，已自动恢复关闭');
+                    }
+                  }());
+                },
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
   }
 
   String _formatSignedDelta(int deltaMs) {
@@ -2582,22 +2954,58 @@ class _PlayerScreenState extends State<PlayerScreen>
                 : math.max(16.0, viewPadding.top + 76.0)))
         : math.max(16.0, viewPadding.top + 16.0);
 
+    final subtitleOverlay =
+        widget.debugSubtitleLayer ?? _videoKernel.buildSubtitleOverlay();
+    final effectiveDanmuSpeed = (_gestureFsm.isSpeedBoosting ||
+            _gestureFsm.isSpeedLockReady ||
+            _gestureFsm.isSpeedLocked)
+        ? _gestureFsm.activeSpeed
+        : _normalSpeed;
+    final Widget? activeDanmuWidget = OhosRuntime.isOhos
+        ? null
+        : (widget.danmuLayer ??
+            (!_isLiveStream
+                ? DanmuLayer(
+                    settings: _danmuSettings,
+                    positionMs: _position.inMilliseconds,
+                    playing: _playing,
+                    playSpeed: effectiveDanmuSpeed,
+                    segmentCache: _danmuCache,
+                    topInset: math.max(8.0, viewPadding.top + 8.0),
+                    bottomSafeInset: math.max(
+                      DanmuLayoutEngine.minBottomSafeInset,
+                      viewPadding.bottom + 48.0,
+                    ),
+                  )
+                : null));
+
     final videoStack = Stack(
+      key: const Key('player-video-stack'),
       fit: StackFit.expand,
       children: [
         Center(
+          key: const Key('player-video-surface-layer'),
           child: RepaintBoundary(
             child: _videoKernel.buildVideoSurface(
               fit: _fit,
               videoWidth: _videoWidth,
               videoHeight: _videoHeight,
+              externalSubtitleOverlay: !OhosRuntime.isOhos,
             ),
           ),
         ),
-        // Wave 2 reserved DanmuLayer slot: strictly below brightness dimming,
-        // HUD controls & subtitles so dimming applies uniformly.
-        if (widget.danmuLayer != null && !OhosRuntime.isOhos)
-          Positioned.fill(child: IgnorePointer(child: widget.danmuLayer!)),
+        // M3b: DanmuLayer strictly ABOVE video surface and BELOW subtitles & HUD.
+        if (activeDanmuWidget != null && !OhosRuntime.isOhos)
+          Positioned.fill(
+            key: const Key('player-danmu-layer'),
+            child: IgnorePointer(child: activeDanmuWidget),
+          ),
+        // M3b: Subtitles strictly ABOVE DanmuLayer and BELOW HUD overlays.
+        if (subtitleOverlay != null)
+          Positioned.fill(
+            key: const Key('player-subtitle-layer'),
+            child: IgnorePointer(child: subtitleOverlay),
+          ),
         if (_playerBrightness < 0.995)
           IgnorePointer(
             child: ColoredBox(
@@ -2680,7 +3088,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           widget.loadingIndicator ??
-                              const CupertinoActivityIndicator(radius: 11),
+                              (!OhosRuntime.isOhos
+                                  ? const BrandLogoLoader(
+                                      key: Key('player-brand-logo-loader'),
+                                      size: 26,
+                                    )
+                                  : const CupertinoActivityIndicator(
+                                      radius: 11,
+                                    )),
                           const SizedBox(width: 12),
                           Flexible(
                             child: Text(
@@ -2707,7 +3122,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           widget.loadingIndicator ??
-                              const CupertinoActivityIndicator(radius: 11),
+                              (!OhosRuntime.isOhos
+                                  ? const BrandLogoLoader(
+                                      key: Key('player-brand-logo-loader'),
+                                      size: 26,
+                                    )
+                                  : const CupertinoActivityIndicator(
+                                      radius: 11,
+                                    )),
                           const SizedBox(width: 12),
                           Flexible(
                             child: Text(
@@ -2896,7 +3318,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                       _position = Duration(milliseconds: targetMs);
                       _hudText = '';
                     });
-                    _player.seek(Duration(milliseconds: targetMs));
+                    _seekPlayer(Duration(milliseconds: targetMs));
                     _saveProgress(immediate: true, triggerSync: false);
                     _scheduleHide();
                   },
@@ -2981,10 +3403,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       backgroundColor: Colors.black,
       body: FocusScope(
         node: _playerFocusScopeNode,
-        autofocus: true,
+        autofocus: !widget.embedded,
         child: Focus(
         focusNode: _playerFocusNode,
-        autofocus: true,
+        autofocus: !widget.embedded,
         onFocusChange: (hasFocus) {
           if (!hasFocus) {
             _cancelDesktopKeyScrub(showToast: false);
@@ -3016,7 +3438,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   _isDraggingSeek = false;
                   _position = Duration(milliseconds: committedMs);
                 });
-                _player.seek(Duration(milliseconds: committedMs));
+                _seekPlayer(Duration(milliseconds: committedMs));
                 _showHud('跳转至 ${_formatDuration(Duration(milliseconds: committedMs))}');
                 _scheduleHide();
               }
@@ -3172,6 +3594,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           }
           if (!isCtrlOrCmd &&
               !editingText &&
+              !OhosRuntime.isOhos &&
               _useEnhancedHud &&
               event.logicalKey == LogicalKeyboardKey.keyD) {
             _handleDanmuToggle();
@@ -3488,10 +3911,40 @@ class _PlayerScreenState extends State<PlayerScreen>
                               child: _buildPlaybackErrorCardContent(context),
                             ),
                     ),
-                  // Wave 2 reserved FirstPlayGestureHint slot.
-                  if (widget.firstPlayGestureHint != null &&
-                      !OhosRuntime.isOhos)
-                    Positioned.fill(child: widget.firstPlayGestureHint!),
+                  // Wave 2 FirstPlayGestureHint slot (above bottom control bar,
+                  // avoiding top-left StartSpecOverlay; guarded with !OhosRuntime.isOhos).
+                  if (!OhosRuntime.isOhos && widget.firstPlayGestureHint != null)
+                    Positioned.fill(child: widget.firstPlayGestureHint!)
+                  else if (!OhosRuntime.isOhos &&
+                      !_isLiveStream &&
+                      !widget.embedded &&
+                      !_screenLocked &&
+                      !_windowsMoreControls &&
+                      _hasStartedVodPlayback &&
+                      _onboardingPrefs != null &&
+                      _onboardingPrefs!.shouldShowFirstPlayHint() &&
+                      !_firstPlayHintDismissedThisSession)
+                    Positioned(
+                      left: 16,
+                      right: 16,
+                      bottom: _controlsVisible
+                          ? (isLandscape ? 136.0 : 156.0)
+                          : math.max(36.0, viewPadding.bottom + 28.0),
+                      child: Align(
+                        alignment: Alignment.bottomCenter,
+                        child: FirstPlayGestureHint(
+                          prefs: _onboardingPrefs!,
+                          reduceTransparency: effectiveReduceTransparency,
+                          onDismissed: () {
+                            if (mounted) {
+                              setState(
+                                () => _firstPlayHintDismissedThisSession = true,
+                              );
+                            }
+                          },
+                        ),
+                      ),
+                    ),
                 ],
               ),
               surface: surfaceWidget,
@@ -3736,7 +4189,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         isLandscape: isLandscape,
         danmuEnabled: widget.onToggleDanmu != null
             ? widget.danmuEnabled
-            : _danmuEnabledLocal,
+            : (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled),
         sleepTimerActive: _sleepTimer.isActive,
         hasMultipleLines: _lines.length > 1,
         storageReduceTransparency: _storageReduceTransparency,
@@ -3778,7 +4231,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             _isSliderDragging = false;
             _position = Duration(milliseconds: targetMs);
           });
-          _player.seek(Duration(milliseconds: targetMs));
+          _seekPlayer(Duration(milliseconds: targetMs));
           unawaited(_saveProgress(immediate: true, triggerSync: false));
           _scheduleHide();
         },
@@ -3915,6 +4368,17 @@ class _PlayerScreenState extends State<PlayerScreen>
       moreControlsOpen: _windowsMoreControls,
       sleepTimerActive: _sleepTimer.isActive,
       sleepTimerLabel: _sleepTimer.shortStatusLabel,
+      danmuEnabled: widget.onToggleDanmu != null
+          ? widget.danmuEnabled
+          : (!OhosRuntime.isOhos && _danmuSettings.effectiveEnabled),
+      onDanmuToggle: OhosRuntime.isOhos ? null : _handleDanmuToggle,
+      onDanmuSettingsTap: OhosRuntime.isOhos ? null : _handleDanmuSettingsTap,
+      anime4kVisible: _anime4kAvailable,
+      anime4kActive: _anime4kController.preset != Anime4kPreset.off,
+      anime4kLabel: _anime4kController.preset == Anime4kPreset.off
+          ? 'Anime4K'
+          : 'Anime4K·${_anime4kController.preset.labelZh}',
+      onAnime4kTap: _anime4kAvailable ? _showAnime4kSheet : null,
       topHeader: _buildTopHeader(
         context,
         true,
@@ -4326,7 +4790,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                             _isSliderDragging = false;
                             _position = Duration(milliseconds: targetMs);
                           });
-                          _player.seek(Duration(milliseconds: targetMs));
+                          _seekPlayer(Duration(milliseconds: targetMs));
                           unawaited(
                             _saveProgress(immediate: true, triggerSync: false),
                           );
@@ -4490,6 +4954,37 @@ class _PlayerScreenState extends State<PlayerScreen>
         shortLabel: '时间',
         active: _alwaysShowClock,
       ),
+      if (!live && !OhosRuntime.isOhos) ...[
+        _PlayerAction(
+          CupertinoIcons.chat_bubble_text_fill,
+          (widget.onToggleDanmu != null
+                  ? widget.danmuEnabled
+                  : _danmuSettings.effectiveEnabled)
+              ? '弹幕·开'
+              : '弹幕·关',
+          _handleDanmuToggle,
+          shortLabel: '弹幕',
+          active: widget.onToggleDanmu != null
+              ? widget.danmuEnabled
+              : _danmuSettings.effectiveEnabled,
+        ),
+        _PlayerAction(
+          CupertinoIcons.slider_horizontal_below_rectangle,
+          '弹幕设置',
+          _handleDanmuSettingsTap,
+          shortLabel: '弹幕设',
+        ),
+      ],
+      if (_anime4kAvailable)
+        _PlayerAction(
+          CupertinoIcons.wand_stars,
+          _anime4kController.preset == Anime4kPreset.off
+              ? 'Anime4K·关'
+              : 'Anime4K·${_anime4kController.preset.labelZh}',
+          _showAnime4kSheet,
+          shortLabel: 'A4K',
+          active: _anime4kController.preset != Anime4kPreset.off,
+        ),
       if (_useEnhancedHud)
         _PlayerAction(
           CupertinoIcons.moon_zzz_fill,
@@ -4512,7 +5007,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _openCurrentEpisode();
           _showHud('正在刷新直播流…');
         } else {
-          _player.seek(Duration.zero);
+          _seekPlayer(Duration.zero);
           _player.play();
           _showHud('已从头开始播放');
         }
@@ -6029,7 +6524,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             unawaited(_openCurrentEpisode());
             _showHud('正在刷新直播流…');
           } else {
-            _player.seek(Duration.zero);
+            _seekPlayer(Duration.zero);
             _player.play();
             _showHud('已从头开始播放');
           }

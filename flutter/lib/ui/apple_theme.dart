@@ -3,6 +3,8 @@ import 'dart:math' as math;
 import 'dart:ui';
 import '../core/ohos_runtime.dart';
 import 'ios_liquid_glass.dart';
+import 'motion/aurora_background.dart';
+import 'motion/motion_tokens.dart';
 import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart'
@@ -2505,7 +2507,11 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
     with SingleTickerProviderStateMixin {
   late final AnimationController _breathController;
 
+  bool get _useAuroraShader =>
+      widget.preset == 'aurora' && !OhosRuntime.isOhos && !_isWindowsDesktop;
+
   bool get _shouldAnimate {
+    if (_useAuroraShader) return false;
     if (!widget.animate || !widget.showAmbientArtwork) return false;
     if (_isWindowsDesktop) return false;
     if (!kIsWeb && Platform.environment.containsKey('FLUTTER_TEST')) {
@@ -2592,16 +2598,27 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
       child: Stack(
         fit: StackFit.expand,
         children: [
-          DecoratedBox(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: gradientColors,
-                stops: const [0.0, 0.38, 0.82],
+          if (_useAuroraShader)
+            Positioned.fill(
+              child: AuroraBackground(
+                key: const Key('apple-ambient-aurora'),
+                active: widget.animate && widget.showAmbientArtwork,
+                strength: widget.showAmbientArtwork
+                    ? MotionTokens.auroraDefaultStrength
+                    : 0.28,
+              ),
+            )
+          else
+            DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: gradientColors,
+                  stops: const [0.0, 0.38, 0.82],
+                ),
               ),
             ),
-          ),
         if (widget.customWallpaper != null)
           Positioned.fill(
             child: IgnorePointer(
@@ -2698,7 +2715,8 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
               ),
             ),
           ),
-        Positioned.fill(
+        if (!_useAuroraShader)
+          Positioned.fill(
           child: IgnorePointer(
             child: AnimatedBuilder(
               animation: _breathController,
