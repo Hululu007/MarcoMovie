@@ -768,9 +768,18 @@ final class DetailScreen {
         for (int n = 0; n < video.lines.size(); n++) {
             final int index = n;
             final boolean selected = n == lineIndex;
+            final Cms.Line candidateLine = video.lines.get(n);
+            final java.util.List<MediaBadges.Badge> lineBadges =
+                    MediaBadgeView.extractForLineOnly(a, candidateLine, null);
+            final String lineSpec =
+                    MediaBadges.formatDotJoined(lineBadges, MediaBadgeView.LINE_PICKER_MAX_BADGES);
+            final String lineBaseLabel =
+                    lineSpec.isEmpty()
+                            ? candidateLine.name
+                            : (candidateLine.name + " · " + lineSpec);
             final Button choice =
                     a.button(
-                            selected ? "● " + video.lines.get(n).name : video.lines.get(n).name,
+                            selected ? "● " + lineBaseLabel : lineBaseLabel,
                             "detail-line:" + n,
                             () -> {
                                 renderEpisodes(a, site, video, index, 0, panel, null);
@@ -796,6 +805,17 @@ final class DetailScreen {
                                                     video.lines.get(index).episodes.get(0));
                                     ((TextView) epFile).setText(cap);
                                     epFile.setVisibility(cap.isEmpty() ? View.GONE : View.VISIBLE);
+                                }
+                                View heroSpec = a.root.findViewWithTag("detail-spec-badges");
+                                if (heroSpec instanceof ViewGroup) {
+                                    MediaBadgeView.populateRow(
+                                            a,
+                                            (ViewGroup) heroSpec,
+                                            MediaBadgeView.extractForHero(
+                                                    a, video.remarks, video.lines.get(index), null),
+                                            MediaBadgeView.HERO_MAX_BADGES,
+                                            false,
+                                            a.isTvDevice());
                                 }
                                 View next = panel.findViewWithTag("detail-line:" + index);
                                 if (next != null) next.requestFocus();

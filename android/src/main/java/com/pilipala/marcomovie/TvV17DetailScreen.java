@@ -60,10 +60,12 @@ final class TvV17DetailScreen {
     final TvScrollView scroll;
     final LinearLayout content;
     private final MainActivity host;
+    private final Cms.Site site;
     private final TextView factsView;
     private final TextView doubanBadge;
     private final TextView rtBadge;
     private final LinearLayout ratingRow;
+    private final MediaBadgeView.BadgeFlowLayout specBadgeRow;
     private final TextView synopsisView;
     private final Button synopsisMoreBtn;
     private final LinearLayout castSection;
@@ -87,6 +89,7 @@ final class TvV17DetailScreen {
         if (a == null || site == null || video == null || actions == null)
             throw new IllegalArgumentException();
         this.host = a;
+        this.site = site;
         this.video = video;
 
         int initialAmbient = MobileDetailScreen.defaultAmbientForTitle(video.title);
@@ -225,6 +228,13 @@ final class TvV17DetailScreen {
             ratingRow.addView(siteLabel);
         }
         applyRatings(0.0, -1);
+
+        // 3b. Plain-text Media Spec Badges (bypassing URLDecoder so '+' in HDR10+/DD+ stays intact)
+        specBadgeRow = MediaBadgeView.createRow(a, "detail-spec-badges", false);
+        LinearLayout.LayoutParams specLp = new LinearLayout.LayoutParams(-1, -2);
+        specLp.topMargin = a.dp(10);
+        heroColumn.addView(specBadgeRow, specLp);
+        refreshSpecBadges();
 
         // 4. Dedicated Action Row directly below ratings: Play + Episodes/Lines Popup Button
         LinearLayout buttons = a.row();
@@ -491,6 +501,50 @@ final class TvV17DetailScreen {
         if (buttonLabel != null && !buttonLabel.isEmpty()) {
             episodesBtn.setText(buttonLabel);
         }
+        refreshSpecBadges();
+    }
+
+    private void refreshSpecBadges() {
+        WatchHistory.Entry bookmark = null;
+        for (WatchHistory.Entry entry : host.watchHistory()) {
+            if (site.key.equals(entry.site) && video.id != null && video.id.equals(entry.id)) {
+                bookmark = entry;
+                break;
+            }
+        }
+        Cms.Line activeLine = null;
+        Cms.Episode activeEpisode = null;
+        if (video.lines != null && !video.lines.isEmpty()) {
+            int[] sel =
+                    TvDetailHost.initialSelection(
+                            video,
+                            bookmark,
+                            host.prefs.getString(Prefs.PREFERRED_LINE, ""),
+                            host.current == null ? null : host.current.selection,
+                            host.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false));
+            int lineIdx = Math.max(0, Math.min(sel[0], video.lines.size() - 1));
+            activeLine = video.lines.get(lineIdx);
+            if (activeLine.episodes != null && !activeLine.episodes.isEmpty()) {
+                activeEpisode = activeLine.episodes.get(0);
+                if (bookmark != null
+                        && activeLine.name.equals(bookmark.line)
+                        && bookmark.episode != null) {
+                    for (Cms.Episode ep : activeLine.episodes) {
+                        if (bookmark.episode.equals(ep.name)) {
+                            activeEpisode = ep;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        MediaBadgeView.populateRow(
+                host,
+                specBadgeRow,
+                MediaBadgeView.extractForHero(host, video.remarks, activeLine, activeEpisode),
+                MediaBadgeView.HERO_MAX_BADGES,
+                false,
+                true);
     }
 
     private static boolean hasMultipleEpisodes(Cms.Video video) {

@@ -55,3 +55,4 @@ flutter:
     - assets/python-host/
     - assets/logo_mark.png
     - shaders/GLASSWORK-LICENSE.txt
+    - assets/ui-spec/badge-rules.json
