@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 import 'dart:collection';
 import 'dart:convert';
 import 'package:flutter/services.dart';
@@ -479,20 +480,67 @@ class MediaBadges {
         if (trackMatched.isNotEmpty) {
           final hasTrackRes = _hasGroup(trackMatched, 'resolution');
           final hasTrackCh = _hasGroup(trackMatched, 'audio_channels');
-          if (hasTrackRes || hasTrackCh) {
+          final hasTrackVid = _hasGroup(trackMatched, 'video_codec');
+          final hasTrackConcreteAud = _hasConcreteAudioCodec(trackMatched);
+          final trackAllowsAtmos = trackMatched.contains('aud_atmos') ||
+              trackMatched.contains('aud_truehd') ||
+              trackMatched.contains('aud_ddp');
+          final hasTrackNonDvDr = _hasNonDvDynamicRange(trackMatched);
+          if (hasTrackRes ||
+              hasTrackCh ||
+              hasTrackVid ||
+              hasTrackConcreteAud ||
+              hasTrackNonDvDr) {
             matched = matched.where((id) {
               final r = _ruleById[id];
               if (r == null) return false;
               if (hasTrackRes && r.group == 'resolution') return false;
               if (hasTrackCh && r.group == 'audio_channels') return false;
+              if (hasTrackVid && r.group == 'video_codec') return false;
+              if (hasTrackConcreteAud && r.group == 'audio_codec') {
+                if (!(id == 'aud_atmos' && trackAllowsAtmos)) return false;
+              }
+              if (hasTrackNonDvDr &&
+                  r.group == 'dynamic_range' &&
+                  id != 'dr_dv') {
+                return false;
+              }
               return true;
             }).toSet();
           }
           matched.addAll(trackMatched);
+          _reconcileDynamicRangeHierarchy(matched);
         }
       }
     }
     return _finalizeBadges(matched);
+  }
+
+  bool _hasConcreteAudioCodec(Set<String> ids) {
+    for (final id in ids) {
+      if (id == 'aud_atmos') continue;
+      final r = _ruleById[id];
+      if (r != null && r.group == 'audio_codec') return true;
+    }
+    return false;
+  }
+
+  bool _hasNonDvDynamicRange(Set<String> ids) {
+    for (final id in ids) {
+      if (id == 'dr_dv') continue;
+      final r = _ruleById[id];
+      if (r != null && r.group == 'dynamic_range') return true;
+    }
+    return false;
+  }
+
+  static void _reconcileDynamicRangeHierarchy(Set<String> matched) {
+    if (matched.contains('dr_hdr10plus')) {
+      matched.remove('dr_hdr10');
+      matched.remove('dr_hdr');
+    } else if (matched.contains('dr_hdr10') || matched.contains('dr_hlg')) {
+      matched.remove('dr_hdr');
+    }
   }
 
   bool _hasGroup(Set<String> ids, String group) {

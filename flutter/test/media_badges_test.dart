@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/media_badges.dart';
@@ -81,6 +82,75 @@ void main() {
       fused.map((b) => b.label).toList(),
       const ['1080p', 'DV · ATMOS', 'REMUX', 'DD+', '5.1', 'HEVC', 'NF'],
     );
+
+    // Contradictory video_codec: live HEVC overrides filename H264
+    expect(
+      engine
+          .fuse(
+            sources: const ['Example.H264.mkv'],
+            track: const MediaTrackSpec(videoCodec: 'hev1.1.6.L120'),
+          )
+          .map((b) => b.label)
+          .toList(),
+      const ['HEVC'],
+    );
+
+    // Contradictory audio_codec: live DD+ overrides filename DD; DTS-HD MA overrides DTS
+    expect(
+      engine
+          .fuse(
+            sources: const ['Example.AC3.mkv'],
+            track: const MediaTrackSpec(audioCodec: 'ec-3'),
+          )
+          .map((b) => b.label)
+          .toList(),
+      const ['DD+'],
+    );
+    expect(
+      engine
+          .fuse(
+            sources: const ['Example.DTS.mkv'],
+            track: const MediaTrackSpec(audioCodec: 'DTS-HD MA'),
+          )
+          .map((b) => b.label)
+          .toList(),
+      const ['DTS-HD MA'],
+    );
+    expect(
+      engine
+          .fuse(
+            sources: const ['Example.DDP.Atmos.5.1.mkv'],
+            track: const MediaTrackSpec(
+              audioCodec: 'mp4a.40.2',
+              audioChannels: 2,
+            ),
+          )
+          .map((b) => b.label)
+          .toList(),
+      const ['AAC', '2.0'],
+    );
+
+    // Contradictory dynamic_range: live HDR10/HDR10+ overrides HDR while preserving DV
+    expect(
+      engine
+          .fuse(
+            sources: const ['Example.4K.HDR.mkv'],
+            track: const MediaTrackSpec(dynamicRange: 'SMPTE2084'),
+          )
+          .map((b) => b.label)
+          .toList(),
+      const ['4K', 'HDR10'],
+    );
+    expect(
+      engine
+          .fuse(
+            sources: const ['Example.4K.DV.HDR.mkv'],
+            track: const MediaTrackSpec(dynamicRange: 'HDR10+'),
+          )
+          .map((b) => b.label)
+          .toList(),
+      const ['4K', 'DV', 'HDR10+'],
+    );
   });
 
   test('Uncached average match latency stays below 0.2ms', () {
@@ -108,24 +178,66 @@ void main() {
         reason: 'Avg uncached latency ${avgMs.toStringAsFixed(4)}ms >= 0.2ms');
   });
 
-  testWidgets('MediaBadgeRow renders plain text capsules and respects reduceTransparency',
+  testWidgets(
+      'MediaBadgeRow renders motion-tokens palette, transitions glass->solid on reduceTransparency & intensity, and uses platform radius',
       (tester) async {
     final badges = MediaBadges.extractBadges('Sample.2160p.DV.Atmos.REMUX.mkv');
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     GlassworkBackdrop.reduceTransparency.value = false;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: MediaBadgeRow(badges: badges),
+    GlassworkBackdrop.intensity.value = 1.0;
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MediaBadgeRow(badges: badges),
+          ),
         ),
-      ),
-    );
-    expect(find.text('4K'), findsOneWidget);
-    expect(find.text('DV · ATMOS'), findsOneWidget);
-    expect(find.text('REMUX'), findsOneWidget);
+      );
+      expect(find.text('4K'), findsOneWidget);
+      expect(find.text('DV · ATMOS'), findsOneWidget);
+      expect(find.text('REMUX'), findsOneWidget);
 
-    GlassworkBackdrop.reduceTransparency.value = true;
-    await tester.pump();
-    expect(find.text('4K'), findsOneWidget);
-    GlassworkBackdrop.reduceTransparency.value = false;
+      BoxDecoration pillDeco() {
+        final container = tester.widget<Container>(
+          find.byKey(const ValueKey('media-badge-res_4k')),
+        );
+        return container.decoration! as BoxDecoration;
+      }
+
+      // iOS glass state: translucent fill + concentric 999 radius
+      expect(pillDeco().color, const Color(0x2EFF9F0A));
+      expect(pillDeco().borderRadius, BorderRadius.circular(999));
+
+      // Reduce Transparency switches to solidFillArgb
+      GlassworkBackdrop.reduceTransparency.value = true;
+      await tester.pump();
+      expect(pillDeco().color, const Color(0xEB3A2810));
+
+      // Reset reduceTransparency, then set glassBlurLevel == 'solid' (intensity <= 0.02)
+      GlassworkBackdrop.reduceTransparency.value = false;
+      await tester.pump();
+      expect(pillDeco().color, const Color(0x2EFF9F0A));
+
+      GlassworkBackdrop.intensity.value = 0.0;
+      await tester.pump();
+      expect(pillDeco().color, const Color(0xEB3A2810));
+
+      // Windows desktop uses solidFillArgb + 6.0 corner radius
+      GlassworkBackdrop.intensity.value = 1.0;
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MediaBadgeRow(badges: badges),
+          ),
+        ),
+      );
+      expect(pillDeco().color, const Color(0xEB3A2810));
+      expect(pillDeco().borderRadius, BorderRadius.circular(6.0));
+    } finally {
+      GlassworkBackdrop.reduceTransparency.value = false;
+      GlassworkBackdrop.intensity.value = 1.0;
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 }

@@ -1,5 +1,4 @@
-import 'dart:io' show Platform;
-import 'package:flutter/foundation.dart' show kIsWeb;
+// SPDX-License-Identifier: GPL-3.0-only
 import 'package:flutter/material.dart';
 import '../core/media_badges.dart';
 import '../core/ohos_runtime.dart';
@@ -19,109 +18,120 @@ class _BadgePalette {
   final Color border;
 }
 
+/// Palette locked 1:1 with `shared/ui-spec/motion-tokens.json#badgeStyles`.
 _BadgePalette _paletteForStyle(String style) {
   switch (style) {
     case 'uhdGold':
       return const _BadgePalette(
-        text: Color(0xFFFFDF7A),
-        glassFill: Color(0x38D97706),
-        solidFill: Color(0xE0422A06),
-        border: Color(0x78F59E0B),
+        text: Color(0xFFFFB340),
+        glassFill: Color(0x2EFF9F0A),
+        solidFill: Color(0xEB3A2810),
+        border: Color(0x66FF9F0A),
       );
     case 'hdCyan':
       return const _BadgePalette(
-        text: Color(0xFF7DD3FC),
-        glassFill: Color(0x340284C7),
-        solidFill: Color(0xE00A2E44),
-        border: Color(0x6E38BDF8),
+        text: Color(0xFF70D7FF),
+        glassFill: Color(0x2964D2FF),
+        solidFill: Color(0xEB142C38),
+        border: Color(0x5C64D2FF),
       );
     case 'sdNeutral':
       return const _BadgePalette(
-        text: Color(0xFFD4D4D8),
-        glassFill: Color(0x2E52525B),
-        solidFill: Color(0xE027272A),
-        border: Color(0x5EA1A1AA),
-      );
-    case 'visionPurple':
-      return const _BadgePalette(
-        text: Color(0xFFD8B4FE),
-        glassFill: Color(0x3A7E22CE),
-        solidFill: Color(0xE031124D),
-        border: Color(0x78A855F7),
-      );
-    case 'hdrBlue':
-      return const _BadgePalette(
-        text: Color(0xFF93C5FD),
-        glassFill: Color(0x361D4ED8),
-        solidFill: Color(0xE013254D),
-        border: Color(0x7260A5FA),
-      );
-    case 'discEmerald':
-      return const _BadgePalette(
-        text: Color(0xFF6EE7B7),
-        glassFill: Color(0x34047857),
-        solidFill: Color(0xE00A3528),
-        border: Color(0x6E34D399),
-      );
-    case 'streamTeal':
-      return const _BadgePalette(
-        text: Color(0xFF5EEAD4),
-        glassFill: Color(0x320F766E),
-        solidFill: Color(0xE00B3330),
-        border: Color(0x682DD4BF),
-      );
-    case 'spatialAudio':
-      return const _BadgePalette(
-        text: Color(0xFFFDBA74),
-        glassFill: Color(0x38C2410C),
-        solidFill: Color(0xE0431E0C),
-        border: Color(0x74FB923C),
-      );
-    case 'standardAudio':
-      return const _BadgePalette(
-        text: Color(0xFFBFDBFE),
-        glassFill: Color(0x2E334155),
-        solidFill: Color(0xE01E293B),
-        border: Color(0x6294A3B8),
-      );
-    case 'codecSlate':
-      return const _BadgePalette(
-        text: Color(0xFFE2E8F0),
-        glassFill: Color(0x2C334155),
-        solidFill: Color(0xE01E293B),
-        border: Color(0x5C94A3B8),
-      );
-    case 'platformTag':
-      return const _BadgePalette(
-        text: Color(0xFFF0ABFC),
-        glassFill: Color(0x2E581C87),
-        solidFill: Color(0xE02D1145),
-        border: Color(0x62C084FC),
+        text: Color(0xFFD1D1DA),
+        glassFill: Color(0x33787884),
+        solidFill: Color(0xEB25252B),
+        border: Color(0x4DEBEBF5),
       );
     case 'premiumCombo':
       return const _BadgePalette(
-        text: Color(0xFFFEF08A),
-        glassFill: Color(0x446D28D9),
-        solidFill: Color(0xE6361A66),
-        border: Color(0x88FACC15),
+        text: Color(0xFFE5C7FF),
+        glassFill: Color(0x335E5CE6),
+        solidFill: Color(0xEB261F42),
+        border: Color(0x73BF5AF2),
+      );
+    case 'visionPurple':
+      return const _BadgePalette(
+        text: Color(0xFFDEB0FF),
+        glassFill: Color(0x2EBF5AF2),
+        solidFill: Color(0xEB2D1B38),
+        border: Color(0x66BF5AF2),
+      );
+    case 'hdrBlue':
+      return const _BadgePalette(
+        text: Color(0xFF64D2FF),
+        glassFill: Color(0x2E0A84FF),
+        solidFill: Color(0xEB122640),
+        border: Color(0x660A84FF),
+      );
+    case 'discEmerald':
+      return const _BadgePalette(
+        text: Color(0xFF63E682),
+        glassFill: Color(0x2930D158),
+        solidFill: Color(0xEB142E1C),
+        border: Color(0x5C30D158),
+      );
+    case 'streamTeal':
+      return const _BadgePalette(
+        text: Color(0xFF82D7FF),
+        glassFill: Color(0x265AC8FA),
+        solidFill: Color(0xEB152936),
+        border: Color(0x525AC8FA),
+      );
+    case 'spatialAudio':
+      return const _BadgePalette(
+        text: Color(0xFF8AE0FF),
+        glassFill: Color(0x2E0A84FF),
+        solidFill: Color(0xEB13283D),
+        border: Color(0x665AC8FA),
+      );
+    case 'standardAudio':
+      return const _BadgePalette(
+        text: Color(0xFFF5F5F7),
+        glassFill: Color(0x38787884),
+        solidFill: Color(0xEB28282E),
+        border: Color(0x3BFFFFFF),
+      );
+    case 'codecSlate':
+      return const _BadgePalette(
+        text: Color(0xFFD1D1DA),
+        glassFill: Color(0x29787884),
+        solidFill: Color(0xEB222228),
+        border: Color(0x29FFFFFF),
+      );
+    case 'platformTag':
+      return const _BadgePalette(
+        text: Color(0xFFEBEBF5),
+        glassFill: Color(0x2E36363D),
+        solidFill: Color(0xEB28282E),
+        border: Color(0x45FFFFFF),
       );
     default:
       return const _BadgePalette(
-        text: Color(0xFFE5E7EB),
-        glassFill: Color(0x2E374151),
-        solidFill: Color(0xE01F2937),
-        border: Color(0x5C9CA3AF),
+        text: Color(0xFFD1D1DA),
+        glassFill: Color(0x29787884),
+        solidFill: Color(0xEB222228),
+        border: Color(0x3BFFFFFF),
       );
   }
 }
 
-bool get _isWindowsFastGlass => !kIsWeb && Platform.isWindows;
+Color _ensureMinAlpha(Color color, double minAlpha) {
+  return color.a >= minAlpha ? color : color.withValues(alpha: minAlpha);
+}
+
+final Listenable _badgeSurfaceListenable = Listenable.merge(<Listenable>[
+  GlassworkBackdrop.reduceTransparency,
+  GlassworkBackdrop.intensity,
+]);
 
 /// Single plain-text typography media specification capsule pill.
 ///
-/// - iOS / macOS: concentric rounded glass pill (`radius = height/2`) respecting
-///   [GlassworkBackdrop.reduceTransparency].
-/// - Windows (`winFastGlass`): crisp solid stroke pill with zero blur.
+/// - iOS / macOS: concentric rounded glass pill (`radius = height/2`, `999`)
+///   respecting [GlassworkBackdrop.reduceTransparency],
+///   [GlassworkBackdrop.intensity] (`glassBlurLevel == 'solid'`), and high
+///   contrast.
+/// - Windows (`winFastGlass` / [isWindowsDesktopUi]): crisp solid stroke pill
+///   with `5`/`6` corner radius and zero blur.
 /// - HarmonyOS NEXT (`OhosRuntime.isOhos`): returns [SizedBox.shrink].
 class MediaBadgePill extends StatelessWidget {
   const MediaBadgePill(
@@ -142,26 +152,31 @@ class MediaBadgePill extends StatelessWidget {
     }
     final palette = _paletteForStyle(badge.style);
     final highContrast = MediaQuery.highContrastOf(context);
-    return ValueListenableBuilder<bool>(
-      valueListenable: GlassworkBackdrop.reduceTransparency,
-      builder: (context, reduceTransparency, _) {
-        final useSolid =
-            windowsSolid || _isWindowsFastGlass || reduceTransparency || highContrast;
-        final bgColor = useSolid ? palette.solidFill : palette.glassFill;
-        final borderColor =
-            highContrast ? palette.text.withValues(alpha: 0.9) : palette.border;
+    final isWin = windowsSolid || isWindowsDesktopUi;
+    final radius = isWin ? (compact ? 5.0 : 6.0) : 999.0;
+    return ListenableBuilder(
+      listenable: _badgeSurfaceListenable,
+      builder: (context, _) {
+        final solidMode = isWin ||
+            GlassworkBackdrop.reduceTransparency.value ||
+            GlassworkBackdrop.intensity.value <= 0.02 ||
+            highContrast;
+        final bgColor = solidMode ? palette.solidFill : palette.glassFill;
+        final borderColor = highContrast
+            ? palette.text.withValues(alpha: 0.9)
+            : (solidMode ? _ensureMinAlpha(palette.border, 0.45) : palette.border);
         return Container(
           key: ValueKey('media-badge-${badge.id}'),
           padding: EdgeInsets.symmetric(
-            horizontal: compact ? 7 : 9,
+            horizontal: compact ? 6 : 8,
             vertical: compact ? 2 : 3,
           ),
           decoration: BoxDecoration(
             color: bgColor,
-            borderRadius: BorderRadius.circular(999),
+            borderRadius: BorderRadius.circular(radius),
             border: Border.all(
               color: borderColor,
-              width: useSolid ? 0.9 : 0.75,
+              width: 1.0,
             ),
           ),
           child: Text(
@@ -171,9 +186,9 @@ class MediaBadgePill extends StatelessWidget {
             overflow: TextOverflow.fade,
             style: TextStyle(
               color: palette.text,
-              fontSize: compact ? 10 : 11,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.25,
+              fontSize: compact ? 11 : 12,
+              fontWeight: compact ? FontWeight.w600 : FontWeight.w700,
+              letterSpacing: compact ? 0.3 : 0.35,
               height: 1.15,
             ),
           ),
@@ -211,7 +226,7 @@ class MediaBadgeRow extends StatelessWidget {
     return Wrap(
       alignment: alignment,
       crossAxisAlignment: WrapCrossAlignment.center,
-      spacing: compact ? 5 : 7,
+      spacing: compact ? 4 : 6,
       runSpacing: compact ? 4 : 6,
       children: [
         for (final badge in visible)

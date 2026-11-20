@@ -770,8 +770,9 @@ final class DetailScreen {
             final boolean selected = n == lineIndex;
             final Cms.Line candidateLine = video.lines.get(n);
             final java.util.List<MediaBadges.Badge> lineBadges =
-                    MediaBadgeView.extractForLine(a, video.remarks, candidateLine, null);
-            final String lineSpec = MediaBadges.formatDotJoined(lineBadges, 2);
+                    MediaBadgeView.extractForLineOnly(a, candidateLine, null);
+            final String lineSpec =
+                    MediaBadges.formatDotJoined(lineBadges, MediaBadgeView.LINE_PICKER_MAX_BADGES);
             final String lineBaseLabel =
                     lineSpec.isEmpty()
                             ? candidateLine.name
@@ -810,9 +811,9 @@ final class DetailScreen {
                                     MediaBadgeView.populateRow(
                                             a,
                                             (ViewGroup) heroSpec,
-                                            MediaBadgeView.extractForLine(
+                                            MediaBadgeView.extractForHero(
                                                     a, video.remarks, video.lines.get(index), null),
-                                            5,
+                                            MediaBadgeView.HERO_MAX_BADGES,
                                             false,
                                             a.isTvDevice());
                                 }

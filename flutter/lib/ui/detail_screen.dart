@@ -205,7 +205,9 @@ class _DetailScreenState extends State<DetailScreen> {
     ];
     _descending = widget.storage.episodesDescending;
     if (!OhosRuntime.isOhos) {
-      unawaited(MediaBadges.ensureInitialized());
+      unawaited(MediaBadges.ensureInitialized().then((_) {
+        if (mounted) setState(() {});
+      }));
     }
     _isFavorite = widget.storage.isFavorite(
       _activeSite.key,
@@ -1233,7 +1235,7 @@ class _DetailScreenState extends State<DetailScreen> {
                 final lineSpec = OhosRuntime.isOhos
                     ? ''
                     : MediaBadges.formatDotJoined(
-                        _specBadgesForLine(line),
+                        _specBadgesForLineOnly(line),
                         maxBadges: 3,
                       );
                 final baseSubtitle = lineReason != null
@@ -2341,7 +2343,7 @@ class _DetailScreenState extends State<DetailScreen> {
                     final activeLine = _video.lines.isEmpty
                         ? null
                         : _video.lines[safeLineIdx];
-                    final specBadges = _specBadgesForLine(activeLine);
+                    final specBadges = _specBadgesForHero(activeLine);
                     if (specBadges.isEmpty) return const SizedBox.shrink();
                     return Padding(
                       padding: const EdgeInsets.only(top: 8),
@@ -2361,16 +2363,21 @@ class _DetailScreenState extends State<DetailScreen> {
     );
   }
 
-  List<MediaBadge> _specBadgesForLine(CmsLine? line) {
-    if (OhosRuntime.isOhos) return const <MediaBadge>[];
-    final firstEp =
-        (line != null && line.episodes.isNotEmpty) ? line.episodes.first : null;
+  List<MediaBadge> _specBadgesForLineOnly(CmsLine? line) {
+    if (OhosRuntime.isOhos || line == null) return const <MediaBadge>[];
+    final firstEp = line.episodes.isNotEmpty ? line.episodes.first : null;
     return MediaBadges.extractBadgesFromSources(<String?>[
-      _video.remarks,
-      line?.name,
+      line.name,
       firstEp?.name,
       firstEp?.url,
     ]);
+  }
+
+  List<MediaBadge> _specBadgesForHero(CmsLine? line) {
+    if (OhosRuntime.isOhos) return const <MediaBadge>[];
+    final lineBadges = _specBadgesForLineOnly(line);
+    if (lineBadges.isNotEmpty) return lineBadges;
+    return MediaBadges.extractBadges(_video.remarks);
   }
 
   double? _effectiveDoubanScore() {
@@ -3745,6 +3752,26 @@ class _DetailScreenState extends State<DetailScreen> {
         ),
         const SizedBox(height: 10),
         _buildRatingsAndSiteWrap(alignment: WrapAlignment.start),
+        if (!OhosRuntime.isOhos) ...[
+          Builder(
+            builder: (_) {
+              final activeLine = _video.lines.isEmpty
+                  ? null
+                  : _video
+                      .lines[_selectedLine.clamp(0, _video.lines.length - 1)];
+              final specBadges = _specBadgesForHero(activeLine);
+              if (specBadges.isEmpty) return const SizedBox.shrink();
+              return Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: MediaBadgeRow(
+                  badges: specBadges,
+                  maxBadges: 5,
+                  alignment: WrapAlignment.start,
+                ),
+              );
+            },
+          ),
+        ],
         if (desc.isNotEmpty || cast.isNotEmpty) ...[
           const SizedBox(height: 12),
           GestureDetector(

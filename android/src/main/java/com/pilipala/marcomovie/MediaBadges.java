@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 package com.pilipala.marcomovie;
 
 import java.io.ByteArrayOutputStream;
@@ -376,7 +377,7 @@ public final class MediaBadges {
     }
 
     public static MediaBadges fromJson(String json) throws JSONException {
-        if (STANDARD_PATTERNS.isEmpty()) {
+        if (defaultEngine == null) {
             getDefault();
         }
         JSONObject root = new JSONObject(json);
@@ -598,22 +599,76 @@ public final class MediaBadges {
                 if (!trackMatched.isEmpty()) {
                     boolean hasTrackRes = hasGroup(trackMatched, "resolution");
                     boolean hasTrackCh = hasGroup(trackMatched, "audio_channels");
-                    if (hasTrackRes || hasTrackCh) {
+                    boolean hasTrackVid = hasGroup(trackMatched, "video_codec");
+                    boolean hasTrackConcreteAud = hasConcreteAudioCodec(trackMatched);
+                    boolean trackAllowsAtmos =
+                            trackMatched.contains("aud_atmos")
+                                    || trackMatched.contains("aud_truehd")
+                                    || trackMatched.contains("aud_ddp");
+                    boolean hasTrackNonDvDr = hasNonDvDynamicRange(trackMatched);
+                    if (hasTrackRes
+                            || hasTrackCh
+                            || hasTrackVid
+                            || hasTrackConcreteAud
+                            || hasTrackNonDvDr) {
                         Set<String> filtered = new HashSet<String>();
                         for (String id : matched) {
                             Rule r = ruleById.get(id);
                             if (r == null) continue;
                             if (hasTrackRes && "resolution".equals(r.group)) continue;
                             if (hasTrackCh && "audio_channels".equals(r.group)) continue;
+                            if (hasTrackVid && "video_codec".equals(r.group)) continue;
+                            if (hasTrackConcreteAud && "audio_codec".equals(r.group)) {
+                                if (!("aud_atmos".equals(id) && trackAllowsAtmos)) {
+                                    continue;
+                                }
+                            }
+                            if (hasTrackNonDvDr
+                                    && "dynamic_range".equals(r.group)
+                                    && !"dr_dv".equals(id)) {
+                                continue;
+                            }
                             filtered.add(id);
                         }
                         matched = filtered;
                     }
                     matched.addAll(trackMatched);
+                    reconcileDynamicRangeHierarchy(matched);
                 }
             }
         }
         return finalizeBadges(matched);
+    }
+
+    private boolean hasConcreteAudioCodec(Set<String> ids) {
+        for (String id : ids) {
+            if ("aud_atmos".equals(id)) continue;
+            Rule r = ruleById.get(id);
+            if (r != null && "audio_codec".equals(r.group)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasNonDvDynamicRange(Set<String> ids) {
+        for (String id : ids) {
+            if ("dr_dv".equals(id)) continue;
+            Rule r = ruleById.get(id);
+            if (r != null && "dynamic_range".equals(r.group)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void reconcileDynamicRangeHierarchy(Set<String> matched) {
+        if (matched.contains("dr_hdr10plus")) {
+            matched.remove("dr_hdr10");
+            matched.remove("dr_hdr");
+        } else if (matched.contains("dr_hdr10") || matched.contains("dr_hlg")) {
+            matched.remove("dr_hdr");
+        }
     }
 
     private boolean hasGroup(Set<String> ids, String group) {

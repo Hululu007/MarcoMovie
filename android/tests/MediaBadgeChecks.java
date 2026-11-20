@@ -126,6 +126,45 @@ public final class MediaBadgeChecks {
                     "Fusion mismatch: expected=" + expectedFused + " actual=" + fusedLabels);
         }
 
+        // Fusion contradiction tests: video_codec, audio_codec, dynamic_range
+        assertLabels(
+                jsonEngine.fuse(
+                        new String[] {"Example.H264.mkv"},
+                        new MediaBadges.TrackSpec(
+                                0, 0, "hev1.1.6.L120", null, null, 0, null, false)),
+                new String[] {"HEVC"},
+                "fuse video_codec override");
+        assertLabels(
+                jsonEngine.fuse(
+                        new String[] {"Example.AC3.mkv"},
+                        new MediaBadges.TrackSpec(0, 0, null, null, "ec-3", 0, null, false)),
+                new String[] {"DD+"},
+                "fuse audio_codec DD+ overrides DD");
+        assertLabels(
+                jsonEngine.fuse(
+                        new String[] {"Example.DTS.mkv"},
+                        new MediaBadges.TrackSpec(0, 0, null, null, "DTS-HD MA", 0, null, false)),
+                new String[] {"DTS-HD MA"},
+                "fuse audio_codec DTS-HD MA overrides DTS");
+        assertLabels(
+                jsonEngine.fuse(
+                        new String[] {"Example.DDP.Atmos.5.1.mkv"},
+                        new MediaBadges.TrackSpec(0, 0, null, null, "mp4a.40.2", 2, null, false)),
+                new String[] {"AAC", "2.0"},
+                "fuse audio_codec stereo AAC evicts DDP+Atmos+5.1");
+        assertLabels(
+                jsonEngine.fuse(
+                        new String[] {"Example.4K.HDR.mkv"},
+                        new MediaBadges.TrackSpec(0, 0, null, "SMPTE2084", null, 0, null, false)),
+                new String[] {"4K", "HDR10"},
+                "fuse dynamic_range HDR10 overrides HDR");
+        assertLabels(
+                jsonEngine.fuse(
+                        new String[] {"Example.4K.DV.HDR.mkv"},
+                        new MediaBadges.TrackSpec(0, 0, null, "HDR10+", null, 0, null, false)),
+                new String[] {"4K", "DV", "HDR10+"},
+                "fuse dynamic_range HDR10+ overrides HDR while preserving DV");
+
         // Verify '+' preservation in raw URLs (TvV17DetailScreen bypasses URLDecoder)
         List<MediaBadges.Badge> plusBadges =
                 jsonEngine.extract("https://cdn.example.test/Sample.2160p.HDR10%2B.DD+.mkv");
@@ -171,6 +210,18 @@ public final class MediaBadgeChecks {
                 "PASS MediaBadgeChecks: golden=%d/%d (MediaBadges JSON + builtin + LiteBadges 0 diff), "
                         + "lru=%d, fusion=OK, plusPreserve=OK, uncachedAvg=%.4fms (<0.2ms)%n",
                 total, total, cacheSize, avgMs);
+    }
+
+    private static void assertLabels(
+            List<MediaBadges.Badge> actual, String[] expected, String label) {
+        List<String> actualLabels = new ArrayList<String>(actual.size());
+        for (MediaBadges.Badge b : actual) actualLabels.add(b.label);
+        List<String> expectedList = new ArrayList<String>(expected.length);
+        for (String e : expected) expectedList.add(e);
+        if (!expectedList.equals(actualLabels)) {
+            throw new AssertionError(
+                    label + " mismatch: expected=" + expectedList + " actual=" + actualLabels);
+        }
     }
 
     private static List<String> formatMediaBadges(List<MediaBadges.Badge> badges) {

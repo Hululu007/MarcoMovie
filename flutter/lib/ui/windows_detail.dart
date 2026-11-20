@@ -130,7 +130,7 @@ extension _WindowsDetail on _DetailScreenState {
           final activeLine = _video.lines.isEmpty
               ? null
               : _video.lines[_selectedLine.clamp(0, _video.lines.length - 1)];
-          final specBadges = _specBadgesForLine(activeLine);
+          final specBadges = _specBadgesForHero(activeLine);
           if (specBadges.isEmpty) return const SizedBox.shrink();
           return Padding(
             padding: const EdgeInsets.only(top: 10),
@@ -239,8 +239,8 @@ extension _WindowsDetail on _DetailScreenState {
                 final spec = OhosRuntime.isOhos
                     ? ''
                     : MediaBadges.formatDotJoined(
-                        _specBadgesForLine(line),
-                        maxBadges: 2,
+                        _specBadgesForLineOnly(line),
+                        maxBadges: 3,
                       );
                 final label = spec.isEmpty ? line.name : '${line.name} · $spec';
                 return ConstrainedBox(

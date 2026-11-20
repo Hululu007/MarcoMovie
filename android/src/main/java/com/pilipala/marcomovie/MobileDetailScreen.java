@@ -703,17 +703,16 @@ final class MobileDetailScreen {
                         updateRatingBadges(
                                 doubanBadge, rtBadge, listing, ratings.douban, ratings.rtPercent));
 
-        final LinearLayout specBadgeRow = MediaBadgeView.createRow(a, "detail-spec-badges");
-        specBadgeRow.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams specRowLp = new LinearLayout.LayoutParams(-2, -2);
-        specRowLp.gravity = Gravity.CENTER_HORIZONTAL;
+        final MediaBadgeView.BadgeFlowLayout specBadgeRow =
+                MediaBadgeView.createRow(a, "detail-spec-badges", true);
+        LinearLayout.LayoutParams specRowLp = new LinearLayout.LayoutParams(-1, -2);
         specRowLp.topMargin = a.dp(8);
         heroCenterCol.addView(specBadgeRow, specRowLp);
         MediaBadgeView.populateRow(
                 a,
                 specBadgeRow,
-                MediaBadgeView.extractForLine(a, listing.remarks, null, null),
-                5,
+                MediaBadgeView.extractForHero(a, listing.remarks, null, null),
+                MediaBadgeView.HERO_MAX_BADGES,
                 false,
                 false);
 
@@ -939,6 +938,13 @@ final class MobileDetailScreen {
                     }
 
                     if (v.lines.isEmpty()) {
+                        MediaBadgeView.populateRow(
+                                a,
+                                specBadgeRow,
+                                MediaBadgeView.extractForHero(a, v.remarks, null, null),
+                                MediaBadgeView.HERO_MAX_BADGES,
+                                false,
+                                false);
                         sourceTopBtn.setText("⇄ " + s.name);
                         TextView empty = a.text("暂未获取到可播放的剧集资源", 14, 0xb3ffffff);
                         empty.setGravity(Gravity.CENTER);
@@ -1186,8 +1192,8 @@ final class MobileDetailScreen {
                 MediaBadgeView.populateRow(
                         a,
                         (android.view.ViewGroup) heroSpecView,
-                        MediaBadgeView.extractForLine(a, video.remarks, line, activeEp),
-                        5,
+                        MediaBadgeView.extractForHero(a, video.remarks, line, activeEp),
+                        MediaBadgeView.HERO_MAX_BADGES,
                         false,
                         false);
             }
@@ -1202,9 +1208,8 @@ final class MobileDetailScreen {
                                 Cms.Line l = video.lines.get(i);
                                 String lineSpec =
                                         MediaBadges.formatDotJoined(
-                                                MediaBadgeView.extractForLine(
-                                                        a, video.remarks, l, null),
-                                                3);
+                                                MediaBadgeView.extractForLineOnly(a, l, null),
+                                                MediaBadgeView.LINE_PICKER_MAX_BADGES);
                                 names[i] =
                                         l.name
                                                 + (lineSpec.isEmpty()

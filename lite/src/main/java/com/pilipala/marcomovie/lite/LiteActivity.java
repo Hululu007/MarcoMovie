@@ -3976,11 +3976,27 @@ public final class LiteActivity extends Activity {
                 (activeDetailLine >= 0 && activeDetailLine < names.length)
                         ? names[activeDetailLine]
                         : "";
-        String firstEpName = currentLineEpisodes.isEmpty() ? "" : currentLineEpisodes.get(0).name;
-        String firstEpUrl = currentLineEpisodes.isEmpty() ? "" : currentLineEpisodes.get(0).url;
-        appendMeta(
-                metaLine,
-                LiteBadges.formatFromSources(4, vodRemarks, activeLineName, firstEpName, firstEpUrl));
+        EpisodeItem metaTargetEp =
+                currentLineEpisodes.isEmpty() ? null : currentLineEpisodes.get(0);
+        if (metaTargetEp != null && savedHist != null && savedHist.epUrl.length() > 0) {
+            for (int i = 0; i < currentLineEpisodes.size(); i++) {
+                EpisodeItem cand = currentLineEpisodes.get(i);
+                if (cand.url.equals(savedHist.epUrl) || cand.name.equals(savedHist.epName)) {
+                    metaTargetEp = cand;
+                    break;
+                }
+            }
+        }
+        String heroSpec =
+                LiteBadges.formatFromSources(
+                        4,
+                        activeLineName,
+                        metaTargetEp == null ? "" : metaTargetEp.name,
+                        metaTargetEp == null ? "" : metaTargetEp.url);
+        if (heroSpec.length() == 0) {
+            heroSpec = LiteBadges.formatFromSources(4, vodRemarks);
+        }
+        appendMeta(metaLine, heroSpec);
         if (metaLine.length() > 0) {
             TextView metaView = text(metaLine.toString(), 14);
             metaView.setTextColor(0xff64d2ff);
@@ -4120,9 +4136,29 @@ public final class LiteActivity extends Activity {
             for (int i = 0; i < lines.length; i++) {
                 final int lineIdx = i;
                 int epCount = countEpisodes(lines[i]);
-                int hash = lines[i].indexOf('#');
-                String firstSeg = hash >= 0 ? lines[i].substring(0, hash) : lines[i];
-                String lineSpec = LiteBadges.formatFromSources(3, names[i], firstSeg);
+                String lineEpName = "";
+                String lineEpUrl = "";
+                String rawLine = lines[i] == null ? "" : lines[i];
+                int segStart = 0;
+                int rawLen = rawLine.length();
+                while (segStart <= rawLen) {
+                    int hash = rawLine.indexOf('#', segStart);
+                    int segEnd = hash < 0 ? rawLen : hash;
+                    String seg = rawLine.substring(segStart, segEnd).trim();
+                    if (seg.length() > 0) {
+                        int dollar = seg.indexOf('$');
+                        if (dollar >= 0) {
+                            lineEpName = seg.substring(0, dollar).trim();
+                            lineEpUrl = seg.substring(dollar + 1).trim();
+                        } else {
+                            lineEpUrl = seg;
+                        }
+                        break;
+                    }
+                    if (hash < 0) break;
+                    segStart = hash + 1;
+                }
+                String lineSpec = LiteBadges.formatFromSources(3, names[i], lineEpName, lineEpUrl);
                 String chipLabel =
                         names[i]
                                 + " ("
