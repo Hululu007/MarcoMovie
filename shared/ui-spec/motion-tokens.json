@@ -1,8 +1,8 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "project": "Marco Movie",
   "license": "GPL-3.0-only",
-  "description": "Cross-platform motion timings, curves, physical springs, accessibility substitutions, and text-only badge style tokens.",
+  "description": "Cross-platform motion timings, curves, physical springs, iOS 26 concentric glass metrics, accessibility substitutions, and text-only badge style tokens.",
   "durationsMs": {
     "instant": 0,
     "micro": 90,
@@ -27,11 +27,35 @@
     "desktopCursorIdleHide": 2500,
     "touchControlsIdleHide": 4000,
     "skipCountdownTotal": 3000,
+    "touchHoldSpeedBoostThreshold": 350,
     "touchHoldFastForwardThreshold": 350,
     "desktopHoldFastForwardThreshold": 280,
     "tvHoldFastForwardThreshold": 500,
     "danmuSeekDebounce": 180,
     "transitionCaptureBudget": 16
+  },
+  "gestureThresholds": {
+    "touchSlopDp": 12,
+    "doubleTapTimeoutMs": 260,
+    "doubleTapSlopDp": 42,
+    "multiTapSeekWindowMs": 650,
+    "edgeBackGuardDp": 24,
+    "systemVerticalGuardDp": 28,
+    "speedSlideStepDp": 36,
+    "touchSwipeLockThresholdDp": 48,
+    "touchSwipeLockReleaseHysteresisDp": 36,
+    "speedBoostDetents": [1.25, 1.5, 2.0, 3.0],
+    "defaultBoostSpeed": 2.0
+  },
+  "ios26PlayerGlassMetrics": {
+    "topCapsuleHeightPt": 40,
+    "topCapsuleRadiusPt": 20,
+    "centerPrimaryButtonSizePt": 76,
+    "centerSecondaryButtonSizePt": 56,
+    "scrubberTrackIdleHeightPt": 5,
+    "scrubberTrackExpandedHeightPt": 10,
+    "dockCapsuleRadiusPt": 22,
+    "maxPrimaryDockActions": 7
   },
   "curves": {
     "standard": {
@@ -61,7 +85,7 @@
       "stiffness": "mass * pow(2 * pi / response, 2)",
       "viscousDamping": "2 * dampingRatio * sqrt(stiffness * mass)",
       "androidMotionSpring": "new MotionSpring(initial, motionSpringFrequency, 0.0025f) // first-party zero-dependency critically-damped solver (dampingRatio == 1.0); androidx.dynamicanimation is NOT in android/*dependencies.json and must not be added",
-      "androidUnderdampedSolver": "MotionTokens.stepUnderdampedSpring(...) or PathInterpolator fallback // 15-line zero-dependency analytical damped-harmonic helper in MotionTokens.java for dampingRatio < 1.0",
+      "androidUnderdampedSolver": "MotionTokens.stepUnderdampedSpring(...) or PathInterpolator fallback // zero-dependency analytical damped-harmonic helper in MotionTokens.java for dampingRatio < 1.0",
       "flutterSpringDescription": "SpringDescription(mass: mass, stiffness: stiffness, damping: viscousDamping)"
     },
     "presets": {
@@ -81,7 +105,7 @@
         "stiffness": 1542.13,
         "viscousDamping": 78.54,
         "motionSpringFrequency": 40.0,
-        "note": "Aligned with FocusMotion.compression (MotionSpring exact integer frequency 40.0 rad/s -> effective response 0.1571s) for tactile press/release."
+        "note": "Aligned with FocusMotion.compression (MotionSpring exact integer frequency 40.0 rad/s -> effective response 0.1571s) for tactile press/release and iOS 26 circle glass transport buttons."
       },
       "hudPopup": {
         "response": 0.28,
@@ -90,7 +114,7 @@
         "stiffness": 503.55,
         "viscousDamping": 38.6,
         "motionSpringFrequency": 22.44,
-        "note": "Used for fast-forward scrub capsule, skip countdown card, and start-up spec banner (Flutter SpringDescription; Android zero-dependency underdamped helper in MotionTokens.java or decelerate PathInterpolator)."
+        "note": "Used for speed boost/lock capsule, iOS 26 fluid scrubber expansion (5pt -> 10pt), desktop/TV scrub preview capsule, skip countdown card, and start-up spec banner."
       },
       "playerTransition": {
         "response": 0.42,
@@ -142,7 +166,7 @@
     },
     "reduceTransparency": {
       "androidCondition": "Prefs.REDUCED_TRANSPARENCY",
-      "flutterCondition": "GlassworkBackdrop.reduceTransparency.value || storage.glassBlurLevel == 'solid' || MediaQuery.highContrastOf(context)",
+      "flutterCondition": "IosLiquidGlassBridge.reduceTransparency || GlassworkBackdrop.reduceTransparency.value || storage.glassBlurLevel == 'solid' || MediaQuery.highContrastOf(context)",
       "rules": {
         "glassSurfaceFillArgb": "#F51E1E22",
         "hudBackdropFillArgb": "#EB16161A",
@@ -175,6 +199,7 @@
         "paddingHorizontal": 6,
         "paddingVertical": 2,
         "cornerRadius": 5,
+        "iosConcentricRadius": 999,
         "borderWidth": 1.0,
         "fontSize": 11,
         "fontWeight": 600,
@@ -186,6 +211,7 @@
         "paddingHorizontal": 8,
         "paddingVertical": 3,
         "cornerRadius": 6,
+        "iosConcentricRadius": 999,
         "borderWidth": 1.0,
         "fontSize": 12,
         "fontWeight": 700,
