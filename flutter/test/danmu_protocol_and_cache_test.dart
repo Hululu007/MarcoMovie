@@ -216,6 +216,19 @@ void main() {
         r're:[^x]*[a-z]{0,2}y',
         r're:[a-z]{1,5}[a-z]{1,5}z',
         r're:(a|a|a)[a-z]+z',
+        // Gate 1 R2 F-1D (prefix chains, TwoByte 3-branch unbounded & bounded spikes)
+        r're:a{20}a{20}a{20}a{20}a+b',
+        r're:a{20}a+x|a{20}a+y|a{20}a+z',
+        r're:[^x]{20}[^x]{20}[^x]{20}[^x]{20}[^x]+y|[^x]{20}[^x]{20}[^x]{20}[^x]{20}[^x]+z',
+        r're:[a-z]{20}[a-z]{20}[a-z]{20}[a-z]{15}[a-z]+[a-z]{2}z',
+        r're:[a-z]+z|[a-z]+z|[a-z]+z',
+        r're:[a-z]{1,4}[a-z]{1,4}[a-z]{3}z|[a-z]{1,3}[a-z]{1,3}[a-z]{6}z',
+        r're:(a|aa|aaa|aaaa)(a|aa|aaa|aaaa)[a-z]{3}z|(a|aa|aaa)(a|aa|aaa)z',
+        r're:a+a{15}b',
+        r're:[a-z]+[a-z]{6}z',
+        r're:.*aaaaaaaaab',
+        r're:.*ababababax',
+        r're:a.*b|c.*d|e.*f',
         // Gate 1 R1 F-1B (UTF-16 surrogates / supplementary codepoints parity)
         're:[\uD83D\uDE00-\\uFFFF]',
         r're:[\uD83D\uDE00-\uFFFF]',
@@ -271,46 +284,49 @@ void main() {
         r're:foo\)bar+',
         r're:foo.*bar',
         r're:剧透.+结局',
+        r're:.*剧透预警',
+        r're:\s+keyword',
+        r're:[a-z]+\.com',
+        r're:第\d+集.*剧透预警',
+        r're:广告.*链接',
         r're:(微信|QQ|VX)\d{5,}',
         r're:https?://[a-z0-9.-]+',
-        r're:a.*b|c.*d|e.*f',
+        r're:a.*b|c.*d',
         r're:^前排|沙发$',
         r're:[a-z]{1,4}[0-9]{1,4}',
         r're:(a|aa)(a|aa)z',
-        r're:[a-z]+z|[a-z]+z|[a-z]+z',
+        r're:[a-z]+z|[a-z]+z',
         r're:(a|a)[a-z]+z',
         r're:[a-z]+[a-z]{2}z',
         r're:(?:foo|bar).*?z',
       ];
-      final adversarial180A = 'a' * 180;
-      final adversarial180Digits = '1' * 180;
+      final adversarialInputs = <String>[
+        '${'a' * 179}!',
+        '${'a' * 179}\u4e00',
+        '${'\u0150' * 179}!',
+        '${'\u4e00' * 179}!',
+        '${'1' * 179}!',
+      ];
       for (final rule in accepted) {
         final vr = DanmuBlockFilter.validateRule(rule);
         expect(vr.valid, isTrue, reason: 'Expected valid for $rule: ${vr.error}');
         final single = DanmuBlockFilter.compile(<String>[rule]);
-        // Benchmark both cold and warm 180-char adversarial mismatch inputs
-        final swCold = Stopwatch()..start();
-        single.isBlocked(adversarial180A);
-        single.isBlocked(adversarial180Digits);
-        swCold.stop();
-        final coldMs = swCold.elapsedMicroseconds / 1000.0;
-
-        final swWarm = Stopwatch()..start();
-        single.isBlocked(adversarial180A);
-        single.isBlocked(adversarial180Digits);
-        swWarm.stop();
-        final warmMs = swWarm.elapsedMicroseconds / 1000.0;
+        // Benchmark every single call (cold call0..warm call5) across OneByte & TwoByte 180-char inputs
+        var maxCallMs = 0.0;
+        for (final sample in adversarialInputs) {
+          for (var run = 0; run < 6; run++) {
+            final sw = Stopwatch()..start();
+            single.isBlocked(sample);
+            sw.stop();
+            final ms = sw.elapsedMicroseconds / 1000.0;
+            if (ms > maxCallMs) maxCallMs = ms;
+          }
+        }
         expect(
-          coldMs,
+          maxCallMs,
           lessThan(5.0),
           reason:
-              'Accepted rule cold run took ${coldMs.toStringAsFixed(3)}ms on 180-char input: $rule',
-        );
-        expect(
-          warmMs,
-          lessThan(5.0),
-          reason:
-              'Accepted rule warm run took ${warmMs.toStringAsFixed(3)}ms on 180-char input: $rule',
+              'Accepted rule peaked at ${maxCallMs.toStringAsFixed(3)}ms on 180-char input: $rule',
         );
       }
 

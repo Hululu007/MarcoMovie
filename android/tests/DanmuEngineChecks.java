@@ -290,6 +290,19 @@ public final class DanmuEngineChecks {
                     "re:[^x]*[a-z]{0,2}y",
                     "re:[a-z]{1,5}[a-z]{1,5}z",
                     "re:(a|a|a)[a-z]+z",
+                    // Gate 1 R2 F-1D (prefix chains, TwoByte 3-branch unbounded & bounded spikes)
+                    "re:a{20}a{20}a{20}a{20}a+b",
+                    "re:a{20}a+x|a{20}a+y|a{20}a+z",
+                    "re:[^x]{20}[^x]{20}[^x]{20}[^x]{20}[^x]+y|[^x]{20}[^x]{20}[^x]{20}[^x]{20}[^x]+z",
+                    "re:[a-z]{20}[a-z]{20}[a-z]{20}[a-z]{15}[a-z]+[a-z]{2}z",
+                    "re:[a-z]+z|[a-z]+z|[a-z]+z",
+                    "re:[a-z]{1,4}[a-z]{1,4}[a-z]{3}z|[a-z]{1,3}[a-z]{1,3}[a-z]{6}z",
+                    "re:(a|aa|aaa|aaaa)(a|aa|aaa|aaaa)[a-z]{3}z|(a|aa|aaa)(a|aa|aaa)z",
+                    "re:a+a{15}b",
+                    "re:[a-z]+[a-z]{6}z",
+                    "re:.*aaaaaaaaab",
+                    "re:.*ababababax",
+                    "re:a.*b|c.*d|e.*f",
                     // Gate 1 R1 F-1B (UTF-16 surrogates / supplementary codepoints parity)
                     "re:[\uD83D\uDE00-\\uFFFF]",
                     "re:[\\uD83D\\uDE00-\\uFFFF]",
@@ -345,38 +358,47 @@ public final class DanmuEngineChecks {
                     "re:foo\\)bar+",
                     "re:foo.*bar",
                     "re:剧透.+结局",
+                    "re:.*剧透预警",
+                    "re:\\s+keyword",
+                    "re:[a-z]+\\.com",
+                    "re:第\\d+集.*剧透预警",
+                    "re:广告.*链接",
                     "re:(微信|QQ|VX)\\d{5,}",
                     "re:https?://[a-z0-9.-]+",
-                    "re:a.*b|c.*d|e.*f",
+                    "re:a.*b|c.*d",
                     "re:^前排|沙发$",
                     "re:[a-z]{1,4}[0-9]{1,4}",
                     "re:(a|aa)(a|aa)z",
-                    "re:[a-z]+z|[a-z]+z|[a-z]+z",
+                    "re:[a-z]+z|[a-z]+z",
                     "re:(a|a)[a-z]+z",
                     "re:[a-z]+[a-z]{2}z",
                     "re:(?:foo|bar).*?z"
                 };
-        String adversarial180A = repeatChar('a', 180);
-        String adversarial180Digits = repeatChar('1', 180);
+        String[] adversarialInputs =
+                new String[] {
+                    repeatChar('a', 179) + "!",
+                    repeatChar('a', 179) + "\u4e00",
+                    repeatChar('\u0150', 179) + "!",
+                    repeatChar('\u4e00', 179) + "!",
+                    repeatChar('1', 179) + "!"
+                };
         for (String rule : accepted) {
             BlockFilter.ValidationResult vr = BlockFilter.validateRule(rule);
             check(vr.valid, "ReDoS validator accepts safe rule: " + rule + " (" + vr.error + ")");
             BlockFilter single = BlockFilter.compile(Collections.singletonList(rule));
-            // Benchmark both cold and warm 180-char adversarial mismatch inputs (< 5ms)
-            long tCold0 = System.nanoTime();
-            single.isBlocked(adversarial180A);
-            single.isBlocked(adversarial180Digits);
-            double coldMs = (System.nanoTime() - tCold0) / 1_000_000.0;
-            long tWarm0 = System.nanoTime();
-            single.isBlocked(adversarial180A);
-            single.isBlocked(adversarial180Digits);
-            double warmMs = (System.nanoTime() - tWarm0) / 1_000_000.0;
+            double maxCallMs = 0.0;
+            for (String sample : adversarialInputs) {
+                for (int run = 0; run < 6; run++) {
+                    long t0 = System.nanoTime();
+                    single.isBlocked(sample);
+                    double ms = (System.nanoTime() - t0) / 1_000_000.0;
+                    if (ms > maxCallMs) maxCallMs = ms;
+                }
+            }
             check(
-                    coldMs < 5.0 && warmMs < 5.0,
-                    "Accepted rule completes < 5ms cold & warm on 180-char input (cold="
-                            + String.format(java.util.Locale.US, "%.3f", coldMs)
-                            + "ms, warm="
-                            + String.format(java.util.Locale.US, "%.3f", warmMs)
+                    maxCallMs < 5.0,
+                    "Accepted rule completes < 5ms across OneByte & TwoByte 180-char inputs (max="
+                            + String.format(java.util.Locale.US, "%.3f", maxCallMs)
                             + "ms): "
                             + rule);
         }

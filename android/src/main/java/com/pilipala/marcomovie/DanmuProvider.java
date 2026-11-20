@@ -193,15 +193,21 @@ public interface DanmuProvider {
         public static final int MAX_GROUP_DEPTH = 6;
         public static final int MAX_QUANTIFIER_BOUND = 20;
         public static final int MAX_UNBOUNDED_PER_BRANCH = 1;
+        public static final int MAX_DET_UNBOUNDED_PER_BRANCH = 1;
+        public static final int MAX_TOTAL_UNBOUNDED = 2;
         public static final int MAX_VAR_QUANTS_PER_BRANCH = 2;
         public static final int MAX_ALT_GROUPS_PER_BRANCH = 2;
+        public static final int MAX_BRANCH_EXPANDED_LEN = 28;
+        public static final int MAX_POST_UNBOUNDED_LITERALS = 10;
+        public static final int MAX_POST_UNBOUNDED_SAME_CHAR = 4;
+        public static final int MAX_POST_UNBOUNDED_NON_LITERAL = 2;
         public static final int MAX_BOUNDED_BRANCH_CHOICES = 16;
         public static final int MAX_BRANCH_CHOICES = 550;
         public static final int MAX_TOTAL_CHOICES = 600;
-        public static final int MAX_BOUNDED_BRANCH_WORK = 150;
-        public static final int MAX_TOTAL_BOUNDED_WORK = 250;
-        public static final int MAX_BRANCH_WORK = 800;
-        public static final int MAX_TOTAL_WORK = 1200;
+        public static final int MAX_BOUNDED_BRANCH_WORK = 100;
+        public static final int MAX_TOTAL_BOUNDED_WORK = 160;
+        public static final int MAX_BRANCH_WORK = 620;
+        public static final int MAX_TOTAL_WORK = 900;
         private static final int UNBOUNDED_CHOICE_COST = 181;
         private static final int WORK_CAP = MAX_TOTAL_WORK + 1;
         public static final BlockFilter EMPTY = new BlockFilter(new String[0], new Pattern[0]);
@@ -226,6 +232,8 @@ public interface DanmuProvider {
 
         private static final class BranchStats {
             final int unboundedQuants;
+            final int detUnboundedQuants;
+            final int totalUnboundedQuants;
             final int varQuants;
             final int altGroups;
             final int choices;
@@ -234,12 +242,16 @@ public interface DanmuProvider {
 
             BranchStats(
                     int unboundedQuants,
+                    int detUnboundedQuants,
+                    int totalUnboundedQuants,
                     int varQuants,
                     int altGroups,
                     int choices,
                     int maxExpandedLen,
                     int work) {
                 this.unboundedQuants = unboundedQuants;
+                this.detUnboundedQuants = detUnboundedQuants;
+                this.totalUnboundedQuants = totalUnboundedQuants;
                 this.varQuants = varQuants;
                 this.altGroups = altGroups;
                 this.choices = choices;
@@ -249,17 +261,100 @@ public interface DanmuProvider {
         }
 
         private static final class QuantStats {
-            static final QuantStats NONE = new QuantStats(0, 0, 1, 1);
+            static final QuantStats NONE = new QuantStats(0, 0, 1, 1, false);
             final int unbounded;
             final int varQuant;
             final int choices;
             final int maxLen;
+            final boolean lazy;
 
-            QuantStats(int unbounded, int varQuant, int choices, int maxLen) {
+            QuantStats(int unbounded, int varQuant, int choices, int maxLen, boolean lazy) {
                 this.unbounded = unbounded;
                 this.varQuant = varQuant;
                 this.choices = choices;
                 this.maxLen = maxLen;
+                this.lazy = lazy;
+            }
+        }
+
+        private static final class AtomInfo {
+            static final int KIND_OTHER = 0;
+            static final int KIND_LITERAL = 1;
+            static final int KIND_DIGIT = 2;
+            static final int KIND_SPACE = 3;
+            static final int KIND_WORD = 4;
+            static final int KIND_ASCII_CLASS = 5;
+
+            static final AtomInfo OTHER = new AtomInfo(KIND_OTHER, -1, null, false);
+            static final AtomInfo DOT = new AtomInfo(KIND_OTHER, -1, null, true);
+            static final AtomInfo DIGIT = new AtomInfo(KIND_DIGIT, -1, null, false);
+            static final AtomInfo SPACE = new AtomInfo(KIND_SPACE, -1, null, false);
+            static final AtomInfo WORD = new AtomInfo(KIND_WORD, -1, null, false);
+
+            final int kind;
+            final int literalCode;
+            final int[] asciiMask; // 4 x 32-bit ints for 0..127
+            final boolean isDot;
+
+            AtomInfo(int kind, int literalCode, int[] asciiMask, boolean isDot) {
+                this.kind = kind;
+                this.literalCode = literalCode;
+                this.asciiMask = asciiMask;
+                this.isDot = isDot;
+            }
+
+            static AtomInfo literal(int code) {
+                return new AtomInfo(KIND_LITERAL, code, null, false);
+            }
+
+            static AtomInfo asciiClass(int[] mask) {
+                return new AtomInfo(KIND_ASCII_CLASS, -1, mask, false);
+            }
+
+            boolean isDisjointFromLiteral(int sepCode) {
+                switch (kind) {
+                    case KIND_LITERAL:
+                        return foldAsciiLower(literalCode) != foldAsciiLower(sepCode);
+                    case KIND_DIGIT:
+                        return sepCode < '0' || sepCode > '9';
+                    case KIND_SPACE:
+                        return !isRegexWhitespace(sepCode);
+                    case KIND_WORD:
+                        return !((sepCode >= '0' && sepCode <= '9')
+                                || (sepCode >= 'A' && sepCode <= 'Z')
+                                || (sepCode >= 'a' && sepCode <= 'z')
+                                || sepCode == '_');
+                    case KIND_ASCII_CLASS:
+                        if (sepCode < 0 || sepCode >= 128) return true;
+                        int folded = foldAsciiLower(sepCode);
+                        boolean matchRaw = (asciiMask[sepCode >>> 5] & (1 << (sepCode & 31))) != 0;
+                        boolean matchFold = (asciiMask[folded >>> 5] & (1 << (folded & 31))) != 0;
+                        return !matchRaw && !matchFold;
+                    default:
+                        return false;
+                }
+            }
+
+            private static int foldAsciiLower(int ch) {
+                return (ch >= 'A' && ch <= 'Z') ? (ch + 32) : ch;
+            }
+
+            private static boolean isRegexWhitespace(int ch) {
+                return ch == ' '
+                        || ch == '\t'
+                        || ch == '\n'
+                        || ch == '\r'
+                        || ch == '\f'
+                        || ch == 0x0B
+                        || ch == 0x00A0
+                        || ch == 0x1680
+                        || (ch >= 0x2000 && ch <= 0x200A)
+                        || ch == 0x2028
+                        || ch == 0x2029
+                        || ch == 0x202F
+                        || ch == 0x205F
+                        || ch == 0x3000
+                        || ch == 0xFEFF;
             }
         }
 
@@ -291,6 +386,9 @@ public interface DanmuProvider {
                 }
                 if (root == null || root.choices > MAX_TOTAL_CHOICES) {
                     return ValidationResult.fail("正则表达式总回溯分支复杂度过高");
+                }
+                if (root.totalUnboundedQuants > MAX_TOTAL_UNBOUNDED) {
+                    return ValidationResult.fail("正则表达式无界量词总数超过安全上限");
                 }
                 if (root.work > MAX_TOTAL_WORK) {
                     return ValidationResult.fail("正则表达式总回溯工作量超过安全上限");
@@ -336,19 +434,67 @@ public interface DanmuProvider {
                 return ch != '_';
             }
 
+            private static int foldAsciiLower(int ch) {
+                return (ch >= 'A' && ch <= 'Z') ? (ch + 32) : ch;
+            }
+
+            private int peekUnquantifiedLiteralCode() {
+                if (pos >= len) return -1;
+                char c = expr.charAt(pos);
+                if (c == '|' || c == ')' || c == '(' || c == '[' || c == ']' || c == '{' || c == '}'
+                        || c == '*' || c == '+' || c == '?' || c == '^' || c == '$' || c == '.') {
+                    return -1;
+                }
+                int code;
+                int afterPos;
+                if (c == '\\') {
+                    if (pos + 1 >= len) return -1;
+                    char next = expr.charAt(pos + 1);
+                    if (next == 't') {
+                        code = '\t';
+                        afterPos = pos + 2;
+                    } else if (next == 'n') {
+                        code = '\n';
+                        afterPos = pos + 2;
+                    } else if (next == 'r') {
+                        code = '\r';
+                        afterPos = pos + 2;
+                    } else if (next == 'f') {
+                        code = '\f';
+                        afterPos = pos + 2;
+                    } else if (isAsciiPunctuation(next)) {
+                        code = next;
+                        afterPos = pos + 2;
+                    } else {
+                        return -1;
+                    }
+                } else {
+                    code = c;
+                    afterPos = pos + 1;
+                }
+                if (afterPos < len && isQuantStart(expr.charAt(afterPos))) {
+                    return -1;
+                }
+                return code;
+            }
+
             private BranchStats parseAlternation(boolean isTopLevel) {
                 BranchStats first = parseBranch();
                 if (error != null) return null;
                 int maxUnbounded = first.unboundedQuants;
+                int maxDetUnbounded = first.detUnboundedQuants;
+                int sumTotalUnbounded = first.totalUnboundedQuants;
                 int maxVar = first.varQuants;
                 int maxAltGroups = first.altGroups;
                 int sumChoices = first.choices;
                 int maxExpandedLen = first.maxExpandedLen;
                 int sumWork = first.work;
-                int sumBoundedWork = first.unboundedQuants == 0 ? first.work : 0;
+                int sumBoundedWork =
+                        (first.totalUnboundedQuants == 0 && first.choices > 1) ? first.work : 0;
                 int branchCount = 1;
                 if (isTopLevel) {
-                    if (!checkTopLevelTotals(sumChoices, sumBoundedWork, sumWork)) {
+                    if (!checkTopLevelTotals(
+                            sumChoices, sumTotalUnbounded, sumBoundedWork, sumWork)) {
                         return null;
                     }
                 }
@@ -360,6 +506,10 @@ public interface DanmuProvider {
                     if (next.unboundedQuants > maxUnbounded) {
                         maxUnbounded = next.unboundedQuants;
                     }
+                    if (next.detUnboundedQuants > maxDetUnbounded) {
+                        maxDetUnbounded = next.detUnboundedQuants;
+                    }
+                    sumTotalUnbounded = satAdd(sumTotalUnbounded, next.totalUnboundedQuants);
                     if (next.varQuants > maxVar) {
                         maxVar = next.varQuants;
                     }
@@ -371,11 +521,12 @@ public interface DanmuProvider {
                     }
                     sumChoices = satAdd(sumChoices, next.choices);
                     sumWork = satAdd(sumWork, next.work);
-                    if (next.unboundedQuants == 0) {
+                    if (next.totalUnboundedQuants == 0 && next.choices > 1) {
                         sumBoundedWork = satAdd(sumBoundedWork, next.work);
                     }
                     if (isTopLevel) {
-                        if (!checkTopLevelTotals(sumChoices, sumBoundedWork, sumWork)) {
+                        if (!checkTopLevelTotals(
+                                sumChoices, sumTotalUnbounded, sumBoundedWork, sumWork)) {
                             return null;
                         }
                     }
@@ -384,6 +535,8 @@ public interface DanmuProvider {
                         (!isTopLevel && branchCount > 1) ? maxAltGroups + 1 : maxAltGroups;
                 return new BranchStats(
                         maxUnbounded,
+                        maxDetUnbounded,
+                        sumTotalUnbounded,
                         maxVar,
                         reportedAltGroups,
                         sumChoices,
@@ -391,9 +544,14 @@ public interface DanmuProvider {
                         sumWork);
             }
 
-            private boolean checkTopLevelTotals(int sumChoices, int sumBoundedWork, int sumWork) {
+            private boolean checkTopLevelTotals(
+                    int sumChoices, int sumTotalUnbounded, int sumBoundedWork, int sumWork) {
                 if (sumChoices > MAX_TOTAL_CHOICES) {
                     fail("正则表达式总回溯分支复杂度过高");
+                    return false;
+                }
+                if (sumTotalUnbounded > MAX_TOTAL_UNBOUNDED) {
+                    fail("正则表达式无界量词总数超过安全上限");
                     return false;
                 }
                 if (sumBoundedWork > MAX_TOTAL_BOUNDED_WORK) {
@@ -409,12 +567,18 @@ public interface DanmuProvider {
 
             private BranchStats parseBranch() {
                 int unbounded = 0;
+                int detUnbounded = 0;
+                int totalUnbounded = 0;
                 int varQuants = 0;
                 int altGroups = 0;
                 int choices = 1;
                 int maxExpandedLen = 0;
                 int work = 0;
                 int atomCount = 0;
+                int postUnboundedLiterals = 0;
+                int postUnboundedNonLiteral = 0;
+                int[] postUnboundedLitCodes = new int[MAX_POST_UNBOUNDED_LITERALS];
+                int postUnboundedLitCount = 0;
 
                 while (pos < len) {
                     char ch = expr.charAt(pos);
@@ -464,13 +628,31 @@ public interface DanmuProvider {
                             fail("禁止闭合括号后紧跟量词以防回溯风险");
                             return null;
                         }
+                        if (unbounded > 0) {
+                            postUnboundedNonLiteral =
+                                    satAdd(postUnboundedNonLiteral, inner.maxExpandedLen);
+                            if (postUnboundedNonLiteral > MAX_POST_UNBOUNDED_NON_LITERAL) {
+                                fail("正则表达式无界量词后的非字面后缀超过安全上限");
+                                return null;
+                            }
+                        }
                         work = satAdd(work, satMul(choices, inner.work));
                         unbounded += inner.unboundedQuants;
+                        detUnbounded += inner.detUnboundedQuants;
+                        totalUnbounded += inner.totalUnboundedQuants;
                         varQuants += inner.varQuants;
                         altGroups += inner.altGroups;
                         choices = satMul(choices, inner.choices);
                         maxExpandedLen = satAdd(maxExpandedLen, inner.maxExpandedLen);
-                        if (!checkBranchBudget(unbounded, varQuants, altGroups, choices, work)) {
+                        if (!checkBranchBudget(
+                                unbounded,
+                                detUnbounded,
+                                totalUnbounded,
+                                varQuants,
+                                altGroups,
+                                choices,
+                                maxExpandedLen,
+                                work)) {
                             return null;
                         }
                         continue;
@@ -493,14 +675,14 @@ public interface DanmuProvider {
                         continue;
                     }
 
-                    boolean isDot = false;
+                    AtomInfo atom;
                     if (ch == '[') {
-                        parseCharClass();
+                        atom = parseCharClass();
                         if (error != null) return null;
                     } else if (ch == '\\') {
-                        boolean isZeroWidthAnchor = parseOutsideEscape();
+                        atom = parseOutsideEscape();
                         if (error != null) return null;
-                        if (isZeroWidthAnchor) {
+                        if (atom == null) {
                             if (pos < len && isQuantStart(expr.charAt(pos))) {
                                 fail("禁止对零宽断言使用量词");
                                 return null;
@@ -509,25 +691,88 @@ public interface DanmuProvider {
                         }
                     } else if (ch == '.') {
                         pos++;
-                        isDot = true;
+                        atom = AtomInfo.DOT;
                     } else {
                         pos++;
+                        atom = AtomInfo.literal(ch);
                     }
 
-                    QuantStats q = parseQuantifier(isDot);
+                    QuantStats q = parseQuantifier(atom.isDot);
                     if (error != null) return null;
+
+                    boolean isUnquantifiedLiteral =
+                            atom.kind == AtomInfo.KIND_LITERAL
+                                    && q.unbounded == 0
+                                    && q.varQuant == 0
+                                    && q.maxLen == 1;
+
                     if (q.unbounded > 0) {
+                        int nextLit = q.lazy ? -1 : peekUnquantifiedLiteralCode();
+                        boolean deterministic = nextLit >= 0 && atom.isDisjointFromLiteral(nextLit);
                         work = satAdd(work, satMul(choices, UNBOUNDED_CHOICE_COST));
+                        totalUnbounded += 1;
+                        varQuants += 1;
+                        maxExpandedLen = satAdd(maxExpandedLen, q.maxLen);
+                        if (deterministic) {
+                            detUnbounded += 1;
+                        } else {
+                            unbounded += 1;
+                            choices = satMul(choices, q.choices);
+                        }
                     } else if (q.varQuant > 0) {
+                        if (unbounded > 0) {
+                            postUnboundedNonLiteral = satAdd(postUnboundedNonLiteral, q.maxLen);
+                            if (postUnboundedNonLiteral > MAX_POST_UNBOUNDED_NON_LITERAL) {
+                                fail("正则表达式无界量词后的非字面后缀超过安全上限");
+                                return null;
+                            }
+                        }
                         work = satAdd(work, satMul(choices, satMul(q.choices, q.maxLen)));
+                        varQuants += 1;
+                        choices = satMul(choices, q.choices);
+                        maxExpandedLen = satAdd(maxExpandedLen, q.maxLen);
+                    } else if (unbounded > 0 && isUnquantifiedLiteral) {
+                        postUnboundedLiterals++;
+                        if (postUnboundedLiterals > MAX_POST_UNBOUNDED_LITERALS) {
+                            fail("正则表达式无界量词后的字面后缀超过安全上限");
+                            return null;
+                        }
+                        int folded = foldAsciiLower(atom.literalCode);
+                        int sameCount = 1;
+                        for (int k = 0; k < postUnboundedLitCount; k++) {
+                            if (postUnboundedLitCodes[k] == folded) {
+                                sameCount++;
+                            }
+                        }
+                        if (sameCount > MAX_POST_UNBOUNDED_SAME_CHAR) {
+                            fail("正则表达式无界量词后的重复字符后缀超过安全上限");
+                            return null;
+                        }
+                        postUnboundedLitCodes[postUnboundedLitCount++] = folded;
+                        int litCost = (choices + 3) / 4;
+                        work = satAdd(work, litCost);
+                        maxExpandedLen = satAdd(maxExpandedLen, 1);
                     } else {
+                        if (unbounded > 0) {
+                            postUnboundedNonLiteral = satAdd(postUnboundedNonLiteral, q.maxLen);
+                            if (postUnboundedNonLiteral > MAX_POST_UNBOUNDED_NON_LITERAL) {
+                                fail("正则表达式无界量词后的非字面后缀超过安全上限");
+                                return null;
+                            }
+                        }
                         work = satAdd(work, satMul(choices, q.maxLen));
+                        maxExpandedLen = satAdd(maxExpandedLen, q.maxLen);
                     }
-                    unbounded += q.unbounded;
-                    varQuants += q.varQuant;
-                    choices = satMul(choices, q.choices);
-                    maxExpandedLen = satAdd(maxExpandedLen, q.maxLen);
-                    if (!checkBranchBudget(unbounded, varQuants, altGroups, choices, work)) {
+
+                    if (!checkBranchBudget(
+                            unbounded,
+                            detUnbounded,
+                            totalUnbounded,
+                            varQuants,
+                            altGroups,
+                            choices,
+                            maxExpandedLen,
+                            work)) {
                         return null;
                     }
                 }
@@ -537,13 +782,35 @@ public interface DanmuProvider {
                     return null;
                 }
                 return new BranchStats(
-                        unbounded, varQuants, altGroups, choices, maxExpandedLen, work);
+                        unbounded,
+                        detUnbounded,
+                        totalUnbounded,
+                        varQuants,
+                        altGroups,
+                        choices,
+                        maxExpandedLen,
+                        work);
             }
 
             private boolean checkBranchBudget(
-                    int unbounded, int varQuants, int altGroups, int choices, int work) {
+                    int unbounded,
+                    int detUnbounded,
+                    int totalUnbounded,
+                    int varQuants,
+                    int altGroups,
+                    int choices,
+                    int maxExpandedLen,
+                    int work) {
                 if (unbounded > MAX_UNBOUNDED_PER_BRANCH) {
                     fail("禁止同分支内组合多个无界量词以防回溯风险");
+                    return false;
+                }
+                if (detUnbounded > MAX_DET_UNBOUNDED_PER_BRANCH) {
+                    fail("禁止同分支内组合多个无界量词以防回溯风险");
+                    return false;
+                }
+                if (totalUnbounded > MAX_TOTAL_UNBOUNDED) {
+                    fail("正则表达式无界量词总数超过安全上限");
                     return false;
                 }
                 if (varQuants > MAX_VAR_QUANTS_PER_BRANCH) {
@@ -554,12 +821,23 @@ public interface DanmuProvider {
                     fail("禁止同分支内串联过多交替分组以防回溯风险");
                     return false;
                 }
+                int lenLimit =
+                        (varQuants > 0 || altGroups > 0)
+                                ? MAX_BRANCH_EXPANDED_LEN
+                                : MAX_REGEX_LENGTH;
+                if (maxExpandedLen > lenLimit) {
+                    fail("正则表达式分支展开长度超过安全上限");
+                    return false;
+                }
                 int choiceLimit = unbounded == 0 ? MAX_BOUNDED_BRANCH_CHOICES : MAX_BRANCH_CHOICES;
                 if (choices > choiceLimit) {
                     fail("正则表达式回溯复杂度过高");
                     return false;
                 }
-                int workLimit = unbounded == 0 ? MAX_BOUNDED_BRANCH_WORK : MAX_BRANCH_WORK;
+                int workLimit =
+                        totalUnbounded > 0
+                                ? MAX_BRANCH_WORK
+                                : (choices == 1 ? MAX_REGEX_LENGTH : MAX_BOUNDED_BRANCH_WORK);
                 if (work > workLimit) {
                     fail("正则表达式回溯工作量超过安全上限");
                     return false;
@@ -579,14 +857,16 @@ public interface DanmuProvider {
                             return null;
                         }
                     }
+                    boolean lazy = false;
                     if (pos < len && expr.charAt(pos) == '?') {
                         pos++;
+                        lazy = true;
                     }
                     if (pos < len && isQuantStart(expr.charAt(pos))) {
                         fail("禁止堆叠或占有型量词");
                         return null;
                     }
-                    return new QuantStats(1, 1, UNBOUNDED_CHOICE_COST, 1);
+                    return new QuantStats(1, 1, UNBOUNDED_CHOICE_COST, 1, lazy);
                 }
                 if (q == '?') {
                     pos++;
@@ -594,7 +874,7 @@ public interface DanmuProvider {
                         fail("禁止堆叠或占有型量词");
                         return null;
                     }
-                    return new QuantStats(0, 1, 2, 1);
+                    return new QuantStats(0, 1, 2, 1, false);
                 }
                 if (q == '{') {
                     pos++;
@@ -615,7 +895,7 @@ public interface DanmuProvider {
                             fail("禁止堆叠或占有型量词");
                             return null;
                         }
-                        return new QuantStats(0, 0, 1, minVal);
+                        return new QuantStats(0, 0, 1, minVal, false);
                     }
                     if (sep == ',') {
                         pos++;
@@ -628,14 +908,17 @@ public interface DanmuProvider {
                                     return null;
                                 }
                             }
+                            boolean lazy = false;
                             if (pos < len && expr.charAt(pos) == '?') {
                                 pos++;
+                                lazy = true;
                             }
                             if (pos < len && isQuantStart(expr.charAt(pos))) {
                                 fail("禁止堆叠或占有型量词");
                                 return null;
                             }
-                            return new QuantStats(1, 1, UNBOUNDED_CHOICE_COST, Math.max(1, minVal));
+                            return new QuantStats(
+                                    1, 1, UNBOUNDED_CHOICE_COST, Math.max(1, minVal), lazy);
                         }
                         int maxVal = parseBoundedInt();
                         if (error != null) return null;
@@ -657,16 +940,18 @@ public interface DanmuProvider {
                                 fail("禁止堆叠或占有型量词");
                                 return null;
                             }
-                            return new QuantStats(0, 0, 1, maxVal);
+                            return new QuantStats(0, 0, 1, maxVal, false);
                         }
+                        boolean lazy = false;
                         if (pos < len && expr.charAt(pos) == '?') {
                             pos++;
+                            lazy = true;
                         }
                         if (pos < len && isQuantStart(expr.charAt(pos))) {
                             fail("禁止堆叠或占有型量词");
                             return null;
                         }
-                        return new QuantStats(0, 1, maxVal - minVal + 1, maxVal);
+                        return new QuantStats(0, 1, maxVal - minVal + 1, maxVal, lazy);
                     }
                     fail("正则表达式量词花括号格式无效");
                     return null;
@@ -694,50 +979,69 @@ public interface DanmuProvider {
                 return val;
             }
 
-            private boolean parseOutsideEscape() {
+            private AtomInfo parseOutsideEscape() {
                 pos++; // consume '\'
                 if (pos >= len) {
                     fail("正则表达式以未闭合转义符结尾");
-                    return false;
+                    return null;
                 }
                 char next = expr.charAt(pos);
                 if ((next >= '1' && next <= '9') || next == 'k') {
                     fail("禁止使用正则反向引用");
-                    return false;
+                    return null;
                 }
                 if (next == 'b' || next == 'B') {
                     pos++;
-                    return true;
+                    return null;
                 }
-                if (next == 'd'
-                        || next == 'D'
-                        || next == 'w'
-                        || next == 'W'
-                        || next == 's'
-                        || next == 'S'
-                        || next == 't'
-                        || next == 'n'
-                        || next == 'r'
-                        || next == 'f') {
+                if (next == 'd') {
                     pos++;
-                    return false;
+                    return AtomInfo.DIGIT;
+                }
+                if (next == 's') {
+                    pos++;
+                    return AtomInfo.SPACE;
+                }
+                if (next == 'w') {
+                    pos++;
+                    return AtomInfo.WORD;
+                }
+                if (next == 'D' || next == 'W' || next == 'S') {
+                    pos++;
+                    return AtomInfo.OTHER;
+                }
+                if (next == 't') {
+                    pos++;
+                    return AtomInfo.literal('\t');
+                }
+                if (next == 'n') {
+                    pos++;
+                    return AtomInfo.literal('\n');
+                }
+                if (next == 'r') {
+                    pos++;
+                    return AtomInfo.literal('\r');
+                }
+                if (next == 'f') {
+                    pos++;
+                    return AtomInfo.literal('\f');
                 }
                 if (next == 'x') {
                     pos++;
-                    parseFixedHexEscape(2);
-                    return false;
+                    int code = parseFixedHexEscape(2);
+                    return error != null ? null : AtomInfo.literal(code);
                 }
                 if (next == 'u') {
                     pos++;
-                    parseFixedHexEscape(4);
-                    return false;
+                    int code = parseFixedHexEscape(4);
+                    return error != null ? null : AtomInfo.literal(code);
                 }
                 if (isAsciiPunctuation(next)) {
                     pos++;
-                    return false;
+                    return AtomInfo.literal(next);
                 }
                 fail("禁止使用不受支持的正则转义序列");
-                return false;
+                return null;
             }
 
             private int parseFixedHexEscape(int digits) {
@@ -764,25 +1068,37 @@ public interface DanmuProvider {
                 return value;
             }
 
-            private void parseCharClass() {
+            private static void setAsciiMaskBit(int[] mask, int code) {
+                if (code >= 0 && code < 128) {
+                    mask[code >>> 5] |= (1 << (code & 31));
+                    int folded = foldAsciiLower(code);
+                    mask[folded >>> 5] |= (1 << (folded & 31));
+                }
+            }
+
+            private AtomInfo parseCharClass() {
                 pos++; // consume '['
+                boolean negated = false;
                 if (pos < len && expr.charAt(pos) == '^') {
                     pos++;
+                    negated = true;
                 }
                 int itemCount = 0;
                 boolean prevWasSingleChar = false;
                 int prevCharCode = -1;
                 boolean pendingRange = false;
+                boolean trackAsciiMask = !negated;
+                int[] asciiMask = trackAsciiMask ? new int[4] : null;
 
                 while (pos < len && expr.charAt(pos) != ']') {
                     char c = expr.charAt(pos);
                     if (c == '[') {
                         fail("禁止在字符类中使用未转义的 [");
-                        return;
+                        return null;
                     }
                     if (c == '&' && pos + 1 < len && expr.charAt(pos + 1) == '&') {
                         fail("禁止在字符类中使用交集语法");
-                        return;
+                        return null;
                     }
                     if (c == '-'
                             && !pendingRange
@@ -791,7 +1107,7 @@ public interface DanmuProvider {
                             && expr.charAt(pos + 1) != ']') {
                         if (!prevWasSingleChar) {
                             fail("字符类范围不能以简写字符类作为起点");
-                            return;
+                            return null;
                         }
                         pos++;
                         pendingRange = true;
@@ -804,7 +1120,7 @@ public interface DanmuProvider {
                         pos++;
                         if (pos >= len) {
                             fail("正则表达式以未闭合转义符结尾");
-                            return;
+                            return null;
                         }
                         char next = expr.charAt(pos);
                         if (next == 'd'
@@ -816,6 +1132,7 @@ public interface DanmuProvider {
                             pos++;
                             isSingleChar = false;
                             charCode = -1;
+                            trackAsciiMask = false;
                         } else if (next == 't') {
                             pos++;
                             isSingleChar = true;
@@ -835,12 +1152,12 @@ public interface DanmuProvider {
                         } else if (next == 'x') {
                             pos++;
                             charCode = parseFixedHexEscape(2);
-                            if (error != null) return;
+                            if (error != null) return null;
                             isSingleChar = true;
                         } else if (next == 'u') {
                             pos++;
                             charCode = parseFixedHexEscape(4);
-                            if (error != null) return;
+                            if (error != null) return null;
                             isSingleChar = true;
                         } else if (isAsciiPunctuation(next)) {
                             pos++;
@@ -848,7 +1165,7 @@ public interface DanmuProvider {
                             charCode = next;
                         } else {
                             fail("禁止在字符类中使用不受支持的转义序列");
-                            return;
+                            return null;
                         }
                     } else {
                         pos++;
@@ -859,15 +1176,31 @@ public interface DanmuProvider {
                     if (pendingRange) {
                         if (!isSingleChar) {
                             fail("字符类范围不能以简写字符类作为终点");
-                            return;
+                            return null;
                         }
                         if (charCode < prevCharCode) {
                             fail("字符类范围起点大于终点");
-                            return;
+                            return null;
+                        }
+                        if (trackAsciiMask) {
+                            if (prevCharCode >= 0 && charCode < 128) {
+                                for (int k = prevCharCode; k <= charCode; k++) {
+                                    setAsciiMaskBit(asciiMask, k);
+                                }
+                            } else {
+                                trackAsciiMask = false;
+                            }
                         }
                         pendingRange = false;
                         prevWasSingleChar = false;
                     } else {
+                        if (trackAsciiMask && isSingleChar) {
+                            if (charCode >= 0 && charCode < 128) {
+                                setAsciiMaskBit(asciiMask, charCode);
+                            } else {
+                                trackAsciiMask = false;
+                            }
+                        }
                         prevWasSingleChar = isSingleChar;
                         prevCharCode = charCode;
                     }
@@ -876,12 +1209,14 @@ public interface DanmuProvider {
 
                 if (pos >= len || expr.charAt(pos) != ']') {
                     fail("字符类未闭合");
-                    return;
+                    return null;
                 }
                 pos++; // consume ']'
                 if (itemCount == 0) {
                     fail("字符类不能为空");
+                    return null;
                 }
+                return trackAsciiMask ? AtomInfo.asciiClass(asciiMask) : AtomInfo.OTHER;
             }
         }
 
