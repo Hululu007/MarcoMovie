@@ -1222,10 +1222,23 @@ class DesktopKeySeekStateMachine {
     required int currentPositionMs,
     required int durationMs,
     required int nowMs,
+    bool isRepeat = false,
   }) {
     assert(direction == -1 || direction == 1);
     if (isActive && _direction == direction) {
       return updatePreview(nowMs);
+    }
+    if (isRepeat) {
+      // Only a fresh KeyDownEvent may initiate a new seek session; ignore
+      // stale KeyRepeatEvent emissions after Escape or opposite-key cancel.
+      return KeySeekPreview(
+        state: _state,
+        direction: 0,
+        targetMs: _previewTargetMs,
+        deltaMs: 0,
+        speedSecPerSec: 0,
+        isHoldPreview: false,
+      );
     }
     if (isActive && _direction != direction) {
       // Opposite arrow key pressed during scrub cancels previous preview first
@@ -1289,9 +1302,11 @@ class DesktopKeySeekStateMachine {
   }
 
   /// Commits on key release and returns the target position in ms (or `null` if
-  /// no arrow seek was active or duration is invalid).
-  int? onKeyUp(int nowMs) {
+  /// no arrow seek was active, [direction] does not match the active seek
+  /// direction, or duration is invalid).
+  int? onKeyUp(int nowMs, {int? direction}) {
     if (!isActive || _direction == 0) return null;
+    if (direction != null && direction != _direction) return null;
     final preview = updatePreview(nowMs);
     _direction = 0;
     _pressStartMs = 0;

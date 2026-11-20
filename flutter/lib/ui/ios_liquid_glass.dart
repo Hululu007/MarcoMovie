@@ -26,7 +26,11 @@ class IosLiquidGlassBridge {
   static bool? _testOverride;
   static bool? _testReduceTransparencyOverride;
   static bool _incomingHandlerInstalled = false;
+  static bool _sheetPresentationInFlight = false;
   static int _pinSessionCounter = 0;
+
+  @visibleForTesting
+  static bool get isSheetPresentationInFlight => _sheetPresentationInFlight;
   static final Map<String, Future<Map<String, dynamic>> Function(String pin)>
       _pinCallbacks =
       <String, Future<Map<String, dynamic>> Function(String pin)>{};
@@ -139,6 +143,18 @@ class IosLiquidGlassBridge {
     }
   }
 
+  /// Dismisses any active native iOS modal sheet/alert owned by this bridge
+  /// (for example when `PlayerScreen` disposes while a native sheet is open).
+  static Future<void> dismissActiveSheets() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return;
+    if (!isAvailable && !_sheetPresentationInFlight) return;
+    try {
+      await channel.invokeMethod<void>('dismissActiveSheets');
+    } on MissingPluginException {
+      // No native sheet bridge registered.
+    } catch (_) {}
+  }
+
   @visibleForTesting
   static void setAvailableForTest(bool? value) {
     _testOverride = value;
@@ -146,6 +162,7 @@ class IosLiquidGlassBridge {
     if (value == null) {
       _initialized = false;
       _testReduceTransparencyOverride = null;
+      _sheetPresentationInFlight = false;
       reduceTransparencyNotifier.value = false;
       _pinCallbacks.clear();
     }
@@ -185,6 +202,7 @@ class IosNativeRouteGate extends StatefulWidget {
   static Future<T> runWithPlaceholders<T>(
     Future<T> Function() action, {
     bool waitForFrame = true,
+    Duration frameTimeout = const Duration(milliseconds: 100),
   }) async {
     _placeholderDepth.value = _placeholderDepth.value + 1;
     try {
@@ -194,7 +212,7 @@ class IosNativeRouteGate extends StatefulWidget {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!completer.isCompleted) completer.complete();
         });
-        await completer.future;
+        await completer.future.timeout(frameTimeout, onTimeout: () {});
       }
       return await action();
     } finally {
@@ -1470,6 +1488,8 @@ Future<IosNativeFilterResult?> showAppleNativeFilterSheet({
   required String selectedYear,
 }) async {
   if (!IosLiquidGlassBridge.isAvailable) return null;
+  if (IosLiquidGlassBridge._sheetPresentationInFlight) return null;
+  IosLiquidGlassBridge._sheetPresentationInFlight = true;
   try {
     final result = await IosLiquidGlassBridge.channel
         .invokeMapMethod<String, dynamic>(
@@ -1496,6 +1516,8 @@ Future<IosNativeFilterResult?> showAppleNativeFilterSheet({
     return null;
   } catch (_) {
     return null;
+  } finally {
+    IosLiquidGlassBridge._sheetPresentationInFlight = false;
   }
 }
 
@@ -1611,6 +1633,8 @@ Future<String?> showAppleNativeAlert(
   bool barrierDismissible = true,
 }) async {
   if (IosLiquidGlassBridge.isAvailable) {
+    if (IosLiquidGlassBridge._sheetPresentationInFlight) return null;
+    IosLiquidGlassBridge._sheetPresentationInFlight = true;
     try {
       return await IosLiquidGlassBridge.channel.invokeMethod<String>(
         'showAlert',
@@ -1624,6 +1648,8 @@ Future<String?> showAppleNativeAlert(
       // Fall through to Flutter CupertinoAlertDialog.
     } catch (_) {
       // Fall through to Flutter CupertinoAlertDialog.
+    } finally {
+      IosLiquidGlassBridge._sheetPresentationInFlight = false;
     }
   }
   if (!context.mounted) return null;
@@ -1663,6 +1689,8 @@ Future<T?> showAppleNativeActionSheet<T>(
   String cancelLabel = '取消',
 }) async {
   if (IosLiquidGlassBridge.isAvailable) {
+    if (IosLiquidGlassBridge._sheetPresentationInFlight) return null;
+    IosLiquidGlassBridge._sheetPresentationInFlight = true;
     try {
       final pickedId = await IosLiquidGlassBridge.channel.invokeMethod<String>(
         'showActionSheet',
@@ -1690,6 +1718,8 @@ Future<T?> showAppleNativeActionSheet<T>(
       // Fall through to Flutter CupertinoActionSheet.
     } catch (_) {
       // Fall through to Flutter CupertinoActionSheet.
+    } finally {
+      IosLiquidGlassBridge._sheetPresentationInFlight = false;
     }
   }
   if (!context.mounted) return null;
@@ -1756,6 +1786,8 @@ Future<T?> showAppleNativeOptionSheet<T>(
   Future<T?> Function()? fallback,
 }) async {
   if (IosLiquidGlassBridge.isAvailable) {
+    if (IosLiquidGlassBridge._sheetPresentationInFlight) return null;
+    IosLiquidGlassBridge._sheetPresentationInFlight = true;
     final effectiveOpaque =
         forceOpaque || IosLiquidGlassBridge.reduceTransparency;
     try {
@@ -1796,6 +1828,8 @@ Future<T?> showAppleNativeOptionSheet<T>(
       // Fall through to Flutter fallback below.
     } catch (_) {
       // Fall through to Flutter fallback below.
+    } finally {
+      IosLiquidGlassBridge._sheetPresentationInFlight = false;
     }
   }
   if (fallback != null) {

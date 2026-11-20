@@ -120,6 +120,11 @@ private enum MarcoLiquidGlassSupport {
         DispatchQueue.main.async {
           MarcoNativePinSheetController.present(args: args, completion: result)
         }
+      case "dismissActiveSheets":
+        DispatchQueue.main.async {
+          MarcoNativeSheetCoordinator.dismissAllActive()
+          result(nil)
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -284,6 +289,158 @@ private enum MarcoLiquidGlassSupport {
   }
 }
 
+// MARK: - Single-Flight Native Sheet Coordinator & Deinit Sentinel
+
+private final class _MarcoDeinitKeyToken: Sendable {}
+
+private final class MarcoDeinitSentinel: NSObject {
+  private static let keyToken = _MarcoDeinitKeyToken()
+  private var onDeinit: (() -> Void)?
+
+  init(onDeinit: @escaping () -> Void) {
+    self.onDeinit = onDeinit
+    super.init()
+  }
+
+  static func attach(to owner: AnyObject, onDeinit: @escaping () -> Void) -> MarcoDeinitSentinel {
+    let sentinel = MarcoDeinitSentinel(onDeinit: onDeinit)
+    let key = UnsafeRawPointer(Unmanaged.passUnretained(keyToken).toOpaque())
+    objc_setAssociatedObject(owner, key, sentinel, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    return sentinel
+  }
+
+  func invalidate() {
+    onDeinit = nil
+  }
+
+  deinit {
+    let cb = onDeinit
+    onDeinit = nil
+    if let cb = cb {
+      if Thread.isMainThread {
+        cb()
+      } else {
+        DispatchQueue.main.async { cb() }
+      }
+    }
+  }
+}
+
+private enum MarcoNativeSheetCoordinator {
+  private static var isPresenting = false
+  private static weak var activeController: UIViewController?
+  private static var activeControllerId: ObjectIdentifier?
+  private static var activeCancelHandler: (() -> Void)?
+
+  static func tryBeginPresentation(
+    host: UIViewController,
+    controller: UIViewController,
+    onCancel: @escaping () -> Void
+  ) -> Bool {
+    // Reclaim stale slot if a previously presented controller disappeared without firing its delegate.
+    if let staleId = activeControllerId, !isPresenting {
+      let staleGone = activeController == nil || activeController?.presentingViewController == nil
+      if staleGone {
+        let staleCancel = activeCancelHandler
+        activeController = nil
+        activeControllerId = nil
+        activeCancelHandler = nil
+        staleCancel?()
+        _ = staleId
+      }
+    }
+    if isPresenting || activeControllerId != nil {
+      return false
+    }
+    if host.isBeingDismissed || host.isBeingPresented {
+      return false
+    }
+    if let existing = host.presentedViewController, !existing.isBeingDismissed {
+      return false
+    }
+    isPresenting = true
+    activeController = controller
+    activeControllerId = ObjectIdentifier(controller)
+    activeCancelHandler = onCancel
+    return true
+  }
+
+  static func isCurrent(identity: ObjectIdentifier) -> Bool {
+    return activeControllerId == identity
+  }
+
+  static func didCompletePresentation(identity: ObjectIdentifier) {
+    guard activeControllerId == identity else { return }
+    isPresenting = false
+    if activeController == nil || activeController?.presentingViewController == nil {
+      let cancel = activeCancelHandler
+      activeController = nil
+      activeControllerId = nil
+      activeCancelHandler = nil
+      cancel?()
+    }
+  }
+
+  static func didFinish(identity: ObjectIdentifier) {
+    guard activeControllerId == identity else { return }
+    isPresenting = false
+    activeController = nil
+    activeControllerId = nil
+    activeCancelHandler = nil
+  }
+
+  static func dismissAllActive() {
+    let vc = activeController
+    let cancel = activeCancelHandler
+    isPresenting = false
+    activeController = nil
+    activeControllerId = nil
+    activeCancelHandler = nil
+    if let presented = vc, presented.isBeingPresented,
+       let coordinator = presented.transitionCoordinator {
+      cancel?()
+      coordinator.animate(alongsideTransition: nil) { _ in
+        if presented.presentingViewController != nil && !presented.isBeingDismissed {
+          presented.dismiss(animated: false, completion: nil)
+        }
+      }
+    } else if let presented = vc, presented.presentingViewController != nil, !presented.isBeingDismissed {
+      presented.dismiss(animated: false) {
+        cancel?()
+      }
+    } else {
+      cancel?()
+    }
+  }
+
+  static func presentRespectingDismissTransition(
+    host: UIViewController,
+    controller: UIViewController,
+    identity: ObjectIdentifier,
+    onRejected: @escaping () -> Void
+  ) {
+    let performPresent: () -> Void = {
+      guard isCurrent(identity: identity),
+            host.presentedViewController == nil,
+            !host.isBeingDismissed else {
+        onRejected()
+        return
+      }
+      host.present(controller, animated: true) {
+        didCompletePresentation(identity: identity)
+      }
+    }
+    if let existing = host.presentedViewController, existing.isBeingDismissed,
+       let coordinator = existing.transitionCoordinator {
+      coordinator.animate(alongsideTransition: nil) { _ in
+        performPresent()
+      }
+    } else {
+      performPresent()
+    }
+  }
+}
+
 // MARK: - Native UIAlertController Presenter (Alert & ActionSheet)
 
 private final class MarcoPopoverDismissBox: NSObject, UIPopoverPresentationControllerDelegate {
@@ -318,12 +475,31 @@ private enum MarcoNativeAlertPresenter {
     let actionDicts = (args["actions"] as? [[String: Any]]) ?? []
     let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
     alert.overrideUserInterfaceStyle = .dark
+    let alertKey = ObjectIdentifier(alert)
 
     var resolved = false
+    var pendingCompletion: FlutterResult? = completion
+    weak var weakSentinel: MarcoDeinitSentinel?
     func finish(_ value: Any?) {
       guard !resolved else { return }
       resolved = true
-      completion(value)
+      weakSentinel?.invalidate()
+      MarcoNativeSheetCoordinator.didFinish(identity: alertKey)
+      let cb = pendingCompletion
+      pendingCompletion = nil
+      cb?(value)
+    }
+
+    guard MarcoNativeSheetCoordinator.tryBeginPresentation(
+      host: host,
+      controller: alert,
+      onCancel: { finish(nil) }
+    ) else {
+      finish(nil)
+      return
+    }
+    weakSentinel = MarcoDeinitSentinel.attach(to: alert) {
+      finish(nil)
     }
 
     if actionDicts.isEmpty {
@@ -353,7 +529,12 @@ private enum MarcoNativeAlertPresenter {
       }
     }
 
-    host.present(alert, animated: true, completion: nil)
+    MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
+      host: host,
+      controller: alert,
+      identity: alertKey,
+      onRejected: { finish(nil) }
+    )
   }
 
   static func presentActionSheet(args: [String: Any], completion: @escaping FlutterResult) {
@@ -370,13 +551,31 @@ private enum MarcoNativeAlertPresenter {
     let sheetKey = ObjectIdentifier(sheet)
 
     var resolved = false
+    var pendingCompletion: FlutterResult? = completion
+    weak var weakSentinel: MarcoDeinitSentinel?
     func finish(_ value: Any?) {
       guard !resolved else { return }
       resolved = true
+      weakSentinel?.invalidate()
       if let box = activePopoverBoxes.removeValue(forKey: sheetKey) {
         box.invalidate()
       }
-      completion(value)
+      MarcoNativeSheetCoordinator.didFinish(identity: sheetKey)
+      let cb = pendingCompletion
+      pendingCompletion = nil
+      cb?(value)
+    }
+
+    guard MarcoNativeSheetCoordinator.tryBeginPresentation(
+      host: host,
+      controller: sheet,
+      onCancel: { finish(nil) }
+    ) else {
+      finish(nil)
+      return
+    }
+    weakSentinel = MarcoDeinitSentinel.attach(to: sheet) {
+      finish(nil)
     }
 
     for dict in actionDicts {
@@ -412,7 +611,12 @@ private enum MarcoNativeAlertPresenter {
       popover.delegate = dismissBox
     }
 
-    host.present(sheet, animated: true, completion: nil)
+    MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
+      host: host,
+      controller: sheet,
+      identity: sheetKey,
+      onRejected: { finish(nil) }
+    )
   }
 }
 
@@ -447,6 +651,7 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   private var completion: FlutterResult?
   private var resolved = false
   private var dismissing = false
+  private var navIdentity: ObjectIdentifier?
 
   private var isOpaqueMode: Bool {
     return forceOpaque || UIAccessibility.isReduceTransparencyEnabled
@@ -459,6 +664,8 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     }
     let vc = MarcoNativeOptionSheetController(args: args, completion: completion)
     let nav = UINavigationController(rootViewController: vc)
+    let navId = ObjectIdentifier(nav)
+    vc.navIdentity = navId
     nav.modalPresentationStyle = .pageSheet
     nav.overrideUserInterfaceStyle = .dark
     nav.presentationController?.delegate = vc
@@ -468,14 +675,20 @@ private final class MarcoNativeOptionSheetController: UIViewController,
       sheet.preferredCornerRadius = 28.0
       sheet.prefersScrollingExpandsWhenScrolledToEdge = true
     }
-    if let existing = host.presentedViewController, existing.isBeingDismissed,
-       let coordinator = existing.transitionCoordinator {
-      coordinator.animate(alongsideTransition: nil) { _ in
-        host.present(nav, animated: true, completion: nil)
-      }
-    } else {
-      host.present(nav, animated: true, completion: nil)
+    guard MarcoNativeSheetCoordinator.tryBeginPresentation(
+      host: host,
+      controller: nav,
+      onCancel: { [weak vc] in vc?.finish(selectedId: nil) }
+    ) else {
+      vc.finish(selectedId: nil)
+      return
     }
+    MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
+      host: host,
+      controller: nav,
+      identity: navId,
+      onRejected: { [weak vc] in vc?.finish(selectedId: nil) }
+    )
   }
 
   init(args: [String: Any], completion: @escaping FlutterResult) {
@@ -534,7 +747,20 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   }
 
   deinit {
-    finish(selectedId: nil)
+    guard !resolved else { return }
+    resolved = true
+    let cb = completion
+    completion = nil
+    let id = navIdentity
+    if Thread.isMainThread {
+      if let id = id { MarcoNativeSheetCoordinator.didFinish(identity: id) }
+      cb?(nil)
+    } else {
+      DispatchQueue.main.async {
+        if let id = id { MarcoNativeSheetCoordinator.didFinish(identity: id) }
+        cb?(nil)
+      }
+    }
   }
 
   override func viewDidLoad() {
@@ -655,6 +881,9 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   private func finish(selectedId: String?) {
     guard !resolved else { return }
     resolved = true
+    if let id = navIdentity {
+      MarcoNativeSheetCoordinator.didFinish(identity: id)
+    }
     let cb = completion
     completion = nil
     cb?(selectedId)
@@ -744,6 +973,7 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
 
   private var completion: FlutterResult?
   private var resolved = false
+  private var navIdentity: ObjectIdentifier?
 
   static func present(args: [String: Any], completion: @escaping FlutterResult) {
     guard let host = MarcoLiquidGlassSupport.topPresenter() else {
@@ -752,6 +982,8 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     }
     let vc = MarcoNativeFilterSheetController(args: args, completion: completion)
     let nav = UINavigationController(rootViewController: vc)
+    let navId = ObjectIdentifier(nav)
+    vc.navIdentity = navId
     nav.modalPresentationStyle = .pageSheet
     nav.overrideUserInterfaceStyle = .dark
     nav.presentationController?.delegate = vc
@@ -761,7 +993,20 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
       sheet.preferredCornerRadius = 28.0
       sheet.prefersScrollingExpandsWhenScrolledToEdge = true
     }
-    host.present(nav, animated: true, completion: nil)
+    guard MarcoNativeSheetCoordinator.tryBeginPresentation(
+      host: host,
+      controller: nav,
+      onCancel: { [weak vc] in vc?.finish(applied: false) }
+    ) else {
+      vc.finish(applied: false)
+      return
+    }
+    MarcoNativeSheetCoordinator.presentRespectingDismissTransition(
+      host: host,
+      controller: nav,
+      identity: navId,
+      onRejected: { [weak vc] in vc?.finish(applied: false) }
+    )
   }
 
   init(args: [String: Any], completion: @escaping FlutterResult) {
@@ -790,7 +1035,20 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
   }
 
   deinit {
-    finish(applied: false)
+    guard !resolved else { return }
+    resolved = true
+    let cb = completion
+    completion = nil
+    let id = navIdentity
+    if Thread.isMainThread {
+      if let id = id { MarcoNativeSheetCoordinator.didFinish(identity: id) }
+      cb?(nil)
+    } else {
+      DispatchQueue.main.async {
+        if let id = id { MarcoNativeSheetCoordinator.didFinish(identity: id) }
+        cb?(nil)
+      }
+    }
   }
 
   override func viewDidLoad() {
@@ -1003,6 +1261,9 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
   private func finish(applied: Bool) {
     guard !resolved else { return }
     resolved = true
+    if let id = navIdentity {
+      MarcoNativeSheetCoordinator.didFinish(identity: id)
+    }
     let cb = completion
     completion = nil
     if !applied {

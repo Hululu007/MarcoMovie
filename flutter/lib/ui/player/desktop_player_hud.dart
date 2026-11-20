@@ -139,98 +139,100 @@ class DesktopPlayerHud extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (embedded) {
-      return Stack(
-        key: const Key('desktop-player-hud-embedded'),
-        children: [
-          Positioned(
-            left: 15,
-            right: 15,
-            top: 12,
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  tooltip: '停止播放',
-                  onPressed: onExit,
-                  icon: const Icon(CupertinoIcons.xmark, color: Colors.white),
-                ),
-              ],
-            ),
-          ),
-          if (moreControlsOpen)
+      return ExcludeFocus(
+        child: Stack(
+          key: const Key('desktop-player-hud-embedded'),
+          children: [
             Positioned(
-              left: 12,
-              right: 12,
-              bottom: 84,
-              child: moreToolsDock,
-            ),
-          Positioned(
-            left: 12,
-            right: 12,
-            bottom: 12,
-            child: WinPanel(
-              dark: true,
-              padding: const EdgeInsets.all(6),
+              left: 15,
+              right: 15,
+              top: 12,
               child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
-                  IconButton(
-                    tooltip: playing ? '暂停' : '播放',
-                    onPressed: onPlayPause,
-                    icon: Icon(
-                      playing
-                          ? CupertinoIcons.pause_fill
-                          : CupertinoIcons.play_fill,
-                      color: Colors.white,
+                  Expanded(
+                    child: Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                   IconButton(
-                    tooltip: '音量',
-                    onPressed: onVolumeTap,
-                    icon: const Icon(
-                      CupertinoIcons.volume_up,
-                      color: Colors.white,
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: '线路',
-                    onPressed: onEpisodesTap,
-                    icon: const Icon(
-                      CupertinoIcons.list_bullet,
-                      color: Colors.white,
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: '更多',
-                    onPressed: onToggleMore,
-                    icon: const Icon(
-                      CupertinoIcons.ellipsis,
-                      color: Colors.white,
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: '展开播放',
-                    onPressed: onToggleExpand,
-                    icon: const Icon(
-                      CupertinoIcons.arrow_up_left_arrow_down_right,
-                      color: Colors.white,
-                    ),
+                    tooltip: '停止播放',
+                    onPressed: onExit,
+                    icon: const Icon(CupertinoIcons.xmark, color: Colors.white),
                   ),
                 ],
               ),
             ),
-          ),
-        ],
+            if (moreControlsOpen)
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: 84,
+                child: moreToolsDock,
+              ),
+            Positioned(
+              left: 12,
+              right: 12,
+              bottom: 12,
+              child: WinPanel(
+                dark: true,
+                padding: const EdgeInsets.all(6),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    IconButton(
+                      tooltip: playing ? '暂停' : '播放',
+                      onPressed: onPlayPause,
+                      icon: Icon(
+                        playing
+                            ? CupertinoIcons.pause_fill
+                            : CupertinoIcons.play_fill,
+                        color: Colors.white,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '音量',
+                      onPressed: onVolumeTap,
+                      icon: const Icon(
+                        CupertinoIcons.volume_up,
+                        color: Colors.white,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '线路',
+                      onPressed: onEpisodesTap,
+                      icon: const Icon(
+                        CupertinoIcons.list_bullet,
+                        color: Colors.white,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '更多',
+                      onPressed: onToggleMore,
+                      icon: const Icon(
+                        CupertinoIcons.ellipsis,
+                        color: Colors.white,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '展开播放',
+                      onPressed: onToggleExpand,
+                      icon: const Icon(
+                        CupertinoIcons.arrow_up_left_arrow_down_right,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       );
     }
 
@@ -255,97 +257,99 @@ class DesktopPlayerHud extends StatelessWidget {
       );
     }
 
-    return SafeArea(
-      child: Stack(
-        key: const Key('desktop-player-hud'),
-        fit: StackFit.expand,
-        children: [
-          Positioned(
-            left: 28,
-            right: 28,
-            top: 20,
-            child: topHeader,
-          ),
-          if (moreControlsOpen)
+    return ExcludeFocus(
+      child: SafeArea(
+        child: Stack(
+          key: const Key('desktop-player-hud'),
+          fit: StackFit.expand,
+          children: [
+            Positioned(
+              left: 28,
+              right: 28,
+              top: 20,
+              child: topHeader,
+            ),
+            if (moreControlsOpen)
+              Positioned(
+                left: 24,
+                right: 24,
+                bottom: 190,
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 1080),
+                    child: moreToolsDock,
+                  ),
+                ),
+              ),
             Positioned(
               left: 24,
               right: 24,
-              bottom: 190,
+              bottom: 27,
               child: Center(
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 1080),
-                  child: moreToolsDock,
-                ),
-              ),
-            ),
-          Positioned(
-            left: 24,
-            right: 24,
-            bottom: 27,
-            child: Center(
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 1080),
-                child: WinPanel(
-                  dark: true,
-                  radius: 30,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 22,
-                    vertical: 12,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (!isLive && progressBar != null) progressBar!,
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          transportButtons,
-                          const Spacer(),
-                          if (!isLive && width >= 880)
+                  child: WinPanel(
+                    dark: true,
+                    radius: 30,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 22,
+                      vertical: 12,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (!isLive && progressBar != null) progressBar!,
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            transportButtons,
+                            const Spacer(),
+                            if (!isLive && width >= 880)
+                              control(
+                                '$normalSpeed×',
+                                CupertinoIcons.speedometer,
+                                onSpeedTap,
+                              ),
+                            if (!isLive && width >= 1000)
+                              control(
+                                '字幕',
+                                CupertinoIcons.captions_bubble,
+                                onSubtitlesTap,
+                              ),
+                            if (width >= 1120)
+                              control(
+                                sleepTimerActive ? sleepTimerLabel : '定时',
+                                CupertinoIcons.moon_zzz_fill,
+                                onSleepTimerTap,
+                                highlighted: sleepTimerActive,
+                                key: const Key('desktop-sleep-timer-button'),
+                              ),
                             control(
-                              '$normalSpeed×',
-                              CupertinoIcons.speedometer,
-                              onSpeedTap,
+                              isLive ? '信号' : '选集',
+                              CupertinoIcons.list_bullet,
+                              onEpisodesTap,
                             ),
-                          if (!isLive && width >= 1000)
+                            if (width >= 780)
+                              control(
+                                '音量',
+                                CupertinoIcons.volume_up,
+                                onVolumeTap,
+                              ),
                             control(
-                              '字幕',
-                              CupertinoIcons.captions_bubble,
-                              onSubtitlesTap,
+                              '更多',
+                              CupertinoIcons.ellipsis,
+                              onToggleMore,
                             ),
-                          if (width >= 1120)
-                            control(
-                              sleepTimerActive ? sleepTimerLabel : '定时',
-                              CupertinoIcons.moon_zzz_fill,
-                              onSleepTimerTap,
-                              highlighted: sleepTimerActive,
-                              key: const Key('desktop-sleep-timer-button'),
-                            ),
-                          control(
-                            isLive ? '信号' : '选集',
-                            CupertinoIcons.list_bullet,
-                            onEpisodesTap,
-                          ),
-                          if (width >= 780)
-                            control(
-                              '音量',
-                              CupertinoIcons.volume_up,
-                              onVolumeTap,
-                            ),
-                          control(
-                            '更多',
-                            CupertinoIcons.ellipsis,
-                            onToggleMore,
-                          ),
-                        ],
-                      ),
-                    ],
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

@@ -981,7 +981,12 @@ class _IosFluidScrubberCapsuleState extends State<IosFluidScrubberCapsule>
 
   @override
   void dispose() {
+    final wasDragging = _activePointerId != null;
+    _activePointerId = null;
     _expandCtrl.dispose();
+    if (wasDragging) {
+      widget.onScrubCancel();
+    }
     super.dispose();
   }
 
@@ -1278,14 +1283,75 @@ class _IosRefractivePressButtonState extends State<_IosRefractivePressButton> {
   }
 }
 
-/// Concentric Liquid Glass surface matched to `MarcoInteractiveCircleGlassControl`
-/// & `ios_liquid_glass.dart`:
-/// - Uses `GlassworkBackdrop` (`glasswork.frag`) ONLY while mounted & when
-///   `!reduceTransparency` (unmounts completely when HUD hides -> 0 GPU cost).
-/// - Under `reduceTransparency`, renders opaque `#F51E1E22` with `>= 0.45` rim.
-/// - On iOS 15–18 (when `ios26Visual == false` and `!reduceTransparency`),
-///   renders refined frosted dark chrome fallback.
+/// 135° directional specular rim matched 1:1 with Home/Detail `_LiquidRimPainter`
+/// in `apple_theme.dart`: bright top-left highlight, quiet sides, subtle
+/// bottom-right bounce light, and thin inner top glass thickness glow.
+class _IosSpatialRimPainter extends CustomPainter {
+  final ShapeBorder shape;
+  final double strength;
+
+  const _IosSpatialRimPainter({required this.shape, this.strength = 1.0});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) return;
+    final rect = Offset.zero & size;
+    final outer = shape.getOuterPath(rect.deflate(0.5));
+    final rim = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.05
+      ..isAntiAlias = true
+      ..shader = LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          Colors.white.withValues(alpha: 0.54 * strength),
+          Colors.white.withValues(alpha: 0.16 * strength),
+          Colors.white.withValues(alpha: 0.06 * strength),
+          Colors.white.withValues(alpha: 0.24 * strength),
+        ],
+        stops: const [0.0, 0.30, 0.68, 1.0],
+      ).createShader(rect);
+    canvas.drawPath(outer, rim);
+
+    final inner = shape.getOuterPath(rect.deflate(1.5));
+    final glow = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.1
+      ..isAntiAlias = true
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [
+          Colors.white.withValues(alpha: 0.26 * strength),
+          Colors.white.withValues(alpha: 0.0),
+          Colors.white.withValues(alpha: 0.08 * strength),
+        ],
+        stops: const [0.0, 0.46, 1.0],
+      ).createShader(rect);
+    canvas.drawPath(inner, glow);
+  }
+
+  @override
+  bool shouldRepaint(covariant _IosSpatialRimPainter old) =>
+      old.shape != shape || old.strength != strength;
+}
+
+/// Concentric Liquid Glass surface unified with Home/Detail `LiquidGlass` +
+/// `_LiquidRimPainter` in `apple_theme.dart`:
+/// - On iOS 26+ (`ios26Visual == true` and `!reduceTransparency`), mounts
+///   `GlassworkBackdrop` (`glasswork.frag`) with dark obsidian tint (`#3D161820`)
+///   and 135° directional specular rim (unmounts completely when HUD hides ->
+///   0 GPU cost).
+/// - On iOS 15–18 (`ios26Visual == false` and `!reduceTransparency`), renders a
+///   lightweight high-contrast dark obsidian translucent fallback with 135°
+///   directional rim and NEVER mounts `GlassworkBackdrop` (0 shader passes).
+/// - Under `reduceTransparency`, renders opaque `#F51E1E22` with `>= 0.45` rim
+///   and 0 shader passes.
 class _IosSpatialGlassSurface extends StatelessWidget {
+  static const Color _darkGlassTint = Color(0x3D161820);
+  static const Color _heroDarkGlassTint = Color(0x52161820);
+
   final Widget child;
   final double? width;
   final double? height;
@@ -1312,22 +1378,17 @@ class _IosSpatialGlassSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final radius = BorderRadius.circular(borderRadius);
-    final inner = Container(
-      width: width,
-      height: height,
-      padding: padding,
-      decoration: BoxDecoration(
-        borderRadius: radius,
-        gradient: _surfaceGradient(),
-        border: Border.all(
-          color: _rimColor(),
-          width: reduceTransparency ? 1.0 : (heroHighlight ? 1.05 : 0.75),
-        ),
-      ),
-      child: child,
-    );
+    final shape = RoundedRectangleBorder(borderRadius: radius);
 
     if (reduceTransparency) {
+      final base = tint != null
+          ? Color.alphaBlend(
+              tint!.withValues(alpha: 0.72),
+              const Color(0xF51E1E22),
+            )
+          : (heroHighlight
+              ? const Color(0xF526272E)
+              : const Color(0xF51E1E22));
       return DecoratedBox(
         decoration: BoxDecoration(
           borderRadius: radius,
@@ -1339,85 +1400,191 @@ class _IosSpatialGlassSurface extends StatelessWidget {
             ),
           ],
         ),
-        child: inner,
+        child: Container(
+          width: width,
+          height: height,
+          padding: padding,
+          decoration: BoxDecoration(
+            borderRadius: radius,
+            color: base,
+            border: Border.all(
+              color: Colors.white.withValues(alpha: 0.48),
+              width: 1.0,
+            ),
+          ),
+          child: child,
+        ),
       );
     }
 
+    // iOS 15–18 / non-iOS26 fallback: lightweight high-contrast dark obsidian
+    // translucent surface with 135° specular rim and ZERO GlassworkBackdrop.
+    if (!ios26Visual) {
+      return DecoratedBox(
+        decoration: ShapeDecoration(
+          shape: shape,
+          shadows: [
+            BoxShadow(
+              color: heroHighlight
+                  ? const Color(0x59000000)
+                  : const Color(0x45000000),
+              blurRadius: heroHighlight ? 22 : 14,
+              offset: Offset(0, heroHighlight ? 8 : 5),
+            ),
+            const BoxShadow(
+              color: Color(0x26000000),
+              blurRadius: 6,
+              offset: Offset(0, 2),
+            ),
+          ],
+        ),
+        child: ClipPath(
+          clipper: ShapeBorderClipper(shape: shape),
+          clipBehavior: Clip.antiAlias,
+          child: CustomPaint(
+            foregroundPainter: _IosSpatialRimPainter(
+              shape: shape,
+              strength: heroHighlight ? 0.92 : 0.76,
+            ),
+            child: Container(
+              width: width,
+              height: height,
+              padding: padding,
+              decoration: ShapeDecoration(
+                shape: shape,
+                gradient: _fallbackTranslucentGradient(),
+              ),
+              child: child,
+            ),
+          ),
+        ),
+      );
+    }
+
+    // iOS 26+ Liquid Glass surface: unified dark obsidian tint (#3D161820) +
+    // GlassworkBackdrop + 135° directional specular rim matching Home/Detail.
+    final baseTint = tint ?? (heroHighlight ? _heroDarkGlassTint : _darkGlassTint);
+    final rimMultiplier = heroHighlight ? 1.12 : 1.0;
+
     return DecoratedBox(
-      decoration: BoxDecoration(
-        borderRadius: radius,
-        boxShadow: [
+      decoration: ShapeDecoration(
+        shape: shape,
+        shadows: [
           BoxShadow(
             color: heroHighlight
                 ? const Color(0x66000000)
-                : const Color(0x42000000),
-            blurRadius: heroHighlight ? 26 : 16,
-            offset: Offset(0, heroHighlight ? 8 : 5),
+                : const Color(0x59000000),
+            blurRadius: heroHighlight ? 30 : 24,
+            offset: Offset(0, heroHighlight ? 12 : 10),
+          ),
+          const BoxShadow(
+            color: Color(0x26000000),
+            blurRadius: 6,
+            offset: Offset(0, 2),
           ),
         ],
       ),
-      child: ClipRRect(
-        borderRadius: radius,
+      child: ClipPath(
+        clipper: ShapeBorderClipper(shape: shape),
         clipBehavior: Clip.antiAlias,
         child: GlassworkBackdrop(
           radius: borderRadius,
-          child: inner,
+          child: ValueListenableBuilder<double>(
+            valueListenable: GlassworkBackdrop.intensity,
+            builder: (context, strength, _) {
+              final s = strength.clamp(0.0, 1.0);
+              return CustomPaint(
+                foregroundPainter: _IosSpatialRimPainter(
+                  shape: shape,
+                  strength: rimMultiplier * (0.28 + 0.92 * s),
+                ),
+                child: Container(
+                  width: width,
+                  height: height,
+                  padding: padding,
+                  decoration: ShapeDecoration(
+                    shape: shape,
+                    gradient: _ios26RefractiveGradient(baseTint, s),
+                  ),
+                  child: child,
+                ),
+              );
+            },
+          ),
         ),
       ),
     );
   }
 
-  LinearGradient _surfaceGradient() {
-    if (reduceTransparency) {
-      final base = tint != null
-          ? Color.alphaBlend(
-              tint!.withValues(alpha: 0.72),
-              const Color(0xF51E1E22),
-            )
-          : (heroHighlight
-              ? const Color(0xF52C2D34)
-              : const Color(0xF51E1E22));
-      return LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: [base, base],
-      );
-    }
+  LinearGradient _ios26RefractiveGradient(Color baseTint, double s) {
     if (tint != null) {
       return LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
         colors: [
-          tint!.withValues(alpha: ios26Visual ? 0.62 : 0.72),
-          tint!.withValues(alpha: ios26Visual ? 0.44 : 0.56),
+          Color.alphaBlend(
+            Color.fromRGBO(255, 255, 255, 0.04 + 0.08 * s),
+            tint!.withValues(alpha: 0.60),
+          ),
+          tint!.withValues(alpha: 0.46),
+          Color.alphaBlend(
+            Color.fromRGBO(255, 255, 255, 0.02 + 0.045 * s),
+            tint!.withValues(alpha: 0.52),
+          ),
+        ],
+        stops: const [0.0, 0.52, 1.0],
+      );
+    }
+    final topSpecAlpha = (heroHighlight ? 0.05 : 0.03) + 0.08 * s;
+    final bottomSpecAlpha = (heroHighlight ? 0.02 : 0.015) + 0.045 * s;
+    return LinearGradient(
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: [
+        Color.alphaBlend(
+          Color.fromRGBO(255, 255, 255, topSpecAlpha),
+          baseTint,
+        ),
+        baseTint,
+        Color.alphaBlend(
+          Color.fromRGBO(255, 255, 255, bottomSpecAlpha),
+          baseTint,
+        ),
+      ],
+      stops: const [0.0, 0.52, 1.0],
+    );
+  }
+
+  LinearGradient _fallbackTranslucentGradient() {
+    if (tint != null) {
+      return LinearGradient(
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+        colors: [
+          Color.alphaBlend(
+            tint!.withValues(alpha: 0.70),
+            const Color(0xCC161820),
+          ),
+          Color.alphaBlend(
+            tint!.withValues(alpha: 0.56),
+            const Color(0xC2161820),
+          ),
         ],
       );
     }
     if (heroHighlight) {
-      return LinearGradient(
+      return const LinearGradient(
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
-        colors: ios26Visual
-            ? const [Color(0x52FFFFFF), Color(0x28D4D8E2), Color(0x36FFFFFF)]
-            : const [Color(0x66565660), Color(0x5236363E)],
+        colors: [Color(0xD4232630), Color(0xC8161820), Color(0xD01C1E27)],
+        stops: [0.0, 0.52, 1.0],
       );
     }
-    return LinearGradient(
-      begin: Alignment.topCenter,
-      end: Alignment.bottomCenter,
-      colors: ios26Visual
-          ? const [Color(0x38FFFFFF), Color(0x2226262E)]
-          : const [Color(0x7A42424C), Color(0x6B2A2A32)],
+    return const LinearGradient(
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: [Color(0xC41E2029), Color(0xB8161820), Color(0xC01A1C25)],
+      stops: [0.0, 0.52, 1.0],
     );
-  }
-
-  Color _rimColor() {
-    if (reduceTransparency) {
-      return Colors.white.withValues(alpha: 0.48);
-    }
-    if (heroHighlight) {
-      return Colors.white.withValues(alpha: ios26Visual ? 0.48 : 0.36);
-    }
-    return Colors.white.withValues(alpha: ios26Visual ? 0.28 : 0.22);
   }
 }

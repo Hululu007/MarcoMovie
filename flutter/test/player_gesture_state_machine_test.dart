@@ -467,5 +467,60 @@ void main() {
       expect(DesktopKeySeekStateMachine.cycleDesktopSpeed(2.0), 1.0);
       expect(DesktopKeySeekStateMachine.cycleDesktopSpeed(0.75), 1.0);
     });
+
+    test('S-07: KeyRepeatEvent after Escape cancel does NOT start a new seek session and mismatched KeyUp direction is ignored', () {
+      final keyFsm = DesktopKeySeekStateMachine();
+      keyFsm.onKeyDownOrRepeat(
+        direction: 1,
+        currentPositionMs: 120000,
+        durationMs: 600000,
+        nowMs: 1000,
+        isRepeat: false,
+      );
+      keyFsm.updatePreview(1600);
+      expect(keyFsm.isScrubbing, isTrue);
+
+      // Escape cancels the hold-seek session.
+      expect(keyFsm.cancel(), isTrue);
+      expect(keyFsm.isActive, isFalse);
+
+      // OS continues emitting KeyRepeatEvent while finger hasn't lifted yet.
+      final repeatAfterEsc = keyFsm.onKeyDownOrRepeat(
+        direction: 1,
+        currentPositionMs: 120000,
+        durationMs: 600000,
+        nowMs: 1630,
+        isRepeat: true,
+      );
+      expect(repeatAfterEsc.isHoldPreview, isFalse);
+      expect(keyFsm.isActive, isFalse);
+      expect(keyFsm.state, KeySeekState.keyIdle);
+      expect(keyFsm.onKeyUp(1660, direction: 1), isNull);
+
+      // Hold right, then press fresh left -> releasing right must NOT commit left.
+      keyFsm.onKeyDownOrRepeat(
+        direction: 1,
+        currentPositionMs: 120000,
+        durationMs: 600000,
+        nowMs: 2000,
+        isRepeat: false,
+      );
+      keyFsm.onKeyDownOrRepeat(
+        direction: -1,
+        currentPositionMs: 120000,
+        durationMs: 600000,
+        nowMs: 2100,
+        isRepeat: false,
+      );
+      expect(keyFsm.direction, -1);
+      expect(keyFsm.onKeyUp(2150, direction: 1), isNull);
+      expect(keyFsm.isActive, isTrue);
+      expect(keyFsm.direction, -1);
+
+      // Releasing matching left key commits rewind (-15s).
+      final committed = keyFsm.onKeyUp(2200, direction: -1);
+      expect(committed, 105000);
+      expect(keyFsm.isActive, isFalse);
+    });
   });
 }
