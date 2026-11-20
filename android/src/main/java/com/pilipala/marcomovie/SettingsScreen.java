@@ -6,6 +6,7 @@ import android.net.Uri;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.*;
+import com.pilipala.marcomovie.hud.PlayerHudPrefs;
 import java.io.*;
 
 /** Remote-friendly settings. Each row changes a setting consumed by the app. */
@@ -1421,6 +1422,107 @@ final class SettingsScreen {
             toggle("播放中右上角显示进度与时间", Prefs.TV_PLAYER_TOP_RIGHT_HUD, true, null);
         } else {
             toggle("播放页常显时间", Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false, null);
+        }
+        link(
+                "起播画质规格提示",
+                PlayerHudPrefs.isStartSpecHudEnabled(a) ? "开启" : "关闭",
+                "setting-" + PlayerHudPrefs.KEY_START_SPEC_HUD,
+                () -> {
+                    PlayerHudPrefs.setStartSpecHudEnabled(
+                            a, !PlayerHudPrefs.isStartSpecHudEnabled(a));
+                    a.refresh();
+                });
+        link(
+                "隐藏工具栏显示底部细进度条",
+                PlayerHudPrefs.isSlimProgressEnabled(a) ? "开启" : "关闭",
+                "setting-" + PlayerHudPrefs.KEY_SLIM_PROGRESS,
+                () -> {
+                    PlayerHudPrefs.setSlimProgressEnabled(
+                            a, !PlayerHudPrefs.isSlimProgressEnabled(a));
+                    a.refresh();
+                });
+        link(
+                "跳过片头片尾 3 秒可取消倒计时",
+                PlayerHudPrefs.isSkipCountdownEnabled(a) ? "开启（3 秒倒计时）" : "关闭（立即跳过）",
+                "setting-" + PlayerHudPrefs.KEY_SKIP_COUNTDOWN,
+                () -> {
+                    PlayerHudPrefs.setSkipCountdownEnabled(
+                            a, !PlayerHudPrefs.isSkipCountdownEnabled(a));
+                    a.refresh();
+                });
+        if (!a.isTvDevice()) {
+            link(
+                    "双击屏幕左右两侧",
+                    PlayerHudPrefs.doubleTapSidesLabel(PlayerHudPrefs.getDoubleTapSides(a)),
+                    "setting-" + PlayerHudPrefs.KEY_DOUBLE_TAP_SIDES,
+                    () -> {
+                        final String[] labels = {
+                            "左右快退/快进 5 秒", "左右快退/快进 10 秒", "左右快退/快进 15 秒", "全屏双击播放 / 暂停"
+                        };
+                        final String[] vals = {
+                            PlayerHudPrefs.SIDES_SEEK_5S,
+                            PlayerHudPrefs.SIDES_SEEK_10S,
+                            PlayerHudPrefs.SIDES_SEEK_15S,
+                            PlayerHudPrefs.SIDES_PLAY_PAUSE
+                        };
+                        String cur = PlayerHudPrefs.getDoubleTapSides(a);
+                        int sel = 1;
+                        for (int i = 0; i < vals.length; i++) {
+                            if (vals[i].equals(cur)) sel = i;
+                        }
+                        MobileShell.showDrawerPicker(
+                                a,
+                                "双击屏幕左右两侧",
+                                "支持连击累加快进快退，或切换回全屏双击播/暂",
+                                labels,
+                                sel,
+                                idx -> {
+                                    PlayerHudPrefs.setDoubleTapSides(a, vals[idx]);
+                                    a.refresh();
+                                });
+                    });
+            link(
+                    "双击屏幕中央",
+                    PlayerHudPrefs.doubleTapCenterLabel(PlayerHudPrefs.getDoubleTapCenter(a)),
+                    "setting-" + PlayerHudPrefs.KEY_DOUBLE_TAP_CENTER,
+                    () -> {
+                        final String[] labels = {"播放 / 暂停", "切换横竖屏全屏", "关闭双击"};
+                        final String[] vals = {
+                            PlayerHudPrefs.CENTER_PLAY_PAUSE,
+                            PlayerHudPrefs.CENTER_FULLSCREEN,
+                            PlayerHudPrefs.CENTER_NONE
+                        };
+                        String cur = PlayerHudPrefs.getDoubleTapCenter(a);
+                        int sel = 0;
+                        for (int i = 0; i < vals.length; i++) {
+                            if (vals[i].equals(cur)) sel = i;
+                        }
+                        MobileShell.showDrawerPicker(
+                                a,
+                                "双击屏幕中央",
+                                "自定义播放画面中区双击响应",
+                                labels,
+                                sel,
+                                idx -> {
+                                    PlayerHudPrefs.setDoubleTapCenter(a, vals[idx]);
+                                    a.refresh();
+                                });
+                    });
+            link(
+                    "长按倍速松手恢复",
+                    PlayerHudPrefs.longPressRestoreLabel(PlayerHudPrefs.getLongPressRestoreMode(a)),
+                    "setting-" + PlayerHudPrefs.KEY_LONG_PRESS_RESTORE_MODE,
+                    () -> {
+                        boolean isOneX =
+                                PlayerHudPrefs.RESTORE_ONE_X.equals(
+                                        PlayerHudPrefs.getLongPressRestoreMode(a));
+                        PlayerHudPrefs.setLongPressRestoreMode(
+                                a,
+                                isOneX
+                                        ? PlayerHudPrefs.RESTORE_PREVIOUS
+                                        : PlayerHudPrefs.RESTORE_ONE_X);
+                        a.refresh();
+                    });
         }
         ints("循环", Prefs.REPEAT_MODE, new String[] {"关闭", "单集循环", "列表循环"}, new int[] {0, 1, 2}, 0);
         int skipRecordCount = PlaybackControls.countVideoSkipRecords(a);

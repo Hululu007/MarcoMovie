@@ -1,6 +1,7 @@
 import 'dart:io' show Platform;
 import 'dart:math' as math;
 import 'dart:ui';
+import '../core/ohos_runtime.dart';
 import 'ios_liquid_glass.dart';
 import 'windows_appearance.dart';
 import 'package:flutter/cupertino.dart';
@@ -308,6 +309,14 @@ class _LiquidRimPainter extends CustomPainter {
       old.shape != shape || old.strength != strength;
 }
 
+bool _isSystemReduceTransparencyActive() =>
+    !OhosRuntime.isOhos && IosLiquidGlassBridge.reduceTransparency;
+
+final Listenable _sharedReduceTransparencyListenable = Listenable.merge([
+  GlassworkBackdrop.reduceTransparency,
+  IosLiquidGlassBridge.reduceTransparencyNotifier,
+]);
+
 /// Native equivalent of Glasswork's clipped rim, with an inexpensive blur on
 /// renderers that cannot sample the backdrop through a fragment shader.
 class GlassworkBackdrop extends StatefulWidget {
@@ -323,21 +332,32 @@ class GlassworkBackdrop extends StatefulWidget {
 class _GlassworkBackdropState extends State<GlassworkBackdrop> {
   static Future<FragmentProgram>? _program;
   FragmentShader? _shader;
+  bool _loadingLens = false;
   late final Listenable _mergedListenable = Listenable.merge([
     GlassworkBackdrop.reduceTransparency,
     GlassworkBackdrop.intensity,
+    IosLiquidGlassBridge.reduceTransparencyNotifier,
   ]);
   @override
   void initState() {
     super.initState();
-    if (!_isWindowsDesktop && ImageFilter.isShaderFilterSupported) _loadLens();
+    if (!_isWindowsDesktop &&
+        !GlassworkBackdrop.reduceTransparency.value &&
+        !_isSystemReduceTransparencyActive() &&
+        ImageFilter.isShaderFilterSupported) {
+      _loadLens();
+    }
   }
   Future<void> _loadLens() async {
+    if (_loadingLens) return;
+    _loadingLens = true;
     try {
       final program = await (_program ??= FragmentProgram.fromAsset('shaders/glasswork.frag'));
       if (mounted) setState(() => _shader = program.fragmentShader());
     } catch (_) {
       // Fallback is also used while the GPU program is being prepared.
+    } finally {
+      _loadingLens = false;
     }
   }
   @override
@@ -350,14 +370,22 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
     return AnimatedBuilder(
       animation: _mergedListenable,
       builder: (context, _) {
-        final reduce = GlassworkBackdrop.reduceTransparency.value;
+        final reduce = GlassworkBackdrop.reduceTransparency.value ||
+            _isSystemReduceTransparencyActive();
         final strength = GlassworkBackdrop.intensity.value.clamp(0.0, 1.0);
         final opaque = reduce ||
             strength <= 0.02 ||
             MediaQuery.highContrastOf(context) ||
             MediaQuery.disableAnimationsOf(context);
         final winFastGlass = _isWindowsDesktop;
-        final shader = winFastGlass ? null : _shader;
+        if (!opaque &&
+            !winFastGlass &&
+            _shader == null &&
+            !_loadingLens &&
+            ImageFilter.isShaderFilterSupported) {
+          _loadLens();
+        }
+        final shader = (winFastGlass || opaque) ? null : _shader;
         if (shader != null) {
           shader.setFloat(2, widget.radius);
           shader.setFloat(
@@ -458,8 +486,37 @@ class LiquidGlass extends StatelessWidget {
       child: ClipPath(
         clipper: ShapeBorderClipper(shape: shape),
         clipBehavior: Clip.antiAlias,
-        child: (MediaQuery.highContrastOf(context) || MediaQuery.disableAnimationsOf(context))
-            ? CustomPaint(
+        child: AnimatedBuilder(
+          animation: _sharedReduceTransparencyListenable,
+          builder: (context, _) {
+            final systemReduce = GlassworkBackdrop.reduceTransparency.value ||
+                _isSystemReduceTransparencyActive();
+            if (systemReduce) {
+              final solidBase = tint.a > 0.01
+                  ? Color.alphaBlend(
+                      tint.withValues(alpha: math.min(tint.a, 0.35)),
+                      const Color(0xF51E1E22),
+                    )
+                  : const Color(0xF51E1E22);
+              return Container(
+                width: width,
+                height: height,
+                decoration: ShapeDecoration(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(borderRadius),
+                    side: BorderSide(
+                      color: Colors.white.withValues(alpha: 0.48),
+                      width: 1.0,
+                    ),
+                  ),
+                  color: solidBase,
+                ),
+                child: content,
+              );
+            }
+            if (MediaQuery.highContrastOf(context) ||
+                MediaQuery.disableAnimationsOf(context)) {
+              return CustomPaint(
                 foregroundPainter:
                     _LiquidRimPainter(shape: shape, strength: rimStrength),
                 child: Container(
@@ -486,46 +543,49 @@ class LiquidGlass extends StatelessWidget {
                   ),
                   child: content,
                 ),
-              )
-            : GlassworkBackdrop(
-                radius: borderRadius,
-                child: ValueListenableBuilder<double>(
-                  valueListenable: GlassworkBackdrop.intensity,
-                  builder: (context, strength, _) {
-                    final s = strength.clamp(0.0, 1.0);
-                    return CustomPaint(
-                      foregroundPainter: _LiquidRimPainter(
+              );
+            }
+            return GlassworkBackdrop(
+              radius: borderRadius,
+              child: ValueListenableBuilder<double>(
+                valueListenable: GlassworkBackdrop.intensity,
+                builder: (context, strength, _) {
+                  final s = strength.clamp(0.0, 1.0);
+                  return CustomPaint(
+                    foregroundPainter: _LiquidRimPainter(
+                      shape: shape,
+                      strength: rimStrength * (0.28 + 0.92 * s),
+                    ),
+                    child: Container(
+                      width: width,
+                      height: height,
+                      decoration: ShapeDecoration(
                         shape: shape,
-                        strength: rimStrength * (0.28 + 0.92 * s),
-                      ),
-                      child: Container(
-                        width: width,
-                        height: height,
-                        decoration: ShapeDecoration(
-                          shape: shape,
-                          gradient: LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              Color.alphaBlend(
-                                Color.fromRGBO(255, 255, 255, 0.03 + 0.08 * s),
-                                tint.withValues(alpha: math.min(tint.a, 0.08)),
-                              ),
-                              tint.withValues(alpha: math.min(tint.a, 0.04)),
-                              Color.alphaBlend(
-                                Color.fromRGBO(255, 255, 255, 0.015 + 0.045 * s),
-                                tint.withValues(alpha: math.min(tint.a, 0.06)),
-                              ),
-                            ],
-                            stops: const [0.0, 0.52, 1.0],
-                          ),
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            Color.alphaBlend(
+                              Color.fromRGBO(255, 255, 255, 0.03 + 0.08 * s),
+                              tint.withValues(alpha: math.min(tint.a, 0.08)),
+                            ),
+                            tint.withValues(alpha: math.min(tint.a, 0.04)),
+                            Color.alphaBlend(
+                              Color.fromRGBO(255, 255, 255, 0.015 + 0.045 * s),
+                              tint.withValues(alpha: math.min(tint.a, 0.06)),
+                            ),
+                          ],
+                          stops: const [0.0, 0.52, 1.0],
                         ),
-                        child: content,
                       ),
-                    );
-                  },
-                ),
+                      child: content,
+                    ),
+                  );
+                },
               ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -626,8 +686,31 @@ class AppleGlassSurface extends StatelessWidget {
       child: ClipRRect(
         borderRadius: radius,
         clipBehavior: Clip.antiAlias,
-        child: (MediaQuery.highContrastOf(context) || MediaQuery.disableAnimationsOf(context))
-            ? CustomPaint(
+        child: AnimatedBuilder(
+          animation: _sharedReduceTransparencyListenable,
+          builder: (context, _) {
+            final systemReduce = GlassworkBackdrop.reduceTransparency.value ||
+                _isSystemReduceTransparencyActive();
+            if (systemReduce) {
+              return Container(
+                width: width,
+                height: height,
+                padding: padding,
+                decoration: BoxDecoration(
+                  color: const Color(0xF51E1E22),
+                  borderRadius: radius,
+                  border: border ??
+                      Border.all(
+                        color: Colors.white.withValues(alpha: 0.48),
+                        width: 1.0,
+                      ),
+                ),
+                child: child,
+              );
+            }
+            if (MediaQuery.highContrastOf(context) ||
+                MediaQuery.disableAnimationsOf(context)) {
+              return CustomPaint(
                 foregroundPainter: border == null
                     ? _LiquidRimPainter(shape: shape, strength: 0.8)
                     : null,
@@ -656,45 +739,48 @@ class AppleGlassSurface extends StatelessWidget {
                   ),
                   child: child,
                 ),
-              )
-            : GlassworkBackdrop(
-                radius: radius.topLeft.x,
-                child: ValueListenableBuilder<double>(
-                  valueListenable: GlassworkBackdrop.intensity,
-                  builder: (context, strength, _) {
-                    final s = strength.clamp(0.0, 1.0);
-                    return CustomPaint(
-                      foregroundPainter: border == null
-                          ? _LiquidRimPainter(
-                              shape: shape,
-                              strength: 0.25 + 0.85 * s,
-                            )
-                          : null,
-                      child: Container(
-                        width: width,
-                        height: height,
-                        padding: padding,
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              Color.alphaBlend(
-                                Color.fromRGBO(255, 255, 255, 0.02 + 0.07 * s),
-                                effectiveColor.withValues(alpha: math.min(effectiveColor.a, .04)),
-                              ),
-                              effectiveColor.withValues(alpha: math.min(effectiveColor.a, .02)),
-                            ],
-                          ),
-                          borderRadius: radius,
-                          border: border,
+              );
+            }
+            return GlassworkBackdrop(
+              radius: radius.topLeft.x,
+              child: ValueListenableBuilder<double>(
+                valueListenable: GlassworkBackdrop.intensity,
+                builder: (context, strength, _) {
+                  final s = strength.clamp(0.0, 1.0);
+                  return CustomPaint(
+                    foregroundPainter: border == null
+                        ? _LiquidRimPainter(
+                            shape: shape,
+                            strength: 0.25 + 0.85 * s,
+                          )
+                        : null,
+                    child: Container(
+                      width: width,
+                      height: height,
+                      padding: padding,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            Color.alphaBlend(
+                              Color.fromRGBO(255, 255, 255, 0.02 + 0.07 * s),
+                              effectiveColor.withValues(alpha: math.min(effectiveColor.a, .04)),
+                            ),
+                            effectiveColor.withValues(alpha: math.min(effectiveColor.a, .02)),
+                          ],
                         ),
-                        child: child,
+                        borderRadius: radius,
+                        border: border,
                       ),
-                    );
-                  },
-                ),
+                      child: child,
+                    ),
+                  );
+                },
               ),
+            );
+          },
+        ),
       ),
     );
   }

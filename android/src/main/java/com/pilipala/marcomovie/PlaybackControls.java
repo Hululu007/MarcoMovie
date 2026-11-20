@@ -13,6 +13,10 @@ import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.LayerDrawable;
 import android.view.*;
 import android.widget.*;
+import com.pilipala.marcomovie.hud.PlaybackStateProbe;
+import com.pilipala.marcomovie.hud.PlayerHudPrefs;
+import com.pilipala.marcomovie.hud.SkipCountdownPill;
+import com.pilipala.marcomovie.hud.SleepTimerSheet;
 
 import java.util.*;
 
@@ -51,6 +55,126 @@ final class PlaybackControls {
     private TvMarkerHost markerState;
     private final TvMarkerTailGate markerTail = new TvMarkerTailGate();
     private MoviePlayer markerObservedPlayer;
+
+    // Session-scoped sleep timer (cold-start default OFF; persists across in-place episode
+    // transitions within the same playback session, cleared on exit/destroy/new playback session).
+    static final SleepTimerSheet.Controller SESSION_SLEEP_TIMER = new SleepTimerSheet.Controller();
+    private static boolean preserveSleepTimerForInPlaceSwitch;
+    final SkipCountdownPill skipCountdownPill;
+    final SleepTimerSheet.WarningPill sleepWarningPill;
+    boolean outroSkipCancelledForEpisode;
+    private int pendingIntroSkipMs;
+    private boolean lastControlsVisibleForSkip;
+
+    static void markSleepTimerInPlaceSwitch() {
+        preserveSleepTimerForInPlaceSwitch = true;
+    }
+
+    static void clearSleepTimerOnLeave() {
+        preserveSleepTimerForInPlaceSwitch = false;
+        SESSION_SLEEP_TIMER.cancel();
+    }
+
+    /** Reserved Wave 2 danmu mount hook (null in Wave 1; preserves existing DanmakuView). */
+    Runnable danmuMountHook;
+
+    FrameLayout firstPlayGestureHintSlot() {
+        return a.playerChrome != null ? a.playerChrome.firstPlayGestureHintSlot : null;
+    }
+
+    void setDanmuMountHook(Runnable hook) {
+        danmuMountHook = hook;
+    }
+
+    void updateSafeTop(int safeTopPx) {
+        if (sleepWarningPill != null) {
+            sleepWarningPill.updateSafeTop(safeTopPx);
+        }
+    }
+
+    private void hideSleepWarning() {
+        if (sleepWarningPill == null) return;
+        boolean hadFocus = sleepWarningPill.hasFocus();
+        sleepWarningPill.hide();
+        syncSleepWarningTvFocusLinks(false);
+        if (hadFocus && a.isTvDevice()) {
+            if (a.controlsVisible) {
+                if (modernTv
+                        && lastFocusedModernButton != null
+                        && lastFocusedModernButton.getVisibility() == View.VISIBLE) {
+                    lastFocusedModernButton.requestFocus();
+                } else if (timeline != null) {
+                    timeline.requestFocus();
+                }
+            } else if (a.root != null) {
+                a.root.requestFocus();
+            }
+        }
+    }
+
+    private void syncSleepWarningTvFocusLinks(boolean warningVisible) {
+        if (!a.isTvDevice() || sleepWarningPill == null) return;
+        int warningExtendId = sleepWarningPill.getExtendButtonId();
+        if (modernTv) {
+            for (Button b : buttons.values()) {
+                if (b instanceof ModernIconButton && b.getVisibility() == View.VISIBLE) {
+                    b.setNextFocusUpId(
+                            SleepTimerSheet.resolveActionUpFocusId(
+                                    warningVisible, warningExtendId, b.getId()));
+                }
+            }
+            if (warningVisible) {
+                int downId =
+                        lastFocusedModernButton != null
+                                        && lastFocusedModernButton.getVisibility() == View.VISIBLE
+                                ? lastFocusedModernButton.getId()
+                                : (timeline != null ? timeline.getId() : View.NO_ID);
+                sleepWarningPill.setDownFocusTargetId(downId);
+            }
+        } else if (timeline != null) {
+            timeline.setNextFocusUpId(
+                    SleepTimerSheet.resolveActionUpFocusId(
+                            warningVisible, warningExtendId, View.NO_ID));
+            if (warningVisible) {
+                sleepWarningPill.setDownFocusTargetId(timeline.getId());
+            }
+        }
+    }
+
+    boolean canRunSkipCountdown() {
+        boolean inPip = android.os.Build.VERSION.SDK_INT >= 24 && a.isInPictureInPictureMode();
+        PlaybackStateProbe.Snapshot snap =
+                a.player != null && a.prepared ? PlaybackStateProbe.inspect(a.player) : null;
+        boolean playbackIntended = PlaybackStateProbe.isPlaybackIntended(a.playing, snap);
+        boolean activeDialogShowing = activeDialog != null && activeDialog.isShowing();
+        return PlaybackStateProbe.canRunSkipCountdown(
+                a.foreground,
+                a.miniMode,
+                inPip,
+                a.playerLocked,
+                a.prepared,
+                playbackIntended,
+                transitioning,
+                activeDialogShowing);
+    }
+
+    void syncSkipCountdownLifecycle() {
+        if (skipCountdownPill != null) {
+            skipCountdownPill.syncPlaybackGuard();
+        }
+    }
+
+    void onScreenLockRequested() {
+        if (skipCountdownPill != null) {
+            skipCountdownPill.dismissSilently();
+        }
+    }
+
+    void resetEpisodeTransientState() {
+        outroSkipCancelledForEpisode = false;
+        pendingIntroSkipMs = 0;
+        if (skipCountdownPill != null) skipCountdownPill.dismissSilently();
+    }
 
     TvMarkerHost markers() {
         if (markerState == null) markerState = new TvMarkerHost(a, this);
@@ -119,6 +243,11 @@ final class PlaybackControls {
             Cms.Video v,
             Cms.Episode ep) {
         a = host;
+        boolean preservedSleep = preserveSleepTimerForInPlaceSwitch;
+        preserveSleepTimerForInPlaceSwitch = false;
+        SESSION_SLEEP_TIMER.onNewPlaybackSession(
+                preservedSleep, android.os.SystemClock.uptimeMillis());
+        lastControlsVisibleForSkip = a.controlsVisible;
         modernTv = a.isTvDevice() && a.prefs.getInt(Prefs.TV_PLAYER_STYLE, 0) == 0;
         site = s;
         video = v;
@@ -127,6 +256,9 @@ final class PlaybackControls {
                 (modernTv && host.playerChrome != null && host.playerChrome.actionHost != null)
                         ? host.playerChrome.actionHost
                         : overlay;
+        if (dockOverlay != null) {
+            dockOverlay.setMotionEventSplittingEnabled(false);
+        }
         surface = texture;
         danmaku =
                 new DanmakuView(
@@ -149,6 +281,120 @@ final class PlaybackControls {
         caption.bottomMargin = a.dp(168);
         a.playbackLayer.addView(subtitle, 1, caption);
         applySubtitleStyle();
+        boolean reducedTransparency =
+                a.prefs != null && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        skipCountdownPill = new SkipCountdownPill(a, a.isTvDevice());
+        skipCountdownPill.setReducedTransparency(reducedTransparency);
+        skipCountdownPill.setPlaybackGuard(this::canRunSkipCountdown);
+        skipCountdownPill.setTouchInteractionHook(
+                () -> {
+                    if (a.touchPlayerGesture != null) a.touchPlayerGesture.cancelActiveGesture();
+                });
+        skipCountdownPill.setSilentDismissListener(
+                wasIntro -> {
+                    if (!wasIntro && !outroSkipCancelledForEpisode) {
+                        // Allow TV outro skip to cleanly re-evaluate when foreground playback
+                        // resumes after pause/call/background without marking user-cancelled.
+                        markerTail.reset();
+                    }
+                });
+        skipCountdownPill.setCallbacks(
+                new SkipCountdownPill.Callbacks() {
+                    @Override
+                    public void onSkipExecute(boolean intro, int targetPositionMs) {
+                        if (intro) pendingIntroSkipMs = 0;
+                        executeSkipAction(intro, targetPositionMs);
+                    }
+
+                    @Override
+                    public void onCancelled(boolean intro) {
+                        if (intro) {
+                            pendingIntroSkipMs = 0;
+                        } else {
+                            outroSkipCancelledForEpisode = true;
+                        }
+                    }
+
+                    @Override
+                    public void onTvDialogStateChanged(boolean open) {
+                        if (open) {
+                            dialogOpen = true;
+                        } else if (activeDialog == null || !activeDialog.isShowing()) {
+                            dialogOpen = false;
+                            if (a.isTvDevice()) {
+                                View curFocus = a.getCurrentFocus();
+                                boolean focusStillOnSkip =
+                                        curFocus == null
+                                                || curFocus == skipCountdownPill
+                                                || (curFocus.getParent() != null
+                                                        && curFocus.getParent().getParent()
+                                                                == skipCountdownPill);
+                                if (focusStillOnSkip) {
+                                    if (a.controlsVisible) {
+                                        if (timeline != null) timeline.requestFocus();
+                                    } else if (a.root != null) {
+                                        a.root.requestFocus();
+                                    }
+                                }
+                                if (a.controlsVisible && a.playing) {
+                                    a.scheduleHide();
+                                }
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void onTvMediaKey(int keyCode) {
+                        if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                                || (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY && !a.playing)
+                                || (keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE && a.playing)) {
+                            a.togglePlayback();
+                        }
+                        a.showControls(true);
+                    }
+
+                    @Override
+                    public void onTvMenuKey() {
+                        a.showControls(true);
+                        focusPrimaryAction();
+                    }
+                });
+        FrameLayout.LayoutParams skipLp =
+                new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.RIGHT);
+        skipLp.rightMargin = a.dp(a.isTvDevice() ? 36 : 20);
+        skipLp.bottomMargin = a.dp(a.isTvDevice() ? 96 : 84);
+        a.playbackLayer.addView(skipCountdownPill, skipLp);
+
+        sleepWarningPill =
+                new SleepTimerSheet.WarningPill(
+                        a,
+                        a.isTvDevice(),
+                        () -> {
+                            SESSION_SLEEP_TIMER.extend15Minutes(
+                                    android.os.SystemClock.uptimeMillis());
+                            hideSleepWarning();
+                            a.toast("定时关闭已延长 15 分钟");
+                        },
+                        () -> {
+                            SESSION_SLEEP_TIMER.cancel();
+                            hideSleepWarning();
+                            a.toast("已取消定时关闭");
+                        });
+        sleepWarningPill.setReducedTransparency(reducedTransparency);
+        sleepWarningPill.setTouchInteractionHook(
+                () -> {
+                    if (a.touchPlayerGesture != null) a.touchPlayerGesture.cancelActiveGesture();
+                });
+        FrameLayout.LayoutParams sleepLp =
+                new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        int initialSafeTop = a.playerChrome != null ? a.playerChrome.windowInsets.top : 0;
+        sleepLp.topMargin =
+                SleepTimerSheet.computeWarningTopMarginPx(
+                        a.isTvDevice(),
+                        initialSafeTop,
+                        a.getResources().getDisplayMetrics().density);
+        a.playbackLayer.addView(sleepWarningPill, sleepLp);
+
         timeline = new SeekBar(a);
         timeline.setTag("timeline");
         timeline.setBackgroundColor(Color.TRANSPARENT);
@@ -186,6 +432,9 @@ final class PlaybackControls {
         timeline.setOnSeekBarChangeListener(
                 new SeekBar.OnSeekBarChangeListener() {
                     public void onStartTrackingTouch(SeekBar b) {
+                        if (a.touchPlayerGesture != null) {
+                            a.touchPlayerGesture.cancelActiveGesture();
+                        }
                         sliderSeeking = true;
                         a.finishSeek(false);
                         a.scheduleHide();
@@ -311,7 +560,17 @@ final class PlaybackControls {
             registerHiddenAction("aspect", this::aspect);
             registerHiddenAction("subtitles", () -> tracks(3));
         } else {
-            add(row, "锁定", "lock-tool", () -> PlaybackController.setPlayerLocked(a, true));
+            add(
+                    row,
+                    "锁定",
+                    "lock-tool",
+                    () -> {
+                        if (a.touchPlayerGesture != null) {
+                            a.touchPlayerGesture.onScreenLockRequested();
+                        }
+                        onScreenLockRequested();
+                        PlaybackController.setPlayerLocked(a, true);
+                    });
             add(
                     row,
                     live ? "上台" : "上集",
@@ -526,13 +785,18 @@ final class PlaybackControls {
             }
         }
         if (vis.isEmpty()) return;
+        boolean sleepVisible = sleepWarningPill != null && sleepWarningPill.isShowing();
+        int sleepExtendId =
+                sleepWarningPill != null ? sleepWarningPill.getExtendButtonId() : View.NO_ID;
         for (int i = 0; i < vis.size(); i++) {
             final Button cur = vis.get(i);
             final Button prev = vis.get((i - 1 + vis.size()) % vis.size());
             final Button nxt = vis.get((i + 1) % vis.size());
             cur.setNextFocusLeftId(prev.getId());
             cur.setNextFocusRightId(nxt.getId());
-            cur.setNextFocusUpId(cur.getId());
+            cur.setNextFocusUpId(
+                    SleepTimerSheet.resolveActionUpFocusId(
+                            sleepVisible, sleepExtendId, cur.getId()));
             cur.setNextFocusDownId(live ? cur.getId() : timeline.getId());
             final boolean isFirst = i == 0;
             final boolean isLast = i == vis.size() - 1;
@@ -577,6 +841,7 @@ final class PlaybackControls {
         }
         if (!tv) {
             LinearLayout col = a.vertical();
+            col.setMotionEventSplittingEnabled(false);
             col.setGravity(Gravity.CENTER_HORIZONTAL);
             col.setClipChildren(false);
             col.setClipToPadding(false);
@@ -723,6 +988,9 @@ final class PlaybackControls {
         a.pressFeedback(b);
         b.setOnClickListener(
                 v -> {
+                    if (a.touchPlayerGesture != null) {
+                        a.touchPlayerGesture.cancelActiveGesture();
+                    }
                     menuAnchor = buttons.get(key);
                     action.run();
                 });
@@ -952,6 +1220,9 @@ final class PlaybackControls {
                         title,
                         key,
                         () -> {
+                            if (a.touchPlayerGesture != null) {
+                                a.touchPlayerGesture.cancelActiveGesture();
+                            }
                             menuAnchor = buttons.get(key);
                             action.run();
                         });
@@ -1015,6 +1286,12 @@ final class PlaybackControls {
             activeDialog.dismiss();
             activeDialog = null;
         }
+        if (skipCountdownPill != null) {
+            skipCountdownPill.dismissSilently();
+        }
+        if (a.touchPlayerGesture != null) {
+            a.touchPlayerGesture.onDialogOpened();
+        }
         if (menuAnchor == null || !UiCompat.isAttached(menuAnchor))
             menuAnchor = buttons.get("more");
         dialogOpen = true;
@@ -1057,7 +1334,10 @@ final class PlaybackControls {
                     line.name + " · 选集",
                     labels,
                     current,
-                    i -> a.changeEpisode(site, video, line, line.episodes.get(i), 0));
+                    i -> {
+                        markSleepTimerInPlaceSwitch();
+                        a.changeEpisode(site, video, line, line.episodes.get(i), 0);
+                    });
             return;
         }
         int page = EpisodeSelection.pageFor(Math.max(0, current), total, false);
@@ -1090,6 +1370,7 @@ final class PlaybackControls {
                     } else {
                         int target = start + (i - 1);
                         if (target >= 0 && target < total) {
+                            markSleepTimerInPlaceSwitch();
                             a.changeEpisode(site, video, line, line.episodes.get(target), 0);
                         }
                     }
@@ -1182,6 +1463,7 @@ final class PlaybackControls {
                         return;
                     }
                     if (crossSearchIndex >= 0 && i == crossSearchIndex) {
+                        clearSleepTimerOnLeave();
                         a.leavePlayback();
                         a.crossSearch(Cms.searchTitle(video));
                         return;
@@ -1211,6 +1493,7 @@ final class PlaybackControls {
                                         !isLiveMode && a.prepared && a.player != null
                                                 ? a.player.getCurrentPosition()
                                                 : 0;
+                                markSleepTimerInPlaceSwitch();
                                 if (LiveQualityPolicy.isEmbyLiveUrl(nextUrl)) {
                                     LiveController.playEmbyLiveAsync(
                                             a, site, video, resolved, nextUrl);
@@ -1227,6 +1510,7 @@ final class PlaybackControls {
                         Cms.Line line = video.lines.get(lineIdx);
                         if (!line.episodes.isEmpty()) {
                             int n = Math.min(Math.max(0, episodeIndex()), line.episodes.size() - 1);
+                            markSleepTimerInPlaceSwitch();
                             a.changeEpisode(site, video, line, line.episodes.get(n), 0);
                         }
                     }
@@ -1242,6 +1526,9 @@ final class PlaybackControls {
             next = (next + line.episodes.size()) % line.episodes.size();
         if (next < 0 || next >= line.episodes.size()) return false;
         transitioning = true;
+        resetEpisodeTransientState();
+        markSleepTimerInPlaceSwitch();
+        if (a.touchPlayerGesture != null) a.touchPlayerGesture.onEpisodeSwitch();
         a.changeEpisode(site, video, line, line.episodes.get(next), 0);
         return true;
     }
@@ -1249,6 +1536,7 @@ final class PlaybackControls {
     void reload(boolean preserve) {
         int position =
                 preserve && a.prepared && a.player != null ? a.player.getCurrentPosition() : 0;
+        markSleepTimerInPlaceSwitch();
         if (a.activeLine != null && a.activeEpisode != null)
             a.changeEpisode(site, video, a.activeLine, a.activeEpisode, position);
         else {
@@ -1270,6 +1558,9 @@ final class PlaybackControls {
                 i -> {
                     if (a.player != null) a.player.setSpeed(speeds[i]);
                     a.prefs.edit().putFloat(Prefs.PLAY_SPEED, speeds[i]).apply();
+                    if (a.touchPlayerGesture != null) {
+                        a.touchPlayerGesture.onManualSpeedChanged();
+                    }
                     updateLabels();
                 });
     }
@@ -1449,6 +1740,25 @@ final class PlaybackControls {
         if (activeDialog != null) {
             activeDialog.dismiss();
             activeDialog = null;
+        }
+        if (skipCountdownPill != null) skipCountdownPill.dismissSilently();
+        hideSleepWarning();
+        boolean preserveSleep =
+                preserveSleepTimerForInPlaceSwitch
+                        && !a.isFinishing()
+                        && (android.os.Build.VERSION.SDK_INT < 17 || !a.isDestroyed());
+        SESSION_SLEEP_TIMER.onPlayerSessionClosed(preserveSleep);
+        if (preserveSleep && a.ui != null) {
+            // If an in-place switch was aborted or left playback before constructing a replacement
+            // PlaybackControls, clear the sleep timer on the very next UI frame.
+            a.ui.post(
+                    () -> {
+                        if (a.playbackControls == null || a.current == null || !a.current.player) {
+                            clearSleepTimerOnLeave();
+                        }
+                    });
+        } else {
+            preserveSleepTimerForInPlaceSwitch = false;
         }
         effects.close();
         danmaku.close();
@@ -2867,17 +3177,90 @@ final class PlaybackControls {
                 });
     }
 
+    void sleepTimerMenu() {
+        long now = android.os.SystemClock.uptimeMillis();
+        choose(
+                "定时关闭（" + SESSION_SLEEP_TIMER.summaryLabel(now) + "）",
+                SleepTimerSheet.PRESET_LABELS,
+                SESSION_SLEEP_TIMER.getMode(),
+                idx -> {
+                    long t = android.os.SystemClock.uptimeMillis();
+                    SESSION_SLEEP_TIMER.selectPreset(idx, t);
+                    if (sleepWarningPill != null) sleepWarningPill.hide();
+                    a.toast(
+                            idx == SleepTimerSheet.MODE_OFF
+                                    ? "已关闭定时停止"
+                                    : "已开启定时关闭：" + SleepTimerSheet.PRESET_LABELS[idx]);
+                });
+    }
+
+    private void triggerSleepExpiry() {
+        if (sleepWarningPill != null) sleepWarningPill.hide();
+        if (skipCountdownPill != null) skipCountdownPill.dismissSilently();
+        if (a.player != null && a.prepared) {
+            try {
+                a.player.pause();
+            } catch (Exception ignored) {
+            }
+        }
+        a.playing = false;
+        if (a.getWindow() != null) {
+            a.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+        if (a.playStatus != null) {
+            a.playStatus.setText("定时关闭已触发 · 已暂停播放");
+        }
+        a.toast("定时关闭已到点，已暂停播放");
+        a.showControls(true);
+    }
+
+    private void executeSkipAction(boolean intro, int targetPositionMs) {
+        if (a.player == null || !a.prepared || transitioning || !canRunSkipCountdown()) return;
+        if (intro) {
+            int duration = a.player.getDuration();
+            if (duration > 0 && targetPositionMs > 0 && targetPositionMs < duration - 1000) {
+                recordUserSeek(targetPositionMs);
+                a.player.seekTo(targetPositionMs);
+                a.toast("已跳过片头");
+            }
+            return;
+        }
+        if (SESSION_SLEEP_TIMER.onEpisodeCompleted()) {
+            triggerSleepExpiry();
+            return;
+        }
+        int duration = a.player.getDuration();
+        long tailNode = outroPosition(duration);
+        if (a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1) {
+            int target = introPosition(duration);
+            if (a.isTvDevice()) {
+                if (tailNode > 0 && target >= tailNode) target = 0;
+                recordUserSeek(target);
+            }
+            a.player.seekTo(target);
+        } else if (!step(1)) {
+            transitioning = true;
+            a.player.pause();
+            a.playing = false;
+            a.playStatus.setText("已跳过片尾");
+            a.showControls(true);
+        }
+    }
+
     void more() {
         if ("live".equals(site.key)) {
             final String clockKey =
                     a.isTvDevice() ? Prefs.TV_PLAYER_TOP_RIGHT_HUD : Prefs.PLAYER_ALWAYS_SHOW_CLOCK;
             boolean alwaysClock = a.prefs.getBoolean(clockKey, a.isTvDevice());
+            String sleepSummary =
+                    SESSION_SLEEP_TIMER.summaryLabel(android.os.SystemClock.uptimeMillis());
             String[] live = {
                 "上一频道",
                 "选择频道",
                 "播放线路",
                 "播放器与解码",
                 "画面色彩",
+                "定时关闭：" + sleepSummary,
                 (a.isTvDevice() ? "右上角进度与时间：" : "播放页常显时间：") + (alwaysClock ? "开启" : "关闭"),
                 "播放信息",
                 "返回频道列表"
@@ -2912,10 +3295,13 @@ final class PlaybackControls {
                                 pictureEffect();
                                 break;
                             case 5:
+                                sleepTimerMenu();
+                                break;
+                            case 6:
                                 a.prefs.edit().putBoolean(clockKey, !alwaysClock).apply();
                                 if (a.playerChrome != null) a.playerChrome.syncClockViews();
                                 break;
-                            case 6:
+                            case 7:
                                 message(
                                         a.player == null
                                                 ? "播放器尚未准备好。"
@@ -2923,7 +3309,8 @@ final class PlaybackControls {
                                                         + "\n"
                                                         + surface.outputName());
                                 break;
-                            case 7:
+                            case 8:
+                                clearSleepTimerOnLeave();
                                 a.leavePlayback();
                                 break;
                         }
@@ -2933,6 +3320,8 @@ final class PlaybackControls {
         final String clockKey =
                 a.isTvDevice() ? Prefs.TV_PLAYER_TOP_RIGHT_HUD : Prefs.PLAYER_ALWAYS_SHOW_CLOCK;
         boolean alwaysClock = a.prefs.getBoolean(clockKey, a.isTvDevice());
+        String sleepSummary =
+                SESSION_SLEEP_TIMER.summaryLabel(android.os.SystemClock.uptimeMillis());
         String[] labels = {
             "画面比例",
             "字幕与显示",
@@ -2940,6 +3329,7 @@ final class PlaybackControls {
             "从头重播",
             "上一集",
             "跳过片头 / 片尾（本片独立）",
+            "定时关闭：" + sleepSummary,
             "弹幕",
             modernTv ? "播放器与解码" : "音效",
             "画面色彩",
@@ -2997,19 +3387,22 @@ final class PlaybackControls {
                                     n -> skip(n == 0));
                             break;
                         case 6:
-                            danmaku();
+                            sleepTimerMenu();
                             break;
                         case 7:
+                            danmaku();
+                            break;
+                        case 8:
                             if (modernTv) decoderMenu();
                             else soundEffect();
                             break;
-                        case 8:
+                        case 9:
                             pictureEffect();
                             break;
-                        case 9:
+                        case 10:
                             repeat();
                             break;
-                        case 10:
+                        case 11:
                             a.prefs
                                     .edit()
                                     .putBoolean(
@@ -3017,11 +3410,11 @@ final class PlaybackControls {
                                             !a.prefs.getBoolean(Prefs.AUTO_NEXT, true))
                                     .apply();
                             break;
-                        case 11:
+                        case 12:
                             a.prefs.edit().putBoolean(clockKey, !alwaysClock).apply();
                             if (a.playerChrome != null) a.playerChrome.syncClockViews();
                             break;
-                        case 12:
+                        case 13:
                             message(
                                     a.player == null
                                             ? "播放器尚未准备好。"
@@ -3029,7 +3422,8 @@ final class PlaybackControls {
                                                     + "\n"
                                                     + surface.outputName());
                             break;
-                        case 13:
+                        case 14:
+                            clearSleepTimerOnLeave();
                             a.leavePlayback();
                             break;
                     }
@@ -3124,6 +3518,7 @@ final class PlaybackControls {
     }
 
     void prepared() {
+        resetEpisodeTransientState();
         if (a.isTvDevice() && !a.isLive() && !a.isCast()) {
             markerObservedPlayer = a.player;
             final MoviePlayer owner = markerObservedPlayer;
@@ -3183,10 +3578,21 @@ final class PlaybackControls {
             if (duration > 0) {
                 if (seek < duration - 1000) {
                     pendingResumeMs = 0;
-                    recordUserSeek(seek);
-                    a.player.seekTo(seek);
-                    if (historyResume) {
-                        a.toast("已为您续播至 " + PlaybackController.formatTime(seek));
+                    if (!historyResume
+                            && !a.miniMode
+                            && skipCountdownPill != null
+                            && PlayerHudPrefs.isSkipCountdownEnabled(a)) {
+                        pendingIntroSkipMs = seek;
+                        boolean hasModalDialog = activeDialog != null && activeDialog.isShowing();
+                        if (canRunSkipCountdown()) {
+                            skipCountdownPill.start(true, seek, !a.controlsVisible, hasModalDialog);
+                        }
+                    } else {
+                        recordUserSeek(seek);
+                        a.player.seekTo(seek);
+                        if (historyResume) {
+                            a.toast("已为您续播至 " + PlaybackController.formatTime(seek));
+                        }
                     }
                 }
             } else {
@@ -3208,7 +3614,47 @@ final class PlaybackControls {
         refreshPlayPauseGlyph();
     }
 
+    private void tickSleepTimer() {
+        if (!SESSION_SLEEP_TIMER.isActive()) {
+            hideSleepWarning();
+            return;
+        }
+        long now = android.os.SystemClock.uptimeMillis();
+        if (SESSION_SLEEP_TIMER.tick(now)) {
+            triggerSleepExpiry();
+            return;
+        }
+        if (sleepWarningPill != null) {
+            if (SESSION_SLEEP_TIMER.shouldShowPreExpiryWarning(now)) {
+                boolean wasShowing = sleepWarningPill.isShowing();
+                long secLeft = (SESSION_SLEEP_TIMER.remainingMs(now) + 999L) / 1000L;
+                sleepWarningPill.showCountdownSeconds(secLeft);
+                if (!wasShowing) {
+                    syncSleepWarningTvFocusLinks(true);
+                    if (a.isTvDevice()
+                            && !dialogOpen
+                            && (activeDialog == null || !activeDialog.isShowing())
+                            && a.markerHost == null
+                            && !a.seekGesture.active
+                            && (skipCountdownPill == null || !skipCountdownPill.isActive())) {
+                        if (!a.controlsVisible) {
+                            a.showControls(true);
+                        }
+                        sleepWarningPill.requestInitialTvFocus();
+                    }
+                }
+            } else {
+                hideSleepWarning();
+            }
+        }
+    }
+
     void tick() {
+        if (a.touchPlayerGesture != null) {
+            a.touchPlayerGesture.syncRuntimeState();
+        }
+        syncSkipCountdownLifecycle();
+        tickSleepTimer();
         if (a.isTvDevice() && (a.markerHost != null || a.seekGesture.active)) return;
         if ("live".equals(site.key)) return;
         if (a.player == null || !a.prepared || isUserSeeking()) return;
@@ -3236,33 +3682,48 @@ final class PlaybackControls {
             timeline.setMax(100);
             timeline.setProgress(0);
         }
+        if (pendingIntroSkipMs > 0 && duration > 0) {
+            if (actualPosition >= pendingIntroSkipMs - 1000
+                    || pendingIntroSkipMs >= duration - 1000) {
+                pendingIntroSkipMs = 0;
+            } else if (skipCountdownPill != null
+                    && !skipCountdownPill.isActive()
+                    && PlayerHudPrefs.isSkipCountdownEnabled(a)
+                    && canRunSkipCountdown()) {
+                boolean hasModalDialog = activeDialog != null && activeDialog.isShowing();
+                skipCountdownPill.start(
+                        true, pendingIntroSkipMs, !a.controlsVisible, hasModalDialog);
+            }
+        }
         long tailNode = outroPosition(duration);
         markerTail.node(tailNode);
         markerTail.observe(actualPosition);
         if (!transitioning
-                && a.playing
+                && !outroSkipCancelledForEpisode
+                && canRunSkipCountdown()
                 && duration > 0
                 && tailNode > 0
                 && tailNode < duration
                 && (a.isTvDevice() ? markerTail.take(actualPosition) : position >= tailNode)) {
-            if (a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1) {
-                int target = introPosition(a.player.getDuration());
-                if (a.isTvDevice()) {
-                    if (target >= tailNode) target = 0;
-                    recordUserSeek(target);
+            if (!a.miniMode
+                    && skipCountdownPill != null
+                    && PlayerHudPrefs.isSkipCountdownEnabled(a)) {
+                if (!skipCountdownPill.isActive()) {
+                    boolean hasModalDialog = activeDialog != null && activeDialog.isShowing();
+                    skipCountdownPill.start(
+                            false, (int) tailNode, !a.controlsVisible, hasModalDialog);
                 }
-                a.player.seekTo(target);
-            } else if (!step(1)) {
-                transitioning = true;
-                a.player.pause();
-                a.playing = false;
-                a.playStatus.setText("已跳过片尾");
-                a.showControls(true);
+            } else {
+                executeSkipAction(false, (int) tailNode);
             }
         }
     }
 
     void completed() {
+        if (SESSION_SLEEP_TIMER.onEpisodeCompleted()) {
+            triggerSleepExpiry();
+            return;
+        }
         if (!transitioning
                 && (a.prefs.getBoolean(Prefs.AUTO_NEXT, true)
                         || a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 2)
@@ -3291,6 +3752,14 @@ final class PlaybackControls {
     }
 
     void visible(boolean visible) {
+        if (a.isTvDevice()
+                && visible
+                && !lastControlsVisibleForSkip
+                && skipCountdownPill != null
+                && skipCountdownPill.isActive()) {
+            skipCountdownPill.onExternalControlsShown();
+        }
+        lastControlsVisibleForSkip = visible;
         int bottomDp = Prefs.clampSubtitleBottom(a.prefs.getInt(Prefs.SUBTITLE_BOTTOM, 24));
         int basePx = a.dp(bottomDp);
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) subtitle.getLayoutParams();
