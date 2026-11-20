@@ -132,18 +132,28 @@
    - 仓库中**不存在 `flutter/src/`**。M0/M1/M2/M3/M4/M5/M6 所有 Flutter 规格与实现均直接面向 `flutter/lib/` 与 `flutter/test/`；`flutter/prepare_platform.py` 当前职责为同步品牌资源与配置 Apple/Windows 原生壳层，不再承担 `src -> lib` 复制。
 2. **M1 规格徽章接线点明确**
    - **Android 手机/平板**：接线点在 `MobileDetailScreen.java`（而非 `DetailScreen.java` 单独覆盖全部）。
-   - **Android TV**：接线点在 `TvV17DetailScreen.java`（及 `TvDetailHost.java` 中调用的 `TvV17DetailScreen.formatEpisodeFileCaption` 与 `DetailScreen` 共享辅助方法），需重点适配 TV 大字号文字样式与焦点态（`TvV17Theme` / `FocusMotion`）。
+   - **Android TV**：接线点仅限 `TvV17DetailScreen.java` 与 `DetailScreen.java`（`renderEpisodes` 选集弹窗线路胶囊）；`TvDetailHost.java` 在 §4.1 中为只读，不得修改。注意 `TvV17DetailScreen.java:456` 的 `extractFilenameFromUrl` 使用了会把字面量 `'+'` 转为空格的 `URLDecoder.decode`，M1 提取规格徽章时必须直接对原始 `episode.url` / `episode.name` 调用 `badge-rules.json` 定义的保 `'+'` 百分号归一化逻辑。
+   - **Android Lite**：接线点在 `lite/src/main/java/com/pilipala/marcomovie/lite/LiteActivity.java`（详情页元数据行 `:3977` 与线路胶囊 `:4114`，需在 Wave 1 启动前纳入 M1 允许最小接线白名单）。
    - **Flutter**：接线点在 `flutter/lib/ui/detail_screen.dart` 与 `flutter/lib/ui/windows_detail.dart`（仅线路胶囊处），且严禁修改 `flutter/lib/ui/tv/**`（只读）。
 3. **HarmonyOS 共享 `flutter/lib/` 带来的硬性隔离约束**
    - `flutter/ohos/` 与 `flutter/lib/ui/tv/**` 为只读目录；本机未安装 HarmonyOS 工具链（无 `hvigorw` / `ohpm` / `hdc`），无法在本地执行 `.hap` 编译。
    - **M1–M6 新增 Flutter 功能不得引入不支持 `ohos` 的新插件/原生通道**，且必须在运行时通过 `OhosRuntime.isOhos` 隔离或默认关闭（尤其 M2 触控/键鼠 HUD、M3 弹幕层、M4 `FragmentProgram` 着色器转场与极光背景、M5 引导），保证现有 `VideoKernel` / `OhosPlatformPlayer` 与 `TvLivingRoomShell` 行为不受影响。
-4. **M2 播放页 HUD 与 M3b 弹幕接入点约束**
-   - **Android `PlaybackControls.java`**：已被 `TvMarkerHost` / `TvMarkerTailGate`（TV 跳过片头片尾标记）、视频子轨菜单、EPG 入口触及；M2 应在独立新类（`PlayerGestureStateMachine`、`hud/*.java`）实现全部状态机与视图，只在 `TouchPlayerGesture.java`、`PlaybackControls.java`、`PlayerChrome.java` 做最小挂载，避免与 `markerHost` 和 `ICON_SKIP_INTRO/OUTRO` 的 `!a.isTvDevice()` 逻辑冲突。
-   - **`Prefs.java`**：已有完善的白名单校验（`sanitizeSetting` / `INT_RANGES` / `BOOLEAN_KEYS`），且 `ReviewFixChecks.java:191` 强校验备份白名单 `Prefs.KEYS.length == 46`、`:311` 强校验持久化 `PLAY_SPEED` 上限为 `2.0f`。因此 M2/M3/M5 新增本机偏好键默认应像 `PLAYER_ALWAYS_SHOW_CLOCK`、`TV_PLAYER_TOP_RIGHT_HUD` 一样置于 `Prefs.KEYS` 之外（若需纳入跨端备份白名单，则必须同步更新 `ReviewFixChecks.java` 断言）。
+4. **M2 播放页 HUD、M3 弹幕与 M5 引导的 §4.1 写入边界协同约束**
+   - **Android 播放器边界**：`MoviePlayer.java` 与 `SystemPlayer.java` 为只读（M2 起播规格提示直接消费现有的 `a.player.mediaBadges()` 纯文本列表并经 `MediaBadges` 融合，无需修改播放器内核）；M2 电视端（S22）需在 `PlaybackController.dispatchPlaybackKey`（`:2020-2097`）顶部增加最小按键委托钩子以协调 `TvMarkerHost` 与倍速状态机（已列入 M0 决策点供 §4.1 白名单确认）。
+   - **Android `PlaybackControls.java`**：已被 `TvMarkerHost` / `TvMarkerTailGate`（TV 跳过片头片尾标记）、视频子轨菜单、EPG 入口触及；M2 应在独立新类（`PlayerGestureStateMachine`、`hud/*.java`）实现全部状态机与视图，只在 `TouchPlayerGesture.java`、`PlaybackControls.java`、`PlayerChrome.java` 做最小挂载，并预留一个可选的首次播放提示浮层槽位（供 M5 注入 `FirstPlayGestureHint`，避免 M5 触碰播放器内部代码）。
+   - **`Prefs.java` 与弹幕/Flutter 偏好隔离**：`Prefs.java` 已有完善的白名单校验（`sanitizeSetting` / `INT_RANGES` / `BOOLEAN_KEYS`），且 `ReviewFixChecks.java:191` 强校验备份白名单 `Prefs.KEYS.length == 46`、`:311` 强校验持久化 `PLAY_SPEED` 上限为 `2.0f`。因此 M2/M5 新增本机偏好键应置于 `Prefs.KEYS` 之外；M3a/M3b 弹幕设置直接在 `DanmuSettingsPanel.java` 与 `flutter/lib/core/danmu/` 内部管理独立键名（不改 `Prefs.java` 与 `storage_service.dart`）；M2 Flutter HUD 偏好在 `flutter/lib/ui/player/` 内封装 `SharedPreferences` 读写并在 `player_screen.dart` 播放设置面板暴露开关。
    - **Flutter `player_screen.dart`**：已通过 `_videoKernel.buildVideoSurface(...)` 渲染画面并存在 `desktop_player_window.dart` / `player_interaction_layers.dart`；M2/M3b/M4 需沿用 `player_screen.dart` 的最小接线边界，将逻辑放在 `flutter/lib/ui/player/`、`flutter/lib/ui/danmu/`、`flutter/lib/ui/motion/`。
 5. **M4 着色器与 Windows 渲染后端约束**
-   - `flutter/shaders/` 当前仅有 `glasswork.frag`（含 `#ifdef IMPELLER_TARGET_OPENGLES` 纹理坐标 Y 轴翻转处理），`apple_theme.dart` 明确标注 Windows 运行于 **Skia over ANGLE/D3D11** 后端（`ImageFilter.isShaderFilterSupported == false`，不支持 `BackdropFilter` + `ImageFilter.shader`）；因此 `transitions-spec.md`（M0）与 S41（M4）统一采用 `CustomPainter` + `Paint()..shader` 绘制，并强制实现 **减少动态效果 / 着色器编译失败 / 截图 > 16ms** 三重自动降级路径；Android TV 端严禁着色器与模糊。
+   - `flutter/shaders/` 当前仅有 `glasswork.frag`（含 `#ifdef IMPELLER_TARGET_OPENGLES` 纹理坐标 Y 轴翻转处理），`apple_theme.dart` 明确标注 Windows 运行于 **Skia over ANGLE/D3D11** 后端（`ImageFilter.isShaderFilterSupported == false`，不支持 `BackdropFilter` + `ImageFilter.shader`）；因此 `transitions-spec.md`（M0）与 S41（M4）统一采用 `CustomPainter` + `Paint()..shader`（逻辑像素坐标系）绘制，不新增任何第三方包依赖，并强制实现 **减少动态效果 / 着色器编译失败 / 截图 > 16ms** 三重自动降级路径；Android TV 端严禁着色器与模糊。
 6. **公开内容合规守卫（`scripts/check_public_content.py`）对 M0–M6 的约束**
    - 追踪文件内禁止出现特定本机路径模式与内网 IP（仅特定测试文件豁免），所有测试用例 URL 必须使用 `ALLOWED_HOSTS`、`127.0.0.1` 或 `.test` / `.example` / `.invalid` 保留域名（对 M3 弹幕模拟测试尤其关键）。
-   - 当前脚本仅对 `.png` 放行跳过二进制检查，而 `.webp` 尚未豁免且未知二进制文件会触发 `unexpected binary`；M5 生成示例海报时，应导出 `.png` 或同步评估合规脚本白名单。
+   - 当前脚本仅对 `.png` 放行跳过二进制检查，而 `.webp` 尚未豁免且未知二进制文件会触发 `unexpected binary`；M5 生成示例海报时，默认导出量化 `.png` 以保持零守卫脚本改动。
    - 所有新增代码、规范文档与测试样例均严格遵守净室红线：不引用第三方闭源应用名称、不使用真实影片名/海报/公共影视目录 URL、不使用第三方商标图形。
+
+---
+
+## 5. 不在范围内（Out of Scope）
+
+1. **只读平台与目录**：`tvos/`（Apple TV 原生客户端）、`flutter/ohos/`（HarmonyOS NEXT 原生宿主）、`flutter/lib/ui/tv/**`（鸿蒙大屏界面）及 `gateway/` 在本轮全部里程碑中保持只读，不纳入改造范围。
+2. **回退或重改基线既有提交（`a3cbe546..aa0adb3acd`）**：本清单列出的 41 个基线既有提交（如直播高清策略、EPG、iOS 26 原生组件桥接、Spider 扩展面板、TV V17 架构）属于基线固有行为，M1–M6 仅做兼容避让，不对其既有业务逻辑做逆向回滚或重构。
+3. **CI 工作流与历史发布归档改动**：`.github/workflows/**`、`docs/releases/**` 与各端版本号文件在 M0–M6 开发期间保持不变（发布文档与版本号仅在收尾阶段 M7 经人工确认后更新）。

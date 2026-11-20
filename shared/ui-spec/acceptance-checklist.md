@@ -111,17 +111,19 @@ flutter run --profile -d windows
 
 1. **全面禁用 `\b` / `\B` 词边界**：
    - 在 Android 真机 ICU 正则引擎中，中文汉字（`\p{Lo}`）属于单词字符（`\w`），导致 `\b4K\b` 面对 `"蓝光4K原盘"` 在 Android 真机上**不匹配**，而在桌面 OpenJDK 与 Dart `RegExp` 上**匹配**！同时下划线 `_` 属于 `\w`，会导致 `Sample_2160p_HEVC` 匹配失败。
-   - **解决方案**：所有英文/数字词元统一使用显式 ASCII 边界 `(?:^|.*[^a-z0-9])` 与 `(?![a-z0-9])`；纯中文词组（如 `杜比视界`、`臻彩`、`蓝光原盘`、`立体声`）直接无边界匹配，`B站` 写作 `(?:^|.*[^a-z0-9])b站(?!点)` 兼顾 `"B站4K"` 命中与 `"Web站点"` 排除。
-2. **严禁单端私有语法**：
-   - 顶层统一声明 `"caseInsensitive": true`（Java `Pattern.CASE_INSENSITIVE` / Dart `caseSensitive: false`）；全包 **0 处** `(?i)`、**0 处**后行断言 `(?<=...)` / `(?<!...)`、**0 处**占有量词 `*+` / `++`、**0 处**原子组 `(?>...)`、**0 处** `\K` 或 `\p{...}`。
-3. **输入百分号解码保 `+` 契约**：
+   - **解决方案**：所有英文/数字词元统一使用显式 ASCII 边界 `(?:^|.*[^a-z0-9])` 与 `(?![a-z0-9])`；纯中文词组（如 `杜比视界`、`臻彩`、`蓝光原盘`、`全景声`、`立体声`）直接无边界匹配，`B站` 写作 `(?:^|.*[^a-z0-9])b站(?!点)` 兼顾 `"B站4K"` 命中与 `"Web站点"` 排除。
+2. **严禁单端私有语法与统一子串匹配入口**：
+   - 顶层统一声明 `"caseInsensitive": true`（Java `Pattern.compile(p, Pattern.CASE_INSENSITIVE)` + `matcher(norm).find()`；Dart `RegExp(p, caseSensitive: false)` + `hasMatch(norm)`）；全包 **0 处** `(?i)`、**0 处**后行断言 `(?<=...)` / `(?<!...)`、**0 处**占有量词 `*+` / `++`、**0 处**原子组 `(?>...)`、**0 处** `\K` 或 `\p{...}`。
+3. **跨引擎统一空白折叠、保 `+` 百分号解码与 UTF-16 代理对安全截断**：
    - 严禁调用 `URLDecoder.decode`（会把 `"HDR10+"` 与 `"DD+"` 中的字面量 `'+'` 破坏为空格 `' '`！）。两端统一仅将合法的 `%XX` 十六进制字节序列按 UTF-8 解码（非法字节替换为 `U+FFFD`），完整保留字面量 `'+'`。
-4. **Android API 14 `org.json.JSONException` 受检异常与 Java 7 语法提示（供 S11 / S12 复用）**：
-   - 在桌面测试库 `json-20240303.jar` 中 `JSONException` 为非受检 `RuntimeException`，而在 Android `android.jar`（API 14–35）中 `JSONException` 为**受检 `Exception`**！因此共享纯 Java `MediaBadges.java` 解析 JSON 时必须显式声明 `throws JSONException`（或使用 `opt*` 方法），且不得使用 Lambda、`Stream`、`Optional`、`StandardCharsets`，确保 `javac -bootclasspath android-14/android.jar` 与 `D8 --min-api 14` 零错误通过。
-5. **M0 跨语言实测基准结果**：
-   - 针对 `badge-golden.json` 全部 **146 条**匿名化测试样例（含组合徽章、负向陷阱、中文混排、`mmcloud://` 与 `%20`/`%2B` WebDAV 地址、1024 字符截断边界）：
-     - **JDK 17**：`146 / 146` 全部通过，预热后 200 条批量匹配单条平均耗时 **`0.0706 ms`**（远优于 `< 0.20 ms` 指标）；
-     - **Dart 3.10.8**：`146 / 146` 全部通过，与 Java 输出差异数为 **`0`**；
+   - 归一化阶段将所有控制字符、C1 控制符/`\u0085`（NEL）、`\u00A0`（NBSP）、`\u2028`/`\u2029`（行/段分隔符）、`\u3000`（全角空格）及 `\uFEFF`（BOM）统一折叠为单个 ASCII `' '`（`0x20`），并显式按 `== 0x20` 剥离首尾空格（禁用两端语义不一致的平台 `.trim()`），彻底消除 `\u0085`/`\u2028` 行终止符与全角空格截断分叉；在 `1024` UTF-16 码元上限截断时，若索引 `1023` 为高代理项（`0xD800..0xDBFF`）则回退至 `1023`，杜绝拆裂补充平面字符。
+4. **Android API 14 `org.json.JSONException` 受检异常与 `Charset.forName("UTF-8")` 约束（供 S11 / S12 复用）**：
+   - 在桌面测试库 `json-20240303.jar` 中 `JSONException` 为非受检 `RuntimeException`，而在 Android `android.jar`（API 14–35）中 `JSONException` 为**受检 `Exception`**；同时 `StandardCharsets.UTF_8` 需要 API 19+！因此共享纯 Java `MediaBadges.java` 必须使用 `Charset.forName("UTF-8")`、显式声明 `throws JSONException`（或使用 `opt*` 方法），且禁用 Lambda、`Stream`、`Optional`、`java.util.Base64`，确保 `javac -bootclasspath android-14/android.jar` 与 `D8 --min-api 14` 零错误通过。
+5. **M0 跨语言与变异测试实测基准结果**：
+   - 针对 `badge-golden.json` 全部 **165 条**匿名化测试样例（含组合徽章、负向陷阱、`WxHp`、`HDR10-bit`、`dav1`/`eac3-joc`/`ec+3`、`SD-Card`、`v1.2.0 + AAC 2.0`、`%C2%85`/`\u2028`/`\u3000`/代理对截断边界）：
+     - **JDK 17**：`165 / 165` 全部通过，预热后 200 条批量匹配单条平均耗时 **`< 0.12 ms`**（优于 `< 0.20 ms` 指标）；
+     - **Dart 3.10.8**：`165 / 146+`（`165 / 165`）全部通过，与 Java 输出差异数为 **`0`**；
+     - **变异测试（Mutation Kill Rate）**：移除 `dr_hdr10`、`src_bluray`、`aud_dts`、`aud_dd`、`res_1080p`（及 `res_4k`/`res_720p`/`res_sd`）互斥/边界前瞻断言的变异体击杀率达 **`100%`（`5/5` 核心目标全击杀）**；
      - **Android API 14 编译与 DEX 验证**：`-source 8 -target 8 -bootclasspath android-14/android.jar` 编译 0 错误，`D8 --min-api 14` 单 DEX 生成通过。
 
 ---

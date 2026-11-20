@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "project": "Marco Movie",
   "license": "GPL-3.0-only",
-  "caseCount": 146,
+  "caseCount": 165,
   "anonymizedNotice": "All titles and URLs in this file are 100% synthetic placeholders (Example/Sample/Demo/示例/样片, .example/.test). Zero real media titles.",
   "cases": [
     {
@@ -3145,6 +3145,320 @@
       "input": "sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_2160p.HDR10.HEVC",
       "note": "Tokens strictly past 1024-char truncation boundary are ignored identically in Java and Dart",
       "expected": []
+    },
+    {
+      "id": "G147",
+      "category": "resolution_trap",
+      "input": "Sample.Banner.1080px.Width.Asset.mp4",
+      "note": "1080px CSS/image width must NOT match res_1080p (kills trailing-lookahead mutant)",
+      "expected": []
+    },
+    {
+      "id": "G148",
+      "category": "resolution_trap",
+      "input": "Sample.Encoder.fhd2.Preset.mp4",
+      "note": "fhd2 token must NOT match res_1080p",
+      "expected": []
+    },
+    {
+      "id": "G149",
+      "category": "resolution",
+      "input": "Sample.2024.3840x2160p.WEB-DL.HEVC.mkv",
+      "note": "WxHp dimension 3840x2160p matches 4K",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G150",
+      "category": "resolution_trap",
+      "input": "Sample.1999.4K.Remastered.1920x1080p.BluRay.AVC.mkv",
+      "note": "4K remaster with 1920x1080p dimension yields to 1080p",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G151",
+      "category": "resolution_trap",
+      "input": "Sample.2024.4K.SD-Card.Capture.mkv",
+      "note": "SD-Card substring must NOT match SD or suppress 4K",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        }
+      ]
+    },
+    {
+      "id": "G152",
+      "category": "dynamic_range",
+      "input": "Sample.2024.2160p.HDR10-bit.HEVC.mkv",
+      "note": "HDR10-bit (generic HDR + 10-bit) emits HDR, not HDR10",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr",
+          "label": "HDR"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G153",
+      "category": "player_tracks",
+      "input": "3840x2160 video/hevc bt.2020 tv-range pq 2ch",
+      "note": "Non-adjacent bt.2020 and pq tokens in track string match HDR",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr",
+          "label": "HDR"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G154",
+      "category": "player_tracks",
+      "input": "3840x2160 video/dolby-vision dav1.10.09 audio/eac3-joc ec+3 6ch",
+      "note": "AV1 Dolby Vision dav1.10.09 + eac3-joc/ec+3 matches DV · ATMOS + DD+ + 5.1 + AV1",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_av1",
+          "label": "AV1"
+        }
+      ]
+    },
+    {
+      "id": "G155",
+      "category": "player_tracks",
+      "input": "4K DOLBY VISION DD+ ATMOS 5.1 HEVC",
+      "note": "Existing MoviePlayer.mediaBadges() output normalizes cleanly via MediaBadges",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G156",
+      "category": "player_tracks",
+      "input": "1080p DOLBY AUDIO 5.1 AVC",
+      "note": "Existing MoviePlayer DOLBY AUDIO 5.1 maps to DD + 5.1",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "aud_dd",
+          "label": "DD"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G157",
+      "category": "cms_chinese",
+      "input": "【示例线路】第01集_4K高码_杜比视界_全景声.mkv",
+      "note": "Chinese 杜比视界 + standalone 全景声 triggers DV · ATMOS",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        }
+      ]
+    },
+    {
+      "id": "G158",
+      "category": "audio_channels",
+      "input": "Sample.2024.v1.2.0.AAC.2.0.mp4",
+      "note": "Version v1.2.0 earlier in filename does NOT suppress valid AAC.2.0",
+      "expected": [
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        }
+      ]
+    },
+    {
+      "id": "G159",
+      "category": "unicode_norm",
+      "input": "Sample2160p.HEVC.mkv",
+      "note": "U+0085 NEL normalized to 0x20 identically in Java and Dart",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G160",
+      "category": "unicode_norm",
+      "input": "Sample%C2%854K%C2%851080p.mkv",
+      "note": "Percent-encoded %C2%85 NEL normalized before lookahead evaluation",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        }
+      ]
+    },
+    {
+      "id": "G161",
+      "category": "unicode_norm",
+      "input": "Sample%E2%80%A84K%E2%80%A81080p.mkv",
+      "note": "Percent-encoded U+2028 Line Separator normalized identically",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        }
+      ]
+    },
+    {
+      "id": "G162",
+      "category": "unicode_norm",
+      "input": "Sample 2160p HDR10.mkv",
+      "note": "U+2029 Paragraph Separator and U+00A0 NBSP normalized identically",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10",
+          "label": "HDR10"
+        }
+      ]
+    },
+    {
+      "id": "G163",
+      "category": "unicode_norm",
+      "input": "　　 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_4K",
+      "note": "Leading U+3000/U+00A0 stripped identically before 1024-code-unit truncation",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        }
+      ]
+    },
+    {
+      "id": "G164",
+      "category": "unicode_norm",
+      "input": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_4K_🎬1080p",
+      "note": "Intact astral surrogate pair at 1022..1023 truncates trailing 1080p at 1024",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        }
+      ]
+    },
+    {
+      "id": "G165",
+      "category": "unicode_norm",
+      "input": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc_4K_🎬",
+      "note": "Astral surrogate pair straddling 1023..1024 backs off to 1023 with zero unpaired surrogate",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        }
+      ]
     }
   ]
 }

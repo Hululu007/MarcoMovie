@@ -6,12 +6,16 @@
   "durationsMs": {
     "instant": 0,
     "micro": 90,
+    "reducedHudFade": 120,
     "fast": 150,
     "windowsRouteExit": 150,
+    "tvPageFade": 180,
     "windowsRouteEnter": 185,
     "standard": 220,
-    "emphasized": 320,
+    "tvPlayExit": 220,
+    "mobileSharedBounds": 280,
     "transitionExit": 300,
+    "emphasized": 320,
     "transitionEnter": 420,
     "logoLoop": 1600,
     "auroraCycle": 16000
@@ -55,8 +59,8 @@
       "omegaRadPerSec": "2 * pi / response",
       "stiffness": "mass * pow(2 * pi / response, 2)",
       "viscousDamping": "2 * dampingRatio * sqrt(stiffness * mass)",
-      "androidSpringForce": "new SpringForce(target).setStiffness(stiffness).setDampingRatio(dampingRatio)",
-      "androidMotionSpring": "new MotionSpring(initial, motionSpringFrequency, 0.0025f) // exact critically damped solver when dampingRatio == 1.0",
+      "androidMotionSpring": "new MotionSpring(initial, motionSpringFrequency, 0.0025f) // first-party zero-dependency critically-damped solver (dampingRatio == 1.0); androidx.dynamicanimation is NOT in android/*dependencies.json and must not be added",
+      "androidUnderdampedSolver": "MotionTokens.stepUnderdampedSpring(...) or PathInterpolator fallback // 15-line zero-dependency analytical damped-harmonic helper in MotionTokens.java for dampingRatio < 1.0",
       "flutterSpringDescription": "SpringDescription(mass: mass, stiffness: stiffness, damping: viscousDamping)"
     },
     "presets": {
@@ -64,28 +68,28 @@
         "response": 0.21,
         "dampingRatio": 1.0,
         "mass": 1.0,
-        "stiffness": 894.9,
-        "viscousDamping": 59.83,
+        "stiffness": 895.2,
+        "viscousDamping": 59.84,
         "motionSpringFrequency": 30.0,
-        "note": "Aligned with FocusMotion.emphasis (MotionSpring frequency 30.0) for zero-overshoot 10-foot D-pad focus."
+        "note": "Aligned with FocusMotion.emphasis (MotionSpring exact integer frequency 30.0 rad/s -> effective response 0.2094s) for zero-overshoot 10-foot D-pad focus."
       },
       "pressFeedback": {
         "response": 0.16,
         "dampingRatio": 1.0,
         "mass": 1.0,
-        "stiffness": 1542.1,
+        "stiffness": 1542.13,
         "viscousDamping": 78.54,
         "motionSpringFrequency": 40.0,
-        "note": "Aligned with FocusMotion.compression (MotionSpring frequency 40.0) for tactile press/release."
+        "note": "Aligned with FocusMotion.compression (MotionSpring exact integer frequency 40.0 rad/s -> effective response 0.1571s) for tactile press/release."
       },
       "hudPopup": {
         "response": 0.28,
         "dampingRatio": 0.86,
         "mass": 1.0,
-        "stiffness": 503.6,
+        "stiffness": 503.55,
         "viscousDamping": 38.6,
-        "motionSpringFrequency": 22.4,
-        "note": "Used for speed capsule, skip countdown card, and start-up spec banner."
+        "motionSpringFrequency": 22.44,
+        "note": "Used for speed capsule, skip countdown card, and start-up spec banner (Flutter SpringDescription; Android zero-dependency underdamped helper in MotionTokens.java or decelerate PathInterpolator)."
       },
       "playerTransition": {
         "response": 0.42,
@@ -93,8 +97,8 @@
         "mass": 1.0,
         "stiffness": 223.8,
         "viscousDamping": 27.53,
-        "motionSpringFrequency": 15.0,
-        "note": "Used for Detail -> Player transition progress driver on Mobile/Desktop/iOS."
+        "motionSpringFrequency": 14.96,
+        "note": "Used for Detail -> Player transition progress driver on Mobile/Desktop/iOS (Flutter SpringDescription; Android zero-dependency underdamped helper in MotionTokens.java)."
       }
     }
   },
