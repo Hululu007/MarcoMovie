@@ -9,9 +9,9 @@ import 'package:flutter/services.dart';
 import '../../core/lan_sync_server.dart';
 import '../../core/models.dart';
 import '../../core/storage_service.dart';
-import '../apple_theme.dart';
 import '../local_qr_code.dart';
 import '../poster_image.dart';
+import 'tv_ambient_theme.dart';
 
 bool isTvActivationKey(LogicalKeyboardKey key) {
   return key == LogicalKeyboardKey.select ||
@@ -21,12 +21,17 @@ bool isTvActivationKey(LogicalKeyboardKey key) {
       key == LogicalKeyboardKey.gameButtonA;
 }
 
-/// High-contrast 10-foot focusable pill/button designed for D-pad / TV remotes.
+/// High-contrast 10-foot focusable glass pill/tile designed for D-pad / TV remotes,
+/// matching Apple TV's translucent frosted-glass language over living-room ambient themes.
 class TvFocusPill extends StatefulWidget {
   final Widget child;
   final VoidCallback? onSelect;
   final VoidCallback? onFocusGained;
   final bool selected;
+  final bool prominent;
+  final bool glass;
+  final bool destructive;
+  final bool preserveColorsOnFocus;
   final bool autofocus;
   final FocusNode? focusNode;
   final EdgeInsetsGeometry padding;
@@ -40,6 +45,10 @@ class TvFocusPill extends StatefulWidget {
     this.onSelect,
     this.onFocusGained,
     this.selected = false,
+    this.prominent = false,
+    this.glass = false,
+    this.destructive = false,
+    this.preserveColorsOnFocus = false,
     this.autofocus = false,
     this.focusNode,
     this.padding = const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
@@ -73,17 +82,116 @@ class _TvFocusPillState extends State<TvFocusPill> {
   @override
   Widget build(BuildContext context) {
     final active = _focused || _hovered;
-    final bg = widget.backgroundColor ??
-        (active
-            ? AppleColors.systemBlue
-            : (widget.selected
-                ? AppleColors.systemBlue.withValues(alpha: 0.28)
-                : const Color(0xFF23252B)));
-    final borderColor = _focused
-        ? Colors.white
-        : (widget.selected
-            ? AppleColors.systemBlue.withValues(alpha: 0.85)
-            : Colors.white.withValues(alpha: 0.12));
+    final disabled = widget.onSelect == null;
+    final Color bg;
+    final Color borderColor;
+    final Color fgColor;
+    final List<BoxShadow>? shadows;
+
+    if (widget.prominent) {
+      bg = disabled
+          ? Colors.white.withValues(alpha: 0.14)
+          : (active ? Colors.white : const Color(0xF5F7F9FC));
+      borderColor = _focused
+          ? TvAmbientColors.accent
+          : Colors.white.withValues(alpha: disabled ? 0.16 : 0.85);
+      fgColor = disabled
+          ? Colors.white.withValues(alpha: 0.45)
+          : TvAmbientColors.darkInk;
+      shadows = _focused
+          ? [
+              BoxShadow(
+                color: Colors.white.withValues(alpha: 0.36),
+                blurRadius: 24,
+                spreadRadius: 1,
+              ),
+              BoxShadow(
+                color: TvAmbientColors.accent.withValues(alpha: 0.44),
+                blurRadius: 26,
+                offset: const Offset(0, 8),
+              ),
+            ]
+          : [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.34),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+            ];
+    } else if (widget.destructive) {
+      bg = widget.backgroundColor ??
+          (active
+              ? const Color(0xFFE5484D)
+              : const Color(0x38FF453A));
+      borderColor = _focused
+          ? Colors.white
+          : const Color(0x70FF6961);
+      fgColor = active ? Colors.white : const Color(0xFFFFB7B3);
+      shadows = _focused
+          ? [
+              BoxShadow(
+                color: const Color(0xFFE5484D).withValues(alpha: 0.45),
+                blurRadius: 20,
+                offset: const Offset(0, 6),
+              ),
+            ]
+          : null;
+    } else if (widget.glass) {
+      bg = widget.backgroundColor ??
+          (active && !widget.preserveColorsOnFocus
+              ? Colors.white
+              : (widget.selected
+                  ? TvAmbientColors.accent.withValues(alpha: 0.90)
+                  : Colors.white.withValues(alpha: active ? 0.20 : 0.12)));
+      borderColor = _focused
+          ? Colors.white
+          : (widget.selected
+              ? Colors.white.withValues(alpha: 0.48)
+              : TvAmbientColors.glassStroke);
+      fgColor = (active && !widget.preserveColorsOnFocus)
+          ? TvAmbientColors.darkInk
+          : Colors.white;
+      shadows = _focused
+          ? [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.46),
+                blurRadius: 20,
+                offset: const Offset(0, 8),
+              ),
+            ]
+          : null;
+    } else {
+      bg = widget.backgroundColor ??
+          (widget.selected
+              ? TvAmbientColors.accent
+              : (active && !widget.preserveColorsOnFocus
+                  ? TvAmbientColors.accent
+                  : Colors.white.withValues(alpha: active ? 0.19 : 0.11)));
+      borderColor = _focused
+          ? Colors.white
+          : (widget.selected
+              ? Colors.white.withValues(alpha: 0.42)
+              : TvAmbientColors.glassStroke);
+      fgColor = Colors.white;
+      shadows = _focused
+          ? [
+              BoxShadow(
+                color: TvAmbientColors.accent.withValues(alpha: 0.45),
+                blurRadius: 20,
+                spreadRadius: 1,
+                offset: const Offset(0, 6),
+              ),
+            ]
+          : (widget.selected
+              ? [
+                  BoxShadow(
+                    color: TvAmbientColors.accent.withValues(alpha: 0.28),
+                    blurRadius: 14,
+                    offset: const Offset(0, 4),
+                  ),
+                ]
+              : null);
+    }
 
     return Semantics(
       button: true,
@@ -119,36 +227,32 @@ class _TvFocusPillState extends State<TvFocusPill> {
             behavior: HitTestBehavior.opaque,
             onTap: widget.onSelect,
             child: AnimatedScale(
-              scale: _focused ? 1.05 : 1.0,
-              duration: const Duration(milliseconds: 150),
+              scale: _focused ? 1.045 : 1.0,
+              duration: const Duration(milliseconds: 140),
               curve: Curves.easeOutCubic,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
+              child: Container(
                 padding: widget.padding,
                 decoration: BoxDecoration(
                   color: bg,
                   borderRadius: BorderRadius.circular(widget.borderRadius),
                   border: Border.all(
                     color: borderColor,
-                    width: _focused ? 2.5 : 1.2,
+                    width: _focused ? 2.4 : 1.1,
                   ),
-                  boxShadow: _focused
-                      ? [
-                          BoxShadow(
-                            color: AppleColors.systemBlue.withValues(alpha: 0.45),
-                            blurRadius: 18,
-                            spreadRadius: 1,
-                          ),
-                        ]
-                      : null,
+                  boxShadow: shadows,
                 ),
-                child: DefaultTextStyle.merge(
-                  style: TextStyle(
-                    color: _focused ? Colors.white : AppleColors.labelPrimary,
-                    fontWeight:
-                        (_focused || widget.selected) ? FontWeight.w700 : FontWeight.w500,
+                child: IconTheme.merge(
+                  data: IconThemeData(color: fgColor),
+                  child: DefaultTextStyle.merge(
+                    style: TextStyle(
+                      color: fgColor,
+                      fontWeight:
+                          (widget.prominent || _focused || widget.selected)
+                              ? FontWeight.w700
+                              : FontWeight.w600,
+                    ),
+                    child: widget.child,
                   ),
-                  child: widget.child,
                 ),
               ),
             ),
@@ -159,11 +263,181 @@ class _TvFocusPillState extends State<TvFocusPill> {
   }
 }
 
-/// 10-foot vertical poster card with luminous D-pad focus ring, 1.06x zoom,
-/// remarks badge, and optional watch-progress bar.
+/// 16:9 widescreen Continue Watching cinema card matching Apple TV's `ContinueWatchingCard`.
+class TvWideContinueCard extends StatefulWidget {
+  final WatchHistoryEntry entry;
+  final VoidCallback onSelect;
+  final VoidCallback? onFocusGained;
+  final bool autofocus;
+
+  const TvWideContinueCard({
+    super.key,
+    required this.entry,
+    required this.onSelect,
+    this.onFocusGained,
+    this.autofocus = false,
+  });
+
+  @override
+  State<TvWideContinueCard> createState() => _TvWideContinueCardState();
+}
+
+class _TvWideContinueCardState extends State<TvWideContinueCard> {
+  bool _focused = false;
+  bool _hovered = false;
+
+  void _ensureVisible() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      Scrollable.ensureVisible(
+        context,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final active = _focused || _hovered;
+    final pct = (widget.entry.progressFraction * 100).round().clamp(0, 100);
+    final sub = widget.entry.episode.isEmpty
+        ? '继续播放 · 已看 $pct%'
+        : '${widget.entry.episode} · 已看 $pct%';
+
+    return Focus(
+      autofocus: widget.autofocus,
+      onFocusChange: (focused) {
+        setState(() => _focused = focused);
+        if (focused) {
+          _ensureVisible();
+          widget.onFocusGained?.call();
+        }
+      },
+      onKeyEvent: (_, event) {
+        if (event is KeyDownEvent && isTvActivationKey(event.logicalKey)) {
+          widget.onSelect();
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onSelect,
+          child: AnimatedScale(
+            scale: active ? 1.04 : 1.0,
+            duration: const Duration(milliseconds: 160),
+            curve: Curves.easeOutCubic,
+            child: SizedBox(
+              width: 268,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    width: 268,
+                    height: 150,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: active
+                            ? Colors.white
+                            : TvAmbientColors.glassStroke,
+                        width: active ? 2.5 : 1.1,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(
+                            alpha: active ? 0.55 : 0.28,
+                          ),
+                          blurRadius: active ? 20 : 10,
+                          offset: Offset(0, active ? 8 : 4),
+                        ),
+                      ],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14.5),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          PosterImage(
+                            url: widget.entry.poster,
+                            title: widget.entry.title,
+                            fit: BoxFit.cover,
+                            placeholder: Container(
+                              color: const Color(0xFF1A2232),
+                              alignment: Alignment.center,
+                              child: Icon(
+                                CupertinoIcons.film,
+                                color: Colors.white.withValues(alpha: 0.30),
+                                size: 32,
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            child: Container(
+                              height: 5,
+                              color: Colors.black.withValues(alpha: 0.62),
+                              alignment: Alignment.centerLeft,
+                              child: FractionallySizedBox(
+                                widthFactor: widget.entry.progressFraction
+                                    .clamp(0.0, 1.0),
+                                child: Container(
+                                  color: TvAmbientColors.accent,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 9),
+                  Text(
+                    widget.entry.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    sub,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: TvAmbientColors.secondaryText,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 10-foot vertical 2:3 cinema poster card with Apple TV-parity frosted stroke,
+/// luminous focus lift, score/remarks capsule badge, and metadata subtitle.
 class TvFocusablePosterCard extends StatefulWidget {
   final CmsVideo video;
   final String subtitleBadge;
+  final String? sourceSubtitle;
   final double progressFraction;
   final VoidCallback onSelect;
   final VoidCallback? onFocusGained;
@@ -174,6 +448,7 @@ class TvFocusablePosterCard extends StatefulWidget {
     required this.video,
     required this.onSelect,
     this.subtitleBadge = '',
+    this.sourceSubtitle,
     this.progressFraction = 0.0,
     this.onFocusGained,
     this.autofocus = false,
@@ -185,6 +460,7 @@ class TvFocusablePosterCard extends StatefulWidget {
 
 class _TvFocusablePosterCardState extends State<TvFocusablePosterCard> {
   bool _focused = false;
+  bool _hovered = false;
 
   void _ensureVisible() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -200,11 +476,28 @@ class _TvFocusablePosterCardState extends State<TvFocusablePosterCard> {
     });
   }
 
+  String _resolveMetaLine() {
+    if (widget.sourceSubtitle != null && widget.sourceSubtitle!.isNotEmpty) {
+      return widget.sourceSubtitle!;
+    }
+    final parts = <String>[
+      if (widget.video.year.trim().isNotEmpty) widget.video.year.trim(),
+      if (widget.video.tag.trim().isNotEmpty)
+        widget.video.tag.trim()
+      else if (widget.video.area.trim().isNotEmpty)
+        widget.video.area.trim(),
+    ];
+    return parts.join(' · ');
+  }
+
   @override
   Widget build(BuildContext context) {
+    final active = _focused || _hovered;
     final badge = widget.subtitleBadge.isNotEmpty
         ? widget.subtitleBadge
         : widget.video.remarks;
+    final metaLine = _resolveMetaLine();
+
     return Focus(
       autofocus: widget.autofocus,
       onFocusChange: (focused) {
@@ -221,120 +514,149 @@ class _TvFocusablePosterCardState extends State<TvFocusablePosterCard> {
         }
         return KeyEventResult.ignored;
       },
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: widget.onSelect,
-        child: AnimatedScale(
-          scale: _focused ? 1.06 : 1.0,
-          duration: const Duration(milliseconds: 160),
-          curve: Curves.easeOutCubic,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 160),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: _focused
-                          ? Colors.white
-                          : Colors.white.withValues(alpha: 0.10),
-                      width: _focused ? 3.0 : 1.0,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onSelect,
+          child: AnimatedScale(
+            scale: active ? 1.045 : 1.0,
+            duration: const Duration(milliseconds: 160),
+            curve: Curves.easeOutCubic,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: active
+                            ? Colors.white
+                            : TvAmbientColors.glassStroke,
+                        width: active ? 2.5 : 1.1,
+                      ),
+                      boxShadow: active
+                          ? [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.58),
+                                blurRadius: 22,
+                                offset: const Offset(0, 10),
+                              ),
+                              BoxShadow(
+                                color: TvAmbientColors.accent
+                                    .withValues(alpha: 0.32),
+                                blurRadius: 20,
+                              ),
+                            ]
+                          : [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.28),
+                                blurRadius: 10,
+                                offset: const Offset(0, 5),
+                              ),
+                            ],
                     ),
-                    boxShadow: _focused
-                        ? [
-                            BoxShadow(
-                              color: AppleColors.systemBlue.withValues(alpha: 0.55),
-                              blurRadius: 24,
-                              spreadRadius: 2,
-                            ),
-                          ]
-                        : const [
-                            BoxShadow(
-                              color: Color(0x55000000),
-                              blurRadius: 10,
-                              offset: Offset(0, 4),
-                            ),
-                          ],
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(11),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        PosterImage(
-                          url: widget.video.poster,
-                          title: widget.video.title,
-                          year: widget.video.year,
-                          placeholder: Container(
-                            color: const Color(0xFF1D1F26),
-                            alignment: Alignment.center,
-                            padding: const EdgeInsets.all(10),
-                            child: Icon(
-                              CupertinoIcons.film,
-                              color: Colors.white.withValues(alpha: 0.28),
-                              size: 32,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(14.5),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          PosterImage(
+                            url: widget.video.poster,
+                            title: widget.video.title,
+                            year: widget.video.year,
+                            placeholder: Container(
+                              color: const Color(0xFF1A2232),
+                              alignment: Alignment.center,
+                              padding: const EdgeInsets.all(10),
+                              child: Icon(
+                                CupertinoIcons.film,
+                                color: Colors.white.withValues(alpha: 0.28),
+                                size: 32,
+                              ),
                             ),
                           ),
-                        ),
-                        if (badge.isNotEmpty)
-                          Positioned(
-                            right: 6,
-                            top: 6,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 3,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.72),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                badge,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
+                          if (badge.isNotEmpty)
+                            Positioned(
+                              right: 10,
+                              top: 10,
+                              child: Container(
+                                constraints: const BoxConstraints(maxWidth: 160),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 9,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: 0.72),
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(
+                                    color: Colors.white.withValues(alpha: 0.18),
+                                    width: 0.8,
+                                  ),
+                                ),
+                                child: Text(
+                                  badge,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w700,
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                        if (widget.progressFraction > 0.01)
-                          Positioned(
-                            left: 0,
-                            right: 0,
-                            bottom: 0,
-                            child: LinearProgressIndicator(
-                              value: widget.progressFraction.clamp(0.0, 1.0),
-                              minHeight: 4,
-                              backgroundColor: Colors.black45,
-                              valueColor: const AlwaysStoppedAnimation<Color>(
-                                AppleColors.systemBlue,
+                          if (widget.progressFraction > 0.01)
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              child: LinearProgressIndicator(
+                                value: widget.progressFraction.clamp(0.0, 1.0),
+                                minHeight: 4.5,
+                                backgroundColor: Colors.black54,
+                                valueColor: const AlwaysStoppedAnimation<Color>(
+                                  TvAmbientColors.accent,
+                                ),
                               ),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                widget.video.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: _focused ? Colors.white : AppleColors.labelPrimary,
-                  fontSize: 14,
-                  fontWeight: _focused ? FontWeight.w700 : FontWeight.w500,
+                const SizedBox(height: 9),
+                Text(
+                  widget.video.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: active
+                        ? Colors.white
+                        : Colors.white.withValues(alpha: 0.94),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-              ),
-            ],
+                if (metaLine.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    metaLine,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: TvAmbientColors.mutedText,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
       ),
@@ -342,21 +664,13 @@ class _TvFocusablePosterCardState extends State<TvFocusablePosterCard> {
   }
 }
 
-/// Built-in living-room remote search keyboard supporting letters, digits,
-/// Pinyin initials, backspace, clear, and search history pills.
-class TvRemoteGridKeyboard extends StatelessWidget {
-  static const List<String> _keys = <String>[
-    'A', 'B', 'C', 'D', 'E', 'F',
-    'G', 'H', 'I', 'J', 'K', 'L',
-    'M', 'N', 'O', 'P', 'Q', 'R',
-    'S', 'T', 'U', 'V', 'W', 'X',
-    'Y', 'Z', '1', '2', '3', '4',
-    '5', '6', '7', '8', '9', '0',
-  ];
-
+/// Built-in Apple TV-parity living-room remote search keyboard with frosted-glass panel,
+/// `ABC 拼音` / `123 数字` toggle, backspace, clear, search CTA, and recent history pills.
+class TvRemoteGridKeyboard extends StatefulWidget {
   final String query;
   final ValueChanged<String> onQueryChanged;
   final VoidCallback onSubmit;
+  final VoidCallback? onClearHistory;
   final List<String> history;
 
   const TvRemoteGridKeyboard({
@@ -364,111 +678,156 @@ class TvRemoteGridKeyboard extends StatelessWidget {
     required this.query,
     required this.onQueryChanged,
     required this.onSubmit,
+    this.onClearHistory,
     this.history = const [],
   });
 
   @override
+  State<TvRemoteGridKeyboard> createState() => _TvRemoteGridKeyboardState();
+}
+
+class _TvRemoteGridKeyboardState extends State<TvRemoteGridKeyboard> {
+  static const List<String> _alphaKeys = <String>[
+    'A', 'B', 'C', 'D', 'E', 'F',
+    'G', 'H', 'I', 'J', 'K', 'L',
+    'M', 'N', 'O', 'P', 'Q', 'R',
+    'S', 'T', 'U', 'V', 'W', 'X',
+    'Y', 'Z', ' ', '-', '1', '2',
+  ];
+
+  static const List<String> _digitKeys = <String>[
+    '1', '2', '3', '4', '5', '6',
+    '7', '8', '9', '0', 'S', 'E',
+  ];
+
+  bool _digitMode = false;
+
+  @override
   Widget build(BuildContext context) {
+    final keys = _digitMode ? _digitKeys : _alphaKeys;
     return Container(
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
-        color: const Color(0xFF171920),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+        color: Colors.white.withValues(alpha: 0.085),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: TvAmbientColors.glassStroke, width: 1.2),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          const Text(
+            '多站聚合搜索',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 22,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 16),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             decoration: BoxDecoration(
-              color: const Color(0xFF0F1116),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.14)),
+              color: Colors.black.withValues(alpha: 0.24),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: TvAmbientColors.glassStroke, width: 1.1),
             ),
             child: Row(
               children: [
                 const Icon(
                   CupertinoIcons.search,
-                  color: AppleColors.labelSecondary,
-                  size: 18,
+                  color: Colors.white,
+                  size: 20,
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    query.isEmpty ? '支持片名首拼 / 字母 / 数字' : query,
+                    widget.query.isEmpty ? '输入片名或首字母检索' : widget.query,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: query.isEmpty
-                          ? AppleColors.labelTertiary
+                      color: widget.query.isEmpty
+                          ? TvAmbientColors.mutedText
                           : Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
                     ),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        CupertinoIcons.mic_fill,
+                        size: 13,
+                        color: TvAmbientColors.secondaryText,
+                      ),
+                      SizedBox(width: 4),
+                      Text(
+                        '遥控首拼',
+                        style: TextStyle(
+                          color: TvAmbientColors.secondaryText,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
           Row(
             children: [
-              Expanded(
-                child: TvFocusPill(
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  borderRadius: 10,
-                  onSelect: () {
-                    if (query.isNotEmpty) {
-                      onQueryChanged(query.substring(0, query.length - 1));
-                    }
-                  },
-                  child: const Center(child: Text('⌫ 退格')),
-                ),
+              TvFocusPill(
+                selected: !_digitMode,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                onSelect: () => setState(() => _digitMode = false),
+                child: const Text('ABC 拼音', style: TextStyle(fontSize: 14)),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: TvFocusPill(
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  borderRadius: 10,
-                  onSelect: () => onQueryChanged(''),
-                  child: const Center(child: Text('清空')),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: TvFocusPill(
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  borderRadius: 10,
-                  selected: true,
-                  onSelect: onSubmit,
-                  child: const Center(child: Text('搜索')),
-                ),
+              const SizedBox(width: 10),
+              TvFocusPill(
+                selected: _digitMode,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                onSelect: () => setState(() => _digitMode = true),
+                child: const Text('123 数字', style: TextStyle(fontSize: 14)),
               ),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
           GridView.builder(
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
-            itemCount: _keys.length,
+            itemCount: keys.length,
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 6,
-              mainAxisSpacing: 8,
-              crossAxisSpacing: 8,
-              childAspectRatio: 1.2,
+              mainAxisSpacing: 9,
+              crossAxisSpacing: 9,
+              childAspectRatio: 1.18,
             ),
             itemBuilder: (context, index) {
-              final ch = _keys[index];
+              final ch = keys[index];
+              final label = ch == ' ' ? '空格' : ch;
               return TvFocusPill(
                 padding: EdgeInsets.zero,
-                borderRadius: 10,
-                onSelect: () => onQueryChanged('$query$ch'),
+                borderRadius: 12,
+                onSelect: () => widget.onQueryChanged('${widget.query}$ch'),
                 child: Center(
                   child: Text(
-                    ch,
-                    style: const TextStyle(
-                      fontSize: 16,
+                    label,
+                    style: TextStyle(
+                      fontSize: ch == ' ' ? 13 : 17,
                       fontWeight: FontWeight.w700,
                     ),
                   ),
@@ -476,30 +835,95 @@ class TvRemoteGridKeyboard extends StatelessWidget {
               );
             },
           ),
-          if (history.isNotEmpty) ...[
-            const SizedBox(height: 14),
-            const Text(
-              '最近搜索',
-              style: TextStyle(
-                color: AppleColors.labelSecondary,
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: TvFocusPill(
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                  onSelect: () {
+                    if (widget.query.isNotEmpty) {
+                      widget.onQueryChanged(
+                        widget.query.substring(0, widget.query.length - 1),
+                      );
+                    }
+                  },
+                  child: const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(CupertinoIcons.delete_left, size: 16),
+                      SizedBox(width: 5),
+                      Text('退格', style: TextStyle(fontSize: 14)),
+                    ],
+                  ),
+                ),
               ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: TvFocusPill(
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                  onSelect: () => widget.onQueryChanged(''),
+                  child: const Center(
+                    child: Text('清空', style: TextStyle(fontSize: 14)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: TvFocusPill(
+                  padding: const EdgeInsets.symmetric(vertical: 11),
+                  selected: true,
+                  onSelect: widget.onSubmit,
+                  child: const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(CupertinoIcons.search, size: 15),
+                      SizedBox(width: 5),
+                      Text('搜索', style: TextStyle(fontSize: 14)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (widget.history.isNotEmpty) ...[
+            const SizedBox(height: 18),
+            Row(
+              children: [
+                const Text(
+                  '最近搜索',
+                  style: TextStyle(
+                    color: TvAmbientColors.secondaryText,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                if (widget.onClearHistory != null)
+                  TvFocusPill(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                    onSelect: widget.onClearHistory,
+                    child: const Text('清除', style: TextStyle(fontSize: 12.5)),
+                  ),
+              ],
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
-                for (final item in history.take(6))
+                for (final item in widget.history.take(6))
                   TvFocusPill(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 7,
+                    ),
                     onSelect: () {
-                      onQueryChanged(item);
-                      onSubmit();
+                      widget.onQueryChanged(item);
+                      widget.onSubmit();
                     },
-                    child: Text(item, style: const TextStyle(fontSize: 13)),
+                    child: Text(item, style: const TextStyle(fontSize: 13.5)),
                   ),
               ],
             ),
@@ -615,12 +1039,15 @@ class _TvQrSyncDialogState extends State<TvQrSyncDialog> {
   @override
   Widget build(BuildContext context) {
     return Dialog(
-      backgroundColor: const Color(0xFF181A22),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      backgroundColor: const Color(0xEB101928),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(28),
+        side: const BorderSide(color: TvAmbientColors.glassStroke, width: 1.2),
+      ),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 680),
+        constraints: const BoxConstraints(maxWidth: 700),
         child: Padding(
-          padding: const EdgeInsets.all(28),
+          padding: const EdgeInsets.all(32),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -628,7 +1055,7 @@ class _TvQrSyncDialogState extends State<TvQrSyncDialog> {
                 '手机扫码推送配置与跨端同步',
                 style: TextStyle(
                   color: Colors.white,
-                  fontSize: 22,
+                  fontSize: 24,
                   fontWeight: FontWeight.w700,
                 ),
               ),
@@ -637,19 +1064,26 @@ class _TvQrSyncDialogState extends State<TvQrSyncDialog> {
                 _status,
                 textAlign: TextAlign.center,
                 style: const TextStyle(
-                  color: AppleColors.labelSecondary,
-                  fontSize: 14,
+                  color: TvAmbientColors.secondaryText,
+                  fontSize: 15,
                 ),
               ),
-              const SizedBox(height: 22),
+              const SizedBox(height: 24),
               if (_lanUrl.isNotEmpty)
                 Container(
-                  width: 220,
-                  height: 220,
-                  padding: const EdgeInsets.all(10),
+                  width: 224,
+                  height: 224,
+                  padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: Colors.white,
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: BorderRadius.circular(18),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.35),
+                        blurRadius: 20,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
                   ),
                   child: LocalQrCode(data: _lanUrl),
                 )
@@ -664,13 +1098,13 @@ class _TvQrSyncDialogState extends State<TvQrSyncDialog> {
                   _lanUrl,
                   textAlign: TextAlign.center,
                   style: const TextStyle(
-                    color: AppleColors.systemBlue,
-                    fontSize: 14,
+                    color: TvAmbientColors.accent,
+                    fontSize: 15,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
               ],
-              const SizedBox(height: 24),
+              const SizedBox(height: 26),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [

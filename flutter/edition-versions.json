@@ -12,11 +12,11 @@
     "buildNumber": 83
   },
   "appletv": {
-    "versionName": "0.1.0",
-    "buildNumber": 1
+    "versionName": "0.1.1",
+    "buildNumber": 2
   },
   "harmonyos": {
-    "versionName": "0.1.0",
-    "buildNumber": 1000001
+    "versionName": "0.1.1",
+    "buildNumber": 1000002
   }
 }

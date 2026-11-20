@@ -18,76 +18,76 @@ public struct LiveTvView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            HStack(spacing: 18) {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 16) {
                 Text("电视直播")
-                    .font(.title2.bold())
+                    .font(TvFont.sectionTitle)
                     .foregroundColor(.white)
 
                 if supportedLives.count > 1 {
                     ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 12) {
+                        HStack(spacing: 10) {
                             ForEach(Array(supportedLives.enumerated()), id: \.offset) { idx, src in
-                                Button {
+                                Button(src.name) {
                                     Task { await appModel.loadLiveCatalog(sourceIndex: idx) }
-                                } label: {
-                                    Text(src.name)
-                                        .font(.caption.weight(.semibold))
-                                        .padding(.horizontal, 16)
-                                        .padding(.vertical, 8)
-                                        .background(appModel.selectedLiveSourceIndex == idx ? TvTheme.accent : TvTheme.surface)
-                                        .clipShape(Capsule())
                                 }
-                                .tvCardButtonStyle()
+                                .buttonStyle(TvPillButtonStyle(active: appModel.selectedLiveSourceIndex == idx, compact: true))
                             }
                         }
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 4)
                     }
                 }
 
                 Spacer()
 
                 Text("全屏播放时按遥控器上 / 下方向键即可快速换台")
-                    .font(.caption)
+                    .font(TvFont.caption)
                     .foregroundColor(TvTheme.mutedText)
             }
 
             if supportedLives.isEmpty {
-                VStack(spacing: 18) {
+                VStack(spacing: 16) {
                     Spacer()
                     Image(systemName: "tv.slash")
-                        .font(.system(size: 54))
+                        .font(.system(size: 48))
                         .foregroundColor(TvTheme.mutedText)
                     Text("当前订阅中未包含可用的 M3U / TXT 直播源")
+                        .font(TvFont.body)
                         .foregroundColor(TvTheme.secondaryText)
                     Button("扫码推送 M3U 直播源") {
                         appModel.openLanQrModal()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(TvPillButtonStyle(prominent: true))
                     Spacer()
                 }
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if appModel.isLoadingLive {
-                Spacer()
-                HStack {
+                VStack {
                     Spacer()
                     ProgressView("正在解析直播频道列表…")
+                        .font(TvFont.body)
                     Spacer()
                 }
-                Spacer()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let err = appModel.liveError {
                 VStack(spacing: 14) {
+                    Spacer()
                     Text("直播列表加载失败：\(err)")
+                        .font(TvFont.body)
                         .foregroundColor(.orange)
                     Button("重新加载") {
                         Task { await appModel.loadLiveCatalog(sourceIndex: appModel.selectedLiveSourceIndex) }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(TvPillButtonStyle(prominent: true))
+                    Spacer()
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                HStack(alignment: .top, spacing: 32) {
+                HStack(alignment: .top, spacing: 28) {
                     // Left group list
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 12) {
+                        LazyVStack(alignment: .leading, spacing: 10) {
                             ForEach(Array(appModel.liveGroups.enumerated()), id: \.offset) { idx, group in
                                 let selected = appModel.selectedLiveGroupIndex == idx
                                 Button {
@@ -95,30 +95,29 @@ public struct LiveTvView: View {
                                 } label: {
                                     HStack {
                                         Text(group.name)
-                                            .font(.callout.weight(selected ? .bold : .regular))
+                                            .font(TvFont.button)
                                             .lineLimit(1)
                                         Spacer()
                                         Text("\(group.channels.count)")
-                                            .font(.caption2)
-                                            .foregroundColor(TvTheme.secondaryText)
+                                            .font(TvFont.caption)
+                                            .opacity(0.75)
                                     }
                                     .padding(.horizontal, 18)
-                                    .padding(.vertical, 14)
-                                    .background(selected ? TvTheme.accent : TvTheme.surface)
-                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                    .padding(.vertical, 13)
                                 }
-                                .tvCardButtonStyle()
+                                .buttonStyle(TvTileButtonStyle(active: selected, cornerRadius: 14))
                             }
                         }
+                        .padding(4)
                     }
-                    .frame(width: 300)
+                    .frame(width: 270)
 
                     // Right channel list
                     ScrollView {
                         if let grp = activeGroup {
                             LazyVGrid(
-                                columns: [GridItem(.adaptive(minimum: 280), spacing: 18)],
-                                spacing: 18
+                                columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: 3),
+                                spacing: 16
                             ) {
                                 ForEach(grp.channels) { channel in
                                     Button {
@@ -127,41 +126,46 @@ public struct LiveTvView: View {
                                         HStack(spacing: 14) {
                                             if !channel.logo.isEmpty {
                                                 RemotePosterView(url: channel.logo, title: channel.name, cornerRadius: 10)
-                                                    .frame(width: 56, height: 56)
+                                                    .frame(width: 50, height: 50)
                                             } else {
-                                                Image(systemName: "play.tv.fill")
-                                                    .font(.title3)
-                                                    .foregroundColor(TvTheme.accent)
-                                                    .frame(width: 56, height: 56)
-                                                    .background(TvTheme.surface)
-                                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                                ZStack {
+                                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                                        .fill(TvTheme.accent.opacity(0.20))
+                                                        .frame(width: 50, height: 50)
+                                                    Image(systemName: "play.tv.fill")
+                                                        .font(.system(size: 18, weight: .semibold))
+                                                        .foregroundColor(TvTheme.accent)
+                                                }
                                             }
 
                                             VStack(alignment: .leading, spacing: 4) {
                                                 Text(channel.name)
-                                                    .font(.callout.weight(.semibold))
+                                                    .font(TvFont.cardTitle)
                                                     .foregroundColor(.white)
                                                     .lineLimit(1)
-                                                Text("线路数：\(channel.episodes.count)")
-                                                    .font(.caption2)
+                                                Text("可用线路 \(channel.episodes.count) 条")
+                                                    .font(TvFont.caption)
                                                     .foregroundColor(TvTheme.secondaryText)
                                             }
                                             Spacer()
                                         }
                                         .padding(14)
-                                        .background(TvTheme.elevatedSurface)
-                                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                                     }
-                                    .tvCardButtonStyle()
+                                    .buttonStyle(TvTileButtonStyle(cornerRadius: 16, preserveColors: true))
                                 }
                             }
+                            .padding(4)
                         }
                     }
+                    .frame(maxWidth: .infinity)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
         }
-        .padding(.horizontal, 48)
-        .padding(.vertical, 32)
+        .padding(.horizontal, 56)
+        .padding(.top, 8)
+        .padding(.bottom, 28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task {
             if appModel.liveGroups.isEmpty && !supportedLives.isEmpty {
                 await appModel.loadLiveCatalog(sourceIndex: appModel.selectedLiveSourceIndex)

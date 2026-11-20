@@ -470,8 +470,136 @@ public final class CastSearchAndPickerChecks {
         }
     }
 
+    private static void testWallpaperUploadServer() throws Exception {
+        java.util.concurrent.atomic.AtomicReference<byte[]> receivedBytes =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        try (WallpaperUploadServer server =
+                new WallpaperUploadServer(
+                        bytes -> receivedBytes.set(bytes),
+                        60_000L,
+                        new java.net.InetSocketAddress("127.0.0.1", 0))) {
+            int port = server.socket.getLocalPort();
+            String path = server.path;
+            String host = "127.0.0.1:" + port;
+
+            String html = rawHttp(port, "GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\n\r\n");
+            check(
+                    html.startsWith("HTTP/1.1 200 ") && html.contains("Marco Movie"),
+                    "WallpaperUploadServer serves mobile upload page for valid token");
+
+            String wrongTok =
+                    rawHttp(
+                            port,
+                            "GET /wallpaper/00000000000000000000000000000000 HTTP/1.1\r\nHost: "
+                                    + host
+                                    + "\r\n\r\n");
+            check(
+                    wrongTok.startsWith("HTTP/1.1 404 "),
+                    "WallpaperUploadServer rejects wrong token with 404");
+
+            String notImgStr = "not-an-image-payload-0123456789";
+            byte[] notImg = notImgStr.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            String badOrigin =
+                    rawHttp(
+                            port,
+                            "POST "
+                                    + path
+                                    + " HTTP/1.1\r\nHost: "
+                                    + host
+                                    + "\r\nOrigin: http://evil.invalid\r\nContent-Length: "
+                                    + notImg.length
+                                    + "\r\n\r\n"
+                                    + notImgStr);
+            check(
+                    badOrigin.startsWith("HTTP/1.1 403 "),
+                    "WallpaperUploadServer rejects cross-origin POST with 403");
+
+            String tooSmall =
+                    rawHttp(
+                            port,
+                            "POST "
+                                    + path
+                                    + " HTTP/1.1\r\nHost: "
+                                    + host
+                                    + "\r\nOrigin: http://"
+                                    + host
+                                    + "\r\nContent-Length: 5\r\n\r\nhello");
+            check(
+                    tooSmall.startsWith("HTTP/1.1 413 "),
+                    "WallpaperUploadServer rejects tiny payload with 413");
+
+            String badMagic =
+                    rawHttp(
+                            port,
+                            "POST "
+                                    + path
+                                    + " HTTP/1.1\r\nHost: "
+                                    + host
+                                    + "\r\nOrigin: http://"
+                                    + host
+                                    + "\r\nContent-Length: "
+                                    + notImg.length
+                                    + "\r\n\r\n"
+                                    + notImgStr);
+            check(
+                    badMagic.startsWith("HTTP/1.1 415 "),
+                    "WallpaperUploadServer rejects non-image magic bytes with 415");
+
+            byte[] pngPayload =
+                    new byte[] {
+                        (byte) 0x89,
+                        0x50,
+                        0x4E,
+                        0x47,
+                        0x0D,
+                        0x0A,
+                        0x1A,
+                        0x0A,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x0D,
+                        0x49,
+                        0x48,
+                        0x44,
+                        0x52,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x01
+                    };
+            try (java.net.Socket s = new java.net.Socket("127.0.0.1", port)) {
+                s.setSoTimeout(3000);
+                java.io.OutputStream os = s.getOutputStream();
+                String hdr =
+                        "POST "
+                                + path
+                                + " HTTP/1.1\r\nHost: "
+                                + host
+                                + "\r\nOrigin: http://"
+                                + host
+                                + "\r\nContent-Type: image/png\r\nContent-Length: "
+                                + pngPayload.length
+                                + "\r\nConnection: close\r\n\r\n";
+                os.write(hdr.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                os.write(pngPayload);
+                os.flush();
+                java.io.ByteArrayOutputStream resp = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[1024];
+                int n;
+                while ((n = s.getInputStream().read(buf)) != -1) resp.write(buf, 0, n);
+                String ok = resp.toString("UTF-8");
+                check(
+                        ok.startsWith("HTTP/1.1 200 ")
+                                && receivedBytes.get() != null
+                                && receivedBytes.get().length == pngPayload.length,
+                        "WallpaperUploadServer accepts valid PNG upload and delivers bytes");
+            }
+        }
+    }
+
     public static void main(String[] args) throws Exception {
-        // Frozen 55799fd backup/reset contract, plus the two reviewed V17 preferences.
+        // Frozen 55799fd backup/reset contract, plus reviewed V17 & TV background/live preferences.
         // Compare identities, not just a count: a removed legacy key must fail too.
         List<String> expectedKeys =
                 Arrays.asList(
@@ -514,15 +642,23 @@ public final class CastSearchAndPickerChecks {
                         "search_timeout",
                         "episodes_descending",
                         "tv_navigation_mode",
-                        "tv_ambient_percent");
+                        "tv_ambient_percent",
+                        "tv_bg_mode",
+                        "tv_glow_preset",
+                        "tv_glow_color_left",
+                        "tv_glow_color_right",
+                        "live_high_quality",
+                        "live_merge_sources");
         java.util.Set<String> actualKeys = new java.util.HashSet<>(Arrays.asList(Prefs.KEYS));
         check(actualKeys.size() == Prefs.KEYS.length, "preference export/reset keys are unique");
         check(
                 actualKeys.equals(new java.util.HashSet<>(expectedKeys)),
-                "legacy preference identities preserved with only reviewed V17 additions");
+                "legacy preference identities preserved with reviewed V17, TV glow, and Live HD additions");
         testSourcePickerEdits();
         testSearchInputServer();
+        testWallpaperUploadServer();
         testCastServiceDlnaAndWeb();
-        System.out.println("PASS " + passed + " Cast, Search QR & SourcePicker checks");
+        System.out.println(
+                "PASS " + passed + " Cast, Search QR, Wallpaper QR & SourcePicker checks");
     }
 }

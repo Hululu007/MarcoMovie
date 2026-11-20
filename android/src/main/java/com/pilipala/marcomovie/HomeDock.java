@@ -27,36 +27,24 @@ final class HomeDock {
         tvLeft = a.useLeftDock();
         labels =
                 tvLeft
-                        ? new String[] {"首页", "片库", "搜索", "直播", "我的", "网盘", "投屏", "设置"}
+                        ? new String[] {"首页", "搜索", "直播", "我的", "网盘", "投屏", "设置"}
                         : new String[] {"首页", "搜索", "直播", "收藏", "网盘", "投屏", "设置"};
         keys =
-                tvLeft
-                        ? new String[] {
-                            "nav-home",
-                            "nav-library",
-                            "nav-search",
-                            "nav-live",
-                            "nav-favorites",
-                            "nav-accounts",
-                            "nav-cast",
-                            "nav-settings"
-                        }
-                        : new String[] {
-                            "nav-home",
-                            "nav-search",
-                            "nav-live",
-                            "nav-favorites",
-                            "nav-accounts",
-                            "nav-cast",
-                            "nav-settings"
-                        };
+                new String[] {
+                    "nav-home",
+                    "nav-search",
+                    "nav-live",
+                    "nav-favorites",
+                    "nav-accounts",
+                    "nav-cast",
+                    "nav-settings"
+                };
         items = new View[labels.length];
         bottomMode = !tvLeft && a.useBottomDock();
         topMode = !tvLeft && a.useTopDock();
         horizontal = bottomMode || topMode;
         navScale = Prefs.clampNavScale(a.prefs.getInt(Prefs.NAV_SCALE_PERCENT, 100)) / 100f;
-        int rawMainBase =
-                a.isTvDevice() ? (horizontal ? 374 : tvLeft ? 418 : 368) : (horizontal ? 342 : 338);
+        int rawMainBase = a.isTvDevice() ? (horizontal ? 374 : 368) : (horizontal ? 342 : 338);
         float density = Math.max(0.5f, a.getResources().getDisplayMetrics().density);
         int windowMainDp =
                 Math.max(
@@ -166,21 +154,12 @@ final class HomeDock {
         }
         Runnable homeAction =
                 () -> {
-                    if (tvLeft && a.current != null && a.current.retainedHome != null) {
-                        a.current.retainedHome.showSection(false);
-                        return;
-                    }
                     if (a.scroll != null) a.smoothHomeScroll(0);
                     View target = a.root.findViewWithTag("home-history:0");
                     if (target == null) target = a.root.findViewWithTag("home-tab:0");
+                    if (target == null) target = a.root.findViewWithTag("source-switcher");
                     if (target == null) target = a.root.findViewWithTag("primary");
                     if (target != null) target.requestFocus();
-                };
-        Runnable libraryAction =
-                () -> {
-                    if (a.current != null && a.current.retainedHome != null)
-                        a.current.retainedHome.showSection(true);
-                    else a.chooseSources();
                 };
         Runnable searchAction = a::globalSearchDialog;
         Runnable liveAction = () -> a.open(new MainActivity.Screen(a::liveSources), true);
@@ -190,30 +169,19 @@ final class HomeDock {
                                 new MainActivity.Screen(
                                         tvLeft ? a::minePage : () -> new FavoritesScreen(a).show()),
                                 true);
-        Runnable accountAction = () -> AccountPanel.show(a, items[tvLeft ? 5 : 4]);
+        Runnable accountAction = () -> AccountPanel.show(a, items[4]);
         Runnable castAction = () -> a.open(new MainActivity.Screen(a::castScreen), true);
         Runnable settingsAction = () -> a.open(new MainActivity.Screen(a::settings), true);
         Runnable[] actions =
-                tvLeft
-                        ? new Runnable[] {
-                            homeAction,
-                            libraryAction,
-                            searchAction,
-                            liveAction,
-                            favoriteAction,
-                            accountAction,
-                            castAction,
-                            settingsAction
-                        }
-                        : new Runnable[] {
-                            homeAction,
-                            searchAction,
-                            liveAction,
-                            favoriteAction,
-                            accountAction,
-                            castAction,
-                            settingsAction
-                        };
+                new Runnable[] {
+                    homeAction,
+                    searchAction,
+                    liveAction,
+                    favoriteAction,
+                    accountAction,
+                    castAction,
+                    settingsAction
+                };
         for (int i = 0; i < items.length; i++) {
             final int index = i;
             Icon icon = new Icon(i);
@@ -298,28 +266,16 @@ final class HomeDock {
                                     && !contains(newFocus)
                                     && contains(oldFocus)
                                     && newFocus.getRootView() == a.root.getRootView())
-                                selection.select(
-                                        items[
-                                                tvLeft
-                                                                && a.current != null
-                                                                && a.current.retainedHome != null
-                                                                && a.current
-                                                                        .retainedHome
-                                                                        .state
-                                                                        .library
-                                                        ? 1
-                                                        : 0]);
+                                selection.select(items[0]);
                         });
         selection.select(items[0]);
     }
 
     void selectSection(boolean library) {
         if (!tvLeft) return;
-        items[0].setSelected(!library);
-        items[1].setSelected(library);
+        items[0].setSelected(true);
         items[0].invalidate();
-        items[1].invalidate();
-        if (!contains(a.getCurrentFocus())) selection.select(items[library ? 1 : 0]);
+        if (!contains(a.getCurrentFocus())) selection.select(items[0]);
     }
 
     void setExpanded(boolean value) {
@@ -443,7 +399,7 @@ final class HomeDock {
     }
 
     void leftEdge(View view, boolean library) {
-        if (view != null && tvLeft) view.setNextFocusLeftId(items[library ? 1 : 0].getId());
+        if (view != null && tvLeft) view.setNextFocusLeftId(items[0].getId());
     }
 
     boolean key(KeyEvent event) {
@@ -494,7 +450,9 @@ final class HomeDock {
                 || !target.isShown()
                 || !target.isFocusable()
                 || !target.isEnabled()) {
-            View fallback = a.root.findViewWithTag("home-open-library");
+            View fallback = a.root.findViewWithTag("home-history:0");
+            if (fallback == null || !fallback.isShown())
+                fallback = a.root.findViewWithTag("home-tab:0");
             if (fallback == null || !fallback.isShown())
                 fallback = a.root.findViewWithTag("source-switcher");
             target = navigation.restore(a.root, fallback);
@@ -609,7 +567,7 @@ final class HomeDock {
             p.setStrokeCap(Paint.Cap.ROUND);
             p.setStrokeJoin(Paint.Join.ROUND);
 
-            int drawingKind = tvLeft && kind == 1 ? 7 : tvLeft && kind > 1 ? kind - 1 : kind;
+            int drawingKind = kind;
             switch (drawingKind) {
                 case 0:
                     {

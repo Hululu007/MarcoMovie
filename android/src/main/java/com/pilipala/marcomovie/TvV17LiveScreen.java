@@ -143,7 +143,8 @@ final class TvV17LiveScreen {
         TextView detailTitle = a.text(group.channels.get(start).name, 24, TvV17Theme.TEXT);
         details.addView(detailTitle);
         a.gap(details, 10);
-        TextView detailInfo = a.text("暂无可显示的节目单", 15, TvV17Theme.MUTED);
+        TextView detailInfo =
+                a.text(channelSummary(group.channels.get(start)), 15, TvV17Theme.MUTED);
         details.addView(detailInfo);
         columns.addView(details, new LinearLayout.LayoutParams(0, -2, 1f));
         a.body.addView(columns);
@@ -172,8 +173,7 @@ final class TvV17LiveScreen {
                                 1.01f);
                         if (focused) {
                             detailTitle.setText(channel.name);
-                            detailInfo.setText(
-                                    channel.streams.isEmpty() ? "此频道暂无可播放的线路" : "暂无可显示的节目单");
+                            detailInfo.setText(channelSummary(channel));
                         }
                     });
             LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, a.dp(52));
@@ -224,6 +224,32 @@ final class TvV17LiveScreen {
         a.open(screen, false);
     }
 
+    private String channelSummary(LiveCatalog.Channel channel) {
+        if (channel == null || channel.streams.isEmpty()) return "此频道暂无可播放的线路";
+        StringBuilder sb = new StringBuilder();
+        String epg = channel.options.get("epg");
+        if (epg != null && !epg.trim().isEmpty()) {
+            sb.append("正在播出：").append(epg.trim()).append("\n");
+        } else {
+            sb.append("暂无实时节目单（可在设置中配置 XMLTV EPG）\n");
+        }
+        String nextEpg = channel.options.get("epg-next");
+        if (nextEpg != null && !nextEpg.trim().isEmpty()) {
+            sb.append("即将播出：").append(nextEpg.trim()).append("\n");
+        }
+        if (LiveEpgService.supportsCatchup(channel)) {
+            sb.append("支持回看时移（播放中按菜单可打开节目单回看）\n");
+        }
+        String[] labels = LiveController.streamLabelsFor(a, channel);
+        if (labels.length > 0) {
+            sb.append("\n优选线路：").append(labels[0]);
+            if (labels.length > 1) {
+                sb.append("  （共 ").append(labels.length).append(" 条可用线路）");
+            }
+        }
+        return sb.toString().trim();
+    }
+
     private void play(
             LiveCatalog.Source source,
             LiveCatalog.Catalog catalog,
@@ -239,11 +265,7 @@ final class TvV17LiveScreen {
             LiveController.playFromCatalog(
                     a, source, catalog, channel, channel.streams.get(0), context);
         } else {
-            String[] labels = new String[channel.streams.size()];
-            for (int i = 0; i < labels.length; i++) {
-                String name = channel.streams.get(i).label;
-                labels[i] = name == null || name.trim().isEmpty() ? "线路 " + (i + 1) : name;
-            }
+            String[] labels = LiveController.streamLabelsFor(a, channel);
             new AppDialog.Builder(a)
                     .setTitle(channel.name)
                     .setItems(

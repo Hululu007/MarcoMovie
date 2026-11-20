@@ -15,6 +15,7 @@ Sources/CQuickJS/include/quickjs-libc.h
 
 # Synced JS host runtime scripts (populated by prepare_tvos.py)
 Sources/MarcoTVCore/Resources/js-host/
+Sources/MarcoTVCore/Resources/catpaw/
 
 # Packaged/signed artifacts
 *.ipa

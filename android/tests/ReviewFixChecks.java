@@ -188,8 +188,36 @@ public final class ReviewFixChecks {
         // to or removed from Prefs.KEYS. Security policy switches (such as EXPERIMENTAL_CSP and
         // ONLY_ALLOW_HTTPS_PLUGINS) are intentionally excluded so backups cannot weaken policy.
         check(
-                Prefs.KEYS.length == 40,
-                "backup settings key table includes TV dock position, TV player style, tunneled playback, and existing appearance settings");
+                Prefs.KEYS.length == 46,
+                "backup settings key table includes TV dock/background/glow, Live HD/merge, TV player style, tunneled playback, and existing appearance settings");
+        check(
+                Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_BG_MODE, 0))
+                        && Integer.valueOf(3).equals(Prefs.sanitizeSetting(Prefs.TV_BG_MODE, 3))
+                        && Prefs.sanitizeSetting(Prefs.TV_BG_MODE, 4) == null
+                        && Prefs.resolveTvBgMode(false, 0, true, true) == Prefs.BG_MODE_WALLPAPER
+                        && Prefs.resolveTvBgMode(false, 0, false, true) == Prefs.BG_MODE_ADAPTIVE
+                        && Prefs.resolveTvBgMode(false, 0, false, false) == Prefs.BG_MODE_DARK
+                        && Prefs.resolveTvBgMode(true, Prefs.BG_MODE_GRADIENT, true, false)
+                                == Prefs.BG_MODE_GRADIENT,
+                "TV background mode sanitizes bounds and resolves legacy wallpaper/ambient defaults cleanly");
+        check(
+                Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_GLOW_PRESET, 0))
+                        && Integer.valueOf(6).equals(Prefs.sanitizeSetting(Prefs.TV_GLOW_PRESET, 6))
+                        && Prefs.sanitizeSetting(Prefs.TV_GLOW_PRESET, 7) == null
+                        && Integer.valueOf(0x1f6feb)
+                                .equals(Prefs.sanitizeSetting(Prefs.TV_GLOW_COLOR_LEFT, 0x1f6feb))
+                        && Integer.valueOf(0x00123456)
+                                .equals(
+                                        Prefs.sanitizeSetting(
+                                                Prefs.TV_GLOW_COLOR_RIGHT, 0x00123456))
+                        && Integer.valueOf(0x00ffffff)
+                                .equals(
+                                        Prefs.sanitizeSetting(
+                                                Prefs.TV_GLOW_COLOR_RIGHT, 0x00ffffff))
+                        && Boolean.TRUE.equals(Prefs.sanitizeSetting(Prefs.LIVE_HIGH_QUALITY, true))
+                        && Boolean.FALSE.equals(
+                                Prefs.sanitizeSetting(Prefs.LIVE_MERGE_SOURCES, false)),
+                "TV glow preset/RGB colors and Live TV quality preferences sanitize cleanly");
         check(
                 Integer.valueOf(0).equals(Prefs.sanitizeSetting(Prefs.TV_DOCK_POSITION, 0))
                         && Integer.valueOf(1)

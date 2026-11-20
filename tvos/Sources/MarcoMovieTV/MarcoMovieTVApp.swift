@@ -11,35 +11,18 @@ public struct MarcoMovieTVApp: App {
 
     public var body: some Scene {
         WindowGroup {
-            ZStack {
-                TvTheme.background.ignoresSafeArea()
-
-                if !appModel.backdropPosterUrl.isEmpty {
-                    RemotePosterView(
-                        url: appModel.backdropPosterUrl,
-                        title: "",
-                        cornerRadius: 0
+            LivingRoomShellView()
+                .environmentObject(appModel)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(
+                    TvAmbientSoftGlowBackground(
+                        themeId: appModel.preferences.ambientTheme,
+                        intensity: appModel.preferences.ambientIntensity,
+                        posterUrl: appModel.backdropPosterUrl,
+                        posterSync: appModel.preferences.ambientPosterSync
                     )
-                    .opacity(0.22)
-                    .blur(radius: 68)
-                    .ignoresSafeArea()
-                }
-
-                LinearGradient(
-                    colors: [
-                        TvTheme.background.opacity(0.60),
-                        TvTheme.background.opacity(0.94),
-                        TvTheme.background,
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
                 )
-                .ignoresSafeArea()
-
-                LivingRoomShellView()
-                    .environmentObject(appModel)
-            }
-            .preferredColorScheme(.dark)
+                .preferredColorScheme(.dark)
         }
     }
 }

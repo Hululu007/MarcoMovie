@@ -1,7 +1,10 @@
 package com.pilipala.marcomovie;
 
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.*;
@@ -218,18 +221,18 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                 - 30);
         a.body.addView(split, new LinearLayout.LayoutParams(-1, a.dp(height)));
         LinearLayout left = a.vertical();
-        left.setPadding(a.dp(4), a.dp(4), a.dp(24), a.dp(8));
+        left.setPadding(a.dp(4), a.dp(6), a.dp(30), a.dp(10));
         ScrollView keyboardScroll = new TvScrollView(a);
         keyboardScroll.setTag("search-keyboard-scroll");
         keyboardScroll.setVerticalScrollBarEnabled(false);
         keyboardScroll.setClipChildren(false);
         keyboardScroll.setClipToPadding(false);
         keyboardScroll.addView(left, new ScrollView.LayoutParams(-1, -2));
-        split.addView(keyboardScroll, new LinearLayout.LayoutParams(a.dp(282), -1));
-        float availableWidth = a.windowWidth() / a.getResources().getDisplayMetrics().density - 346;
+        split.addView(keyboardScroll, new LinearLayout.LayoutParams(a.dp(294), -1));
+        float availableWidth = a.windowWidth() / a.getResources().getDisplayMetrics().density - 358;
         columns =
                 a.isTvDevice()
-                        ? Math.max(2, Math.min(6, (int) (availableWidth / 95)))
+                        ? Math.max(2, Math.min(6, (int) (availableWidth / 98)))
                         : TvLayoutPolicy.searchColumns(availableWidth);
         LinearLayout headingRow = a.row();
         headingRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -244,7 +247,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         qrBtn.setPadding(a.dp(10), a.dp(3), a.dp(10), a.dp(3));
         if (!a.isTvDevice()) headingRow.addView(qrBtn, new LinearLayout.LayoutParams(-2, a.dp(30)));
         left.addView(headingRow, new LinearLayout.LayoutParams(-1, -2));
-        a.gap(left, 12);
+        a.gap(left, 16);
         input =
                 new EditText(a) {
                     @Override
@@ -434,16 +437,14 @@ public final class GlobalSearchScreen implements AutoCloseable {
         if (a.isTvDevice()) {
             LinearLayout inputRow = a.row();
             inputRow.setGravity(Gravity.CENTER_VERTICAL);
-            inputRow.setBackground(a.bg(0xff29292e, 10));
+            inputRow.setClipChildren(false);
+            inputRow.setClipToPadding(false);
+            inputRow.setBackground(a.bg(0xff29292e, 12));
             inputRow.addView(input, new LinearLayout.LayoutParams(0, a.dp(48), 1));
-            qrBtn.setText("扫码");
-            qrBtn.setContentDescription("手机扫码输入");
-            // Two CJK glyphs plus padding do not fit in the former 42dp slot.
-            // Measure the label at the active font scale instead of ellipsizing it away.
-            qrBtn.setMinWidth(a.dp(64));
-            qrBtn.setMinimumWidth(a.dp(64));
-            qrBtn.setEllipsize(null);
-            inputRow.addView(qrBtn, new LinearLayout.LayoutParams(-2, a.dp(40)));
+            View qrIconBtn = buildTvQrIconButton();
+            LinearLayout.LayoutParams qrLp = new LinearLayout.LayoutParams(a.dp(40), a.dp(40));
+            qrLp.rightMargin = a.dp(4);
+            inputRow.addView(qrIconBtn, qrLp);
             left.addView(inputRow, new LinearLayout.LayoutParams(-1, a.dp(48)));
         } else left.addView(input, new LinearLayout.LayoutParams(-1, a.dp(48)));
         composition = a.text("", 12, MainActivity.MUTED);
@@ -526,20 +527,37 @@ public final class GlobalSearchScreen implements AutoCloseable {
             suggestionScroll = new HorizontalScrollView(a);
             suggestionScroll.setTag("search-title-suggestions");
             suggestionScroll.setHorizontalScrollBarEnabled(false);
+            suggestionScroll.setClipChildren(false);
+            suggestionScroll.setClipToPadding(false);
             titleSuggestions = a.row();
             titleSuggestions.setGravity(Gravity.CENTER_VERTICAL);
-            titleSuggestions.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
+            titleSuggestions.setClipChildren(false);
+            titleSuggestions.setClipToPadding(false);
+            titleSuggestions.setPadding(a.dp(4), a.dp(6), a.dp(8), a.dp(6));
             suggestionScroll.addView(titleSuggestions);
             suggestionScroll.setVisibility(View.GONE);
-            right.addView(suggestionScroll, new LinearLayout.LayoutParams(-1, a.dp(44)));
+            LinearLayout.LayoutParams sugLp = new LinearLayout.LayoutParams(-1, a.dp(50));
+            sugLp.topMargin = a.dp(4);
+            sugLp.bottomMargin = a.dp(4);
+            right.addView(suggestionScroll, sugLp);
         }
         resultScroll = new TvScrollView(a);
         resultScroll.setTag("global-search-results");
         resultScroll.setClipToPadding(false);
         resultBody = a.vertical();
-        resultBody.setPadding(a.dp(4), a.dp(8), a.dp(4), a.dp(20));
+        resultBody.setPadding(a.dp(6), a.dp(12), a.dp(6), a.dp(28));
         resultScroll.addView(resultBody);
         right.addView(resultScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        if (!a.privateMode) {
+            HotTitleCatalog.ensureLoadedAsync(
+                    a,
+                    () -> {
+                        if (current() && !a.privateMode) {
+                            suggestedQuery = null;
+                            updateTitleSuggestions();
+                        }
+                    });
+        }
         rebuildKeys();
         if (reuse) {
             edited = restored.trim();
@@ -967,14 +985,15 @@ public final class GlobalSearchScreen implements AutoCloseable {
                             final List<String> values =
                                     index == null
                                             ? Collections.emptyList()
-                                            : index.suggestTitles(query, 6);
+                                            : index.suggestTitles(query, 8);
                             a.ui.post(
                                     () -> {
                                         if (!acceptsTitleSuggestions(ticket, query)) return;
                                         titleSuggestions.removeAllViews();
                                         if (values.isEmpty()) return;
-                                        TextView label = a.text("片名联想", 12, MainActivity.MUTED);
-                                        label.setPadding(0, 0, a.dp(8), 0);
+                                        TextView label = a.text("热门联想", 12.5f, 0xa8ebebf5);
+                                        label.setTypeface(null, Typeface.BOLD);
+                                        label.setPadding(0, 0, a.dp(10), 0);
                                         titleSuggestions.addView(label);
                                         for (String title : values) {
                                             Button choice =
@@ -995,19 +1014,47 @@ public final class GlobalSearchScreen implements AutoCloseable {
                                                                 submit(true);
                                                             });
                                             choice.setTag("search-title:" + title);
-                                            choice.setTextSize(13);
+                                            choice.setTextSize(13.5f);
                                             choice.setSingleLine(true);
-                                            choice.setMaxWidth(a.dp(200));
+                                            choice.setMaxWidth(a.dp(220));
                                             choice.setEllipsize(
                                                     android.text.TextUtils.TruncateAt.END);
                                             choice.setMinWidth(0);
                                             choice.setMinimumWidth(0);
                                             choice.setMinHeight(0);
                                             choice.setMinimumHeight(0);
-                                            choice.setPadding(a.dp(10), 0, a.dp(10), 0);
+                                            choice.setPadding(a.dp(14), 0, a.dp(14), 0);
+                                            choice.setBackground(
+                                                    TvV17Surface.rounded(
+                                                            0x28ffffff,
+                                                            a.dp(18),
+                                                            0x38ffffff,
+                                                            a.dp(1)));
+                                            choice.setTextColor(0xf2ffffff);
+                                            choice.setOnFocusChangeListener(
+                                                    (v, focused) -> {
+                                                        FocusMotion.unclipAncestors(choice);
+                                                        choice.setBackground(
+                                                                TvV17Surface.rounded(
+                                                                        focused
+                                                                                ? 0xfff5f5f7
+                                                                                : 0x28ffffff,
+                                                                        a.dp(18),
+                                                                        focused
+                                                                                ? 0xffffffff
+                                                                                : 0x38ffffff,
+                                                                        a.dp(1)));
+                                                        choice.setTextColor(
+                                                                focused ? 0xff0b0e14 : 0xf2ffffff);
+                                                        choice.animate()
+                                                                .scaleX(focused ? 1.05f : 1f)
+                                                                .scaleY(focused ? 1.05f : 1f)
+                                                                .setDuration(120)
+                                                                .start();
+                                                    });
                                             LinearLayout.LayoutParams size =
-                                                    new LinearLayout.LayoutParams(-2, a.dp(34));
-                                            size.rightMargin = a.dp(6);
+                                                    new LinearLayout.LayoutParams(-2, a.dp(36));
+                                            size.rightMargin = a.dp(8);
                                             titleSuggestions.addView(choice, size);
                                         }
                                         suggestionScroll.scrollTo(0, 0);
@@ -2210,6 +2257,93 @@ public final class GlobalSearchScreen implements AutoCloseable {
         JSONArray list = new JSONArray();
         for (int i = 0; i < Math.min(8, previous.size()); i++) list.put(previous.get(i));
         a.prefs.edit().putString(Prefs.GLOBAL_SEARCH_HISTORY, list.toString()).apply();
+    }
+
+    private View buildTvQrIconButton() {
+        final View iconBtn =
+                new View(a) {
+                    private final Paint strokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                    private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                    private final RectF box = new RectF();
+
+                    @Override
+                    protected void onDraw(Canvas canvas) {
+                        super.onDraw(canvas);
+                        int w = getWidth();
+                        int h = getHeight();
+                        if (w <= 0 || h <= 0) return;
+                        int tint = hasFocus() ? 0xff0b0e14 : 0xf2f5f5f7;
+                        float s = Math.min(w, h) * 0.56f;
+                        float ox = (w - s) * 0.5f;
+                        float oy = (h - s) * 0.5f;
+                        float unit = s / 7f;
+                        float sw = Math.max(1.5f, unit * 0.62f);
+                        float cr = unit * 0.35f;
+
+                        strokePaint.setStyle(Paint.Style.STROKE);
+                        strokePaint.setStrokeWidth(sw);
+                        strokePaint.setColor(tint);
+                        fillPaint.setStyle(Paint.Style.FILL);
+                        fillPaint.setColor(tint);
+
+                        // Top-left finder
+                        drawFinder(canvas, ox, oy, unit * 3f, cr);
+                        // Top-right finder
+                        drawFinder(canvas, ox + unit * 4f, oy, unit * 3f, cr);
+                        // Bottom-left finder
+                        drawFinder(canvas, ox, oy + unit * 4f, unit * 3f, cr);
+
+                        // Bottom-right QR data modules
+                        drawDot(canvas, ox + unit * 4.0f, oy + unit * 4.0f, unit * 1.1f);
+                        drawDot(canvas, ox + unit * 5.9f, oy + unit * 4.0f, unit * 1.1f);
+                        drawDot(canvas, ox + unit * 4.95f, oy + unit * 4.95f, unit * 1.1f);
+                        drawDot(canvas, ox + unit * 4.0f, oy + unit * 5.9f, unit * 1.1f);
+                        drawDot(canvas, ox + unit * 5.9f, oy + unit * 5.9f, unit * 1.1f);
+                    }
+
+                    private void drawFinder(
+                            Canvas canvas, float x, float y, float size, float radius) {
+                        float inset = strokePaint.getStrokeWidth() * 0.5f;
+                        box.set(x + inset, y + inset, x + size - inset, y + size - inset);
+                        canvas.drawRoundRect(box, radius, radius, strokePaint);
+                        float pip = size * 0.34f;
+                        float px = x + (size - pip) * 0.5f;
+                        float py = y + (size - pip) * 0.5f;
+                        box.set(px, py, px + pip, py + pip);
+                        canvas.drawRoundRect(box, radius * 0.5f, radius * 0.5f, fillPaint);
+                    }
+
+                    private void drawDot(Canvas canvas, float x, float y, float size) {
+                        box.set(x, y, x + size, y + size);
+                        canvas.drawRoundRect(box, size * 0.25f, size * 0.25f, fillPaint);
+                    }
+                };
+        iconBtn.setTag("search-qr-button");
+        iconBtn.setContentDescription("手机扫码输入");
+        iconBtn.setFocusable(true);
+        iconBtn.setFocusableInTouchMode(true);
+        iconBtn.setClickable(true);
+        iconBtn.setBackground(TvV17Surface.rounded(0x26ffffff, a.dp(10), 0x34ffffff, a.dp(1)));
+        a.pressFeedback(iconBtn);
+        iconBtn.setOnClickListener(v -> showQrDialog(false));
+        iconBtn.setOnFocusChangeListener(
+                (v, focused) -> {
+                    FocusMotion.unclipAncestors(iconBtn);
+                    iconBtn.setBackground(
+                            TvV17Surface.rounded(
+                                    focused ? 0xffffffff : 0x26ffffff,
+                                    a.dp(10),
+                                    focused ? 0xffffffff : 0x34ffffff,
+                                    a.dp(1)));
+                    iconBtn.setElevation(focused ? a.dp(6) : 0);
+                    iconBtn.animate()
+                            .scaleX(focused ? 1.07f : 1f)
+                            .scaleY(focused ? 1.07f : 1f)
+                            .setDuration(a.reduced ? 0 : 120)
+                            .start();
+                    iconBtn.invalidate();
+                });
+        return iconBtn;
     }
 
     @Override

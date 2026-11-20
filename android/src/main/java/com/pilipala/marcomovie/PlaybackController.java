@@ -1288,8 +1288,37 @@ final class PlaybackController {
                                                         });
                                                 ready.setOnVideoSizeChangedListener(
                                                         (mp, w, h) -> {
-                                                            if (ticket == a.generation)
+                                                            if (ticket == a.generation) {
                                                                 controls.resize(w, h);
+                                                                if ("live".equals(s.key)
+                                                                        && w > 0
+                                                                        && h > 0
+                                                                        && a.prefs != null) {
+                                                                    String updated =
+                                                                            LiveQualityPolicy
+                                                                                    .recordStreamSuccess(
+                                                                                            a.prefs
+                                                                                                    .getString(
+                                                                                                            Prefs
+                                                                                                                    .LIVE_STREAM_METRICS,
+                                                                                                            ""),
+                                                                                            ep.url,
+                                                                                            w,
+                                                                                            h,
+                                                                                            (int)
+                                                                                                    mp
+                                                                                                            .getFirstFrameMs(),
+                                                                                            System
+                                                                                                    .currentTimeMillis());
+                                                                    a.prefs
+                                                                            .edit()
+                                                                            .putString(
+                                                                                    Prefs
+                                                                                            .LIVE_STREAM_METRICS,
+                                                                                    updated)
+                                                                            .apply();
+                                                                }
+                                                            }
                                                         });
                                                 ready.setOnCompletionListener(
                                                         mp -> {
@@ -1390,73 +1419,9 @@ final class PlaybackController {
                                                                     return true;
                                                                 }
                                                             }
-                                                            JSONArray qualities =
-                                                                    ep.media.optJSONArray(
-                                                                            "qualities");
-                                                            int qIdx =
-                                                                    ep.media.optInt(
-                                                                            "_qualityIdx", 0);
-                                                            if (qualities != null
-                                                                    && qIdx + 1
-                                                                            < qualities.length()) {
-                                                                JSONObject nextQ =
-                                                                        qualities.optJSONObject(
-                                                                                qIdx + 1);
-                                                                String nextUrl =
-                                                                        nextQ != null
-                                                                                ? nextQ.optString(
-                                                                                        "url", "")
-                                                                                : "";
-                                                                if (!nextUrl.isEmpty()) {
-                                                                    try {
-                                                                        ep.media.put(
-                                                                                "_qualityIdx",
-                                                                                qIdx + 1);
-                                                                        ep.media.remove(
-                                                                                "_softwareFallback");
-                                                                        ep.media.remove(
-                                                                                "_systemFallback");
-                                                                    } catch (Exception ignored) {
-                                                                    }
-                                                                    ep.url =
-                                                                            LocalProxy.rewrite(
-                                                                                    nextUrl);
-                                                                    JSONObject nextHeaders =
-                                                                            nextQ.optJSONObject(
-                                                                                    "headers");
-                                                                    ep.headers.clear();
-                                                                    if (nextHeaders != null) {
-                                                                        java.util.Iterator<String>
-                                                                                hk =
-                                                                                        nextHeaders
-                                                                                                .keys();
-                                                                        while (hk.hasNext()) {
-                                                                            String k = hk.next();
-                                                                            String val =
-                                                                                    nextHeaders
-                                                                                            .optString(
-                                                                                                    k,
-                                                                                                    "");
-                                                                            if (!val.isEmpty())
-                                                                                ep.headers.put(
-                                                                                        k, val);
-                                                                        }
-                                                                    }
-                                                                    String qName =
-                                                                            nextQ.optString(
-                                                                                    "name", "备用线路");
-                                                                    a.playStatus.setText(
-                                                                            "正在切换至 " + qName + "…");
-                                                                    a.ui.post(
-                                                                            () -> {
-                                                                                if (ticket
-                                                                                        == a.generation)
-                                                                                    playerPage(
-                                                                                            a, s, v,
-                                                                                            ep);
-                                                                            });
-                                                                    return true;
-                                                                }
+                                                            if (tryAdvanceQualityOrLiveStream(
+                                                                    a, ticket, s, v, ep)) {
+                                                                return true;
                                                             }
                                                             if (v != null
                                                                     && v.lines != null
@@ -1541,6 +1506,26 @@ final class PlaybackController {
                                                         });
                                                 a.playStatus.setText("正在加载播放…");
                                                 ready.prepareAsync();
+                                                if ("live".equals(s.key)) {
+                                                    JSONArray liveQs =
+                                                            ep.media.optJSONArray("qualities");
+                                                    int curQIdx = ep.media.optInt("_qualityIdx", 0);
+                                                    if (liveQs != null
+                                                            && curQIdx + 1 < liveQs.length()) {
+                                                        a.ui.postDelayed(
+                                                                () -> {
+                                                                    if (ticket == a.generation
+                                                                            && !a.prepared
+                                                                            && a.current != null
+                                                                            && a.current.player) {
+                                                                        tryAdvanceQualityOrLiveStream(
+                                                                                a, ticket, s, v,
+                                                                                ep);
+                                                                    }
+                                                                },
+                                                                7500L);
+                                                    }
+                                                }
                                             });
                                 } catch (Exception ex) {
                                     AppLog.w("PlaybackController", "player init failed", ex);
@@ -1884,6 +1869,84 @@ final class PlaybackController {
             }
         }
         if (commit) scheduleHide(a);
+    }
+
+    static boolean tryAdvanceQualityOrLiveStream(
+            MainActivity a, int ticket, Cms.Site s, Cms.Video v, Cms.Episode ep) {
+        if ("live".equals(s.key) && a.prefs != null && ep.url != null && !ep.url.isEmpty()) {
+            String failedMetrics =
+                    LiveQualityPolicy.recordStreamFailure(
+                            a.prefs.getString(Prefs.LIVE_STREAM_METRICS, ""),
+                            ep.url,
+                            System.currentTimeMillis());
+            a.prefs.edit().putString(Prefs.LIVE_STREAM_METRICS, failedMetrics).apply();
+        }
+        JSONArray qualities = ep.media.optJSONArray("qualities");
+        int qIdx = ep.media.optInt("_qualityIdx", 0);
+        if (qualities == null || qIdx + 1 >= qualities.length()) return false;
+        JSONObject nextQ = qualities.optJSONObject(qIdx + 1);
+        String nextUrl = nextQ != null ? nextQ.optString("url", "") : "";
+        if (nextUrl.isEmpty()) return false;
+        try {
+            ep.media.put("_qualityIdx", qIdx + 1);
+            ep.media.remove("_softwareFallback");
+            ep.media.remove("_systemFallback");
+        } catch (Exception ignored) {
+        }
+        applyCandidateHeaders(s, ep, nextQ);
+        if (LiveQualityPolicy.isEmbyLiveUrl(nextUrl)) {
+            a.ui.post(
+                    () -> {
+                        if (ticket == a.generation) {
+                            LiveController.playEmbyLiveAsync(a, s, v, ep, nextUrl);
+                        }
+                    });
+            return true;
+        }
+        ep.url = LocalProxy.rewrite(nextUrl);
+        String qName = nextQ.optString("name", "备用线路");
+        if (a.playStatus != null) {
+            a.playStatus.setText("正在切换至 " + qName + "…");
+        }
+        a.ui.post(
+                () -> {
+                    if (ticket == a.generation) playerPage(a, s, v, ep);
+                });
+        return true;
+    }
+
+    static void applyCandidateHeaders(Cms.Site s, Cms.Episode ep, JSONObject qObj) {
+        if (ep == null || qObj == null) return;
+        ep.headers.clear();
+        if (s != null && !"live".equals(s.key)) {
+            ep.headers.putAll(s.headers);
+        }
+        JSONObject hs = qObj.optJSONObject("headers");
+        if (hs != null) {
+            java.util.Iterator<String> keys = hs.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                String val = hs.optString(k, "");
+                if (!val.isEmpty()) ep.headers.put(k, val);
+            }
+        }
+        if (s != null && "live".equals(s.key)) {
+            s.headers.clear();
+            s.headers.putAll(ep.headers);
+            if (!LiveQualityPolicy.isEmbyLiveUrl(qObj.optString("url", ""))) {
+                ep.media.remove("embySession");
+                s.api = qObj.optString("url", "");
+            }
+        }
+        String mime = qObj.optString("mimeType", "").trim();
+        JSONObject drm = qObj.optJSONObject("drm");
+        try {
+            if (!mime.isEmpty()) ep.media.put("mimeType", mime);
+            else ep.media.remove("mimeType");
+            if (drm != null) ep.media.put("drm", new JSONObject(drm.toString()));
+            else ep.media.remove("drm");
+        } catch (Exception ignored) {
+        }
     }
 
     static void savePlaybackHistoryOnPrepared(MainActivity a) {

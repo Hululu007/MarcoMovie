@@ -412,8 +412,8 @@ export class OhosSystemPlugin implements FlutterPlugin, AbilityAware, MethodCall
     const info: Record<string, string> = {
       'appName': 'Marco Movie',
       'packageName': String(bundleInfo.name ?? 'com.pilipala.marcomovie'),
-      'version': String(bundleInfo.versionName ?? '0.1.0'),
-      'buildNumber': String(bundleInfo.versionCode ?? 1000001)
+      'version': String(bundleInfo.versionName ?? '0.1.1'),
+      'buildNumber': String(bundleInfo.versionCode ?? 1000002)
     };
     return info;
   }

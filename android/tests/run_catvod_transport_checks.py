@@ -12,7 +12,7 @@ deps = prepare()
 classpath = os.pathsep.join(map(str, deps))
 sources = [ROOT / 'android/src/main/java/com/pilipala/marcomovie' / name for name in
            ('Cms.java', 'RequestScope.java', 'SourceEngine.java', 'JsEngine.java',
-            'QuickJsDeadline.java', 'LocalSourcePackage.java', 'LiveCatalog.java', 'ProxyAddress.java')]
+            'QuickJsDeadline.java', 'LocalSourcePackage.java', 'LiveQualityPolicy.java', 'LiveCatalog.java', 'ProxyAddress.java')]
 with tempfile.TemporaryDirectory(prefix='catvod-http-checks-') as tmp:
     folder = Path(tmp)
     base64 = folder / 'android/util/Base64.java'

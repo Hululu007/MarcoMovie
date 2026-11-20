@@ -88,6 +88,9 @@ class StorageService {
   static const String keyVideoSkipRecords = 'video_skip_records';
   static const String keyPlayerAlwaysShowClock = 'player_always_show_clock';
   static const String keyTvUiMode = 'tv_ui_mode';
+  static const String keyTvAmbientTheme = 'tv_ambient_theme';
+  static const String keyTvAmbientIntensity = 'tv_ambient_intensity';
+  static const String keyTvAmbientPosterSync = 'tv_ambient_poster_sync';
   static const String keyHomeSnapshots = 'site_home_snapshots_v1';
   static const String keySpiderAdapterPacks = 'spider_adapter_packs_v1';
   static const String keySpiderGatewayEnabled = 'spider_gateway_enabled';
@@ -715,6 +718,11 @@ class StorageService {
   String get playerKernel =>
       _prefs.getString(keyPlayerKernel) ?? 'exo';
   String get tvUiMode => _prefs.getString(keyTvUiMode) ?? 'auto';
+  String get tvAmbientTheme => _prefs.getString(keyTvAmbientTheme) ?? 'aurora';
+  String get tvAmbientIntensity =>
+      _prefs.getString(keyTvAmbientIntensity) ?? 'standard';
+  bool get tvAmbientPosterSync =>
+      _prefs.getBool(keyTvAmbientPosterSync) ?? true;
   String get quarkCookie =>
       _credentialCache[keyQuarkCookie] ?? _prefs.getString(keyQuarkCookie) ?? '';
   String get ucCookie =>
@@ -2236,6 +2244,28 @@ class StorageService {
     };
     await _prefs.setString(keyTvUiMode, normalized);
     OhosRuntime.uiModeRevision.value++;
+  }
+
+  Future<void> setTvAmbientTheme(String themeId) async {
+    const allowed = {'aurora', 'twilight', 'ocean', 'amber', 'nebula', 'frost'};
+    final normalized = themeId.trim().toLowerCase();
+    await _prefs.setString(
+      keyTvAmbientTheme,
+      allowed.contains(normalized) ? normalized : 'aurora',
+    );
+  }
+
+  Future<void> setTvAmbientIntensity(String intensity) async {
+    final normalized = switch (intensity.trim().toLowerCase()) {
+      'soft' => 'soft',
+      'vivid' => 'vivid',
+      _ => 'standard',
+    };
+    await _prefs.setString(keyTvAmbientIntensity, normalized);
+  }
+
+  Future<void> setTvAmbientPosterSync(bool enabled) async {
+    await _prefs.setBool(keyTvAmbientPosterSync, enabled);
   }
   /// Selects the recommended line index from [lines] based on [preferredQuality]
   /// and the user's configured Netdisk drive order.

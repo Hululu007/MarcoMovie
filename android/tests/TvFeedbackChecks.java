@@ -56,6 +56,16 @@ public final class TvFeedbackChecks {
         for (int i = 0; i < 20; i++) index.learn("斗罗大陆" + i);
         check(index.suggestTitles("dl", 99).size() == 8, "suggestions have hard upper bound");
         check(index.searchTerms("DLDL").contains("DLDL"), "remote literal query preserved");
+        index.learnHotTitles(Arrays.asList("长安的荔枝", "生万物"));
+        check(
+                index.suggestTitles("cadlz", 8).contains("长安的荔枝")
+                        && index.suggestTitles("sww", 8).contains("生万物"),
+                "trending hot titles match Chinese initials for fast search suggestions");
+        PhoneticSearchIndex privateSession = index.newSession(false);
+        privateSession.learnHotTitles(Collections.singletonList("隐秘热剧测试"));
+        check(
+                !privateSession.suggestTitles("ymrj", 8).contains("隐秘热剧测试"),
+                "private search session never ingests trending hot titles");
         check(
                 TvReadingScrollPolicy.step(600, 24, 48) == 552,
                 "prose keeps two lines of reading context");

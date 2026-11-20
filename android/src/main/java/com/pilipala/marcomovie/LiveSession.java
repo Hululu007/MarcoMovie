@@ -5,12 +5,15 @@ import java.util.*;
 /** Stable catalogue order for cross-group channel stepping and numeric tuning. */
 final class LiveSession {
     final LiveCatalog.Source source;
+    final LiveCatalog.Catalog catalog;
     final List<LiveCatalog.Channel> channels = new ArrayList<>();
+    volatile LiveEpgService.Guide epgGuide;
     int index = -1;
     String digits = "";
 
     LiveSession(LiveCatalog.Source selected, LiveCatalog.Catalog catalog) {
         source = selected;
+        this.catalog = catalog;
         for (LiveCatalog.Group group : catalog.groups)
             for (LiveCatalog.Channel channel : group.channels)
                 if (!channel.streams.isEmpty()) channels.add(channel);

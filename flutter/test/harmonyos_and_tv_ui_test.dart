@@ -917,5 +917,174 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump(const Duration(seconds: 25));
     });
+
+    testWidgets('Immersive TvDetailScreen opens full-screen episode sheet with pagination & line switching', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final storage = await StorageService.init();
+
+      tester.view.physicalSize = const Size(1920, 1080);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      const site = CmsSite(
+        key: 'series_demo',
+        name: '家庭影院主源',
+        type: 1,
+        api: 'http://127.0.0.1:18080/unused',
+      );
+      final ep24 = List.generate(
+        24,
+        (i) => '第${(i + 1).toString().padLeft(2, '0')}集\$http://127.0.0.1:18080/ep${i + 1}.m3u8',
+      ).join('#');
+      final fakeClient = CmsClient(
+        client: _StaticJsonHttpClient(
+          jsonEncode({
+            'code': 1,
+            'list': [
+              {
+                'vod_id': '201',
+                'vod_name': '远山回响',
+                'vod_year': '2026',
+                'vod_area': '自然纪实',
+                'vod_remarks': '全24集',
+                'vod_content': '沉浸式全屏剧集详情与选集测试。',
+                'vod_play_from': '超清直连\$\$\$夸父4K',
+                'vod_play_url': '$ep24\$\$\$第01集\$mmwogg://quark?share_id=q1#第02集\$mmwogg://quark?share_id=q2',
+              },
+            ],
+          }),
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TvDetailScreen(
+            site: site,
+            initialVideo: const CmsVideo(
+              id: '201',
+              title: '远山回响',
+              year: '2026',
+              area: '自然纪实',
+              remarks: '全24集',
+            ),
+            storage: storage,
+            client: fakeClient,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('远山回响'), findsOneWidget);
+      expect(find.text('超清直连 (24)'), findsOneWidget);
+      expect(find.text('夸父4K (2)'), findsOneWidget);
+
+      // Select the 24-episode line and verify hero & toolbar episode counts update
+      await tester.tap(find.text('超清直连 (24)'));
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.text('选集 · 共24集'), findsOneWidget);
+      expect(find.text('全屏选集 ›'), findsOneWidget);
+
+      // Open full-screen immersive episode sheet
+      await tester.tap(find.text('选集 · 共24集'));
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('← 返回详情'), findsOneWidget);
+      expect(find.text('1-20'), findsOneWidget);
+      expect(find.text('21-24'), findsOneWidget);
+      expect(find.text('第01集'), findsWidgets);
+
+      // Switch to page 2 (21-24)
+      await tester.tap(find.text('21-24'));
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.text('第24集'), findsWidgets);
+
+      // Switch to Netdisk line inside full-screen episode sheet & verify 4K badge
+      await tester.tap(find.text('夸父4K (2)').last);
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.text('选集 · 共 2 集 · 夸父4K'), findsOneWidget);
+
+      // Close full-screen sheet back to immersive detail page
+      await tester.tap(find.text('← 返回详情'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('← 返回详情'), findsNothing);
+      expect(find.text('选集 · 共2集'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    testWidgets('TvLivingRoomShell Apple TV parity: 6 ambient themes, intensity, poster sync & settings studio', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final storage = await StorageService.init();
+      final configJson = jsonEncode({
+        'sites': [
+          {
+            'key': 'local_cms',
+            'name': '家庭影院主源',
+            'type': 1,
+            'api': 'http://127.0.0.1:18080/api.php/provide/vod/',
+            'searchable': 1,
+          },
+        ],
+      });
+      await storage.saveConfig(configJson);
+
+      tester.view.physicalSize = const Size(1920, 1080);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      OhosRuntime.debugIsOhosOverride = true;
+      OhosRuntime.debugDeviceTypeOverride = 'tv';
+
+      final client = CmsClient(client: _FakeCmsHttpClient());
+      await tester.pumpWidget(
+        MaterialApp(
+          home: TvLivingRoomShell(storage: storage, client: client),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.pump(const Duration(milliseconds: 250));
+
+      // Floating centered Apple TV-parity nav bar has `发现` + right `扫码快传`
+      expect(find.text('发现'), findsOneWidget);
+      expect(find.text('扫码快传'), findsOneWidget);
+
+      // Navigate to Settings -> 外观与柔光
+      await tester.tap(find.text('设置'));
+      await tester.pump(const Duration(milliseconds: 200));
+
+      expect(find.text('系统设置'), findsOneWidget);
+      expect(find.text('客厅全局渐变柔光主题'), findsOneWidget);
+      expect(find.text('极光青翠'), findsOneWidget);
+      expect(find.text('暮色流光'), findsOneWidget);
+      expect(find.text('暖金影院'), findsOneWidget);
+
+      // Switch theme to 暮色流光 & intensity to 浓郁流光 and verify persistence
+      await tester.tap(find.text('暮色流光'));
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(storage.tvAmbientTheme, 'twilight');
+      expect(find.textContaining('当前：暮色流光'), findsOneWidget);
+
+      await tester.tap(find.text('浓郁流光'));
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(storage.tvAmbientIntensity, 'vivid');
+
+      // Toggle 海报色彩氛围联动 off
+      await tester.tap(find.text('海报色彩氛围联动'));
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(storage.tvAmbientPosterSync, isFalse);
+
+      // Switch settings sidebar to 播放与跳过 & verify UI mode options
+      await tester.tap(find.text('播放与跳过'));
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(find.text('自动识别（手机/平板/智慧屏）'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(seconds: 5));
+    });
   });
 }

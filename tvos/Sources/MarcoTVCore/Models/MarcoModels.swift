@@ -213,6 +213,7 @@ public struct CmsSite: Codable, Hashable, Identifiable, Sendable {
     public static let statusExtTooLarge = "ext-too-large"
     public static let statusCustomSiteUrl = "custom-site-url"
     public static let statusParserRequired = "parser-required"
+    public static let statusCatPawNodeRequired = "catpaw-node-required"
     public static let maxExtSize = 128 * 1024
 
     public var id: String { key }
@@ -286,6 +287,10 @@ public struct CmsSite: Codable, Hashable, Identifiable, Sendable {
         api.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("m3u_vod://")
     }
 
+    public var isCatPaw: Bool {
+        api.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().hasPrefix("catpaw://")
+    }
+
     private var cleanApiPath: String {
         let trimmed = api.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let noFragment = trimmed.components(separatedBy: "#").first ?? trimmed
@@ -306,8 +311,172 @@ public struct CmsSite: Codable, Hashable, Identifiable, Sendable {
     }
 
     public var isDrpySource: Bool {
-        api == "csp_LocalRule.js" || api.lowercased() == "csp_drpy"
+        let lower = api.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return api == "csp_LocalRule.js"
+            || lower == "csp_drpy"
+            || (type == 3 && isHttpApi && (cleanApiPath.hasSuffix("drpy2.min.js") || cleanApiPath.hasSuffix("drpy2.js")))
     }
+
+    /// Guard-ported TVBox plugin adapter table (1:1 parity with Flutter `CspBridge.guardAdapterFor`).
+    public var guardAdapterKey: String? {
+        guard type == 3 else { return nil }
+        return Self.guardAdapterMap[api.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()]
+    }
+
+    public var isGuardPortedSource: Bool {
+        guardAdapterKey != nil && !pluginReference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static let guardAdapterMap: [String: String] = [
+        "csp_dm84guard": "dm84-v1",
+        "csp_dm84": "dm84-v1",
+        "csp_aueteguard": "auete-v1",
+        "csp_auete": "auete-v1",
+        "csp_bttwooguard": "bttwoo-v1",
+        "csp_bttwoo": "bttwoo-v1",
+        "csp_appgzguard": "appgz-v1",
+        "csp_appgz": "appgz-v1",
+        "csp_t4guard": "t4-v1",
+        "csp_t4": "t4-v1",
+        "csp_appttguard": "apptt-v1",
+        "csp_apptt": "apptt-v1",
+        "csp_fyguard": "fy-v1",
+        "csp_fy": "fy-v1",
+        "csp_jpysguard": "jpys-v1",
+        "csp_jpys": "jpys-v1",
+        "csp_jpjguard": "jpj-v1",
+        "csp_jpj": "jpj-v1",
+        "csp_nmyswvguard": "nmyswv-v1",
+        "csp_nmyswv": "nmyswv-v1",
+        "csp_hmysguard": "hmys-v1",
+        "csp_hmys": "hmys-v1",
+        "csp_app99guard": "app99-v1",
+        "csp_app99": "app99-v1",
+        "csp_appsxguard": "appsx-v1",
+        "csp_appsx": "appsx-v1",
+        "csp_newczguard": "newcz-v1",
+        "csp_newcz": "newcz-v1",
+        "csp_libvioguard": "libvio-v1",
+        "csp_libvio": "libvio-v1",
+        "csp_ygpguard": "ygp-v1",
+        "csp_ygp": "ygp-v1",
+        "csp_kanqiuguard": "kanqiu-v1",
+        "csp_kanqiu": "kanqiu-v1",
+        "csp_doubaoguard": "doubao-v1",
+        "csp_doubao": "doubao-v1",
+        "csp_livegzguard": "livegz-v1",
+        "csp_livegz": "livegz-v1",
+        "csp_allliveguard": "alllive-v1",
+        "csp_alllive": "alllive-v1",
+        "csp_tingshu275guard": "tingshu275-v1",
+        "csp_tingshu275": "tingshu275-v1",
+        "csp_yuetingguard": "yueting-v1",
+        "csp_yueting": "yueting-v1",
+        "csp_seedhubguard": "seedhub-v1",
+        "csp_seedhub": "seedhub-v1",
+        "csp_s_zpsguard": "szps-v1",
+        "csp_s_zps": "szps-v1",
+        "csp_ypansoguard": "ypanso-v1",
+        "csp_ypanso": "ypanso-v1",
+        "csp_bpansoguard": "bpanso-v1",
+        "csp_bpanso": "bpanso-v1",
+        "csp_kkssguard": "kkss-v1",
+        "csp_kkss": "kkss-v1",
+        "csp_uussguard": "uuss-v1",
+        "csp_uuss": "uuss-v1",
+        "csp_wexappv7guard": "wexappv7-v1",
+        "csp_wexappv7": "wexappv7-v1",
+        "csp_wexaiguaziguard": "wexguazi-v1",
+        "csp_wexaiguazi": "wexguazi-v1",
+        "csp_wexaidubokuguard": "wexduboku-v1",
+        "csp_wexaiduboku": "wexduboku-v1",
+        "csp_wexaiwencaiguard": "wexwencai-v1",
+        "csp_wexaiwencai": "wexwencai-v1",
+        "csp_wexfengye4kguard": "wexfengye-v1",
+        "csp_wexfengye4k": "wexfengye-v1",
+        "csp_wexaifengyeguard": "wexfengye-v1",
+        "csp_wexaifengye": "wexfengye-v1",
+        "csp_wexaijianpianguard": "wexjianpian-v1",
+        "csp_wexaijianpian": "wexjianpian-v1",
+        "csp_wexaijuxiafanguard": "wexjuxiafan-v1",
+        "csp_wexaijuxiafan": "wexjuxiafan-v1",
+        "csp_wexaireboguard": "wexrebo-v1",
+        "csp_wexairebo": "wexrebo-v1",
+        "csp_wexaiboboguard": "wexbobo-v1",
+        "csp_wexaibobo": "wexbobo-v1",
+        "csp_wexaiikanbotguard": "wexikanbot-v1",
+        "csp_wexaiikanbot": "wexikanbot-v1",
+        "csp_ainewikanbotguard": "wexikanbot-v1",
+        "csp_ainewikanbot": "wexikanbot-v1",
+        "csp_wexaiyiysguard": "wexyiys-v1",
+        "csp_wexaiyiys": "wexyiys-v1",
+        "csp_ainewyiysguard": "wexyiys-v1",
+        "csp_ainewyiys": "wexyiys-v1",
+        "csp_wexaihanxiaoquanguard": "wexhanxiaoquan-v1",
+        "csp_wexaihanxiaoquan": "wexhanxiaoquan-v1",
+        "csp_ainewduoduoguard": "wexduoduo-v1",
+        "csp_ainewduoduo": "wexduoduo-v1",
+        "csp_ainewhubanguard": "wexhuban-v1",
+        "csp_ainewhuban": "wexhuban-v1",
+        "csp_ainewkuaiyingguard": "wexkuaiying-v1",
+        "csp_ainewkuaiying": "wexkuaiying-v1",
+        "csp_ainewlabiguard": "wexlabi-v1",
+        "csp_ainewlabi": "wexlabi-v1",
+        "csp_ainewmuouguard": "wexmuou-v1",
+        "csp_ainewmuou": "wexmuou-v1",
+        "csp_ainewshandianguard": "wexshandian-v1",
+        "csp_ainewshandian": "wexshandian-v1",
+        "csp_ainewxiaopanguard": "wexxiaopan-v1",
+        "csp_ainewxiaopan": "wexxiaopan-v1",
+        "csp_ainewzhizhenguard": "wexzhizhen-v1",
+        "csp_ainewzhizhen": "wexzhizhen-v1",
+        "csp_ainewwoggguard": "wexwogg-v1",
+        "csp_ainewwogg": "wexwogg-v1",
+        "csp_ainewhuajuanguard": "wexhuajuan-v1",
+        "csp_ainewhuajuan": "wexhuajuan-v1",
+        "csp_ainewjutouguard": "wexjutou-v1",
+        "csp_ainewjutou": "wexjutou-v1",
+        "csp_ainewzhinan4kguard": "wexzhinan-v1",
+        "csp_ainewzhinan4k": "wexzhinan-v1",
+        "csp_ainewwoniu4kguard": "wexwoniu-v1",
+        "csp_ainewwoniu4k": "wexwoniu-v1",
+        "csp_ainewpiankuguard": "wexpianku-v1",
+        "csp_ainewpianku": "wexpianku-v1",
+        "csp_aiqwmkvguard": "wexqiwei-v1",
+        "csp_aiqwmkv": "wexqiwei-v1",
+        "csp_ainewyidong4kguard": "wexyidong-v1",
+        "csp_ainewyidong4k": "wexyidong-v1",
+        "csp_soaiaipansoguard": "wexaipanso-v1",
+        "csp_soaiaipanso": "wexaipanso-v1",
+        "csp_soaihaiyinguard": "wexhaiyin-v1",
+        "csp_soaihaiyin": "wexhaiyin-v1",
+        "csp_soaiquanpanguard": "wexquanpan-v1",
+        "csp_soaiquanpan": "wexquanpan-v1",
+        "csp_sokakaguard": "wexkaka-v1",
+        "csp_sokaka": "wexkaka-v1",
+        "csp_jumitvguard": "jumitv-v1",
+        "csp_jumitv": "jumitv-v1",
+        "csp_animeaimoduguard": "wexmodu-v1",
+        "csp_animeaimodu": "wexmodu-v1",
+        "csp_duanjuaihaokanguard": "wexhaokan-v1",
+        "csp_duanjuaihaokan": "wexhaokan-v1",
+        "csp_duanjuaiqimiaoguard": "wexqimiao-v1",
+        "csp_duanjuaiqimiao": "wexqimiao-v1",
+        "csp_musicaikuwoaguard": "wexkuwoa-v1",
+        "csp_musicaikuwoa": "wexkuwoa-v1",
+        "csp_musicaiqingtingguard": "wexqingting-v1",
+        "csp_musicaiqingting": "wexqingting-v1",
+        "csp_sportaiguaziguard": "wexsportguazi-v1",
+        "csp_sportaiguazi": "wexsportguazi-v1",
+        "csp_sportaikafeiguard": "wexkafei-v1",
+        "csp_sportaikafei": "wexkafei-v1",
+        "csp_sportaikanqiutongguard": "wexkanqiutong-v1",
+        "csp_sportaikanqiutong": "wexkanqiutong-v1",
+        "csp_sportaikanqiuguard": "wexkanqiu-v1",
+        "csp_sportaikanqiu": "wexkanqiu-v1",
+        "csp_sportaiwweguard": "wexwwe-v1",
+        "csp_sportaiwwe": "wexwwe-v1",
+    ]
 
     public var isScriptOrJarApi: Bool {
         let lower = cleanApiPath
@@ -329,7 +498,7 @@ public struct CmsSite: Codable, Hashable, Identifiable, Sendable {
     }
 
     public var hasQuickJsAdapter: Bool {
-        isJavaScriptSource || isRemoteScriptSource || isDrpySource
+        isJavaScriptSource || isRemoteScriptSource || isDrpySource || isGuardPortedSource
     }
 
     public var isEffectivelyPrivate: Bool {
@@ -342,6 +511,9 @@ public struct CmsSite: Codable, Hashable, Identifiable, Sendable {
         }
         if key == "mydrive" {
             return Self.statusUnsupportedType
+        }
+        if isCatPaw {
+            return Self.statusCatPawNodeRequired
         }
         if (type == 3 || isScriptOrJarApi) && hasQuickJsAdapter {
             return Self.statusOk
@@ -372,6 +544,8 @@ public struct CmsSite: Codable, Hashable, Identifiable, Sendable {
         switch status {
         case statusOk:
             return "正常可用"
+        case statusCatPawNodeRequired:
+            return "此线路依赖 Node.js CatPaw 本机服务包，Apple TV (tvOS) 暂不支持运行此类服务包"
         case statusNeedsJar:
             return "此来源依赖 Android JAR / 原生插件运行环境，Apple TV 暂不支持"
         case statusUnsupportedType:
@@ -926,6 +1100,9 @@ public struct FavoriteItem: Codable, Hashable, Identifiable, Sendable {
 public typealias FavoriteEntry = FavoriteItem
 
 public struct PlaybackPreferences: Codable, Hashable, Sendable {
+    public static let supportedAmbientThemes = ["aurora", "twilight", "ocean", "amber", "nebula", "frost"]
+    public static let supportedAmbientIntensities = ["soft", "standard", "vivid"]
+
     public var skipIntroSec: Int
     public var skipOutroSec: Int
     public var playSpeed: Double
@@ -936,6 +1113,9 @@ public struct PlaybackPreferences: Codable, Hashable, Sendable {
     public var preferredSiteKey: String
     public var netdiskQuality: String
     public var playerKernel: String
+    public var ambientTheme: String
+    public var ambientIntensity: String
+    public var ambientPosterSync: Bool
 
     private enum CodingKeys: String, CodingKey {
         case skipIntroSec
@@ -948,6 +1128,9 @@ public struct PlaybackPreferences: Codable, Hashable, Sendable {
         case preferredSiteKey
         case netdiskQuality
         case playerKernel
+        case ambientTheme
+        case ambientIntensity
+        case ambientPosterSync
     }
 
     public init(
@@ -960,7 +1143,10 @@ public struct PlaybackPreferences: Codable, Hashable, Sendable {
         selectedSiteKey: String = "",
         preferredSiteKey: String = "",
         netdiskQuality: String = "auto",
-        playerKernel: String = "range_proxy"
+        playerKernel: String = "range_proxy",
+        ambientTheme: String = "aurora",
+        ambientIntensity: String = "standard",
+        ambientPosterSync: Bool = true
     ) {
         self.skipIntroSec = min(max(skipIntroSec, 0), 600)
         self.skipOutroSec = min(max(skipOutroSec, 0), 600)
@@ -972,6 +1158,9 @@ public struct PlaybackPreferences: Codable, Hashable, Sendable {
         self.preferredSiteKey = preferredSiteKey
         self.netdiskQuality = ["auto", "4k_hdr", "1080p"].contains(netdiskQuality) ? netdiskQuality : "auto"
         self.playerKernel = ["avkit", "range_proxy"].contains(playerKernel) ? playerKernel : "range_proxy"
+        self.ambientTheme = Self.supportedAmbientThemes.contains(ambientTheme) ? ambientTheme : "aurora"
+        self.ambientIntensity = Self.supportedAmbientIntensities.contains(ambientIntensity) ? ambientIntensity : "standard"
+        self.ambientPosterSync = ambientPosterSync
     }
 
     public init(from decoder: Decoder) throws {
@@ -986,6 +1175,9 @@ public struct PlaybackPreferences: Codable, Hashable, Sendable {
         let prefSite = try container.decodeIfPresent(String.self, forKey: .preferredSiteKey) ?? ""
         let quality = try container.decodeIfPresent(String.self, forKey: .netdiskQuality) ?? "auto"
         let kernel = try container.decodeIfPresent(String.self, forKey: .playerKernel) ?? "range_proxy"
+        let theme = try container.decodeIfPresent(String.self, forKey: .ambientTheme) ?? "aurora"
+        let intensity = try container.decodeIfPresent(String.self, forKey: .ambientIntensity) ?? "standard"
+        let posterSync = try container.decodeIfPresent(Bool.self, forKey: .ambientPosterSync) ?? true
         self.init(
             skipIntroSec: skipIntro,
             skipOutroSec: skipOutro,
@@ -996,7 +1188,10 @@ public struct PlaybackPreferences: Codable, Hashable, Sendable {
             selectedSiteKey: selSite,
             preferredSiteKey: prefSite,
             netdiskQuality: quality,
-            playerKernel: kernel
+            playerKernel: kernel,
+            ambientTheme: theme,
+            ambientIntensity: intensity,
+            ambientPosterSync: posterSync
         )
     }
 }

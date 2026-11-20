@@ -50,8 +50,10 @@ final class ImageLoader {
     }
 
     static void poster(MainActivity a, String address, ImageView image, boolean detail) {
-        image.setTag(address);
-        if (!Cms.isHttp(address) && !address.startsWith("catpaw://")) return;
+        String normalized = normalizeArtworkAddress(address);
+        image.setTag(normalized);
+        if (!Cms.isHttp(normalized) && !normalized.startsWith("catpaw://")) return;
+        address = normalized;
         final int ticket = a.generation;
         int initialW = ImageDecodePolicy.targetWidth(image.getWidth(), detail);
         int initialH = ImageDecodePolicy.targetHeight(image.getHeight(), detail);
@@ -250,6 +252,16 @@ final class ImageLoader {
         }
     }
 
+    static String normalizeArtworkAddress(String raw) {
+        if (raw == null) return "";
+        String trimmed = raw.trim();
+        if (trimmed.startsWith("//")) return "https:" + trimmed;
+        return trimmed;
+    }
+
+    private static final String BROWSER_IMAGE_UA =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
     private static byte[] fetchPosterBytesWithFallback(
             MainActivity a,
             Cms.ImageRequest source,
@@ -265,50 +277,78 @@ final class ImageLoader {
                         : new String[] {targetUrl, resolvedUrl};
         Exception lastError = null;
         java.util.HashSet<String> tried = new java.util.HashSet<>();
+        boolean hasCustomUa = source.headers.containsKey("User-Agent");
+        String[] userAgents =
+                hasCustomUa
+                        ? new String[] {source.headers.get("User-Agent")}
+                        : new String[] {BROWSER_IMAGE_UA, Cms.USER_AGENT};
         for (String candidate : candidates) {
             if (candidate == null || candidate.isEmpty() || !tried.add(candidate)) continue;
             byte[] cached = readDiskCachedPoster(a, candidate);
             if (cached != null) return cached;
-            HttpURLConnection connection = null;
-            try {
-                connection = ProxyAddress.openHttpConnection(new URL(candidate));
-                for (Map.Entry<String, String> header : source.headers.entrySet())
-                    connection.setRequestProperty(header.getKey(), header.getValue());
-                String fragment = new URL(candidate).getRef();
-                if (fragment != null && fragment.startsWith("mm-emby=")) {
-                    connection.setInstanceFollowRedirects(false);
-                    com.pilipala.emby.EmbyLibrary library =
-                            com.pilipala.emby.EmbyAccounts.open(
-                                    a, "emby://account/" + fragment.substring(8));
-                    for (Map.Entry<String, String> h : library.imageHeaders(candidate).entrySet())
-                        connection.setRequestProperty(h.getKey(), h.getValue());
-                }
-                applyArtworkHeaders(connection, candidate, source.headers);
-                connection.setConnectTimeout(4500);
-                connection.setReadTimeout(5500);
-                if (!source.headers.containsKey("User-Agent"))
-                    connection.setRequestProperty("User-Agent", Cms.USER_AGENT);
-                RequestScope.attach(connection);
-                try (InputStream in = connection.getInputStream()) {
-                    ByteArrayOutputStream out = new ByteArrayOutputStream();
-                    byte[] buffer = new byte[8192];
-                    int n;
-                    while ((n = in.read(buffer)) != -1) {
-                        RequestScope.current().check();
-                        if (out.size() + n > (detail ? 8 : 3) * 1024 * 1024)
-                            throw new IOException("Poster too large");
-                        out.write(buffer, 0, n);
+            for (String ua : userAgents) {
+                HttpURLConnection connection = null;
+                try {
+                    String currentUrl = candidate;
+                    for (int hop = 0; hop < 4; hop++) {
+                        if (connection != null) {
+                            RequestScope.detach(connection);
+                            connection.disconnect();
+                        }
+                        connection = ProxyAddress.openHttpConnection(new URL(currentUrl));
+                        connection.setInstanceFollowRedirects(false);
+                        for (Map.Entry<String, String> header : source.headers.entrySet())
+                            connection.setRequestProperty(header.getKey(), header.getValue());
+                        String fragment = new URL(currentUrl).getRef();
+                        if (fragment != null && fragment.startsWith("mm-emby=")) {
+                            com.pilipala.emby.EmbyLibrary library =
+                                    com.pilipala.emby.EmbyAccounts.open(
+                                            a, "emby://account/" + fragment.substring(8));
+                            for (Map.Entry<String, String> h :
+                                    library.imageHeaders(currentUrl).entrySet())
+                                connection.setRequestProperty(h.getKey(), h.getValue());
+                        }
+                        applyArtworkHeaders(connection, currentUrl, source.headers);
+                        connection.setConnectTimeout(4500);
+                        connection.setReadTimeout(5500);
+                        if (!hasCustomUa && ua != null) {
+                            connection.setRequestProperty("User-Agent", ua);
+                        }
+                        RequestScope.attach(connection);
+                        int code = connection.getResponseCode();
+                        if (code >= 300 && code < 400 && code != 304) {
+                            String loc = connection.getHeaderField("Location");
+                            if (loc == null || loc.trim().isEmpty()) break;
+                            currentUrl = new URL(new URL(currentUrl), loc.trim()).toString();
+                            continue;
+                        }
+                        break;
                     }
-                    byte[] bytes = out.toByteArray();
-                    if (bytes.length > 128) {
-                        writeDiskCachedPoster(a, candidate, bytes);
-                        return bytes;
+                    if (connection == null) continue;
+                    try (InputStream in = connection.getInputStream()) {
+                        ByteArrayOutputStream out = new ByteArrayOutputStream();
+                        byte[] buffer = new byte[8192];
+                        int n;
+                        while ((n = in.read(buffer)) != -1) {
+                            RequestScope.current().check();
+                            if (out.size() + n > (detail ? 8 : 3) * 1024 * 1024)
+                                throw new IOException("Poster too large");
+                            out.write(buffer, 0, n);
+                        }
+                        byte[] bytes = out.toByteArray();
+                        if (bytes.length > 128) {
+                            writeDiskCachedPoster(a, candidate, bytes);
+                            return bytes;
+                        }
+                    }
+                } catch (Exception e) {
+                    lastError = e;
+                } finally {
+                    if (connection != null) {
+                        RequestScope.detach(connection);
+                        connection.disconnect();
                     }
                 }
-            } catch (Exception e) {
-                lastError = e;
-            } finally {
-                if (connection != null) connection.disconnect();
             }
         }
         if (lastError != null) throw lastError;
@@ -411,10 +451,25 @@ final class ImageLoader {
         Atmosphere(Context c) {
             super(c);
             a = (MainActivity) c;
-            if (a.prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false))
-                wallpaper =
-                        BitmapFactory.decodeFile(
-                                new File(a.getFilesDir(), "wallpaper.jpg").getAbsolutePath());
+            reloadWallpaper();
+        }
+
+        void reloadWallpaper() {
+            if (wallpaper != null) {
+                wallpaper.recycle();
+                wallpaper = null;
+            }
+            boolean showWallpaper =
+                    a.isTvDevice()
+                            ? HomeAmbient.effectiveBgMode(a) == Prefs.BG_MODE_WALLPAPER
+                            : a.prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false);
+            if (showWallpaper) {
+                File f = new File(a.getFilesDir(), "wallpaper.jpg");
+                if (f.exists()) {
+                    wallpaper = BitmapFactory.decodeFile(f.getAbsolutePath());
+                }
+            }
+            invalidate();
         }
 
         @Override

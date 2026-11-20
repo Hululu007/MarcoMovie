@@ -55,14 +55,77 @@ final class ImmersivePoster extends FrameLayout {
         }
     }
 
+    static final class CastMember {
+        final String name;
+        final String role;
+        final String avatarUrl;
+        final boolean director;
+
+        CastMember(String name, String role, String avatarUrl, boolean director) {
+            this.name = name == null ? "" : name.trim();
+            this.role = role == null ? "" : role.trim();
+            this.avatarUrl = avatarUrl == null ? "" : avatarUrl.trim();
+            this.director = director;
+        }
+    }
+
+    static final class SubjectDetails {
+        final String year;
+        final String countries;
+        final int episodesCount;
+        final String duration;
+        final String genres;
+        final String intro;
+        final String posterUrl;
+        final double doubanScore;
+        final int rtPercent;
+        final java.util.List<CastMember> cast;
+        final long fetchedAtMs;
+
+        SubjectDetails(
+                String year,
+                String countries,
+                int episodesCount,
+                String duration,
+                String genres,
+                String intro,
+                String posterUrl,
+                double doubanScore,
+                int rtPercent,
+                java.util.List<CastMember> cast,
+                long fetchedAtMs) {
+            this.year = year == null ? "" : year.trim();
+            this.countries = countries == null ? "" : countries.trim();
+            this.episodesCount = Math.max(0, episodesCount);
+            this.duration = duration == null ? "" : duration.trim();
+            this.genres = genres == null ? "" : genres.trim();
+            this.intro = intro == null ? "" : intro.trim();
+            this.posterUrl = posterUrl == null ? "" : posterUrl.trim();
+            this.doubanScore = doubanScore;
+            this.rtPercent = rtPercent;
+            this.cast =
+                    cast == null
+                            ? java.util.Collections.emptyList()
+                            : java.util.Collections.unmodifiableList(
+                                    new java.util.ArrayList<>(cast));
+            this.fetchedAtMs = fetchedAtMs;
+        }
+    }
+
     private static final LruCache<String, Bitmap> WIDE_MEM_CACHE = new LruCache<>(18);
     private static final LruCache<String, Bitmap> PORTRAIT_HD_MEM_CACHE = new LruCache<>(18);
     private static final LruCache<String, Double> DOUBAN_RATING_CACHE = new LruCache<>(96);
     private static final LruCache<String, Integer> RT_RATING_CACHE = new LruCache<>(96);
     private static final LruCache<String, Ratings> MEDIA_RATINGS_CACHE = new LruCache<>(128);
+    private static final LruCache<String, SubjectDetails> SUBJECT_DETAILS_CACHE =
+            new LruCache<>(64);
     private static final java.util.concurrent.ConcurrentHashMap<
                     String, java.util.concurrent.CopyOnWriteArrayList<MainActivity.Done<Ratings>>>
             INFLIGHT_RATINGS = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.concurrent.ConcurrentHashMap<
+                    String,
+                    java.util.concurrent.CopyOnWriteArrayList<MainActivity.Done<SubjectDetails>>>
+            INFLIGHT_SUBJECT_DETAILS = new java.util.concurrent.ConcurrentHashMap<>();
     private static final String SESSION_DOUBAN_BID = generateDoubanBid();
     private static final Pattern YEAR_PATTERN = Pattern.compile("((?:19|20)\\d{2})");
     private static final java.util.concurrent.ExecutorService HD_POOL =
@@ -171,6 +234,17 @@ final class ImmersivePoster extends FrameLayout {
             String actor,
             String director,
             boolean resolveWide) {
+        load(address, title, year, actor, director, resolveWide, false);
+    }
+
+    void load(
+            String address,
+            String title,
+            String year,
+            String actor,
+            String director,
+            boolean resolveWide,
+            boolean likelyTvSeries) {
         String nextAddress = address == null ? "" : address.trim();
         String nextTitle = title == null ? "" : title.trim();
         if (!Objects.equals(nextTitle, currentTitle)
@@ -188,7 +262,12 @@ final class ImmersivePoster extends FrameLayout {
         a.poster(currentAddress, image, true);
         if (resolveWide && !currentTitle.isEmpty()) {
             resolveHdBackdrop(
-                    currentTitle, currentYear, currentActor, currentDirector, currentAddress);
+                    currentTitle,
+                    currentYear,
+                    currentActor,
+                    currentDirector,
+                    currentAddress,
+                    likelyTvSeries);
         }
     }
 
@@ -326,7 +405,8 @@ final class ImmersivePoster extends FrameLayout {
             String rawYear,
             String rawActor,
             String rawDirector,
-            String posterUrl) {
+            String posterUrl,
+            boolean likelyTvSeries) {
         final String cleanTitle = normalizeTitleForBackdrop(rawTitle);
         if (cleanTitle.isEmpty()) return;
         // Skip synthetic fixture URLs during unit/device probes so offline fixtures remain
@@ -374,7 +454,12 @@ final class ImmersivePoster extends FrameLayout {
                         // 1. Primary authoritative source: Douban Rexxar official subject stills
                         //    verified by exact title + year + cast/director
                         collectVerifiedDoubanStills(
-                                cleanTitle, cleanYear, rawActor, rawDirector, candidates);
+                                cleanTitle,
+                                cleanYear,
+                                rawActor,
+                                rawDirector,
+                                likelyTvSeries,
+                                candidates);
                         // 2. Secondary authoritative source: Bilibili PGC horizontal_cover
                         //    verified by exact title + year
                         if (candidates.isEmpty()) {
@@ -395,6 +480,42 @@ final class ImmersivePoster extends FrameLayout {
                                 WIDE_MEM_CACHE.put(cacheKey, wide);
                                 postWideBitmap(wide, token, generation);
                                 return;
+                            }
+                        }
+
+                        // 3. Verified portrait HD fallback if no 16:9 still is available and source
+                        //    poster failed or is missing/small.
+                        if (token != hdRevision || generation != a.generation) return;
+                        Bitmap curRaw = backdrop.rawBitmap;
+                        boolean needsPortraitFallback =
+                                curRaw == null || curRaw.isRecycled() || curRaw.getWidth() < 320;
+                        if (needsPortraitFallback) {
+                            Set<String> portraitCandidates = new LinkedHashSet<>();
+                            collectVerifiedDoubanPosters(
+                                    cleanTitle,
+                                    cleanYear,
+                                    rawActor,
+                                    rawDirector,
+                                    portraitCandidates);
+                            collectVerifiedBilibiliVerticalCovers(
+                                    cleanTitle, cleanYear, portraitCandidates);
+                            for (String pCand : portraitCandidates) {
+                                if (token != hdRevision || generation != a.generation) return;
+                                byte[] pData = downloadImageBytes(pCand, 5500);
+                                if (pData == null || pData.length < 8192) continue;
+                                Bitmap portraitBmp = decodePortraitHdBytes(pData);
+                                if (portraitBmp != null) {
+                                    a.ui.post(
+                                            () -> {
+                                                if (token != hdRevision
+                                                        || generation != a.generation
+                                                        || a.isFinishing()) return;
+                                                if (backdrop.wideBitmap == null) {
+                                                    soften(portraitBmp);
+                                                }
+                                            });
+                                    return;
+                                }
                             }
                         }
                     } catch (Exception ignored) {
@@ -1359,6 +1480,366 @@ final class ImmersivePoster extends FrameLayout {
                 });
     }
 
+    static SubjectDetails parseDoubanSubjectJson(String subjectJson, String creditsJson) {
+        String year = "";
+        String countries = "";
+        int episodesCount = 0;
+        String duration = "";
+        String genres = "";
+        String intro = "";
+        String posterUrl = "";
+        double doubanScore = 0.0;
+        int rtPercent = -1;
+        java.util.List<CastMember> cast = new java.util.ArrayList<>();
+        java.util.Set<String> seenNames = new java.util.LinkedHashSet<>();
+
+        if (subjectJson != null && subjectJson.trim().startsWith("{")) {
+            try {
+                JSONObject obj = new JSONObject(subjectJson);
+                year = extractFourDigitYear(obj.optString("year", ""));
+                countries = joinJsonStringArray(obj.optJSONArray("countries"), " / ", 2);
+                episodesCount = Math.max(0, obj.optInt("episodes_count", 0));
+                duration = joinJsonStringArray(obj.optJSONArray("durations"), " / ", 1);
+                genres = joinJsonStringArray(obj.optJSONArray("genres"), " / ", 3);
+                intro = obj.optString("intro", "").trim();
+                JSONObject pic = obj.optJSONObject("pic");
+                if (pic != null) {
+                    String large = pic.optString("large", "").trim();
+                    String normal = pic.optString("normal", "").trim();
+                    posterUrl = normalizeCoverUrl(!large.isEmpty() ? large : normal);
+                }
+                JSONObject ratingObj = obj.optJSONObject("rating");
+                if (ratingObj != null) {
+                    double rv = ratingObj.optDouble("value", 0.0);
+                    if (rv >= 2.0 && rv <= 9.9) doubanScore = rv;
+                }
+                rtPercent = extractRtPercentFromText(intro);
+                appendDoubanPeopleArray(obj.optJSONArray("directors"), true, cast, seenNames);
+                appendDoubanPeopleArray(obj.optJSONArray("actors"), false, cast, seenNames);
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (creditsJson != null && creditsJson.trim().startsWith("{")) {
+            try {
+                JSONObject cr = new JSONObject(creditsJson);
+                java.util.List<CastMember> richer = new java.util.ArrayList<>();
+                java.util.Set<String> richerSeen = new java.util.LinkedHashSet<>();
+                JSONArray items = cr.optJSONArray("items");
+                if (items != null) {
+                    for (int i = 0; i < items.length() && richer.size() < 16; i++) {
+                        JSONObject item = items.optJSONObject(i);
+                        if (item == null) continue;
+                        String category = item.optString("category", "").trim();
+                        boolean isDir =
+                                category.contains("导演") || "director".equalsIgnoreCase(category);
+                        boolean isActor =
+                                category.contains("演员")
+                                        || category.contains("主演")
+                                        || category.contains("配音")
+                                        || "actor".equalsIgnoreCase(category);
+                        if (!isDir && !isActor && !category.isEmpty()) continue;
+                        CastMember member = parseDoubanPersonObject(item, isDir);
+                        if (member != null
+                                && !member.name.isEmpty()
+                                && richerSeen.add(member.name)) {
+                            richer.add(member);
+                        }
+                    }
+                }
+                appendDoubanPeopleArray(cr.optJSONArray("directors"), true, richer, richerSeen);
+                appendDoubanPeopleArray(cr.optJSONArray("actors"), false, richer, richerSeen);
+                if (!richer.isEmpty()) {
+                    cast = richer;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        return new SubjectDetails(
+                year,
+                countries,
+                episodesCount,
+                duration,
+                genres,
+                intro,
+                posterUrl,
+                doubanScore,
+                rtPercent,
+                cast,
+                System.currentTimeMillis());
+    }
+
+    private static String joinJsonStringArray(JSONArray arr, String sep, int maxItems) {
+        if (arr == null || arr.length() == 0) return "";
+        StringBuilder sb = new StringBuilder();
+        int count = 0;
+        for (int i = 0; i < arr.length() && count < maxItems; i++) {
+            String s = arr.optString(i, "").trim();
+            if (s.isEmpty()) continue;
+            if (sb.length() > 0) sb.append(sep);
+            sb.append(s);
+            count++;
+        }
+        return sb.toString();
+    }
+
+    private static void appendDoubanPeopleArray(
+            JSONArray arr,
+            boolean isDirector,
+            java.util.List<CastMember> out,
+            java.util.Set<String> seen) {
+        if (arr == null) return;
+        for (int i = 0; i < arr.length() && out.size() < 16; i++) {
+            JSONObject p = arr.optJSONObject(i);
+            if (p == null) continue;
+            CastMember m = parseDoubanPersonObject(p, isDirector);
+            if (m != null && !m.name.isEmpty() && seen.add(m.name)) {
+                out.add(m);
+            }
+        }
+    }
+
+    private static CastMember parseDoubanPersonObject(JSONObject p, boolean isDirector) {
+        String name = p.optString("name", "").trim();
+        if (name.isEmpty()) return null;
+        String role = p.optString("character", "").trim();
+        if (role.isEmpty()) {
+            JSONArray roles = p.optJSONArray("roles");
+            if (roles != null && roles.length() > 0) {
+                role = roles.optString(0, "").trim();
+            }
+        }
+        if (role.startsWith("饰 ") || role.startsWith("饰:")) {
+            role = role.substring(2).trim();
+        }
+        if (role.isEmpty()) {
+            role = isDirector ? "导演" : "演员";
+        }
+        String avatarUrl = "";
+        JSONObject avatar = p.optJSONObject("avatar");
+        if (avatar != null) {
+            avatarUrl = avatar.optString("normal", "").trim();
+            if (avatarUrl.isEmpty()) avatarUrl = avatar.optString("large", "").trim();
+        }
+        if (avatarUrl.isEmpty()) {
+            avatarUrl = p.optString("cover_url", "").trim();
+        }
+        if (avatarUrl.contains("celebrity-default") || avatarUrl.contains("personage-default")) {
+            avatarUrl = "";
+        }
+        avatarUrl = normalizeCoverUrl(avatarUrl);
+        return new CastMember(name, role, avatarUrl, isDirector);
+    }
+
+    static java.util.List<CastMember> parseCastNamesFallback(String director, String actor) {
+        java.util.List<CastMember> out = new java.util.ArrayList<>();
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>();
+        addSplitCast(director, "导演", true, out, seen, 3);
+        addSplitCast(actor, "主演", false, out, seen, 12);
+        return out;
+    }
+
+    private static void addSplitCast(
+            String raw,
+            String role,
+            boolean isDirector,
+            java.util.List<CastMember> out,
+            java.util.Set<String> seen,
+            int maxAdd) {
+        if (raw == null || raw.trim().isEmpty()) return;
+        String[] parts = raw.split("[,，、/|;；]+");
+        int added = 0;
+        for (String part : parts) {
+            String name = part.trim();
+            if (name.isEmpty() || "未知".equals(name) || "暂无".equals(name) || "内详".equals(name)) {
+                continue;
+            }
+            if (seen.add(name)) {
+                out.add(new CastMember(name, role, "", isDirector));
+                if (++added >= maxAdd) break;
+            }
+        }
+    }
+
+    static String formatOfficialFactLine(Cms.Video v, SubjectDetails official) {
+        java.util.List<String> parts = new java.util.ArrayList<>();
+        String year =
+                official != null && !official.year.isEmpty()
+                        ? official.year
+                        : (v == null ? "" : extractFourDigitYear(v.year));
+        if (!year.isEmpty()) parts.add(year);
+
+        String region =
+                official != null && !official.countries.isEmpty()
+                        ? official.countries
+                        : (v == null || v.area == null ? "" : v.area.trim());
+        if (!region.isEmpty()) parts.add(region);
+
+        String episodeOrDuration = "";
+        if (official != null && official.episodesCount > 0) {
+            episodeOrDuration = "全 " + official.episodesCount + " 集";
+        } else if (official != null && !official.duration.isEmpty()) {
+            episodeOrDuration = official.duration;
+        } else if (v != null && v.remarks != null && !v.remarks.trim().isEmpty()) {
+            episodeOrDuration = v.remarks.trim();
+        } else if (v != null && v.lines != null && !v.lines.isEmpty()) {
+            int maxEp = 0;
+            for (Cms.Line line : v.lines) {
+                if (line != null && line.episodes != null && line.episodes.size() > maxEp) {
+                    maxEp = line.episodes.size();
+                }
+            }
+            if (maxEp > 1) episodeOrDuration = "共 " + maxEp + " 集";
+        }
+        if (!episodeOrDuration.isEmpty()) parts.add(episodeOrDuration);
+
+        String genreText =
+                official != null && !official.genres.isEmpty()
+                        ? official.genres
+                        : (v == null || v.tag == null ? "" : v.tag.trim());
+        if (!genreText.isEmpty()) {
+            String[] gParts = genreText.split("[/,，、\\s]+");
+            StringBuilder gBuf = new StringBuilder();
+            int gAdded = 0;
+            for (String g : gParts) {
+                String clean = g.trim();
+                if (clean.isEmpty() || parts.contains(clean)) continue;
+                if (gBuf.length() > 0) gBuf.append(" / ");
+                gBuf.append(clean);
+                if (++gAdded >= 2) break;
+            }
+            if (gBuf.length() > 0) parts.add(gBuf.toString());
+        }
+
+        StringBuilder joined = new StringBuilder();
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) joined.append("  ·  ");
+            joined.append(parts.get(i));
+        }
+        return joined.toString();
+    }
+
+    static void resolveSubjectDetails(
+            final MainActivity a,
+            final Cms.Video v,
+            final MainActivity.Done<SubjectDetails> onResolved) {
+        if (a == null || v == null || onResolved == null) return;
+        if (v.poster != null && v.poster.contains("fixture.test")) return;
+        final String cleanTitle = normalizeTitleForBackdrop(v.title);
+        final String normTarget = normalizeForStrictCompare(cleanTitle);
+        if (normTarget.isEmpty() || "选集响应样本".equals(cleanTitle) || "独立调度".equals(cleanTitle)) {
+            return;
+        }
+        final String cleanYear = extractFourDigitYear(v.year);
+        final boolean likelyTvSeries =
+                v.lines != null
+                        && !v.lines.isEmpty()
+                        && v.lines.get(0) != null
+                        && v.lines.get(0).episodes != null
+                        && v.lines.get(0).episodes.size() > 1;
+        final String cacheKey = normTarget + "#" + cleanYear + "#" + (likelyTvSeries ? "tv" : "mv");
+        SubjectDetails cached = SUBJECT_DETAILS_CACHE.get(cacheKey);
+        if (cached != null && (System.currentTimeMillis() - cached.fetchedAtMs) < 10 * 60 * 1000L) {
+            try {
+                onResolved.accept(cached);
+            } catch (Exception ignored) {
+            }
+            return;
+        }
+
+        final int generation = a.generation;
+        final MainActivity.Done<SubjectDetails> uiCallback =
+                details ->
+                        a.ui.post(
+                                () -> {
+                                    if (generation == a.generation && !a.isFinishing()) {
+                                        try {
+                                            onResolved.accept(details);
+                                        } catch (Exception ignored) {
+                                        }
+                                    }
+                                });
+
+        java.util.concurrent.CopyOnWriteArrayList<MainActivity.Done<SubjectDetails>> listeners =
+                new java.util.concurrent.CopyOnWriteArrayList<>();
+        listeners.add(uiCallback);
+        java.util.concurrent.CopyOnWriteArrayList<MainActivity.Done<SubjectDetails>> existing =
+                INFLIGHT_SUBJECT_DETAILS.putIfAbsent(cacheKey, listeners);
+        if (existing != null) {
+            existing.add(uiCallback);
+            return;
+        }
+
+        RATING_POOL.execute(
+                () -> {
+                    SubjectDetails resolved = null;
+                    try {
+                        java.util.List<DoubanCandidate> cands =
+                                findVerifiedDoubanSubjects(cleanTitle, cleanYear);
+                        for (int i = 0; i < Math.min(2, cands.size()) && resolved == null; i++) {
+                            DoubanCandidate cand = cands.get(i);
+                            String[] kinds =
+                                    (cand.isTv || likelyTvSeries)
+                                            ? new String[] {"tv", "movie"}
+                                            : new String[] {"movie", "tv"};
+                            for (String kind : kinds) {
+                                String base =
+                                        "https://m.douban.com/rexxar/api/v2/"
+                                                + kind
+                                                + "/"
+                                                + cand.id;
+                                String referer =
+                                        "https://m.douban.com/movie/subject/" + cand.id + "/";
+                                String subjectJson = httpGetText(base, referer, true, 3800);
+                                if (subjectJson == null || !subjectJson.trim().startsWith("{")) {
+                                    continue;
+                                }
+                                String creditsJson =
+                                        httpGetText(base + "/credits", referer, true, 3800);
+                                SubjectDetails parsed =
+                                        parseDoubanSubjectJson(subjectJson, creditsJson);
+                                if (!parsed.year.isEmpty()
+                                        || !parsed.countries.isEmpty()
+                                        || parsed.episodesCount > 0
+                                        || !parsed.cast.isEmpty()
+                                        || !parsed.intro.isEmpty()
+                                        || !parsed.posterUrl.isEmpty()) {
+                                    resolved = parsed;
+                                    if (parsed.doubanScore >= 2.0) {
+                                        DOUBAN_RATING_CACHE.put(
+                                                normTarget + "#" + cleanYear, parsed.doubanScore);
+                                        DOUBAN_RATING_CACHE.put(
+                                                normTarget + "#", parsed.doubanScore);
+                                    }
+                                    if (parsed.rtPercent > 0) {
+                                        RT_RATING_CACHE.put(
+                                                normTarget + "#" + cleanYear, parsed.rtPercent);
+                                        RT_RATING_CACHE.put(normTarget + "#", parsed.rtPercent);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (Exception ignored) {
+                    } finally {
+                        if (resolved != null) {
+                            SUBJECT_DETAILS_CACHE.put(cacheKey, resolved);
+                        }
+                        java.util.List<MainActivity.Done<SubjectDetails>> waiters =
+                                INFLIGHT_SUBJECT_DETAILS.remove(cacheKey);
+                        if (waiters != null && resolved != null) {
+                            for (MainActivity.Done<SubjectDetails> cb : waiters) {
+                                try {
+                                    cb.accept(resolved);
+                                } catch (Exception ignored) {
+                                }
+                            }
+                        }
+                    }
+                });
+    }
+
     private static void collectVerifiedBilibiliVerticalCovers(
             String title, String year, Set<String> out) {
         String normTarget = normalizeForStrictCompare(title);
@@ -1418,43 +1899,60 @@ final class ImmersivePoster extends FrameLayout {
     }
 
     private static void collectVerifiedDoubanStills(
-            String title, String year, String actor, String director, Set<String> out) {
+            String title,
+            String year,
+            String actor,
+            String director,
+            boolean likelyTvSeries,
+            Set<String> out) {
         try {
             java.util.List<DoubanCandidate> cands = findVerifiedDoubanSubjects(title, year);
             if (cands.isEmpty()) return;
 
             for (int cIdx = 0; cIdx < Math.min(3, cands.size()) && out.isEmpty(); cIdx++) {
-                String bestId = cands.get(cIdx).id;
+                DoubanCandidate cand = cands.get(cIdx);
+                String bestId = cand.id;
                 if (bestId == null || bestId.isEmpty()) continue;
 
-                String photosUrl =
-                        "https://m.douban.com/rexxar/api/v2/movie/" + bestId + "/photos?count=20";
-                String photosJson =
-                        httpGetText(
-                                photosUrl,
-                                "https://m.douban.com/movie/subject/" + bestId + "/",
-                                true,
-                                4500);
-                if (photosJson == null || !photosJson.trim().startsWith("{")) continue;
-                JSONObject root = new JSONObject(photosJson);
-                JSONArray photos = root.optJSONArray("photos");
-                if (photos == null || photos.length() == 0) continue;
+                String[] kinds =
+                        (cand.isTv || likelyTvSeries)
+                                ? new String[] {"tv", "movie"}
+                                : new String[] {"movie", "tv"};
+                for (String kind : kinds) {
+                    if (!out.isEmpty()) break;
+                    String photosUrl =
+                            "https://m.douban.com/rexxar/api/v2/"
+                                    + kind
+                                    + "/"
+                                    + bestId
+                                    + "/photos?count=20";
+                    String photosJson =
+                            httpGetText(
+                                    photosUrl,
+                                    "https://m.douban.com/movie/subject/" + bestId + "/",
+                                    true,
+                                    4500);
+                    if (photosJson == null || !photosJson.trim().startsWith("{")) continue;
+                    JSONObject root = new JSONObject(photosJson);
+                    JSONArray photos = root.optJSONArray("photos");
+                    if (photos == null || photos.length() == 0) continue;
 
-                int added = 0;
-                for (int i = 0; i < photos.length() && added < 4; i++) {
-                    JSONObject p = photos.optJSONObject(i);
-                    if (p == null) continue;
-                    JSONObject img = p.optJSONObject("image");
-                    if (img == null) continue;
-                    JSONObject large = img.optJSONObject("large");
-                    if (large == null) large = img.optJSONObject("normal");
-                    if (large == null) continue;
-                    int w = large.optInt("width", 0);
-                    int h = large.optInt("height", 0);
-                    String u = large.optString("url", "").trim();
-                    if (w >= 600 && h >= 330 && w >= h * 1.18f && !u.isEmpty()) {
-                        out.add(ImageLoader.upgradePosterUrl(u, true));
-                        added++;
+                    int added = 0;
+                    for (int i = 0; i < photos.length() && added < 4; i++) {
+                        JSONObject p = photos.optJSONObject(i);
+                        if (p == null) continue;
+                        JSONObject img = p.optJSONObject("image");
+                        if (img == null) continue;
+                        JSONObject large = img.optJSONObject("large");
+                        if (large == null) large = img.optJSONObject("normal");
+                        if (large == null) continue;
+                        int w = large.optInt("width", 0);
+                        int h = large.optInt("height", 0);
+                        String u = large.optString("url", "").trim();
+                        if (w >= 600 && h >= 330 && w >= h * 1.18f && !u.isEmpty()) {
+                            out.add(ImageLoader.upgradePosterUrl(u, true));
+                            added++;
+                        }
                     }
                 }
             }
@@ -1587,31 +2085,45 @@ final class ImmersivePoster extends FrameLayout {
     }
 
     private static byte[] downloadImageBytes(String urlStr, int timeoutMs) {
-        HttpURLConnection conn = null;
-        try {
-            conn = (HttpURLConnection) new URL(urlStr).openConnection();
-            conn.setConnectTimeout(timeoutMs);
-            conn.setReadTimeout(timeoutMs);
-            conn.setInstanceFollowRedirects(true);
-            conn.setRequestProperty(
-                    "User-Agent",
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
-            ImageLoader.applyArtworkHeaders(conn, urlStr, null);
-            try (InputStream in = conn.getInputStream();
-                    ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) != -1) {
-                    if (out.size() + n > 8 * 1024 * 1024) return null;
-                    out.write(buf, 0, n);
+        if (urlStr == null || urlStr.trim().isEmpty()) return null;
+        String currentUrl = urlStr.trim();
+        if (currentUrl.startsWith("//")) currentUrl = "https:" + currentUrl;
+        for (int hop = 0; hop < 4; hop++) {
+            HttpURLConnection conn = null;
+            try {
+                conn = (HttpURLConnection) new URL(currentUrl).openConnection();
+                conn.setConnectTimeout(timeoutMs);
+                conn.setReadTimeout(timeoutMs);
+                conn.setInstanceFollowRedirects(false);
+                conn.setRequestProperty(
+                        "User-Agent",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+                ImageLoader.applyArtworkHeaders(conn, currentUrl, null);
+                int code = conn.getResponseCode();
+                if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                    String loc = conn.getHeaderField("Location");
+                    if (loc == null || loc.trim().isEmpty()) return null;
+                    currentUrl = new URL(new URL(currentUrl), loc.trim()).toString();
+                    continue;
                 }
-                return out.toByteArray();
+                if (code < 200 || code >= 300) return null;
+                try (InputStream in = conn.getInputStream();
+                        ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        if (out.size() + n > 8 * 1024 * 1024) return null;
+                        out.write(buf, 0, n);
+                    }
+                    return out.toByteArray();
+                }
+            } catch (Exception e) {
+                return null;
+            } finally {
+                if (conn != null) conn.disconnect();
             }
-        } catch (Exception e) {
-            return null;
-        } finally {
-            if (conn != null) conn.disconnect();
         }
+        return null;
     }
 
     final class Art extends ImageView {
@@ -1666,6 +2178,7 @@ final class ImmersivePoster extends FrameLayout {
         Bitmap wideBlurredBitmap;
         int ambientColor = 0xff090c14;
         float scrollProgress = 0f;
+        boolean leftAlignedHero = false;
         final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         final Paint maskPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         final Paint veilPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -1707,7 +2220,7 @@ final class ImmersivePoster extends FrameLayout {
                 return;
             }
 
-            float winH = h * 0.80f;
+            float winH = leftAlignedHero ? h * 0.88f : h * 0.80f;
             Bitmap horizontalHero = null;
             if (wideBitmap != null && !wideBitmap.isRecycled()) {
                 horizontalHero = wideBitmap;
@@ -1728,6 +2241,31 @@ final class ImmersivePoster extends FrameLayout {
                 paint.setAlpha(255);
             }
 
+            int r = Color.red(bg);
+            int g = Color.green(bg);
+            int b = Color.blue(bg);
+
+            // Apple TV+ cinema directional left vignette for left-aligned hero typography
+            if (leftAlignedHero) {
+                veilPaint.setShader(
+                        new LinearGradient(
+                                0,
+                                0,
+                                w * 0.74f,
+                                0,
+                                new int[] {
+                                    Color.argb(236, r, g, b),
+                                    Color.argb(204, r, g, b),
+                                    Color.argb(122, r, g, b),
+                                    Color.argb(28, r, g, b),
+                                    Color.argb(0, r, g, b)
+                                },
+                                new float[] {0f, 0.30f, 0.56f, 0.82f, 1f},
+                                Shader.TileMode.CLAMP));
+                c.drawRect(0, 0, w * 0.75f, h, veilPaint);
+                veilPaint.setShader(null);
+            }
+
             // Top floating navigation bar subtle legibility scrim
             veilPaint.setShader(
                     new LinearGradient(
@@ -1735,36 +2273,34 @@ final class ImmersivePoster extends FrameLayout {
                             0,
                             0,
                             h * 0.16f,
-                            new int[] {0x74000000, 0x26000000, 0x00000000},
+                            new int[] {0x70000000, 0x24000000, 0x00000000},
                             new float[] {0f, 0.55f, 1f},
                             Shader.TileMode.CLAMP));
             c.drawRect(0, 0, w, h * 0.16f, veilPaint);
             veilPaint.setShader(null);
 
             // Bottom lock-in gradient into ambientColor so the episode shelf sits on a pure surface
-            int r = Color.red(bg);
-            int g = Color.green(bg);
-            int b = Color.blue(bg);
+            float fadeStart = leftAlignedHero ? winH * 0.42f : winH * 0.46f;
             veilPaint.setShader(
                     new LinearGradient(
                             0,
-                            winH * 0.46f,
+                            fadeStart,
                             0,
                             winH,
                             new int[] {
                                 Color.argb(0, r, g, b),
-                                Color.argb(96, r, g, b),
-                                Color.argb(215, r, g, b),
+                                Color.argb(104, r, g, b),
+                                Color.argb(220, r, g, b),
                                 Color.argb(255, r, g, b)
                             },
-                            new float[] {0f, 0.45f, 0.82f, 1f},
+                            new float[] {0f, 0.44f, 0.80f, 1f},
                             Shader.TileMode.CLAMP));
-            c.drawRect(0, winH * 0.46f, w, winH + 2f, veilPaint);
+            c.drawRect(0, fadeStart, w, winH + 2f, veilPaint);
             veilPaint.setShader(null);
 
             // Scroll-driven ambient veil when user scrolls down into the episode grid
             if (scrollProgress > 0.005f) {
-                int veilAlpha = Math.min(238, Math.round(scrollProgress * 238f));
+                int veilAlpha = Math.min(240, Math.round(scrollProgress * 240f));
                 veilPaint.setColor(Color.argb(veilAlpha, r, g, b));
                 c.drawRect(0, 0, w, winH, veilPaint);
             }
@@ -1852,11 +2388,17 @@ final class ImmersivePoster extends FrameLayout {
             }
 
             // 2. Crisp vertical poster scaled strictly by height (NEVER stretched or zoomed to 16:9
-            // width)
+            // width). In leftAlignedHero mode, position subtly right of center so the left-aligned
+            // hero stack enjoys breathing room while the right side displays the full poster
+            // cleanly.
             float scale = (winH * 0.96f) / bh;
             float dw = bw * scale;
             float dh = bh * scale;
-            float dx = (w - dw) * 0.5f;
+            float dx =
+                    leftAlignedHero
+                            ? Math.max(
+                                    w * 0.36f, Math.min(w - dw - w * 0.04f, w * 0.68f - dw * 0.5f))
+                            : (w - dw) * 0.5f;
             float dy = 0f;
             dstRect.set(dx, dy, dx + dw, dy + dh);
 

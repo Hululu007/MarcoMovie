@@ -6,7 +6,7 @@ JDK=Path(os.environ.get('MARCOMOVIE_JDK',os.environ.get('JAVA_HOME', 'missing-jd
 test=ROOT/'android/tests';out=test/'js-player-classes';out.mkdir(exist_ok=True)
 deps=prepare()
 classpath=os.pathsep.join(map(str,deps))
-sources=[ROOT/'android/src/main/java/com/pilipala/marcomovie'/f for f in ('Cms.java','RequestScope.java','SourceEngine.java','JsEngine.java','QuickJsDeadline.java','LocalSourcePackage.java','LiveCatalog.java','ProxyAddress.java')]
+sources=[ROOT/'android/src/main/java/com/pilipala/marcomovie'/f for f in ('Cms.java','RequestScope.java','SourceEngine.java','JsEngine.java','QuickJsDeadline.java','LocalSourcePackage.java','LiveQualityPolicy.java','LiveCatalog.java','ProxyAddress.java')]
 with tempfile.TemporaryDirectory(prefix='js-http-shims-') as tmp:
     shim=Path(tmp)
     base64=shim/'android/util/Base64.java';base64.parent.mkdir(parents=True)

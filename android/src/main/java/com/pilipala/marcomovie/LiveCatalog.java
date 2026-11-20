@@ -87,14 +87,24 @@ public final class LiveCatalog {
 
     public static List<Source> sourcesFor(
             String configRaw, String configOrigin, String customUrl, String customName) {
+        return sourcesFor(configRaw, configOrigin, "", customUrl, customName);
+    }
+
+    public static List<Source> sourcesFor(
+            String configRaw,
+            String configOrigin,
+            String customSourcesJson,
+            String customUrl,
+            String customName) {
         List<Source> out = new ArrayList<>();
-        String trimmedCustom = customUrl == null ? "" : customUrl.trim();
-        if (!trimmedCustom.isEmpty()) {
+        List<LiveQualityPolicy.CustomLiveSource> customs =
+                LiveQualityPolicy.parseCustomSources(customSourcesJson, customUrl, customName);
+        for (LiveQualityPolicy.CustomLiveSource item : customs) {
+            if (item.url.isEmpty()) continue;
             Source custom = new Source();
-            custom.name = customName == null ? "" : customName.trim();
-            if (custom.name.isEmpty()) custom.name = "自定义直播源";
-            custom.url = trimmedCustom;
-            custom.origin = trimmedCustom;
+            custom.name = item.name.isEmpty() ? "自定义直播源" : item.name;
+            custom.url = item.url;
+            custom.origin = item.url;
             custom.headers.put("User-Agent", Cms.USER_AGENT);
             out.add(custom);
         }

@@ -1,3 +1,10 @@
+## 2026-11-19 鸿蒙智慧屏 Apple TV 同款柔光大屏 UI、全端沉浸式详情与选集重构、无 Node 嵌入式 CatPaw/DRPY/Guard 运行时（Apple TV 0.1.1 · HarmonyOS NEXT 0.1.1）
+
+- [Apple TV 0.1.1](docs/releases/appletv-v0.1.1.md) · [HarmonyOS NEXT 0.1.1](docs/releases/harmonyos-v0.1.1.md)
+- **修复鸿蒙端“安装包缺少 CatPaw 本机运行组件”并双端补齐嵌入式 QuickJS-NG DRPY2 / Guard 运行时**：鸿蒙端新增纯 Dart + QuickJS-NG 进程内运行引擎（`catpaw_embedded_engine.dart` / `catpaw_crypto.dart`）直接加载包内 `libquickjs_c_bridge_plugin.so` 与 `37` 项 `assets/catpaw/` 资产，彻底摆脱外部 Node 依赖；Apple TV 端同步新增 `CatPawCrypto.swift` + `DrpyGuardHost.swift` 并在 `.ipa` 内置 `26` 项 `catpaw/` 与 `6` 项 `js-host/` 资产。
+- **鸿蒙智慧屏 UI 1:1 对齐 Apple TV 客厅视觉规范**：引入 `极光青翠`、`暮色流光`、`深海晨雾`、`暖金影院`、`星云紫夜`、`冰川银雾` 6 套渐变柔光主题、3 档柔光浓度与海报色彩氛围联动；重构居中悬浮玻璃顶栏、16:9 宽屏继续观看（修复默认焦点导致分类胶囊被遮挡问题）、6 列精选片库、玻璃直播/搜索/片库与双栏系统设置工坊。
+- **Apple TV 与鸿蒙双端沉浸式剧集详情页 & Apple TV 选集页布局重构**：双端剧集详情升级为全屏剧照背景 + 多段渐隐遮罩 + 底部磨砂线路/选集坞（含 `4K 云盘` 与 `HLS` 徽标）；重构 Apple TV `EpisodeSelectionView` 为独立顶栏 + 线路切换 + 每页 20 集分组胶囊 + 5×4 零溢出玻璃网格。
+
 ## 2026-11-19 iPad 全屏沉浸播放、设置页卡片呼吸感、首页秒开缓存与片源/封面精准度升级（iOS / iPadOS 0.5.33）
 
 - [iOS / iPadOS 0.5.33](docs/releases/ios-v0.5.33.md)

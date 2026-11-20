@@ -56,8 +56,8 @@ class PrepareOhosTests(unittest.TestCase):
             self.assertFalse(prepare_ohos._copy_bytes_idempotent(icon_master, app_icon))
 
             app_cfg = prepare_ohos.load_json5(sandbox / "ohos" / "AppScope" / "app.json5")["app"]
-            self.assertEqual(app_cfg["versionName"], "0.1.0")
-            self.assertEqual(app_cfg["versionCode"], 1000001)
+            self.assertEqual(app_cfg["versionName"], prepare_ohos.DEFAULT_OHOS_VERSION_NAME)
+            self.assertEqual(app_cfg["versionCode"], prepare_ohos.DEFAULT_OHOS_VERSION_CODE)
 
             # 2) Explicit harmonyos entry in edition-versions.json
             (sandbox / "edition-versions.json").write_text(

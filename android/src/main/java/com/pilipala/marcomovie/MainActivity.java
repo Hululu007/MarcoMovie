@@ -977,16 +977,19 @@ public final class MainActivity extends Activity {
         root.setBackgroundColor(DARK);
         root.addView(ImageLoader.createAtmosphere(this), new FrameLayout.LayoutParams(-1, -1));
         homeAmbient = null;
-        if (navigation
-                && prefs.getBoolean(Prefs.HOME_AMBIENT, true)
-                && !prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false)) {
+        int tvBgMode = HomeAmbient.effectiveBgMode(this);
+        boolean wantAmbient =
+                isTvDevice()
+                        ? (tvBgMode == Prefs.BG_MODE_ADAPTIVE || tvBgMode == Prefs.BG_MODE_GRADIENT)
+                        : (navigation
+                                && prefs.getBoolean(Prefs.HOME_AMBIENT, true)
+                                && !prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false));
+        if (wantAmbient) {
             homeAmbient = new HomeAmbient(this);
-            if (isTvDevice())
-                homeAmbient.setStrength(
-                        Prefs.tvAmbientStrength(prefs.getInt(Prefs.TV_AMBIENT_PERCENT, 100)));
             root.addView(homeAmbient, new FrameLayout.LayoutParams(-1, -1));
         }
-        if (navigation) root.addView(homeGradient(), new FrameLayout.LayoutParams(-1, -1));
+        if (navigation || isTvDevice())
+            root.addView(homeGradient(), new FrameLayout.LayoutParams(-1, -1));
         scroll = new TvScrollView(this);
         scroll.setClipChildren(false);
         scroll.setClipToPadding(false);
@@ -1091,14 +1094,23 @@ public final class MainActivity extends Activity {
      * side shading. Sits above the poster colors or wallpaper and below all content.
      */
     View homeGradient() {
+        boolean glowActive = homeAmbient != null && homeAmbient.getVisibility() == View.VISIBLE;
         GradientDrawable vertical =
                 new GradientDrawable(
                         GradientDrawable.Orientation.TOP_BOTTOM,
-                        new int[] {0x3a3b5a80, 0x0d1a2233, 0x00101013, 0x8c0a0a0d, 0xe60a0a0d});
+                        glowActive
+                                ? new int[] {
+                                    0x10000000, 0x00000000, 0x08060910, 0x22060910, 0x48060910
+                                }
+                                : new int[] {
+                                    0x1c000000, 0x00000000, 0x18080a0f, 0x66080a0f, 0xb8080a0f
+                                });
         GradientDrawable sides =
                 new GradientDrawable(
                         GradientDrawable.Orientation.LEFT_RIGHT,
-                        new int[] {0x47000000, 0x00000000, 0x00000000, 0x38000000});
+                        glowActive
+                                ? new int[] {0x22000000, 0x00000000, 0x00000000, 0x14000000}
+                                : new int[] {0x38000000, 0x00000000, 0x00000000, 0x26000000});
         View scrim = new View(this);
         scrim.setTag("home-gradient");
         scrim.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
