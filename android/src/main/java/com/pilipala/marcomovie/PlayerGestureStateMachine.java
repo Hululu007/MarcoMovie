@@ -418,6 +418,16 @@ public final class PlayerGestureStateMachine {
             return false;
         }
 
+        // Defensively clear any orphaned active drag/boost gesture before a fresh single-pointer
+        // stream begins so lost UP/CANCEL events can never leave speed or seek stuck.
+        if (state == State.HORIZONTAL_SEEK
+                || state == State.VERTICAL_BRIGHTNESS
+                || state == State.VERTICAL_VOLUME
+                || state == State.LONG_PRESS_SPEED
+                || state == State.SPEED_LOCK_READY) {
+            cancel(InterruptReason.ACTION_CANCEL, nowMs);
+        }
+
         // Flush expired timers first in case caller didn't tick right before down.
         onTick(nowMs);
 
@@ -719,6 +729,18 @@ public final class PlayerGestureStateMachine {
             transition(restingState());
             listener.onDoubleTapPlayPause();
         }
+    }
+
+    /**
+     * Re-evaluates scheduled timers with a fresh runtime environment snapshot so external pauses,
+     * audio-focus loss, screen lock, or PiP transitions occurring during the 350ms hold window
+     * prevent stale long-press speed activation.
+     */
+    public void onTick(long nowMs, Env currentEnv) {
+        if (currentEnv != null) {
+            lastEnv = currentEnv;
+        }
+        onTick(nowMs);
     }
 
     public void onTick(long nowMs) {

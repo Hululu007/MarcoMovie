@@ -13,11 +13,14 @@ import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import com.pilipala.marcomovie.hud.PlaybackStateProbe;
 import com.pilipala.marcomovie.hud.PlayerHudPrefs;
 import com.pilipala.marcomovie.hud.SpeedLockCapsule;
 import java.util.Locale;
@@ -45,17 +48,24 @@ final class TouchPlayerGesture implements View.OnTouchListener {
     private float startVolume = 0.5f;
     private float miniDownX, miniDownY;
     private boolean miniTapCandidate;
+    private boolean briefNoticeActive;
+    private PlayerGestureStateMachine.InterruptReason activeCancelReason;
 
     private final Runnable fsmTickRunnable = this::handleFsmTick;
     private final Runnable hideNoticeRunnable = this::handleHideNotice;
     private final Runnable runtimeSyncRunnable = this::syncRuntimeState;
 
     private void handleFsmTick() {
-        fsm.onTick(SystemClock.uptimeMillis());
+        if (a.touchPlayerGesture != this) return;
+        syncRuntimeState();
+        long nowMs = SystemClock.uptimeMillis();
+        PlayerGestureStateMachine.Env freshEnv = buildEnv(0f, 0f, false);
+        fsm.onTick(nowMs, freshEnv);
         scheduleNextFsmTick();
     }
 
     private void handleHideNotice() {
+        briefNoticeActive = false;
         PlayerGestureStateMachine.State st = fsm.getState();
         if (st == PlayerGestureStateMachine.State.IDLE
                 || st == PlayerGestureStateMachine.State.LOCKED_IDLE
@@ -181,6 +191,8 @@ final class TouchPlayerGesture implements View.OnTouchListener {
                     @Override
                     public void onViewDetachedFromWindow(View v) {
                         a.ui.removeCallbacks(runtimeSyncRunnable);
+                        a.ui.removeCallbacks(hideNoticeRunnable);
+                        a.ui.removeCallbacks(fsmTickRunnable);
                         if (focusRegistered[0] && Build.VERSION.SDK_INT >= 18) {
                             ViewTreeObserver vto = v.getViewTreeObserver();
                             if (vto != null && vto.isAlive()) {
@@ -265,7 +277,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
             @Override
             public void onSeekMove(float dx, float stepDx, float rawX, long nowMs) {
                 if (a.player == null || !a.prepared || durationMs <= 0) return;
-                int width = Math.max(1, a.windowWidth());
+                int width = effectiveHostWidth();
                 long dtMs = Math.max(1L, nowMs - lastMoveTimeMs);
                 lastMoveTimeMs = nowMs;
                 float vx = (stepDx * 1000f) / dtMs;
@@ -339,15 +351,20 @@ final class TouchPlayerGesture implements View.OnTouchListener {
 
             @Override
             public void onSeekCancel() {
-                if (a.playbackControls != null) {
-                    a.playbackControls.touchSeeking = false;
-                }
-                if (a.playerChrome != null && a.playerChrome.seekHint != null) {
-                    a.playerChrome.seekHint.setText("");
-                    a.playerChrome.seekHint.setVisibility(View.GONE);
-                }
-                if (a.playerChrome != null && a.playerChrome.progressOnlyMode) {
-                    a.showControls(false);
+                if (a.touchPlayerGesture == TouchPlayerGesture.this) {
+                    if (a.playbackControls != null) {
+                        a.playbackControls.touchSeeking = false;
+                    }
+                    if (a.playerChrome != null && a.playerChrome.seekHint != null) {
+                        a.playerChrome.seekHint.setText("");
+                        a.playerChrome.seekHint.setVisibility(View.GONE);
+                    }
+                    if (a.playerChrome != null
+                            && a.playerChrome.progressOnlyMode
+                            && activeCancelReason
+                                    != PlayerGestureStateMachine.InterruptReason.EXIT_PLAYER) {
+                        a.showControls(false);
+                    }
                 }
                 hideHud();
             }
@@ -361,7 +378,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
 
             @Override
             public void onBrightnessMove(float dy) {
-                int height = Math.max(1, a.windowHeight());
+                int height = effectiveHostHeight();
                 float level = SeekGesture.dragVerticalLevel(startBrightness, dy, height);
                 WindowManager.LayoutParams attrs = a.getWindow().getAttributes();
                 attrs.screenBrightness = Math.max(0.02f, level);
@@ -378,7 +395,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
 
             @Override
             public void onVolumeMove(float dy) {
-                int height = Math.max(1, a.windowHeight());
+                int height = effectiveHostHeight();
                 float level = SeekGesture.dragVerticalLevel(startVolume, dy, height);
                 AudioManager audio = (AudioManager) a.getSystemService(Context.AUDIO_SERVICE);
                 if (audio != null) {
@@ -425,7 +442,10 @@ final class TouchPlayerGesture implements View.OnTouchListener {
 
             @Override
             public void onSpeedBoostEnd(float restoredSpeed, boolean cancelled) {
-                applyPlayerSpeedSafely(restoredSpeed);
+                if (activeCancelReason != PlayerGestureStateMachine.InterruptReason.EXIT_PLAYER
+                        || a.touchPlayerGesture == TouchPlayerGesture.this) {
+                    applyPlayerSpeedSafely(restoredSpeed);
+                }
                 speedLockCapsule.hide();
             }
 
@@ -433,17 +453,70 @@ final class TouchPlayerGesture implements View.OnTouchListener {
             public void onSpeedUnlocked(float restoredSpeed) {
                 speedLockCapsule.hide();
                 if (restoredSpeed > 0f) {
-                    applyPlayerSpeedSafely(restoredSpeed);
-                    showBriefNotice("已恢复 " + SpeedLockCapsule.formatSpeed(restoredSpeed) + " 播放");
+                    if (activeCancelReason != PlayerGestureStateMachine.InterruptReason.EXIT_PLAYER
+                            || a.touchPlayerGesture == TouchPlayerGesture.this) {
+                        applyPlayerSpeedSafely(restoredSpeed);
+                    }
+                    if (shouldShowUnlockNotice(activeCancelReason)) {
+                        showBriefNotice(
+                                "已恢复 " + SpeedLockCapsule.formatSpeed(restoredSpeed) + " 播放");
+                    }
                 }
             }
         };
     }
 
+    static boolean shouldShowUnlockNotice(PlayerGestureStateMachine.InterruptReason reason) {
+        return reason != PlayerGestureStateMachine.InterruptReason.EXIT_PLAYER
+                && reason != PlayerGestureStateMachine.InterruptReason.SCREEN_LOCKED;
+    }
+
+    static boolean shouldPreserveNoticeOnCancel(
+            PlayerGestureStateMachine.InterruptReason reason, boolean noticeActive) {
+        return noticeActive && reason == PlayerGestureStateMachine.InterruptReason.SCREEN_LOCKED;
+    }
+
+    static void mergeSystemGestureInsets(
+            PlayerGestureStateMachine.Env env,
+            int chromeLeft,
+            int chromeTop,
+            int chromeRight,
+            int chromeBottom,
+            int gestureLeft,
+            int gestureTop,
+            int gestureRight,
+            int gestureBottom) {
+        if (env == null) return;
+        env.systemGestureInsetLeftPx = Math.max(0, Math.max(chromeLeft, gestureLeft));
+        env.systemGestureInsetRightPx = Math.max(0, Math.max(chromeRight, gestureRight));
+        env.systemInsetTopPx = Math.max(0, Math.max(chromeTop, gestureTop));
+        env.systemInsetBottomPx = Math.max(0, Math.max(chromeBottom, gestureBottom));
+    }
+
+    static void disableMotionEventSplitting(ViewGroup group) {
+        if (group == null) return;
+        group.setMotionEventSplittingEnabled(false);
+    }
+
     static void attach(MainActivity activity, View surfaceView) {
         TouchPlayerGesture listener = new TouchPlayerGesture(activity);
         activity.touchPlayerGesture = listener;
+        disableMotionEventSplitting(activity.root);
+        disableMotionEventSplitting(activity.playbackLayer);
+        if (activity.playerChrome != null) {
+            disableMotionEventSplitting(activity.playerChrome.overlay);
+        }
         activity.root.setOnTouchListener(listener);
+    }
+
+    private int effectiveHostWidth() {
+        if (a.root != null && a.root.getWidth() > 0) return a.root.getWidth();
+        return Math.max(1, a.windowWidth());
+    }
+
+    private int effectiveHostHeight() {
+        if (a.root != null && a.root.getHeight() > 0) return a.root.getHeight();
+        return Math.max(1, a.windowHeight());
     }
 
     void updateSafeTop(int safeTopPx) {
@@ -470,10 +543,19 @@ final class TouchPlayerGesture implements View.OnTouchListener {
     }
 
     /**
+     * Proactively invoked right before locking the screen so SPEED_LOCKED unlocks immediately even
+     * though PlaybackController.setPlayerLocked() sets a.playerLocked after cancelActiveGesture().
+     */
+    void onScreenLockRequested() {
+        cancelWithReason(PlayerGestureStateMachine.InterruptReason.SCREEN_LOCKED);
+    }
+
+    /**
      * Synchronizes gesture/speed-lock state with external runtime transitions (miniMode/PiP entry,
      * Home backgrounding after focus loss, screen lock, or external pause/audio-focus loss).
      */
     void syncRuntimeState() {
+        if (a.touchPlayerGesture != this) return;
         boolean inPip = Build.VERSION.SDK_INT >= 24 && a.isInPictureInPictureMode();
         if (a.miniMode || inPip) {
             if (fsm.getState() != PlayerGestureStateMachine.State.IDLE
@@ -496,16 +578,18 @@ final class TouchPlayerGesture implements View.OnTouchListener {
             }
             return;
         }
+        if (fsm.getState() == PlayerGestureStateMachine.State.LOCKED_IDLE) {
+            fsm.setScreenLocked(false, SystemClock.uptimeMillis());
+        }
         if (fsm.isAnySpeedOverrideActive()) {
-            boolean playerPlaying = a.playing;
-            if (playerPlaying && a.player != null && a.prepared) {
-                try {
-                    playerPlaying = a.player.isPlaying();
-                } catch (Exception ignored) {
-                }
-            }
-            if (!playerPlaying) {
-                cancelWithReason(PlayerGestureStateMachine.InterruptReason.PLAYBACK_PAUSED);
+            PlaybackStateProbe.Snapshot snap =
+                    a.player != null && a.prepared ? PlaybackStateProbe.inspect(a.player) : null;
+            boolean intended = PlaybackStateProbe.isPlaybackIntended(a.playing, snap);
+            if (!intended) {
+                cancelWithReason(
+                        PlaybackStateProbe.isAudioFocusSuppressed(snap)
+                                ? PlayerGestureStateMachine.InterruptReason.AUDIO_FOCUS_LOST
+                                : PlayerGestureStateMachine.InterruptReason.PLAYBACK_PAUSED);
             }
         }
     }
@@ -519,9 +603,27 @@ final class TouchPlayerGesture implements View.OnTouchListener {
 
     private void cancelWithReason(PlayerGestureStateMachine.InterruptReason reason) {
         a.ui.removeCallbacks(fsmTickRunnable);
-        a.ui.removeCallbacks(hideNoticeRunnable);
+        boolean keepNotice = shouldPreserveNoticeOnCancel(reason, briefNoticeActive);
+        if (!keepNotice) {
+            a.ui.removeCallbacks(hideNoticeRunnable);
+            if (reason == PlayerGestureStateMachine.InterruptReason.EXIT_PLAYER
+                    || reason == PlayerGestureStateMachine.InterruptReason.PIP_OR_MINI
+                    || reason == PlayerGestureStateMachine.InterruptReason.BACKGROUND) {
+                hideHud();
+            }
+        }
         recycleVelocityTracker();
-        fsm.cancel(reason, SystemClock.uptimeMillis());
+        PlayerGestureStateMachine.InterruptReason prev = activeCancelReason;
+        activeCancelReason = reason;
+        try {
+            fsm.cancel(reason, SystemClock.uptimeMillis());
+        } finally {
+            activeCancelReason = prev;
+        }
+        if (reason == PlayerGestureStateMachine.InterruptReason.EXIT_PLAYER) {
+            a.ui.removeCallbacks(hideNoticeRunnable);
+            hideHud();
+        }
     }
 
     private void refreshConfigFromPrefs() {
@@ -569,7 +671,20 @@ final class TouchPlayerGesture implements View.OnTouchListener {
     }
 
     void showBriefNotice(String text) {
+        if (a.touchPlayerGesture != this) return;
+        // PlaybackController.setPlayerLocked(a, true) sets a.playerLocked = true right before
+        // calling showBriefNotice(); synchronize LOCKED_IDLE & unlock SPEED_LOCKED immediately
+        // without clobbering the notice we are about to show.
+        if (a.playerLocked
+                && (fsm.getState() != PlayerGestureStateMachine.State.LOCKED_IDLE
+                        || fsm.isAnySpeedOverrideActive())) {
+            cancelWithReason(PlayerGestureStateMachine.InterruptReason.SCREEN_LOCKED);
+        } else if (!a.playerLocked
+                && fsm.getState() == PlayerGestureStateMachine.State.LOCKED_IDLE) {
+            fsm.setScreenLocked(false, SystemClock.uptimeMillis());
+        }
         a.ui.removeCallbacks(hideNoticeRunnable);
+        briefNoticeActive = true;
         showHud(text, -1f);
         a.ui.postDelayed(hideNoticeRunnable, 1300L);
     }
@@ -577,6 +692,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
     private void showHud(String text, float progressFraction) {
         hud.setText(text);
         if (progressFraction >= 0f) {
+            briefNoticeActive = false;
             hudProgress.setProgressFraction(progressFraction);
             hudProgress.setVisibility(View.VISIBLE);
         } else {
@@ -586,6 +702,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
     }
 
     private void hideHud() {
+        briefNoticeActive = false;
         hudCard.setVisibility(View.GONE);
         hudProgress.setVisibility(View.GONE);
     }
@@ -621,23 +738,57 @@ final class TouchPlayerGesture implements View.OnTouchListener {
                 || isTouchInsideView(a.playerChrome.lockBtn, rawX, rawY);
     }
 
+    @SuppressWarnings("deprecation")
     private PlayerGestureStateMachine.Env buildEnv(float rawX, float rawY, boolean downEvent) {
         PlayerGestureStateMachine.Env env = new PlayerGestureStateMachine.Env();
         env.density = a.getResources().getDisplayMetrics().density;
-        env.screenWidthPx = Math.max(1, a.windowWidth());
-        env.screenHeightPx = Math.max(1, a.windowHeight());
-        if (a.playerChrome != null) {
-            env.systemGestureInsetLeftPx = a.playerChrome.windowInsets.left;
-            env.systemGestureInsetRightPx = a.playerChrome.windowInsets.right;
-            env.systemInsetTopPx = a.playerChrome.windowInsets.top;
-            env.systemInsetBottomPx = a.playerChrome.windowInsets.bottom;
+        env.screenWidthPx = effectiveHostWidth();
+        env.screenHeightPx = effectiveHostHeight();
+        int chromeLeft = a.playerChrome != null ? a.playerChrome.windowInsets.left : 0;
+        int chromeTop = a.playerChrome != null ? a.playerChrome.windowInsets.top : 0;
+        int chromeRight = a.playerChrome != null ? a.playerChrome.windowInsets.right : 0;
+        int chromeBottom = a.playerChrome != null ? a.playerChrome.windowInsets.bottom : 0;
+        int gestureLeft = 0;
+        int gestureTop = 0;
+        int gestureRight = 0;
+        int gestureBottom = 0;
+        if (Build.VERSION.SDK_INT >= 29 && a.root != null) {
+            WindowInsets rootInsets = a.root.getRootWindowInsets();
+            if (rootInsets != null) {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    android.graphics.Insets g =
+                            rootInsets.getInsets(WindowInsets.Type.systemGestures());
+                    gestureLeft = g.left;
+                    gestureTop = g.top;
+                    gestureRight = g.right;
+                    gestureBottom = g.bottom;
+                } else {
+                    android.graphics.Insets g = rootInsets.getSystemGestureInsets();
+                    gestureLeft = g.left;
+                    gestureTop = g.top;
+                    gestureRight = g.right;
+                    gestureBottom = g.bottom;
+                }
+            }
         }
+        mergeSystemGestureInsets(
+                env,
+                chromeLeft,
+                chromeTop,
+                chromeRight,
+                chromeBottom,
+                gestureLeft,
+                gestureTop,
+                gestureRight,
+                gestureBottom);
         env.screenLocked = a.playerLocked;
         boolean inPip = Build.VERSION.SDK_INT >= 24 && a.isInPictureInPictureMode();
         env.miniOrPip = a.miniMode || inPip;
         env.liveStream = a.isLive();
         env.prepared = a.prepared;
-        env.playing = a.playing;
+        PlaybackStateProbe.Snapshot snap =
+                a.player != null && a.prepared ? PlaybackStateProbe.inspect(a.player) : null;
+        env.playing = PlaybackStateProbe.isPlaybackIntended(a.playing, snap);
         env.durationMs =
                 a.player != null && a.prepared ? Math.max(0, a.player.getDuration()) : durationMs;
         env.controlsVisible = a.controlsVisible;
@@ -656,10 +807,14 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         int action = event.getActionMasked();
         int pointerCount = event.getPointerCount();
         int pointerId = event.getPointerId(0);
+        // View-local coordinates relative to a.root ensure split-screen / freeform windows match
+        // effectiveHostWidth/Height; keep rawX/rawY exclusively for getGlobalVisibleRect hit tests.
+        float localX = event.getX();
+        float localY = event.getY();
         float rawX = event.getRawX();
         float rawY = event.getRawY();
 
-        if (action == MotionEvent.ACTION_POINTER_DOWN) {
+        if (action == MotionEvent.ACTION_POINTER_DOWN || pointerCount > 1) {
             cancelWithReason(PlayerGestureStateMachine.InterruptReason.MULTI_TOUCH);
             return true;
         }
@@ -694,7 +849,8 @@ final class TouchPlayerGesture implements View.OnTouchListener {
                 startVolume = cur / (float) max;
             }
             PlayerGestureStateMachine.Env env = buildEnv(rawX, rawY, true);
-            boolean accepted = fsm.onPointerDown(pointerId, pointerCount, rawX, rawY, nowMs, env);
+            boolean accepted =
+                    fsm.onPointerDown(pointerId, pointerCount, localX, localY, nowMs, env);
             scheduleNextFsmTick();
             // Return false if ignored by edge guard so system back swipe works cleanly.
             return accepted || a.playerLocked;
@@ -703,14 +859,14 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         if (action == MotionEvent.ACTION_MOVE) {
             if (velocityTracker != null) velocityTracker.addMovement(event);
             PlayerGestureStateMachine.Env env = buildEnv(rawX, rawY, false);
-            fsm.onPointerMove(pointerId, pointerCount, rawX, rawY, nowMs, env);
+            fsm.onPointerMove(pointerId, pointerCount, localX, localY, nowMs, env);
             scheduleNextFsmTick();
             return true;
         }
 
         if (action == MotionEvent.ACTION_UP) {
             PlayerGestureStateMachine.Env env = buildEnv(rawX, rawY, false);
-            fsm.onPointerUp(pointerId, rawX, rawY, nowMs, env);
+            fsm.onPointerUp(pointerId, localX, localY, nowMs, env);
             recycleVelocityTracker();
             scheduleNextFsmTick();
             return true;

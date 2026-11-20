@@ -5,10 +5,14 @@ import com.pilipala.marcomovie.PlayerGestureStateMachine.Env;
 import com.pilipala.marcomovie.PlayerGestureStateMachine.InterruptReason;
 import com.pilipala.marcomovie.PlayerGestureStateMachine.State;
 import com.pilipala.marcomovie.hud.FastForwardScrubCapsule;
+import com.pilipala.marcomovie.hud.PlaybackStateProbe;
 import com.pilipala.marcomovie.hud.PlayerHudPrefs;
 import com.pilipala.marcomovie.hud.SkipCountdownPill;
 import com.pilipala.marcomovie.hud.SleepTimerSheet;
 import com.pilipala.marcomovie.hud.StartSpecBanner;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -213,6 +217,15 @@ public final class PlayerGestureChecks {
         testSleepTimerControllerPresetsWarningExtendAndExpiry();
         testPrefsNormalizersAndScrubFormatting();
         testRound2Regressions();
+        testGate1_S01_MultiTouchCrossViewOrphanGuard();
+        testGate1_S02_BufferingNotPausedAndHoldTickRecheck();
+        testGate1_S03_SkipCountdownSilentCancelOnPauseBackgroundCallPipLock();
+        testGate1_S05_TvSkipCountdownStartupFocusShowControlsAndBackRepeatGuard();
+        testGate1_M01_ScreenLockUnlocksSpeedLockedAndPreservesNoticeTimer();
+        testGate1_M02_SplitScreenLocalCoordsAndApi29SystemGestureInsets();
+        testGate1_M07_SlimProgressToggleDecoupledFromHorizontalSeekPreview();
+        testGate1_M08_SleepTimerTvReachabilityMobileSafeTopAndSessionReset();
+        testGate1_L01_ExitPlayerSkipsUnlockNoticeAndOwnershipGuard();
         System.out.println("ALL PASS (" + checks + " Android M2 HUD & gesture checks)");
     }
 
@@ -838,5 +851,442 @@ public final class PlayerGestureChecks {
         check(
                 sleep.onEpisodeCompleted() && !sleep.isActive() && !sleep.onEpisodeCompleted(),
                 "End-of-episode sleep timer fires once on outro skip and does not double-fire");
+    }
+
+    private static String readSourceFile(String relativePath) {
+        try {
+            return new String(Files.readAllBytes(Paths.get(relativePath)), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new AssertionError("Failed reading source: " + relativePath, e);
+        }
+    }
+
+    private static void testGate1_S01_MultiTouchCrossViewOrphanGuard() {
+        Spy spy = new Spy();
+        PlayerGestureStateMachine fsm = new PlayerGestureStateMachine(spy);
+        Env env = defaultEnv();
+        env.userNormalSpeed = 1.25f;
+
+        // 1. Multi-touch during active LONG_PRESS_SPEED cancels and restores userNormalSpeed
+        fsm.onPointerDown(0, 1, 500, 250, 1000, env);
+        fsm.onTick(1350, env);
+        check(
+                fsm.getState() == State.LONG_PRESS_SPEED,
+                "S-01 precondition: active LONG_PRESS_SPEED at 2.0x");
+        fsm.onPointerMove(0, 2, 500, 250, 1400, env);
+        check(
+                fsm.getState() == State.IDLE
+                        && !fsm.isAnySpeedOverrideActive()
+                        && spy.boostEnds == 1
+                        && spy.lastBoostEndCancelled
+                        && Math.abs(spy.lastRestoredSpeed - 1.25f) < 0.001f,
+                "S-01: multi-touch during LONG_PRESS_SPEED cancels and restores 1.25x");
+
+        // 2. Orphaned active gesture cleared defensively if a fresh single-finger ACTION_DOWN
+        // arrives after a child view swallowed prior stream
+        Spy orphanSpy = new Spy();
+        PlayerGestureStateMachine orphanFsm = new PlayerGestureStateMachine(orphanSpy);
+        orphanFsm.onPointerDown(0, 1, 500, 250, 2000, env);
+        orphanFsm.onTick(2350, env);
+        check(
+                orphanFsm.getState() == State.LONG_PRESS_SPEED,
+                "S-01 precondition: LONG_PRESS_SPEED active before fresh DOWN");
+        orphanFsm.onPointerDown(1, 1, 500, 250, 2600, env);
+        check(
+                orphanSpy.boostEnds == 1
+                        && orphanSpy.lastBoostEndCancelled
+                        && orphanFsm.getState() == State.DOWN_PENDING,
+                "S-01: fresh ACTION_DOWN defensively clears any orphaned LONG_PRESS_SPEED");
+
+        // 3. Verify motion event splitting is disabled and child controls proactively cancel
+        String touchSrc =
+                readSourceFile(
+                        "android/src/main/java/com/pilipala/marcomovie/TouchPlayerGesture.java");
+        String chromeSrc =
+                readSourceFile("android/src/main/java/com/pilipala/marcomovie/PlayerChrome.java");
+        String controlsSrc =
+                readSourceFile(
+                        "android/src/main/java/com/pilipala/marcomovie/PlaybackControls.java");
+        check(
+                touchSrc.contains("setMotionEventSplittingEnabled(false)")
+                        && touchSrc.contains("disableMotionEventSplitting(activity.root)")
+                        && touchSrc.contains("disableMotionEventSplitting(activity.playbackLayer)"),
+                "S-01: TouchPlayerGesture disables motion event splitting on root & playbackLayer");
+        check(
+                chromeSrc.contains("overlay.setMotionEventSplittingEnabled(false)")
+                        && chromeSrc.contains("cancelActiveTouchGesture()"),
+                "S-01: PlayerChrome disables splitting and cancels active gesture on child taps");
+        check(
+                controlsSrc.contains("dockOverlay.setMotionEventSplittingEnabled(false)")
+                        && controlsSrc.contains("a.touchPlayerGesture.cancelActiveGesture()"),
+                "S-01: PlaybackControls disables splitting and cancels gesture on seekbar/button");
+    }
+
+    private static void testGate1_S02_BufferingNotPausedAndHoldTickRecheck() {
+        // 1. Media3 STATE_BUFFERING with playWhenReady=true and no suppression MUST stay intended
+        check(
+                PlaybackStateProbe.isPlaybackIntended(
+                        true,
+                        true,
+                        true,
+                        PlaybackStateProbe.STATE_BUFFERING,
+                        PlaybackStateProbe.SUPPRESSION_NONE,
+                        false),
+                "S-02: Media3 STATE_BUFFERING with playWhenReady=true is NOT mistaken for paused");
+        check(
+                PlaybackStateProbe.isPlaybackIntended(
+                        true,
+                        true,
+                        true,
+                        PlaybackStateProbe.STATE_READY,
+                        PlaybackStateProbe.SUPPRESSION_NONE,
+                        true),
+                "S-02: Media3 STATE_READY with playWhenReady=true is intended to play");
+
+        // 2. Transient audio-focus loss or playWhenReady=false or STATE_ENDED MUST report paused
+        PlaybackStateProbe.Snapshot focusLostSnap =
+                new PlaybackStateProbe.Snapshot(
+                        true,
+                        true,
+                        PlaybackStateProbe.STATE_READY,
+                        PlaybackStateProbe.SUPPRESSION_TRANSIENT_AUDIO_FOCUS_LOSS,
+                        false);
+        check(
+                !PlaybackStateProbe.isPlaybackIntended(true, focusLostSnap)
+                        && PlaybackStateProbe.isAudioFocusSuppressed(focusLostSnap),
+                "S-02: transient audio-focus suppression reports not intended & focus suppressed");
+        check(
+                !PlaybackStateProbe.isPlaybackIntended(
+                        true,
+                        true,
+                        false,
+                        PlaybackStateProbe.STATE_READY,
+                        PlaybackStateProbe.SUPPRESSION_NONE,
+                        false),
+                "S-02: playWhenReady=false reports paused even if activityPlaying flag is stale");
+        check(
+                !PlaybackStateProbe.isPlaybackIntended(
+                        true,
+                        true,
+                        true,
+                        PlaybackStateProbe.STATE_ENDED,
+                        PlaybackStateProbe.SUPPRESSION_NONE,
+                        false),
+                "S-02: STATE_ENDED reports not playing");
+
+        // 3. handleFsmTick() at 350ms with refreshed Env (playing=false due to audio-focus loss
+        // after ACTION_DOWN) MUST NOT enter LONG_PRESS_SPEED
+        Spy spy = new Spy();
+        PlayerGestureStateMachine fsm = new PlayerGestureStateMachine(spy);
+        Env downEnv = defaultEnv();
+        downEnv.playing = true;
+        fsm.onPointerDown(0, 1, 500, 250, 1000, downEnv);
+        check(
+                fsm.getState() == State.DOWN_PENDING && fsm.isLongPressArmed(),
+                "S-02 precondition: long-press armed on ACTION_DOWN while playing");
+        Env tickEnv = defaultEnv();
+        tickEnv.playing = false;
+        fsm.onTick(1350, tickEnv);
+        check(
+                fsm.getState() == State.DOWN_PENDING && spy.boostStarts == 0,
+                "S-02: 350ms tick with refreshed playing=false never boosts to 2.0x");
+    }
+
+    private static void testGate1_S03_SkipCountdownSilentCancelOnPauseBackgroundCallPipLock() {
+        // 1. Lifecycle guard matrix
+        check(
+                PlaybackStateProbe.canRunSkipCountdown(
+                        true, false, false, false, true, true, false, false),
+                "S-03: skip countdown allowed in foreground active playback");
+        check(
+                !PlaybackStateProbe.canRunSkipCountdown(
+                        true, false, false, false, true, false, false, false),
+                "S-03: skip countdown blocked on pause / audio-focus loss");
+        check(
+                !PlaybackStateProbe.canRunSkipCountdown(
+                        false, false, false, false, true, true, false, false),
+                "S-03: skip countdown blocked in background (!foreground)");
+        check(
+                !PlaybackStateProbe.canRunSkipCountdown(
+                        true, false, true, false, true, true, false, false),
+                "S-03: skip countdown blocked in PiP");
+        check(
+                !PlaybackStateProbe.canRunSkipCountdown(
+                        true, true, false, false, true, true, false, false),
+                "S-03: skip countdown blocked in miniMode");
+        check(
+                !PlaybackStateProbe.canRunSkipCountdown(
+                        true, false, false, true, true, true, false, false),
+                "S-03: skip countdown blocked on screen lock");
+
+        // 2. Controller guard silently resets (STATE_IDLE, NOT STATE_CANCELLED) and blocks expiry
+        SkipCountdownPill.Controller ctl = new SkipCountdownPill.Controller();
+        ctl.start(false, 2_400_000, 1000L, true);
+        check(
+                !ctl.guardPlaybackCondition(false)
+                        && !ctl.isActive()
+                        && ctl.getState() == SkipCountdownPill.Controller.STATE_IDLE
+                        && !ctl.ownsTvFocus(),
+                "S-03: lifecycle guard silently resets outro countdown without marking cancelled");
+        check(
+                !ctl.tick(5000L) && ctl.getState() == SkipCountdownPill.Controller.STATE_IDLE,
+                "S-03: silently dismissed countdown never auto-triggers step(1) at 3000ms");
+
+        // 3. Re-evaluating cleanly after returning to foreground playback starts fresh countdown
+        ctl.start(false, 2_400_000, 6000L, true);
+        check(
+                ctl.isActive() && ctl.guardPlaybackCondition(true) && ctl.tick(9000L),
+                "S-03: foreground resume re-evaluates and completes outro skip cleanly");
+    }
+
+    private static void testGate1_S05_TvSkipCountdownStartupFocusShowControlsAndBackRepeatGuard() {
+        // 1. TV takes focus even when controlsVisible == true on startup/autoplay
+        check(
+                SkipCountdownPill.Controller.shouldTakeTvFocus(true, false),
+                "S-05: TV startup skip pill takes TV focus even when controlsVisible == true");
+        check(
+                !SkipCountdownPill.Controller.shouldTakeTvFocus(true, true),
+                "S-05: TV skip pill yields when another modal dialog is already open");
+        check(
+                !SkipCountdownPill.Controller.shouldTakeTvFocus(false, false),
+                "S-05: mobile touch skip pill never takes TV dialog focus");
+
+        // 2. OK / Confirm skips on UP and freezes timer during hold
+        SkipCountdownPill.Controller okCtl = new SkipCountdownPill.Controller();
+        okCtl.start(true, 90_000, 1000L, true);
+        check(
+                okCtl.handleTvKeyEvent(KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.ACTION_DOWN, 0)
+                                == SkipCountdownPill.Controller.KEY_CONSUMED
+                        && okCtl.isActive(),
+                "S-05: TV OK ACTION_DOWN is consumed while keeping pill active");
+        check(
+                okCtl.handleTvKeyEvent(KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.ACTION_UP, 0)
+                                == SkipCountdownPill.Controller.KEY_COMMIT_SKIP
+                        && okCtl.getState() == SkipCountdownPill.Controller.STATE_SKIPPED
+                        && !okCtl.ownsTvFocus(),
+                "S-05: TV OK ACTION_UP immediately commits skip and releases TV focus");
+
+        // 3. Long-press Back (repeatCount >= 1) swallows ALL repeats and cancels only on ACTION_UP
+        SkipCountdownPill.Controller backCtl = new SkipCountdownPill.Controller();
+        backCtl.start(true, 90_000, 2000L, true);
+        check(
+                backCtl.handleTvKeyEvent(KeyEvent.KEYCODE_BACK, KeyEvent.ACTION_DOWN, 0)
+                                == SkipCountdownPill.Controller.KEY_CONSUMED
+                        && backCtl.ownsTvFocus(),
+                "S-05: TV Back ACTION_DOWN(repeat=0) consumed while keeping dialogOpen/focus");
+        check(
+                backCtl.handleTvKeyEvent(KeyEvent.KEYCODE_BACK, KeyEvent.ACTION_DOWN, 1)
+                                == SkipCountdownPill.Controller.KEY_CONSUMED
+                        && backCtl.handleTvKeyEvent(KeyEvent.KEYCODE_BACK, KeyEvent.ACTION_DOWN, 2)
+                                == SkipCountdownPill.Controller.KEY_CONSUMED
+                        && backCtl.ownsTvFocus(),
+                "S-05: TV Back repeatCount >= 1 is swallowed so it never leaks to PiP/exit");
+        check(
+                !backCtl.tick(6000L) && backCtl.isActive(),
+                "S-05: countdown does not auto-skip while Back key is held down");
+        check(
+                backCtl.handleTvKeyEvent(KeyEvent.KEYCODE_BACK, KeyEvent.ACTION_UP, 0)
+                                == SkipCountdownPill.Controller.KEY_COMMIT_CANCEL
+                        && backCtl.getState() == SkipCountdownPill.Controller.STATE_CANCELLED
+                        && !backCtl.ownsTvFocus(),
+                "S-05: TV Back ACTION_UP cancels countdown cleanly and releases dialogOpen/focus");
+
+        // 4. D-pad key cancels on UP without leaking repeat into SeekGesture
+        SkipCountdownPill.Controller dpadCtl = new SkipCountdownPill.Controller();
+        dpadCtl.start(true, 90_000, 7000L, true);
+        check(
+                dpadCtl.handleTvKeyEvent(KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.ACTION_DOWN, 0)
+                                == SkipCountdownPill.Controller.KEY_CONSUMED
+                        && dpadCtl.handleTvKeyEvent(
+                                        KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.ACTION_DOWN, 1)
+                                == SkipCountdownPill.Controller.KEY_CONSUMED
+                        && dpadCtl.handleTvKeyEvent(
+                                        KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.ACTION_UP, 0)
+                                == SkipCountdownPill.Controller.KEY_COMMIT_CANCEL,
+                "S-05: TV D-pad cancels pill cleanly on UP without leaking repeats to seek");
+    }
+
+    private static void testGate1_M01_ScreenLockUnlocksSpeedLockedAndPreservesNoticeTimer() {
+        Spy spy = new Spy();
+        PlayerGestureStateMachine fsm = new PlayerGestureStateMachine(spy);
+        Env env = defaultEnv();
+        env.userNormalSpeed = 1.25f;
+
+        // Enter SPEED_LOCKED at 2.0x
+        fsm.onPointerDown(0, 1, 500, 300, 1000, env);
+        fsm.onTick(1350, env);
+        fsm.onPointerMove(0, 1, 500, 240, 1400, env);
+        fsm.onPointerUp(0, 500, 240, 1450, env);
+        check(
+                fsm.getState() == State.SPEED_LOCKED && fsm.isSpeedLocked(),
+                "M-01 precondition: SPEED_LOCKED active before locking screen");
+
+        // Immediate screen lock request unlocks SPEED_LOCKED and transitions directly to
+        // LOCKED_IDLE
+        fsm.cancel(InterruptReason.SCREEN_LOCKED, 1500);
+        check(
+                fsm.getState() == State.LOCKED_IDLE
+                        && !fsm.isSpeedLocked()
+                        && spy.speedUnlocks == 1
+                        && Math.abs(spy.lastUnlockedSpeed - 1.25f) < 0.001f,
+                "M-01: locking screen immediately unlocks SPEED_LOCKED and enters LOCKED_IDLE");
+
+        // Notice preservation invariant: SCREEN_LOCKED preserves active brief notice hide timer
+        check(
+                TouchPlayerGesture.shouldPreserveNoticeOnCancel(
+                        InterruptReason.SCREEN_LOCKED, true),
+                "M-01: SCREEN_LOCKED preserves active brief-notice auto-hide runnable");
+        check(
+                !TouchPlayerGesture.shouldShowUnlockNotice(InterruptReason.SCREEN_LOCKED),
+                "M-01: SCREEN_LOCKED suppresses redundant speed-restore toast");
+        check(
+                !TouchPlayerGesture.shouldPreserveNoticeOnCancel(InterruptReason.EXIT_PLAYER, true),
+                "M-01: EXIT_PLAYER cancels brief-notice runnable cleanly");
+    }
+
+    private static void testGate1_M02_SplitScreenLocalCoordsAndApi29SystemGestureInsets() {
+        // 1. Split-screen / freeform local coordinates (window 500x500 positioned at raw 540,960)
+        Spy spy = new Spy();
+        PlayerGestureStateMachine fsm = new PlayerGestureStateMachine(spy);
+        Env splitEnv = defaultEnv();
+        splitEnv.density = 1.0f;
+        splitEnv.screenWidthPx = 500f;
+        splitEnv.screenHeightPx = 500f;
+        // Raw screen coords (790, 1210) would fail edge guard, while view-local (250, 250) succeeds
+        check(
+                PlayerGestureStateMachine.isInEdgeOrSystemGuard(790f, 1210f, splitEnv),
+                "M-02 precondition: raw screen coords > split window fail edge guard");
+        check(
+                !PlayerGestureStateMachine.isInEdgeOrSystemGuard(250f, 250f, splitEnv)
+                        && fsm.onPointerDown(0, 1, 250f, 250f, 1000L, splitEnv),
+                "M-02: view-local coords relative to a.root work 100% in split-screen windows");
+
+        // 2. API 29 system gesture inset merging overrides zero chrome side insets
+        Env api29Env = defaultEnv();
+        api29Env.density = 1.0f;
+        api29Env.screenWidthPx = 1000f;
+        api29Env.screenHeightPx = 500f;
+        TouchPlayerGesture.mergeSystemGestureInsets(api29Env, 0, 24, 0, 20, 44, 0, 44, 32);
+        check(
+                api29Env.systemGestureInsetLeftPx == 44f
+                        && api29Env.systemGestureInsetRightPx == 44f
+                        && api29Env.systemInsetTopPx == 24f
+                        && api29Env.systemInsetBottomPx == 32f,
+                "M-02: mergeSystemGestureInsets combines API 29 system gesture insets via max()");
+        check(
+                PlayerGestureStateMachine.isInEdgeOrSystemGuard(35f, 250f, api29Env)
+                        && PlayerGestureStateMachine.isInEdgeOrSystemGuard(965f, 250f, api29Env),
+                "M-02: API 29 44px side gesture inset guards touches at 35px / width-35px");
+
+        // Verify TouchPlayerGesture uses event.getX()/getY() for FSM and getSystemGestureInsets()
+        String touchSrc =
+                readSourceFile(
+                        "android/src/main/java/com/pilipala/marcomovie/TouchPlayerGesture.java");
+        check(
+                touchSrc.contains("event.getX()")
+                        && touchSrc.contains("event.getY()")
+                        && touchSrc.contains("getSystemGestureInsets()"),
+                "M-02: TouchPlayerGesture passes view-local getX/getY and reads API 29 gesture insets");
+    }
+
+    private static void testGate1_M07_SlimProgressToggleDecoupledFromHorizontalSeekPreview() {
+        check(
+                PlayerChrome.resolveProgressOnlyMode(true, false),
+                "M-07: disabling player_slim_progress still allows progress-only horizontal seek");
+        check(
+                !PlayerChrome.resolveProgressOnlyMode(false, true),
+                "M-07: non-progress-only mode remains full controls");
+        check(
+                !PlayerChrome.shouldShowSlimProgressBar(false, false, false, true, 600_000, false),
+                "M-07: 2dp SlimProgressBar stays hidden when player_slim_progress is disabled");
+        check(
+                PlayerChrome.shouldShowSlimProgressBar(false, false, false, true, 600_000, true),
+                "M-07: 2dp SlimProgressBar shows when player_slim_progress is enabled & HUD hidden");
+    }
+
+    private static void testGate1_M08_SleepTimerTvReachabilityMobileSafeTopAndSessionReset() {
+        // (a) TV WarningPill D-pad Up reachability
+        check(
+                SleepTimerSheet.resolveActionUpFocusId(true, 9001, 1001) == 9001,
+                "M-08(a): visible WarningPill overrides self-locked modernTv nextFocusUpId");
+        check(
+                SleepTimerSheet.resolveActionUpFocusId(false, 9001, 1001) == 1001,
+                "M-08(a): hidden WarningPill restores fallback nextFocusUpId");
+
+        // (b) Mobile safe.top inset avoids notch/status bar clipping
+        check(
+                SleepTimerSheet.computeWarningTopMarginPx(false, 88, 2.0f) == 124,
+                "M-08(b): mobile sleepWarningPill topMargin adds safe.top (88 + 18dp*2 = 124px)");
+        check(
+                SleepTimerSheet.computeWarningTopMarginPx(false, 0, 2.0f) == 36,
+                "M-08(b): mobile sleepWarningPill keeps 18dp base when safe.top is 0");
+        check(
+                SleepTimerSheet.computeWarningTopMarginPx(true, 88, 2.0f) == 48,
+                "M-08(b): TV sleepWarningPill preserves 24dp topMargin");
+
+        // (c) Session-scoped sleep timer cleanup on exit/detach/new session
+        SleepTimerSheet.Controller sleep = new SleepTimerSheet.Controller();
+        sleep.selectPreset(SleepTimerSheet.MODE_15M, 10_000L);
+        // Exiting playback (not an in-place switch) immediately clears timer
+        sleep.onPlayerSessionClosed(false);
+        check(
+                !sleep.isActive() && !sleep.tick(2_000_000L),
+                "M-08(c): leaving playback clears sleep timer so a later video never pauses");
+
+        // Re-arm and verify abandoned timer cannot pause a brand-new playback session
+        sleep.selectPreset(SleepTimerSheet.MODE_15M, 10_000L);
+        sleep.onNewPlaybackSession(false, 2_000_000L);
+        check(
+                !sleep.isActive() && !sleep.tick(2_000_001L),
+                "M-08(c): new playback session without in-place switch resets stale sleep timer");
+
+        // In-place episode switch preserves active unexpired timer
+        sleep.selectPreset(SleepTimerSheet.MODE_15M, 10_000L);
+        sleep.onPlayerSessionClosed(true);
+        sleep.onNewPlaybackSession(true, 100_000L);
+        check(
+                sleep.isActive() && sleep.remainingMs(100_000L) == 810_000L,
+                "M-08(c): in-place episode switch preserves unexpired session sleep timer");
+
+        // Even an in-place switch whose timer already expired while loading cancels cleanly
+        sleep.onNewPlaybackSession(true, 2_000_000L);
+        check(
+                !sleep.isActive() && !sleep.tick(2_000_001L),
+                "M-08(c): already-expired timer on new playback session cancels instead of pausing");
+    }
+
+    private static void testGate1_L01_ExitPlayerSkipsUnlockNoticeAndOwnershipGuard() {
+        check(
+                !TouchPlayerGesture.shouldShowUnlockNotice(InterruptReason.EXIT_PLAYER),
+                "L-01: EXIT_PLAYER skips showBriefNotice so hideNoticeRunnable is not re-posted");
+        check(
+                TouchPlayerGesture.shouldShowUnlockNotice(InterruptReason.PLAYBACK_PAUSED)
+                        && TouchPlayerGesture.shouldShowUnlockNotice(
+                                InterruptReason.EPISODE_SWITCH),
+                "L-01: normal unlock reasons still display brief restore notice");
+
+        Spy spy = new Spy();
+        PlayerGestureStateMachine fsm = new PlayerGestureStateMachine(spy);
+        Env env = defaultEnv();
+        env.userNormalSpeed = 1.25f;
+        fsm.onPointerDown(0, 1, 500, 300, 1000, env);
+        fsm.onTick(1350, env);
+        fsm.onPointerMove(0, 1, 500, 240, 1400, env);
+        fsm.onPointerUp(0, 500, 240, 1450, env);
+        fsm.cancel(InterruptReason.EXIT_PLAYER, 1600);
+        check(
+                !fsm.isSpeedLocked()
+                        && fsm.getState() == State.IDLE
+                        && spy.speedUnlocks == 1
+                        && Math.abs(spy.lastUnlockedSpeed - 1.25f) < 0.001f,
+                "L-01: EXIT_PLAYER unlocks SPEED_LOCKED cleanly in FSM");
+
+        String touchSrc =
+                readSourceFile(
+                        "android/src/main/java/com/pilipala/marcomovie/TouchPlayerGesture.java");
+        check(
+                touchSrc.contains("a.touchPlayerGesture == TouchPlayerGesture.this")
+                        && touchSrc.contains("if (a.touchPlayerGesture != this) return;"),
+                "L-01: TouchPlayerGesture verifies ownership before mutating shared UI/state");
     }
 }

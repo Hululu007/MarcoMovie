@@ -34,12 +34,28 @@ public final class SkipCountdownPill extends LinearLayout {
         public static final int STATE_SKIPPED = 2;
         public static final int STATE_CANCELLED = 3;
 
+        public static final int KEY_IGNORED = 0;
+        public static final int KEY_CONSUMED = 1;
+        public static final int KEY_COMMIT_SKIP = 2;
+        public static final int KEY_COMMIT_CANCEL = 3;
+
         private int state = STATE_IDLE;
         private boolean intro;
         private int targetPositionMs;
         private long startTimeMs;
         private long remainingMs;
         private boolean ownsTvFocus;
+        private int pendingKeyCode = -1;
+        private boolean pausedForKeyHold;
+
+        /**
+         * On Android TV, the skip countdown pill takes TV focus whenever no modal dialog is
+         * already open—including during startup/autoplay when controls are initially visible—so OK
+         * skips immediately and Back/D-pad cancel cleanly without conflicting with timeline focus.
+         */
+        public static boolean shouldTakeTvFocus(boolean isTv, boolean hasModalDialog) {
+            return isTv && !hasModalDialog;
+        }
 
         public int getState() {
             return state;
@@ -82,20 +98,74 @@ public final class SkipCountdownPill extends LinearLayout {
             this.startTimeMs = nowMs;
             this.remainingMs = TOTAL_MS;
             this.ownsTvFocus = takeTvFocus;
+            this.pendingKeyCode = -1;
+            this.pausedForKeyHold = false;
             this.state = STATE_ACTIVE;
+        }
+
+        /**
+         * Evaluates whether countdown may continue under current playback/lifecycle conditions. If
+         * not allowed (paused, audio-focus loss, background, PiP, screen lock), resets silently to
+         * {@link #STATE_IDLE} (NOT {@link #STATE_CANCELLED}) so playback resume can re-evaluate.
+         *
+         * @return {@code true} if countdown remains active and allowed.
+         */
+        public boolean guardPlaybackCondition(boolean allowed) {
+            if (state != STATE_ACTIVE) return false;
+            if (!allowed) {
+                reset();
+                return false;
+            }
+            return true;
         }
 
         /** @return {@code true} when countdown expires and skip should execute now. */
         public boolean tick(long nowMs) {
             if (state != STATE_ACTIVE) return false;
+            if (pausedForKeyHold) return false;
             long elapsed = Math.max(0L, nowMs - startTimeMs);
             remainingMs = Math.max(0L, TOTAL_MS - elapsed);
             if (remainingMs <= 0L) {
                 state = STATE_SKIPPED;
                 ownsTvFocus = false;
+                pendingKeyCode = -1;
+                pausedForKeyHold = false;
                 return true;
             }
             return false;
+        }
+
+        /**
+         * Routes TV remote key events through the countdown without leaking long-press repeat
+         * events (e.g. Back repeatCount >= 1) to Activity back/PiP handlers after dismissal.
+         */
+        public int handleTvKeyEvent(int keyCode, int action, int repeatCount) {
+            if (state != STATE_ACTIVE) return KEY_IGNORED;
+            int intent = classifyTvKey(keyCode);
+            if (intent == 0) return KEY_IGNORED;
+            if (action == KeyEvent.ACTION_DOWN) {
+                if (repeatCount == 0 && pendingKeyCode < 0) {
+                    pendingKeyCode = keyCode;
+                    pausedForKeyHold = true;
+                }
+                return KEY_CONSUMED;
+            }
+            if (action == KeyEvent.ACTION_UP) {
+                if (pendingKeyCode < 0 || pendingKeyCode == keyCode) {
+                    pendingKeyCode = -1;
+                    pausedForKeyHold = false;
+                    if (intent == 1) {
+                        skipNow();
+                        return KEY_COMMIT_SKIP;
+                    }
+                    if (intent == -1) {
+                        cancel();
+                        return KEY_COMMIT_CANCEL;
+                    }
+                }
+                return KEY_CONSUMED;
+            }
+            return KEY_IGNORED;
         }
 
         public boolean skipNow() {
@@ -103,6 +173,8 @@ public final class SkipCountdownPill extends LinearLayout {
             remainingMs = 0L;
             state = STATE_SKIPPED;
             ownsTvFocus = false;
+            pendingKeyCode = -1;
+            pausedForKeyHold = false;
             return true;
         }
 
@@ -111,6 +183,8 @@ public final class SkipCountdownPill extends LinearLayout {
             remainingMs = 0L;
             state = STATE_CANCELLED;
             ownsTvFocus = false;
+            pendingKeyCode = -1;
+            pausedForKeyHold = false;
             return true;
         }
 
@@ -118,6 +192,8 @@ public final class SkipCountdownPill extends LinearLayout {
             state = STATE_IDLE;
             remainingMs = 0L;
             ownsTvFocus = false;
+            pendingKeyCode = -1;
+            pausedForKeyHold = false;
         }
 
         /**
@@ -149,6 +225,14 @@ public final class SkipCountdownPill extends LinearLayout {
         void onCancelled(boolean intro);
 
         void onTvDialogStateChanged(boolean open);
+    }
+
+    public interface PlaybackGuard {
+        boolean canContinueCountdown();
+    }
+
+    public interface SilentDismissListener {
+        void onSilentDismiss(boolean intro);
     }
 
     private static final class CountdownBar extends View {
@@ -194,14 +278,36 @@ public final class SkipCountdownPill extends LinearLayout {
     private final Button cancelBtn;
     private final CountdownBar progressBar;
     private Callbacks callbacks;
+    private PlaybackGuard playbackGuard;
+    private SilentDismissListener silentDismissListener;
+    private Runnable touchInteractionHook;
     private boolean reducedTransparency;
     private boolean notifiedDialogOpen;
+    private boolean skipBtnGainedFocus;
+
+    private final Runnable focusSkipBtnRunnable =
+            new Runnable() {
+                @Override
+                public void run() {
+                    if (controller.isActive()
+                            && controller.ownsTvFocus()
+                            && getVisibility() == View.VISIBLE) {
+                        skipBtn.requestFocus();
+                    }
+                }
+            };
 
     private final Runnable tickRunnable =
             new Runnable() {
                 @Override
                 public void run() {
                     if (!controller.isActive()) return;
+                    if (playbackGuard != null
+                            && !controller.guardPlaybackCondition(
+                                    playbackGuard.canContinueCountdown())) {
+                        dismissSilentlyAfterGuard(controller.isIntro());
+                        return;
+                    }
                     boolean expired = controller.tick(android.os.SystemClock.uptimeMillis());
                     updateCountdownUi();
                     if (expired) {
@@ -217,12 +323,14 @@ public final class SkipCountdownPill extends LinearLayout {
         this.isTv = tv;
         setTag("player-skip-countdown-pill");
         setOrientation(VERTICAL);
+        setMotionEventSplittingEnabled(false);
         setPadding(dp(tv ? 18 : 14), dp(tv ? 12 : 10), dp(tv ? 18 : 14), dp(tv ? 10 : 8));
         applySurface();
 
         LinearLayout row = new LinearLayout(context);
         row.setOrientation(HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMotionEventSplittingEnabled(false);
 
         titleView = new TextView(context);
         titleView.setTag("player-skip-countdown-title");
@@ -237,7 +345,11 @@ public final class SkipCountdownPill extends LinearLayout {
 
         skipBtn = buildActionButton(context, "立即跳过", true);
         skipBtn.setTag("player-skip-now");
-        skipBtn.setOnClickListener(v -> finishWithSkip());
+        skipBtn.setOnClickListener(
+                v -> {
+                    if (touchInteractionHook != null) touchInteractionHook.run();
+                    finishWithSkip();
+                });
         LayoutParams skipLp = new LayoutParams(-2, dp(tv ? 36 : 32));
         skipLp.rightMargin = dp(8);
         row.addView(skipBtn, skipLp);
@@ -245,7 +357,11 @@ public final class SkipCountdownPill extends LinearLayout {
         cancelBtn = buildActionButton(context, tv ? "方向键/返回取消" : "取消", false);
         cancelBtn.setTag("player-skip-cancel");
         cancelBtn.setFocusable(!tv);
-        cancelBtn.setOnClickListener(v -> finishWithCancel());
+        cancelBtn.setOnClickListener(
+                v -> {
+                    if (touchInteractionHook != null) touchInteractionHook.run();
+                    finishWithCancel();
+                });
         row.addView(cancelBtn, new LayoutParams(-2, dp(tv ? 36 : 32)));
 
         if (tv) {
@@ -254,20 +370,18 @@ public final class SkipCountdownPill extends LinearLayout {
             skipBtn.setOnKeyListener(
                     (v, keyCode, event) -> {
                         if (!controller.isActive()) return false;
-                        int action = Controller.classifyTvKey(keyCode);
-                        if (action == 1) {
-                            if (event.getAction() == KeyEvent.ACTION_UP) {
-                                finishWithSkip();
-                            }
+                        int result =
+                                controller.handleTvKeyEvent(
+                                        keyCode, event.getAction(), event.getRepeatCount());
+                        if (result == Controller.KEY_COMMIT_SKIP) {
+                            finishWithSkip();
                             return true;
                         }
-                        if (action == -1) {
-                            if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                                finishWithCancel();
-                            }
+                        if (result == Controller.KEY_COMMIT_CANCEL) {
+                            finishWithCancel();
                             return true;
                         }
-                        return false;
+                        return result == Controller.KEY_CONSUMED;
                     });
         }
 
@@ -305,7 +419,19 @@ public final class SkipCountdownPill extends LinearLayout {
         b.setPadding(dp(12), 0, dp(12), 0);
         styleButton(b, primary, false);
         if (isTv && primary) {
-            b.setOnFocusChangeListener((v, focused) -> styleButton(b, true, focused));
+            b.setOnFocusChangeListener(
+                    (v, focused) -> {
+                        styleButton(b, true, focused);
+                        if (focused) {
+                            skipBtnGainedFocus = true;
+                        } else if (skipBtnGainedFocus
+                                && controller.isActive()
+                                && controller.ownsTvFocus()) {
+                            // External focus move (e.g. showControls focusing timeline) must
+                            // never leave dialogOpen == true blocking TV remote keys.
+                            dismissSilently();
+                        }
+                    });
         }
         return b;
     }
@@ -348,13 +474,36 @@ public final class SkipCountdownPill extends LinearLayout {
         this.callbacks = callbacks;
     }
 
+    public void setPlaybackGuard(PlaybackGuard playbackGuard) {
+        this.playbackGuard = playbackGuard;
+    }
+
+    public void setSilentDismissListener(SilentDismissListener silentDismissListener) {
+        this.silentDismissListener = silentDismissListener;
+    }
+
+    public void setTouchInteractionHook(Runnable touchInteractionHook) {
+        this.touchInteractionHook = touchInteractionHook;
+    }
+
     public boolean isActive() {
         return controller.isActive();
     }
 
+    public boolean isIntroActive() {
+        return controller.isActive() && controller.isIntro();
+    }
+
     public void start(boolean intro, int targetPositionMs, boolean controlsHidden) {
+        start(intro, targetPositionMs, controlsHidden, false);
+    }
+
+    public void start(
+            boolean intro, int targetPositionMs, boolean controlsHidden, boolean hasModalDialog) {
         if (controller.isActive()) return;
-        boolean takeTvFocus = isTv && controlsHidden;
+        if (playbackGuard != null && !playbackGuard.canContinueCountdown()) return;
+        boolean takeTvFocus = Controller.shouldTakeTvFocus(isTv, hasModalDialog);
+        skipBtnGainedFocus = false;
         controller.start(
                 intro, targetPositionMs, android.os.SystemClock.uptimeMillis(), takeTvFocus);
         updateCountdownUi();
@@ -363,22 +512,74 @@ public final class SkipCountdownPill extends LinearLayout {
             notifiedDialogOpen = true;
             if (callbacks != null) callbacks.onTvDialogStateChanged(true);
             skipBtn.requestFocus();
-            skipBtn.post(skipBtn::requestFocus);
+            skipBtn.removeCallbacks(focusSkipBtnRunnable);
+            skipBtn.post(focusSkipBtnRunnable);
         }
         removeCallbacks(tickRunnable);
         postDelayed(tickRunnable, TICK_MS);
     }
 
-    public void dismissSilently() {
+    /** Called when TV controls transition from hidden to visible while this pill is active. */
+    public void onExternalControlsShown() {
+        if (isTv && controller.isActive()) {
+            dismissSilently();
+        }
+    }
+
+    /** Synchronously evaluates the playback guard and silently dismisses if playback paused/lost. */
+    public void syncPlaybackGuard() {
+        if (!controller.isActive()) return;
+        if (playbackGuard != null && !playbackGuard.canContinueCountdown()) {
+            dismissSilently();
+        }
+    }
+
+    private void dismissSilentlyAfterGuard(boolean wasIntro) {
         removeCallbacks(tickRunnable);
+        skipBtn.removeCallbacks(focusSkipBtnRunnable);
+        skipBtnGainedFocus = false;
+        setVisibility(View.GONE);
+        releaseTvDialogState();
+        if (silentDismissListener != null) {
+            silentDismissListener.onSilentDismiss(wasIntro);
+        }
+    }
+
+    public void dismissSilently() {
+        boolean wasActive = controller.isActive();
+        boolean wasIntro = controller.isIntro();
+        removeCallbacks(tickRunnable);
+        skipBtn.removeCallbacks(focusSkipBtnRunnable);
+        skipBtnGainedFocus = false;
         controller.reset();
         setVisibility(View.GONE);
         releaseTvDialogState();
+        if (wasActive && silentDismissListener != null) {
+            silentDismissListener.onSilentDismiss(wasIntro);
+        }
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (visibility != View.VISIBLE && controller.isActive()) {
+            dismissSilently();
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasWindowFocus) {
+        super.onWindowFocusChanged(hasWindowFocus);
+        if (!hasWindowFocus && controller.isActive()) {
+            dismissSilently();
+        }
     }
 
     @Override
     protected void onDetachedFromWindow() {
         removeCallbacks(tickRunnable);
+        skipBtn.removeCallbacks(focusSkipBtnRunnable);
+        skipBtnGainedFocus = false;
         controller.reset();
         releaseTvDialogState();
         super.onDetachedFromWindow();
@@ -386,6 +587,18 @@ public final class SkipCountdownPill extends LinearLayout {
 
     private void finishWithSkip() {
         removeCallbacks(tickRunnable);
+        skipBtn.removeCallbacks(focusSkipBtnRunnable);
+        skipBtnGainedFocus = false;
+        if (playbackGuard != null && !playbackGuard.canContinueCountdown()) {
+            boolean wasIntro = controller.isIntro();
+            controller.reset();
+            setVisibility(View.GONE);
+            releaseTvDialogState();
+            if (silentDismissListener != null) {
+                silentDismissListener.onSilentDismiss(wasIntro);
+            }
+            return;
+        }
         boolean wasIntro = controller.isIntro();
         int target = controller.getTargetPositionMs();
         if (!controller.skipNow() && controller.getState() != Controller.STATE_SKIPPED) return;
@@ -397,8 +610,10 @@ public final class SkipCountdownPill extends LinearLayout {
 
     private void finishWithCancel() {
         removeCallbacks(tickRunnable);
+        skipBtn.removeCallbacks(focusSkipBtnRunnable);
+        skipBtnGainedFocus = false;
         boolean wasIntro = controller.isIntro();
-        if (!controller.cancel()) return;
+        if (!controller.cancel() && controller.getState() != Controller.STATE_CANCELLED) return;
         controller.reset();
         setVisibility(View.GONE);
         releaseTvDialogState();

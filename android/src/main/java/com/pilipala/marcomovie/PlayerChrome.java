@@ -257,6 +257,7 @@ final class PlayerChrome {
         modernTv = a.isTvDevice() && a.prefs.getInt(Prefs.TV_PLAYER_STYLE, 0) == 0;
         overlay = new FrameLayout(a);
         overlay.setTag("player-chrome");
+        overlay.setMotionEventSplittingEnabled(false);
         overlay.setClipChildren(true);
         overlay.setClipToPadding(true);
         overlay.addOnLayoutChangeListener(
@@ -291,11 +292,21 @@ final class PlayerChrome {
                         -1, modernTv ? vp(a, 176) : a.dp(210), Gravity.BOTTOM));
         heading = a.vertical();
         heading.setTag("player-heading");
+        heading.setMotionEventSplittingEnabled(false);
         if (!a.isTvDevice()) {
             topActions = a.row();
+            topActions.setMotionEventSplittingEnabled(false);
             topActions.setGravity(Gravity.CENTER_VERTICAL);
             topActions.setPadding(0, 0, 0, a.dp(8));
-            backBtn = a.navButton("‹ 返回", "player-back", a::leavePlayback);
+            backBtn =
+                    a.navButton(
+                            "‹ 返回",
+                            "player-back",
+                            () -> {
+                                cancelActiveTouchGesture();
+                                PlaybackControls.clearSleepTimerOnLeave();
+                                a.leavePlayback();
+                            });
             backBtn.setTextColor(MainActivity.WHITE);
             backBtn.setBackground(chromeSurface(0xcc22222a, 17, 0x33ffffff));
             topActions.addView(backBtn, new LinearLayout.LayoutParams(-2, a.dp(34)));
@@ -394,6 +405,7 @@ final class PlayerChrome {
             fsBtn = null;
             dock = a.vertical();
             dock.setTag("player-dock");
+            dock.setMotionEventSplittingEnabled(false);
             dock.setPadding(vp(a, 20), vp(a, 12.5f), vp(a, 20), vp(a, 11.5f));
             dock.setClipChildren(false);
             dock.setClipToPadding(false);
@@ -428,6 +440,7 @@ final class PlayerChrome {
 
             progress = a.vertical();
             progress.setTag("player-progress");
+            progress.setMotionEventSplittingEnabled(false);
             progress.setClipChildren(false);
             progress.setClipToPadding(false);
             progress.setVisibility(live ? View.GONE : View.VISIBLE);
@@ -475,6 +488,7 @@ final class PlayerChrome {
             cardTitleView = null;
             progress = a.vertical();
             progress.setTag("player-progress");
+            progress.setMotionEventSplittingEnabled(false);
             LinearLayout clockRow = a.row();
             a.playClock = a.text("--:-- / --:--", 12, MainActivity.WHITE);
             a.playClock.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
@@ -491,7 +505,10 @@ final class PlayerChrome {
                         a.navButton(
                                 a.isPortrait() ? "⛶ 全屏横屏" : "⛶ 退出全屏",
                                 "player-fullscreen",
-                                a::togglePlayerOrientation);
+                                () -> {
+                                    cancelActiveTouchGesture();
+                                    a.togglePlayerOrientation();
+                                });
                 fsBtn.setTextColor(MainActivity.WHITE);
                 fsBtn.setTextSize(12);
                 fsBtn.setMinHeight(a.dp(30));
@@ -529,6 +546,7 @@ final class PlayerChrome {
 
             dock = a.vertical();
             dock.setTag("player-dock");
+            dock.setMotionEventSplittingEnabled(false);
             if (a.isTvDevice()) {
                 dock.setPadding(a.dp(6), a.dp(5), a.dp(6), a.dp(5));
             } else {
@@ -565,11 +583,13 @@ final class PlayerChrome {
         state.setVisibility(View.GONE);
         state.setOnClickListener(
                 v -> {
+                    cancelActiveTouchGesture();
                     a.togglePlayback();
                     a.showControls(true);
                 });
         if (!a.isTvDevice()) {
             centerRow = a.row();
+            centerRow.setMotionEventSplittingEnabled(false);
             centerRow.setGravity(Gravity.CENTER);
             rewindBtn = buildSeekCircle("↺ 15s", -15000);
             forwardBtn = buildSeekCircle("15s ↻", 15000);
@@ -597,7 +617,16 @@ final class PlayerChrome {
                     new PadlockGlyph(false, MainActivity.WHITE),
                     new FrameLayout.LayoutParams(a.dp(20), a.dp(20), Gravity.CENTER));
             a.pressFeedback(lockBtn);
-            lockBtn.setOnClickListener(v -> PlaybackController.setPlayerLocked(a, true));
+            lockBtn.setOnClickListener(
+                    v -> {
+                        if (a.touchPlayerGesture != null) {
+                            a.touchPlayerGesture.onScreenLockRequested();
+                        }
+                        if (a.playbackControls != null) {
+                            a.playbackControls.onScreenLockRequested();
+                        }
+                        PlaybackController.setPlayerLocked(a, true);
+                    });
             FrameLayout.LayoutParams lockLp =
                     new FrameLayout.LayoutParams(
                             a.dp(44), a.dp(44), Gravity.LEFT | Gravity.CENTER_VERTICAL);
@@ -633,7 +662,11 @@ final class PlayerChrome {
             unlockPill.addView(unlockLabel, new LinearLayout.LayoutParams(-2, -2));
             unlockPill.setVisibility(View.GONE);
             a.pressFeedback(unlockPill);
-            unlockPill.setOnClickListener(v -> PlaybackController.setPlayerLocked(a, false));
+            unlockPill.setOnClickListener(
+                    v -> {
+                        cancelActiveTouchGesture();
+                        PlaybackController.setPlayerLocked(a, false);
+                    });
             FrameLayout.LayoutParams uLp =
                     new FrameLayout.LayoutParams(-2, -2, Gravity.LEFT | Gravity.CENTER_VERTICAL);
             uLp.leftMargin = a.dp(16);
@@ -842,6 +875,12 @@ final class PlayerChrome {
         scheduleLayout();
     }
 
+    private void cancelActiveTouchGesture() {
+        if (a.touchPlayerGesture != null) {
+            a.touchPlayerGesture.cancelActiveGesture();
+        }
+    }
+
     TextView buildSeekCircle(String label, int deltaMs) {
         TextView btn = a.text(label, 12, MainActivity.WHITE);
         btn.setGravity(Gravity.CENTER);
@@ -851,6 +890,7 @@ final class PlayerChrome {
         btn.setBackground(bg);
         btn.setOnClickListener(
                 v -> {
+                    cancelActiveTouchGesture();
                     if (a.player != null && a.prepared) {
                         int dur = Math.max(1, a.player.getDuration());
                         int cur =
@@ -968,6 +1008,9 @@ final class PlayerChrome {
         }
         if (a.touchPlayerGesture != null) {
             a.touchPlayerGesture.updateSafeTop(safe.top);
+        }
+        if (a.playbackControls != null) {
+            a.playbackControls.updateSafeTop(safe.top);
         }
         int width = safe.width(), height = safe.height();
         boolean mobileLandscape = !a.isTvDevice() && !portrait;
@@ -1263,6 +1306,7 @@ final class PlayerChrome {
     }
 
     void switchEpisode(Cms.Episode episode, Cms.Line line) {
+        PlaybackControls.markSleepTimerInPlaceSwitch();
         if (startSpecBanner != null) startSpecBanner.resetEpisode();
         if (mobileSpecBadgeRow != null) {
             mobileSpecBadgeRow.removeAllViews();
@@ -1288,13 +1332,36 @@ final class PlayerChrome {
         update();
     }
 
+    /**
+     * Resolves progress-only seek preview mode independently from {@code player_slim_progress},
+     * which only governs the persistent 2dp {@link SlimProgressBar} while HUD controls are hidden.
+     */
+    static boolean resolveProgressOnlyMode(
+            boolean requestedProgressOnly, boolean slimProgressEnabled) {
+        return requestedProgressOnly;
+    }
+
+    static boolean shouldShowSlimProgressBar(
+            boolean controlsVisible,
+            boolean miniMode,
+            boolean live,
+            boolean prepared,
+            int durationMs,
+            boolean slimProgressEnabled) {
+        return !controlsVisible
+                && !miniMode
+                && !live
+                && prepared
+                && durationMs > 0
+                && slimProgressEnabled;
+    }
+
     void setProgressOnlyMode(boolean progressOnly) {
-        if (progressOnly && !a.isTvDevice() && !PlayerHudPrefs.isSlimProgressEnabled(a)) {
-            progressOnly = false;
-        }
-        if (this.progressOnlyMode == progressOnly) return;
-        this.progressOnlyMode = progressOnly;
-        int otherVis = progressOnly ? View.INVISIBLE : View.VISIBLE;
+        boolean resolved =
+                resolveProgressOnlyMode(progressOnly, PlayerHudPrefs.isSlimProgressEnabled(a));
+        if (this.progressOnlyMode == resolved) return;
+        this.progressOnlyMode = resolved;
+        int otherVis = resolved ? View.INVISIBLE : View.VISIBLE;
         topShade.setVisibility(otherVis);
         heading.setVisibility(otherVis);
         if (modernTv) {
@@ -1304,7 +1371,7 @@ final class PlayerChrome {
             dock.setVisibility(otherVis);
             if (lockBtn != null) lockBtn.setVisibility(otherVis);
         }
-        seekHint.setVisibility(progressOnly ? View.VISIBLE : View.GONE);
+        seekHint.setVisibility(resolved ? View.VISIBLE : View.GONE);
         update();
         if (a.playbackControls != null) {
             a.playbackControls.visible(a.controlsVisible);
@@ -1337,12 +1404,13 @@ final class PlayerChrome {
         if (slimProgressBar == null) return;
         slimProgressBar.setReducedMotion(a.reduced);
         boolean showSlim =
-                !a.controlsVisible
-                        && !a.miniMode
-                        && !live
-                        && a.prepared
-                        && durationMs > 0
-                        && PlayerHudPrefs.isSlimProgressEnabled(a);
+                shouldShowSlimProgressBar(
+                        a.controlsVisible,
+                        a.miniMode,
+                        live,
+                        a.prepared,
+                        durationMs,
+                        PlayerHudPrefs.isSlimProgressEnabled(a));
         slimProgressBar.setActiveVisible(showSlim);
     }
 
@@ -1397,6 +1465,9 @@ final class PlayerChrome {
     void update() {
         if (a.prepared) loading = false;
         syncClockViews();
+        if (a.playbackControls != null) {
+            a.playbackControls.syncSkipCountdownLifecycle();
+        }
         if (startSpecBanner != null) {
             startSpecBanner.onControlsVisibilityChanged(a.controlsVisible);
         }

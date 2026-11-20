@@ -8,8 +8,10 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Session-scoped sleep timer controller and pre-expiry warning banner (player-hud-spec.md §4.5).
@@ -32,7 +34,35 @@ public final class SleepTimerSheet {
         "关闭（默认）", "15 分钟后停止", "30 分钟后停止", "60 分钟后停止", "90 分钟后停止", "播完本集后停止"
     };
 
+    private static final AtomicInteger FALLBACK_VIEW_ID = new AtomicInteger(0x4d300000);
+
     private SleepTimerSheet() {}
+
+    /** Computes the top margin for the pre-expiry warning pill respecting mobile safe.top inset. */
+    public static int computeWarningTopMarginPx(boolean tv, int safeTopPx, float density) {
+        float d = density > 0f ? density : 1f;
+        int base = Math.max(1, Math.round((tv ? 24f : 18f) * d));
+        if (tv) return base;
+        return Math.max(base, Math.max(0, safeTopPx) + base);
+    }
+
+    /**
+     * Resolves {@code nextFocusUpId} for TV playback actions so D-pad Up reaches the 30s sleep
+     * warning pill whenever visible instead of locking focus onto the action row itself.
+     */
+    public static int resolveActionUpFocusId(
+            boolean warningVisible, int warningExtendBtnId, int fallbackUpId) {
+        return warningVisible && warningExtendBtnId != View.NO_ID
+                ? warningExtendBtnId
+                : fallbackUpId;
+    }
+
+    private static int nextViewId() {
+        if (Build.VERSION.SDK_INT >= 17) {
+            return View.generateViewId();
+        }
+        return FALLBACK_VIEW_ID.getAndIncrement();
+    }
 
     /** Pure-Java sleep timer state controller for deterministic JVM unit checks. */
     public static final class Controller {
@@ -89,6 +119,30 @@ public final class SleepTimerSheet {
             mode = MODE_OFF;
             deadlineMs = -1L;
             expired = false;
+        }
+
+        /**
+         * Clears the session-scoped sleep timer when exiting playback unless an in-place episode or
+         * line switch is actively transitioning to the next player instance.
+         */
+        public void onPlayerSessionClosed(boolean preserveForInPlaceSwitch) {
+            if (!preserveForInPlaceSwitch) {
+                cancel();
+            }
+        }
+
+        /**
+         * Guards a newly opened playback session so an abandoned or already-expired timer from a
+         * previous session can never immediately pause a newly opened video.
+         */
+        public void onNewPlaybackSession(boolean preserveFromInPlaceSwitch, long nowMs) {
+            if (!preserveFromInPlaceSwitch) {
+                cancel();
+                return;
+            }
+            if (isActive() && deadlineMs >= 0L && nowMs >= deadlineMs) {
+                cancel();
+            }
         }
 
         public void extend15Minutes(long nowMs) {
@@ -157,7 +211,9 @@ public final class SleepTimerSheet {
         private final TextView label;
         private final Button extendBtn;
         private final Button cancelBtn;
+        private Runnable touchInteractionHook;
         private boolean reducedTransparency;
+        private int safeTopPx;
 
         public WarningPill(Context context, boolean tv, Runnable onExtend, Runnable onCancel) {
             super(context);
@@ -165,6 +221,7 @@ public final class SleepTimerSheet {
             setTag("player-sleep-warning-pill");
             setOrientation(HORIZONTAL);
             setGravity(Gravity.CENTER_VERTICAL);
+            setMotionEventSplittingEnabled(false);
             setPadding(dp(14), dp(8), dp(14), dp(8));
             applySurface();
 
@@ -179,8 +236,11 @@ public final class SleepTimerSheet {
             addView(label, lblLp);
 
             extendBtn = makeButton(context, "+15 分钟", true);
+            extendBtn.setId(nextViewId());
+            extendBtn.setTag("player-sleep-extend");
             extendBtn.setOnClickListener(
                     v -> {
+                        if (touchInteractionHook != null) touchInteractionHook.run();
                         if (onExtend != null) onExtend.run();
                     });
             LayoutParams extLp = new LayoutParams(-2, dp(tv ? 34 : 30));
@@ -188,16 +248,82 @@ public final class SleepTimerSheet {
             addView(extendBtn, extLp);
 
             cancelBtn = makeButton(context, "取消", false);
+            cancelBtn.setId(nextViewId());
+            cancelBtn.setTag("player-sleep-cancel");
             cancelBtn.setOnClickListener(
                     v -> {
+                        if (touchInteractionHook != null) touchInteractionHook.run();
                         if (onCancel != null) onCancel.run();
                     });
             addView(cancelBtn, new LayoutParams(-2, dp(tv ? 34 : 30)));
+
+            if (tv) {
+                extendBtn.setNextFocusLeftId(cancelBtn.getId());
+                extendBtn.setNextFocusRightId(cancelBtn.getId());
+                extendBtn.setNextFocusUpId(extendBtn.getId());
+                cancelBtn.setNextFocusLeftId(extendBtn.getId());
+                cancelBtn.setNextFocusRightId(extendBtn.getId());
+                cancelBtn.setNextFocusUpId(cancelBtn.getId());
+            }
 
             if (Build.VERSION.SDK_INT >= 21) {
                 setElevation(dp(12));
             }
             setVisibility(View.GONE);
+        }
+
+        public void setTouchInteractionHook(Runnable touchInteractionHook) {
+            this.touchInteractionHook = touchInteractionHook;
+        }
+
+        public int getExtendButtonId() {
+            return extendBtn.getId();
+        }
+
+        public int getCancelButtonId() {
+            return cancelBtn.getId();
+        }
+
+        public Button getExtendButton() {
+            return extendBtn;
+        }
+
+        public Button getCancelButton() {
+            return cancelBtn;
+        }
+
+        public boolean isShowing() {
+            return getVisibility() == View.VISIBLE;
+        }
+
+        public void setDownFocusTargetId(int targetId) {
+            if (!isTv) return;
+            extendBtn.setNextFocusDownId(targetId);
+            cancelBtn.setNextFocusDownId(targetId);
+        }
+
+        public void requestInitialTvFocus() {
+            if (!isTv || getVisibility() != View.VISIBLE) return;
+            extendBtn.requestFocus();
+            extendBtn.post(
+                    () -> {
+                        if (getVisibility() == View.VISIBLE) {
+                            extendBtn.requestFocus();
+                        }
+                    });
+        }
+
+        public void updateSafeTop(int safeTopPx) {
+            this.safeTopPx = Math.max(0, safeTopPx);
+            if (getLayoutParams() instanceof FrameLayout.LayoutParams) {
+                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) getLayoutParams();
+                float d = getResources() != null ? getResources().getDisplayMetrics().density : 1f;
+                int nextTop = computeWarningTopMarginPx(isTv, this.safeTopPx, d);
+                if (lp.topMargin != nextTop) {
+                    lp.topMargin = nextTop;
+                    setLayoutParams(lp);
+                }
+            }
         }
 
         private int dp(float v) {
@@ -220,6 +346,7 @@ public final class SleepTimerSheet {
             b.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
             b.setPadding(dp(10), 0, dp(10), 0);
             b.setFocusable(isTv);
+            b.setFocusableInTouchMode(isTv);
             styleButton(b, primary, false);
             if (isTv) {
                 b.setOnFocusChangeListener((v, f) -> styleButton(b, primary, f));
