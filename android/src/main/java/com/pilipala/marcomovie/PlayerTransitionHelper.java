@@ -416,13 +416,15 @@ public final class PlayerTransitionHelper {
                         finish.runOnce();
                     }
                 });
+        final AnimatorHandle handle = new AnimatorHandle(animator, finish);
+        finish.bindDetachCancel(detailRoot, handle);
         try {
             animator.start();
         } catch (RuntimeException error) {
             finish.runOnce();
             throw error;
         }
-        return new AnimatorHandle(animator, finish);
+        return handle;
     }
 
     /** Lightweight Android TV page transition ({@code 180ms} pure alpha, zero shader/blur). */
@@ -579,13 +581,15 @@ public final class PlayerTransitionHelper {
                         finish.runOnce();
                     }
                 });
+        final AnimatorHandle handle = new AnimatorHandle(animator, finish);
+        finish.bindDetachCancel(target, handle);
         try {
             animator.start();
         } catch (RuntimeException error) {
             finish.runOnce();
             throw error;
         }
-        return new AnimatorHandle(animator, finish);
+        return handle;
     }
 
     /**
@@ -654,13 +658,15 @@ public final class PlayerTransitionHelper {
                         finish.runOnce();
                     }
                 });
+        final AnimatorHandle handle = new AnimatorHandle(animator, finish);
+        finish.bindDetachCancel(detailLayer != null ? detailLayer : posterView, handle);
         try {
             animator.start();
         } catch (RuntimeException error) {
             finish.runOnce();
             throw error;
         }
-        return new AnimatorHandle(animator, finish);
+        return handle;
     }
 
     /**
@@ -669,7 +675,7 @@ public final class PlayerTransitionHelper {
      * GlassFreezeCallback} freeze/unfreeze — zero software Camera+Matrix and zero allocations per
      * frame.
      */
-    private static TransitionHandle runApi23HardwareRenderNodeTransition(
+    static TransitionHandle runApi23HardwareRenderNodeTransition(
             final View detailLayer,
             final View posterView,
             final GlassFreezeCallback glassFreezeCallback,
@@ -755,13 +761,15 @@ public final class PlayerTransitionHelper {
                         finish.runOnce();
                     }
                 });
+        final AnimatorHandle handle = new AnimatorHandle(animator, finish);
+        finish.bindDetachCancel(detailLayer != null ? detailLayer : posterView, handle);
         try {
             animator.start();
         } catch (RuntimeException error) {
             finish.runOnce();
             throw error;
         }
-        return new AnimatorHandle(animator, finish);
+        return handle;
     }
 
     /** Isolated API 33+ AGSL runner so Dalvik/ART on API 23-32 never resolves RuntimeShader. */
@@ -1062,11 +1070,29 @@ public final class PlayerTransitionHelper {
     private static final class AtomicFinish {
         private final ValueAnimator animator;
         private final Runnable action;
+        private View detachWatchView;
+        private View.OnAttachStateChangeListener detachListener;
         private boolean done;
 
         AtomicFinish(ValueAnimator animator, Runnable action) {
             this.animator = animator;
             this.action = action;
+        }
+
+        void bindDetachCancel(View watchView, final TransitionHandle handle) {
+            if (watchView == null || handle == null || done) return;
+            detachWatchView = watchView;
+            detachListener =
+                    new View.OnAttachStateChangeListener() {
+                        @Override
+                        public void onViewAttachedToWindow(View v) {}
+
+                        @Override
+                        public void onViewDetachedFromWindow(View v) {
+                            handle.cancel();
+                        }
+                    };
+            watchView.addOnAttachStateChangeListener(detachListener);
         }
 
         void runOnce() {
@@ -1075,6 +1101,11 @@ public final class PlayerTransitionHelper {
             try {
                 action.run();
             } finally {
+                if (detachWatchView != null && detachListener != null) {
+                    detachWatchView.removeOnAttachStateChangeListener(detachListener);
+                    detachWatchView = null;
+                    detachListener = null;
+                }
                 if (animator != null) {
                     animator.removeAllUpdateListeners();
                     animator.removeAllListeners();

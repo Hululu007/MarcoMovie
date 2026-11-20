@@ -34,6 +34,7 @@ final class PlayerChrome {
     final FrameLayout firstPlayGestureHintSlot;
 
     final FrameLayout loadingIndicatorSlot;
+    final BrandLogoLoaderView brandLoader;
     final TextView hudProgressView;
     final View hudDivider;
     final Button backBtn;
@@ -683,11 +684,13 @@ final class PlayerChrome {
         UiCompat.setElevation(loadingPill, a.dp(10));
         loadingIndicatorSlot = new FrameLayout(a);
         loadingIndicatorSlot.setTag("player-loading-indicator-slot");
+        brandLoader = new BrandLogoLoaderView(a);
+        brandLoader.setReducedMotion(a.reduced);
+        brandLoader.setActive(true);
         loadingIndicatorSlot.addView(
-                new PlaybackLoading.Ring(a),
-                new FrameLayout.LayoutParams(a.dp(26), a.dp(26), Gravity.CENTER));
+                brandLoader, new FrameLayout.LayoutParams(a.dp(32), a.dp(32), Gravity.CENTER));
         loadingPill.addView(
-                loadingIndicatorSlot, new LinearLayout.LayoutParams(a.dp(26), a.dp(26)));
+                loadingIndicatorSlot, new LinearLayout.LayoutParams(a.dp(32), a.dp(32)));
         String epTitle =
                 episode != null && episode.name != null && !episode.name.isEmpty()
                         ? " " + episode.name
@@ -1467,6 +1470,7 @@ final class PlayerChrome {
         syncClockViews();
         if (a.playbackControls != null) {
             a.playbackControls.syncSkipCountdownLifecycle();
+            a.playbackControls.syncDanmuPlaybackState();
         }
         if (startSpecBanner != null) {
             startSpecBanner.onControlsVisibilityChanged(a.controlsVisible);
@@ -1477,6 +1481,10 @@ final class PlayerChrome {
         boolean showSpinner = loading && !a.prepared && a.playbackLoading == null && !a.miniMode;
         if (loadingPill.getVisibility() != (showSpinner ? View.VISIBLE : View.GONE)) {
             loadingPill.setVisibility(showSpinner ? View.VISIBLE : View.GONE);
+        }
+        if (brandLoader != null) {
+            brandLoader.setReducedMotion(a.reduced);
+            brandLoader.setActive(showSpinner);
         }
         if (!a.controlsVisible && !loading && a.prepared) {
             return;

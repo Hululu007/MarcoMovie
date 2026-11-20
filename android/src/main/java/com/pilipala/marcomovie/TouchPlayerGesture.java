@@ -272,6 +272,9 @@ final class TouchPlayerGesture implements View.OnTouchListener {
                     startPositionMs = a.player.getCurrentPosition();
                     durationMs = a.player.getDuration();
                     targetSeekMs = startPositionMs;
+                    if (a.playbackControls != null) {
+                        a.playbackControls.onDanmuSeekInitiated();
+                    }
                 }
             }
 
@@ -355,6 +358,9 @@ final class TouchPlayerGesture implements View.OnTouchListener {
                 if (a.touchPlayerGesture == TouchPlayerGesture.this) {
                     if (a.playbackControls != null) {
                         a.playbackControls.touchSeeking = false;
+                        if (a.player != null && a.prepared) {
+                            a.playbackControls.onDanmuSeekSettled(a.player.getCurrentPosition());
+                        }
                     }
                     if (a.playerChrome != null && a.playerChrome.seekHint != null) {
                         a.playerChrome.seekHint.setText("");
@@ -641,6 +647,9 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         if (a.player != null && a.prepared && speed > 0f) {
             try {
                 a.player.setSpeed(speed);
+                if (a.playbackControls != null) {
+                    a.playbackControls.onDanmuPlaySpeedChanged(speed);
+                }
             } catch (Exception ignored) {
             }
         }

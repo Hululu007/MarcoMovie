@@ -228,6 +228,10 @@ final class DanmakuView extends View implements AutoCloseable {
         invalidate();
     }
 
+    boolean hasSegmentCache() {
+        return segmentCache != null;
+    }
+
     int getEffectiveMaxRows() {
         return tvMode ? tvPacingMonitor.getEffectiveMaxRows() : configuredMaxRows;
     }
@@ -414,6 +418,7 @@ final class DanmakuView extends View implements AutoCloseable {
                         post(
                                 () -> {
                                     if (!closed && ticket == request) {
+                                        detachSegmentCache();
                                         comments = values;
                                         legacyItems = converted;
                                         layoutEngine.reset();
@@ -446,6 +451,7 @@ final class DanmakuView extends View implements AutoCloseable {
                         post(
                                 () -> {
                                     if (!closed && ticket == request) {
+                                        detachSegmentCache();
                                         comments = values;
                                         legacyItems = converted;
                                         layoutEngine.reset();

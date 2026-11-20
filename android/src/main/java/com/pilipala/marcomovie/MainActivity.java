@@ -83,6 +83,62 @@ public final class MainActivity extends Activity {
             };
     final HomeKeyTracker homeKeys = new HomeKeyTracker();
     Screen shortcutScreen;
+
+    static final class GlassFreezeController implements PlayerTransitionHelper.GlassFreezeCallback {
+        private int freezeDepth;
+        private final Runnable onUnfreeze;
+
+        GlassFreezeController(Runnable onUnfreeze) {
+            this.onUnfreeze = onUnfreeze;
+        }
+
+        @Override
+        public synchronized void setGlassFrozen(boolean frozen) {
+            if (frozen) {
+                freezeDepth++;
+            } else if (freezeDepth > 0) {
+                freezeDepth--;
+                if (freezeDepth == 0 && onUnfreeze != null) {
+                    onUnfreeze.run();
+                }
+            }
+        }
+
+        synchronized void forceUnfreeze() {
+            if (freezeDepth > 0) {
+                freezeDepth = 0;
+                if (onUnfreeze != null) {
+                    onUnfreeze.run();
+                }
+            }
+        }
+
+        synchronized boolean isFrozen() {
+            return freezeDepth > 0;
+        }
+
+        boolean shouldReduceTransparency(boolean userReducedTransparency) {
+            return userReducedTransparency || isFrozen();
+        }
+    }
+
+    final GlassFreezeController glassFreezeController =
+            new GlassFreezeController(this::invalidateGlassBackdrop);
+
+    private void invalidateGlassBackdrop() {
+        if (root != null) {
+            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(root);
+        }
+    }
+
+    Rect pendingDetailOrigin;
+    PlayerTransitionHelper.TransitionHandle activeTransition;
+    boolean pendingPlayerTransition;
+    int transitionSerial;
+    OnboardingScreen activeOnboarding;
+    AuroraSurfaceView onboardingAurora;
+    final Map<ViewGroup, Integer> savedOnboardingFocusability = new IdentityHashMap<>();
+    final Map<View, Boolean> savedOnboardingViewFocusable = new IdentityHashMap<>();
     StartupIntro startupIntro;
     boolean introSkipKey;
     HomeAmbient homeAmbient;
@@ -703,6 +759,9 @@ public final class MainActivity extends Activity {
                                     }
                                     if (recoveredFromCrash) {
                                         toast("上次加载该片源时异常退出，已自动重置片源选择");
+                                    } else if (!privateMode
+                                            && OnboardingScreen.shouldShow(MainActivity.this)) {
+                                        showOnboarding(false);
                                     } else if (layoutIntro && isTvDevice()) {
                                         StartupIntro.show(MainActivity.this);
                                     }
@@ -780,7 +839,12 @@ public final class MainActivity extends Activity {
 
     void glass(View view, float radius) {
         com.pilipala.glass.GlassworkSurface.attach(
-                view, root, dp(radius), () -> prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false));
+                view,
+                root,
+                dp(radius),
+                () ->
+                        glassFreezeController.shouldReduceTransparency(
+                                prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)));
     }
 
     GradientDrawable bg(int color, float radius) {
@@ -951,6 +1015,8 @@ public final class MainActivity extends Activity {
     }
 
     void preparePage(boolean navigation) {
+        cancelActiveTransition();
+        dismissOnboarding();
         clearPlaybackLoading();
         cancelArtwork();
         cancelPageRequests();
@@ -1138,12 +1204,260 @@ public final class MainActivity extends Activity {
         SourceController.closeEngines(this);
     }
 
-    void open(Screen s, boolean history) {
+    void capturePendingDetailOrigin(View sourceCard) {
+        if (isTvDevice()
+                || reduced
+                || root == null
+                || sourceCard == null
+                || sourceCard.getWidth() <= 0
+                || sourceCard.getHeight() <= 0) {
+            pendingDetailOrigin = null;
+            return;
+        }
+        Rect rect = new Rect();
+        PlayerTransitionHelper.resolveDescendantRectInRoot(root, sourceCard, rect);
+        pendingDetailOrigin = rect.width() > 0 && rect.height() > 0 ? rect : null;
+    }
+
+    Rect consumePendingDetailOrigin() {
+        Rect rect = pendingDetailOrigin;
+        pendingDetailOrigin = null;
+        return rect;
+    }
+
+    void cancelActiveTransition() {
+        transitionSerial++;
+        pendingPlayerTransition = false;
+        PlayerTransitionHelper.TransitionHandle handle = activeTransition;
+        activeTransition = null;
+        if (handle != null) {
+            handle.cancel();
+        }
+        glassFreezeController.forceUnfreeze();
+    }
+
+    private static Bitmap extractDetailPosterBitmap(View posterView) {
+        if (posterView instanceof MobileDetailScreen.PortraitBackdropView) {
+            Bitmap bmp = ((MobileDetailScreen.PortraitBackdropView) posterView).getPosterBitmap();
+            return (bmp != null && !bmp.isRecycled()) ? bmp : null;
+        }
+        if (posterView instanceof ImmersivePoster.Backdrop) {
+            ImmersivePoster.Backdrop b = (ImmersivePoster.Backdrop) posterView;
+            if (b.wideBitmap != null && !b.wideBitmap.isRecycled()) return b.wideBitmap;
+            if (b.rawBitmap != null && !b.rawBitmap.isRecycled()) return b.rawBitmap;
+        }
+        return null;
+    }
+
+    void openScreenNow(Screen s, boolean history) {
         capture();
         if (history && current != null) back.push(current);
         current = s;
         s.render.run();
         restore(s);
+    }
+
+    void open(Screen s, boolean history) {
+        dismissOnboarding();
+        cancelActiveTransition();
+        boolean detailToPlayer =
+                s != null
+                        && s.player
+                        && current != null
+                        && !current.player
+                        && !miniMode
+                        && layoutReady
+                        && root != null
+                        && root.getWidth() > 0
+                        && root.getHeight() > 0;
+        if (!detailToPlayer) {
+            openScreenNow(s, history);
+            return;
+        }
+
+        final View detailLayer = root;
+        View posterView = detailLayer.findViewWithTag("detail-backdrop");
+        if (posterView == null) {
+            posterView = detailLayer.findViewWithTag("detail-cover");
+        }
+        Rect posterRect = new Rect();
+        if (posterView != null && posterView.getWidth() > 0 && posterView.getHeight() > 0) {
+            PlayerTransitionHelper.resolveDescendantRectInRoot(detailLayer, posterView, posterRect);
+        } else {
+            posterRect.set(0, 0, detailLayer.getWidth(), detailLayer.getHeight());
+        }
+        RectF posterOriginPx = new RectF(posterRect);
+        float posterRadiusPx = dp(16);
+        Rect safeInsetsPx = new Rect(0, statusBarHeight(), 0, navigationBarHeight());
+
+        if (Build.VERSION.SDK_INT >= 33 && !isTvDevice() && !reduced) {
+            Bitmap posterBitmap = extractDetailPosterBitmap(posterView);
+            Bitmap backdrop = PlayerTransitionHelper.captureDownsampledBackdrop(detailLayer);
+            if (backdrop != null) {
+                openScreenNow(s, history);
+                activeTransition =
+                        PlayerTransitionHelper.startDetailToPlayerTransition(
+                                root,
+                                null,
+                                null,
+                                backdrop,
+                                true,
+                                posterBitmap,
+                                posterOriginPx,
+                                posterRadiusPx,
+                                safeInsetsPx,
+                                false,
+                                false,
+                                glassFreezeController,
+                                () -> activeTransition = null);
+                return;
+            }
+        }
+
+        final int serial = ++transitionSerial;
+        pendingPlayerTransition = true;
+        PlayerTransitionHelper.TransitionHandle handle =
+                PlayerTransitionHelper.startDetailToPlayerTransition(
+                        null,
+                        detailLayer,
+                        posterView,
+                        null,
+                        false,
+                        null,
+                        posterOriginPx,
+                        posterRadiusPx,
+                        safeInsetsPx,
+                        isTvDevice(),
+                        reduced,
+                        glassFreezeController,
+                        () -> {
+                            pendingPlayerTransition = false;
+                            if (serial != transitionSerial
+                                    || isFinishing()
+                                    || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) {
+                                return;
+                            }
+                            activeTransition = null;
+                            openScreenNow(s, history);
+                        });
+        if (serial == transitionSerial && pendingPlayerTransition) {
+            activeTransition = handle;
+        }
+    }
+
+    void showOnboarding(boolean isReplay) {
+        if (isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) return;
+        if (root == null) return;
+        if (current != null && current.player && !miniMode) return;
+        dismissOnboarding();
+        cancelActiveTransition();
+
+        final int initialScale = prefs.getInt(Prefs.UI_SCALE_PERCENT, 100);
+        boolean reduceTransparency = prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        OnboardingScreen screen =
+                new OnboardingScreen(
+                        this,
+                        isTvDevice(),
+                        reduced,
+                        reduceTransparency,
+                        initialScale,
+                        new OnboardingScreen.Callbacks() {
+                            @Override
+                            public void onImportConfig(String initialEmptyUrl) {
+                                if (activeOnboarding != null) {
+                                    activeOnboarding.getController().complete(false);
+                                }
+                                dismissOnboarding();
+                                importDialog();
+                            }
+
+                            @Override
+                            public void onOpenSync() {
+                                if (activeOnboarding != null) {
+                                    activeOnboarding.getController().complete(false);
+                                }
+                                dismissOnboarding();
+                                if (!privateMode) {
+                                    CloudSyncDialog.show(
+                                            MainActivity.this, MainActivity.this::refresh);
+                                }
+                            }
+
+                            @Override
+                            public void onPersonalizationChanged(
+                                    boolean reduceMotion,
+                                    boolean nextReduceTransparency,
+                                    int uiScalePercent) {
+                                prefs.edit()
+                                        .putBoolean(Prefs.REDUCED, reduceMotion)
+                                        .putBoolean(
+                                                Prefs.REDUCED_TRANSPARENCY, nextReduceTransparency)
+                                        .putInt(Prefs.UI_SCALE_PERCENT, uiScalePercent)
+                                        .apply();
+                                reduced = reduceMotion;
+                                if (onboardingAurora != null) {
+                                    onboardingAurora.setReducedMotion(reduceMotion);
+                                }
+                                if (root != null) {
+                                    com.pilipala.glass.GlassworkSurface.invalidateBackdrop(root);
+                                }
+                            }
+
+                            @Override
+                            public void onFinished(boolean skipped) {
+                                dismissOnboarding();
+                                int nextScale = prefs.getInt(Prefs.UI_SCALE_PERCENT, 100);
+                                if (nextScale != initialScale) {
+                                    recreate();
+                                } else if (current != null) {
+                                    restore(current);
+                                }
+                            }
+                        });
+        screen.setTag("onboarding-screen");
+        if (!isTvDevice()) {
+            AuroraSurfaceView aurora = new AuroraSurfaceView(this);
+            aurora.setReducedMotion(reduced);
+            onboardingAurora = aurora;
+            screen.setBackgroundLayer(aurora);
+        }
+
+        savedOnboardingFocusability.clear();
+        savedOnboardingViewFocusable.clear();
+        for (int i = 0; i < root.getChildCount(); i++) {
+            View child = root.getChildAt(i);
+            if (child instanceof ViewGroup) {
+                ViewGroup vg = (ViewGroup) child;
+                savedOnboardingFocusability.put(vg, vg.getDescendantFocusability());
+                vg.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+            } else if (child.isFocusable()) {
+                savedOnboardingViewFocusable.put(child, Boolean.TRUE);
+                child.setFocusable(false);
+            }
+        }
+        activeOnboarding = screen;
+        root.addView(screen, new FrameLayout.LayoutParams(-1, -1));
+        screen.post(screen::requestFocus);
+    }
+
+    void dismissOnboarding() {
+        OnboardingScreen screen = activeOnboarding;
+        activeOnboarding = null;
+        if (onboardingAurora != null) {
+            onboardingAurora.setActive(false);
+            onboardingAurora = null;
+        }
+        if (screen != null && screen.getParent() instanceof ViewGroup) {
+            ((ViewGroup) screen.getParent()).removeView(screen);
+        }
+        for (Map.Entry<ViewGroup, Integer> entry : savedOnboardingFocusability.entrySet()) {
+            entry.getKey().setDescendantFocusability(entry.getValue());
+        }
+        savedOnboardingFocusability.clear();
+        for (Map.Entry<View, Boolean> entry : savedOnboardingViewFocusable.entrySet()) {
+            entry.getKey().setFocusable(entry.getValue());
+        }
+        savedOnboardingViewFocusable.clear();
     }
 
     void capture() {
@@ -1208,6 +1522,15 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (activeOnboarding != null) {
+            activeOnboarding.handleBackPressed();
+            return;
+        }
+        if (pendingPlayerTransition) {
+            cancelActiveTransition();
+            return;
+        }
+        cancelActiveTransition();
         if (markerHost != null) {
             markerHost.cancel();
             return;
@@ -1648,6 +1971,9 @@ public final class MainActivity extends Activity {
             return;
         }
         DetailScreen.show(this, s, listing, ready);
+        if (root != null) {
+            activeTransition = PlayerTransitionHelper.animateTvPageFade(root, true, reduced, null);
+        }
     }
 
     void renderEpisodes(
@@ -1991,6 +2317,9 @@ public final class MainActivity extends Activity {
             }
             return true;
         }
+        if (activeOnboarding != null) {
+            return super.dispatchKeyEvent(event);
+        }
         if (current != null && current.player && !miniMode && playerLocked) {
             if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
                 PlaybackController.revealLockedHint(this);
@@ -2086,6 +2415,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        cancelActiveTransition();
         if (markerHost != null) markerHost.abort();
         savePlaybackHistory(true);
         super.onPause();
@@ -2093,6 +2423,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onStop() {
+        cancelActiveTransition();
         PrivacySpace.cancelPrompt(this);
         finishSeek(false);
         if (playbackLoading != null) {
@@ -2145,6 +2476,8 @@ public final class MainActivity extends Activity {
             PrivacySpace.active = false;
         }
         if (activeActivity == this) activeActivity = null;
+        cancelActiveTransition();
+        dismissOnboarding();
         clearPlaybackLoading();
         if (phoneConfig != null) phoneConfig.close();
         stopCastService();

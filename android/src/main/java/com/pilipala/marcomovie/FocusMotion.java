@@ -156,12 +156,35 @@ final class FocusMotion {
         transition(a, view, state);
     }
 
+    static boolean isReducedMotion(MainActivity a) {
+        return a != null
+                && (a.reduced || (a.prefs != null && a.prefs.getBoolean(Prefs.REDUCED, false)));
+    }
+
+    static float resolveScale(float gain, float emphasis, float compression, boolean reduced) {
+        if (reduced) {
+            return MotionTokens.TV_FOCUS_REDUCED_SCALE;
+        }
+        float f = Math.max(0f, Math.min(1f, emphasis));
+        float p = Math.max(0f, Math.min(1f, compression));
+        return (1f + (gain - 1f) * f) * (1f - 0.03f * p);
+    }
+
+    static int resolveStrokeColor(boolean border, float emphasis, boolean reduced) {
+        float f = Math.max(0f, Math.min(1f, emphasis));
+        if (reduced) {
+            return f >= 0.5f ? MotionTokens.TV_FOCUS_STROKE_ARGB : 0x00f5f5f7;
+        }
+        return border ? lerpColor(0x00f5f5f7, MotionTokens.TV_FOCUS_STROKE_ARGB, f) : 0x00f5f5f7;
+    }
+
     static void transition(MainActivity a, View view, State state) {
-        if (a.reduced || !view.isAttachedToWindow()) {
+        boolean reduced = isReducedMotion(a);
+        if (reduced || !view.isAttachedToWindow()) {
             cancel(state);
             state.emphasis.snap(state.emphasis.target);
             state.compression.snap(state.compression.target);
-            paint(view, state, a.reduced);
+            paint(view, state, reduced);
             return;
         }
         if (!state.emphasis.step(0) && !state.compression.step(0)) {
@@ -172,6 +195,13 @@ final class FocusMotion {
         state.animator =
                 seconds -> {
                     if (!view.isAttachedToWindow()) {
+                        state.animator = null;
+                        return false;
+                    }
+                    if (isReducedMotion(a)) {
+                        state.emphasis.snap(state.emphasis.target);
+                        state.compression.snap(state.compression.target);
+                        paint(view, state, true);
                         state.animator = null;
                         return false;
                     }
@@ -188,7 +218,7 @@ final class FocusMotion {
         float f = Math.max(0, Math.min(1, state.emphasis.value)),
                 p = Math.max(0, Math.min(1, state.compression.value));
         int color = lerpColor(state.normal, state.active, f),
-                outline = state.border ? lerpColor(0x00f5f5f7, MainActivity.WHITE, f) : 0x00f5f5f7;
+                outline = resolveStrokeColor(state.border, f, reduced);
         int text = f < .5f ? state.idleText : state.activeText;
         if (view instanceof TextView && Color.alpha(color) > 220) {
             float light =
@@ -208,7 +238,7 @@ final class FocusMotion {
                 color,
                 outline,
                 text,
-                reduced ? 1 : (1 + (state.gain - 1) * f) * (1 - .03f * p),
+                resolveScale(state.gain, f, p, reduced),
                 0,
                 1 - .1f * p);
     }

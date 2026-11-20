@@ -15,8 +15,6 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import java.net.URI;
-import java.net.URLDecoder;
 import java.util.List;
 
 /**
@@ -100,6 +98,7 @@ final class TvV17DetailScreen {
         // Full-bleed cinema backdrop with Apple TV+ left-aligned directional vignette
         cover = new ImmersivePoster(a, "detail-cover");
         cover.immersiveMode = true;
+        cover.backdrop.setTag("detail-backdrop");
         cover.backdrop.leftAlignedHero = true;
         cover.backdrop.ambientColor = initialAmbient;
         cover.onAmbientChanged = color -> view.setBackgroundColor(color);
@@ -457,40 +456,50 @@ final class TvV17DetailScreen {
                 && !trimmed.regionMatches(true, 0, "https://", 0, 8)) {
             return "";
         }
-        try {
-            String path = new URI(trimmed).getPath();
-            if (path == null || path.isEmpty()) return "";
-            int slash = path.lastIndexOf('/');
-            String base = slash >= 0 ? path.substring(slash + 1) : path;
-            if (base.isEmpty()) return "";
-            String decoded = URLDecoder.decode(base, "UTF-8").trim();
-            String lower = decoded.toLowerCase(java.util.Locale.ROOT);
-            if (lower.equals("index.m3u8")
-                    || lower.equals("playlist.m3u8")
-                    || lower.equals("master.m3u8")
-                    || lower.equals("video.m3u8")
-                    || lower.equals("play.m3u8")
-                    || lower.equals("stream.m3u8")
-                    || lower.equals("stream.ts")
-                    || lower.endsWith(".php")
-                    || lower.endsWith(".html")
-                    || decoded.length() < 5
-                    || decoded.matches("^[0-9a-fA-F]{16,}\\.[a-z0-9]{2,5}$")) {
-                return "";
-            }
-            if (lower.endsWith(".mp4")
-                    || lower.endsWith(".mkv")
-                    || lower.endsWith(".mov")
-                    || lower.endsWith(".avi")
-                    || lower.endsWith(".ts")
-                    || lower.endsWith(".flv")
-                    || lower.endsWith(".webm")
-                    || lower.endsWith(".m3u8")) {
-                return decoded;
-            }
-        } catch (Exception ignored) {
+        String path = extractRawHttpPath(trimmed);
+        if (path.isEmpty()) return "";
+        int slash = path.lastIndexOf('/');
+        String base = slash >= 0 ? path.substring(slash + 1) : path;
+        if (base.isEmpty()) return "";
+        String decoded = MediaBadges.percentDecodeUtf8PreservePlus(base).trim();
+        String lower = decoded.toLowerCase(java.util.Locale.ROOT);
+        if (lower.equals("index.m3u8")
+                || lower.equals("playlist.m3u8")
+                || lower.equals("master.m3u8")
+                || lower.equals("video.m3u8")
+                || lower.equals("play.m3u8")
+                || lower.equals("stream.m3u8")
+                || lower.equals("stream.ts")
+                || lower.endsWith(".php")
+                || lower.endsWith(".html")
+                || decoded.length() < 5
+                || decoded.matches("^[0-9a-fA-F]{16,}\\.[a-z0-9]{2,5}$")) {
+            return "";
+        }
+        if (lower.endsWith(".mp4")
+                || lower.endsWith(".mkv")
+                || lower.endsWith(".mov")
+                || lower.endsWith(".avi")
+                || lower.endsWith(".ts")
+                || lower.endsWith(".flv")
+                || lower.endsWith(".webm")
+                || lower.endsWith(".m3u8")) {
+            return decoded;
         }
         return "";
+    }
+
+    private static String extractRawHttpPath(String url) {
+        int schemeEnd = url.indexOf("://");
+        if (schemeEnd < 0) return "";
+        int pathStart = url.indexOf('/', schemeEnd + 3);
+        if (pathStart < 0) return "";
+        int end = url.length();
+        int queryIdx = url.indexOf('?', pathStart);
+        if (queryIdx >= 0 && queryIdx < end) end = queryIdx;
+        int hashIdx = url.indexOf('#', pathStart);
+        if (hashIdx >= 0 && hashIdx < end) end = hashIdx;
+        return url.substring(pathStart, end);
     }
 
     void updateEpisodeCaption(String caption, String buttonLabel) {
