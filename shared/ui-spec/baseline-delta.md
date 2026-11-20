@@ -138,16 +138,16 @@
 3. **HarmonyOS 共享 `flutter/lib/` 带来的硬性隔离约束**
    - `flutter/ohos/` 与 `flutter/lib/ui/tv/**` 为只读目录；本机未安装 HarmonyOS 工具链（无 `hvigorw` / `ohpm` / `hdc`），无法在本地执行 `.hap` 编译。
    - **M1–M6 新增 Flutter 功能不得引入不支持 `ohos` 的新插件/原生通道**，且必须在运行时通过 `OhosRuntime.isOhos` 隔离或默认关闭（尤其 M2 触控/键鼠 HUD、M3 弹幕层、M4 `FragmentProgram` 着色器转场与极光背景、M5 引导），保证现有 `VideoKernel` / `OhosPlatformPlayer` 与 `TvLivingRoomShell` 行为不受影响。
-4. **M2 播放页 HUD、M3 弹幕与 M5 引导的 §4.1 写入边界协同约束**
-   - **Android 播放器边界**：`MoviePlayer.java` 与 `SystemPlayer.java` 为只读（M2 起播规格提示直接消费现有的 `a.player.mediaBadges()` 纯文本列表并经 `MediaBadges` 融合，无需修改播放器内核）；M2 电视端（S22）需在 `PlaybackController.dispatchPlaybackKey`（`:2020-2097`）顶部增加最小按键委托钩子以协调 `TvMarkerHost` 与倍速状态机（已列入 M0 决策点供 §4.1 白名单确认）。
-   - **Android `PlaybackControls.java`**：已被 `TvMarkerHost` / `TvMarkerTailGate`（TV 跳过片头片尾标记）、视频子轨菜单、EPG 入口触及；M2 应在独立新类（`PlayerGestureStateMachine`、`hud/*.java`）实现全部状态机与视图，只在 `TouchPlayerGesture.java`、`PlaybackControls.java`、`PlayerChrome.java` 做最小挂载，并预留一个可选的首次播放提示浮层槽位（供 M5 注入 `FirstPlayGestureHint`，避免 M5 触碰播放器内部代码）。
-   - **`Prefs.java` 与弹幕/Flutter 偏好隔离**：`Prefs.java` 已有完善的白名单校验（`sanitizeSetting` / `INT_RANGES` / `BOOLEAN_KEYS`），且 `ReviewFixChecks.java:191` 强校验备份白名单 `Prefs.KEYS.length == 46`、`:311` 强校验持久化 `PLAY_SPEED` 上限为 `2.0f`。因此 M2/M5 新增本机偏好键应置于 `Prefs.KEYS` 之外；M3a/M3b 弹幕设置直接在 `DanmuSettingsPanel.java` 与 `flutter/lib/core/danmu/` 内部管理独立键名（不改 `Prefs.java` 与 `storage_service.dart`）；M2 Flutter HUD 偏好在 `flutter/lib/ui/player/` 内封装 `SharedPreferences` 读写并在 `player_screen.dart` 播放设置面板暴露开关。
+4. **M2 播放页 HUD、M3 弹幕与 M5 引导的 §4.1 写入边界协同约束（已锁定）**
+   - **Android 播放器核心只读边界**：`MoviePlayer.java`、`SystemPlayer.java`、`PlaybackController.java`、`SeekGesture.java` 与 `TvDetailHost.java` 全部严格保持只读、零修改！M2 起播规格提示直接消费现有的 `a.player.mediaBadges()` 纯文本列表并经 `MediaBadges` 做双通道分组融合；电视端长按左右方向键沿用 `PlaybackController.dispatchPlaybackKey`（`:2067-2083`）-> `SeekGesture`（`:62-101`）加速快进/快退预览管线（与 `InteractionProbe.java:96-147` 100% 兼容，且与 `:2026` `TvMarkerHost` 上键零冲突），S22 仅在 `PlaybackControls.java`、`PlayerChrome.java` 与 `hud/*.java` 中升级预览浮层与 3 秒跳过倒计时（利用 `dialogOpen` 将按键路由至聚焦按钮）。
+   - **Android `PlaybackControls.java`**：已被 `TvMarkerHost` / `TvMarkerTailGate`（TV 跳过片头片尾标记）、视频子轨菜单、EPG 入口触及；M2 在独立新类（`PlayerGestureStateMachine`、`hud/*.java`）实现全部状态机与视图，只在 `TouchPlayerGesture.java`、`PlaybackControls.java`、`PlayerChrome.java` 做最小挂载，并预留一个可选的首次播放提示浮层槽位（供 M5 注入 `FirstPlayGestureHint`，避免 M5 触碰播放器内部代码）。
+   - **本机偏好存储隔离（不入跨端备份表）**：`Prefs.java` 已有完善的白名单校验（`sanitizeSetting` / `INT_RANGES` / `BOOLEAN_KEYS`），且 `ReviewFixChecks.java:191` 强校验备份白名单 `Prefs.KEYS.length == 46`、`:311` 强校验持久化 `PLAY_SPEED` 上限为 `2.0f`。已锁定将 M2/M5 新增本机偏好键一律置于 `Prefs.KEYS` 之外（不纳入 `marco-movie-backup`）；M3a/M3b 弹幕设置直接在 `DanmuSettingsPanel.java` 与 `flutter/lib/core/danmu/` 内部管理独立键名（不改 `Prefs.java` 与 `storage_service.dart`）；M2 Flutter HUD 偏好在 `flutter/lib/ui/player/` 内封装 `SharedPreferences` 读写并在 `player_screen.dart` 播放设置面板暴露开关。
    - **Flutter `player_screen.dart`**：已通过 `_videoKernel.buildVideoSurface(...)` 渲染画面并存在 `desktop_player_window.dart` / `player_interaction_layers.dart`；M2/M3b/M4 需沿用 `player_screen.dart` 的最小接线边界，将逻辑放在 `flutter/lib/ui/player/`、`flutter/lib/ui/danmu/`、`flutter/lib/ui/motion/`。
 5. **M4 着色器与 Windows 渲染后端约束**
    - `flutter/shaders/` 当前仅有 `glasswork.frag`（含 `#ifdef IMPELLER_TARGET_OPENGLES` 纹理坐标 Y 轴翻转处理），`apple_theme.dart` 明确标注 Windows 运行于 **Skia over ANGLE/D3D11** 后端（`ImageFilter.isShaderFilterSupported == false`，不支持 `BackdropFilter` + `ImageFilter.shader`）；因此 `transitions-spec.md`（M0）与 S41（M4）统一采用 `CustomPainter` + `Paint()..shader`（逻辑像素坐标系）绘制，不新增任何第三方包依赖，并强制实现 **减少动态效果 / 着色器编译失败 / 截图 > 16ms** 三重自动降级路径；Android TV 端严禁着色器与模糊。
 6. **公开内容合规守卫（`scripts/check_public_content.py`）对 M0–M6 的约束**
    - 追踪文件内禁止出现特定本机路径模式与内网 IP（仅特定测试文件豁免），所有测试用例 URL 必须使用 `ALLOWED_HOSTS`、`127.0.0.1` 或 `.test` / `.example` / `.invalid` 保留域名（对 M3 弹幕模拟测试尤其关键）。
-   - 当前脚本仅对 `.png` 放行跳过二进制检查，而 `.webp` 尚未豁免且未知二进制文件会触发 `unexpected binary`；M5 生成示例海报时，默认导出量化 `.png` 以保持零守卫脚本改动。
+   - 当前脚本仅对 `.png` 放行跳过二进制检查，而未知二进制文件会触发 `unexpected binary`；已锁定 M5 `scripts/generate_demo_art.py` 唯一输出格式为 **8-bit 索引量化 `.png`**（14 张总计 `< 480 KB`），实现零守卫脚本改动。
    - 所有新增代码、规范文档与测试样例均严格遵守净室红线：不引用第三方闭源应用名称、不使用真实影片名/海报/公共影视目录 URL、不使用第三方商标图形。
 
 ---

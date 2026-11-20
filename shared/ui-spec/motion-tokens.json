@@ -26,9 +26,10 @@
     "startSpecFadeOut": 240,
     "desktopCursorIdleHide": 2500,
     "touchControlsIdleHide": 4000,
-    "skipCountdownTotal": 5000,
-    "desktopHoldBoostThreshold": 280,
-    "tvHoldBoostThreshold": 320,
+    "skipCountdownTotal": 3000,
+    "touchHoldFastForwardThreshold": 350,
+    "desktopHoldFastForwardThreshold": 280,
+    "tvHoldFastForwardThreshold": 500,
     "danmuSeekDebounce": 180,
     "transitionCaptureBudget": 16
   },
@@ -89,7 +90,7 @@
         "stiffness": 503.55,
         "viscousDamping": 38.6,
         "motionSpringFrequency": 22.44,
-        "note": "Used for speed capsule, skip countdown card, and start-up spec banner (Flutter SpringDescription; Android zero-dependency underdamped helper in MotionTokens.java or decelerate PathInterpolator)."
+        "note": "Used for fast-forward scrub capsule, skip countdown card, and start-up spec banner (Flutter SpringDescription; Android zero-dependency underdamped helper in MotionTokens.java or decelerate PathInterpolator)."
       },
       "playerTransition": {
         "response": 0.42,
