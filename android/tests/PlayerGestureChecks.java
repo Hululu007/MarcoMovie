@@ -1104,6 +1104,66 @@ public final class PlayerGestureChecks {
                                         KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.ACTION_UP, 0)
                                 == SkipCountdownPill.Controller.KEY_COMMIT_CANCEL,
                 "S-05: TV D-pad cancels pill cleanly on UP without leaking repeats to seek");
+
+        // 5. F-A1: external controls shown / focus loss while playing MUST cancel (STATE_CANCELLED)
+        // so tick() never respawns the pill or steals focus back 1s later; when paused/suspended,
+        // it silently resets (STATE_IDLE) so foreground resume can re-evaluate.
+        SkipCountdownPill.Controller extActiveCtl = new SkipCountdownPill.Controller();
+        extActiveCtl.start(false, 2_400_000, 8000L, true);
+        check(
+                extActiveCtl.dismissOnExternalControlsOrFocusLoss(true)
+                                == SkipCountdownPill.Controller.STATE_CANCELLED
+                        && extActiveCtl.getState() == SkipCountdownPill.Controller.STATE_CANCELLED
+                        && !extActiveCtl.isActive()
+                        && !extActiveCtl.ownsTvFocus(),
+                "F-A1: external controls/focus loss while playing cancels (STATE_CANCELLED) to prevent respawn");
+        SkipCountdownPill.Controller extPausedCtl = new SkipCountdownPill.Controller();
+        extPausedCtl.start(false, 2_400_000, 9000L, true);
+        check(
+                extPausedCtl.dismissOnExternalControlsOrFocusLoss(false)
+                                == SkipCountdownPill.Controller.STATE_IDLE
+                        && extPausedCtl.getState() == SkipCountdownPill.Controller.STATE_IDLE
+                        && !extPausedCtl.isActive()
+                        && !extPausedCtl.ownsTvFocus(),
+                "F-A1: external controls/focus loss while paused silently suspends (STATE_IDLE)");
+
+        // 6. F-A1: TV hardware MEDIA_PLAY_PAUSE / MEDIA_PAUSE / MEDIA_PLAY and MENU keys work
+        // while SkipCountdownPill holds dialogOpen == true
+        SkipCountdownPill.Controller mediaCtl = new SkipCountdownPill.Controller();
+        mediaCtl.start(false, 2_400_000, 10_000L, true);
+        check(
+                mediaCtl.handleTvKeyEvent(
+                                        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.ACTION_DOWN, 0)
+                                == SkipCountdownPill.Controller.KEY_MEDIA_PLAYBACK
+                        && mediaCtl.handleTvKeyEvent(
+                                        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.ACTION_DOWN, 1)
+                                == SkipCountdownPill.Controller.KEY_CONSUMED
+                        && mediaCtl.handleTvKeyEvent(
+                                        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.ACTION_UP, 0)
+                                == SkipCountdownPill.Controller.KEY_CONSUMED,
+                "F-A1: TV MEDIA_PLAY_PAUSE forwards on DOWN(repeat=0) and swallows repeats/UP");
+        check(
+                mediaCtl.handleTvKeyEvent(KeyEvent.KEYCODE_MEDIA_PAUSE, KeyEvent.ACTION_DOWN, 0)
+                                == SkipCountdownPill.Controller.KEY_MEDIA_PLAYBACK
+                        && mediaCtl.handleTvKeyEvent(
+                                        KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.ACTION_DOWN, 0)
+                                == SkipCountdownPill.Controller.KEY_MEDIA_PLAYBACK,
+                "F-A1: TV MEDIA_PAUSE and MEDIA_PLAY forward cleanly during active countdown");
+        SkipCountdownPill.Controller menuCtl = new SkipCountdownPill.Controller();
+        menuCtl.start(true, 90_000, 11_000L, true);
+        check(
+                menuCtl.handleTvKeyEvent(KeyEvent.KEYCODE_MENU, KeyEvent.ACTION_DOWN, 0)
+                                == SkipCountdownPill.Controller.KEY_CONSUMED
+                        && menuCtl.handleTvKeyEvent(KeyEvent.KEYCODE_MENU, KeyEvent.ACTION_DOWN, 1)
+                                == SkipCountdownPill.Controller.KEY_CONSUMED
+                        && menuCtl.isActive(),
+                "F-A1: TV KEYCODE_MENU ACTION_DOWN consumes repeats while holding focus");
+        check(
+                menuCtl.handleTvKeyEvent(KeyEvent.KEYCODE_MENU, KeyEvent.ACTION_UP, 0)
+                                == SkipCountdownPill.Controller.KEY_COMMIT_MENU
+                        && menuCtl.getState() == SkipCountdownPill.Controller.STATE_CANCELLED
+                        && !menuCtl.ownsTvFocus(),
+                "F-A1: TV KEYCODE_MENU ACTION_UP cancels countdown and routes to TV primary menu");
     }
 
     private static void testGate1_M01_ScreenLockUnlocksSpeedLockedAndPreservesNoticeTimer() {
@@ -1178,15 +1238,38 @@ public final class PlayerGestureChecks {
                         && PlayerGestureStateMachine.isInEdgeOrSystemGuard(965f, 250f, api29Env),
                 "M-02: API 29 44px side gesture inset guards touches at 35px / width-35px");
 
-        // Verify TouchPlayerGesture uses event.getX()/getY() for FSM and getSystemGestureInsets()
+        // 3. F-A2: consistent Window-space HUD hit-exclusion in bottom-half split-screen & freeform
+        // Bottom-half split-screen (1080x2400 phone, windowTop=1200, window height=1200):
+        // a.root globalVisibleRect=(0,0..1080,1200), progress bar
+        // globalVisibleRect=(20,1080..1060,1180).
+        // Touching progress at local (500, 1120) [rawY=2320] MUST hit progress; touching empty
+        // upper video at local (500, 100) [rawY=1300] MUST NOT falsely hit progress!
+        check(
+                TouchPlayerGesture.isLocalTouchInsideWindowRect(
+                        500f, 1120f, 0, 0, 20, 1080, 1060, 1180),
+                "F-A2: bottom-half split-screen touch on progress bar hits Window-space HUD rect");
+        check(
+                !TouchPlayerGesture.isLocalTouchInsideWindowRect(
+                        500f, 100f, 0, 0, 20, 1000, 1060, 1200),
+                "F-A2: freeform upper video touch (localY=100, rawY=1100) does not hit bottom HUD");
+        check(
+                TouchPlayerGesture.isLocalTouchInsideWindowRect(
+                                200f, 420f, 40, 120, 100, 500, 400, 600)
+                        && !TouchPlayerGesture.isLocalTouchInsideWindowRect(
+                                200f, 300f, 40, 120, 100, 500, 400, 600),
+                "F-A2: non-zero rootGlobalLeft/Top offset maps local coords cleanly into Window rect");
+
+        // Verify TouchPlayerGesture uses event.getX()/getY() for FSM & Window-space HUD hit tests
         String touchSrc =
                 readSourceFile(
                         "android/src/main/java/com/pilipala/marcomovie/TouchPlayerGesture.java");
         check(
                 touchSrc.contains("event.getX()")
                         && touchSrc.contains("event.getY()")
-                        && touchSrc.contains("getSystemGestureInsets()"),
-                "M-02: TouchPlayerGesture passes view-local getX/getY and reads API 29 gesture insets");
+                        && touchSrc.contains("getSystemGestureInsets()")
+                        && touchSrc.contains("isLocalTouchInsideWindowRect(")
+                        && !touchSrc.contains("isTouchInsideControls(rawX"),
+                "M-02/F-A2: TouchPlayerGesture uses view-local coords + Window-space hit rects + API 29 insets");
     }
 
     private static void testGate1_M07_SlimProgressToggleDecoupledFromHorizontalSeekPreview() {

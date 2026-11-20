@@ -41,6 +41,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
     final PlayerGestureStateMachine fsm;
 
     private final Rect hitRect = new Rect();
+    private final Rect rootRect = new Rect();
     private VelocityTracker velocityTracker;
     private long lastMoveTimeMs;
     private int startPositionMs, durationMs, targetSeekMs;
@@ -707,39 +708,84 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         hudProgress.setVisibility(View.GONE);
     }
 
-    private boolean isTouchInsideView(View view, float rawX, float rawY) {
-        if (view == null || !view.isShown()) return false;
-        if (!view.getGlobalVisibleRect(hitRect)) return false;
-        return hitRect.contains(Math.round(rawX), Math.round(rawY));
+    /**
+     * Tests whether a view-local touch point relative to {@code a.root} falls inside a child view's
+     * Activity-window {@link View#getGlobalVisibleRect(Rect)} bounds. Converting {@code (localX,
+     * localY)} into the same Window coordinate space avoids split-screen and freeform physical
+     * screen-offset skew caused by comparing {@code getRawX()/getRawY()} against Window rects.
+     */
+    static boolean isLocalTouchInsideWindowRect(
+            float localX,
+            float localY,
+            int rootGlobalLeft,
+            int rootGlobalTop,
+            int targetLeft,
+            int targetTop,
+            int targetRight,
+            int targetBottom) {
+        int winX = Math.round(rootGlobalLeft + localX);
+        int winY = Math.round(rootGlobalTop + localY);
+        return winX >= targetLeft && winX < targetRight && winY >= targetTop && winY < targetBottom;
     }
 
-    private boolean isTouchInsideControls(float rawX, float rawY) {
+    private boolean isTouchInsideView(
+            View view, float localX, float localY, int rootGlobalLeft, int rootGlobalTop) {
+        if (view == null || !view.isShown()) return false;
+        if (!view.getGlobalVisibleRect(hitRect)) return false;
+        return isLocalTouchInsideWindowRect(
+                localX,
+                localY,
+                rootGlobalLeft,
+                rootGlobalTop,
+                hitRect.left,
+                hitRect.top,
+                hitRect.right,
+                hitRect.bottom);
+    }
+
+    private boolean isTouchInsideControls(float localX, float localY) {
+        int rootLeft = 0;
+        int rootTop = 0;
+        if (a.root != null && a.root.getGlobalVisibleRect(rootRect)) {
+            rootLeft = rootRect.left;
+            rootTop = rootRect.top;
+        }
         if (speedLockCapsule != null
                 && speedLockCapsule.getVisibility() == View.VISIBLE
-                && isTouchInsideView(speedLockCapsule, rawX, rawY)) {
+                && isTouchInsideView(speedLockCapsule, localX, localY, rootLeft, rootTop)) {
             return true;
         }
         if (a.playbackControls != null) {
             if (a.playbackControls.skipCountdownPill != null
                     && a.playbackControls.skipCountdownPill.getVisibility() == View.VISIBLE
-                    && isTouchInsideView(a.playbackControls.skipCountdownPill, rawX, rawY)) {
+                    && isTouchInsideView(
+                            a.playbackControls.skipCountdownPill,
+                            localX,
+                            localY,
+                            rootLeft,
+                            rootTop)) {
                 return true;
             }
             if (a.playbackControls.sleepWarningPill != null
                     && a.playbackControls.sleepWarningPill.getVisibility() == View.VISIBLE
-                    && isTouchInsideView(a.playbackControls.sleepWarningPill, rawX, rawY)) {
+                    && isTouchInsideView(
+                            a.playbackControls.sleepWarningPill,
+                            localX,
+                            localY,
+                            rootLeft,
+                            rootTop)) {
                 return true;
             }
         }
         if (!a.controlsVisible || a.playerChrome == null) return false;
-        return isTouchInsideView(a.playerChrome.dock, rawX, rawY)
-                || isTouchInsideView(a.playerChrome.heading, rawX, rawY)
-                || isTouchInsideView(a.playerChrome.progress, rawX, rawY)
-                || isTouchInsideView(a.playerChrome.lockBtn, rawX, rawY);
+        return isTouchInsideView(a.playerChrome.dock, localX, localY, rootLeft, rootTop)
+                || isTouchInsideView(a.playerChrome.heading, localX, localY, rootLeft, rootTop)
+                || isTouchInsideView(a.playerChrome.progress, localX, localY, rootLeft, rootTop)
+                || isTouchInsideView(a.playerChrome.lockBtn, localX, localY, rootLeft, rootTop);
     }
 
     @SuppressWarnings("deprecation")
-    private PlayerGestureStateMachine.Env buildEnv(float rawX, float rawY, boolean downEvent) {
+    private PlayerGestureStateMachine.Env buildEnv(float localX, float localY, boolean downEvent) {
         PlayerGestureStateMachine.Env env = new PlayerGestureStateMachine.Env();
         env.density = a.getResources().getDisplayMetrics().density;
         env.screenWidthPx = effectiveHostWidth();
@@ -792,7 +838,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         env.durationMs =
                 a.player != null && a.prepared ? Math.max(0, a.player.getDuration()) : durationMs;
         env.controlsVisible = a.controlsVisible;
-        env.startedInsideControls = downEvent && isTouchInsideControls(rawX, rawY);
+        env.startedInsideControls = downEvent && isTouchInsideControls(localX, localY);
         env.userNormalSpeed = a.prefs != null ? a.prefs.getFloat(Prefs.PLAY_SPEED, 1.0f) : 1.0f;
         return env;
     }
@@ -808,11 +854,9 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         int pointerCount = event.getPointerCount();
         int pointerId = event.getPointerId(0);
         // View-local coordinates relative to a.root ensure split-screen / freeform windows match
-        // effectiveHostWidth/Height; keep rawX/rawY exclusively for getGlobalVisibleRect hit tests.
+        // effectiveHostWidth/Height and map consistently into Window-space HUD hit rects.
         float localX = event.getX();
         float localY = event.getY();
-        float rawX = event.getRawX();
-        float rawY = event.getRawY();
 
         if (action == MotionEvent.ACTION_POINTER_DOWN || pointerCount > 1) {
             cancelWithReason(PlayerGestureStateMachine.InterruptReason.MULTI_TOUCH);
@@ -848,7 +892,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
                 int cur = audio.getStreamVolume(AudioManager.STREAM_MUSIC);
                 startVolume = cur / (float) max;
             }
-            PlayerGestureStateMachine.Env env = buildEnv(rawX, rawY, true);
+            PlayerGestureStateMachine.Env env = buildEnv(localX, localY, true);
             boolean accepted =
                     fsm.onPointerDown(pointerId, pointerCount, localX, localY, nowMs, env);
             scheduleNextFsmTick();
@@ -858,14 +902,14 @@ final class TouchPlayerGesture implements View.OnTouchListener {
 
         if (action == MotionEvent.ACTION_MOVE) {
             if (velocityTracker != null) velocityTracker.addMovement(event);
-            PlayerGestureStateMachine.Env env = buildEnv(rawX, rawY, false);
+            PlayerGestureStateMachine.Env env = buildEnv(localX, localY, false);
             fsm.onPointerMove(pointerId, pointerCount, localX, localY, nowMs, env);
             scheduleNextFsmTick();
             return true;
         }
 
         if (action == MotionEvent.ACTION_UP) {
-            PlayerGestureStateMachine.Env env = buildEnv(rawX, rawY, false);
+            PlayerGestureStateMachine.Env env = buildEnv(localX, localY, false);
             fsm.onPointerUp(pointerId, localX, localY, nowMs, env);
             recycleVelocityTracker();
             scheduleNextFsmTick();

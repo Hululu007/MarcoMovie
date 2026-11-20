@@ -214,6 +214,15 @@ public final class SleepTimerSheet {
         private Runnable touchInteractionHook;
         private boolean reducedTransparency;
         private int safeTopPx;
+        private final Runnable focusExtendBtnRunnable =
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        if (getVisibility() == View.VISIBLE) {
+                            extendBtn.requestFocus();
+                        }
+                    }
+                };
 
         public WarningPill(Context context, boolean tv, Runnable onExtend, Runnable onCancel) {
             super(context);
@@ -304,13 +313,9 @@ public final class SleepTimerSheet {
 
         public void requestInitialTvFocus() {
             if (!isTv || getVisibility() != View.VISIBLE) return;
+            extendBtn.removeCallbacks(focusExtendBtnRunnable);
             extendBtn.requestFocus();
-            extendBtn.post(
-                    () -> {
-                        if (getVisibility() == View.VISIBLE) {
-                            extendBtn.requestFocus();
-                        }
-                    });
+            extendBtn.post(focusExtendBtnRunnable);
         }
 
         public void updateSafeTop(int safeTopPx) {
@@ -394,9 +399,16 @@ public final class SleepTimerSheet {
         }
 
         public void hide() {
+            extendBtn.removeCallbacks(focusExtendBtnRunnable);
             if (getVisibility() != View.GONE) {
                 setVisibility(View.GONE);
             }
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            extendBtn.removeCallbacks(focusExtendBtnRunnable);
+            super.onDetachedFromWindow();
         }
     }
 }

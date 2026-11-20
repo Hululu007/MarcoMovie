@@ -38,6 +38,8 @@ public final class SkipCountdownPill extends LinearLayout {
         public static final int KEY_CONSUMED = 1;
         public static final int KEY_COMMIT_SKIP = 2;
         public static final int KEY_COMMIT_CANCEL = 3;
+        public static final int KEY_COMMIT_MENU = 4;
+        public static final int KEY_MEDIA_PLAYBACK = 5;
 
         private int state = STATE_IDLE;
         private boolean intro;
@@ -119,6 +121,25 @@ public final class SkipCountdownPill extends LinearLayout {
             return true;
         }
 
+        /**
+         * Handles external controls becoming visible or focus leaving the skip button on TV. While
+         * playback is still active/allowed, cancels the countdown ({@link #STATE_CANCELLED}) so the
+         * 1s clock tick never respawns the pill or steals focus back; when playback is already
+         * suspended/paused, silently resets ({@link #STATE_IDLE}) so foreground resume can
+         * re-evaluate cleanly.
+         *
+         * @return resulting state ({@link #STATE_CANCELLED} or {@link #STATE_IDLE}).
+         */
+        public int dismissOnExternalControlsOrFocusLoss(boolean playbackAllowed) {
+            if (state != STATE_ACTIVE) return STATE_IDLE;
+            if (playbackAllowed) {
+                cancel();
+                return STATE_CANCELLED;
+            }
+            reset();
+            return STATE_IDLE;
+        }
+
         /** @return {@code true} when countdown expires and skip should execute now. */
         public boolean tick(long nowMs) {
             if (state != STATE_ACTIVE) return false;
@@ -137,10 +158,39 @@ public final class SkipCountdownPill extends LinearLayout {
 
         /**
          * Routes TV remote key events through the countdown without leaking long-press repeat
-         * events (e.g. Back repeatCount >= 1) to Activity back/PiP handlers after dismissal.
+         * events (e.g. Back repeatCount >= 1) to Activity back/PiP handlers after dismissal, while
+         * still forwarding hardware Media Play/Pause/Play and Menu keys cleanly.
          */
         public int handleTvKeyEvent(int keyCode, int action, int repeatCount) {
             if (state != STATE_ACTIVE) return KEY_IGNORED;
+            if (isMediaPlaybackKey(keyCode)) {
+                if (action == KeyEvent.ACTION_DOWN) {
+                    return repeatCount == 0 ? KEY_MEDIA_PLAYBACK : KEY_CONSUMED;
+                }
+                if (action == KeyEvent.ACTION_UP) {
+                    return KEY_CONSUMED;
+                }
+                return KEY_IGNORED;
+            }
+            if (isMenuKey(keyCode)) {
+                if (action == KeyEvent.ACTION_DOWN) {
+                    if (repeatCount == 0 && pendingKeyCode < 0) {
+                        pendingKeyCode = keyCode;
+                        pausedForKeyHold = true;
+                    }
+                    return KEY_CONSUMED;
+                }
+                if (action == KeyEvent.ACTION_UP) {
+                    if (pendingKeyCode < 0 || pendingKeyCode == keyCode) {
+                        pendingKeyCode = -1;
+                        pausedForKeyHold = false;
+                        cancel();
+                        return KEY_COMMIT_MENU;
+                    }
+                    return KEY_CONSUMED;
+                }
+                return KEY_IGNORED;
+            }
             int intent = classifyTvKey(keyCode);
             if (intent == 0) return KEY_IGNORED;
             if (action == KeyEvent.ACTION_DOWN) {
@@ -166,6 +216,16 @@ public final class SkipCountdownPill extends LinearLayout {
                 return KEY_CONSUMED;
             }
             return KEY_IGNORED;
+        }
+
+        public static boolean isMediaPlaybackKey(int keyCode) {
+            return keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                    || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY
+                    || keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE;
+        }
+
+        public static boolean isMenuKey(int keyCode) {
+            return keyCode == KeyEvent.KEYCODE_MENU;
         }
 
         public boolean skipNow() {
@@ -225,6 +285,10 @@ public final class SkipCountdownPill extends LinearLayout {
         void onCancelled(boolean intro);
 
         void onTvDialogStateChanged(boolean open);
+
+        default void onTvMediaKey(int keyCode) {}
+
+        default void onTvMenuKey() {}
     }
 
     public interface PlaybackGuard {
@@ -381,6 +445,14 @@ public final class SkipCountdownPill extends LinearLayout {
                             finishWithCancel();
                             return true;
                         }
+                        if (result == Controller.KEY_COMMIT_MENU) {
+                            finishWithMenu();
+                            return true;
+                        }
+                        if (result == Controller.KEY_MEDIA_PLAYBACK) {
+                            if (callbacks != null) callbacks.onTvMediaKey(keyCode);
+                            return true;
+                        }
                         return result == Controller.KEY_CONSUMED;
                     });
         }
@@ -427,9 +499,10 @@ public final class SkipCountdownPill extends LinearLayout {
                         } else if (skipBtnGainedFocus
                                 && controller.isActive()
                                 && controller.ownsTvFocus()) {
-                            // External focus move (e.g. showControls focusing timeline) must
-                            // never leave dialogOpen == true blocking TV remote keys.
-                            dismissSilently();
+                            // External focus move (e.g. showControls focusing timeline or air-mouse
+                            // click) must release dialogOpen and, if playback is still active,
+                            // cancel so tick() never respawns the pill or steals focus back.
+                            dismissForExternalControlsOrFocusLoss();
                         }
                     });
         }
@@ -522,7 +595,24 @@ public final class SkipCountdownPill extends LinearLayout {
     /** Called when TV controls transition from hidden to visible while this pill is active. */
     public void onExternalControlsShown() {
         if (isTv && controller.isActive()) {
-            dismissSilently();
+            dismissForExternalControlsOrFocusLoss();
+        }
+    }
+
+    private void dismissForExternalControlsOrFocusLoss() {
+        boolean playbackAllowed = playbackGuard == null || playbackGuard.canContinueCountdown();
+        boolean wasIntro = controller.isIntro();
+        int outcome = controller.dismissOnExternalControlsOrFocusLoss(playbackAllowed);
+        if (outcome == Controller.STATE_CANCELLED) {
+            removeCallbacks(tickRunnable);
+            skipBtn.removeCallbacks(focusSkipBtnRunnable);
+            skipBtnGainedFocus = false;
+            controller.reset();
+            setVisibility(View.GONE);
+            releaseTvDialogState();
+            if (callbacks != null) callbacks.onCancelled(wasIntro);
+        } else {
+            dismissSilentlyAfterGuard(wasIntro);
         }
     }
 
@@ -618,6 +708,21 @@ public final class SkipCountdownPill extends LinearLayout {
         setVisibility(View.GONE);
         releaseTvDialogState();
         if (callbacks != null) callbacks.onCancelled(wasIntro);
+    }
+
+    private void finishWithMenu() {
+        removeCallbacks(tickRunnable);
+        skipBtn.removeCallbacks(focusSkipBtnRunnable);
+        skipBtnGainedFocus = false;
+        boolean wasIntro = controller.isIntro();
+        if (!controller.cancel() && controller.getState() != Controller.STATE_CANCELLED) return;
+        controller.reset();
+        setVisibility(View.GONE);
+        releaseTvDialogState();
+        if (callbacks != null) {
+            callbacks.onCancelled(wasIntro);
+            callbacks.onTvMenuKey();
+        }
     }
 
     private void releaseTvDialogState() {

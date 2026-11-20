@@ -25,7 +25,11 @@ public class KeyEvent {
     public static final int KEYCODE_DPAD_RIGHT = 22;
     public static final int KEYCODE_DPAD_CENTER = 23;
     public static final int KEYCODE_ENTER = 66;
+    public static final int KEYCODE_MENU = 82;
+    public static final int KEYCODE_MEDIA_PLAY_PAUSE = 85;
     public static final int KEYCODE_ESCAPE = 111;
+    public static final int KEYCODE_MEDIA_PLAY = 126;
+    public static final int KEYCODE_MEDIA_PAUSE = 127;
     public static final int KEYCODE_NUMPAD_ENTER = 160;
 }
 """,

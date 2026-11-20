@@ -322,14 +322,41 @@ final class PlaybackControls {
                         } else if (activeDialog == null || !activeDialog.isShowing()) {
                             dialogOpen = false;
                             if (a.isTvDevice()) {
-                                if (a.controlsVisible) {
-                                    if (timeline != null) timeline.requestFocus();
-                                    if (a.playing) a.scheduleHide();
-                                } else if (a.root != null) {
-                                    a.root.requestFocus();
+                                View curFocus = a.getCurrentFocus();
+                                boolean focusStillOnSkip =
+                                        curFocus == null
+                                                || curFocus == skipCountdownPill
+                                                || (curFocus.getParent() != null
+                                                        && curFocus.getParent().getParent()
+                                                                == skipCountdownPill);
+                                if (focusStillOnSkip) {
+                                    if (a.controlsVisible) {
+                                        if (timeline != null) timeline.requestFocus();
+                                    } else if (a.root != null) {
+                                        a.root.requestFocus();
+                                    }
+                                }
+                                if (a.controlsVisible && a.playing) {
+                                    a.scheduleHide();
                                 }
                             }
                         }
+                    }
+
+                    @Override
+                    public void onTvMediaKey(int keyCode) {
+                        if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                                || (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY && !a.playing)
+                                || (keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE && a.playing)) {
+                            a.togglePlayback();
+                        }
+                        a.showControls(true);
+                    }
+
+                    @Override
+                    public void onTvMenuKey() {
+                        a.showControls(true);
+                        focusPrimaryAction();
                     }
                 });
         FrameLayout.LayoutParams skipLp =
