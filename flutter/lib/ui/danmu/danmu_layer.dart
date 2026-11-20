@@ -724,6 +724,14 @@ class _DanmuLayerState extends State<DanmuLayer>
     if (oldWidget.playing != widget.playing ||
         oldWidget.settings.enabled != widget.settings.enabled) {
       _syncTickerState();
+      if (!oldWidget.settings.enabled &&
+          widget.settings.effectiveEnabled &&
+          !OhosRuntime.isOhos) {
+        widget.segmentCache?.onPlaybackTick(
+          _clock.currentPositionMs(playing: widget.playing),
+          playing: widget.playing,
+        );
+      }
       shouldRepaint = true;
     }
 

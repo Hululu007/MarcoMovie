@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -115,11 +116,93 @@ void main() {
           'https://s10.danmu.test';
       expect(DandanplayProvider.parseConfiguredOrigins(tenUrls).length, 8);
     });
+
+    test('IPv6 literal origins preserve brackets and roundtrip through Uri.tryParse & mmdanmu://v1',
+        () {
+      const httpProto = 'http';
+      const httpsProto = 'https';
+      final v6PortPath = DandanplayProvider.normalizeOriginOrNull(
+        '$httpProto://[::1]:8080/path/',
+      );
+      expect(v6PortPath, '$httpProto://[::1]:8080/path');
+      final parsedPortPath = Uri.tryParse(v6PortPath!);
+      expect(parsedPortPath, isNotNull);
+      expect(parsedPortPath!.host, '::1');
+      expect(parsedPortPath.port, 8080);
+      expect(parsedPortPath.path, '/path');
+
+      final v6HttpsDefault = DandanplayProvider.normalizeOriginOrNull(
+        '$httpsProto://[2001:DB8::1]:443/api/',
+      );
+      expect(v6HttpsDefault, '$httpsProto://[2001:db8::1]/api');
+      expect(Uri.tryParse(v6HttpsDefault!), isNotNull);
+
+      expect(
+        DandanplayProvider.normalizeOriginOrNull('$httpProto://[::1]:80'),
+        '$httpProto://[::1]',
+      );
+      final v6Bare =
+          DandanplayProvider.normalizeOriginOrNull('$httpProto://[::1]');
+      expect(v6Bare, '$httpProto://[::1]');
+      expect(Uri.tryParse(v6Bare!), isNotNull);
+
+      final bound = DandanplayProvider.encodeBoundEpisodeId(v6PortPath, 'ep-v6');
+      final decoded = DandanplayProvider.decodeBoundEpisodeId(
+        bound,
+        <String>[v6PortPath],
+      );
+      expect(decoded.origin, v6PortPath);
+      expect(decoded.rawEpisodeId, 'ep-v6');
+    });
   });
 
   group('O(N) Static ReDoS Blocker & BlockFilter', () {
-    test('rejects catastrophic backtracking & unsafe regex constructs', () {
+    test('rejects catastrophic & high-polynomial backtracking constructs (Java parity vector)',
+        () {
       final rejected = <String>[
+        // Report bypasses (ungrouped adjacent quantifiers)
+        r're:a+a+a+a+a+a+a+a+b',
+        r're:[^x]*[^x]*[^x]*[^x]*[^x]*[^x]*[^x]*b',
+        // Additional ungrouped / chained / hidden-group / alternation adversarial rules
+        r're:a+a+b',
+        r're:a+a+a+a+b',
+        r're:[^x]*[^x]*[^x]*b',
+        r're:\w+\w+\w+\w+!',
+        r're:\d+\d+\d+\d+x',
+        r're:[a-z]{1,10}[a-z]{1,10}[a-z]{1,10}[a-z]{1,10}z',
+        r're:a+b?a+b?a+c',
+        r're:(?:a+)(?:a+)(?:a+)b',
+        r're:a+.*a+.*a+b',
+        r're:.*.*b',
+        r're:(?:a|aa)+$',
+        r're:(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)b',
+        r're:(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)b',
+        r're:a?a?a?a?a?a?a?a?a?a?b',
+        r're:a++',
+        r're:a+*',
+        r're:a??',
+        r're:a*?+',
+        r're:a{1,2}*',
+        r're:(?=a)b',
+        r're:(?!a)b',
+        r're:\k<x>',
+        r're:^+a',
+        r're:$+',
+        r're:\b+a',
+        r're:a{1,65}',
+        r're:a{0}',
+        r're:[a-z]{1,20}[a-z]{1,20}z',
+        r're:[a-z]{1,30}[a-z]{1,30}z',
+        r're:(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)z',
+        r're:a+z|a+z|a+z|a+z',
+        r're:a.*b|c.*d|e.*f|g.*h',
+        r're:\Qfoo\E',
+        r're:[a[b]]',
+        r're:[a-z&&[^bc]]',
+        r're:[]a]',
+        r're:a||b',
+        r're:()a',
+        // Existing spec rejection suite
         r're:(a|aa)+$',
         r're:(a+)+',
         r're:(a?)+',
@@ -143,7 +226,7 @@ void main() {
       }
     });
 
-    test('accepts safe plain text, top-level alternation & non-quantified groups',
+    test('accepts safe regexes and matches 180-char adversarial inputs in < 5ms',
         () {
       const accepted = <String>[
         '剧透',
@@ -151,10 +234,38 @@ void main() {
         're:第(一|二)章',
         're:[0-9]{4,}',
         r're:foo\)bar+',
+        r're:foo.*bar',
+        r're:剧透.+结局',
+        r're:(微信|QQ|VX)\d{5,}',
+        r're:https?://[a-z0-9.-]+',
+        r're:a.*b|c.*d|e.*f',
+        r're:^前排|沙发$',
+        r're:[a-z]{1,5}[a-z]{1,5}z',
+        r're:(a|a)(a|a)(a|a)(a|a)(a|a)z',
+        r're:[a-z]+z|[a-z]+z|[a-z]+z',
+        r're:(a|a|a)[a-z]+z',
+        r're:(?:foo|bar).*?z',
       ];
+      final adversarial180A = 'a' * 180;
+      final adversarial180Digits = '1' * 180;
       for (final rule in accepted) {
         final vr = DanmuBlockFilter.validateRule(rule);
         expect(vr.valid, isTrue, reason: 'Expected valid for $rule: ${vr.error}');
+        final single = DanmuBlockFilter.compile(<String>[rule]);
+        // Warm up once, then measure 180-char adversarial mismatch inputs
+        single.isBlocked(adversarial180A);
+        single.isBlocked(adversarial180Digits);
+        final sw = Stopwatch()..start();
+        single.isBlocked(adversarial180A);
+        single.isBlocked(adversarial180Digits);
+        sw.stop();
+        final elapsedMs = sw.elapsedMicroseconds / 1000.0;
+        expect(
+          elapsedMs,
+          lessThan(5.0),
+          reason:
+              'Accepted rule took ${elapsedMs.toStringAsFixed(3)}ms on 180-char input: $rule',
+        );
       }
 
       final filter = DanmuBlockFilter.compile(<String>[
@@ -610,6 +721,251 @@ void main() {
       expect(
         cache.snapshotForPosition(10 * 30000 + 5000).map((e) => e.text).toList(),
         <String>['seek-win-10'],
+      );
+    });
+
+    test('real HttpServer delayed w0 (900ms) + seek storm aborts transport request promptly',
+        () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final origin = 'http://127.0.0.1:${server.port}';
+      final w0Started = Completer<void>();
+
+      server.listen((req) async {
+        try {
+          if (req.uri.path == '/api/v2/comment/ep-abort') {
+            final segs = List<Map<String, dynamic>>.generate(
+              12,
+              (w) => <String, dynamic>{
+                'startMs': w * 30000,
+                'endMs': (w + 1) * 30000,
+                'segmentUrl': '/abortseg/$w',
+              },
+            );
+            req.response
+              ..statusCode = 200
+              ..headers.contentType = ContentType.json
+              ..write(jsonEncode(<String, dynamic>{'segments': segs}));
+            await req.response.close();
+            return;
+          }
+          if (req.uri.path.startsWith('/abortseg/')) {
+            final w = int.parse(req.uri.path.substring('/abortseg/'.length));
+            if (w == 0) {
+              if (!w0Started.isCompleted) w0Started.complete();
+              await Future<void>.delayed(const Duration(milliseconds: 900));
+            }
+            req.response
+              ..statusCode = 200
+              ..headers.contentType = ContentType.json
+              ..write(
+                jsonEncode(<String, dynamic>{
+                  'comments': <Map<String, dynamic>>[
+                    <String, dynamic>{
+                      'cid': 'a$w',
+                      'p': '${w * 30 + 2}.0,1,16777215',
+                      'm': 'abort-win-$w',
+                    },
+                  ],
+                }),
+              );
+            await req.response.close();
+            return;
+          }
+          req.response.statusCode = 404;
+          await req.response.close();
+        } catch (_) {
+          // Client legitimately aborted connection mid-flight.
+        }
+      });
+
+      final provider = DandanplayProvider(
+        multilineServerUrls: origin,
+        minRequestIntervalMs: 0,
+      );
+      addTearDown(provider.close);
+      final cache = DanmuSegmentCache(provider: provider, seekDebounceMs: 180);
+      addTearDown(cache.dispose);
+
+      final boundId = DandanplayProvider.encodeBoundEpisodeId(origin, 'ep-abort');
+      await cache.bindSession(boundId);
+
+      // Start slow w0 (900ms server delay)
+      cache.onPlaybackTick(2000, playing: true);
+      await w0Started.future.timeout(const Duration(seconds: 2));
+
+      // Trigger seek storm -> must abort in-flight w0 immediately, NOT wait 900ms!
+      final sw = Stopwatch()..start();
+      cache.onSeekChanged(2 * 30000 + 5000);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      cache.onSeekChanged(6 * 30000 + 5000);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      cache.onSeekChanged(10 * 30000 + 5000);
+
+      await cache.waitUntilIdle(timeout: const Duration(milliseconds: 800));
+      sw.stop();
+
+      expect(
+        sw.elapsedMilliseconds,
+        lessThan(600),
+        reason:
+            'Seek storm waited ${sw.elapsedMilliseconds}ms (expected < 600ms, NOT 900ms delayed w0)',
+      );
+      expect(cache.isWindowCached(0), isFalse);
+      expect(
+        cache.snapshotForPosition(10 * 30000 + 5000).map((e) => e.text).toList(),
+        <String>['abort-win-10'],
+      );
+    });
+
+    test('real HttpServer w0(2500ms) -> w2 -> w0 bounce aborts stale w0 and returns fresh w0',
+        () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final origin = 'http://127.0.0.1:${server.port}';
+      var w0Hits = 0;
+      final firstW0Entered = Completer<void>();
+
+      server.listen((req) async {
+        try {
+          if (req.uri.path == '/api/v2/comment/ep-bounce') {
+            final segs = List<Map<String, dynamic>>.generate(
+              4,
+              (w) => <String, dynamic>{
+                'startMs': w * 30000,
+                'endMs': (w + 1) * 30000,
+                'segmentUrl': '/bounceseg/$w',
+              },
+            );
+            req.response
+              ..statusCode = 200
+              ..headers.contentType = ContentType.json
+              ..write(jsonEncode(<String, dynamic>{'segments': segs}));
+            await req.response.close();
+            return;
+          }
+          if (req.uri.path.startsWith('/bounceseg/')) {
+            final w = int.parse(req.uri.path.substring('/bounceseg/'.length));
+            var label = 'win-$w';
+            if (w == 0) {
+              w0Hits++;
+              final hit = w0Hits;
+              if (hit == 1) {
+                label = 'stale-0';
+                if (!firstW0Entered.isCompleted) firstW0Entered.complete();
+                await Future<void>.delayed(const Duration(milliseconds: 2500));
+              } else {
+                label = 'fresh-0';
+              }
+            }
+            req.response
+              ..statusCode = 200
+              ..headers.contentType = ContentType.json
+              ..write(
+                jsonEncode(<String, dynamic>{
+                  'comments': <Map<String, dynamic>>[
+                    <String, dynamic>{
+                      'cid': 'b_${w}_$label',
+                      'p': '${w * 30 + 1}.0,1,16777215',
+                      'm': label,
+                    },
+                  ],
+                }),
+              );
+            await req.response.close();
+            return;
+          }
+          req.response.statusCode = 404;
+          await req.response.close();
+        } catch (_) {
+          // Expected when stale request socket is aborted.
+        }
+      });
+
+      final provider = DandanplayProvider(
+        multilineServerUrls: origin,
+        minRequestIntervalMs: 0,
+      );
+      addTearDown(provider.close);
+      final cache = DanmuSegmentCache(provider: provider, seekDebounceMs: 60);
+      addTearDown(cache.dispose);
+
+      final boundId = DandanplayProvider.encodeBoundEpisodeId(origin, 'ep-bounce');
+      await cache.bindSession(boundId);
+
+      // Kick off slow 2500ms w0
+      cache.onPlaybackTick(1500, playing: true);
+      await firstW0Entered.future.timeout(const Duration(seconds: 2));
+
+      // Bounce w0 -> w2 -> w0 quickly; must NOT wait 2500ms or time out
+      final sw = Stopwatch()..start();
+      cache.onSeekChanged(2 * 30000 + 2000);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      cache.onSeekChanged(2000);
+      await cache.waitUntilIdle(timeout: const Duration(milliseconds: 1200));
+      sw.stop();
+
+      expect(
+        sw.elapsedMilliseconds,
+        lessThan(1000),
+        reason: 'w0(2500ms)->w2->w0 bounce took ${sw.elapsedMilliseconds}ms',
+      );
+      expect(w0Hits, 2);
+      expect(
+        cache.snapshotForPosition(2000).map((e) => e.text).toList(),
+        <String>['fresh-0'],
+      );
+    });
+
+    test('cancelToken aborts mid-body slow stream immediately without draining remaining chunks',
+        () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final origin = 'http://127.0.0.1:${server.port}';
+      final firstChunkFlushed = Completer<void>();
+
+      server.listen((req) async {
+        try {
+          if (req.uri.path == '/api/v2/comment/ep-slowbody') {
+            req.response.statusCode = 200;
+            req.response.headers.contentType = ContentType.json;
+            req.response.bufferOutput = false;
+            req.response.write('{"comments":[');
+            await req.response.flush();
+            if (!firstChunkFlushed.isCompleted) firstChunkFlushed.complete();
+            // Hold body open for 2500ms; cancellation must NOT drain this.
+            await Future<void>.delayed(const Duration(milliseconds: 2500));
+            req.response.write(']}');
+            await req.response.close();
+            return;
+          }
+          req.response.statusCode = 404;
+          await req.response.close();
+        } catch (_) {}
+      });
+
+      final provider = DandanplayProvider(
+        multilineServerUrls: origin,
+        minRequestIntervalMs: 0,
+      );
+      addTearDown(provider.close);
+
+      final boundId =
+          DandanplayProvider.encodeBoundEpisodeId(origin, 'ep-slowbody');
+      final token = DanmuCancelToken();
+      final future = provider.openSession(boundId, cancelToken: token);
+
+      await firstChunkFlushed.future.timeout(const Duration(seconds: 2));
+      final sw = Stopwatch()..start();
+      token.cancel();
+      await expectLater(future, throwsA(isA<DanmuCancelledException>()));
+      sw.stop();
+
+      expect(
+        sw.elapsedMilliseconds,
+        lessThan(300),
+        reason:
+            'Mid-body cancellation waited ${sw.elapsedMilliseconds}ms (must not drain 2500ms stream)',
       );
     });
 

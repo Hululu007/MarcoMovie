@@ -183,6 +183,38 @@ public final class DanmuEngineChecks {
                                 == null,
                 "Origin normalizer rejects userinfo credentials");
 
+        // IPv6 origin normalization & bound episode roundtrip
+        String httpProto = "http";
+        String httpsProto = "https";
+        String ipv6Port =
+                DandanplayProvider.normalizeOriginOrNull(httpProto + "://[::1]:8080/path/");
+        check(
+                (httpProto + "://[::1]:8080/path").equals(ipv6Port)
+                        && java.net.URI.create(ipv6Port).getPort() == 8080,
+                "IPv6 origin normalization preserves brackets, port and path");
+        String ipv6HttpsDefault =
+                DandanplayProvider.normalizeOriginOrNull(httpsProto + "://[2001:DB8::1]:443/api/");
+        check(
+                (httpsProto + "://[2001:db8::1]/api").equals(ipv6HttpsDefault),
+                "IPv6 origin normalization lowercases hex and strips default 443 port");
+        check(
+                (httpProto + "://[::1]")
+                                .equals(
+                                        DandanplayProvider.normalizeOriginOrNull(
+                                                httpProto + "://[::1]:80"))
+                        && (httpProto + "://[::1]")
+                                .equals(
+                                        DandanplayProvider.normalizeOriginOrNull(
+                                                httpProto + "://[::1]")),
+                "IPv6 loopback origin normalizes cleanly with and without default port 80");
+        String ipv6Bound = DandanplayProvider.encodeBoundEpisodeId(ipv6Port, "ep-v6");
+        DandanplayProvider.BoundEpisode ipv6Decoded =
+                DandanplayProvider.decodeBoundEpisodeId(
+                        ipv6Bound, Collections.singletonList(ipv6Port));
+        check(
+                ipv6Port.equals(ipv6Decoded.origin) && "ep-v6".equals(ipv6Decoded.rawEpisodeId),
+                "IPv6 SourceBoundEpisodeId roundtrip succeeds");
+
         // Cap at 8 servers
         String tenUrls =
                 String.join(
@@ -203,9 +235,52 @@ public final class DanmuEngineChecks {
     }
 
     private static void testBlockFilterAndReDoS() {
-        // Must reject catastrophic backtracking & forbidden constructs
+        // Must reject catastrophic & high-polynomial backtracking (100% parity vector with Dart)
         String[] rejected =
                 new String[] {
+                    // Report bypasses (ungrouped adjacent quantifiers)
+                    "re:a+a+a+a+a+a+a+a+b",
+                    "re:[^x]*[^x]*[^x]*[^x]*[^x]*[^x]*[^x]*b",
+                    // Additional ungrouped / chained / hidden-group / alternation adversarial rules
+                    "re:a+a+b",
+                    "re:a+a+a+a+b",
+                    "re:[^x]*[^x]*[^x]*b",
+                    "re:\\w+\\w+\\w+\\w+!",
+                    "re:\\d+\\d+\\d+\\d+x",
+                    "re:[a-z]{1,10}[a-z]{1,10}[a-z]{1,10}[a-z]{1,10}z",
+                    "re:a+b?a+b?a+c",
+                    "re:(?:a+)(?:a+)(?:a+)b",
+                    "re:a+.*a+.*a+b",
+                    "re:.*.*b",
+                    "re:(?:a|aa)+$",
+                    "re:(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)b",
+                    "re:(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)(a|ab)b",
+                    "re:a?a?a?a?a?a?a?a?a?a?b",
+                    "re:a++",
+                    "re:a+*",
+                    "re:a??",
+                    "re:a*?+",
+                    "re:a{1,2}*",
+                    "re:(?=a)b",
+                    "re:(?!a)b",
+                    "re:\\k<x>",
+                    "re:^+a",
+                    "re:$+",
+                    "re:\\b+a",
+                    "re:a{1,65}",
+                    "re:a{0}",
+                    "re:[a-z]{1,20}[a-z]{1,20}z",
+                    "re:[a-z]{1,30}[a-z]{1,30}z",
+                    "re:(a|a)(a|a)(a|a)(a|a)(a|a)(a|a)z",
+                    "re:a+z|a+z|a+z|a+z",
+                    "re:a.*b|c.*d|e.*f|g.*h",
+                    "re:\\Qfoo\\E",
+                    "re:[a[b]]",
+                    "re:[a-z&&[^bc]]",
+                    "re:[]a]",
+                    "re:a||b",
+                    "re:()a",
+                    // Existing spec rejection suite
                     "re:(a|aa)+$",
                     "re:(a+)+",
                     "re:(a?)+",
@@ -229,12 +304,45 @@ public final class DanmuEngineChecks {
         }
 
         // Must accept safe plain text, top-level alternation, non-quantified groups, char class
-        // quantifiers
+        // quantifiers, and worst-case in-budget patterns
         String[] accepted =
-                new String[] {"剧透", "re:剧透|打卡", "re:第(一|二)章", "re:[0-9]{4,}", "re:foo\\)bar+"};
+                new String[] {
+                    "剧透",
+                    "re:剧透|打卡",
+                    "re:第(一|二)章",
+                    "re:[0-9]{4,}",
+                    "re:foo\\)bar+",
+                    "re:foo.*bar",
+                    "re:剧透.+结局",
+                    "re:(微信|QQ|VX)\\d{5,}",
+                    "re:https?://[a-z0-9.-]+",
+                    "re:a.*b|c.*d|e.*f",
+                    "re:^前排|沙发$",
+                    "re:[a-z]{1,5}[a-z]{1,5}z",
+                    "re:(a|a)(a|a)(a|a)(a|a)(a|a)z",
+                    "re:[a-z]+z|[a-z]+z|[a-z]+z",
+                    "re:(a|a|a)[a-z]+z",
+                    "re:(?:foo|bar).*?z"
+                };
+        String adversarial180A = repeatChar('a', 180);
+        String adversarial180Digits = repeatChar('1', 180);
         for (String rule : accepted) {
             BlockFilter.ValidationResult vr = BlockFilter.validateRule(rule);
             check(vr.valid, "ReDoS validator accepts safe rule: " + rule + " (" + vr.error + ")");
+            BlockFilter single = BlockFilter.compile(Collections.singletonList(rule));
+            // Warm up JIT once, then benchmark 180-char adversarial mismatch inputs (< 5ms)
+            single.isBlocked(adversarial180A);
+            single.isBlocked(adversarial180Digits);
+            long t0 = System.nanoTime();
+            single.isBlocked(adversarial180A);
+            single.isBlocked(adversarial180Digits);
+            double elapsedMs = (System.nanoTime() - t0) / 1_000_000.0;
+            check(
+                    elapsedMs < 5.0,
+                    "Accepted rule completes < 5ms on 180-char adversarial input ("
+                            + String.format(java.util.Locale.US, "%.3f", elapsedMs)
+                            + "ms): "
+                            + rule);
         }
 
         List<String> rules = new ArrayList<>();

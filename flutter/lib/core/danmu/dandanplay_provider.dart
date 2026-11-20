@@ -1,10 +1,12 @@
 // Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show HttpClient;
 import 'dart:math' as math;
 
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 
 import '../ohos_runtime.dart';
 import 'provider.dart';
@@ -45,16 +47,47 @@ class DandanplayProvider implements DanmuProvider {
   final int maxConcurrency;
   final int minRequestIntervalMs;
   final http.Client _client;
+  final HttpClient? _ownedIoHttpClient;
   final bool _ownsClient;
   final Map<String, int> _domainNextAllowedMs = <String, int>{};
 
-  DandanplayProvider({
+  factory DandanplayProvider({
     String multilineServerUrls = defaultServerUrls,
     String appId = '',
     String appSecret = '',
     int maxConcurrency = defaultMaxConcurrency,
     int minRequestIntervalMs = defaultMinRequestIntervalMs,
     http.Client? client,
+  }) {
+    HttpClient? ownedIoHttpClient;
+    late final http.Client resolvedClient;
+    if (client != null) {
+      resolvedClient = client;
+    } else {
+      ownedIoHttpClient = HttpClient()..connectionTimeout = connectTimeout;
+      resolvedClient = IOClient(ownedIoHttpClient);
+    }
+    return DandanplayProvider._(
+      multilineServerUrls: multilineServerUrls,
+      appId: appId,
+      appSecret: appSecret,
+      maxConcurrency: maxConcurrency,
+      minRequestIntervalMs: minRequestIntervalMs,
+      client: resolvedClient,
+      ownedIoHttpClient: ownedIoHttpClient,
+      ownsClient: client == null,
+    );
+  }
+
+  DandanplayProvider._({
+    required String multilineServerUrls,
+    required String appId,
+    required String appSecret,
+    required int maxConcurrency,
+    required int minRequestIntervalMs,
+    required http.Client client,
+    required HttpClient? ownedIoHttpClient,
+    required bool ownsClient,
   })  : configuredOrigins = parseConfiguredOrigins(multilineServerUrls),
         _originWhitelist =
             Set<String>.unmodifiable(parseConfiguredOrigins(multilineServerUrls)),
@@ -62,12 +95,14 @@ class DandanplayProvider implements DanmuProvider {
         appSecret = appSecret.trim(),
         maxConcurrency = maxConcurrency.clamp(1, 5),
         minRequestIntervalMs = math.max(0, minRequestIntervalMs),
-        _client = client ?? http.Client(),
-        _ownsClient = client == null;
+        _client = client,
+        _ownedIoHttpClient = ownedIoHttpClient,
+        _ownsClient = ownsClient;
 
   void close() {
     if (_ownsClient) {
       _client.close();
+      _ownedIoHttpClient?.close(force: true);
     }
   }
 
@@ -141,11 +176,13 @@ class DandanplayProvider implements DanmuProvider {
       path = path.substring(0, path.length - 1);
     }
     final host = uri.host.toLowerCase();
+    final formattedHost =
+        (host.contains(':') && !host.startsWith('[')) ? '[$host]' : host;
     final includePort = uri.hasPort &&
         !((scheme == 'http' && uri.port == 80) ||
             (scheme == 'https' && uri.port == 443));
     final portPart = includePort ? ':${uri.port}' : '';
-    return '$scheme://$host$portPart$path';
+    return '$scheme://$formattedHost$portPart$path';
   }
 
   static String percentEncode(String value) {
@@ -680,8 +717,27 @@ class DandanplayProvider implements DanmuProvider {
         _domainNextAllowedMs[originKey] = now + minRequestIntervalMs;
         return;
       }
-      final waitMs = math.min(allowed - now, 50);
-      await Future<void>.delayed(Duration(milliseconds: math.max(1, waitMs)));
+      final waitMs = math.max(1, math.min(allowed - now, 50));
+      if (cancelToken == null) {
+        await Future<void>.delayed(Duration(milliseconds: waitMs));
+      } else {
+        final waiter = Completer<void>();
+        final timer = Timer(Duration(milliseconds: waitMs), () {
+          if (!waiter.isCompleted) waiter.complete();
+        });
+        void onCancel() {
+          if (!waiter.isCompleted) {
+            waiter.completeError(const DanmuCancelledException());
+          }
+        }
+        cancelToken.onCancel(onCancel);
+        try {
+          await waiter.future;
+        } finally {
+          timer.cancel();
+          cancelToken.removeCancelHook(onCancel);
+        }
+      }
     }
   }
 
@@ -703,6 +759,173 @@ class DandanplayProvider implements DanmuProvider {
     return defaultRetryAfterMs;
   }
 
+  static void _discardStreamWithoutDrain(http.StreamedResponse response) {
+    try {
+      final sub = response.stream.listen(
+        (_) {},
+        onError: (_) {},
+        cancelOnError: true,
+      );
+      unawaited(sub.cancel());
+    } catch (_) {}
+  }
+
+  Future<http.StreamedResponse> _sendAbortable(
+    http.AbortableRequest req,
+    Completer<void> abortCompleter,
+    DanmuCancelToken? cancelToken,
+  ) async {
+    cancelToken?.throwIfCancelled();
+    final responseCompleter = Completer<http.StreamedResponse>();
+
+    void triggerAbort() {
+      if (!abortCompleter.isCompleted) {
+        abortCompleter.complete();
+      }
+    }
+
+    final timer = Timer(readTimeout, () {
+      triggerAbort();
+      if (!responseCompleter.isCompleted) {
+        responseCompleter.completeError(
+          TimeoutException('Danmu HTTP request timed out', readTimeout),
+        );
+      }
+    });
+
+    void onCancel() {
+      triggerAbort();
+      if (!responseCompleter.isCompleted) {
+        responseCompleter.completeError(const DanmuCancelledException());
+      }
+    }
+
+    cancelToken?.onCancel(onCancel);
+
+    unawaited(
+      _client.send(req).then(
+        (streamed) {
+          if (!responseCompleter.isCompleted) {
+            if (cancelToken != null && cancelToken.isCancelled) {
+              triggerAbort();
+              _discardStreamWithoutDrain(streamed);
+              responseCompleter.completeError(const DanmuCancelledException());
+            } else {
+              responseCompleter.complete(streamed);
+            }
+          } else {
+            // Cancelled or timed out while awaiting headers: NEVER drain the body.
+            _discardStreamWithoutDrain(streamed);
+          }
+        },
+        onError: (Object err, StackTrace st) {
+          if (!responseCompleter.isCompleted) {
+            if (cancelToken != null && cancelToken.isCancelled) {
+              responseCompleter.completeError(const DanmuCancelledException());
+            } else {
+              responseCompleter.completeError(err, st);
+            }
+          }
+        },
+      ),
+    );
+
+    try {
+      return await responseCompleter.future;
+    } finally {
+      timer.cancel();
+      cancelToken?.removeCancelHook(onCancel);
+    }
+  }
+
+  Future<List<int>> _readBodyBytesAbortable(
+    http.StreamedResponse streamed,
+    Completer<void> abortCompleter,
+    DanmuCancelToken? cancelToken,
+  ) async {
+    if (cancelToken != null && cancelToken.isCancelled) {
+      if (!abortCompleter.isCompleted) abortCompleter.complete();
+      _discardStreamWithoutDrain(streamed);
+      cancelToken.throwIfCancelled();
+    }
+
+    final completer = Completer<List<int>>();
+    final bytes = <int>[];
+    late final StreamSubscription<List<int>> sub;
+
+    void triggerAbort() {
+      if (!abortCompleter.isCompleted) {
+        abortCompleter.complete();
+      }
+    }
+
+    void finishError(Object error) {
+      if (!completer.isCompleted) {
+        completer.completeError(error);
+      }
+    }
+
+    final timer = Timer(readTimeout, () {
+      triggerAbort();
+      unawaited(sub.cancel());
+      finishError(TimeoutException('Danmu body read timed out', readTimeout));
+    });
+
+    void onCancel() {
+      triggerAbort();
+      unawaited(sub.cancel());
+      finishError(const DanmuCancelledException());
+    }
+
+    sub = streamed.stream.listen(
+      (chunk) {
+        if (completer.isCompleted) return;
+        if (cancelToken != null && cancelToken.isCancelled) {
+          triggerAbort();
+          unawaited(sub.cancel());
+          finishError(const DanmuCancelledException());
+          return;
+        }
+        if (bytes.length + chunk.length > maxPayloadBytes) {
+          triggerAbort();
+          unawaited(sub.cancel());
+          finishError(
+            const FormatException('Danmu payload exceeds 8 MB limit'),
+          );
+          return;
+        }
+        bytes.addAll(chunk);
+      },
+      onError: (Object err, StackTrace st) {
+        if (!completer.isCompleted) {
+          if (cancelToken != null && cancelToken.isCancelled) {
+            completer.completeError(const DanmuCancelledException());
+          } else {
+            completer.completeError(err, st);
+          }
+        }
+      },
+      onDone: () {
+        if (!completer.isCompleted) {
+          if (cancelToken != null && cancelToken.isCancelled) {
+            completer.completeError(const DanmuCancelledException());
+          } else {
+            completer.complete(bytes);
+          }
+        }
+      },
+      cancelOnError: true,
+    );
+
+    cancelToken?.onCancel(onCancel);
+    try {
+      return await completer.future;
+    } finally {
+      timer.cancel();
+      cancelToken?.removeCancelHook(onCancel);
+    }
+  }
+
   Future<String> _executeHttp({
     required String originKey,
     required Uri uri,
@@ -719,7 +942,12 @@ class DandanplayProvider implements DanmuProvider {
 
     for (var redirect = 0; redirect < 4; redirect++) {
       cancelToken?.throwIfCancelled();
-      final req = http.Request(currentMethod, currentUri)
+      final abortCompleter = Completer<void>();
+      final req = http.AbortableRequest(
+        currentMethod,
+        currentUri,
+        abortTrigger: abortCompleter.future,
+      )
         ..followRedirects = false
         ..headers['Accept'] = 'application/json, application/xml, text/xml, */*'
         ..headers['User-Agent'] = 'MarcoMovie-Danmu/1.0';
@@ -741,11 +969,10 @@ class DandanplayProvider implements DanmuProvider {
         req.body = currentBody;
       }
 
-      final streamed = await _client.send(req).timeout(readTimeout);
+      final streamed = await _sendAbortable(req, abortCompleter, cancelToken);
       if (cancelToken != null && cancelToken.isCancelled) {
-        try {
-          await streamed.stream.drain<void>();
-        } catch (_) {}
+        if (!abortCompleter.isCompleted) abortCompleter.complete();
+        _discardStreamWithoutDrain(streamed);
         cancelToken.throwIfCancelled();
       }
 
@@ -755,7 +982,7 @@ class DandanplayProvider implements DanmuProvider {
           status == 303 ||
           status == 307 ||
           status == 308) {
-        await streamed.stream.drain<void>();
+        _discardStreamWithoutDrain(streamed);
         final loc = streamed.headers['location']?.trim() ?? '';
         if (loc.isEmpty) {
           throw const DanmuHttpException(302, 'Redirect missing Location header');
@@ -769,7 +996,7 @@ class DandanplayProvider implements DanmuProvider {
       }
 
       if (status == 429) {
-        await streamed.stream.drain<void>();
+        _discardStreamWithoutDrain(streamed);
         final retryAfterMs = parseRetryAfterMs(streamed.headers['retry-after']);
         _recordBackoff(originKey, retryAfterMs);
         throw DanmuHttpException(
@@ -779,22 +1006,19 @@ class DandanplayProvider implements DanmuProvider {
         );
       }
       if (status == 410) {
-        await streamed.stream.drain<void>();
+        _discardStreamWithoutDrain(streamed);
         throw const DanmuHttpException(410, 'HTTP 410 Segment Expired');
       }
       if (status < 200 || status >= 300) {
-        await streamed.stream.drain<void>();
+        _discardStreamWithoutDrain(streamed);
         throw DanmuHttpException(status, 'Danmu server returned HTTP $status');
       }
 
-      final bytes = <int>[];
-      await for (final chunk in streamed.stream) {
-        cancelToken?.throwIfCancelled();
-        if (bytes.length + chunk.length > maxPayloadBytes) {
-          throw const FormatException('Danmu payload exceeds 8 MB limit');
-        }
-        bytes.addAll(chunk);
-      }
+      final bytes = await _readBodyBytesAbortable(
+        streamed,
+        abortCompleter,
+        cancelToken,
+      );
       return utf8.decode(bytes, allowMalformed: true);
     }
 

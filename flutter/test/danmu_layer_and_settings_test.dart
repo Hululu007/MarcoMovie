@@ -631,6 +631,107 @@ void main() {
     });
 
     testWidgets(
+        'DanmuLayer paused toggle enabled false -> true triggers onPlaybackTick and fetches unloaded window',
+        (tester) async {
+      final fetchedWindows = <int>[];
+      final mockClient = MockClient((req) async {
+        if (req.url.path == '/api/v2/comment/ep-paused-toggle') {
+          return http.Response(
+            jsonEncode(<String, dynamic>{
+              'segments': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'startMs': 0,
+                  'endMs': 30000,
+                  'segmentUrl': '/seg/0',
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        if (req.url.path == '/seg/0') {
+          fetchedWindows.add(0);
+          return http.Response(
+            jsonEncode(<String, dynamic>{
+              'comments': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'cid': 'p0',
+                  'p': '4.0,1,16777215',
+                  'm': '暂停开启立即拉取',
+                },
+              ],
+            }),
+            200,
+            headers: const <String, String>{
+              'content-type': 'application/json; charset=utf-8',
+            },
+          );
+        }
+        return http.Response('not found', 404);
+      });
+
+      final provider = DandanplayProvider(
+        multilineServerUrls: 'https://node-a.danmu.test',
+        minRequestIntervalMs: 0,
+        client: mockClient,
+      );
+      final cache = DanmuSegmentCache(provider: provider);
+      addTearDown(cache.dispose);
+      final boundId = DandanplayProvider.encodeBoundEpisodeId(
+        'https://node-a.danmu.test',
+        'ep-paused-toggle',
+      );
+      await cache.bindSession(boundId);
+
+      // 1. Mount paused with danmu disabled -> window 0 must NOT be fetched yet
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 800,
+              height: 450,
+              child: DanmuLayer(
+                settings: const DanmuSettings(enabled: false),
+                positionMs: 5000,
+                playing: false,
+                segmentCache: cache,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.runAsync(() => cache.waitUntilIdle());
+      expect(fetchedWindows, isEmpty);
+      expect(cache.isWindowCached(0), isFalse);
+
+      // 2. Toggle settings.enabled false -> true while still paused at the exact same positionMs
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 800,
+              height: 450,
+              child: DanmuLayer(
+                settings: const DanmuSettings(enabled: true),
+                positionMs: 5000,
+                playing: false,
+                segmentCache: cache,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.runAsync(() => cache.waitUntilIdle());
+
+      expect(fetchedWindows, <int>[0]);
+      expect(cache.isWindowCached(0), isTrue);
+      expect(
+        cache.snapshotForPosition(5000).map((e) => e.text).toList(),
+        <String>['暂停开启立即拉取'],
+      );
+    });
+
+    testWidgets(
         'DanmuSettingsSheet uses IosNativeSwitch, opaque reduceTransparency surface, and throttles slider save to onChangeEnd',
         (tester) async {
       SharedPreferences.setMockInitialValues(<String, Object>{});
