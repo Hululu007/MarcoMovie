@@ -3,10 +3,12 @@ package com.pilipala.marcomovie;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -1238,6 +1240,7 @@ public interface DanmuProvider {
 
         private final String[] plainLowerRules;
         private final Pattern[] regexRules;
+        private final AtomicLong evaluationCount = new AtomicLong();
 
         private BlockFilter(String[] plainLowerRules, Pattern[] regexRules) {
             this.plainLowerRules = plainLowerRules;
@@ -1327,6 +1330,7 @@ public interface DanmuProvider {
 
         public boolean isBlocked(String text) {
             if (text == null || text.isEmpty() || isEmpty()) return false;
+            evaluationCount.incrementAndGet();
             if (plainLowerRules.length > 0) {
                 String lower = text.toLowerCase(Locale.ROOT);
                 for (int i = 0; i < plainLowerRules.length; i++) {
@@ -1337,6 +1341,26 @@ public interface DanmuProvider {
                 if (regexRules[i].matcher(text).find()) return true;
             }
             return false;
+        }
+
+        /** Total number of non-empty candidate texts evaluated against active rules. */
+        public long getEvaluationCount() {
+            return evaluationCount.get();
+        }
+
+        /** Structural equality of compiled rules to skip redundant window re-filtering. */
+        public boolean sameRules(BlockFilter other) {
+            if (this == other) return true;
+            if (other == null) return false;
+            if (!Arrays.equals(plainLowerRules, other.plainLowerRules)) return false;
+            if (regexRules.length != other.regexRules.length) return false;
+            for (int i = 0; i < regexRules.length; i++) {
+                if (regexRules[i].flags() != other.regexRules[i].flags()
+                        || !regexRules[i].pattern().equals(other.regexRules[i].pattern())) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 

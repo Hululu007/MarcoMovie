@@ -60,14 +60,24 @@ public final class DanmuSegmentCache implements AutoCloseable {
         }
     }
 
+    private static final class WindowEntry {
+        final List<DanmuItem> rawItems;
+        List<DanmuItem> filteredItems;
+
+        WindowEntry(List<DanmuItem> rawItems, List<DanmuItem> filteredItems) {
+            this.rawItems = rawItems;
+            this.filteredItems = filteredItems;
+        }
+    }
+
     private final DanmuProvider provider;
     private final long seekDebounceMs;
     private final ExecutorService workerPool;
     private final ScheduledExecutorService scheduler;
     private final Object lock = new Object();
 
-    // Access-order LRU map of windowIndex -> immutable list of DanmuItem
-    private final LinkedHashMap<Integer, List<DanmuItem>> windowCache =
+    // Access-order LRU map of windowIndex -> raw + pre-filtered DanmuItem lists
+    private final LinkedHashMap<Integer, WindowEntry> windowCache =
             new LinkedHashMap<>(32, 0.75f, true);
     private final Map<Integer, CancellationToken> inFlightWindows = new HashMap<>();
     private final Set<Integer> retried410Windows = new HashSet<>();
@@ -91,6 +101,12 @@ public final class DanmuSegmentCache implements AutoCloseable {
     private long seekSequence = 0L;
     private ScheduledFuture<?> pendingSeekFuture;
     private BlockFilter blockFilter = BlockFilter.EMPTY;
+    private int filterGeneration = 0;
+    private int fastWindowIndex = -1;
+    private List<DanmuItem> fastPrevFiltered;
+    private List<DanmuItem> fastCurrFiltered;
+    private boolean fastCurrCached = false;
+    private boolean fastNextCached = false;
     private Listener listener;
     private boolean closed = false;
 
@@ -121,9 +137,50 @@ public final class DanmuSegmentCache implements AutoCloseable {
         }
     }
 
+    static List<DanmuItem> filterItems(List<DanmuItem> raw, BlockFilter filter) {
+        if (raw == null || raw.isEmpty()) return Collections.emptyList();
+        if (filter == null || filter.isEmpty()) return raw;
+        ArrayList<DanmuItem> kept = null;
+        int n = raw.size();
+        for (int i = 0; i < n; i++) {
+            DanmuItem item = raw.get(i);
+            if (filter.isBlocked(item.text)) {
+                if (kept == null) {
+                    kept = new ArrayList<>(Math.max(0, n - 1));
+                    for (int j = 0; j < i; j++) {
+                        kept.add(raw.get(j));
+                    }
+                }
+            } else if (kept != null) {
+                kept.add(item);
+            }
+        }
+        if (kept == null) return raw;
+        return kept.isEmpty()
+                ? Collections.<DanmuItem>emptyList()
+                : Collections.unmodifiableList(kept);
+    }
+
+    private void invalidateFastWindowLocked() {
+        fastWindowIndex = -1;
+        fastPrevFiltered = null;
+        fastCurrFiltered = null;
+        fastCurrCached = false;
+        fastNextCached = false;
+    }
+
     public void setBlockFilter(BlockFilter filter) {
+        BlockFilter next = filter == null ? BlockFilter.EMPTY : filter;
         synchronized (lock) {
-            this.blockFilter = filter == null ? BlockFilter.EMPTY : filter;
+            if (this.blockFilter.sameRules(next)) {
+                return;
+            }
+            this.blockFilter = next;
+            this.filterGeneration++;
+            for (WindowEntry entry : windowCache.values()) {
+                entry.filteredItems = filterItems(entry.rawItems, next);
+            }
+            invalidateFastWindowLocked();
         }
     }
 
@@ -155,6 +212,7 @@ public final class DanmuSegmentCache implements AutoCloseable {
             this.activeRefreshFlight = null;
             this.retried410Windows.clear();
             this.windowCache.clear();
+            invalidateFastWindowLocked();
             this.totalCachedItems = 0;
             this.currentPinnedWindow = 0;
             this.pendingWindowAfterOpen = -1;
@@ -216,6 +274,19 @@ public final class DanmuSegmentCache implements AutoCloseable {
             if (closed || boundEpisodeId.isEmpty()) return;
             long effectiveMs = computeEffectiveMs(rawPositionMs, timeOffsetMs);
             int w = computeFetchWindowIndex(effectiveMs);
+            if (w == currentPinnedWindow
+                    && w == fastWindowIndex
+                    && fastCurrCached
+                    && activeSession != null
+                    && !seeking) {
+                long windowStartMs = (long) w * WINDOW_DURATION_MS;
+                if (!playing
+                        || effectiveMs < windowStartMs + PREFETCH_OFFSET_MS
+                        || fastNextCached
+                        || activePrefetchWindow == w + 1) {
+                    return;
+                }
+            }
             currentPinnedWindow = w;
             evictIfNeededLocked();
             if (seeking) return;
@@ -299,39 +370,49 @@ public final class DanmuSegmentCache implements AutoCloseable {
 
     /**
      * Zero-allocation snapshot helper for {@link DanmakuView#onDraw}: clears {@code reusableOut}
-     * and populates active items from {@code w - 1} and {@code w} in chronological order.
+     * and populates pre-filtered active items from {@code w - 1} and {@code w} in chronological
+     * order without per-frame regex/string matching or {@link Integer} boxing past 64 minutes.
      */
     public void fillVisibleWindowSnapshot(long rawPositionMs, List<DanmuItem> reusableOut) {
         reusableOut.clear();
         final long effectiveMs;
         final List<DanmuItem> prevItems;
         final List<DanmuItem> currItems;
-        final BlockFilter filter;
         synchronized (lock) {
             effectiveMs = computeEffectiveMs(rawPositionMs, timeOffsetMs);
             if (effectiveMs < 0L) {
                 return;
             }
             int w = (int) (effectiveMs / WINDOW_DURATION_MS);
-            prevItems = w > 0 ? windowCache.get(w - 1) : null;
-            currItems = windowCache.get(w);
-            filter = blockFilter;
+            if (w == fastWindowIndex) {
+                prevItems = fastPrevFiltered;
+                currItems = fastCurrFiltered;
+            } else {
+                WindowEntry prevEntry = w > 0 ? windowCache.get(w - 1) : null;
+                WindowEntry currEntry = windowCache.get(w);
+                prevItems = prevEntry != null ? prevEntry.filteredItems : null;
+                currItems = currEntry != null ? currEntry.filteredItems : null;
+                fastWindowIndex = w;
+                fastPrevFiltered = prevItems;
+                fastCurrFiltered = currItems;
+                fastCurrCached = currEntry != null;
+                fastNextCached = windowCache.containsKey(w + 1);
+            }
         }
         if ((prevItems == null || prevItems.isEmpty())
                 && (currItems == null || currItems.isEmpty())) {
             return;
         }
         long minTimeMs = effectiveMs - MAX_COMMENT_LIFETIME_MS;
-        appendVisibleNoAlloc(prevItems, minTimeMs, effectiveMs, filter, reusableOut, 0);
+        appendVisibleNoAlloc(prevItems, minTimeMs, effectiveMs, reusableOut, 0);
         int prevAdded = reusableOut.size();
-        appendVisibleNoAlloc(currItems, minTimeMs, effectiveMs, filter, reusableOut, prevAdded);
+        appendVisibleNoAlloc(currItems, minTimeMs, effectiveMs, reusableOut, prevAdded);
     }
 
     private static void appendVisibleNoAlloc(
             List<DanmuItem> source,
             long minTimeMs,
             long maxTimeMs,
-            BlockFilter filter,
             List<DanmuItem> dest,
             int dedupLimit) {
         if (source == null || source.isEmpty()) return;
@@ -342,12 +423,10 @@ public final class DanmuSegmentCache implements AutoCloseable {
             if (source.get(mid).timeMs < minTimeMs) lo = mid + 1;
             else hi = mid;
         }
-        boolean hasFilter = filter != null && !filter.isEmpty();
         for (int i = lo; i < source.size(); i++) {
             DanmuItem item = source.get(i);
             if (item.timeMs > maxTimeMs) break;
             if (item.timeMs < minTimeMs) continue;
-            if (hasFilter && filter.isBlocked(item.text)) continue;
             if (dedupLimit > 0 && containsIdInPrefix(dest, dedupLimit, item.id)) continue;
             dest.add(item);
         }
@@ -386,10 +465,22 @@ public final class DanmuSegmentCache implements AutoCloseable {
                                             gen,
                                             token);
                             if (items == null) return;
+                            final BlockFilter filterSnap;
+                            final int filterGenSnap;
+                            synchronized (lock) {
+                                filterSnap = blockFilter;
+                                filterGenSnap = filterGeneration;
+                            }
+                            List<DanmuItem> bounded = boundWindowItems(items);
+                            List<DanmuItem> prefiltered = filterItems(bounded, filterSnap);
                             Listener l = null;
                             synchronized (lock) {
                                 if (!closed && gen == bindGeneration && !token.isCancelled()) {
-                                    putWindowLocked(windowIndex, items);
+                                    List<DanmuItem> finalFiltered =
+                                            filterGenSnap == filterGeneration
+                                                    ? prefiltered
+                                                    : filterItems(bounded, blockFilter);
+                                    putWindowLocked(windowIndex, bounded, finalFiltered);
                                     l = listener;
                                 }
                             }
@@ -522,22 +613,26 @@ public final class DanmuSegmentCache implements AutoCloseable {
         return null;
     }
 
-    private void putWindowLocked(int windowIndex, List<DanmuItem> items) {
-        List<DanmuItem> bounded;
+    private static List<DanmuItem> boundWindowItems(List<DanmuItem> items) {
         if (items == null || items.isEmpty()) {
-            bounded = Collections.emptyList();
-        } else if (items.size() > MAX_WINDOW_ITEMS) {
-            bounded =
-                    Collections.unmodifiableList(
-                            new ArrayList<>(items.subList(0, MAX_WINDOW_ITEMS)));
-        } else {
-            bounded = Collections.unmodifiableList(new ArrayList<>(items));
+            return Collections.emptyList();
         }
-        List<DanmuItem> prev = windowCache.put(windowIndex, bounded);
+        if (items.size() > MAX_WINDOW_ITEMS) {
+            return Collections.unmodifiableList(
+                    new ArrayList<>(items.subList(0, MAX_WINDOW_ITEMS)));
+        }
+        return Collections.unmodifiableList(new ArrayList<>(items));
+    }
+
+    private void putWindowLocked(
+            int windowIndex, List<DanmuItem> boundedRaw, List<DanmuItem> filtered) {
+        WindowEntry entry = new WindowEntry(boundedRaw, filtered);
+        WindowEntry prev = windowCache.put(windowIndex, entry);
         if (prev != null) {
-            totalCachedItems -= prev.size();
+            totalCachedItems -= prev.rawItems.size();
         }
-        totalCachedItems += bounded.size();
+        totalCachedItems += boundedRaw.size();
+        invalidateFastWindowLocked();
         evictIfNeededLocked();
     }
 
@@ -551,12 +646,13 @@ public final class DanmuSegmentCache implements AutoCloseable {
     private void evictIfNeededLocked() {
         while (windowCache.size() > MAX_CACHED_WINDOWS || totalCachedItems > MAX_TOTAL_ITEMS) {
             boolean evicted = false;
-            Iterator<Map.Entry<Integer, List<DanmuItem>>> it = windowCache.entrySet().iterator();
+            Iterator<Map.Entry<Integer, WindowEntry>> it = windowCache.entrySet().iterator();
             while (it.hasNext()) {
-                Map.Entry<Integer, List<DanmuItem>> entry = it.next();
+                Map.Entry<Integer, WindowEntry> entry = it.next();
                 if (!isPinnedLocked(entry.getKey())) {
-                    totalCachedItems -= entry.getValue().size();
+                    totalCachedItems -= entry.getValue().rawItems.size();
                     it.remove();
+                    invalidateFastWindowLocked();
                     evicted = true;
                     break;
                 }
@@ -651,6 +747,7 @@ public final class DanmuSegmentCache implements AutoCloseable {
             closed = true;
             cancelInFlightLocked(true);
             windowCache.clear();
+            invalidateFastWindowLocked();
             totalCachedItems = 0;
         }
         scheduler.shutdownNow();
@@ -822,6 +919,49 @@ public final class DanmuSegmentCache implements AutoCloseable {
                 boolean showTop,
                 boolean showBottom,
                 TextWidthMeasurer measurer) {
+            return step(
+                    effectiveMs,
+                    candidates,
+                    viewW,
+                    viewH,
+                    fontSizePx,
+                    topInsetPx,
+                    bottomSafeInsetPx,
+                    area,
+                    platformRowCap,
+                    maxOnScreenItems,
+                    scrollDurationMs,
+                    showScroll,
+                    showTop,
+                    showBottom,
+                    measurer,
+                    null);
+        }
+
+        /**
+         * Updates active slots for the current frame with zero object allocations. If an optional
+         * {@code entryBlockFilter} is supplied (for unfiltered candidate feeds), each newly
+         * arriving danmu is evaluated AT MOST ONCE on entry and recorded in {@code droppedIds}.
+         *
+         * @return number of active visible slots stored in {@link #getSlots()}
+         */
+        public int step(
+                long effectiveMs,
+                List<DanmuItem> candidates,
+                int viewW,
+                int viewH,
+                float fontSizePx,
+                float topInsetPx,
+                float bottomSafeInsetPx,
+                float area,
+                int platformRowCap,
+                int maxOnScreenItems,
+                long scrollDurationMs,
+                boolean showScroll,
+                boolean showTop,
+                boolean showBottom,
+                TextWidthMeasurer measurer,
+                BlockFilter entryBlockFilter) {
             if (viewW <= 0 || viewH <= 0 || effectiveMs < 0L) {
                 reset();
                 return 0;
@@ -874,6 +1014,7 @@ public final class DanmuSegmentCache implements AutoCloseable {
 
             // 2. Admit newly arrived candidates
             int itemCap = Math.max(1, Math.min(MAX_ACTIVE_SLOTS, maxOnScreenItems));
+            boolean hasEntryFilter = entryBlockFilter != null && !entryBlockFilter.isEmpty();
             if (candidates != null) {
                 int n = candidates.size();
                 for (int i = 0; i < n; i++) {
@@ -888,6 +1029,10 @@ public final class DanmuSegmentCache implements AutoCloseable {
                             (mode == 4 || mode == 5) ? PINNED_DURATION_MS : scrollDurationMs;
                     if (age > duration) continue;
                     if (isTrackedOrDropped(item.id)) continue;
+                    if (hasEntryFilter && entryBlockFilter.isBlocked(item.text)) {
+                        recordDropped(item.id);
+                        continue;
+                    }
 
                     if (activeCount >= itemCap) {
                         recordDropped(item.id);
@@ -970,6 +1115,14 @@ public final class DanmuSegmentCache implements AutoCloseable {
                 }
             }
             activeCount = remaining;
+        }
+
+        public void onBlockFilterChanged(BlockFilter filter) {
+            purgeBlocked(filter);
+            for (int i = 0; i < DROPPED_RING_SIZE; i++) {
+                droppedIds[i] = null;
+            }
+            droppedCursor = 0;
         }
 
         private boolean isTrackedOrDropped(String id) {

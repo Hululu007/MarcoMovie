@@ -59,8 +59,9 @@ final class DanmakuView extends View implements AutoCloseable {
 
     List<Comment> comments = Collections.emptyList();
     List<DanmuItem> legacyItems = Collections.emptyList();
+    List<DanmuItem> filteredLegacyItems = Collections.emptyList();
     private DanmuSegmentCache segmentCache;
-    private BlockFilter blockFilter = BlockFilter.EMPTY;
+    private volatile BlockFilter blockFilter = BlockFilter.EMPTY;
 
     boolean closed, enabled;
     boolean tvMode = false;
@@ -134,12 +135,31 @@ final class DanmakuView extends View implements AutoCloseable {
         invalidate();
     }
 
+    private void rebuildFilteredLegacyItems() {
+        filteredLegacyItems = DanmuSegmentCache.filterItems(legacyItems, blockFilter);
+    }
+
+    void setLegacyItems(List<DanmuItem> items) {
+        legacyItems = items == null ? Collections.<DanmuItem>emptyList() : items;
+        rebuildFilteredLegacyItems();
+        layoutEngine.reset();
+    }
+
+    List<DanmuItem> getFrameItemsForTest() {
+        return frameItems;
+    }
+
     void setBlockFilter(BlockFilter filter) {
-        blockFilter = filter == null ? BlockFilter.EMPTY : filter;
+        BlockFilter next = filter == null ? BlockFilter.EMPTY : filter;
+        boolean changed = !blockFilter.sameRules(next);
+        blockFilter = next;
         if (segmentCache != null) {
             segmentCache.setBlockFilter(blockFilter);
         }
-        layoutEngine.purgeBlocked(blockFilter);
+        if (changed) {
+            rebuildFilteredLegacyItems();
+            layoutEngine.onBlockFilterChanged(blockFilter);
+        }
         invalidate();
     }
 
@@ -159,7 +179,9 @@ final class DanmakuView extends View implements AutoCloseable {
         if (tvMode) {
             tvPacingMonitor.setCeilingRows(configuredMaxRows);
         }
-        blockFilter = config.createBlockFilter();
+        BlockFilter nextFilter = config.createBlockFilter();
+        boolean filterChanged = !blockFilter.sameRules(nextFilter);
+        blockFilter = nextFilter;
         if (segmentCache != null) {
             segmentCache.setTimeOffsetMs(timeOffsetMs);
             segmentCache.setBlockFilter(blockFilter);
@@ -167,10 +189,13 @@ final class DanmakuView extends View implements AutoCloseable {
                 segmentCache.onPlaybackTick(clock.position(), clock.playing());
             }
         }
+        if (filterChanged) {
+            rebuildFilteredLegacyItems();
+        }
         if (offsetChanged) {
             layoutEngine.reset();
-        } else {
-            layoutEngine.purgeBlocked(blockFilter);
+        } else if (filterChanged) {
+            layoutEngine.onBlockFilterChanged(blockFilter);
         }
         enabled(config.enabled);
     }
@@ -414,13 +439,21 @@ final class DanmakuView extends View implements AutoCloseable {
                     try {
                         String body = fetchDanmaku(url, headers);
                         List<Comment> values = DanmakuData.parse(body);
+                        BlockFilter filterSnap = blockFilter;
                         List<DanmuItem> converted = convertLegacyComments(values);
+                        List<DanmuItem> prefiltered =
+                                DanmuSegmentCache.filterItems(converted, filterSnap);
                         post(
                                 () -> {
                                     if (!closed && ticket == request) {
                                         detachSegmentCache();
                                         comments = values;
                                         legacyItems = converted;
+                                        filteredLegacyItems =
+                                                blockFilter.sameRules(filterSnap)
+                                                        ? prefiltered
+                                                        : DanmuSegmentCache.filterItems(
+                                                                converted, blockFilter);
                                         layoutEngine.reset();
                                         listener.loaded(values.size());
                                         invalidate();
@@ -447,13 +480,21 @@ final class DanmakuView extends View implements AutoCloseable {
                 () -> {
                     try {
                         List<Comment> values = DanmakuData.parse(text);
+                        BlockFilter filterSnap = blockFilter;
                         List<DanmuItem> converted = convertLegacyComments(values);
+                        List<DanmuItem> prefiltered =
+                                DanmuSegmentCache.filterItems(converted, filterSnap);
                         post(
                                 () -> {
                                     if (!closed && ticket == request) {
                                         detachSegmentCache();
                                         comments = values;
                                         legacyItems = converted;
+                                        filteredLegacyItems =
+                                                blockFilter.sameRules(filterSnap)
+                                                        ? prefiltered
+                                                        : DanmuSegmentCache.filterItems(
+                                                                converted, blockFilter);
                                         layoutEngine.reset();
                                         listener.loaded(values.size());
                                         invalidate();
@@ -472,23 +513,21 @@ final class DanmakuView extends View implements AutoCloseable {
         return smoothClock.sample(clock.position(), clock.playing(), SystemClock.elapsedRealtime());
     }
 
-    private void populateLegacyFrameItems(long effectiveMs) {
+    void populateLegacyFrameItems(long effectiveMs) {
         frameItems.clear();
-        if (effectiveMs < 0L || legacyItems.isEmpty()) return;
+        if (effectiveMs < 0L || filteredLegacyItems.isEmpty()) return;
         long minTimeMs = effectiveMs - DanmuSegmentCache.MAX_COMMENT_LIFETIME_MS;
         int lo = 0;
-        int hi = legacyItems.size();
+        int hi = filteredLegacyItems.size();
         while (lo < hi) {
             int mid = (lo + hi) >>> 1;
-            if (legacyItems.get(mid).timeMs < minTimeMs) lo = mid + 1;
+            if (filteredLegacyItems.get(mid).timeMs < minTimeMs) lo = mid + 1;
             else hi = mid;
         }
-        boolean hasFilter = blockFilter != null && !blockFilter.isEmpty();
-        for (int i = lo; i < legacyItems.size(); i++) {
-            DanmuItem item = legacyItems.get(i);
+        for (int i = lo; i < filteredLegacyItems.size(); i++) {
+            DanmuItem item = filteredLegacyItems.get(i);
             if (item.timeMs > effectiveMs) break;
             if (item.timeMs < minTimeMs) continue;
-            if (hasFilter && blockFilter.isBlocked(item.text)) continue;
             frameItems.add(item);
         }
     }
@@ -596,6 +635,7 @@ final class DanmakuView extends View implements AutoCloseable {
         loader.shutdownNow();
         comments = Collections.emptyList();
         legacyItems = Collections.emptyList();
+        filteredLegacyItems = Collections.emptyList();
         frameItems.clear();
         layoutEngine.reset();
     }

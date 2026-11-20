@@ -85,31 +85,68 @@ public final class MainActivity extends Activity {
     Screen shortcutScreen;
 
     static final class GlassFreezeController implements PlayerTransitionHelper.GlassFreezeCallback {
+        private static final class DeferredFrame {
+            final GlassFreezeFrameLayout host;
+            final Runnable ready;
+
+            DeferredFrame(GlassFreezeFrameLayout host, Runnable ready) {
+                this.host = host;
+                this.ready = ready;
+            }
+        }
+
         private int freezeDepth;
         private final Runnable onUnfreeze;
+        private final List<DeferredFrame> deferredFrames = new ArrayList<>();
 
         GlassFreezeController(Runnable onUnfreeze) {
             this.onUnfreeze = onUnfreeze;
         }
 
         @Override
-        public synchronized void setGlassFrozen(boolean frozen) {
-            if (frozen) {
-                freezeDepth++;
-            } else if (freezeDepth > 0) {
-                freezeDepth--;
-                if (freezeDepth == 0 && onUnfreeze != null) {
-                    onUnfreeze.run();
+        public void setGlassFrozen(boolean frozen) {
+            List<DeferredFrame> toResume = null;
+            boolean unfroze = false;
+            synchronized (this) {
+                if (frozen) {
+                    freezeDepth++;
+                } else if (freezeDepth > 0) {
+                    freezeDepth--;
+                    if (freezeDepth == 0) {
+                        unfroze = true;
+                        if (!deferredFrames.isEmpty()) {
+                            toResume = new ArrayList<>(deferredFrames);
+                            deferredFrames.clear();
+                        }
+                    }
                 }
             }
-        }
-
-        synchronized void forceUnfreeze() {
-            if (freezeDepth > 0) {
-                freezeDepth = 0;
+            if (unfroze) {
                 if (onUnfreeze != null) {
                     onUnfreeze.run();
                 }
+                resumeDeferred(toResume);
+            }
+        }
+
+        void forceUnfreeze() {
+            List<DeferredFrame> toResume = null;
+            boolean unfroze = false;
+            synchronized (this) {
+                if (freezeDepth > 0) {
+                    freezeDepth = 0;
+                    unfroze = true;
+                    if (!deferredFrames.isEmpty()) {
+                        toResume = new ArrayList<>(deferredFrames);
+                        deferredFrames.clear();
+                    }
+                }
+            }
+            if (unfroze) {
+                if (onUnfreeze != null) {
+                    onUnfreeze.run();
+                }
+                resumeDeferred(toResume);
             }
         }
 
@@ -117,9 +154,139 @@ public final class MainActivity extends Activity {
             return freezeDepth > 0;
         }
 
+        /**
+         * Preserves real user {@code Prefs.REDUCED_TRANSPARENCY} without forcing frozen glass
+         * surfaces to snap from their cached blurred {@code material} bitmaps to solid {@code
+         * DARK_TINT}. Backdrop resampling is intercepted via {@link GlassFreezeFrameLayout}
+         * ({@link com.pilipala.glass.GlassworkSurface.FrameSource}).
+         */
         boolean shouldReduceTransparency(boolean userReducedTransparency) {
-            return userReducedTransparency || isFrozen();
+            return userReducedTransparency;
         }
+
+        boolean deferCaptureIfFrozen(GlassFreezeFrameLayout host, Runnable ready) {
+            if (ready == null) return false;
+            synchronized (this) {
+                if (freezeDepth <= 0) {
+                    return false;
+                }
+                deferredFrames.add(new DeferredFrame(host, ready));
+                return true;
+            }
+        }
+
+        synchronized void clearDeferredForHost(GlassFreezeFrameLayout host) {
+            for (int i = deferredFrames.size() - 1; i >= 0; i--) {
+                if (deferredFrames.get(i).host == host) {
+                    deferredFrames.remove(i);
+                }
+            }
+        }
+
+        synchronized int getDeferredCaptureCount() {
+            return deferredFrames.size();
+        }
+
+        private void resumeDeferred(List<DeferredFrame> toResume) {
+            if (toResume == null) return;
+            for (int i = 0; i < toResume.size(); i++) {
+                DeferredFrame item = toResume.get(i);
+                if (isFrozen()) {
+                    synchronized (this) {
+                        for (int j = i; j < toResume.size(); j++) {
+                            deferredFrames.add(toResume.get(j));
+                        }
+                    }
+                    return;
+                }
+                item.host.dispatchUnfrozenFrame(item.ready);
+            }
+        }
+    }
+
+    /**
+     * Root backdrop container implementing {@link com.pilipala.glass.GlassworkSurface.FrameSource}
+     * so transitions freeze backdrop resampling before bitmap capture/blur while keeping existing
+     * cached {@code material} bitmaps rendered smoothly on every child view (including independent
+     * API 23+ hardware DisplayLists) and keeping {@code target.getBackground() instanceof
+     * GlassworkSurface} intact.
+     */
+    static class GlassFreezeFrameLayout extends FrameLayout
+            implements com.pilipala.glass.GlassworkSurface.FrameSource {
+        private final GlassFreezeController freezeController;
+
+        GlassFreezeFrameLayout(Context context, GlassFreezeController freezeController) {
+            super(context);
+            this.freezeController = freezeController;
+        }
+
+        @Override
+        public void prepareGlassFrame(Runnable ready) {
+            if (ready == null) return;
+            if (freezeController != null && freezeController.deferCaptureIfFrozen(this, ready)) {
+                return;
+            }
+            dispatchUnfrozenFrame(ready);
+        }
+
+        @Override
+        public boolean glassFrameAdvancing() {
+            if (freezeController != null && freezeController.isFrozen()) {
+                return false;
+            }
+            com.pilipala.glass.GlassworkSurface.FrameSource child = findDescendantFrameSource(this);
+            return child != null && child.glassFrameAdvancing();
+        }
+
+        void dispatchUnfrozenFrame(Runnable ready) {
+            if (ready == null) return;
+            com.pilipala.glass.GlassworkSurface.FrameSource child = findDescendantFrameSource(this);
+            if (child != null) {
+                child.prepareGlassFrame(ready);
+            } else {
+                ready.run();
+            }
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            if (freezeController != null) {
+                freezeController.clearDeferredForHost(this);
+            }
+            super.onDetachedFromWindow();
+        }
+
+        private static com.pilipala.glass.GlassworkSurface.FrameSource findDescendantFrameSource(
+                ViewGroup group) {
+            if (group == null) return null;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                com.pilipala.glass.GlassworkSurface.FrameSource found =
+                        findFrameSourceInSubtree(group.getChildAt(i));
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static com.pilipala.glass.GlassworkSurface.FrameSource findFrameSourceInSubtree(
+                View view) {
+            if (view == null || view.getVisibility() != View.VISIBLE) return null;
+            if (view instanceof com.pilipala.glass.GlassworkSurface.FrameSource) {
+                return (com.pilipala.glass.GlassworkSurface.FrameSource) view;
+            }
+            if (view instanceof ViewGroup) {
+                ViewGroup vg = (ViewGroup) view;
+                for (int i = 0; i < vg.getChildCount(); i++) {
+                    com.pilipala.glass.GlassworkSurface.FrameSource found =
+                            findFrameSourceInSubtree(vg.getChildAt(i));
+                    if (found != null) return found;
+                }
+            }
+            return null;
+        }
+    }
+
+    FrameLayout newGlassBackdropRoot() {
+        return new GlassFreezeFrameLayout(this, glassFreezeController);
     }
 
     final GlassFreezeController glassFreezeController =
@@ -684,7 +851,7 @@ public final class MainActivity extends Activity {
         if (!isTvDevice()) DownloadManager.get(this);
         initializePhonetic();
         layoutIntro = b == null || b.getBoolean("layout_initial_launch", false);
-        root = new FrameLayout(this);
+        root = newGlassBackdropRoot();
         root.setBackgroundColor(DARK);
         setContentView(root);
         root.addOnLayoutChangeListener(
@@ -1037,7 +1204,7 @@ public final class MainActivity extends Activity {
 
     void renderPage(String title, String eyebrow, boolean navigation) {
         preparePage(navigation);
-        root = new FrameLayout(this);
+        root = newGlassBackdropRoot();
         root.setClipChildren(false);
         root.setClipToPadding(false);
         root.setBackgroundColor(DARK);
@@ -1236,7 +1403,90 @@ public final class MainActivity extends Activity {
         glassFreezeController.forceUnfreeze();
     }
 
-    private static Bitmap extractDetailPosterBitmap(View posterView) {
+    static final class DetailPortalSelection {
+        final View ambientPosterView;
+        final View portalCardView;
+        final RectF posterOriginPx;
+        final Bitmap posterBitmap;
+
+        DetailPortalSelection(
+                View ambientPosterView,
+                View portalCardView,
+                RectF posterOriginPx,
+                Bitmap posterBitmap) {
+            this.ambientPosterView = ambientPosterView;
+            this.portalCardView = portalCardView;
+            this.posterOriginPx = posterOriginPx;
+            this.posterBitmap = posterBitmap;
+        }
+    }
+
+    private static boolean isIndependentPosterCardCandidate(View view) {
+        if (view == null
+                || view.getVisibility() != View.VISIBLE
+                || view.getWidth() <= 0
+                || view.getHeight() <= 0) {
+            return false;
+        }
+        if (view instanceof MobileDetailScreen.PortraitBackdropView
+                || view instanceof MobileDetailScreen.PosterHookImageView
+                || view instanceof ImmersivePoster.Backdrop) {
+            return false;
+        }
+        if (view instanceof ImmersivePoster && ((ImmersivePoster) view).immersiveMode) {
+            return false;
+        }
+        return true;
+    }
+
+    static DetailPortalSelection resolveDetailPortalSelection(View detailLayer) {
+        if (detailLayer == null) {
+            return new DetailPortalSelection(null, null, new RectF(0f, 0f, 0f, 0f), null);
+        }
+        View explicitCard = detailLayer.findViewWithTag("detail-poster-card");
+        View coverView = detailLayer.findViewWithTag("detail-cover");
+        View backdropView = detailLayer.findViewWithTag("detail-backdrop");
+
+        View ambientPosterView = null;
+        if (isIndependentPosterCardCandidate(explicitCard)) {
+            ambientPosterView = explicitCard;
+        } else if (backdropView != null
+                && backdropView.getVisibility() == View.VISIBLE
+                && backdropView.getWidth() > 0
+                && backdropView.getHeight() > 0) {
+            ambientPosterView = backdropView;
+        } else if (isIndependentPosterCardCandidate(coverView)) {
+            ambientPosterView = coverView;
+        }
+
+        View portalCard = null;
+        if (isIndependentPosterCardCandidate(explicitCard)) {
+            portalCard = explicitCard;
+        } else if (isIndependentPosterCardCandidate(coverView)) {
+            portalCard = coverView;
+        }
+
+        RectF originPx = new RectF(0f, 0f, 0f, 0f);
+        Bitmap posterBitmap = null;
+        if (portalCard != null) {
+            Rect cardRect = new Rect();
+            PlayerTransitionHelper.resolveDescendantRectInRoot(detailLayer, portalCard, cardRect);
+            RectF candidateRect = new RectF(cardRect);
+            if (PlayerTransitionHelper.isBoundedPosterCardRect(
+                    candidateRect, detailLayer.getWidth(), detailLayer.getHeight())) {
+                Bitmap extracted = extractDetailPosterBitmap(portalCard);
+                if (extracted != null && !extracted.isRecycled()) {
+                    originPx = candidateRect;
+                    posterBitmap = extracted;
+                }
+            } else {
+                portalCard = null;
+            }
+        }
+        return new DetailPortalSelection(ambientPosterView, portalCard, originPx, posterBitmap);
+    }
+
+    static Bitmap extractDetailPosterBitmap(View posterView) {
         if (posterView instanceof MobileDetailScreen.PortraitBackdropView) {
             Bitmap bmp = ((MobileDetailScreen.PortraitBackdropView) posterView).getPosterBitmap();
             return (bmp != null && !bmp.isRecycled()) ? bmp : null;
@@ -1245,6 +1495,30 @@ public final class MainActivity extends Activity {
             ImmersivePoster.Backdrop b = (ImmersivePoster.Backdrop) posterView;
             if (b.wideBitmap != null && !b.wideBitmap.isRecycled()) return b.wideBitmap;
             if (b.rawBitmap != null && !b.rawBitmap.isRecycled()) return b.rawBitmap;
+        }
+        if (posterView instanceof ImmersivePoster) {
+            ImmersivePoster ip = (ImmersivePoster) posterView;
+            Bitmap fromImage = extractImageViewBitmap(ip.image);
+            if (fromImage != null) return fromImage;
+            if (ip.backdrop != null
+                    && ip.backdrop.rawBitmap != null
+                    && !ip.backdrop.rawBitmap.isRecycled()) {
+                return ip.backdrop.rawBitmap;
+            }
+            return null;
+        }
+        if (posterView instanceof ImageView) {
+            return extractImageViewBitmap((ImageView) posterView);
+        }
+        return null;
+    }
+
+    private static Bitmap extractImageViewBitmap(ImageView imageView) {
+        if (imageView == null) return null;
+        Drawable d = imageView.getDrawable();
+        if (d instanceof BitmapDrawable) {
+            Bitmap bmp = ((BitmapDrawable) d).getBitmap();
+            return (bmp != null && !bmp.isRecycled()) ? bmp : null;
         }
         return null;
     }
@@ -1276,22 +1550,12 @@ public final class MainActivity extends Activity {
         }
 
         final View detailLayer = root;
-        View posterView = detailLayer.findViewWithTag("detail-backdrop");
-        if (posterView == null) {
-            posterView = detailLayer.findViewWithTag("detail-cover");
-        }
-        Rect posterRect = new Rect();
-        if (posterView != null && posterView.getWidth() > 0 && posterView.getHeight() > 0) {
-            PlayerTransitionHelper.resolveDescendantRectInRoot(detailLayer, posterView, posterRect);
-        } else {
-            posterRect.set(0, 0, detailLayer.getWidth(), detailLayer.getHeight());
-        }
-        RectF posterOriginPx = new RectF(posterRect);
-        float posterRadiusPx = dp(16);
+        DetailPortalSelection portal = resolveDetailPortalSelection(detailLayer);
+        RectF posterOriginPx = portal.posterOriginPx;
+        float posterRadiusPx = portal.posterBitmap != null ? dp(16) : 0f;
         Rect safeInsetsPx = new Rect(0, statusBarHeight(), 0, navigationBarHeight());
 
         if (Build.VERSION.SDK_INT >= 33 && !isTvDevice() && !reduced) {
-            Bitmap posterBitmap = extractDetailPosterBitmap(posterView);
             Bitmap backdrop = PlayerTransitionHelper.captureDownsampledBackdrop(detailLayer);
             if (backdrop != null) {
                 openScreenNow(s, history);
@@ -1302,7 +1566,7 @@ public final class MainActivity extends Activity {
                                 null,
                                 backdrop,
                                 true,
-                                posterBitmap,
+                                portal.posterBitmap,
                                 posterOriginPx,
                                 posterRadiusPx,
                                 safeInsetsPx,
@@ -1320,7 +1584,7 @@ public final class MainActivity extends Activity {
                 PlayerTransitionHelper.startDetailToPlayerTransition(
                         null,
                         detailLayer,
-                        posterView,
+                        portal.ambientPosterView,
                         null,
                         false,
                         null,

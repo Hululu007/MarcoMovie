@@ -698,7 +698,7 @@ final class MobileShell {
 
         resolveActiveSite();
 
-        a.root = new FrameLayout(a);
+        a.root = a.newGlassBackdropRoot();
         a.root.setBackgroundColor(0xff070c0a);
         a.setContentView(a.root);
         a.watchRootLayout(a.root);
