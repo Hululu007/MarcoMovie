@@ -1,3 +1,10 @@
+## 2026-11-20 原生 iOS 26 Liquid Glass 全面升级、全屏影院搜索重构与脚本扩展包/自建网关（iOS / iPadOS 0.5.34）
+
+- [iOS / iPadOS 0.5.34](docs/releases/ios-v0.5.34.md)
+- **原生 iOS 26 Liquid Glass 控件体系与零跳动转场**：接入原生 `UIGlassEffect` 62pt 4+1 悬浮 Dock（下滑折叠为右下角品牌标志圆形玻璃球及原生 `UIMenu`）、不限条数分组片源/仓库 `UIMenu`、原生 `UISegmentedControl`、`UISheetPresentationController` 筛选弹层、居中原生隐私空间密码面板及 `UISwitch` / `UISlider`；通过 `MarcoInteractiveCircleGlassControl` 预尺寸创建与 `IosNativeRouteGate` 路由即时接管，根治跨页黑屏遮挡、暗到明闪烁与图标缩放跳动，并优化观看历史弹窗流畅度与边界渐隐。
+- **全屏液态玻璃影院搜索（B + A + C）**：重构全局搜索为深色影院全屏页 + 底部悬浮液态玻璃搜索胶囊（随键盘平滑抬升）与原生圆形关闭按钮；零态支持可单条删除的最近搜索胶囊与零额外请求的「本源热播」3 列海报墙；搜索结果支持原生分段控件在「智能聚合」（跨源同名归并影院卡 + 色标直达片源胶囊）与「全部海报」间切换，并由横向命中片源筛选条取代旧版窄侧栏。
+- **系统级 iOS 26 设置页与「本地优先」`.so` 线路扩展体系**：重构设置页为 `22pt` 圆角内嵌分组卡片 + 折叠大标题 + 页内搜索；落地热插拔 `marco-adapter-pack-v1` 本地脚本扩展包与可选个人自建 `marco-spider-gateway-v1` 网关（含 UDP `41978` 局域网发现、零依赖自建网关模板 `gateway/` 及设置页内置新手图文教程与一键复制工具）。
+
 ## 2026-11-19 鸿蒙智慧屏 Apple TV 同款柔光大屏 UI、全端沉浸式详情与选集重构、无 Node 嵌入式 CatPaw/DRPY/Guard 运行时（Apple TV 0.1.1 · HarmonyOS NEXT 0.1.1）
 
 - [Apple TV 0.1.1](docs/releases/appletv-v0.1.1.md) · [HarmonyOS NEXT 0.1.1](docs/releases/harmonyos-v0.1.1.md)
