@@ -1,6 +1,6 @@
 # 跨端分片弹幕协议、缓存与渲染规范（`danmu-segment-protocol.md`）
 
-> **适用里程碑**：M3a（S31 Android 分片弹幕引擎与 `DanmakuView` 升级、S32 Flutter 弹幕核心与 `DanmuLayer`，不改播放器主控文件）、M3b（变基后挂载至 `PlaybackControls.java`、`player_screen.dart`、`SettingsScreen.java`）、R3 跨端一致性与压测评审。
+> **适用里程碑**：Wave 1 · M3a（S31 Android 分片弹幕引擎与 `DanmakuView` 升级、S32 Flutter 弹幕核心与 `DanmuLayer`，写独立 `android/tests/run_danmu_checks.py`，严禁触碰播放器与设置主文件）、Wave 2 · M3b（在 Android `PlaybackControls.java`、`MobileIosSettings.java`/`SettingsScreen.java` 与 Flutter `player_screen.dart`/`ios_player_chrome.dart`、`ios_settings.dart` 完成挂载并修正字幕置顶 Z 轴）、Gate 1 · R3 跨端一致性与压测评审。
 
 ---
 
@@ -12,8 +12,8 @@
 2. **可选公开 API 签名与限流礼仪**：
    - 当用户同时选填自定义 `appId` 与 `appSecret` 时，按公开 Open API v2 规范附加请求头：`X-AppId`、`X-Timestamp`（Unix 秒级时间戳）、`X-Signature = Base64(SHA256(appId + timestamp + urlPath + appSecret))`；未填写凭据时发送标准无签名请求。
    - 单域名限流：同一服务源相邻两次请求最小间隔 `>= 200ms`；收到 `HTTP 429` 时读取 `Retry-After`（缺省退避 `2000ms`）。
-3. **M3a / M3b 写入边界与 Android API 23 / 纯 JVM 兼容约束（对齐 §4.1）**：
-   - **偏好键隔离**：为避免与并行开发的 M2 冲突，M3a 与 M3b **均不得修改 `Prefs.java` 或 `storage_service.dart`**；弹幕偏好键统一在 `DanmuSettingsPanel.java`（直接读写 `SharedPreferences`）与 `flutter/lib/core/danmu/` 内部自包含定义。
+3. **Wave 1（M3a）/ Wave 2（M3b）写入边界与 Android API 23 / 纯 JVM 兼容约束**：
+   - **偏好键与原生设置融合**：为避免与并行线冲突，M3a 与 M3b **均不得修改 `Prefs.java` 或 `storage_service.dart`**；弹幕偏好键统一在 `DanmuSettingsPanel.java`（直接读写 `SharedPreferences`）与 `flutter/lib/core/danmu/danmu_prefs.dart` 内部自包含定义。Wave 1（M3a）严禁触碰 `PlaybackControls.java`、`player_screen.dart`、`SettingsScreen.java`、`ios_settings.dart`、`run_checks.py` 与 `pubspec.yaml`；Wave 2（M3b）在 `MobileIosSettings.java` / `SettingsScreen.java` 及 `ios_settings.dart`（iOS 26 使用 `IosNativeSwitch`）暴露全局弹幕设置入口，并在 iOS 26 播放页支持原生风格半屏弹幕调节面板。
    - **自包含 Base64url 编解码**：Android `minSdk = 23`（禁用 API 26+ 的 `java.util.Base64`）且 `run_checks.py` 为无 Android SDK 的纯 JVM 环境（避免直接耦合 `android.util.Base64`），Java 侧必须在 `DanmuProvider` / `DandanplayProvider` 内部附带约 25 行零依赖 RFC 4648 Base64url（无填充 `=`）与 SHA-256 编解码工具方法。
 4. **HarmonyOS NEXT 隔离约束**：
    - Flutter 新增弹幕模块不得引入任何原生插件；在 `OhosRuntime.isOhos` 为真时默认关闭弹幕层与网络拉取，严禁触碰 `flutter/ohos/` 与 `flutter/lib/ui/tv/**`。

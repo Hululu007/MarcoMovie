@@ -1,6 +1,6 @@
-# 跨端真机 A/B 验收、性能探针与合规审计清单（`acceptance-checklist.md`）
+# 跨端真机 A/B 验收、性能探针与合规审计清单（`acceptance-checklist.md` · v2 基线对齐修订版）
 
-> **适用范围**：M1–M7 各波次门禁、外部跨型号复核（R1–R4）、Forensic Auditor 净室审计，以及最终 **8 类目标真机** A/B 对照验收。  
+> **适用范围**：Wave 1（五线大并行）与 Wave 2（双端接线）门禁、外部跨型号复核（R1–R4）、Forensic Auditor 净室审计，以及最终 **8 类目标真机** A/B 对照验收。  
 > **真实性红线**：代码编译通过、JVM 检查通过或模拟器截图**绝不等同于真机验收通过**；未在物理设备上实测的条目必须如实勾选为 `[ ] 未实测` 并注明原因，严禁伪造真机结果。
 
 ---
@@ -11,134 +11,109 @@
 
 | # | 物理设备目标 | A 组正式版对照包（Tag @ Commit） | 核心验收模块 | 性能与帧率硬指标 |
 | :---: | :--- | :--- | :--- | :--- |
-| 1 | **Android 电视盒子**（底线：Android 9 ARM32 低配盒子） | `android-tv-v0.5.29`（`@ 940ed502`） | M1 大字号徽章与焦点态、M2 遥控长按加速快进/快退预览与 3s 跳过倒计时/细进度条、M3 弹幕自适应降级、M4 焦点弹簧与淡入、M5 遥控版引导 | 动效、HUD 与弹幕全程 **`>= 50fps`**（P90 帧耗时 `<= 20ms`）；零着色器、零模糊 |
-| 2 | **Android 手机**（ARM64/ARM32，含挖孔/刘海屏） | `android-mobile-v0.5.26`（`@ a3cbe546`） | M1 线路胶囊与选集徽章、M2 触控长按加速快进预览（松手即播）/安全区起播提示/3s 跳过/定时关闭、M3 分片弹幕、M4 分级转场与 `AuroraView`（验证 API 33+ 与 API 23–32 路径）、M5 触控引导 | 交互与转场 **`>= 60fps`**（高刷屏跟随）；横竖屏切换与来电/后台恢复正常 |
+| 1 | **Android 电视盒子**（底线：Android 9 ARM32 低配盒子） | `android-tv-v0.5.29`（`@ 940ed502`） | V17 沉浸详情与 `HomeAmbient` 无退化、M1 大字号徽章与焦点态、M2 遥控长按加速快进预览与 3s 跳过倒计时/细进度条、M3 弹幕自适应降级、M4 焦点弹簧与淡入、M5 遥控版引导 | 动效、HUD 与弹幕全程 **`>= 50fps`**（P90 帧耗时 `<= 20ms`）；零着色器、零模糊 |
+| 2 | **Android 手机**（ARM64/ARM32，含挖孔/刘海屏） | `android-mobile-v0.5.26`（`@ a3cbe546`） | M1 线路胶囊徽章、M2 **触控长按 2.0× 倍速→横滑调速→上滑锁定** / 原生细进度条复用 / 3s 跳过 / 定时关闭、M3 分片弹幕与字幕置顶 Z 轴、M4 分级转场（API 33+ AGSL / API 23–32 硬件缩放冻结模糊）与极光 + F8 丝带加载、M5 触控引导 | 交互与转场 **`>= 60fps`**（高刷屏跟随）；横竖屏切换与来电/后台复位正常 |
 | 3 | **Android 平板**（横屏侧边栏 + 竖屏底栏） | `android-mobile-v0.5.26`（`@ a3cbe546`） | 平板宽屏详情页徽章换行、大屏手势三区比例、横竖屏旋转时转场与极光视图生命周期 | **`>= 60fps`**；`100% / 110% / 120%` 界面缩放无裁切 |
-| 4 | **Lite 旧盒子**（Android 4.x / API 14 单 DEX） | `android-lite-v0.5.7`（`@ a3cbe546`） | **仅 M1（S12）**：详情页线路与选集纯文字标签（如 `4K · HDR10 · DD+ · 5.1`），沿用 `LiteActivity` 蓝/白焦点配色 | 保持**单 DEX**；冷启动与焦点移动无卡顿、无 `NoSuchMethodError` |
-| 5 | **Windows 桌面**（x64，Skia over ANGLE/D3D11） | `windows-v0.5.24`（`@ a3cbe546`） | M1 `WinButton` 线路徽章与悬停提示、M2 鼠标静止 `2.5s` 隐去/滚轮音量/`ArrowLeft`/`ArrowRight` 短按 `±15s` 与长按快进预览松手即播、M3 弹幕与 `D` 键、M4 `Paint.shader` 转场及 `> 16ms` 自动降级、M5 键鼠版引导、M6 Anime4K（若勾选） | 播放与弹幕 **`>= 60fps`**；4K 窗口 300 条弹幕 UI 线程 `< 8ms/帧`；窗口缩放起播提示位置稳定 |
-| 6 | **macOS 桌面**（Apple Silicon / Intel，Impeller Metal） | `macos-v0.5.19`（`@ a3cbe546`） | M1–M6 全套桌面体验、Retina 高分屏截图降采样（`<= 1280px`）与纹理即时释放 | **`>= 60fps`**；进退全屏与 `Cmd+W` 退出无残影或内存泄漏 |
-| 7 | **iPhone**（含刘海 / 灵动岛机型） | `ios-v0.5.34`（`@ 120cb3fc`） | M1 详情页与换源面板徽章（与 `IosNativeGlassButton` 协同）、M2 左/右横屏灵动岛安全区避让与侧滑返回互斥、M3 弹幕、M4 Impeller 着色器转场与 `IosNativeRouteGate` 门控、M5 触控引导 | **`>= 60fps`**（ProMotion 跟随）；侧滑边缘 `24lp` 不误触播放手势 |
-| 8 | **iPad**（全屏 / 分屏多任务横竖屏） | `ios-v0.5.34`（`@ 120cb3fc`） | iPad 沉浸式播放状态栏协同（`MobilePlayerChrome`）、宽屏双栏新手引导、分屏尺寸动态变化下弹幕轨道重算 | **`>= 60fps`**；动态字体缩放下胶囊无溢出 |
+| 4 | **Lite 旧盒子**（Android 4.x / API 14 单 DEX） | `android-lite-v0.5.7`（`@ a3cbe546`） | **仅 M1（S12）**：`LiteActivity` 详情元数据行与线路胶囊纯文字标签（如 `4K · HDR10 · DD+ 5.1`） | 保持**单 DEX**；冷启动与焦点移动无卡顿、无 `NoSuchMethodError` |
+| 5 | **Windows 桌面**（x64，Skia over ANGLE/D3D11） | `windows-v0.5.24`（`@ a3cbe546`） | `winFastGlass` 无模糊守卫、M1 线路徽章、M2 鼠标静止 `2.5s` 隐去/滚轮音量/`←`/`→` 快进预览/`S` 倍速键、M3 弹幕与 `D` 键、M4 `<= 16ms` 快速转场兜底、M5 宽屏引导、M6 Anime4K（开启切 `spline36`，关闭恢复 `bilinear`） | 播放与弹幕 **`>= 60fps`**；4K 窗口 300 条弹幕 UI 线程 `< 8ms/帧` |
+| 6 | **macOS 桌面**（Apple Silicon / Intel，Impeller Metal） | `macos-v0.5.19`（`@ a3cbe546`） | M1–M6 全套桌面体验、Retina 高分屏截图降采样（`<= 1280px`）与纹理即时释放、Anime4K 热切换不重启播放 | **`>= 60fps`**；进退全屏与 `Cmd+W` 退出无残影或内存泄漏 |
+| 7 | **iPhone**（含刘海 / 灵动岛机型，iOS 26 & 15–18 回退） | `ios-v0.5.34`（`@ 120cb3fc`） | **iOS 26 原生 Liquid Glass 全局统一与播放页重构**（40pt 同心顶栏 + 整合规格徽章条 + 56/76/56pt 折射圆钮 + 5pt→10pt 流体进度条 + 精简胶囊坞 + 原生 ActionSheet/UISheet 面板）、长按倍速→横滑→上滑锁定、无黑洞 `IosNativeRouteGate.runWithPlaceholders` 转场、M3 弹幕、M5 原生按钮引导 | **`>= 60fps`**（ProMotion 120fps 跟随）；活跃视频纹理无多 `UiKitView` 切片；侧滑边缘 `24lp` 零误触 |
+| 8 | **iPad**（全屏 / 分屏多任务横竖屏） | `ios-v0.5.34`（`@ 120cb3fc`） | iPad 沉浸式播放状态栏协同（`MobilePlayerChrome`）、iOS 26 重构播放页宽屏自适应、宽屏双栏新手引导、分屏尺寸动态变化下弹幕轨道重算 | **`>= 60fps`**；动态字体缩放与降低透明度（`reduceTransparency`）下无溢出 |
 
 ---
 
-## 2. 分端实测核查项清单
+## 2. 分模块实测核查项清单
 
 ### 2.1 M1 媒体规格徽章（Android / Lite / Flutter）
-- [ ] **跨端一致性**：同一组线路名与剧集文件名在 Android TV、Android 手机、Lite（纯文字文本序列）与 Flutter 四端输出的徽章文本及先后顺序 **100% 逐项一致**。
-- [ ] **互斥与防误判实测**：`10bit` 无 HDR 片源不出 `HDR10`；`4K.Remastered.1080p` 只出 `1080p`；`BluRay.REMUX` 只出 `REMUX`；`DV + Atmos` 合并为 `DV · ATMOS` 且不重复出单枚 `DV` 或 `ATMOS`；`[5.1GB]` 文件大小不出 `5.1` 声道。
-- [ ] **焦点与缩放**：Android TV 选集弹窗（`DetailScreen.renderEpisodes`）与 `TvV17DetailScreen` 徽章在 `100% / 110% / 120%` 缩放下文字清晰、焦点框不裁切；Lite 保持单 DEX 且 `COLOR_FOCUS`（`0xfff5f5f7`）/ `COLOR_ACCENT`（`0xff0a84ff`）对比度正常。
+- [ ] **跨端一致性**：同一组线路名与剧集文件名在 Android TV、Android 手机、Lite（纯文字序列）与 Flutter 四端输出的徽章文本及先后顺序 **100% 逐项一致**。
+- [ ] **互斥与保 `+` 归一化**：`10bit` 无 HDR 片源不出 `HDR10`；`TvV17DetailScreen` 等含 `'+'` 或 `%2B` 的 URL 正确输出 `HDR10+` / `DD+`（不被 `URLDecoder` 吞掉 `+`）；`DV + Atmos` 合并为 `DV · ATMOS`；`[5.1GB]` 不误出 `5.1` 声道。
+- [ ] **视觉与缩放**：iOS 26 采用同心圆角胶囊（`radius = height/2`）；Android TV 在 `100% / 110% / 120%` 缩放下焦点框不裁切；Lite 保持单 DEX。
 
-### 2.2 M2 播放页 HUD 与手势/按键状态机
-- [ ] **触控全链路（Android 手机/平板、iPhone、iPad）**：
-  - [ ] 单击显隐主控栏；锁屏态单击仅显隐解锁胶囊。
-  - [ ] 左/中/右三区双击符合配置（移动端默认中区播/暂、左右侧连续快进快退累加且奇数次连击不误触工具栏）。
-  - [ ] 静止长按 `>= 350ms` 进入进度条加速快进预览（可横滑微调预览时间点，按住期间不触发解码器卡顿寻道），**松手瞬间精准跳转至当前进度条预览位置并立即播放**。
-  - [ ] 长按预览期间接听电话、下拉通知栏、切后台、进入小窗/画中画或双指捏合时，**立即取消预览且不发生误跳转**。
-  - [ ] 左右边缘 `24dp`/`24lp` 侧滑返回系统手势顺畅触发，不串入快进或亮度音量调节；常驻倍速仍由工具栏倍速菜单独立调节。
-  - [ ] iPhone 左横屏与右横屏两种握持方向及 Android 挖孔屏下，左上角起播规格提示均完全避开灵动岛/刘海挖孔且边距无翻倍。
-- [ ] **Android 电视遥控器**：
-  - [ ] 短按左右键保持 `15s` 快进/快退；长按左右键沿进度条平滑加速快进/快退预览，松手立即从目标位置起播，按返回键取消预览不跳转（`InteractionProbe` 全量通过）。
-  - [ ] 隐藏控制栏下按上键正常呼出 `TvMarkerHost` 片头片尾标记面板（零冲突）。
-  - [ ] 跳过片头/片尾 **3 秒倒计时**（设置可切换为静默立即跳转）弹出时自动获焦，按确认键立即跳过，按任意方向键或返回键立即取消。
-- [ ] **桌面端键鼠（Windows / macOS）**：
-  - [ ] 鼠标移动唤醒 HUD，静止 `2.5s` 自动隐藏 HUD 与鼠标指针；滚轮调节音量每次 `±5%`。
-  - [ ] 短按 `←`/`→`（`< 280ms`）松手立即跳转 `±15s`；按住 `←`/`→`（`>= 280ms`）沿进度条加速预览并松手即播，按 `Esc` 优先取消预览不误退全屏；`[` / `]` 键正常调节常驻倍速。
-- [ ] **常驻细进度条与定时关闭**：主控栏展开时细进度条自动隐去，不遮挡字幕；定时关闭在 `15m / 30m / 播完本集` 到点前 `30s` 提示并准时暂停释放常亮锁。
+### 2.2 M2 播放页重构、HUD 与手势/按键状态机
+- [ ] **触控长按倍速全链路（Android 手机/平板、iPhone、iPad）**：
+  - [ ] 静止长按 `>= 350ms` 激活 `2.0×` 临时倍速，左右横滑顺畅切换 `1.25× / 1.5× / 2.0× / 3.0×` 并带轻触觉反馈；
+  - [ ] 按住向上滑过 `48dp` 提示松手锁定，松手进入锁定倍速并在顶部常驻 `"🔒 2.0× 锁定中 · 点击恢复"`，点击胶囊或切集/锁屏立即恢复长按前的 `userNormalSpeed`；
+  - [ ] 未锁定时松手，或长按期间发生来电、切后台、双指触碰、打开面板、进入小窗/PiP 时，**100% 立即恢复 `userNormalSpeed`**，无高倍速残留。
+- [ ] **iOS / iPadOS 26 统一液态玻璃播放页专项**：
+  - [ ] 播放页顶栏、中央圆形播控、底部流体伸缩进度条（`5pt -> 10pt`）与 `<= 7` 项精简胶囊坞同首页/搜索/详情页的 iOS 26 Liquid Glass 美学完全统一，旧版右侧 16 项拥挤竖条已彻底移除；
+  - [ ] 倍速、定时关闭、音字幕、策略菜单在 iOS 26+ 呼出原生 ActionSheet / UISheet 半屏面板；`ios_settings.dart` 新增开关使用 `IosNativeSwitch`；
+  - [ ] `glasswork.frag` 在 HUD 隐藏后停止运行；开启系统「降低透明度」或运行在 iOS 15–18 时平滑回退。
+- [ ] **防遮挡、遥控器与键鼠**：
+  - [ ] 起播规格提示与左上角返回按钮在任何状态下零重叠；`PlaybackController.java` 仅放宽第 1680 行单行门控复用手机细进度条；
+  - [ ] Android TV 遥控短按 `15s`、长按 `SeekGesture` 加速预览、`TvMarkerHost` 上键标记及 3 秒可取消跳过倒计时焦点链 100% 正常（`InteractionProbe` 全绿）；
+  - [ ] 桌面端鼠标静止 `2.5s` 隐去、滚轮音量、短按/长按 `←`/`→` 快进预览、`Esc` 抢占取消预览及 `S` / `[` `]` 倍速键正常。
 
-### 2.3 M3 分片弹幕引擎与渲染层
-- [ ] **按需窗口与容错**：拖动进度条触发 `180ms` 防抖，快速来回拖动期间旧窗口请求立即取消，不堆积网络队列；模拟 `HTTP 410` 时自动刷新目录并严格每窗最多重试 `1` 次（全集 `<= 3` 次），连续 `410` 不死循环。
-- [ ] **防重叠、跨界连续与层级**：滚动、顶部、底部弹幕同屏密集出现时全程无追尾叠印；跨越 `30s` 窗口整倍边界时在途弹幕不消失；负时间轴偏移下片头不冻结 `0.0s` 弹幕；**字幕层始终位于弹幕层上方**。
-- [ ] **电视自适应与桌面快捷键**：Android 9 ARM32 盒子高密弹幕下自动下调行数维持 `>= 50fps`；桌面端按 `D` 键即时开关弹幕。
+### 2.3 M3 分片弹幕引擎与层级顺序
+- [ ] **按需窗口、负偏移与容错**：负时间偏移（如 `-10s`）片头不冻结 `0.0s` 弹幕；跨越 `30s` 窗口交界处在途滚动弹幕不消失；并发 `HTTP 410` 单窗最多重试 `1` 次（全集 `<= 3` 次）；`180ms` Seek 防抖及时取消旧请求；恶意屏蔽词正则 `re:(a|aa)+$` 被静态拦截器直接拒绝。
+- [ ] **字幕置顶 Z 轴顺序与性能**：Android `PlaybackControls.java` 与 Flutter 播放栈严格保证**字幕层始终压在弹幕层上方**；Android 9 ARM32 盒子自动降级行数维持 `>= 50fps`；桌面 `D` 键即时开关弹幕。
 
-### 2.4 M4 转场着色器、极光背景与轻量动效
-- [ ] **三重降级与高分屏坐标必测（Flutter & Android）**：
-  - [ ] `2x` / `3x` Retina 及高分屏下 `CustomPainter` 逻辑像素坐标对位精准，竖版 `2:3` 海报等比过渡无横向拉伸；Android API 33+ AGSL 降采样截图按 Bitmap 像素坐标正确采样。
-  - [ ] 开启「减少动态效果」时，进出播放器立即切换为 `150ms` 纯淡入淡出，极光背景静止在 `t = 0` 帧且 `Ticker` 不运行。
-  - [ ] 人为注入着色器加载失败或模拟 `toImage()` 耗时 `> 16ms` 时，无崩溃、无黑屏卡死，自动回退为缩放 + 淡入；转场结束后截图纹理立即 `dispose()` 释放。
-- [ ] **电视端禁令核查**：确认 TV 端代码路径未创建任何着色器或模糊滤镜，海报焦点缩放与播放淡出流畅。
+### 2.4 M4 着色器转场、极光、F8 品牌丝带加载与 F9 桌面 Anime4K
+- [ ] **iOS 无黑洞截图与三重降级**：iPhone / iPad 从详情页进入播放器时，`IosNativeRouteGate.runWithPlaceholders` 单帧占位使截图纹理中原生玻璃按钮位置完整无黑洞，异常或取消时 `try/finally` 100% 恢复原生视图；减少动态效果、着色器异常、`toImage() > 16ms` 三条降级分支均实测可达且及时 `dispose()` 纹理。
+- [ ] **Android 硬件加速与 F8 品牌丝带加载**：API 23–32 转场使用硬件 `RenderNode` 属性并冻结 `GlassworkSurface` 重采样；缓冲等待处显示 1.6s 丝带 M 描边扫光加载器（减少动态效果时切换为静态呼吸透明度）。
+- [ ] **F9 桌面 Anime4K（Windows / macOS）**：切换「关闭 / 性能 / 均衡 / 画质」实时生效不中断播放；Windows 下开启预设时切换 `spline36`，切回「关闭」立即恢复默认 `bilinear`；移动端与鸿蒙完全隐藏。
 
 ### 2.5 M5 新手引导与示例素材
-- [ ] 首次安装冷启动展示 5 幕引导，初始配置地址仍为空串 `""`，显著展示不提供影视内容声明，第 4 幕准确演示长按快进预览与松手即播交互。
-- [ ] `scripts/generate_demo_art.py` 输出 **8-bit 索引量化 `.png`** 示例海报（14 张 `< 480 KB`），每张均带清晰「示例」角标，无任何真实片名或海报；首次播放手势提示满 3 次或点「不再提示」后不再弹出。
+- [ ] 独立引导页 5 幕流程顺畅（第 4 幕准确展示触控长按倍速调速锁定与遥控/键鼠预览），初始配置地址保持 `""`，第 1/5 幕直连导入/同步回调；`scripts/generate_demo_art.py` 产出的 14 张 8-bit 索引 `.png`（`< 480 KB`）均带清晰「示例」角标；首次播放手势提示满 3 次或点「不再提示」后不再弹出。
 
 ---
 
-## 3. 标准自动化检查、性能采集与探针命令
+## 3. 本机标准工具链、自动化检查与探针命令
 
 ```powershell
+# 0) 配置 JDK 17、Android Build-Tools 与 Flutter 3.38 工具链环境
+$env:JAVA_HOME = "C:\Tools\jdk-17"
+$env:MARCOMOVIE_JDK = $env:JAVA_HOME
+$env:MARCOMOVIE_BUILD_TOOLS = "C:\Android\Sdk\build-tools\35.0.0"
+$env:PATH = "$env:JAVA_HOME\bin;C:\Tools\flutter\bin;$env:PATH"
+
 # 1) 公开内容、默认空地址、保留域名与二进制守卫（每次提交前必跑，必须 PASS）
 python -X utf8 scripts/check_public_content.py
 
 # 2) Android Java 格式检查与全量离线 JVM 套件
-$env:MARCOMOVIE_JDK = 'C:\Tools\jdk-17'
-$env:MARCOMOVIE_BUILD_TOOLS = 'C:\Android\Sdk\build-tools\35.0.0'
 python -X utf8 scripts/format_java.py --check
 python -X utf8 android/tests/run_checks.py
 python -X utf8 android/tests/run_seek_checks.py
 python -X utf8 android/tests/run_review_fix_checks.py
 python -X utf8 android/tests/run_compat_checks.py
 
-# 3) Lite API 14 单 DEX 构建与 194+ 项 JVM 检查
+# 3) Lite API 14 单 DEX 构建与 JVM 检查
 python -X utf8 scripts/build_lite.py
 python -X utf8 scripts/test_lite_jvm.py
 
-# 4) Android TV / 手机真机帧耗时采集与截图命令
+# 4) Android TV / 手机真机帧耗时采集与遥控器探针
 adb shell dumpsys gfxinfo com.pilipala.marcomovie reset
-# （在真机执行播放 HUD 显隐、弹幕滚动或焦点快速移动 15 秒后采集）
 adb shell dumpsys gfxinfo com.pilipala.marcomovie framestats
-adb exec-out screencap -p > build/device-screen.png
 
-# 5) Android TV 遥控器仪器探针（仅在专用测试机执行）
-python -X utf8 scripts/build_android.py
-python -X utf8 scripts/build_device_probe.py InteractionProbe
-adb reverse tcp:18765 tcp:18765
-adb shell am instrument -w -e base http://127.0.0.1:18765/ com.pilipala.marcomovie.test/com.pilipala.marcomovie.InteractionProbe
-
-# 6) Flutter 单元测试与桌面 Profile 帧耗时实测
-# （注：基线已知 history_shelf / home_loading / dock_notice / detail_loading 4 个历史测试会卡死，可单独跳过并如实说明）
+# 5) Flutter 单元测试（注：已知 history_shelf / home_loading / dock_notice / detail_loading 4 个遗留测试会卡死，跳过并如实注明）
 cd flutter
 flutter test test/media_badges_test.dart
-flutter run --profile -d windows
 ```
 
 ---
 
-## 4. 正则跨语言兼容性自检说明（M0 实测验证记录）
+## 4. 正则跨语言兼容性自检说明（M0 实测验证记录 — 保持不变）
 
-为确保 `shared/ui-spec/badge-rules.json` 在 **Android API 14（Lite ICU 正则）**、**Android / JVM JDK 17（`java.util.regex.Pattern`）** 与 **Flutter Dart 3.10.8（ECMA-262 `RegExp`）** 三套引擎上输出 100% 逐字节一致，M0 制定并实测验证了以下五条兼容准则：
-
-1. **全面禁用 `\b` / `\B` 词边界**：
-   - 在 Android 真机 ICU 正则引擎中，中文汉字（`\p{Lo}`）属于单词字符（`\w`），导致 `\b4K\b` 面对 `"蓝光4K原盘"` 在 Android 真机上**不匹配**，而在桌面 OpenJDK 与 Dart `RegExp` 上**匹配**！同时下划线 `_` 属于 `\w`，会导致 `Sample_2160p_HEVC` 匹配失败。
-   - **解决方案**：所有英文/数字词元统一使用显式 ASCII 边界 `(?:^|.*[^a-z0-9])` 与 `(?![a-z0-9])`；纯中文词组（如 `杜比视界`、`臻彩`、`蓝光原盘`、`全景声`、`立体声`）直接无边界匹配，`B站` 写作 `(?:^|.*[^a-z0-9])b站(?!点)` 兼顾 `"B站4K"` 命中与 `"Web站点"` 排除。
-2. **严禁单端私有语法与统一子串匹配入口**：
-   - 顶层统一声明 `"caseInsensitive": true`（Java `Pattern.compile(p, Pattern.CASE_INSENSITIVE)` + `matcher(norm).find()`；Dart `RegExp(p, caseSensitive: false)` + `hasMatch(norm)`）；全包 **0 处** `(?i)`、**0 处**后行断言 `(?<=...)` / `(?<!...)`、**0 处**占有量词 `*+` / `++`、**0 处**原子组 `(?>...)`、**0 处** `\K` 或 `\p{...}`。
-3. **跨引擎统一空白折叠、保 `+` 百分号解码与 UTF-16 代理对安全截断**：
-   - 严禁调用 `URLDecoder.decode`（会把 `"HDR10+"` 与 `"DD+"` 中的字面量 `'+'` 破坏为空格 `' '`！）。两端统一仅将合法的 `%XX` 十六进制字节序列按 UTF-8 解码（非法字节替换为 `U+FFFD`），完整保留字面量 `'+'`。
-   - 归一化阶段将所有控制字符、C1 控制符/`\u0085`（NEL）、`\u00A0`（NBSP）、`\u2028`/`\u2029`（行/段分隔符）、`\u3000`（全角空格）及 `\uFEFF`（BOM）统一折叠为单个 ASCII `' '`（`0x20`），并显式按 `== 0x20` 剥离首尾空格（禁用两端语义不一致的平台 `.trim()`），彻底消除 `\u0085`/`\u2028` 行终止符与全角空格截断分叉；在 `1024` UTF-16 码元上限截断时，若索引 `1023` 为高代理项（`0xD800..0xDBFF`）则回退至 `1023`，杜绝拆裂补充平面字符。
-4. **Android API 14 `org.json.JSONException` 受检异常与 `Charset.forName("UTF-8")` 约束（供 S11 / S12 复用）**：
-   - 在桌面测试库 `json-20240303.jar` 中 `JSONException` 为非受检 `RuntimeException`，而在 Android `android.jar`（API 14–35）中 `JSONException` 为**受检 `Exception`**；同时 `StandardCharsets.UTF_8` 需要 API 19+！因此共享纯 Java `MediaBadges.java` 必须使用 `Charset.forName("UTF-8")`、显式声明 `throws JSONException`（或使用 `opt*` 方法），且禁用 Lambda、`Stream`、`Optional`、`java.util.Base64`，确保 `javac -bootclasspath android-14/android.jar` 与 `D8 --min-api 14` 零错误通过。
-5. **M0 跨语言与变异测试实测基准结果**：
-   - 针对 `badge-golden.json` 全部 **165 条**匿名化测试样例（含组合徽章、负向陷阱、`WxHp`、`HDR10-bit`、`dav1`/`eac3-joc`/`ec+3`、`SD-Card`、`v1.2.0 + AAC 2.0`、`%C2%85`/`\u2028`/`\u3000`/代理对截断边界）：
-     - **JDK 17**：`165 / 165` 全部通过，预热后 200 条批量匹配单条平均耗时 **`< 0.12 ms`**（优于 `< 0.20 ms` 指标）；
-     - **Dart 3.10.8**：`165 / 165` 全部通过，与 Java 输出差异数为 **`0`**；
-     - **变异测试（Mutation Kill Rate）**：移除 `dr_hdr10`、`src_bluray`、`aud_dts`、`aud_dd`、`res_1080p`（及 `res_4k`/`res_720p`/`res_sd`）互斥/边界前瞻断言的变异体击杀率达 **`100%`（`5/5` 核心目标与 `8/8` 全层级全击杀）**；
-     - **Android API 14 编译与 DEX 验证**：`-source 8 -target 8 -bootclasspath android-14/android.jar` 编译 0 错误，`D8 --min-api 14` 单 DEX 生成通过。
+`shared/ui-spec/badge-rules.json`（45 条规则 + `comboRules`）与 `badge-golden.json`（165 条样例）已在 M0 完成跨引擎实测锁定：
+1. **全面禁用 `\b` / `\B` 词边界**：统一采用显式 ASCII 边界 `(?:^|.*[^a-z0-9])` 与 `(?![a-z0-9])`，消除 Android ICU 正则将汉字归为 `\w` 的跨端分叉。
+2. **零单端私有语法**：顶层 `"caseInsensitive": true`，全包 0 处 `(?i)`、0 处后行断言、0 处占有量词或 `\p{...}`。
+3. **保 `+` 百分号解码与空白折叠**：禁用破坏 `"HDR10+"` / `"DD+"` 的 `URLDecoder.decode`，统一仅解码合法 `%XX` UTF-8 序列并保留字面量 `'+'`，折叠全角/控制空白并在 `1024` UTF-16 码元处做代理对安全截断。
+4. **Android API 14 兼容**：共享纯 Java `MediaBadges.java` 必须使用 `Charset.forName("UTF-8")`、处理受检 `org.json.JSONException`、禁用 Java 8+ API，已实测通过 `android-14/android.jar` 编译与 `D8 --min-api 14`。
+5. **实测基准**：JDK 17 与 Dart 3.10.8 跑完 165 条样例 **0 差异**（单条 `< 0.12 ms`），核心互斥变异击杀率 **100%**。
 
 ---
 
 ## 5. 净室与公开合规审计表（Forensic Auditor 必查）
 
-- [ ] 全仓变更内容及提交信息不区分大小写扫描，确认**零处**闭源参考软件名称或域名标识。
-- [ ] 确认**零处**逐字拷贝的外部正则表达式、外部着色器入口/结构体/字段名、外部短分组代号或外部专用分隔符常量。
+- [ ] 全仓变更内容、分支名及提交信息不区分大小写扫描，确认**零处**闭源参考软件名称或域名标识。
+- [ ] 确认**零处**逐字拷贝的外部正则表达式、外部着色器入口/结构体/字段名或外部专用文案。
 - [ ] 确认**零处**真实电影/剧集/番剧名称、**零处**真实海报图片、**零处**外部公共影视数据库域名或接口调用。
 - [ ] 确认**零处**第三方商业影音或流媒体品牌矢量/位图商标图形，所有徽章 100% 为纯文字胶囊。
 - [ ] 确认无新增硬编码弹幕/内容服务器地址或密钥，无新增遥测上报；`scripts/check_public_content.py` 返回 `0`。
-- [ ] 确认只读目录（`tvos/`、`flutter/ohos/`、`flutter/lib/ui/tv/**`、`gateway/`）零改动，且新增 Flutter 逻辑均已使用 `!OhosRuntime.isOhos` 默认关闭保护。
+- [ ] 确认只读目录（`tvos/`、`flutter/ohos/`、`flutter/lib/ui/tv/**`、`gateway/`）与 `Prefs.KEYS`（长度 46）零改动，且新增 Flutter 逻辑均含 `!OhosRuntime.isOhos` 默认关闭保护。
 
 ---
 
 ## 6. 不在范围内（Out of Scope）
 
-1. **Apple TV（`tvos/`）物理真机与 HarmonyOS NEXT（`flutter/ohos/`）物理真机的本轮新特性验收**：两平台在本轮维持只读不改（本机亦无 HarmonyOS `hvigorw` / DevEco 编译工具链，鸿蒙编译仅在云端 CI 或后续 M8 阶段验证，各里程碑交付需如实标注「未在本机验证鸿蒙 HAP 编译」）。
-2. **非授权第三方真实盗版源或私有账号样本的入库测试**：所有自动化测试必须使用本地回环模拟服务（`127.0.0.1`）或 `.test` / `.example` 合成样本。
+1. **Apple TV（`tvos/`）物理真机与 HarmonyOS NEXT（`flutter/ohos/`）物理真机的本轮新特性验收**：两平台在本轮维持只读不改（本机无 HarmonyOS `hvigorw` 编译工具链，各里程碑交付需如实标注「未在本机验证鸿蒙 HAP 编译」）。
+2. **非授权第三方真实源或私有账号样本的入库测试**：所有自动化测试必须使用本地回环模拟服务（`127.0.0.1`）或 `.test` / `.example` 合成样本。
