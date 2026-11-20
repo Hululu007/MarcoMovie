@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 package com.pilipala.marcomovie;
 
 import com.pilipala.marcomovie.DanmuProvider.BlockFilter;
@@ -10,6 +11,7 @@ import com.pilipala.marcomovie.DanmuProvider.MatchQuery;
 import com.pilipala.marcomovie.DanmuSegmentCache.ActiveSlot;
 import com.pilipala.marcomovie.DanmuSegmentCache.FramePacingMonitor;
 import com.pilipala.marcomovie.DanmuSegmentCache.LayoutEngine;
+import com.pilipala.marcomovie.DanmuSegmentCache.SmoothClock;
 import com.pilipala.marcomovie.DanmuSegmentCache.TextWidthMeasurer;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -81,6 +83,7 @@ public final class DanmuEngineChecks {
         testBlockFilterAndReDoS();
         testCollisionFreeLinearKinematics();
         testTvP90AdaptiveDegradation();
+        testSpeedBoostMonotonicReAnchorAndModePurge();
         testLocalHttpProtocolAndFullEpisodeFallback();
         testBoundaryContinuityNegativeOffsetAndPinning();
         testConcurrent410SingleflightAndCap();
@@ -394,6 +397,218 @@ public final class DanmuEngineChecks {
         check(
                 mon.getEffectiveMaxRows() == 3,
                 "180 consecutive frames < 15.5ms recover +1 row (2 -> 3)");
+
+        // Adaptive row-cap steps (6 -> 4 -> 5) must NOT reset or teleport already in-flight danmu!
+        LayoutEngine engine = new LayoutEngine();
+        TextWidthMeasurer measurer =
+                new TextWidthMeasurer() {
+                    @Override
+                    public float measureWidth(String text) {
+                        return 200f;
+                    }
+                };
+        List<DanmuItem> initialWave = new ArrayList<>();
+        for (int i = 0; i < 6; i++) {
+            initialWave.add(new DanmuItem("lane_" + i, 1000L, 1, 0xFFFFFF, "弹幕" + i));
+        }
+        engine.step(
+                1200L,
+                initialWave,
+                1920,
+                1080,
+                24f,
+                0f,
+                44f,
+                0.50f,
+                6,
+                48,
+                8200L,
+                true,
+                true,
+                true,
+                measurer);
+        int lane4Before = -1;
+        int lane5Before = -1;
+        float x4Before = -1f;
+        for (ActiveSlot s : engine.getSlots()) {
+            if (!s.active) continue;
+            if ("lane_4".equals(s.id)) {
+                lane4Before = s.lane;
+                x4Before = s.x;
+            }
+            if ("lane_5".equals(s.id)) lane5Before = s.lane;
+        }
+        check(lane4Before == 4 && lane5Before == 5, "Initial 6-row wave fills lanes 0..5");
+
+        // Degrade rowCap 6 -> 4 and admit a new comment wave; in-flight lanes 4 & 5 keep exact
+        // lanes
+        List<DanmuItem> wave2 = new ArrayList<>(initialWave);
+        wave2.add(new DanmuItem("after_degrade", 2600L, 1, 0xFFFFFF, "降级后新弹幕"));
+        engine.step(
+                2700L, wave2, 1920, 1080, 24f, 0f, 44f, 0.50f, 4, 32, 8200L, true, true, true,
+                measurer);
+        int lane4After = -1;
+        int lane5After = -1;
+        float x4After = -1f;
+        int newAfterDegradeLane = -1;
+        for (ActiveSlot s : engine.getSlots()) {
+            if (!s.active) continue;
+            if ("lane_4".equals(s.id)) {
+                lane4After = s.lane;
+                x4After = s.x;
+            }
+            if ("lane_5".equals(s.id)) lane5After = s.lane;
+            if ("after_degrade".equals(s.id)) newAfterDegradeLane = s.lane;
+        }
+        check(
+                lane4After == 4 && lane5After == 5 && x4After < x4Before,
+                "P90 degradation 6->4 keeps in-flight lanes 4 & 5 intact without teleporting");
+        check(
+                newAfterDegradeLane >= 0 && newAfterDegradeLane < 4,
+                "New admission under degraded rowCap=4 stays strictly within lanes 0..3");
+
+        // Recover rowCap 4 -> 5; in-flight items still stay on their original lanes
+        engine.step(
+                3200L, wave2, 1920, 1080, 24f, 0f, 44f, 0.50f, 5, 40, 8200L, true, true, true,
+                measurer);
+        int lane4Recover = -1;
+        for (ActiveSlot s : engine.getSlots()) {
+            if (s.active && "lane_4".equals(s.id)) lane4Recover = s.lane;
+        }
+        check(lane4Recover == 4, "P90 recovery 4->5 preserves in-flight lane continuity");
+    }
+
+    private static void testSpeedBoostMonotonicReAnchorAndModePurge() throws Exception {
+        // M2 speed boost (1.0x -> 2.0x -> 1.0x) mid-tick must NEVER jump backwards or wipe danmu
+        SmoothClock clock = new SmoothClock();
+        clock.setPlaySpeed(2.0f, 10000, true, 0L);
+        long t0 = clock.sample(10000, true, 0L);
+        long t180 = clock.sample(10000, true, 180L);
+        check(t0 == 10000L && t180 == 10360L, "SmoothClock interpolates 2.0x speed accurately");
+
+        LayoutEngine engine = new LayoutEngine();
+        TextWidthMeasurer measurer =
+                new TextWidthMeasurer() {
+                    @Override
+                    public float measureWidth(String text) {
+                        return 180f;
+                    }
+                };
+        List<DanmuItem> items =
+                Arrays.asList(
+                        new DanmuItem("s1", 9000L, 1, 0xFFFFFF, "普通弹幕"),
+                        new DanmuItem("s2", 9100L, 1, 0xFFFFFF, "剧透内容"),
+                        new DanmuItem("top1", 9200L, 5, 0xFFFFFF, "顶部固定"));
+        engine.step(
+                t180, items, 1920, 1080, 24f, 0f, 44f, 0.50f, 6, 48, 7600L, true, true, true,
+                measurer);
+        int s1LaneBefore = -1;
+        for (ActiveSlot s : engine.getSlots()) {
+            if (s.active && "s1".equals(s.id)) s1LaneBefore = s.lane;
+        }
+        check(
+                engine.getActiveCount() == 3 && s1LaneBefore == 0,
+                "Active danmu admitted before 2.0x -> 1.0x release");
+
+        // Release 2.0x boost back to 1.0x at wall=180ms before next player tick
+        clock.setPlaySpeed(1.0f, 10000, true, 180L);
+        long t196 = clock.sample(10000, true, 196L);
+        check(
+                t196 == 10376L && t196 >= t180,
+                "SmoothClock re-anchors monotonically on 2.0x -> 1.0x release (" + t196 + "ms)");
+
+        // Even if delayed player tick reports 10350ms at wall=200ms, clock stays monotonic
+        long t200 = clock.sample(10350, true, 200L);
+        check(t200 >= t196, "Delayed forward player tick stays monotonic after speed release");
+
+        // Step LayoutEngine at t196 with ONLY new-arriving empty list: active danmu MUST survive!
+        engine.step(
+                t196,
+                Collections.<DanmuItem>emptyList(),
+                1920,
+                1080,
+                24f,
+                0f,
+                44f,
+                0.50f,
+                6,
+                48,
+                7600L,
+                true,
+                true,
+                true,
+                measurer);
+        int s1LaneAfter = -1;
+        for (ActiveSlot s : engine.getSlots()) {
+            if (s.active && "s1".equals(s.id)) s1LaneAfter = s.lane;
+        }
+        check(
+                engine.getActiveCount() == 3 && s1LaneAfter == s1LaneBefore,
+                "Releasing 2.0x -> 1.0x preserves all active danmu intact without LayoutEngine reset");
+
+        // Toggling showTop=false must immediately expire active top danmu on next step
+        engine.step(
+                t196 + 16L,
+                Collections.<DanmuItem>emptyList(),
+                1920,
+                1080,
+                24f,
+                0f,
+                44f,
+                0.50f,
+                6,
+                48,
+                7600L,
+                true,
+                false,
+                true,
+                measurer);
+        check(
+                engine.getActiveCount() == 2,
+                "Disabling showTop immediately expires active top danmu without resetting scroll danmu");
+
+        // Live block-rule purge removes newly blocked active danmu while keeping unblocked ones
+        engine.purgeBlocked(BlockFilter.compile(Collections.singletonList("剧透")));
+        check(
+                engine.getActiveCount() == 1,
+                "purgeBlocked immediately removes newly blocked active danmu while preserving safe ones");
+
+        // Cross-language X-Signature rawPath parity on percent-encoded episodeId
+        final AtomicReference<String> seenRawPath = new AtomicReference<>();
+        final AtomicReference<String> seenTs = new AtomicReference<>();
+        final AtomicReference<String> seenSig = new AtomicReference<>();
+        HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        srv.setExecutor(daemonPool(2));
+        String origin = "http://127.0.0.1:" + srv.getAddress().getPort();
+        srv.createContext(
+                "/api/v2/comment/",
+                new HttpHandler() {
+                    @Override
+                    public void handle(HttpExchange ex) throws IOException {
+                        seenRawPath.set(ex.getRequestURI().getRawPath());
+                        seenTs.set(ex.getRequestHeaders().getFirst("X-Timestamp"));
+                        seenSig.set(ex.getRequestHeaders().getFirst("X-Signature"));
+                        sendResponse(ex, 200, "application/json", "{\"comments\":[]}");
+                    }
+                });
+        srv.start();
+        try {
+            DandanplayProvider signed = new DandanplayProvider(origin, "appX", "secY", 4, 0L);
+            String bound = DandanplayProvider.encodeBoundEpisodeId(origin, "ep+42/sub");
+            signed.openSession(bound, null);
+            String expected =
+                    DandanplayProvider.computeOpenApiSignature(
+                            "appX",
+                            Long.parseLong(seenTs.get()),
+                            "/api/v2/comment/ep%2B42%2Fsub",
+                            "secY");
+            check(
+                    "/api/v2/comment/ep%2B42%2Fsub".equals(seenRawPath.get())
+                            && expected.equals(seenSig.get()),
+                    "Java X-Signature signs raw percent-encoded path matching Dart");
+        } finally {
+            srv.stop(0);
+        }
     }
 
     private static void testLocalHttpProtocolAndFullEpisodeFallback() throws Exception {

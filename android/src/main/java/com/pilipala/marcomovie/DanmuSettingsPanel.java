@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 package com.pilipala.marcomovie;
 
 import android.app.AlertDialog;
@@ -334,23 +335,30 @@ public final class DanmuSettingsPanel {
         final DanmuConfig[] state = new DanmuConfig[] {loadConfig(context, isTv)};
         final float density = context.getResources().getDisplayMetrics().density;
         final int pad = Math.round(16f * density);
+        final boolean reducedMotion =
+                context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                        .getBoolean(Prefs.REDUCED, false);
 
         ScrollView scroll = new ScrollView(context);
         scroll.setBackgroundColor(TvV17Theme.OPAQUE_SURFACE);
+        scroll.setClipToPadding(false);
 
         LinearLayout root = new LinearLayout(context);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(pad, pad, pad, pad);
+        root.setClipChildren(false);
+        root.setClipToPadding(false);
         scroll.addView(root);
 
-        final CheckBox enableBox = makeCheckBox(context, "开启弹幕", state[0].enabled);
+        final CheckBox enableBox =
+                makeCheckBox(context, "开启弹幕", state[0].enabled, density, isTv, reducedMotion);
         root.addView(enableBox);
 
         final TextView opacityLabel = makeSectionLabel(context, "");
         root.addView(opacityLabel);
         LinearLayout opacityRow = makeRow(context);
-        Button opacityMinus = makeActionButton(context, "-5%", density);
-        Button opacityPlus = makeActionButton(context, "+5%", density);
+        Button opacityMinus = makeActionButton(context, "-5%", density, isTv, reducedMotion);
+        Button opacityPlus = makeActionButton(context, "+5%", density, isTv, reducedMotion);
         opacityRow.addView(opacityMinus);
         opacityRow.addView(opacityPlus);
         root.addView(opacityRow);
@@ -359,9 +367,34 @@ public final class DanmuSettingsPanel {
         root.addView(areaLabel);
         LinearLayout areaRow = makeRow(context);
         final Button[] areaButtons = new Button[AREA_OPTIONS.length];
+        final Button[] speedButtons = new Button[SPEED_OPTIONS.length];
+        final Runnable refreshPresetStates =
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        for (int i = 0; i < AREA_OPTIONS.length; i++) {
+                            Button btn = areaButtons[i];
+                            if (btn == null) continue;
+                            boolean selected =
+                                    Math.abs(state[0].displayArea - AREA_OPTIONS[i]) < 0.01f;
+                            btn.setSelected(selected);
+                            styleActionButton(btn, btn.hasFocus(), density, isTv, reducedMotion);
+                        }
+                        for (int i = 0; i < SPEED_OPTIONS.length; i++) {
+                            Button btn = speedButtons[i];
+                            if (btn == null) continue;
+                            boolean selected =
+                                    Math.abs(state[0].speedMultiplier - SPEED_OPTIONS[i]) < 0.01f;
+                            btn.setSelected(selected);
+                            styleActionButton(btn, btn.hasFocus(), density, isTv, reducedMotion);
+                        }
+                    }
+                };
         for (int i = 0; i < AREA_OPTIONS.length; i++) {
             final float opt = AREA_OPTIONS[i];
-            Button b = makeActionButton(context, Math.round(opt * 100) + "%", density);
+            Button b =
+                    makeActionButton(
+                            context, Math.round(opt * 100) + "%", density, isTv, reducedMotion);
             areaButtons[i] = b;
             areaRow.addView(b);
             b.setOnClickListener(
@@ -373,6 +406,7 @@ public final class DanmuSettingsPanel {
                             state[0] = bldr.build();
                             persistAndNotify(context, state[0], listener);
                             areaLabel.setText(formatArea(state[0].displayArea));
+                            refreshPresetStates.run();
                         }
                     });
         }
@@ -381,8 +415,8 @@ public final class DanmuSettingsPanel {
         final TextView fontLabel = makeSectionLabel(context, "");
         root.addView(fontLabel);
         LinearLayout fontRow = makeRow(context);
-        Button fontMinus = makeActionButton(context, "字号 -2", density);
-        Button fontPlus = makeActionButton(context, "字号 +2", density);
+        Button fontMinus = makeActionButton(context, "字号 -2", density, isTv, reducedMotion);
+        Button fontPlus = makeActionButton(context, "字号 +2", density, isTv, reducedMotion);
         fontRow.addView(fontMinus);
         fontRow.addView(fontPlus);
         root.addView(fontRow);
@@ -392,7 +426,14 @@ public final class DanmuSettingsPanel {
         LinearLayout speedRow = makeRow(context);
         for (int i = 0; i < SPEED_OPTIONS.length; i++) {
             final float opt = SPEED_OPTIONS[i];
-            Button b = makeActionButton(context, String.format(Locale.US, "%.2gx", opt), density);
+            Button b =
+                    makeActionButton(
+                            context,
+                            String.format(Locale.US, "%.2gx", opt),
+                            density,
+                            isTv,
+                            reducedMotion);
+            speedButtons[i] = b;
             speedRow.addView(b);
             b.setOnClickListener(
                     new View.OnClickListener() {
@@ -403,6 +444,7 @@ public final class DanmuSettingsPanel {
                             state[0] = bldr.build();
                             persistAndNotify(context, state[0], listener);
                             speedLabel.setText(formatSpeed(state[0].speedMultiplier));
+                            refreshPresetStates.run();
                         }
                     });
         }
@@ -411,17 +453,20 @@ public final class DanmuSettingsPanel {
         final TextView offsetLabel = makeSectionLabel(context, "");
         root.addView(offsetLabel);
         LinearLayout offsetRow = makeRow(context);
-        Button offsetMinus = makeActionButton(context, "-0.5s", density);
-        Button offsetReset = makeActionButton(context, "归零", density);
-        Button offsetPlus = makeActionButton(context, "+0.5s", density);
+        Button offsetMinus = makeActionButton(context, "-0.5s", density, isTv, reducedMotion);
+        Button offsetReset = makeActionButton(context, "归零", density, isTv, reducedMotion);
+        Button offsetPlus = makeActionButton(context, "+0.5s", density, isTv, reducedMotion);
         offsetRow.addView(offsetMinus);
         offsetRow.addView(offsetReset);
         offsetRow.addView(offsetPlus);
         root.addView(offsetRow);
 
-        final CheckBox scrollBox = makeCheckBox(context, "显示滚动弹幕", state[0].showScroll);
-        final CheckBox topBox = makeCheckBox(context, "显示顶部弹幕", state[0].showTop);
-        final CheckBox bottomBox = makeCheckBox(context, "显示底部弹幕", state[0].showBottom);
+        final CheckBox scrollBox =
+                makeCheckBox(context, "显示滚动弹幕", state[0].showScroll, density, isTv, reducedMotion);
+        final CheckBox topBox =
+                makeCheckBox(context, "显示顶部弹幕", state[0].showTop, density, isTv, reducedMotion);
+        final CheckBox bottomBox =
+                makeCheckBox(context, "显示底部弹幕", state[0].showBottom, density, isTv, reducedMotion);
         root.addView(scrollBox);
         root.addView(topBox);
         root.addView(bottomBox);
@@ -440,7 +485,7 @@ public final class DanmuSettingsPanel {
         root.addView(appIdInput);
         root.addView(appSecretInput);
 
-        Button saveServerBtn = makeActionButton(context, "保存服务配置", density);
+        Button saveServerBtn = makeActionButton(context, "保存服务配置", density, isTv, reducedMotion);
         root.addView(saveServerBtn);
 
         root.addView(makeSectionLabel(context, "屏蔽词管理（支持纯文本或 re: 正则，最多 100 条）"));
@@ -453,8 +498,8 @@ public final class DanmuSettingsPanel {
         root.addView(ruleError);
 
         LinearLayout ruleActions = makeRow(context);
-        Button addRuleBtn = makeActionButton(context, "添加屏蔽规则", density);
-        Button clearRulesBtn = makeActionButton(context, "清空规则", density);
+        Button addRuleBtn = makeActionButton(context, "添加屏蔽规则", density, isTv, reducedMotion);
+        Button clearRulesBtn = makeActionButton(context, "清空规则", density, isTv, reducedMotion);
         ruleActions.addView(addRuleBtn);
         ruleActions.addView(clearRulesBtn);
         root.addView(ruleActions);
@@ -474,6 +519,7 @@ public final class DanmuSettingsPanel {
                         speedLabel.setText(formatSpeed(state[0].speedMultiplier));
                         offsetLabel.setText(formatOffset(state[0].timeOffsetMs));
                         rulesSummary.setText(formatRulesSummary(state[0].blockRules));
+                        refreshPresetStates.run();
                     }
                 };
         refreshLabels.run();
@@ -709,31 +755,79 @@ public final class DanmuSettingsPanel {
         return tv;
     }
 
-    private static CheckBox makeCheckBox(Context context, String label, boolean checked) {
-        CheckBox box = new CheckBox(context);
+    private static CheckBox makeCheckBox(
+            Context context,
+            String label,
+            boolean checked,
+            final float density,
+            final boolean isTv,
+            final boolean reducedMotion) {
+        final CheckBox box = new CheckBox(context);
         box.setText(label);
         box.setTextColor(TvV17Theme.TEXT);
         box.setChecked(checked);
         box.setFocusable(true);
+        int hPad = Math.round(10f * density);
+        int vPad = Math.round(6f * density);
+        box.setPadding(hPad, vPad, hPad, vPad);
+        styleCheckBox(box, false, density);
+        box.setOnFocusChangeListener(
+                new View.OnFocusChangeListener() {
+                    @Override
+                    public void onFocusChange(View v, boolean hasFocus) {
+                        styleCheckBox(box, hasFocus, density);
+                        float scale = (hasFocus && isTv && !reducedMotion) ? 1.03f : 1.0f;
+                        box.setScaleX(scale);
+                        box.setScaleY(scale);
+                    }
+                });
         return box;
+    }
+
+    private static void styleCheckBox(CheckBox box, boolean focused, float density) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(8f * density);
+        if (focused) {
+            bg.setColor(0xFFF5F5F7);
+            bg.setStroke(Math.max(2, Math.round(2f * density)), 0xFFFFFFFF);
+            box.setTextColor(0xFF101013);
+        } else {
+            bg.setColor(0x00000000);
+            box.setTextColor(TvV17Theme.TEXT);
+        }
+        box.setBackground(bg);
     }
 
     private static LinearLayout makeRow(Context context) {
         LinearLayout row = new LinearLayout(context);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setClipChildren(false);
+        row.setClipToPadding(false);
         return row;
     }
 
-    private static Button makeActionButton(Context context, String text, float density) {
-        Button b = new Button(context);
+    private static Button makeActionButton(
+            Context context,
+            String text,
+            final float density,
+            final boolean isTv,
+            final boolean reducedMotion) {
+        final Button b = new Button(context);
         b.setText(text);
-        b.setTextColor(TvV17Theme.TEXT);
         b.setFocusable(true);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xFF2E3846);
-        bg.setCornerRadius(8f * density);
-        b.setBackground(bg);
+        b.setAllCaps(false);
+        int hPad = Math.round(12f * density);
+        int vPad = Math.round(6f * density);
+        b.setPadding(hPad, vPad, hPad, vPad);
+        styleActionButton(b, false, density, isTv, reducedMotion);
+        b.setOnFocusChangeListener(
+                new View.OnFocusChangeListener() {
+                    @Override
+                    public void onFocusChange(View v, boolean hasFocus) {
+                        styleActionButton(b, hasFocus, density, isTv, reducedMotion);
+                    }
+                });
         LinearLayout.LayoutParams lp =
                 new LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -742,6 +836,31 @@ public final class DanmuSettingsPanel {
         lp.bottomMargin = Math.round(6f * density);
         b.setLayoutParams(lp);
         return b;
+    }
+
+    private static void styleActionButton(
+            Button b, boolean focused, float density, boolean isTv, boolean reducedMotion) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(8f * density);
+        if (focused) {
+            // High-contrast TV D-pad focus pill (motion-tokens.json tvFocus: #FFF5F5F7 + 2dp
+            // stroke)
+            bg.setColor(0xFFF5F5F7);
+            bg.setStroke(Math.max(2, Math.round(2f * density)), 0xFFFFFFFF);
+            b.setTextColor(0xFF101013);
+        } else if (b.isSelected()) {
+            bg.setColor(0xFF0A84FF);
+            bg.setStroke(Math.max(1, Math.round(1.5f * density)), 0xB3FFFFFF);
+            b.setTextColor(0xFFFFFFFF);
+        } else {
+            bg.setColor(0xFF2E3846);
+            bg.setStroke(Math.max(1, Math.round(1f * density)), 0x33FFFFFF);
+            b.setTextColor(TvV17Theme.TEXT);
+        }
+        b.setBackground(bg);
+        float scale = (focused && isTv && !reducedMotion) ? 1.06f : 1.0f;
+        b.setScaleX(scale);
+        b.setScaleY(scale);
     }
 
     private static EditText makeInput(

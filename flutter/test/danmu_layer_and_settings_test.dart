@@ -1,17 +1,29 @@
+// Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
+import 'dart:convert';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:marco_movie/core/danmu/block_filter.dart';
+import 'package:marco_movie/core/danmu/dandanplay_provider.dart';
 import 'package:marco_movie/core/danmu/danmu_prefs.dart';
 import 'package:marco_movie/core/danmu/provider.dart';
+import 'package:marco_movie/core/danmu/segment_cache.dart';
 import 'package:marco_movie/core/ohos_runtime.dart';
+import 'package:marco_movie/ui/apple_theme.dart';
 import 'package:marco_movie/ui/danmu/danmu_layer.dart';
 import 'package:marco_movie/ui/danmu/danmu_settings_sheet.dart';
+import 'package:marco_movie/ui/ios_liquid_glass.dart';
 
 void main() {
   tearDown(() {
     OhosRuntime.resetForTesting();
+    GlassworkBackdrop.reduceTransparency.value = false;
+    GlassworkBackdrop.intensity.value = 0.68;
   });
 
   group('Collision-Free Linear Kinematics Layout Engine', () {
@@ -326,6 +338,340 @@ void main() {
         ),
       );
       expect(find.text('弹幕设置'), findsNothing);
+    });
+
+    test('DanmuClockInterpolator re-anchors monotonically on 2.0x -> 1.0x release without wiping active danmu',
+        () {
+      final clock = DanmuClockInterpolator(initialPosMs: 10000, playSpeed: 2.0);
+      clock.onTickerStarted(10000);
+      clock.onTick(const Duration(milliseconds: 180));
+      final t180 = clock.currentPositionMs(playing: true);
+      expect(t180, 10360);
+
+      final engine = DanmuLayoutEngine();
+      const items = <DanmuItem>[
+        DanmuItem(id: 's1', timeMs: 9000, mode: 1, rgbColor: 0xFFFFFF, text: '普通'),
+        DanmuItem(id: 's2', timeMs: 9100, mode: 1, rgbColor: 0xFFFFFF, text: '剧透警告'),
+        DanmuItem(id: 'top1', timeMs: 9200, mode: 5, rgbColor: 0xFFFFFF, text: '顶部'),
+      ];
+      engine.step(
+        effectiveMs: t180,
+        candidates: items,
+        viewWidth: 1920,
+        viewHeight: 1080,
+        fontSize: 20,
+        topInset: 0,
+        bottomSafeInset: 44,
+        area: 0.50,
+        rowCap: 6,
+        maxOnScreenItems: 120,
+        scrollDurationMs: 7600,
+        showScroll: true,
+        showTop: true,
+        showBottom: true,
+        measureWidth: (_) => 160,
+      );
+      expect(engine.activeCount, 3);
+      final s1LaneBefore =
+          engine.activeEntries.firstWhere((e) => e.item.id == 's1').lane;
+
+      // Release 2.0x boost back to 1.0x mid-tick -> must NOT regress clock or reset engine
+      clock.setPlaySpeed(1.0, playing: true);
+      clock.onTick(const Duration(milliseconds: 196));
+      final t196 = clock.currentPositionMs(playing: true);
+      expect(t196, 10376);
+      expect(t196, greaterThanOrEqualTo(t180));
+
+      // Even if player clock tick arrives slightly behind estimate (10350), stays monotonic
+      clock.onTick(const Duration(milliseconds: 200));
+      clock.onExternalPosition(10350, playing: true);
+      expect(clock.currentPositionMs(playing: true), greaterThanOrEqualTo(t196));
+
+      engine.step(
+        effectiveMs: t196,
+        candidates: const <DanmuItem>[],
+        viewWidth: 1920,
+        viewHeight: 1080,
+        fontSize: 20,
+        topInset: 0,
+        bottomSafeInset: 44,
+        area: 0.50,
+        rowCap: 6,
+        maxOnScreenItems: 120,
+        scrollDurationMs: 7600,
+        showScroll: true,
+        showTop: true,
+        showBottom: true,
+        measureWidth: (_) => 160,
+      );
+      expect(engine.activeCount, 3);
+      expect(
+        engine.activeEntries.firstWhere((e) => e.item.id == 's1').lane,
+        s1LaneBefore,
+      );
+
+      // Disabling showTop immediately removes active top danmu while preserving scroll danmu
+      engine.step(
+        effectiveMs: t196 + 16,
+        candidates: const <DanmuItem>[],
+        viewWidth: 1920,
+        viewHeight: 1080,
+        fontSize: 20,
+        topInset: 0,
+        bottomSafeInset: 44,
+        area: 0.50,
+        rowCap: 6,
+        maxOnScreenItems: 120,
+        scrollDurationMs: 7600,
+        showScroll: true,
+        showTop: false,
+        showBottom: true,
+        measureWidth: (_) => 160,
+      );
+      expect(engine.activeCount, 2);
+
+      // purgeBlocked removes newly blocked active danmu while keeping safe active danmu
+      engine.purgeBlocked(DanmuBlockFilter.compile(const <String>['剧透']));
+      expect(engine.activeCount, 1);
+      expect(engine.activeEntries.single.item.id, 's1');
+    });
+
+    test('DanmuLayoutEngine preserves in-flight lanes across rowCap 6 -> 4 -> 5 changes',
+        () {
+      final engine = DanmuLayoutEngine();
+      final wave1 = List<DanmuItem>.generate(
+        6,
+        (i) => DanmuItem(
+          id: 'lane_$i',
+          timeMs: 1000,
+          mode: 1,
+          rgbColor: 0xFFFFFF,
+          text: '弹幕$i',
+        ),
+      );
+      engine.step(
+        effectiveMs: 1200,
+        candidates: wave1,
+        viewWidth: 1920,
+        viewHeight: 1080,
+        fontSize: 24,
+        topInset: 0,
+        bottomSafeInset: 44,
+        area: 0.50,
+        rowCap: 6,
+        maxOnScreenItems: 120,
+        scrollDurationMs: 7600,
+        showScroll: true,
+        showTop: true,
+        showBottom: true,
+        measureWidth: (_) => 200,
+      );
+      final lane4Before =
+          engine.activeEntries.firstWhere((e) => e.item.id == 'lane_4');
+      expect(lane4Before.lane, 4);
+      final x4Before = lane4Before.x;
+
+      final wave2 = <DanmuItem>[
+        ...wave1,
+        const DanmuItem(
+          id: 'new_after_drop',
+          timeMs: 2600,
+          mode: 1,
+          rgbColor: 0xFFFFFF,
+          text: '新弹幕',
+        ),
+      ];
+      engine.step(
+        effectiveMs: 2700,
+        candidates: wave2,
+        viewWidth: 1920,
+        viewHeight: 1080,
+        fontSize: 24,
+        topInset: 0,
+        bottomSafeInset: 44,
+        area: 0.50,
+        rowCap: 4,
+        maxOnScreenItems: 120,
+        scrollDurationMs: 7600,
+        showScroll: true,
+        showTop: true,
+        showBottom: true,
+        measureWidth: (_) => 200,
+      );
+      final lane4After =
+          engine.activeEntries.firstWhere((e) => e.item.id == 'lane_4');
+      final newEntry =
+          engine.activeEntries.firstWhere((e) => e.item.id == 'new_after_drop');
+      expect(lane4After.lane, 4);
+      expect(lane4After.x, lessThan(x4Before));
+      expect(newEntry.lane, inInclusiveRange(0, 3));
+    });
+
+    testWidgets(
+        'DanmuLayer syncs initial/swapped segmentCache offset & filter, fetches while paused, and uses listEquals for blockRules',
+        (tester) async {
+      final fetchedWindows = <int>[];
+      final mockClient = MockClient((req) async {
+        if (req.url.path == '/api/v2/comment/ep1') {
+          return http.Response(
+            jsonEncode(<String, dynamic>{
+              'segments': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'startMs': 0,
+                  'endMs': 30000,
+                  'segmentUrl': '/seg/0',
+                },
+                <String, dynamic>{
+                  'startMs': 30000,
+                  'endMs': 60000,
+                  'segmentUrl': '/seg/1',
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        if (req.url.path.startsWith('/seg/')) {
+          final w = int.parse(req.url.path.substring('/seg/'.length));
+          fetchedWindows.add(w);
+          return http.Response(
+            jsonEncode(<String, dynamic>{
+              'comments': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'cid': 'w${w}_safe',
+                  'p': '${w * 30 + 18}.0,1,16777215',
+                  'm': '正常内容$w',
+                },
+                <String, dynamic>{
+                  'cid': 'w${w}_spoiler',
+                  'p': '${w * 30 + 19}.0,1,16777215',
+                  'm': '剧透内容$w',
+                },
+              ],
+            }),
+            200,
+            headers: const <String, String>{
+              'content-type': 'application/json; charset=utf-8',
+            },
+          );
+        }
+        return http.Response('not found', 404);
+      });
+
+      final provider = DandanplayProvider(
+        multilineServerUrls: 'https://node-a.danmu.test',
+        minRequestIntervalMs: 0,
+        client: mockClient,
+      );
+      final cache = DanmuSegmentCache(provider: provider);
+      addTearDown(cache.dispose);
+      final boundId = DandanplayProvider.encodeBoundEpisodeId(
+        'https://node-a.danmu.test',
+        'ep1',
+      );
+      await cache.bindSession(boundId);
+
+      // Mount paused DanmuLayer with initial +15000ms offset and saved block rule '剧透'
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 800,
+              height: 450,
+              child: DanmuLayer(
+                settings: const DanmuSettings(
+                  enabled: true,
+                  timeOffsetMs: 15000,
+                  blockRules: <String>['剧透'],
+                ),
+                positionMs: 5000,
+                playing: false,
+                segmentCache: cache,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.runAsync(() => cache.waitUntilIdle());
+
+      expect(cache.timeOffsetMs, 15000);
+      expect(cache.isWindowCached(0), isTrue);
+      // Effective time = 5000 + 15000 = 20000ms; '剧透内容0' must be filtered by synced blockFilter
+      final snap0 = cache.snapshotForPosition(5000);
+      expect(snap0.map((e) => e.text).toList(), <String>['正常内容0']);
+
+      // While still paused, shift timeOffsetMs to +30000ms (effectiveMs = 35000 -> window 1)
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 800,
+              height: 450,
+              child: DanmuLayer(
+                settings: const DanmuSettings(
+                  enabled: true,
+                  timeOffsetMs: 30000,
+                  blockRules: <String>['剧透', '正常内容1'],
+                ),
+                positionMs: 5000,
+                playing: false,
+                segmentCache: cache,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.runAsync(() => cache.waitUntilIdle());
+
+      expect(cache.timeOffsetMs, 30000);
+      expect(fetchedWindows, contains(1));
+      expect(cache.isWindowCached(1), isTrue);
+      // Both items in window 1 are now blocked via updated blockRules
+      expect(cache.snapshotForPosition(20000), isEmpty);
+    });
+
+    testWidgets(
+        'DanmuSettingsSheet uses IosNativeSwitch, opaque reduceTransparency surface, and throttles slider save to onChangeEnd',
+        (tester) async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      GlassworkBackdrop.reduceTransparency.value = true;
+      DanmuSettings latest = const DanmuSettings(opacity: 0.85);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: DanmuSettingsSheet(
+              initialSettings: latest,
+              persistAutomatically: true,
+              onChanged: (s) => latest = s,
+            ),
+          ),
+        ),
+      );
+
+      expect(find.byType(IosNativeSwitch), findsOneWidget);
+      final colored = tester.widget<ColoredBox>(
+        find
+            .descendant(
+              of: find.byType(DanmuSettingsSheet),
+              matching: find.byType(ColoredBox),
+            )
+            .first,
+      );
+      expect(colored.color, DanmuSettingsSheet.reducedTransparencySurface);
+
+      // Simulate slider drag: onChanged previews live without saving until onChangeEnd
+      final opacitySlider = tester.widget<Slider>(find.byType(Slider).first);
+      opacitySlider.onChanged!(0.50);
+      await tester.pump();
+      expect(latest.opacity, 0.50);
+      final spBeforeEnd = await SharedPreferences.getInstance();
+      expect(spBeforeEnd.getDouble(DanmuPrefs.keyOpacity), isNull);
+
+      opacitySlider.onChangeEnd!(0.50);
+      await tester.pump();
+      final spAfterEnd = await SharedPreferences.getInstance();
+      expect(spAfterEnd.getDouble(DanmuPrefs.keyOpacity), 0.50);
     });
   });
 }

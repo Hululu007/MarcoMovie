@@ -1,14 +1,18 @@
+// Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 import 'package:flutter/material.dart';
 
 import '../../core/danmu/block_filter.dart';
 import '../../core/danmu/danmu_prefs.dart';
 import '../../core/ohos_runtime.dart';
 import '../apple_theme.dart';
+import '../ios_liquid_glass.dart';
 
 /// Standalone danmu settings modal sheet for mobile and desktop Flutter builds.
 ///
 /// Guarded by `!OhosRuntime.isOhos`: returns [SizedBox.shrink] on HarmonyOS NEXT.
 class DanmuSettingsSheet extends StatefulWidget {
+  static const Color reducedTransparencySurface = Color(0xF51E1E22);
+
   final DanmuSettings initialSettings;
   final ValueChanged<DanmuSettings> onChanged;
   final bool persistAutomatically;
@@ -20,6 +24,13 @@ class DanmuSettingsSheet extends StatefulWidget {
     this.persistAutomatically = true,
   });
 
+  static Color resolveSurfaceColor(BuildContext context) {
+    final reduce = GlassworkBackdrop.reduceTransparency.value ||
+        GlassworkBackdrop.intensity.value <= 0.02 ||
+        MediaQuery.highContrastOf(context);
+    return reduce ? reducedTransparencySurface : AppleColors.groupedPrimary;
+  }
+
   static Future<void> show(
     BuildContext context, {
     required DanmuSettings initialSettings,
@@ -29,21 +40,27 @@ class DanmuSettingsSheet extends StatefulWidget {
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      backgroundColor: AppleColors.groupedPrimary,
+      backgroundColor: resolveSurfaceColor(context),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (ctx) => SafeArea(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(ctx).size.height * 0.85,
+      builder: (ctx) {
+        final keyboardInset = MediaQuery.viewInsetsOf(ctx).bottom;
+        return Padding(
+          padding: EdgeInsets.only(bottom: keyboardInset),
+          child: SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(ctx).size.height * 0.85,
+              ),
+              child: DanmuSettingsSheet(
+                initialSettings: initialSettings,
+                onChanged: onChanged,
+              ),
+            ),
           ),
-          child: DanmuSettingsSheet(
-            initialSettings: initialSettings,
-            onChanged: onChanged,
-          ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -77,10 +94,10 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
     super.dispose();
   }
 
-  void _update(DanmuSettings next) {
+  void _update(DanmuSettings next, {bool persist = true}) {
     setState(() => _settings = next);
     widget.onChanged(next);
-    if (widget.persistAutomatically && !OhosRuntime.isOhos) {
+    if (persist && widget.persistAutomatically && !OhosRuntime.isOhos) {
       DanmuPrefs.save(next);
     }
   }
@@ -128,9 +145,18 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
       return const SizedBox.shrink();
     }
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-      child: Column(
+    return ListenableBuilder(
+      listenable: Listenable.merge(<Listenable>[
+        GlassworkBackdrop.reduceTransparency,
+        GlassworkBackdrop.intensity,
+      ]),
+      builder: (ctx, child) => ColoredBox(
+        color: DanmuSettingsSheet.resolveSurfaceColor(ctx),
+        child: child,
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+        child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -145,8 +171,9 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
                 ),
               ),
               const Spacer(),
-              Switch.adaptive(
+              IosNativeSwitch(
                 value: _settings.enabled,
+                accessibilityLabel: '开启弹幕',
                 onChanged: (v) => _update(_settings.copyWith(enabled: v)),
               ),
             ],
@@ -158,7 +185,10 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
             min: 0.20,
             max: 1.00,
             divisions: 16,
-            onChanged: (v) => _update(_settings.copyWith(opacity: v)),
+            onChanged: (v) =>
+                _update(_settings.copyWith(opacity: v), persist: false),
+            onChangeEnd: (v) =>
+                _update(_settings.copyWith(opacity: v), persist: true),
           ),
           _sectionTitle('显示区域'),
           Wrap(
@@ -179,7 +209,10 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
             min: 14,
             max: 32,
             divisions: 18,
-            onChanged: (v) => _update(_settings.copyWith(fontSize: v)),
+            onChanged: (v) =>
+                _update(_settings.copyWith(fontSize: v), persist: false),
+            onChangeEnd: (v) =>
+                _update(_settings.copyWith(fontSize: v), persist: true),
           ),
           _sectionTitle('滚动速度'),
           Wrap(
@@ -334,6 +367,7 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
           ],
         ],
       ),
+    ),
     );
   }
 

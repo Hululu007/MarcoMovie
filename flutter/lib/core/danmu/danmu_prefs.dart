@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../ohos_runtime.dart';

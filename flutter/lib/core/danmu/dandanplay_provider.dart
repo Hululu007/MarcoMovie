@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -741,7 +742,12 @@ class DandanplayProvider implements DanmuProvider {
       }
 
       final streamed = await _client.send(req).timeout(readTimeout);
-      cancelToken?.throwIfCancelled();
+      if (cancelToken != null && cancelToken.isCancelled) {
+        try {
+          await streamed.stream.drain<void>();
+        } catch (_) {}
+        cancelToken.throwIfCancelled();
+      }
 
       final status = streamed.statusCode;
       if (status == 301 ||

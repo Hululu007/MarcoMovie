@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 package com.pilipala.marcomovie;
 
 import java.io.ByteArrayInputStream;
@@ -849,7 +850,8 @@ public final class DandanplayProvider implements DanmuProvider {
                 conn.setRequestProperty("User-Agent", "MarcoMovie-Danmu/1.0");
                 if (!appId.isEmpty() && !appSecret.isEmpty()) {
                     long ts = System.currentTimeMillis() / 1000L;
-                    String path = uri.getPath();
+                    String rawPath = uri.getRawPath();
+                    String path = (rawPath == null || rawPath.isEmpty()) ? "/" : rawPath;
                     String sig = computeOpenApiSignature(appId, ts, path, appSecret);
                     conn.setRequestProperty("X-AppId", appId);
                     conn.setRequestProperty("X-Timestamp", String.valueOf(ts));
@@ -1109,15 +1111,8 @@ public final class DandanplayProvider implements DanmuProvider {
                             timeMs = Math.round(Double.parseDouble(p[0].trim()) * 1000.0);
                         }
                         if (p.length >= 3) {
-                            int v1 = Integer.parseInt(p[1].trim());
-                            int v2 = Integer.parseInt(p[2].trim());
-                            if (v1 <= 8 && v2 > 8) {
-                                mode = normalizeMode(v1);
-                                color = v2 & 0xFFFFFF;
-                            } else {
-                                mode = normalizeMode(v1);
-                                color = v2 & 0xFFFFFF;
-                            }
+                            mode = normalizeMode(Integer.parseInt(p[1].trim()));
+                            color = Integer.parseInt(p[2].trim()) & 0xFFFFFF;
                         } else if (p.length == 2) {
                             mode = normalizeMode(Integer.parseInt(p[1].trim()));
                         }

@@ -10,6 +10,7 @@ import com.pilipala.marcomovie.DanmuProvider.DanmuItem;
 import com.pilipala.marcomovie.DanmuSegmentCache.ActiveSlot;
 import com.pilipala.marcomovie.DanmuSegmentCache.FramePacingMonitor;
 import com.pilipala.marcomovie.DanmuSegmentCache.LayoutEngine;
+import com.pilipala.marcomovie.DanmuSegmentCache.SmoothClock;
 import com.pilipala.marcomovie.DanmuSegmentCache.TextWidthMeasurer;
 import java.io.*;
 import java.net.*;
@@ -46,6 +47,7 @@ final class DanmakuView extends View implements AutoCloseable {
     final ExecutorService loader = Executors.newSingleThreadExecutor();
     final LayoutEngine layoutEngine = new LayoutEngine();
     final FramePacingMonitor tvPacingMonitor = new FramePacingMonitor();
+    final SmoothClock smoothClock = new SmoothClock();
     private final ArrayList<DanmuItem> frameItems = new ArrayList<>(128);
     private final TextWidthMeasurer widthMeasurer =
             new TextWidthMeasurer() {
@@ -75,8 +77,6 @@ final class DanmakuView extends View implements AutoCloseable {
     int configuredMaxRows = 14;
     float subtitleBottomClearanceDp = MIN_BOTTOM_SAFE_INSET_DP;
 
-    private int lastClockPos = -1;
-    private long lastClockSampleMs = 0L;
     private long lastDrawNanos = 0L;
 
     DanmakuView(Context context, Clock clock) {
@@ -114,12 +114,15 @@ final class DanmakuView extends View implements AutoCloseable {
 
     void setPlaySpeed(float speed) {
         playSpeed = Math.max(0.5f, Math.min(2.0f, speed));
+        smoothClock.setPlaySpeed(
+                playSpeed, clock.position(), clock.playing(), SystemClock.elapsedRealtime());
     }
 
     void setTimeOffsetMs(long offsetMs) {
         timeOffsetMs = Math.max(-30000L, Math.min(30000L, offsetMs));
         if (segmentCache != null) {
             segmentCache.setTimeOffsetMs(timeOffsetMs);
+            segmentCache.onPlaybackTick(clock.position(), clock.playing());
         }
         layoutEngine.reset();
         invalidate();
@@ -136,12 +139,13 @@ final class DanmakuView extends View implements AutoCloseable {
         if (segmentCache != null) {
             segmentCache.setBlockFilter(blockFilter);
         }
-        layoutEngine.reset();
+        layoutEngine.purgeBlocked(blockFilter);
         invalidate();
     }
 
     void applyConfig(DanmuSettingsPanel.DanmuConfig config) {
         if (config == null) return;
+        boolean offsetChanged = timeOffsetMs != config.timeOffsetMs;
         tvMode = config.tvProfile;
         opacity = config.opacity;
         area = config.displayArea;
@@ -159,8 +163,15 @@ final class DanmakuView extends View implements AutoCloseable {
         if (segmentCache != null) {
             segmentCache.setTimeOffsetMs(timeOffsetMs);
             segmentCache.setBlockFilter(blockFilter);
+            if (offsetChanged) {
+                segmentCache.onPlaybackTick(clock.position(), clock.playing());
+            }
         }
-        layoutEngine.reset();
+        if (offsetChanged) {
+            layoutEngine.reset();
+        } else {
+            layoutEngine.purgeBlocked(blockFilter);
+        }
         enabled(config.enabled);
     }
 
@@ -452,25 +463,7 @@ final class DanmakuView extends View implements AutoCloseable {
     }
 
     private long smoothNow() {
-        int raw = clock.position();
-        long wall = SystemClock.elapsedRealtime();
-        if (!clock.playing()) {
-            lastClockPos = raw;
-            lastClockSampleMs = wall;
-            return raw;
-        }
-        if (lastClockPos < 0 || Math.abs(raw - lastClockPos) > 1200) {
-            lastClockPos = raw;
-            lastClockSampleMs = wall;
-            return raw;
-        }
-        if (raw != lastClockPos) {
-            lastClockPos = raw;
-            lastClockSampleMs = wall;
-            return raw;
-        }
-        long elapsed = Math.max(0L, Math.min(500L, wall - lastClockSampleMs));
-        return raw + Math.round(elapsed * playSpeed);
+        return smoothClock.sample(clock.position(), clock.playing(), SystemClock.elapsedRealtime());
     }
 
     private void populateLegacyFrameItems(long effectiveMs) {
@@ -581,9 +574,18 @@ final class DanmakuView extends View implements AutoCloseable {
     }
 
     @Override
+    protected void onDetachedFromWindow() {
+        lastDrawNanos = 0L;
+        smoothClock.reset();
+        super.onDetachedFromWindow();
+    }
+
+    @Override
     public void close() {
         closed = true;
         request++;
+        lastDrawNanos = 0L;
+        smoothClock.reset();
         detachSegmentCache();
         loader.shutdownNow();
         comments = Collections.emptyList();

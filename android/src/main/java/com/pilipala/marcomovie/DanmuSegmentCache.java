@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 package com.pilipala.marcomovie;
 
 import com.pilipala.marcomovie.DanmuProvider.BlockFilter;
@@ -708,8 +709,8 @@ public final class DanmuSegmentCache implements AutoCloseable {
         private int lastViewW = -1;
         private int lastViewH = -1;
         private float lastFontSizePx = -1f;
-        private float lastArea = -1f;
-        private int lastMaxRows = -1;
+        private float lastTopInsetPx = -1f;
+        private float lastBottomSafeInsetPx = -1f;
 
         public LayoutEngine() {
             for (int i = 0; i < MAX_ACTIVE_SLOTS; i++) {
@@ -828,12 +829,15 @@ public final class DanmuSegmentCache implements AutoCloseable {
             int maxRows =
                     computeMaxRows(
                             viewH, topInsetPx, bottomSafeInsetPx, area, fontSizePx, platformRowCap);
+            // Do NOT include maxRows/area here: adaptive TV row steps (6->4->2 / +1 recovery)
+            // must only constrain NEW admissions so already in-flight danmu never reset or
+            // teleport.
             boolean geometryChanged =
                     viewW != lastViewW
                             || viewH != lastViewH
                             || Math.abs(fontSizePx - lastFontSizePx) > 0.25f
-                            || Math.abs(area - lastArea) > 0.01f
-                            || maxRows != lastMaxRows;
+                            || Math.abs(topInsetPx - lastTopInsetPx) > 0.5f
+                            || Math.abs(bottomSafeInsetPx - lastBottomSafeInsetPx) > 0.5f;
             boolean timeJumped =
                     lastEffectiveMs != Long.MIN_VALUE
                             && (effectiveMs < lastEffectiveMs - 100L
@@ -843,18 +847,22 @@ public final class DanmuSegmentCache implements AutoCloseable {
                 lastViewW = viewW;
                 lastViewH = viewH;
                 lastFontSizePx = fontSizePx;
-                lastArea = area;
-                lastMaxRows = maxRows;
+                lastTopInsetPx = topInsetPx;
+                lastBottomSafeInsetPx = bottomSafeInsetPx;
             }
             lastEffectiveMs = effectiveMs;
 
-            // 1. Expire finished slots in place
+            // 1. Expire finished or mode-disabled slots in place
             int count = 0;
             for (int i = 0; i < MAX_ACTIVE_SLOTS; i++) {
                 ActiveSlot slot = slots[i];
                 if (!slot.active) continue;
                 long age = effectiveMs - slot.startMs;
-                if (age < 0L || age > slot.durationMs) {
+                boolean modeDisabled =
+                        (slot.mode == 1 && !showScroll)
+                                || (slot.mode == 5 && !showTop)
+                                || (slot.mode == 4 && !showBottom);
+                if (modeDisabled || age < 0L || age > slot.durationMs) {
                     slot.active = false;
                     slot.id = null;
                     slot.text = null;
@@ -945,6 +953,23 @@ public final class DanmuSegmentCache implements AutoCloseable {
 
         public int getActiveCount() {
             return activeCount;
+        }
+
+        public void purgeBlocked(BlockFilter filter) {
+            if (filter == null || filter.isEmpty()) return;
+            int remaining = 0;
+            for (int i = 0; i < MAX_ACTIVE_SLOTS; i++) {
+                ActiveSlot s = slots[i];
+                if (!s.active) continue;
+                if (filter.isBlocked(s.text)) {
+                    s.active = false;
+                    s.id = null;
+                    s.text = null;
+                } else {
+                    remaining++;
+                }
+            }
+            activeCount = remaining;
         }
 
         private boolean isTrackedOrDropped(String id) {
@@ -1091,6 +1116,66 @@ public final class DanmuSegmentCache implements AutoCloseable {
 
         public double getLastP90Ms() {
             return lastP90Ms;
+        }
+    }
+
+    /**
+     * Monotonic sub-tick media clock interpolator that re-anchors smoothly whenever {@code
+     * playSpeed} changes (e.g. M2 long-press 2.0x boost release -> 1.0x), preventing backward
+     * jumps that would trigger {@link LayoutEngine#reset()}.
+     */
+    public static final class SmoothClock {
+        private int lastRawPos = -1;
+        private long smoothBasePosMs = -1L;
+        private long lastSampleWallMs = 0L;
+        private float playSpeed = 1.0f;
+
+        public void reset() {
+            lastRawPos = -1;
+            smoothBasePosMs = -1L;
+            lastSampleWallMs = 0L;
+        }
+
+        public float getPlaySpeed() {
+            return playSpeed;
+        }
+
+        public void setPlaySpeed(float speed, int currentRawPos, boolean playing, long wallMs) {
+            float clamped = Math.max(0.5f, Math.min(2.0f, speed));
+            if (playing && lastRawPos >= 0) {
+                smoothBasePosMs = sample(currentRawPos, true, wallMs);
+                lastSampleWallMs = wallMs;
+            }
+            playSpeed = clamped;
+        }
+
+        public long sample(int raw, boolean playing, long wallMs) {
+            if (!playing) {
+                lastRawPos = raw;
+                smoothBasePosMs = raw;
+                lastSampleWallMs = wallMs;
+                return raw;
+            }
+            if (lastRawPos < 0 || Math.abs(raw - lastRawPos) > 1200) {
+                lastRawPos = raw;
+                smoothBasePosMs = raw;
+                lastSampleWallMs = wallMs;
+                return raw;
+            }
+            if (raw != lastRawPos) {
+                long prevElapsed = Math.max(0L, Math.min(500L, wallMs - lastSampleWallMs));
+                long prevInterp = smoothBasePosMs + Math.round(prevElapsed * playSpeed);
+                if (raw >= lastRawPos && raw < prevInterp) {
+                    smoothBasePosMs = prevInterp;
+                } else {
+                    smoothBasePosMs = raw;
+                }
+                lastRawPos = raw;
+                lastSampleWallMs = wallMs;
+                return smoothBasePosMs;
+            }
+            long elapsed = Math.max(0L, Math.min(500L, wallMs - lastSampleWallMs));
+            return smoothBasePosMs + Math.round(elapsed * playSpeed);
         }
     }
 }

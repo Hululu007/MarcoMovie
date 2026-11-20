@@ -1,8 +1,9 @@
+// Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 import 'dart:collection';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform, kIsWeb;
+    show TargetPlatform, defaultTargetPlatform, kIsWeb, listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
@@ -181,8 +182,8 @@ class DanmuLayoutEngine {
   double _lastViewW = -1;
   double _lastViewH = -1;
   double _lastFontSize = -1;
-  double _lastArea = -1;
-  int _lastMaxRows = -1;
+  double _lastTopInset = -1;
+  double _lastBottomSafeInset = -1;
 
   List<DanmuActiveEntry> get activeEntries => _active.values.toList(growable: false);
   Iterable<DanmuActiveEntry> get activeIterable => _active.values;
@@ -272,6 +273,11 @@ class DanmuLayoutEngine {
     return -1;
   }
 
+  void purgeBlocked(DanmuBlockFilter filter) {
+    if (filter.isEmpty || _active.isEmpty) return;
+    _active.removeWhere((_, entry) => filter.isBlocked(entry.item.text));
+  }
+
   void step({
     required int effectiveMs,
     required List<DanmuItem> candidates,
@@ -303,11 +309,13 @@ class DanmuLayoutEngine {
       rowCap: rowCap,
     );
 
+    // Do NOT include maxRows/area here: adaptive or area row changes only constrain
+    // NEW lane admissions so already in-flight danmu never reset or teleport.
     final geometryChanged = viewWidth != _lastViewW ||
         viewHeight != _lastViewH ||
         (fontSize - _lastFontSize).abs() > 0.25 ||
-        (area - _lastArea).abs() > 0.01 ||
-        maxRows != _lastMaxRows;
+        (topInset - _lastTopInset).abs() > 0.5 ||
+        (bottomSafeInset - _lastBottomSafeInset).abs() > 0.5;
     final timeJumped = _lastEffectiveMs != null &&
         (effectiveMs < _lastEffectiveMs! - 100 ||
             effectiveMs > _lastEffectiveMs! + 3000);
@@ -317,17 +325,21 @@ class DanmuLayoutEngine {
       _lastViewW = viewWidth;
       _lastViewH = viewHeight;
       _lastFontSize = fontSize;
-      _lastArea = area;
-      _lastMaxRows = maxRows;
+      _lastTopInset = topInset;
+      _lastBottomSafeInset = bottomSafeInset;
     }
     _lastEffectiveMs = effectiveMs;
 
-    // 1. Expire finished entries
+    // 1. Expire finished or mode-disabled entries
     if (_active.isNotEmpty) {
       final expired = <String>[];
       for (final entry in _active.entries) {
-        final age = effectiveMs - entry.value.item.timeMs;
-        if (age < 0 || age > entry.value.durationMs) {
+        final item = entry.value.item;
+        final age = effectiveMs - item.timeMs;
+        final modeDisabled = (item.mode == 1 && !showScroll) ||
+            (item.mode == 5 && !showTop) ||
+            (item.mode == 4 && !showBottom);
+        if (modeDisabled || age < 0 || age > entry.value.durationMs) {
           expired.add(entry.key);
         }
       }
@@ -529,17 +541,81 @@ class DanmuLayer extends StatefulWidget {
   State<DanmuLayer> createState() => _DanmuLayerState();
 }
 
+/// Monotonic sub-tick media clock interpolator that re-anchors smoothly whenever
+/// `playSpeed` changes (e.g. M2 long-press 2.0x boost release -> 1.0x), preventing
+/// backward jumps that would trigger [DanmuLayoutEngine.reset].
+class DanmuClockInterpolator {
+  int _lastReportedPosMs = 0;
+  int _anchorPosMs = 0;
+  Duration _anchorTickElapsed = Duration.zero;
+  Duration _lastTickElapsed = Duration.zero;
+  double _clampedPlaySpeed = 1.0;
+
+  DanmuClockInterpolator({int initialPosMs = 0, double playSpeed = 1.0})
+      : _lastReportedPosMs = initialPosMs,
+        _anchorPosMs = initialPosMs,
+        _clampedPlaySpeed = playSpeed.clamp(0.5, 2.0);
+
+  double get playSpeed => _clampedPlaySpeed;
+
+  void onTickerStarted(int rawPositionMs) {
+    _lastReportedPosMs = rawPositionMs;
+    _anchorPosMs = rawPositionMs;
+    _anchorTickElapsed = Duration.zero;
+    _lastTickElapsed = Duration.zero;
+  }
+
+  void onTick(Duration elapsed) {
+    _lastTickElapsed = elapsed;
+  }
+
+  void setPlaySpeed(double newSpeed, {required bool playing}) {
+    final next = newSpeed.clamp(0.5, 2.0);
+    if (playing) {
+      _anchorPosMs = currentPositionMs(playing: true);
+      _anchorTickElapsed = _lastTickElapsed;
+    }
+    _clampedPlaySpeed = next;
+  }
+
+  void onExternalPosition(int newPosMs, {required bool playing}) {
+    if (!playing) {
+      _lastReportedPosMs = newPosMs;
+      _anchorPosMs = newPosMs;
+      _anchorTickElapsed = _lastTickElapsed;
+      return;
+    }
+    final current = currentPositionMs(playing: true);
+    final isLargeJump = (newPosMs - _lastReportedPosMs).abs() > 1200;
+    if (!isLargeJump && newPosMs >= _lastReportedPosMs && newPosMs < current) {
+      // Forward player tick slightly behind extrapolated speed-boost estimate: stay monotonic.
+      _anchorPosMs = current;
+    } else {
+      _anchorPosMs = newPosMs;
+    }
+    _lastReportedPosMs = newPosMs;
+    _anchorTickElapsed = _lastTickElapsed;
+  }
+
+  int currentPositionMs({required bool playing}) {
+    if (!playing) return _lastReportedPosMs;
+    final dtMs = (_lastTickElapsed - _anchorTickElapsed).inMilliseconds;
+    if (dtMs <= 0) return _anchorPosMs;
+    final advance = math.min(500, (dtMs * _clampedPlaySpeed).round());
+    return _anchorPosMs + advance;
+  }
+}
+
 class _DanmuLayerState extends State<DanmuLayer>
     with SingleTickerProviderStateMixin {
   final DanmuLayoutEngine _layoutEngine = DanmuLayoutEngine();
   final DanmuTextPainterPool _painterPool = DanmuTextPainterPool();
   final ValueNotifier<int> _frameTick = ValueNotifier<int>(0);
+  late final DanmuClockInterpolator _clock;
   Ticker? _ticker;
+  AppLifecycleListener? _lifecycleListener;
+  bool _appBackgrounded = false;
   DanmuBlockFilter _blockFilter = DanmuBlockFilter.empty;
-
-  int _anchorPosMs = 0;
-  Duration _anchorTickElapsed = Duration.zero;
-  Duration _lastTickElapsed = Duration.zero;
 
   bool get _isDesktop {
     if (widget.isDesktopOverride != null) return widget.isDesktopOverride!;
@@ -552,45 +628,107 @@ class _DanmuLayerState extends State<DanmuLayer>
   @override
   void initState() {
     super.initState();
-    _anchorPosMs = widget.positionMs;
+    _clock = DanmuClockInterpolator(
+      initialPosMs: widget.positionMs,
+      playSpeed: widget.playSpeed,
+    );
     _blockFilter = widget.settings.buildBlockFilter();
-    widget.segmentCache?.addListener(_onCacheUpdated);
+    _attachCache(widget.segmentCache);
     if (!OhosRuntime.isOhos) {
       _ticker = createTicker(_onTick);
+      _lifecycleListener = AppLifecycleListener(
+        onPause: _onAppBackgrounded,
+        onInactive: _onAppBackgrounded,
+        onHide: _onAppBackgrounded,
+        onResume: _onAppResumed,
+      );
       _syncTickerState();
     }
+  }
+
+  void _attachCache(DanmuSegmentCache? cache) {
+    if (cache == null) return;
+    cache.addListener(_onCacheUpdated);
+    cache.setTimeOffsetMs(widget.settings.timeOffsetMs);
+    cache.setBlockFilter(_blockFilter);
+    if (!OhosRuntime.isOhos && widget.settings.effectiveEnabled) {
+      cache.onPlaybackTick(
+        _clock.currentPositionMs(playing: widget.playing),
+        playing: widget.playing,
+      );
+    }
+  }
+
+  void _onAppBackgrounded() {
+    _appBackgrounded = true;
+    _syncTickerState();
+  }
+
+  void _onAppResumed() {
+    _appBackgrounded = false;
+    _syncTickerState();
   }
 
   @override
   void didUpdateWidget(covariant DanmuLayer oldWidget) {
     super.didUpdateWidget(oldWidget);
+    var shouldRepaint = false;
+
     if (oldWidget.segmentCache != widget.segmentCache) {
       oldWidget.segmentCache?.removeListener(_onCacheUpdated);
-      widget.segmentCache?.addListener(_onCacheUpdated);
       _layoutEngine.reset();
+      _attachCache(widget.segmentCache);
+      shouldRepaint = true;
     }
-    if (oldWidget.settings.blockRules != widget.settings.blockRules) {
+
+    if (!listEquals(oldWidget.settings.blockRules, widget.settings.blockRules)) {
       _blockFilter = widget.settings.buildBlockFilter();
       widget.segmentCache?.setBlockFilter(_blockFilter);
+      _layoutEngine.purgeBlocked(_blockFilter);
+      shouldRepaint = true;
     }
+
     if (oldWidget.settings.timeOffsetMs != widget.settings.timeOffsetMs) {
       widget.segmentCache?.setTimeOffsetMs(widget.settings.timeOffsetMs);
       _layoutEngine.reset();
-    }
-    if (oldWidget.positionMs != widget.positionMs) {
-      final delta = (widget.positionMs - _interpolatedRawPositionMs()).abs();
-      if (!widget.playing || delta > 600) {
-        _anchorPosMs = widget.positionMs;
-        _anchorTickElapsed = _lastTickElapsed;
-      } else {
-        _anchorPosMs = widget.positionMs;
-        _anchorTickElapsed = _lastTickElapsed;
+      if (!OhosRuntime.isOhos && widget.settings.effectiveEnabled) {
+        widget.segmentCache?.onPlaybackTick(
+          _clock.currentPositionMs(playing: widget.playing),
+          playing: widget.playing,
+        );
       }
-      _frameTick.value++;
+      shouldRepaint = true;
     }
+
+    if (oldWidget.settings.showScroll != widget.settings.showScroll ||
+        oldWidget.settings.showTop != widget.settings.showTop ||
+        oldWidget.settings.showBottom != widget.settings.showBottom) {
+      shouldRepaint = true;
+    }
+
+    if (oldWidget.playSpeed != widget.playSpeed) {
+      _clock.setPlaySpeed(widget.playSpeed, playing: widget.playing);
+      shouldRepaint = true;
+    }
+
+    if (oldWidget.positionMs != widget.positionMs) {
+      _clock.onExternalPosition(widget.positionMs, playing: widget.playing);
+      if (!widget.playing &&
+          !OhosRuntime.isOhos &&
+          widget.settings.effectiveEnabled) {
+        widget.segmentCache?.onPlaybackTick(widget.positionMs, playing: false);
+      }
+      shouldRepaint = true;
+    }
+
     if (oldWidget.playing != widget.playing ||
         oldWidget.settings.enabled != widget.settings.enabled) {
       _syncTickerState();
+      shouldRepaint = true;
+    }
+
+    if (shouldRepaint) {
+      _frameTick.value++;
     }
   }
 
@@ -601,12 +739,12 @@ class _DanmuLayerState extends State<DanmuLayer>
   void _syncTickerState() {
     final ticker = _ticker;
     if (ticker == null) return;
-    final shouldRun =
-        !OhosRuntime.isOhos && widget.settings.effectiveEnabled && widget.playing;
+    final shouldRun = !OhosRuntime.isOhos &&
+        !_appBackgrounded &&
+        widget.settings.effectiveEnabled &&
+        widget.playing;
     if (shouldRun && !ticker.isActive) {
-      _anchorPosMs = widget.positionMs;
-      _anchorTickElapsed = Duration.zero;
-      _lastTickElapsed = Duration.zero;
+      _clock.onTickerStarted(widget.positionMs);
       ticker.start();
     } else if (!shouldRun && ticker.isActive) {
       ticker.stop();
@@ -614,19 +752,14 @@ class _DanmuLayerState extends State<DanmuLayer>
   }
 
   void _onTick(Duration elapsed) {
-    _lastTickElapsed = elapsed;
+    _clock.onTick(elapsed);
     final rawPos = _interpolatedRawPositionMs();
     widget.segmentCache?.onPlaybackTick(rawPos, playing: widget.playing);
     _frameTick.value++;
   }
 
   int _interpolatedRawPositionMs() {
-    if (!widget.playing) return widget.positionMs;
-    final dtMs = (_lastTickElapsed - _anchorTickElapsed).inMilliseconds;
-    if (dtMs <= 0) return _anchorPosMs;
-    final clampedSpeed = widget.playSpeed.clamp(0.5, 2.0);
-    final advance = math.min(500, (dtMs * clampedSpeed).round());
-    return _anchorPosMs + advance;
+    return _clock.currentPositionMs(playing: widget.playing);
   }
 
   List<DanmuItem> _resolveCandidates(int rawPosMs) {
@@ -664,6 +797,7 @@ class _DanmuLayerState extends State<DanmuLayer>
   @override
   void dispose() {
     widget.segmentCache?.removeListener(_onCacheUpdated);
+    _lifecycleListener?.dispose();
     _ticker?.dispose();
     _painterPool.dispose();
     _frameTick.dispose();

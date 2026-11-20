@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 // Clean-room segmented danmu provider contract shared across Flutter platforms.
 
 typedef DanmuVoidCallback = void Function();

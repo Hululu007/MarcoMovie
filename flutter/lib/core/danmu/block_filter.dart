@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 // O(N) user block filter with strict single-pass static ReDoS rejection.
 
 class DanmuRuleValidationResult {

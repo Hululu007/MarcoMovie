@@ -1,3 +1,4 @@
+// Copyright (C) 2026 Pilipala. SPDX-License-Identifier: GPL-3.0-only
 import 'dart:convert';
 import 'dart:io';
 
