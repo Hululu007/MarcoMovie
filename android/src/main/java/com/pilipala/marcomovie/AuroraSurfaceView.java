@@ -92,8 +92,9 @@ public final class AuroraSurfaceView extends View {
     private LinearGradient secondaryGradient;
     private final Api33AgslDriver agslDriver;
 
+    private final MainActivity hostActivity;
     private final boolean tvDevice;
-    private boolean reducedMotion;
+    private Boolean reducedMotionOverride;
     private boolean active = true;
     private boolean loopRunning;
     private float strength = MotionTokens.AURORA_DEFAULT_STRENGTH;
@@ -109,11 +110,11 @@ public final class AuroraSurfaceView extends View {
 
         if (context instanceof MainActivity) {
             MainActivity host = (MainActivity) context;
+            this.hostActivity = host;
             this.tvDevice = host.isTvDevice();
-            this.reducedMotion = host.reduced;
         } else {
+            this.hostActivity = null;
             this.tvDevice = false;
-            this.reducedMotion = false;
         }
 
         Api33AgslDriver driver = null;
@@ -142,6 +143,17 @@ public final class AuroraSurfaceView extends View {
                 && strength > 0.005f;
     }
 
+    /** Resolves effective reduce-motion state (explicit override takes precedence over host). */
+    public static boolean resolveEffectiveReducedMotion(
+            Boolean explicitOverride, boolean hostReduced) {
+        return explicitOverride != null ? explicitOverride.booleanValue() : hostReduced;
+    }
+
+    private boolean isReducedMotionEffective() {
+        return resolveEffectiveReducedMotion(
+                reducedMotionOverride, hostActivity != null && hostActivity.reduced);
+    }
+
     public void setActive(boolean active) {
         if (this.active == active) return;
         this.active = active;
@@ -149,8 +161,9 @@ public final class AuroraSurfaceView extends View {
     }
 
     public void setReducedMotion(boolean reduced) {
-        if (this.reducedMotion == reduced) return;
-        this.reducedMotion = reduced;
+        Boolean next = Boolean.valueOf(reduced);
+        if (next.equals(this.reducedMotionOverride)) return;
+        this.reducedMotionOverride = next;
         if (reduced) {
             elapsedSec = MotionTokens.REDUCE_MOTION_AURORA_FROZEN_TIME_SEC;
         }
@@ -179,7 +192,7 @@ public final class AuroraSurfaceView extends View {
                 viewVisible,
                 windowVisible,
                 active,
-                reducedMotion,
+                isReducedMotionEffective(),
                 tvDevice,
                 strength);
     }
@@ -258,7 +271,12 @@ public final class AuroraSurfaceView extends View {
             return;
         }
 
-        float tSec = reducedMotion ? 0f : (float) elapsedSec;
+        boolean reducedNow = isReducedMotionEffective();
+        if (reducedNow && loopRunning) {
+            elapsedSec = MotionTokens.REDUCE_MOTION_AURORA_FROZEN_TIME_SEC;
+            syncLoop();
+        }
+        float tSec = reducedNow ? 0f : (float) elapsedSec;
         if (agslDriver != null && Build.VERSION.SDK_INT >= 33) {
             agslDriver.draw(canvas, w, h, tSec, strength);
             return;

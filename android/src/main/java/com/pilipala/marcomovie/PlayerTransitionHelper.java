@@ -17,6 +17,8 @@ import android.graphics.Shader;
 import android.os.Build;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
+import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 
 /**
@@ -246,38 +248,129 @@ public final class PlayerTransitionHelper {
     }
 
     /**
+     * Pure-Java projection of shared-bounds start transforms from {@code originRectInRoot} onto a
+     * target poster rectangle already expressed in {@code detailRoot} coordinate space.
+     *
+     * @param outScaleXYTranslateXY 4-element buffer receiving {@code [startScaleX, startScaleY,
+     *     startDx, startDy]}.
+     */
+    public static void computeSharedBoundsDeltas(
+            float originLeft,
+            float originTop,
+            float originRight,
+            float originBottom,
+            float targetLeftInRoot,
+            float targetTopInRoot,
+            float targetWidth,
+            float targetHeight,
+            float[] outScaleXYTranslateXY) {
+        float safeTargetW = Math.max(1f, targetWidth);
+        float safeTargetH = Math.max(1f, targetHeight);
+        float originW = Math.max(1f, originRight - originLeft);
+        float originH = Math.max(1f, originBottom - originTop);
+        float originCx = (originLeft + originRight) * 0.5f;
+        float originCy = (originTop + originBottom) * 0.5f;
+        float targetCx = targetLeftInRoot + safeTargetW * 0.5f;
+        float targetCy = targetTopInRoot + safeTargetH * 0.5f;
+        outScaleXYTranslateXY[0] = Math.max(0.2f, originW / safeTargetW);
+        outScaleXYTranslateXY[1] = Math.max(0.2f, originH / safeTargetH);
+        outScaleXYTranslateXY[2] = originCx - targetCx;
+        outScaleXYTranslateXY[3] = originCy - targetCy;
+    }
+
+    /** Resolves {@code descendant}'s bounding rectangle in {@code detailRoot}'s coordinate space. */
+    static void resolveDescendantRectInRoot(View detailRoot, View descendant, Rect outRect) {
+        int w = descendant.getWidth();
+        int h = descendant.getHeight();
+        outRect.set(0, 0, w, h);
+        if (detailRoot == null || detailRoot == descendant) {
+            return;
+        }
+        if (detailRoot instanceof ViewGroup) {
+            try {
+                ((ViewGroup) detailRoot).offsetDescendantRectToMyCoords(descendant, outRect);
+                return;
+            } catch (IllegalArgumentException ignored) {
+                // Fall back to explicit parent walk if hierarchy is detached/transitional.
+            }
+        }
+        int offsetX = 0;
+        int offsetY = 0;
+        View cur = descendant;
+        while (cur != null && cur != detailRoot) {
+            offsetX += cur.getLeft();
+            offsetY += cur.getTop();
+            ViewParent p = cur.getParent();
+            if (p instanceof View) {
+                View pv = (View) p;
+                offsetX -= pv.getScrollX();
+                offsetY -= pv.getScrollY();
+                cur = pv;
+            } else {
+                break;
+            }
+        }
+        outRect.set(offsetX, offsetY, offsetX + w, offsetY + h);
+    }
+
+    /**
      * Runs the Poster -> Detail shared-bounds entry animation ({@code 280ms} decelerate curve, or
-     * {@code 150ms} linear fade under {@code reducedMotion}). Zero per-frame allocations.
+     * {@code 150ms} linear fade under {@code reducedMotion}). Projects {@code heroPosterView} into
+     * {@code detailRoot} coordinate space and defers cleanly via a cancellable one-shot {@link
+     * ViewTreeObserver.OnPreDrawListener} when invoked before first layout.
      */
     public static TransitionHandle animateSharedBoundsEnter(
             final View detailRoot,
             final View heroPosterView,
-            Rect originRectInRoot,
+            final Rect originRectInRoot,
             boolean reducedMotion,
             final Runnable onComplete) {
         if (detailRoot == null) {
             if (onComplete != null) onComplete.run();
             return NO_OP_HANDLE;
         }
-        if (reducedMotion
-                || originRectInRoot == null
-                || heroPosterView == null
-                || heroPosterView.getWidth() <= 0
-                || heroPosterView.getHeight() <= 0) {
+        if (reducedMotion || originRectInRoot == null || heroPosterView == null) {
             return runSimpleAlphaFade(
-                    detailRoot, 0f, 1f, MotionTokens.DURATION_FAST_MS, true, onComplete);
+                    detailRoot, 0f, 1f, MotionTokens.DURATION_FAST_MS, true, false, onComplete);
         }
+        if (heroPosterView.getWidth() > 0 && heroPosterView.getHeight() > 0) {
+            return launchSharedBoundsAnimator(
+                    detailRoot, heroPosterView, originRectInRoot, onComplete);
+        }
+        // Pre-layout frame-0 path: hide root immediately and start 280ms shared-bounds on pre-draw.
+        detailRoot.setAlpha(0f);
+        return new DeferredSharedBoundsHandle(
+                detailRoot, heroPosterView, new Rect(originRectInRoot), onComplete);
+    }
 
-        final int targetW = Math.max(1, heroPosterView.getWidth());
-        final int targetH = Math.max(1, heroPosterView.getHeight());
-        final float startScaleX = Math.max(0.2f, (float) originRectInRoot.width() / targetW);
-        final float startScaleY = Math.max(0.2f, (float) originRectInRoot.height() / targetH);
-        final float originCx = originRectInRoot.exactCenterX();
-        final float originCy = originRectInRoot.exactCenterY();
-        final float targetCx = heroPosterView.getLeft() + targetW * 0.5f;
-        final float targetCy = heroPosterView.getTop() + targetH * 0.5f;
-        final float startDx = originCx - targetCx;
-        final float startDy = originCy - targetCy;
+    private static TransitionHandle launchSharedBoundsAnimator(
+            final View detailRoot,
+            final View heroPosterView,
+            Rect originRectInRoot,
+            final Runnable onComplete) {
+        final int targetW = heroPosterView.getWidth();
+        final int targetH = heroPosterView.getHeight();
+        if (targetW <= 0 || targetH <= 0) {
+            return runSimpleAlphaFade(
+                    detailRoot, 0f, 1f, MotionTokens.DURATION_FAST_MS, true, false, onComplete);
+        }
+        Rect targetInRoot = new Rect();
+        resolveDescendantRectInRoot(detailRoot, heroPosterView, targetInRoot);
+        float[] deltas = new float[4];
+        computeSharedBoundsDeltas(
+                originRectInRoot.left,
+                originRectInRoot.top,
+                originRectInRoot.right,
+                originRectInRoot.bottom,
+                targetInRoot.left,
+                targetInRoot.top,
+                targetW,
+                targetH,
+                deltas);
+        final float startScaleX = deltas[0];
+        final float startScaleY = deltas[1];
+        final float startDx = deltas[2];
+        final float startDy = deltas[3];
 
         detailRoot.setAlpha(0f);
         heroPosterView.setPivotX(targetW * 0.5f);
@@ -292,6 +385,7 @@ public final class PlayerTransitionHelper {
         animator.setInterpolator(MotionTokens.createDecelerateInterpolator());
         final AtomicFinish finish =
                 new AtomicFinish(
+                        animator,
                         () -> {
                             detailRoot.setAlpha(1f);
                             heroPosterView.setScaleX(1f);
@@ -322,7 +416,12 @@ public final class PlayerTransitionHelper {
                         finish.runOnce();
                     }
                 });
-        animator.start();
+        try {
+            animator.start();
+        } catch (RuntimeException error) {
+            finish.runOnce();
+            throw error;
+        }
         return new AnimatorHandle(animator, finish);
     }
 
@@ -339,6 +438,7 @@ public final class PlayerTransitionHelper {
                 fadeIn ? 1f : 0f,
                 duration,
                 reducedMotion,
+                false,
                 onComplete);
     }
 
@@ -349,12 +449,17 @@ public final class PlayerTransitionHelper {
      *   <li>{@code reducedMotion}: {@code 150ms} linear crossfade.
      *   <li>{@code isTvDevice}: {@code 220ms} lightweight hardware scale ({@code 1.0 -> 1.08}) +
      *       fade (ZERO blur/shader/screenshot).
-     *   <li>API 33+ Mobile/Tablet: {@code 420ms} AGSL Cinema Portal overlay (recycles owned
-     *       backdrop on completion/cancel).
+     *   <li>API 33+ Mobile/Tablet: {@code 420ms} AGSL Cinema Portal overlay (hides {@code
+     *       detailLayer} under overlay and recycles owned backdrop on completion/cancel).
      *   <li>API 23-32 Mobile/Tablet (or AGSL fallback): {@code 320ms} hardware {@code RenderNode}
      *       scale/alpha/translationY with {@link GlassFreezeCallback} freeze/unfreeze and zero
      *       per-frame allocations.
      * </ol>
+     *
+     * <p>All 4 modes enforce the identical completion/cancel post-condition: {@code onComplete}
+     * executes first (allowing callers to hide/detach {@code detailLayer} in the same frame), then
+     * {@code finally} restores {@code detailLayer} and {@code posterView} transforms/alpha/layers
+     * cleanly so returning to detail never renders an invisible view.
      */
     public static TransitionHandle startDetailToPlayerTransition(
             ViewGroup overlayHost,
@@ -389,6 +494,7 @@ public final class PlayerTransitionHelper {
             TransitionHandle handle =
                     Api33AgslRunner.start(
                             overlayHost,
+                            detailLayer,
                             backdrop,
                             recycleBackdrop,
                             optionalPosterBitmap,
@@ -410,7 +516,7 @@ public final class PlayerTransitionHelper {
 
         if (mode == Mode.REDUCED_FADE) {
             return runSimpleAlphaFade(
-                    detailLayer, 1f, 0f, MotionTokens.DURATION_FAST_MS, true, onComplete);
+                    detailLayer, 1f, 0f, MotionTokens.DURATION_FAST_MS, true, true, onComplete);
         }
 
         if (mode == Mode.TV_LIGHTWEIGHT) {
@@ -427,10 +533,17 @@ public final class PlayerTransitionHelper {
             final float endAlpha,
             int durationMs,
             boolean linear,
+            final boolean restoreAlphaAfterComplete,
             final Runnable onComplete) {
         if (target == null || durationMs <= 0) {
-            if (target != null) target.setAlpha(endAlpha);
-            if (onComplete != null) onComplete.run();
+            try {
+                if (target != null) target.setAlpha(endAlpha);
+                if (onComplete != null) onComplete.run();
+            } finally {
+                if (target != null && restoreAlphaAfterComplete) {
+                    target.setAlpha(1f);
+                }
+            }
             return NO_OP_HANDLE;
         }
         target.setAlpha(startAlpha);
@@ -442,9 +555,16 @@ public final class PlayerTransitionHelper {
                         : MotionTokens.createDecelerateInterpolator());
         final AtomicFinish finish =
                 new AtomicFinish(
+                        animator,
                         () -> {
-                            target.setAlpha(endAlpha);
-                            if (onComplete != null) onComplete.run();
+                            try {
+                                target.setAlpha(endAlpha);
+                                if (onComplete != null) onComplete.run();
+                            } finally {
+                                if (restoreAlphaAfterComplete) {
+                                    target.setAlpha(1f);
+                                }
+                            }
                         });
         animator.addUpdateListener(anim -> target.setAlpha((Float) anim.getAnimatedValue()));
         animator.addListener(
@@ -459,7 +579,12 @@ public final class PlayerTransitionHelper {
                         finish.runOnce();
                     }
                 });
-        animator.start();
+        try {
+            animator.start();
+        } catch (RuntimeException error) {
+            finish.runOnce();
+            throw error;
+        }
         return new AnimatorHandle(animator, finish);
     }
 
@@ -485,17 +610,25 @@ public final class PlayerTransitionHelper {
         animator.setInterpolator(MotionTokens.createDecelerateInterpolator());
         final AtomicFinish finish =
                 new AtomicFinish(
+                        animator,
                         () -> {
-                            if (detailLayer != null) {
-                                detailLayer.setLayerType(prevDetailLayer, null);
-                                detailLayer.setAlpha(1f);
+                            try {
+                                if (onComplete != null) onComplete.run();
+                            } finally {
+                                if (detailLayer != null) {
+                                    detailLayer.setLayerType(prevDetailLayer, null);
+                                    detailLayer.setScaleX(1f);
+                                    detailLayer.setScaleY(1f);
+                                    detailLayer.setTranslationY(0f);
+                                    detailLayer.setAlpha(1f);
+                                }
+                                if (posterView != null) {
+                                    posterView.setLayerType(prevPosterLayer, null);
+                                    posterView.setScaleX(1f);
+                                    posterView.setScaleY(1f);
+                                    posterView.setAlpha(1f);
+                                }
                             }
-                            if (posterView != null) {
-                                posterView.setLayerType(prevPosterLayer, null);
-                                posterView.setScaleX(1f);
-                                posterView.setScaleY(1f);
-                            }
-                            if (onComplete != null) onComplete.run();
                         });
         animator.addUpdateListener(
                 anim -> {
@@ -521,7 +654,12 @@ public final class PlayerTransitionHelper {
                         finish.runOnce();
                     }
                 });
-        animator.start();
+        try {
+            animator.start();
+        } catch (RuntimeException error) {
+            finish.runOnce();
+            throw error;
+        }
         return new AnimatorHandle(animator, finish);
     }
 
@@ -561,27 +699,31 @@ public final class PlayerTransitionHelper {
         animator.setInterpolator(MotionTokens.createStandardInterpolator());
         final AtomicFinish finish =
                 new AtomicFinish(
+                        animator,
                         () -> {
                             try {
-                                if (detailLayer != null) {
-                                    detailLayer.setLayerType(prevDetailLayer, null);
-                                    detailLayer.setScaleX(1f);
-                                    detailLayer.setScaleY(1f);
-                                    detailLayer.setTranslationY(0f);
-                                    detailLayer.setAlpha(1f);
-                                }
-                                if (posterView != null) {
-                                    posterView.setLayerType(prevPosterLayer, null);
-                                    posterView.setScaleX(1f);
-                                    posterView.setScaleY(1f);
-                                    posterView.setAlpha(1f);
-                                }
+                                if (onComplete != null) onComplete.run();
                             } finally {
-                                if (glassFreezeCallback != null) {
-                                    glassFreezeCallback.setGlassFrozen(false);
+                                try {
+                                    if (detailLayer != null) {
+                                        detailLayer.setLayerType(prevDetailLayer, null);
+                                        detailLayer.setScaleX(1f);
+                                        detailLayer.setScaleY(1f);
+                                        detailLayer.setTranslationY(0f);
+                                        detailLayer.setAlpha(1f);
+                                    }
+                                    if (posterView != null) {
+                                        posterView.setLayerType(prevPosterLayer, null);
+                                        posterView.setScaleX(1f);
+                                        posterView.setScaleY(1f);
+                                        posterView.setAlpha(1f);
+                                    }
+                                } finally {
+                                    if (glassFreezeCallback != null) {
+                                        glassFreezeCallback.setGlassFrozen(false);
+                                    }
                                 }
                             }
-                            if (onComplete != null) onComplete.run();
                         });
         animator.addUpdateListener(
                 anim -> {
@@ -626,6 +768,7 @@ public final class PlayerTransitionHelper {
     private static final class Api33AgslRunner {
         static TransitionHandle start(
                 final ViewGroup overlayHost,
+                final View detailLayer,
                 final Bitmap backdrop,
                 final boolean ownsBackdrop,
                 final Bitmap poster,
@@ -648,19 +791,35 @@ public final class PlayerTransitionHelper {
             }
 
             overlayHost.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+            // Hide live detailLayer immediately after backdrop capture + overlay attach so the
+            // 0.68 -> 1.0 shader dissolve reveals the underlying video surface with zero flash.
+            if (detailLayer != null) {
+                detailLayer.setAlpha(0f);
+            }
             final ValueAnimator animator = ValueAnimator.ofFloat(0f, 1f);
             animator.setDuration(MotionTokens.DURATION_TRANSITION_ENTER_MS);
-            animator.setInterpolator(MotionTokens.createStandardInterpolator());
+            // Match Flutter player_enter.frag linear uProgress driver (shader owns smoothstep).
+            animator.setInterpolator(MotionTokens.createLinearInterpolator());
             final AtomicFinish finish =
                     new AtomicFinish(
+                            animator,
                             () -> {
                                 try {
-                                    if (overlay.getParent() instanceof ViewGroup) {
-                                        ((ViewGroup) overlay.getParent()).removeView(overlay);
-                                    }
-                                    overlay.release(ownsBackdrop);
-                                } finally {
                                     if (onComplete != null) onComplete.run();
+                                } finally {
+                                    try {
+                                        if (overlay.getParent() instanceof ViewGroup) {
+                                            ((ViewGroup) overlay.getParent()).removeView(overlay);
+                                        }
+                                        overlay.release(ownsBackdrop);
+                                    } finally {
+                                        if (detailLayer != null) {
+                                            detailLayer.setScaleX(1f);
+                                            detailLayer.setScaleY(1f);
+                                            detailLayer.setTranslationY(0f);
+                                            detailLayer.setAlpha(1f);
+                                        }
+                                    }
                                 }
                             });
             animator.addUpdateListener(
@@ -679,9 +838,14 @@ public final class PlayerTransitionHelper {
                             finish.runOnce();
                         }
                     });
-            animator.start();
             final AnimatorHandle handle = new AnimatorHandle(animator, finish);
             overlay.setOnDetachCancel(handle::cancel);
+            try {
+                animator.start();
+            } catch (RuntimeException error) {
+                finish.runOnce();
+                throw error;
+            }
             return handle;
         }
     }
@@ -811,18 +975,111 @@ public final class PlayerTransitionHelper {
         }
     }
 
+    private static final class DeferredSharedBoundsHandle
+            implements TransitionHandle,
+                    ViewTreeObserver.OnPreDrawListener,
+                    View.OnAttachStateChangeListener {
+        private final View detailRoot;
+        private final View heroPosterView;
+        private final Rect originRectInRoot;
+        private final Runnable onComplete;
+        private ViewTreeObserver observedTree;
+        private TransitionHandle activeHandle;
+        private boolean finished;
+
+        DeferredSharedBoundsHandle(
+                View detailRoot, View heroPosterView, Rect originRectInRoot, Runnable onComplete) {
+            this.detailRoot = detailRoot;
+            this.heroPosterView = heroPosterView;
+            this.originRectInRoot = originRectInRoot;
+            this.onComplete = onComplete;
+            this.observedTree = detailRoot.getViewTreeObserver();
+            if (this.observedTree != null && this.observedTree.isAlive()) {
+                this.observedTree.addOnPreDrawListener(this);
+                detailRoot.addOnAttachStateChangeListener(this);
+            } else {
+                this.finished = true;
+                detailRoot.setAlpha(1f);
+                if (onComplete != null) onComplete.run();
+            }
+        }
+
+        private void detachListeners() {
+            ViewTreeObserver vto = observedTree;
+            observedTree = null;
+            if (vto != null && vto.isAlive()) {
+                vto.removeOnPreDrawListener(this);
+            } else {
+                ViewTreeObserver current = detailRoot.getViewTreeObserver();
+                if (current != null && current.isAlive()) {
+                    current.removeOnPreDrawListener(this);
+                }
+            }
+            detailRoot.removeOnAttachStateChangeListener(this);
+        }
+
+        @Override
+        public boolean onPreDraw() {
+            detachListeners();
+            if (finished) return true;
+            finished = true;
+            activeHandle =
+                    launchSharedBoundsAnimator(
+                            detailRoot, heroPosterView, originRectInRoot, onComplete);
+            return true;
+        }
+
+        @Override
+        public void onViewAttachedToWindow(View v) {}
+
+        @Override
+        public void onViewDetachedFromWindow(View v) {
+            cancel();
+        }
+
+        @Override
+        public void cancel() {
+            detachListeners();
+            TransitionHandle handle = activeHandle;
+            if (handle != null) {
+                handle.cancel();
+                return;
+            }
+            if (!finished) {
+                finished = true;
+                detailRoot.setAlpha(1f);
+                if (onComplete != null) onComplete.run();
+            }
+        }
+
+        @Override
+        public boolean isRunning() {
+            if (activeHandle != null) return activeHandle.isRunning();
+            return !finished;
+        }
+    }
+
     private static final class AtomicFinish {
+        private final ValueAnimator animator;
         private final Runnable action;
         private boolean done;
 
-        AtomicFinish(Runnable action) {
+        AtomicFinish(ValueAnimator animator, Runnable action) {
+            this.animator = animator;
             this.action = action;
         }
 
         void runOnce() {
             if (done) return;
             done = true;
-            action.run();
+            try {
+                action.run();
+            } finally {
+                if (animator != null) {
+                    animator.removeAllUpdateListeners();
+                    animator.removeAllListeners();
+                }
+            }
         }
     }
 

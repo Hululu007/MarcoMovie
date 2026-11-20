@@ -1,6 +1,8 @@
 // Copyright (C) 2026 Pilipala
 // SPDX-License-Identifier: GPL-3.0-only
+import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -179,6 +181,44 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 80));
     expect(AuroraBackground.shaderLoadFailed, isTrue);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+      'MINOR-4 regression: async prewarmShader completion does not overwrite explicit shaderProgram prop',
+      (tester) async {
+    final realProgram = await ui.FragmentProgram.fromAsset('shaders/aurora.frag');
+    final completer = Completer<ui.FragmentProgram>();
+    AuroraBackground.debugProgramLoaderOverride = (_) => completer.future;
+
+    final key = GlobalKey<AuroraBackgroundState>();
+    ui.FragmentProgram? explicitProgram;
+    late StateSetter outerSetState;
+
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: StatefulBuilder(
+          builder: (context, setState) {
+            outerSetState = setState;
+            return AuroraBackground(
+              key: key,
+              shaderProgram: explicitProgram,
+            );
+          },
+        ),
+      ),
+    );
+
+    // Supply explicit shaderProgram before async prewarm completes.
+    outerSetState(() => explicitProgram = realProgram);
+    await tester.pump();
+    expect(key.currentState!.hasActiveShader, isTrue);
+
+    // Completing async prewarm later must keep explicit shader cleanly without errors.
+    completer.complete(realProgram);
+    await tester.pump();
+    expect(key.currentState!.hasActiveShader, isTrue);
     expect(tester.takeException(), isNull);
   });
 }

@@ -221,11 +221,13 @@ class AuroraBackgroundState extends State<AuroraBackground>
       return;
     }
     AuroraBackground.prewarmShader().then((program) {
-      if (!mounted || program == null || OhosRuntime.isOhos || _isWindowsStatic) {
+      if (!mounted || OhosRuntime.isOhos || _isWindowsStatic) {
         return;
       }
+      final effective = widget.shaderProgram ?? program;
+      if (effective == null) return;
       setState(() {
-        _bindProgram(program);
+        _bindProgram(effective);
       });
     });
   }

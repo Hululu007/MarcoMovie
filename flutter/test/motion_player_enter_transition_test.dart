@@ -172,8 +172,14 @@ void main() {
       PlayerEnterTransition.enterDurationFor(PlayerTransitionMode.reducedCrossFade),
       const Duration(milliseconds: 150),
     );
-    expect(find.byType(FadeTransition), findsOneWidget);
-    expect(find.byType(ScaleTransition), findsNothing);
+    final fade = tester.widget<FadeTransition>(find.byType(FadeTransition));
+    final scale = tester.widget<ScaleTransition>(find.byType(ScaleTransition));
+    expect(fade.opacity.value, closeTo(0.5, 1e-6));
+    expect(scale.scale.value, 1.0);
+    controller.value = 0.0;
+    await tester.pump();
+    expect(fade.opacity.value, closeTo(0.0, 1e-6));
+    expect(scale.scale.value, 1.0);
 
     // Capture must also skip immediately under reduceMotion.
     var capturerCalled = false;
@@ -365,4 +371,164 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     expect(snapshot.isDisposed, isTrue);
   });
+
+  testWidgets(
+      'CRITICAL-1 regression: stateful player child is NEVER disposed/remounted across enter, completion, MediaQuery rebuild & reverse pop',
+      (tester) async {
+    final program = await PlayerEnterTransition.prewarmShader();
+    expect(program, isNotNull);
+
+    final snapshot = PlayerTransitionSnapshot(
+      backdropImage: _createSolidTestImage(240, 420, const Color(0xFF1A2230)),
+      ownsBackdrop: true,
+    );
+    final controller = AnimationController(
+      vsync: tester,
+      duration: MotionTokens.durationTransitionEnter,
+      reverseDuration: MotionTokens.durationTransitionExit,
+      value: 0.0,
+    );
+    addTearDown(controller.dispose);
+
+    int initStateCount = 0;
+    int disposeCount = 0;
+    final resolvedModes = <PlayerTransitionMode>[];
+    EdgeInsets padding = const EdgeInsets.only(top: 47, bottom: 34);
+    bool disableAnimations = false;
+    late StateSetter outerSetState;
+
+    await tester.pumpWidget(
+      StatefulBuilder(
+        builder: (context, setState) {
+          outerSetState = setState;
+          return MediaQuery(
+            data: MediaQueryData(
+              padding: padding,
+              disableAnimations: disableAnimations,
+            ),
+            child: Directionality(
+              textDirection: TextDirection.ltr,
+              child: PlayerEnterTransition(
+                animation: controller,
+                snapshot: snapshot,
+                shaderProgram: program,
+                onModeResolved: resolvedModes.add,
+                child: _LifecycleProbeChild(
+                  onInit: () => initStateCount++,
+                  onDispose: () => disposeCount++,
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+
+    expect(initStateCount, 1);
+    expect(disposeCount, 0);
+    expect(resolvedModes, <PlayerTransitionMode>[PlayerTransitionMode.shaderPortal]);
+
+    // 1) Forward enter 0.0 -> 0.5 -> 1.0 (settled): child state stays intact, snapshot disposed.
+    controller.forward();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 210));
+    expect(initStateCount, 1);
+    expect(disposeCount, 0);
+
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(controller.status, AnimationStatus.completed);
+    expect(snapshot.isDisposed, isTrue);
+    expect(initStateCount, 1);
+    expect(disposeCount, 0);
+    expect(resolvedModes, <PlayerTransitionMode>[PlayerTransitionMode.shaderPortal]);
+
+    // 2) Post-completion MediaQuery safe-area inset change during playback (e.g. HUD toggle / rotation).
+    outerSetState(() => padding = EdgeInsets.zero);
+    await tester.pump();
+    expect(initStateCount, 1);
+    expect(disposeCount, 0);
+    expect(resolvedModes, <PlayerTransitionMode>[PlayerTransitionMode.shaderPortal]);
+
+    // 3) Reverse exit (1.0 -> 0.5 -> 0.0): child never remounted AND exit smoothly animates!
+    controller.reverse();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(initStateCount, 1);
+    expect(disposeCount, 0);
+    final midReverseFade = tester.widget<FadeTransition>(find.byType(FadeTransition));
+    final midReverseScale = tester.widget<ScaleTransition>(find.byType(ScaleTransition));
+    expect(midReverseFade.opacity.value, greaterThan(0.05));
+    expect(midReverseFade.opacity.value, lessThan(0.95));
+    expect(midReverseScale.scale.value, greaterThan(0.96));
+    expect(midReverseScale.scale.value, lessThan(1.0));
+
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(controller.status, AnimationStatus.dismissed);
+    expect(initStateCount, 1);
+    expect(disposeCount, 0);
+
+    // Toggle reduceMotion while mounted -> still invariant tree, zero remount.
+    outerSetState(() => disableAnimations = true);
+    await tester.pump();
+    expect(initStateCount, 1);
+    expect(disposeCount, 0);
+  });
+
+  testWidgets(
+      'MAJOR-2 regression: routeGateWrapper endOfFrame vsync wait is NOT charged against 16ms capture budget',
+      (tester) async {
+    late PlayerTransitionSnapshot result;
+    await tester.runAsync(() async {
+      result = await PlayerEnterTransition.captureBackdrop(
+        logicalSize: const Size(390, 844),
+        devicePixelRatio: 3.0,
+        routeGateWrapper: (action) async {
+          // Simulate 60Hz iOS 26 placeholder swap + endOfFrame vsync wait (> 16ms).
+          await Future<void>.delayed(const Duration(milliseconds: 25));
+          return action();
+        },
+        customCapturer: (_) async =>
+            _createSolidTestImage(100, 100, const Color(0xFF223344)),
+      );
+    });
+
+    addTearDown(result.dispose);
+    expect(result.exceededBudget, isFalse);
+    expect(PlayerEnterTransition.preferFastTransition, isFalse);
+    expect(result.hasBackdrop, isTrue);
+    expect(
+      result.captureDuration.inMilliseconds,
+      lessThanOrEqualTo(MotionTokens.hudTransitionCaptureBudgetMs),
+    );
+  });
+}
+
+class _LifecycleProbeChild extends StatefulWidget {
+  final VoidCallback onInit;
+  final VoidCallback onDispose;
+
+  const _LifecycleProbeChild({
+    required this.onInit,
+    required this.onDispose,
+  });
+
+  @override
+  State<_LifecycleProbeChild> createState() => _LifecycleProbeChildState();
+}
+
+class _LifecycleProbeChildState extends State<_LifecycleProbeChild> {
+  @override
+  void initState() {
+    super.initState();
+    widget.onInit();
+  }
+
+  @override
+  void dispose() {
+    widget.onDispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => const ColoredBox(color: Color(0xFF000000));
 }

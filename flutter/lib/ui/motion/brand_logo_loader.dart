@@ -236,6 +236,23 @@ class BrandRibbonLoaderPainter extends CustomPainter {
   Size? _cachedSize;
   Path? _cachedFullPath;
   ui.PathMetric? _cachedMetric;
+  Size? _cachedMetallicSize;
+  int _cachedMetallicAlpha = -1;
+  ui.Shader? _cachedMetallicShader;
+
+  final Paint _guidePaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round;
+  final Paint _metallicPaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round;
+  final Paint _sheenPaint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeCap = StrokeCap.round
+    ..strokeJoin = StrokeJoin.round;
+  final Paint _sprocketPaint = Paint()..style = PaintingStyle.fill;
 
   BrandRibbonLoaderPainter({
     required this.progressListenable,
@@ -250,6 +267,32 @@ class BrandRibbonLoaderPainter extends CustomPainter {
     _cachedFullPath = path;
     final iterator = path.computeMetrics().iterator;
     _cachedMetric = iterator.moveNext() ? iterator.current : null;
+  }
+
+  ui.Shader _ensureMetallicShader(Size size, double alpha) {
+    final alphaKey = (alpha.clamp(0.0, 1.0) * 255.0).round();
+    if (_cachedMetallicShader != null &&
+        _cachedMetallicSize == size &&
+        _cachedMetallicAlpha == alphaKey) {
+      return _cachedMetallicShader!;
+    }
+    _cachedMetallicSize = size;
+    _cachedMetallicAlpha = alphaKey;
+    final a = alphaKey / 255.0;
+    final shader = ui.Gradient.linear(
+      Offset(size.width * 0.08, size.height * 0.78),
+      Offset(size.width * 0.94, size.height * 0.22),
+      <Color>[
+        Color.fromRGBO(106, 112, 126, a),
+        Color.fromRGBO(210, 214, 224, a),
+        Color.fromRGBO(244, 246, 250, a),
+        Color.fromRGBO(234, 216, 198, a),
+        Color.fromRGBO(172, 178, 190, a),
+      ],
+      const <double>[0.0, 0.28, 0.54, 0.76, 1.0],
+    );
+    _cachedMetallicShader = shader;
+    return shader;
   }
 
   @override
@@ -271,49 +314,28 @@ class BrandRibbonLoaderPainter extends CustomPainter {
     final ribbonWidth = math.max(2.4, minDim * 0.145);
 
     // 1) Subtle dark-slate silhouette guide track so the M stays grounded.
-    final guidePaint = Paint()
-      ..style = PaintingStyle.stroke
+    _guidePaint
       ..strokeWidth = ribbonWidth
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
       ..color = Color.fromRGBO(168, 174, 188, 0.16 * alpha);
-    canvas.drawPath(fullPath, guidePaint);
+    canvas.drawPath(fullPath, _guidePaint);
 
     // 2) Traced metallic film-ribbon stroke matching logo_mark.png brushed platinum + champagne tone.
     final tracedPath = strokeFraction >= 0.999
         ? fullPath
         : metric.extractPath(0.0, metric.length * strokeFraction);
 
-    final rect = Offset.zero & size;
-    final metallicPaint = Paint()
-      ..style = PaintingStyle.stroke
+    _metallicPaint
       ..strokeWidth = ribbonWidth
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..shader = ui.Gradient.linear(
-        Offset(rect.left + rect.width * 0.08, rect.bottom * 0.78),
-        Offset(rect.right * 0.94, rect.top + rect.height * 0.22),
-        <Color>[
-          Color.fromRGBO(106, 112, 126, alpha),
-          Color.fromRGBO(210, 214, 224, alpha),
-          Color.fromRGBO(244, 246, 250, alpha),
-          Color.fromRGBO(234, 216, 198, alpha),
-          Color.fromRGBO(172, 178, 190, alpha),
-        ],
-        const <double>[0.0, 0.28, 0.54, 0.76, 1.0],
-      );
-    canvas.drawPath(tracedPath, metallicPaint);
+      ..shader = _ensureMetallicShader(size, alpha);
+    canvas.drawPath(tracedPath, _metallicPaint);
 
     // 3) Diagonal metallic sheen sweep during the second half of the 1.6s loop
     // (drawn directly along the traced ribbon stroke with zero saveLayer overhead).
     if (sheenProgress >= 0.0 && sheenProgress <= 1.0) {
       final sweepX = (-0.35 + 1.70 * sheenProgress) * size.width;
       final band = size.width * 0.28;
-      final sheenPaint = Paint()
-        ..style = PaintingStyle.stroke
+      _sheenPaint
         ..strokeWidth = ribbonWidth * 0.96
-        ..strokeCap = StrokeCap.round
-        ..strokeJoin = StrokeJoin.round
         ..shader = ui.Gradient.linear(
           Offset(sweepX - band, size.height * 0.15),
           Offset(sweepX + band, size.height * 0.85),
@@ -325,7 +347,7 @@ class BrandRibbonLoaderPainter extends CustomPainter {
           ],
           const <double>[0.0, 0.46, 0.62, 1.0],
         );
-      canvas.drawPath(tracedPath, sheenPaint);
+      canvas.drawPath(tracedPath, _sheenPaint);
     }
 
     // 4) Film sprocket perforations along traced portion (only when large enough to stay crisp).
@@ -333,9 +355,7 @@ class BrandRibbonLoaderPainter extends CustomPainter {
       final holeW = math.max(1.4, ribbonWidth * 0.34);
       final holeH = math.max(1.2, ribbonWidth * 0.26);
       final holeRadius = Radius.circular(math.max(0.5, holeH * 0.28));
-      final sprocketPaint = Paint()
-        ..style = PaintingStyle.fill
-        ..color = Color.fromRGBO(20, 22, 27, 0.78 * alpha);
+      _sprocketPaint.color = Color.fromRGBO(20, 22, 27, 0.78 * alpha);
       for (final ratio in BrandRibbonGeometry.sprocketRatios) {
         if (ratio > strokeFraction - 0.02) continue;
         final tangent = metric.getTangentForOffset(metric.length * ratio);
@@ -348,7 +368,7 @@ class BrandRibbonLoaderPainter extends CustomPainter {
             Rect.fromCenter(center: Offset.zero, width: holeW, height: holeH),
             holeRadius,
           ),
-          sprocketPaint,
+          _sprocketPaint,
         );
         canvas.restore();
       }

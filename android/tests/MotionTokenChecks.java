@@ -790,9 +790,63 @@ public final class MotionTokenChecks {
         check(
                 !helperSrc.contains("android.graphics.Camera"),
                 "PlayerTransitionHelper must NOT use software android.graphics.Camera");
+
+        // Round 2 MAJOR-3 regression: shared-bounds deltas in detailRoot space (nested poster)
+        float[] sbDeltas = new float[4];
+        PlayerTransitionHelper.computeSharedBoundsDeltas(
+                40f, 620f, 280f, 980f, 140f, 220f, 300f, 450f, sbDeltas);
+        checkClose(0.8, sbDeltas[0], 1e-4, "sharedBounds startScaleX");
+        checkClose(0.8, sbDeltas[1], 1e-4, "sharedBounds startScaleY");
+        checkClose(-130.0, sbDeltas[2], 1e-3, "sharedBounds startDx in detailRoot space");
+        checkClose(355.0, sbDeltas[3], 1e-3, "sharedBounds startDy in detailRoot space");
+
+        // Verify source contracts for Round 2 Android fixes (MAJOR-1, MAJOR-3, MINOR-1, MINOR-3)
+        check(
+                helperSrc.contains("offsetDescendantRectToMyCoords"),
+                "animateSharedBoundsEnter projects descendant rect into detailRoot coordinates");
+        check(
+                helperSrc.contains("DeferredSharedBoundsHandle")
+                        && helperSrc.contains("OnPreDrawListener"),
+                "animateSharedBoundsEnter defers pre-layout frame-0 calls via OnPreDrawListener");
+        check(
+                helperSrc.contains("detailLayer.setAlpha(0f);"),
+                "Api33AgslRunner hides detailLayer immediately under AGSL overlay");
+        check(
+                helperSrc.contains("restoreAlphaAfterComplete"),
+                "REDUCED_FADE restores detailLayer alpha cleanly after onComplete");
+        check(
+                helperSrc.contains("animator.removeAllUpdateListeners();")
+                        && helperSrc.contains("animator.removeAllListeners();"),
+                "AtomicFinish detaches animator listeners on finish/cancel");
     }
 
     private static void verifyAuroraAndBrandLogoLoader() {
+        // Round 2 MINOR-2 regression: dynamic MainActivity.reduced tracking vs explicit override
+        checkEq(
+                false,
+                AuroraSurfaceView.resolveEffectiveReducedMotion(null, false),
+                "aurora follows host reduced=false");
+        checkEq(
+                true,
+                AuroraSurfaceView.resolveEffectiveReducedMotion(null, true),
+                "aurora follows host reduced=true dynamically");
+        checkEq(
+                false,
+                AuroraSurfaceView.resolveEffectiveReducedMotion(Boolean.FALSE, true),
+                "aurora explicit override false wins over host");
+        checkEq(
+                true,
+                AuroraSurfaceView.resolveEffectiveReducedMotion(Boolean.TRUE, false),
+                "aurora explicit override true wins over host");
+        checkEq(
+                true,
+                BrandLogoLoaderView.resolveEffectiveReducedMotion(null, true),
+                "brandLoader follows host reduced=true dynamically");
+        checkEq(
+                false,
+                BrandLogoLoaderView.resolveEffectiveReducedMotion(Boolean.FALSE, true),
+                "brandLoader explicit override false wins over host");
+
         // AuroraSurfaceView lifecycle safety
         check(
                 AuroraSurfaceView.shouldRunLoop(true, true, true, true, false, false, 0.62f),

@@ -306,17 +306,26 @@ class PlayerEnterTransition extends StatefulWidget {
 
     ui.Image? captured;
     bool ownershipTransferred = false;
-    final sw = Stopwatch()..start();
+    Duration measuredCapture = Duration.zero;
+    Future<ui.Image?> runTimedCapture() async {
+      final sw = Stopwatch()..start();
+      try {
+        return await capturer(pixelRatio);
+      } finally {
+        sw.stop();
+        measuredCapture = sw.elapsed;
+      }
+    }
+
     try {
       if (routeGateWrapper != null) {
-        captured = await routeGateWrapper(() => capturer(pixelRatio));
+        captured = await routeGateWrapper(runTimedCapture);
       } else {
-        captured = await capturer(pixelRatio);
+        captured = await runTimedCapture();
       }
-      sw.stop();
       final elapsed = debugElapsedOverride != null
-          ? debugElapsedOverride(sw.elapsed)
-          : sw.elapsed;
+          ? debugElapsedOverride(measuredCapture)
+          : measuredCapture;
       final exceeded = elapsed.inMicroseconds > budgetMs * 1000;
       if (exceeded) {
         _preferFastTransition = true;
@@ -344,14 +353,13 @@ class PlayerEnterTransition extends StatefulWidget {
       ownershipTransferred = true;
       return snapshot;
     } catch (_) {
-      sw.stop();
       return PlayerTransitionSnapshot(
         posterImage: posterImage,
         ownsPoster: ownsPoster,
         posterOriginLogical: posterOriginLogical,
         posterRadiusLogical: posterRadiusLogical,
         posterAspect: posterAspect,
-        captureDuration: sw.elapsed,
+        captureDuration: measuredCapture,
       );
     } finally {
       if (!ownershipTransferred && captured != null) {
@@ -471,6 +479,7 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
   ui.FragmentProgram? _boundProgram;
   PlayerTransitionMode? _lastReportedMode;
   bool _snapshotReleased = false;
+  bool _enterCompleted = false;
   late CurvedAnimation _linearAnimation;
   late CurvedAnimation _scaleFadeAnimation;
   late Animation<double> _scaleTweenAnimation;
@@ -481,9 +490,12 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
   @override
   void initState() {
     super.initState();
+    _enterCompleted = widget.animation.status == AnimationStatus.completed;
     _initAnimations();
     widget.animation.addStatusListener(_handleAnimationStatus);
-    _syncShader();
+    if (!_enterCompleted) {
+      _syncShader();
+    }
   }
 
   void _initAnimations() {
@@ -516,8 +528,9 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
     }
     if (oldWidget.snapshot != widget.snapshot) {
       _snapshotReleased = false;
+      _enterCompleted = widget.animation.status == AnimationStatus.completed;
     }
-    if (oldWidget.shaderProgram != widget.shaderProgram) {
+    if (oldWidget.shaderProgram != widget.shaderProgram && !_enterCompleted) {
       _syncShader();
     }
   }
@@ -552,10 +565,16 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
   }
 
   void _handleAnimationStatus(AnimationStatus status) {
-    if (status == AnimationStatus.completed ||
-        status == AnimationStatus.dismissed) {
-      if (status == AnimationStatus.completed) {
-        _releaseOwnedResources();
+    if (status == AnimationStatus.completed) {
+      final hadActiveOverlay = !_enterCompleted ||
+          _shader != null ||
+          (widget.disposeSnapshotOnComplete &&
+              !_snapshotReleased &&
+              widget.snapshot != null);
+      _enterCompleted = true;
+      _releaseOwnedResources();
+      if (hadActiveOverlay && mounted) {
+        setState(() {});
       }
     }
   }
@@ -576,6 +595,12 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
   }
 
   void _reportMode(PlayerTransitionMode mode) {
+    if (_enterCompleted &&
+        _lastReportedMode == PlayerTransitionMode.shaderPortal &&
+        mode == PlayerTransitionMode.scaleFadeFallback) {
+      // Do not spuriously downgrade the reported enter mode after post-completion cleanup.
+      return;
+    }
     if (_lastReportedMode == mode) return;
     _lastReportedMode = mode;
     widget.onModeResolved?.call(mode);
@@ -588,67 +613,82 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
     final snapshot = widget.snapshot;
     final mode = PlayerEnterTransition.resolveMode(
       reduceMotion: reduceMotion,
-      hasShaderProgram: _shader != null,
-      hasBackdropImage: snapshot != null && snapshot.hasBackdrop,
+      hasShaderProgram: !_enterCompleted && _shader != null,
+      hasBackdropImage: !_enterCompleted && snapshot != null && snapshot.hasBackdrop,
       preferFast: snapshot?.exceededBudget ?? false,
       useFastWindowsMode: widget.useFastWindowsMode,
     );
     _reportMode(mode);
 
-    switch (mode) {
-      case PlayerTransitionMode.reducedCrossFade:
-        return FadeTransition(
-          opacity: _linearAnimation,
-          child: widget.child,
-        );
+    final bool showPortalOverlay = mode == PlayerTransitionMode.shaderPortal &&
+        !_enterCompleted &&
+        _shader != null &&
+        snapshot != null &&
+        snapshot.hasBackdrop;
 
-      case PlayerTransitionMode.scaleFadeFallback:
-        return FadeTransition(
-          opacity: _scaleFadeAnimation,
-          child: ScaleTransition(
-            scale: _scaleTweenAnimation,
-            child: widget.child,
-          ),
-        );
+    final Animation<double> effectiveOpacity;
+    final Animation<double> effectiveScale;
+    if (showPortalOverlay) {
+      // Underlying player stays at full opacity/scale while the shader dissolves above it.
+      effectiveOpacity = kAlwaysCompleteAnimation;
+      effectiveScale = kAlwaysCompleteAnimation;
+    } else if (mode == PlayerTransitionMode.reducedCrossFade) {
+      // Fallback 1 (reduce-motion): 150ms linear crossfade with fixed scale == 1.0.
+      effectiveOpacity = _linearAnimation;
+      effectiveScale = kAlwaysCompleteAnimation;
+    } else {
+      // Fallback 2/3 AND post-completion reverse exit (1.0 -> 0.0): smooth scale + fade.
+      effectiveOpacity = _scaleFadeAnimation;
+      effectiveScale = _scaleTweenAnimation;
+    }
 
-      case PlayerTransitionMode.shaderPortal:
-        final safePadding = MediaQuery.paddingOf(context);
-        return AnimatedBuilder(
-          animation: widget.animation,
-          child: widget.child,
-          builder: (context, child) {
-            final t = widget.animation.value.clamp(0.0, 1.0);
-            final activeSnapshot = widget.snapshot;
-            final activeShader = _shader;
-            if (t >= 0.999 ||
-                activeShader == null ||
-                activeSnapshot == null ||
-                !activeSnapshot.hasBackdrop) {
-              return child!;
-            }
-            return Stack(
-              fit: StackFit.passthrough,
-              children: <Widget>[
-                child!,
-                Positioned.fill(
-                  child: IgnorePointer(
-                    child: RepaintBoundary(
-                      child: CustomPaint(
-                        painter: PlayerEnterShaderPainter(
-                          shader: activeShader,
-                          progress: t,
-                          snapshot: activeSnapshot,
-                          safePaddingLogical: safePadding,
+    final EdgeInsets safePadding =
+        showPortalOverlay ? MediaQuery.paddingOf(context) : EdgeInsets.zero;
+
+    // Maintain an invariant FadeTransition -> ScaleTransition -> Stack ancestor chain
+    // around widget.child (always slot 0) so stateful player children are never disposed
+    // or remounted when the enter shader completes, MediaQuery changes, or the route pops.
+    return FadeTransition(
+      opacity: effectiveOpacity,
+      child: ScaleTransition(
+        scale: effectiveScale,
+        child: Stack(
+          fit: StackFit.passthrough,
+          children: <Widget>[
+            widget.child,
+            if (showPortalOverlay)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: AnimatedBuilder(
+                    animation: widget.animation,
+                    builder: (context, _) {
+                      final t = widget.animation.value.clamp(0.0, 1.0);
+                      final activeSnapshot = widget.snapshot;
+                      final activeShader = _shader;
+                      if (t >= 0.999 ||
+                          activeShader == null ||
+                          activeSnapshot == null ||
+                          !activeSnapshot.hasBackdrop) {
+                        return const SizedBox.shrink();
+                      }
+                      return RepaintBoundary(
+                        child: CustomPaint(
+                          painter: PlayerEnterShaderPainter(
+                            shader: activeShader,
+                            progress: t,
+                            snapshot: activeSnapshot,
+                            safePaddingLogical: safePadding,
+                          ),
                         ),
-                      ),
-                    ),
+                      );
+                    },
                   ),
                 ),
-              ],
-            );
-          },
-        );
-    }
+              ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

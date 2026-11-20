@@ -55,7 +55,8 @@ public final class BrandLogoLoaderView extends View {
     private float holeRadius;
     private boolean showSprockets;
 
-    private boolean reducedMotion;
+    private final MainActivity hostActivity;
+    private Boolean reducedMotionOverride;
     private boolean active = true;
     private boolean loopRunning;
     private float phase;
@@ -68,9 +69,7 @@ public final class BrandLogoLoaderView extends View {
         setFocusable(false);
         setContentDescription("正在加载");
 
-        if (context instanceof MainActivity) {
-            this.reducedMotion = ((MainActivity) context).reduced;
-        }
+        this.hostActivity = (context instanceof MainActivity) ? (MainActivity) context : null;
 
         guidePaint.setStyle(Paint.Style.STROKE);
         guidePaint.setStrokeCap(Paint.Cap.ROUND);
@@ -151,9 +150,21 @@ public final class BrandLogoLoaderView extends View {
         syncLoop();
     }
 
+    /** Resolves effective reduce-motion state (explicit override takes precedence over host). */
+    public static boolean resolveEffectiveReducedMotion(
+            Boolean explicitOverride, boolean hostReduced) {
+        return explicitOverride != null ? explicitOverride.booleanValue() : hostReduced;
+    }
+
+    private boolean isReducedMotionEffective() {
+        return resolveEffectiveReducedMotion(
+                reducedMotionOverride, hostActivity != null && hostActivity.reduced);
+    }
+
     public void setReducedMotion(boolean reduced) {
-        if (this.reducedMotion == reduced) return;
-        this.reducedMotion = reduced;
+        Boolean next = Boolean.valueOf(reduced);
+        if (next.equals(this.reducedMotionOverride)) return;
+        this.reducedMotionOverride = next;
         invalidate();
     }
 
@@ -270,9 +281,10 @@ public final class BrandLogoLoaderView extends View {
         int h = getHeight();
         if (w <= 0 || h <= 0 || pathLength <= 0f) return;
 
-        float strokeFraction = computeStrokeFraction(phase, reducedMotion);
-        float sheenProgress = computeSheenProgress(phase, reducedMotion);
-        float alpha = computeRibbonAlpha(phase, reducedMotion);
+        boolean reducedNow = isReducedMotionEffective();
+        float strokeFraction = computeStrokeFraction(phase, reducedNow);
+        float sheenProgress = computeSheenProgress(phase, reducedNow);
+        float alpha = computeRibbonAlpha(phase, reducedNow);
 
         // 1) Grounded guide silhouette (zero allocations).
         guidePaint.setAlpha(Math.round(255f * 0.16f * alpha));
