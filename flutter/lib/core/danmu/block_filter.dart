@@ -83,6 +83,12 @@ class _AtomInfo {
   bool isDisjointFromLiteral(int sepCode) {
     switch (kind) {
       case kindLiteral:
+        if (literalCode >= 128 &&
+            sepCode >= 128 &&
+            !isCaselessCjk(literalCode) &&
+            !isCaselessCjk(sepCode)) {
+          return false;
+        }
         return _foldAsciiLower(literalCode) != _foldAsciiLower(sepCode);
       case kindDigit:
         return sepCode < 0x30 || sepCode > 0x39;
@@ -103,6 +109,12 @@ class _AtomInfo {
       default:
         return false;
     }
+  }
+
+  static bool isCaselessCjk(int ch) {
+    return (ch >= 0x4E00 && ch <= 0x9FFF) ||
+        (ch >= 0x3400 && ch <= 0x4DBF) ||
+        (ch >= 0x3040 && ch <= 0x30FF);
   }
 
   static int _foldAsciiLower(int ch) {
@@ -549,7 +561,10 @@ class _SafeRegexValidator {
           _fail('正则表达式无界量词后的字面后缀超过安全上限');
           return null;
         }
-        final folded = _foldAsciiLower(atom.literalCode);
+        final folded = (atom.literalCode >= 128 &&
+                !_AtomInfo.isCaselessCjk(atom.literalCode))
+            ? 0xFFFD
+            : _foldAsciiLower(atom.literalCode);
         var sameCount = 1;
         for (var k = 0; k < postUnboundedLitCount; k++) {
           if (postUnboundedLitCodes[k] == folded) {
@@ -1081,8 +1096,8 @@ class DanmuBlockFilter {
   static const int maxBranchWork = 620;
   static const int maxTotalWork = 900;
 
-  static final String _warmupOneByte = 'a' * 36;
-  static final String _warmupTwoByte = '\u4e00' * 36;
+  static final String _warmupOneByte = '${'a' * 179}!';
+  static final String _warmupTwoByte = '${'\u4e00' * 179}!';
 
   static const DanmuBlockFilter empty = DanmuBlockFilter._(
     <String>[],

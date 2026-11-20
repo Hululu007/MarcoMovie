@@ -314,6 +314,12 @@ public interface DanmuProvider {
             boolean isDisjointFromLiteral(int sepCode) {
                 switch (kind) {
                     case KIND_LITERAL:
+                        if (literalCode >= 128
+                                && sepCode >= 128
+                                && !isCaselessCjk(literalCode)
+                                && !isCaselessCjk(sepCode)) {
+                            return false;
+                        }
                         return foldAsciiLower(literalCode) != foldAsciiLower(sepCode);
                     case KIND_DIGIT:
                         return sepCode < '0' || sepCode > '9';
@@ -333,6 +339,12 @@ public interface DanmuProvider {
                     default:
                         return false;
                 }
+            }
+
+            static boolean isCaselessCjk(int ch) {
+                return (ch >= 0x4E00 && ch <= 0x9FFF)
+                        || (ch >= 0x3400 && ch <= 0x4DBF)
+                        || (ch >= 0x3040 && ch <= 0x30FF);
             }
 
             private static int foldAsciiLower(int ch) {
@@ -737,7 +749,11 @@ public interface DanmuProvider {
                             fail("正则表达式无界量词后的字面后缀超过安全上限");
                             return null;
                         }
-                        int folded = foldAsciiLower(atom.literalCode);
+                        int folded =
+                                (atom.literalCode >= 128
+                                                && !AtomInfo.isCaselessCjk(atom.literalCode))
+                                        ? 0xFFFD
+                                        : foldAsciiLower(atom.literalCode);
                         int sameCount = 1;
                         for (int k = 0; k < postUnboundedLitCount; k++) {
                             if (postUnboundedLitCodes[k] == folded) {

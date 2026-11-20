@@ -229,6 +229,12 @@ void main() {
         r're:.*aaaaaaaaab',
         r're:.*ababababax',
         r're:a.*b|c.*d|e.*f',
+        // Gate 1 R3 F-1F (non-ASCII case-folded literal delimiter & suffix bucketing)
+        're:\u00E9+\u00C9.*z',
+        're:\u0151+\u0150.*z',
+        're:\u03B1+\u0391.*z',
+        're:\u03B1+\u0391[^\\n]*z',
+        're:.*\u00E9\u00C9\u00E9\u00C9\u00E9\u00C9\u00E9\u00C9\u00E9z',
         // Gate 1 R1 F-1B (UTF-16 surrogates / supplementary codepoints parity)
         're:[\uD83D\uDE00-\\uFFFF]',
         r're:[\uD83D\uDE00-\uFFFF]',
@@ -298,6 +304,8 @@ void main() {
         r're:[a-z]+z|[a-z]+z',
         r're:(a|a)[a-z]+z',
         r're:[a-z]+[a-z]{2}z',
+        r're:[^x]{20}[^x]+y|[^x]{20}[^x]+z',
+        r're:剧+透.*预警',
         r're:(?:foo|bar).*?z',
       ];
       final adversarialInputs = <String>[
