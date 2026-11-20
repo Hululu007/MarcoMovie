@@ -46,6 +46,8 @@ flutter:
   uses-material-design: true
   shaders:
     - shaders/glasswork.frag
+    - shaders/player_enter.frag
+    - shaders/aurora.frag
   assets:
     - assets/js-host/module-interop.js
     - assets/js-host/catvod.mjs
