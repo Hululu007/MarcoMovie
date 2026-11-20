@@ -1,0 +1,697 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'package:marco_movie/core/danmu/block_filter.dart';
+import 'package:marco_movie/core/danmu/dandanplay_provider.dart';
+import 'package:marco_movie/core/danmu/danmu_prefs.dart';
+import 'package:marco_movie/core/danmu/provider.dart';
+import 'package:marco_movie/core/danmu/segment_cache.dart';
+import 'package:marco_movie/core/ohos_runtime.dart';
+
+void main() {
+  tearDown(() {
+    OhosRuntime.resetForTesting();
+  });
+
+  group('Defaults, Base64url, SHA-256 & Source Binding SSRF Guard', () {
+    test('default server URLs are strictly empty', () {
+      expect(DandanplayProvider.defaultServerUrls, isEmpty);
+      final provider = DandanplayProvider();
+      addTearDown(provider.close);
+      expect(provider.configuredOrigins, isEmpty);
+
+      const settings = DanmuSettings();
+      expect(settings.serverUrls, isEmpty);
+      expect(settings.appId, isEmpty);
+      expect(settings.appSecret, isEmpty);
+      expect(settings.enabled, isFalse);
+    });
+
+    test('RFC 4648 Base64url no-padding roundtrip & Open API v2 signature', () {
+      final samples = <List<int>>[
+        <int>[],
+        <int>[0xFB],
+        <int>[0xFB, 0xFF],
+        <int>[0xFB, 0xFF, 0xBF],
+        utf8.encode('https://danmu.example:8443/v2'),
+        utf8.encode('a+b/c=d?e&f'),
+      ];
+      for (final sample in samples) {
+        final enc = DandanplayProvider.base64UrlEncodeNoPad(sample);
+        expect(enc.contains('='), isFalse);
+        expect(enc.contains('+'), isFalse);
+        expect(enc.contains('/'), isFalse);
+        expect(DandanplayProvider.base64UrlDecode(enc), equals(sample));
+      }
+
+      final sig = DandanplayProvider.computeOpenApiSignature(
+        appId: 'demoApp',
+        timestampSec: 1700000000,
+        urlPath: '/api/v2/match',
+        appSecret: 'demoSecret',
+      );
+      expect(sig.length, 44);
+      expect(sig.endsWith('='), isTrue);
+    });
+
+    test('mmdanmu://v1 roundtrip preserves literal + and enforces SSRF whitelist',
+        () {
+      const origin = 'https://node-a.danmu.test:8443/prefix/';
+      final bound = DandanplayProvider.encodeBoundEpisodeId(origin, 'ep+42/sub');
+      expect(bound.startsWith('mmdanmu://v1?src='), isTrue);
+
+      final whitelist = <String>['https://node-a.danmu.test:8443/prefix'];
+      final decoded = DandanplayProvider.decodeBoundEpisodeId(bound, whitelist);
+      expect(decoded.origin, 'https://node-a.danmu.test:8443/prefix');
+      expect(decoded.rawEpisodeId, 'ep+42/sub');
+
+      // Unlisted host rejected
+      final evilBound = DandanplayProvider.encodeBoundEpisodeId(
+        'https://evil.invalid',
+        '1001',
+      );
+      expect(
+        () => DandanplayProvider.decodeBoundEpisodeId(evilBound, whitelist),
+        throwsFormatException,
+      );
+
+      // Forbidden schemes & userinfo rejected
+      expect(
+        DandanplayProvider.normalizeOriginOrNull('file:///etc/passwd'),
+        isNull,
+      );
+      expect(
+        DandanplayProvider.normalizeOriginOrNull('ftp://danmu.example'),
+        isNull,
+      );
+      expect(
+        DandanplayProvider.normalizeOriginOrNull('https://user@danmu.example'),
+        isNull,
+      );
+      expect(
+        DandanplayProvider.normalizeOriginOrNull(
+          Uri(scheme: 'https', userInfo: 'u:p', host: 'danmu.example')
+              .toString(),
+        ),
+        isNull,
+      );
+
+      // Server cap = 8
+      const tenUrls = 'https://s1.danmu.test\n'
+          'https://s2.danmu.test\n'
+          'https://s3.danmu.test\n'
+          'https://s4.danmu.test\n'
+          'https://s5.danmu.test\n'
+          'https://s6.danmu.test\n'
+          'https://s7.danmu.test\n'
+          'https://s8.danmu.test\n'
+          'https://s9.danmu.test\n'
+          'https://s10.danmu.test';
+      expect(DandanplayProvider.parseConfiguredOrigins(tenUrls).length, 8);
+    });
+  });
+
+  group('O(N) Static ReDoS Blocker & BlockFilter', () {
+    test('rejects catastrophic backtracking & unsafe regex constructs', () {
+      final rejected = <String>[
+        r're:(a|aa)+$',
+        r're:(a+)+',
+        r're:(a?)+',
+        r're:(.*a){20}',
+        r're:([a-z]|a)+$',
+        r're:(foo)?',
+        r're:(bar)*',
+        r're:([0-9]+){2,5}',
+        r're:abc\1',
+        r're:(?<=pre)word',
+        r're:(?<!pre)word',
+        r're:(?i)spoiler',
+        r're:a.*b.*c.*d.*e',
+        're:${'a' * 121}',
+        're:',
+        '   ',
+      ];
+      for (final rule in rejected) {
+        final vr = DanmuBlockFilter.validateRule(rule);
+        expect(vr.valid, isFalse, reason: 'Expected rejection for $rule');
+      }
+    });
+
+    test('accepts safe plain text, top-level alternation & non-quantified groups',
+        () {
+      const accepted = <String>[
+        '剧透',
+        're:剧透|打卡',
+        're:第(一|二)章',
+        're:[0-9]{4,}',
+        r're:foo\)bar+',
+      ];
+      for (final rule in accepted) {
+        final vr = DanmuBlockFilter.validateRule(rule);
+        expect(vr.valid, isTrue, reason: 'Expected valid for $rule: ${vr.error}');
+      }
+
+      final filter = DanmuBlockFilter.compile(<String>[
+        'Spoiler',
+        're:第(一|二)章',
+        r're:(a|aa)+$',
+      ]);
+      expect(filter.ruleCount, 2);
+      expect(filter.isBlocked('HUGE spoiler ahead'), isTrue);
+      expect(filter.isBlocked('请看第二章'), isTrue);
+      expect(filter.isBlocked('正常弹幕'), isFalse);
+
+      // 100-rule maximum
+      final many = List<String>.generate(130, (i) => 'rule$i');
+      expect(DanmuBlockFilter.compile(many).ruleCount, 100);
+    });
+  });
+
+  group('3-Stage Protocol, Signatures, Full-Episode Fallback & SSRF', () {
+    test('signed/unsigned headers, multi-source isolation & full-episode fallback',
+        () async {
+      String? seenAppId;
+      String? seenTs;
+      String? seenSig;
+      String? seenPath;
+
+      final mockClient = MockClient((req) async {
+        if (req.url.host == 'bad.danmu.test') {
+          return http.Response('error', 500);
+        }
+        if (req.url.path == '/api/v2/match') {
+          seenAppId = req.headers['X-AppId'];
+          seenTs = req.headers['X-Timestamp'];
+          seenSig = req.headers['X-Signature'];
+          seenPath = req.url.path;
+          return http.Response(
+            jsonEncode(<String, dynamic>{
+              'isMatched': true,
+              'matches': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'episodeId': 10001,
+                  'animeId': 500,
+                  'animeTitle': 'Sample Show',
+                  'episodeTitle': 'Ep 1',
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        if (req.url.path == '/api/v2/bangumi/500') {
+          return http.Response(
+            jsonEncode(<String, dynamic>{
+              'bangumi': <String, dynamic>{
+                'animeTitle': 'Sample Show',
+                'episodes': <Map<String, dynamic>>[
+                  <String, dynamic>{'episodeId': 10001, 'episodeTitle': 'Ep 1'},
+                  <String, dynamic>{'episodeId': 10002, 'episodeTitle': 'Ep 2'},
+                ],
+              },
+            }),
+            200,
+          );
+        }
+        if (req.url.path == '/api/v2/comment/10001') {
+          return http.Response(
+            jsonEncode(<String, dynamic>{
+              'count': 3,
+              'comments': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'cid': 1,
+                  'p': '2.5,1,16777215,u1',
+                  'm': 'first',
+                },
+                <String, dynamic>{
+                  'cid': 2,
+                  'p': '35.0,5,16711680,u2',
+                  'm': 'second window',
+                },
+                <String, dynamic>{
+                  'cid': 1,
+                  'p': '2.5,1,16777215,u1',
+                  'm': 'dup ignored',
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        if (req.url.path == '/api/v2/comment/evilseg') {
+          return http.Response(
+            jsonEncode(<String, dynamic>{
+              'segments': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'startMs': 0,
+                  'endMs': 30000,
+                  'segmentUrl': 'https://unlisted.invalid/s0.json',
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        return http.Response('not found', 404);
+      });
+
+      final signed = DandanplayProvider(
+        multilineServerUrls: 'https://bad.danmu.test\nhttps://good.danmu.test',
+        appId: 'testAppId',
+        appSecret: 'testSecret',
+        minRequestIntervalMs: 0,
+        client: mockClient,
+      );
+
+      final matches = await signed.matchOrSearch(
+        const DanmuMatchQuery(
+          title: 'Sample Show',
+          episodeTitle: 'Ep 1',
+          episodeIndex: 1,
+          durationSec: 1440,
+        ),
+      );
+      expect(matches.length, 1);
+      expect(seenAppId, 'testAppId');
+      expect(seenTs, isNotNull);
+      expect(
+        seenSig,
+        DandanplayProvider.computeOpenApiSignature(
+          appId: 'testAppId',
+          timestampSec: int.parse(seenTs!),
+          urlPath: seenPath!,
+          appSecret: 'testSecret',
+        ),
+      );
+
+      // Unsigned omits signature headers
+      seenAppId = null;
+      final unsigned = DandanplayProvider(
+        multilineServerUrls: 'https://good.danmu.test',
+        minRequestIntervalMs: 0,
+        client: mockClient,
+      );
+      await unsigned.matchOrSearch(const DanmuMatchQuery(title: 'Sample Show'));
+      expect(seenAppId, isNull);
+
+      final eps = await unsigned.listEpisodes('https://good.danmu.test', '500');
+      expect(eps.length, 2);
+      expect(eps.first.boundEpisodeId.startsWith('mmdanmu://v1?'), isTrue);
+
+      final fullSession = await unsigned.openSession(eps.first.boundEpisodeId);
+      expect(fullSession.segmented, isFalse);
+      expect(fullSession.preloadComments.length, 2);
+
+      final w0 = await unsigned.fetchWindow(fullSession, 0);
+      final w1 = await unsigned.fetchWindow(fullSession, 1);
+      expect(w0.map((e) => e.text).toList(), <String>['first']);
+      expect(w1.map((e) => e.text).toList(), <String>['second window']);
+
+      // Unlisted segmentUrl SSRF rejection
+      final evilBound = DandanplayProvider.encodeBoundEpisodeId(
+        'https://good.danmu.test',
+        'evilseg',
+      );
+      await expectLater(
+        () => unsigned.openSession(evilBound),
+        throwsFormatException,
+      );
+
+      // XML external entity rejection
+      expect(
+        () => DandanplayProvider.parseDanmuPayload(
+          '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY e "boom">]><i><d p="1,1,25,16777215">&e;</d></i>',
+        ),
+        throwsFormatException,
+      );
+    });
+  });
+
+  group('Segmented Cache: Boundary Continuity, Negative Offset, 410 Singleflight, Seek Storm',
+      () {
+    test('negative offset (-10s), 60% prefetch, 30s boundary continuity & 3-window pinning',
+        () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final origin = 'http://127.0.0.1:${server.port}';
+
+      server.listen((req) async {
+        final path = req.uri.path;
+        if (path == '/api/v2/comment/ep-seg') {
+          final segs = List<Map<String, dynamic>>.generate(
+            30,
+            (w) => <String, dynamic>{
+              'startMs': w * 30000,
+              'endMs': (w + 1) * 30000,
+              'segmentUrl': '/seg/$w',
+            },
+          );
+          req.response
+            ..statusCode = 200
+            ..headers.contentType = ContentType.json
+            ..write(jsonEncode(<String, dynamic>{'segments': segs}));
+          await req.response.close();
+          return;
+        }
+        if (path.startsWith('/seg/')) {
+          final w = int.parse(path.substring('/seg/'.length));
+          late Map<String, dynamic> body;
+          if (w == 0) {
+            body = <String, dynamic>{
+              'comments': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'cid': 'c0',
+                  'p': '0.0,1,16777215',
+                  'm': 'intro-zero',
+                },
+                <String, dynamic>{
+                  'cid': 'c285',
+                  'p': '28.5,1,16777215',
+                  'm': 'crossing-boundary',
+                },
+              ],
+            };
+          } else if (w == 1) {
+            body = <String, dynamic>{
+              'comments': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'cid': 'c305',
+                  'p': '30.5,1,16777215',
+                  'm': 'after-boundary',
+                },
+              ],
+            };
+          } else {
+            body = <String, dynamic>{
+              'comments': List<Map<String, dynamic>>.generate(
+                900,
+                (i) => <String, dynamic>{
+                  'cid': 'w${w}_$i',
+                  'p': '${w * 30.0 + i * 0.02},1,16777215',
+                  'm': 'msg-$i',
+                },
+              ),
+            };
+          }
+          req.response
+            ..statusCode = 200
+            ..headers.contentType = ContentType.json
+            ..write(jsonEncode(body));
+          await req.response.close();
+          return;
+        }
+        req.response.statusCode = 404;
+        await req.response.close();
+      });
+
+      final provider = DandanplayProvider(
+        multilineServerUrls: origin,
+        minRequestIntervalMs: 0,
+      );
+      addTearDown(provider.close);
+      final cache = DanmuSegmentCache(provider: provider);
+      addTearDown(cache.dispose);
+
+      final boundId = DandanplayProvider.encodeBoundEpisodeId(origin, 'ep-seg');
+      await cache.bindSession(boundId);
+      expect(cache.currentSession?.segmented, isTrue);
+
+      // Negative offset (-10000ms): 0.0s danmu MUST NOT freeze during first 10s
+      cache.setTimeOffsetMs(-10000);
+      cache.onPlaybackTick(0, playing: true);
+      await cache.waitUntilIdle();
+      expect(cache.isWindowCached(0), isTrue);
+      expect(cache.snapshotForPosition(0), isEmpty);
+      expect(cache.snapshotForPosition(5000), isEmpty);
+      expect(cache.snapshotForPosition(9999), isEmpty);
+      final at10s = cache.snapshotForPosition(10000);
+      expect(at10s.map((e) => e.text).toList(), <String>['intro-zero']);
+
+      // Reset offset -> 60% prefetch at 18500ms -> boundary continuity at 31500ms
+      cache.setTimeOffsetMs(0);
+      cache.onPlaybackTick(18500, playing: true);
+      await cache.waitUntilIdle();
+      expect(cache.isWindowCached(1), isTrue);
+
+      cache.onPlaybackTick(31500, playing: true);
+      final boundary = cache.snapshotForPosition(31500);
+      expect(
+        boundary.map((e) => e.text).toList(),
+        <String>['crossing-boundary', 'after-boundary'],
+      );
+
+      // Heavy eviction: load 26 more windows (900 items each) -> dual cap & 3-window pinning
+      for (var w = 2; w < 28; w++) {
+        cache.onPlaybackTick(w * 30000 + 1000, playing: false);
+        await cache.waitUntilIdle();
+      }
+      expect(
+        cache.cachedWindowCount,
+        lessThanOrEqualTo(DanmuSegmentCache.maxCachedWindows),
+      );
+      expect(
+        cache.totalCachedItemCount,
+        lessThanOrEqualTo(DanmuSegmentCache.maxTotalItems),
+      );
+      expect(cache.isWindowCached(26), isTrue);
+      expect(cache.isWindowCached(27), isTrue);
+    });
+
+    test('concurrent HTTP 410 triggers singleflight refresh & caps at <= 3/episode',
+        () async {
+      var openCount = 0;
+      var epochVer = 0;
+      var always410 = false;
+      final segFetches = <int, int>{};
+
+      final client = MockClient((req) async {
+        if (req.url.path == '/api/v2/comment/ep-410') {
+          openCount++;
+          if (openCount > 1) {
+            await Future<void>.delayed(const Duration(milliseconds: 60));
+          }
+          epochVer++;
+          final segs = List<Map<String, dynamic>>.generate(
+            6,
+            (w) => <String, dynamic>{
+              'startMs': w * 30000,
+              'endMs': (w + 1) * 30000,
+              'segmentUrl': '/seg410/v$epochVer/$w',
+            },
+          );
+          return http.Response(jsonEncode(<String, dynamic>{'segments': segs}), 200);
+        }
+        if (req.url.path.startsWith('/seg410/')) {
+          final parts = req.url.path.split('/');
+          final ver = int.parse(parts[2].substring(1));
+          final w = int.parse(parts[3]);
+          segFetches[w] = (segFetches[w] ?? 0) + 1;
+          if (always410 || (ver == 1 && (w == 0 || w == 1))) {
+            return http.Response('expired', 410);
+          }
+          return http.Response(
+            jsonEncode(<String, dynamic>{
+              'comments': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'cid': 'ok_$w',
+                  'p': '${w * 30 + 1}.0,1,16777215',
+                  'm': 'recovered-$w',
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        return http.Response('not found', 404);
+      });
+
+      final provider = DandanplayProvider(
+        multilineServerUrls: 'https://node-a.danmu.test',
+        minRequestIntervalMs: 0,
+        client: client,
+      );
+      final cache = DanmuSegmentCache(provider: provider);
+      addTearDown(cache.dispose);
+
+      final boundId = DandanplayProvider.encodeBoundEpisodeId(
+        'https://node-a.danmu.test',
+        'ep-410',
+      );
+      await cache.bindSession(boundId);
+      // Concurrently trigger window 0 and prefetch window 1 (both hit 410 on v1)
+      cache.onPlaybackTick(19000, playing: true);
+      await cache.waitUntilIdle();
+
+      expect(cache.session410RefreshCount, 1);
+      expect(openCount, 2); // 1 initial + 1 singleflight refresh
+      expect(cache.sessionEpoch, 1);
+      expect(cache.snapshotForPosition(1500).length, 1);
+      expect(cache.snapshotForPosition(31500).length, 1);
+
+      // Persistent 410 across windows 2..5 -> strictly <= 3 total refreshes & <= 2 attempts/window
+      always410 = true;
+      for (var w = 2; w <= 5; w++) {
+        cache.onPlaybackTick(w * 30000 + 1000, playing: false);
+        await cache.waitUntilIdle();
+      }
+      expect(
+        cache.session410RefreshCount,
+        lessThanOrEqualTo(DanmuSegmentCache.maxSession410Refreshes),
+      );
+      for (var w = 2; w <= 5; w++) {
+        expect(segFetches[w] ?? 0, lessThanOrEqualTo(2));
+      }
+    });
+
+    test('180ms seek storm debounce cancels intermediate targets', () async {
+      final requested = <int>[];
+      final client = MockClient((req) async {
+        if (req.url.path == '/api/v2/comment/ep-seek') {
+          final segs = List<Map<String, dynamic>>.generate(
+            12,
+            (w) => <String, dynamic>{
+              'startMs': w * 30000,
+              'endMs': (w + 1) * 30000,
+              'segmentUrl': '/seekseg/$w',
+            },
+          );
+          return http.Response(jsonEncode(<String, dynamic>{'segments': segs}), 200);
+        }
+        if (req.url.path.startsWith('/seekseg/')) {
+          final w = int.parse(req.url.path.substring('/seekseg/'.length));
+          requested.add(w);
+          return http.Response(
+            jsonEncode(<String, dynamic>{
+              'comments': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'cid': 's$w',
+                  'p': '${w * 30 + 2}.0,1,16777215',
+                  'm': 'seek-win-$w',
+                },
+              ],
+            }),
+            200,
+          );
+        }
+        return http.Response('not found', 404);
+      });
+
+      final provider = DandanplayProvider(
+        multilineServerUrls: 'https://node-a.danmu.test',
+        minRequestIntervalMs: 0,
+        client: client,
+      );
+      final cache = DanmuSegmentCache(provider: provider, seekDebounceMs: 180);
+      addTearDown(cache.dispose);
+
+      final boundId = DandanplayProvider.encodeBoundEpisodeId(
+        'https://node-a.danmu.test',
+        'ep-seek',
+      );
+      await cache.bindSession(boundId);
+
+      cache.onSeekChanged(2 * 30000 + 5000);
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+      cache.onSeekChanged(4 * 30000 + 5000);
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+      cache.onSeekChanged(6 * 30000 + 5000);
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+      cache.onSeekChanged(10 * 30000 + 5000);
+
+      expect(requested, isEmpty);
+      await cache.waitUntilIdle();
+      expect(requested, <int>[10]);
+      expect(
+        cache.snapshotForPosition(10 * 30000 + 5000).map((e) => e.text).toList(),
+        <String>['seek-win-10'],
+      );
+    });
+
+    test('HTTP 429 Retry-After parsing and per-domain >= 200ms rate limit',
+        () async {
+      expect(DandanplayProvider.parseRetryAfterMs('3'), 3000);
+      expect(DandanplayProvider.parseRetryAfterMs(null), 2000);
+
+      final times = <int>[];
+      var calls = 0;
+      final client = MockClient((req) async {
+        times.add(DateTime.now().millisecondsSinceEpoch);
+        calls++;
+        if (calls == 3) {
+          return http.Response('rate limited', 429, headers: {'retry-after': '1'});
+        }
+        return http.Response('{"episodes":[]}', 200);
+      });
+
+      final provider = DandanplayProvider(
+        multilineServerUrls: 'https://node-a.danmu.test',
+        minRequestIntervalMs: 200,
+        client: client,
+      );
+      await provider.listEpisodes('https://node-a.danmu.test', '1');
+      await provider.listEpisodes('https://node-a.danmu.test', '2');
+      expect(times[1] - times[0], greaterThanOrEqualTo(180));
+
+      await expectLater(
+        () => provider.listEpisodes('https://node-a.danmu.test', '3'),
+        throwsA(
+          isA<DanmuHttpException>()
+              .having((e) => e.statusCode, 'statusCode', 429)
+              .having((e) => e.retryAfterMs, 'retryAfterMs', 1000),
+        ),
+      );
+    });
+  });
+
+  group('DanmuPrefs & OhosRuntime.isOhos Isolation', () {
+    test('prefs roundtrip and OHOS guard disables danmu cleanly', () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final initial = await DanmuPrefs.load();
+      expect(initial.enabled, isFalse);
+      expect(initial.serverUrls, isEmpty);
+      expect(initial.opacity, 0.85);
+      expect(initial.displayArea, 0.50);
+      expect(initial.fontSize, 20.0);
+
+      final updated = initial.copyWith(
+        enabled: true,
+        serverUrls: 'https://danmu.example',
+        opacity: 0.70,
+        timeOffsetMs: -2500,
+        blockRules: <String>['剧透', r're:(a|aa)+$', 're:第(一|二)章'],
+      );
+      await DanmuPrefs.save(updated);
+      final reloaded = await DanmuPrefs.load();
+      expect(reloaded.enabled, isTrue);
+      expect(reloaded.effectiveEnabled, isTrue);
+      expect(reloaded.serverUrls, 'https://danmu.example');
+      expect(reloaded.timeOffsetMs, -2500);
+      expect(reloaded.blockRules, <String>['剧透', 're:第(一|二)章']);
+
+      // Under OhosRuntime.isOhos == true, effectiveEnabled is forced false
+      OhosRuntime.debugIsOhosOverride = true;
+      expect(reloaded.effectiveEnabled, isFalse);
+      final ohosLoaded = await DanmuPrefs.load();
+      expect(ohosLoaded.enabled, isFalse);
+
+      var networkCalled = false;
+      final provider = DandanplayProvider(
+        multilineServerUrls: 'https://danmu.example',
+        client: MockClient((_) async {
+          networkCalled = true;
+          return http.Response('{}', 200);
+        }),
+      );
+      expect(
+        await provider.matchOrSearch(const DanmuMatchQuery(title: 'Test')),
+        isEmpty,
+      );
+      expect(networkCalled, isFalse);
+    });
+  });
+}
