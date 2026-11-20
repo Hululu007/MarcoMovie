@@ -1,0 +1,3150 @@
+{
+  "schemaVersion": 1,
+  "project": "Marco Movie",
+  "license": "GPL-3.0-only",
+  "caseCount": 146,
+  "anonymizedNotice": "All titles and URLs in this file are 100% synthetic placeholders (Example/Sample/Demo/示例/样片, .example/.test). Zero real media titles.",
+  "cases": [
+    {
+      "id": "G001",
+      "category": "resolution",
+      "input": "Example.Docu.2025.4320p.AV1.mkv",
+      "note": "8K via 4320p token",
+      "expected": [
+        {
+          "id": "res_8k",
+          "label": "8K"
+        },
+        {
+          "id": "vid_av1",
+          "label": "AV1"
+        }
+      ]
+    },
+    {
+      "id": "G002",
+      "category": "resolution",
+      "input": "Sample.Demo.8K.FUHD.HEVC.mp4",
+      "note": "8K via 8K + FUHD tokens",
+      "expected": [
+        {
+          "id": "res_8k",
+          "label": "8K"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G003",
+      "category": "resolution",
+      "input": "7680x4320 60fps Demo Clip",
+      "note": "8K via pixel dimension 7680x4320",
+      "expected": [
+        {
+          "id": "res_8k",
+          "label": "8K"
+        }
+      ]
+    },
+    {
+      "id": "G004",
+      "category": "resolution",
+      "input": "Example.Feature.2024.2160p.mkv",
+      "note": "4K via 2160p",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        }
+      ]
+    },
+    {
+      "id": "G005",
+      "category": "resolution",
+      "input": "Sample.Broadcast.2160i.HLG.ts",
+      "note": "4K via 2160i interlaced",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hlg",
+          "label": "HLG"
+        }
+      ]
+    },
+    {
+      "id": "G006",
+      "category": "resolution",
+      "input": "Demo.Title.2023.UHD.HEVC.mkv",
+      "note": "4K via standalone UHD",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G007",
+      "category": "resolution",
+      "input": "Sample.Clip.Ultra-HD.HDR10.mp4",
+      "note": "4K via Ultra-HD",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10",
+          "label": "HDR10"
+        }
+      ]
+    },
+    {
+      "id": "G008",
+      "category": "resolution",
+      "input": "3840x1606 Widescreen Cinema Sample",
+      "note": "Cropped 2.39:1 4K width 3840x1606",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        }
+      ]
+    },
+    {
+      "id": "G009",
+      "category": "resolution",
+      "input": "4096 × 2160 DCI Master Sample",
+      "note": "DCI 4K with Unicode multiplication sign",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        }
+      ]
+    },
+    {
+      "id": "G010",
+      "category": "resolution",
+      "input": "Sample.Gameplay.1440p.VP9.webm",
+      "note": "2K via 1440p",
+      "expected": [
+        {
+          "id": "res_2k",
+          "label": "2K"
+        },
+        {
+          "id": "vid_vp9",
+          "label": "VP9"
+        }
+      ]
+    },
+    {
+      "id": "G011",
+      "category": "resolution",
+      "input": "Demo.Capture.2K.QHD.H264.mp4",
+      "note": "2K via 2K/QHD",
+      "expected": [
+        {
+          "id": "res_2k",
+          "label": "2K"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G012",
+      "category": "resolution",
+      "input": "2560x1440 Desktop Sample Stream",
+      "note": "2K via 2560x1440",
+      "expected": [
+        {
+          "id": "res_2k",
+          "label": "2K"
+        }
+      ]
+    },
+    {
+      "id": "G013",
+      "category": "resolution",
+      "input": "Example.Episode.01.1080p.mp4",
+      "note": "1080p standard",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        }
+      ]
+    },
+    {
+      "id": "G014",
+      "category": "resolution",
+      "input": "Sample.Concert.1080i.AVC.ts",
+      "note": "1080p via 1080i",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G015",
+      "category": "resolution",
+      "input": "1920x804 Cropped FHD Sample",
+      "note": "1080p via cropped 1920x804 + FHD",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        }
+      ]
+    },
+    {
+      "id": "G016",
+      "category": "resolution",
+      "input": "Sample.Archive.720p.AAC.mp4",
+      "note": "720p standard",
+      "expected": [
+        {
+          "id": "res_720p",
+          "label": "720p"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        }
+      ]
+    },
+    {
+      "id": "G017",
+      "category": "resolution",
+      "input": "Sample.Classic.576p.FLAC.mkv",
+      "note": "SD via PAL 576p",
+      "expected": [
+        {
+          "id": "res_sd",
+          "label": "SD"
+        },
+        {
+          "id": "aud_flac",
+          "label": "FLAC"
+        }
+      ]
+    },
+    {
+      "id": "G018",
+      "category": "resolution",
+      "input": "Sample.Classic.480i.AC3.mkv",
+      "note": "SD via NTSC 480i",
+      "expected": [
+        {
+          "id": "res_sd",
+          "label": "SD"
+        },
+        {
+          "id": "aud_dd",
+          "label": "DD"
+        }
+      ]
+    },
+    {
+      "id": "G019",
+      "category": "resolution_trap",
+      "input": "Example.Title.1999.4K.Remastered.1080p.BluRay.AVC.mkv",
+      "note": "4K remaster downscaled to 1080p must emit 1080p only",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G020",
+      "category": "resolution_trap",
+      "input": "Sample.Feature.2023.UHD.BluRay.1080p.x265.mkv",
+      "note": "UHD BluRay rip at 1080p must emit 1080p only",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G021",
+      "category": "resolution_trap",
+      "input": "Demo.Documentary.8K.Mastered.2160p.WEB-DL.HEVC.mkv",
+      "note": "8K master encoded at 2160p emits 4K only",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G022",
+      "category": "resolution_trap",
+      "input": "Demo.Documentary.8K.Mastered.1080p.WEB-DL.H264.mkv",
+      "note": "8K master encoded at 1080p emits 1080p only",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G023",
+      "category": "resolution_trap",
+      "input": "Sample.Film.4K.Restoration.720p.BRRip.x264.mkv",
+      "note": "4K restoration at 720p emits 720p only",
+      "expected": [
+        {
+          "id": "res_720p",
+          "label": "720p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G024",
+      "category": "resolution_trap",
+      "input": "Sample.Clip.UHD.Source.480p.WEBRip.mp4",
+      "note": "UHD source downscaled to 480p emits SD only",
+      "expected": [
+        {
+          "id": "res_sd",
+          "label": "SD"
+        },
+        {
+          "id": "src_webrip",
+          "label": "WEBRip"
+        }
+      ]
+    },
+    {
+      "id": "G025",
+      "category": "resolution_trap",
+      "input": "备用线路：1080P/720P自适应",
+      "note": "Dual 1080P/720P label selects 1080p only",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        }
+      ]
+    },
+    {
+      "id": "G026",
+      "category": "resolution_trap",
+      "input": "旧版路线：720p / 480p",
+      "note": "Dual 720p/480p label selects 720p only",
+      "expected": [
+        {
+          "id": "res_720p",
+          "label": "720p"
+        }
+      ]
+    },
+    {
+      "id": "G027",
+      "category": "resolution_trap",
+      "input": "测试画质：4K / 2K",
+      "note": "Dual 4K/2K without 1080p selects 4K only",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        }
+      ]
+    },
+    {
+      "id": "G028",
+      "category": "resolution_trap",
+      "input": "Anime4K_Clamp_Highlights.glsl",
+      "note": "Anime4K token must not trigger 4K",
+      "expected": []
+    },
+    {
+      "id": "G029",
+      "category": "resolution_trap",
+      "input": "Sports.2K25.Edition.Trailer.mp4",
+      "note": "2K25 year/game token must not trigger 2K",
+      "expected": []
+    },
+    {
+      "id": "G030",
+      "category": "resolution_trap",
+      "input": "https://stream.example/vod/1080/720/480/index.m3u8",
+      "note": "Bare numeric URL segments /1080/720/480/ must not false-match resolutions",
+      "expected": []
+    },
+    {
+      "id": "G031",
+      "category": "resolution_trap",
+      "input": "Audio_Sample_384kbps_48khz.m4a",
+      "note": "Bitrate 384kbps and sample rate 48khz must not match 4K/8K",
+      "expected": []
+    },
+    {
+      "id": "G032",
+      "category": "resolution_trap",
+      "input": "MicroSD_Card_Backup_Demo.mp4",
+      "note": "MicroSD substring must not match SD",
+      "expected": []
+    },
+    {
+      "id": "G033",
+      "category": "source_quality",
+      "input": "Sample.2024.2160p.UHD.BluRay.REMUX.HEVC.mkv",
+      "note": "REMUX suppresses BluRay",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_remux",
+          "label": "REMUX"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G034",
+      "category": "source_quality",
+      "input": "Example.2022.1080p.Blu-ray.Remux.AVC.FLAC.mkv",
+      "note": "Blu-ray Remux emits REMUX only",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_remux",
+          "label": "REMUX"
+        },
+        {
+          "id": "aud_flac",
+          "label": "FLAC"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G035",
+      "category": "source_quality",
+      "input": "Sample.2021.1080p.BDREMUX.H264.mkv",
+      "note": "BDREMUX emits REMUX",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_remux",
+          "label": "REMUX"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G036",
+      "category": "source_quality",
+      "input": "Sample.2024.2160p.UHD-Remux.HEVC.mkv",
+      "note": "UHD-Remux emits 4K + REMUX",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_remux",
+          "label": "REMUX"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G037",
+      "category": "source_quality",
+      "input": "Sample.2024.1080p.BluRay.x264.mkv",
+      "note": "Standard BluRay",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G038",
+      "category": "source_quality",
+      "input": "Sample.2024.1080p.BDRip.x265.FLAC.mkv",
+      "note": "BDRip maps to BluRay",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_flac",
+          "label": "FLAC"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G039",
+      "category": "source_quality",
+      "input": "Sample.2024.2160p.BDMV.HEVC.iso",
+      "note": "BDMV ISO maps to BluRay",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G040",
+      "category": "source_quality",
+      "input": "Sample.2024.2160p.BD66.HEVC.mkv",
+      "note": "BD66 disc tag maps to BluRay",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G041",
+      "category": "source_quality",
+      "input": "Sample.2024.1080p.BD.AAC.mp4",
+      "note": "Standalone BD token maps to BluRay",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        }
+      ]
+    },
+    {
+      "id": "G042",
+      "category": "source_quality",
+      "input": "Sample.2024.1080p.WEB-DL.WEBRip.H264.mp4",
+      "note": "WEB-DL suppresses WEBRip",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G043",
+      "category": "source_quality",
+      "input": "Sample.2024.1080p.WEBDL.H.265.mkv",
+      "note": "WEBDL without hyphen",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G044",
+      "category": "source_quality",
+      "input": "Sample.2024.720p.WEB-Rip.x264.mkv",
+      "note": "WEB-Rip with hyphen",
+      "expected": [
+        {
+          "id": "res_720p",
+          "label": "720p"
+        },
+        {
+          "id": "src_webrip",
+          "label": "WEBRip"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G045",
+      "category": "source_quality",
+      "input": "Sample.2024.1080i.HDTV.MPEG2.DD2.0.ts",
+      "note": "HDTV broadcast capture",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_hdtv",
+          "label": "HDTV"
+        },
+        {
+          "id": "aud_dd",
+          "label": "DD"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        }
+      ]
+    },
+    {
+      "id": "G046",
+      "category": "source_quality",
+      "input": "bd://internal/catalog/item_42",
+      "note": "Custom bd:// scheme must not match BluRay",
+      "expected": []
+    },
+    {
+      "id": "G047",
+      "category": "dynamic_range_trap",
+      "input": "Example.2024.1080p.BluRay.x265.10bit.AAC.mkv",
+      "note": "10bit without HDR must NOT emit HDR10 or HDR",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G048",
+      "category": "dynamic_range_trap",
+      "input": "Example.2024.1080p.BD.Hi10P.10-bit.FLAC.x264.mkv",
+      "note": "Hi10P + 10-bit without HDR must NOT emit HDR10",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_flac",
+          "label": "FLAC"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G049",
+      "category": "dynamic_range_trap",
+      "input": "Example.2024.2160p.WEB-DL.SDR.10bit.HEVC.mkv",
+      "note": "Explicit SDR 10bit emits zero HDR badges",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G050",
+      "category": "dynamic_range_trap",
+      "input": "Example.2024.2160p.non-HDR.10bit.HEVC.mkv",
+      "note": "Explicit non-HDR emits zero HDR badges",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G051",
+      "category": "dynamic_range_trap",
+      "input": "Example.2024.480p.DVDRip.x264.mkv",
+      "note": "DVDRip must NOT match DV",
+      "expected": [
+        {
+          "id": "res_sd",
+          "label": "SD"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G052",
+      "category": "dynamic_range_trap",
+      "input": "https://dav.example/webdav/dvr_capture_01.ts",
+      "note": "webdav/dvr path must NOT match DV",
+      "expected": []
+    },
+    {
+      "id": "G053",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.WEB-DL.HDR10+.HEVC.mkv",
+      "note": "HDR10+ suppresses HDR10 and HDR",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10plus",
+          "label": "HDR10+"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G054",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.WEB-DL.HDR10Plus.H265.mkv",
+      "note": "HDR10Plus text variant",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10plus",
+          "label": "HDR10+"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G055",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.BluRay.HDR10_Plus.HDR10.HEVC.mkv",
+      "note": "Dual HDR10_Plus + HDR10 emits HDR10+ only",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10plus",
+          "label": "HDR10+"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G056",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.WEB-DL.HDR10.10bit.HEVC.mkv",
+      "note": "HDR10 followed by .10bit emits HDR10",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10",
+          "label": "HDR10"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G057",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.WEB-DL.HDR-10.HEVC.mkv",
+      "note": "HDR-10 hyphenated emits HDR10",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10",
+          "label": "HDR10"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G058",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.SMPTE2084.HEVC.mkv",
+      "note": "SMPTE2084 transfer tag maps to HDR10",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10",
+          "label": "HDR10"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G059",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.WEB-DL.HDR.10bit.HEVC.mkv",
+      "note": "HDR.10bit (generic HDR + 10-bit depth) emits HDR, not HDR10",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr",
+          "label": "HDR"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G060",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.WEB-DL.HDR-10-bit.HEVC.mkv",
+      "note": "HDR-10-bit emits HDR, not HDR10",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr",
+          "label": "HDR"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G061",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.HLG.ARIB-STD-B67.HEVC.ts",
+      "note": "HLG broadcast transfer",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hlg",
+          "label": "HLG"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G062",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.HDR.Vivid.HEVC.mp4",
+      "note": "HDR Vivid maps to HDR",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr",
+          "label": "HDR"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G063",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.DoVi.HDR10+.HEVC.mkv",
+      "note": "Hybrid DoVi + HDR10+ preserves both DV and HDR10+",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_dv",
+          "label": "DV"
+        },
+        {
+          "id": "dr_hdr10plus",
+          "label": "HDR10+"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G064",
+      "category": "dynamic_range",
+      "input": "Example.2024.2160p.DV.HDR10.HEVC.mkv",
+      "note": "Profile 8.1 DV + HDR10 preserves both DV and HDR10",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_dv",
+          "label": "DV"
+        },
+        {
+          "id": "dr_hdr10",
+          "label": "HDR10"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G065",
+      "category": "combo",
+      "input": "Example.Title.2023.2160p.WEB-DL.DV.HDR10.DDP5.1.Atmos.H265",
+      "note": "Canonical S00 combo: DV+Atmos -> DV · ATMOS while keeping HDR10 and DD+",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        },
+        {
+          "id": "dr_hdr10",
+          "label": "HDR10"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G066",
+      "category": "combo",
+      "input": "Sample.Film.2024.2160p.UHD.BluRay.REMUX.DoVi.TrueHD.7.1.Atmos.HEVC.mkv",
+      "note": "Remux DV+TrueHD+Atmos -> DV · ATMOS + REMUX + TrueHD + 7.1",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        },
+        {
+          "id": "src_remux",
+          "label": "REMUX"
+        },
+        {
+          "id": "aud_truehd",
+          "label": "TrueHD"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G067",
+      "category": "combo",
+      "input": "Sample.Show.S01E01.2160p.NF.WEB-DL.DV.DDP5.1.H265.mkv",
+      "note": "DV + DDP5.1 without Atmos -> DV · DD+",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_ddp",
+          "label": "DV · DD+"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        },
+        {
+          "id": "plt_nf",
+          "label": "NF"
+        }
+      ]
+    },
+    {
+      "id": "G068",
+      "category": "combo",
+      "input": "Sample.Film.2024.2160p.BluRay.Dolby.Vision.TrueHD.5.1.x265.mkv",
+      "note": "Dolby Vision + TrueHD without Atmos -> DV · TrueHD",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_truehd",
+          "label": "DV · TrueHD"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G069",
+      "category": "combo",
+      "input": "Sample.Show.S02E03.2160p.ATVP.WEB-DL.DV.DD+Atmos.H.265.mp4",
+      "note": "DV + DD+Atmos concatenated",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        },
+        {
+          "id": "plt_atvp",
+          "label": "ATVP"
+        }
+      ]
+    },
+    {
+      "id": "G070",
+      "category": "combo",
+      "input": "Sample.Film.2024.2160p.WEB-DL.dvh1.05.06.ec-3.6ch.mp4",
+      "note": "Player fourcc dvh1.05.06 + ec-3 -> DV · DD+",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_ddp",
+          "label": "DV · DD+"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        }
+      ]
+    },
+    {
+      "id": "G071",
+      "category": "combo",
+      "input": "Sample.Film.2024.2160p.dvhe.08.06.mlp.atmos.8ch.mkv",
+      "note": "Player fourcc dvhe.08.06 + mlp + atmos -> DV · ATMOS + TrueHD + 7.1",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        },
+        {
+          "id": "aud_truehd",
+          "label": "TrueHD"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        }
+      ]
+    },
+    {
+      "id": "G072",
+      "category": "combo",
+      "input": "Sample.Film.2024.2160p.BluRay.REMUX.DV.DTS-HD.MA.7.1.HEVC.mkv",
+      "note": "DV + DTS-HD MA emits standalone DV (no combo)",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_dv",
+          "label": "DV"
+        },
+        {
+          "id": "src_remux",
+          "label": "REMUX"
+        },
+        {
+          "id": "aud_dtshd_ma",
+          "label": "DTS-HD MA"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G073",
+      "category": "combo",
+      "input": "Sample.Film.2024.2160p.WEB-DL.DV.FLAC.2.0.HEVC.mkv",
+      "note": "DV + FLAC emits standalone DV",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_dv",
+          "label": "DV"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_flac",
+          "label": "FLAC"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G074",
+      "category": "combo",
+      "input": "Sample.Film.2024.2160p.WEB-DL.DV.AC3.5.1.H265.mkv",
+      "note": "DV + legacy AC3 (DD) emits standalone DV + DD",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_dv",
+          "label": "DV"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_dd",
+          "label": "DD"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G075",
+      "category": "combo",
+      "input": "Sample.Film.2024.2160p.WEB-DL.HDR10.DDP5.1.Atmos.H265.mkv",
+      "note": "HDR10 + Atmos without DV emits separate HDR10 + ATMOS + DD+",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10",
+          "label": "HDR10"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_atmos",
+          "label": "ATMOS"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G076",
+      "category": "combo",
+      "input": "【样片】第01集 4K 杜比视界 杜比全景声 高码HEVC",
+      "note": "Chinese Dolby Vision + Atmos -> DV · ATMOS",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G077",
+      "category": "combo",
+      "input": "杜比视界 + EAC3 5.1 臻享线路",
+      "note": "Chinese Dolby Vision + EAC3 -> DV · DD+",
+      "expected": [
+        {
+          "id": "combo_dv_ddp",
+          "label": "DV · DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        }
+      ]
+    },
+    {
+      "id": "G078",
+      "category": "combo",
+      "input": "Sample.2160p.DV.TrueHD7.1.DDP5.1.HEVC.mkv",
+      "note": "DV + TrueHD + DDP: combo_dv_truehd consumes DV+TrueHD, leaving DD+ unconsumed without double DV",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_truehd",
+          "label": "DV · TrueHD"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G079",
+      "category": "audio_codec",
+      "input": "Sample.2024.2160p.BluRay.DTS:X.7.1.HEVC.mkv",
+      "note": "DTS:X with colon",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dtsx",
+          "label": "DTS:X"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G080",
+      "category": "audio_codec",
+      "input": "Sample.2024.2160p.BluRay.DTS-X.DTS-HD.MA.7.1.HEVC.mkv",
+      "note": "DTS-X suppresses DTS-HD MA",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dtsx",
+          "label": "DTS:X"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G081",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.DTS.X.7.1.AVC.mkv",
+      "note": "DTS.X with dot",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dtsx",
+          "label": "DTS:X"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G082",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.DTS-HD.MA.5.1.x264.mkv",
+      "note": "DTS-HD MA suppresses DTS-HD and DTS",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dtshd_ma",
+          "label": "DTS-HD MA"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G083",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.DTS-MA.7.1.x265.mkv",
+      "note": "DTS-MA shorthand maps to DTS-HD MA",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dtshd_ma",
+          "label": "DTS-HD MA"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G084",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.DTS-XLL.5.1.AVC.mkv",
+      "note": "DTS-XLL lossless extension maps to DTS-HD MA, not DTS:X",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dtshd_ma",
+          "label": "DTS-HD MA"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G085",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.DTS-HD.HR.5.1.x264.mkv",
+      "note": "DTS-HD HR maps to DTS-HD and suppresses DTS",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dtshd",
+          "label": "DTS-HD"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G086",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.DTS-HRA.7.1.x265.mkv",
+      "note": "DTS-HRA maps to DTS-HD",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dtshd",
+          "label": "DTS-HD"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G087",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.DTS-HD.5.1.AVC.mkv",
+      "note": "Plain DTS-HD",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dtshd",
+          "label": "DTS-HD"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G088",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.DTS-ES.5.1.x264.mkv",
+      "note": "DTS-ES maps to DTS",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dts",
+          "label": "DTS"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G089",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.DTS5.1.x264.mkv",
+      "note": "Concatenated DTS5.1 emits DTS + 5.1",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dts",
+          "label": "DTS"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G090",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.WEB-DL.E-AC-3.5.1.AC-3.2.0.H264.mkv",
+      "note": "E-AC-3 (DD+) suppresses AC-3 (DD); 5.1 suppresses 2.0",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G091",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.WEB-DL.Dolby.Digital.Plus.5.1.H264.mp4",
+      "note": "Full name Dolby Digital Plus",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G092",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.Dolby.Digital.5.1.x264.mkv",
+      "note": "Full name Dolby Digital -> DD",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dd",
+          "label": "DD"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G093",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.LPCM2.0.AVC.mkv",
+      "note": "Concatenated LPCM2.0",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_lpcm",
+          "label": "LPCM"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G094",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.BluRay.PCM.5.1.AVC.mkv",
+      "note": "PCM maps to LPCM",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_lpcm",
+          "label": "LPCM"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G095",
+      "category": "audio_codec",
+      "input": "Sample.2024.1080p.WEBRip.OPUS5.1.AV1.webm",
+      "note": "Concatenated OPUS5.1",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webrip",
+          "label": "WEBRip"
+        },
+        {
+          "id": "aud_opus",
+          "label": "OPUS"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_av1",
+          "label": "AV1"
+        }
+      ]
+    },
+    {
+      "id": "G096",
+      "category": "audio_codec",
+      "input": "Sample.2024.720p.WEB-DL.HE-AAC.2.0.H264.mp4",
+      "note": "HE-AAC maps to AAC",
+      "expected": [
+        {
+          "id": "res_720p",
+          "label": "720p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G097",
+      "category": "audio_codec_trap",
+      "input": "odd_episode_padding_hdd_backup_sdd.mp4",
+      "note": "Substrings odd/padding/hdd/sdd must not match DD",
+      "expected": []
+    },
+    {
+      "id": "G098",
+      "category": "audio_channels",
+      "input": "Sample.2024.2160p.TrueHD.7.1.4.Atmos.HEVC.mkv",
+      "note": "7.1.4 spatial bed maps to 7.1",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "aud_atmos",
+          "label": "ATMOS"
+        },
+        {
+          "id": "aud_truehd",
+          "label": "TrueHD"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G099",
+      "category": "audio_channels",
+      "input": "Sample.2024.2160p.DDP.5.1.2.Atmos.HEVC.mkv",
+      "note": "5.1.2 spatial bed maps to 5.1",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "aud_atmos",
+          "label": "ATMOS"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G100",
+      "category": "audio_channels",
+      "input": "Sample.2024.2160p.BluRay.TrueHD.7.1.DDP.5.1.AAC.2.0.HEVC.mkv",
+      "note": "Multi-track string emits highest surround channel 7.1 only",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_truehd",
+          "label": "TrueHD"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G101",
+      "category": "audio_channels",
+      "input": "Sample.2024.1080p.WEB-DL.8channels.FLAC.mkv",
+      "note": "8channels maps to 7.1",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_flac",
+          "label": "FLAC"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        }
+      ]
+    },
+    {
+      "id": "G102",
+      "category": "audio_channels",
+      "input": "Sample.2024.1080p.WEB-DL.6ch.AAC.mp4",
+      "note": "6ch maps to 5.1",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        }
+      ]
+    },
+    {
+      "id": "G103",
+      "category": "audio_channels",
+      "input": "Sample.2024.1080p.WEB-DL.Stereo.AAC.mp4",
+      "note": "Stereo maps to 2.0",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        }
+      ]
+    },
+    {
+      "id": "G104",
+      "category": "audio_channels_trap",
+      "input": "[5.1GB] Sample.Episode.01.1080p.WEB-DL.AAC.mp4",
+      "note": "File size [5.1GB] must NOT match 5.1 channels",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        }
+      ]
+    },
+    {
+      "id": "G105",
+      "category": "audio_channels_trap",
+      "input": "[7.1 GB] Sample.Episode.02.2160p.WEB-DL.H265.mkv",
+      "note": "Spaced file size [7.1 GB] must NOT match 7.1 channels",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G106",
+      "category": "audio_channels_trap",
+      "input": "[2.0GB] Sample.Episode.03.1080p.x264.mp4",
+      "note": "File size [2.0GB] must NOT match 2.0 channels",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G107",
+      "category": "audio_channels_trap",
+      "input": "Sample.Episode.04.Repack.v2.0.1080p.WEB-DL.H264.mkv",
+      "note": "Version tag v2.0 must NOT match 2.0 channels",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G108",
+      "category": "audio_channels_trap",
+      "input": "Encoder_Build_v1.5.1_Test_Sample.mp4",
+      "note": "Version tag v1.5.1 must NOT match 5.1 channels",
+      "expected": []
+    },
+    {
+      "id": "G109",
+      "category": "audio_channels_trap",
+      "input": "Sample.Clip.5.12.Ratio.1080p.mp4",
+      "note": "Decimal 5.12 must NOT match 5.1 channels",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        }
+      ]
+    },
+    {
+      "id": "G110",
+      "category": "audio_channels_trap",
+      "input": "Sample.Clip.25.1fps.Capture.mp4",
+      "note": "25.1fps must NOT match 5.1 channels",
+      "expected": []
+    },
+    {
+      "id": "G111",
+      "category": "audio_channels_trap",
+      "input": "https://dav.example/dd/cr/video_sample.mp4",
+      "note": "URL path /dd/cr/ must NOT match DD or CR",
+      "expected": []
+    },
+    {
+      "id": "G112",
+      "category": "player_tracks",
+      "input": "1920x1080 video/av01 av01.0.08M.10 opus 2ch",
+      "note": "ExoPlayer/media_kit AV1 + Opus 2ch track string",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "aud_opus",
+          "label": "OPUS"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        },
+        {
+          "id": "vid_av1",
+          "label": "AV1"
+        }
+      ]
+    },
+    {
+      "id": "G113",
+      "category": "player_tracks",
+      "input": "3840x1606 video/hevc hvc1.2.4.L153.B0 bt.2020 pq ec-3 6ch",
+      "note": "ExoPlayer/media_kit HEVC + bt.2020 pq + EC-3 6ch",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr",
+          "label": "HDR"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G114",
+      "category": "player_tracks",
+      "input": "3840x2160 video/x-vnd.on2.vp9 vp09.02.51.10 hlg opus 2ch",
+      "note": "VP9 Profile 2 HLG track string",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hlg",
+          "label": "HLG"
+        },
+        {
+          "id": "aud_opus",
+          "label": "OPUS"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        },
+        {
+          "id": "vid_vp9",
+          "label": "VP9"
+        }
+      ]
+    },
+    {
+      "id": "G115",
+      "category": "player_tracks",
+      "input": "1280x534 video/avc avc1.64001F mp4a.40.2 stereo",
+      "note": "AVC + mp4a.40.2 stereo track string",
+      "expected": [
+        {
+          "id": "res_720p",
+          "label": "720p"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G116",
+      "category": "video_codec",
+      "input": "Sample.2024.2160p.SVT-AV1.10bit.OPUS.5.1.mkv",
+      "note": "SVT-AV1 encoder tag",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "aud_opus",
+          "label": "OPUS"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_av1",
+          "label": "AV1"
+        }
+      ]
+    },
+    {
+      "id": "G117",
+      "category": "video_codec",
+      "input": "Sample.2024.1080p.WEB-DL.H.265.AAC2.0.mp4",
+      "note": "Dotted H.265",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G118",
+      "category": "video_codec",
+      "input": "Sample.2024.1080p.WEB-DL.H.264.AAC2.0.mp4",
+      "note": "Dotted H.264",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G119",
+      "category": "platform",
+      "input": "Sample.Show.S01E01.2160p.NFLX.WEB-DL.DV.Atmos.DDP5.1.H265.mkv",
+      "note": "NFLX maps to text-only NF",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        },
+        {
+          "id": "plt_nf",
+          "label": "NF"
+        }
+      ]
+    },
+    {
+      "id": "G120",
+      "category": "platform",
+      "input": "Sample.Show.S01E02.2160p.AMZN.WEB-DL.HDR10+.DDP5.1.H.265.mkv",
+      "note": "AMZN platform tag",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10plus",
+          "label": "HDR10+"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        },
+        {
+          "id": "plt_amzn",
+          "label": "AMZN"
+        }
+      ]
+    },
+    {
+      "id": "G121",
+      "category": "platform",
+      "input": "Sample.Show.S01E03.2160p.Apple.TV+.WEB-DL.DV.DDP5.1.Atmos.HEVC.mp4",
+      "note": "Apple.TV+ maps to ATVP",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        },
+        {
+          "id": "plt_atvp",
+          "label": "ATVP"
+        }
+      ]
+    },
+    {
+      "id": "G122",
+      "category": "platform",
+      "input": "Sample.Show.S01E04.2160p.DSNP.WEB-DL.DV.HDR10.DDP5.1.Atmos.H265.mkv",
+      "note": "DSNP platform tag",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        },
+        {
+          "id": "dr_hdr10",
+          "label": "HDR10"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        },
+        {
+          "id": "plt_dsnp",
+          "label": "DSNP"
+        }
+      ]
+    },
+    {
+      "id": "G123",
+      "category": "platform",
+      "input": "Sample.Show.S01E05.2160p.MAX.WEB-DL.DV.DDP5.1.Atmos.H265.mkv",
+      "note": "MAX adjacent to WEB-DL matches MAX",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        },
+        {
+          "id": "plt_max",
+          "label": "MAX"
+        }
+      ]
+    },
+    {
+      "id": "G124",
+      "category": "platform",
+      "input": "Sample.Show.S01E06.1080p.HMAX.WEBRip.DD5.1.x264.mkv",
+      "note": "HMAX maps to MAX",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webrip",
+          "label": "WEBRip"
+        },
+        {
+          "id": "aud_dd",
+          "label": "DD"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        },
+        {
+          "id": "plt_max",
+          "label": "MAX"
+        }
+      ]
+    },
+    {
+      "id": "G125",
+      "category": "platform_trap",
+      "input": "Sample.Max.Bitrate.Edition.1080p.BluRay.x264.mkv",
+      "note": "Generic word Max in BluRay title must NOT trigger MAX platform",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G126",
+      "category": "platform",
+      "input": "Sample.Show.S01E07.1080p.HULU.WEB-DL.DDP5.1.H264.mkv",
+      "note": "HULU platform tag",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        },
+        {
+          "id": "plt_hulu",
+          "label": "HULU"
+        }
+      ]
+    },
+    {
+      "id": "G127",
+      "category": "platform",
+      "input": "Sample.Show.S01E08.2160p.PCOK.WEB-DL.HDR10.DDP5.1.H265.mkv",
+      "note": "PCOK platform tag",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10",
+          "label": "HDR10"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        },
+        {
+          "id": "plt_pcok",
+          "label": "PCOK"
+        }
+      ]
+    },
+    {
+      "id": "G128",
+      "category": "platform",
+      "input": "Sample.Show.S01E09.2160p.PMTP.WEB-DL.DV.DDP5.1.H265.mkv",
+      "note": "PMTP platform tag",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_ddp",
+          "label": "DV · DD+"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        },
+        {
+          "id": "plt_pmtp",
+          "label": "PMTP"
+        }
+      ]
+    },
+    {
+      "id": "G129",
+      "category": "platform",
+      "input": "[BILI] 示例剧集 - 01 [1080p][HEVC][AAC].mp4",
+      "note": "BILI bracket tag",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        },
+        {
+          "id": "plt_bili",
+          "label": "BILI"
+        }
+      ]
+    },
+    {
+      "id": "G130",
+      "category": "platform",
+      "input": "[CR] Sample_Animation_-_01_[1080p][AAC2.0][H264].mkv",
+      "note": "[CR] anime release tag",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "aud_aac",
+          "label": "AAC"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        },
+        {
+          "id": "plt_cr",
+          "label": "CR"
+        }
+      ]
+    },
+    {
+      "id": "G131",
+      "category": "platform_trap",
+      "input": "Sample.2024.1080p.BluRay.x264-CR.mkv",
+      "note": "Trailing group -CR on BluRay must NOT trigger CR platform",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "vid_avc",
+          "label": "AVC"
+        }
+      ]
+    },
+    {
+      "id": "G132",
+      "category": "cms_chinese",
+      "input": "云盘4K蓝光原盘REMUX",
+      "note": "Chinese 4K + 蓝光原盘 + REMUX -> 4K + REMUX",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "src_remux",
+          "label": "REMUX"
+        }
+      ]
+    },
+    {
+      "id": "G133",
+      "category": "cms_chinese",
+      "input": "网盘4K臻彩高码",
+      "note": "Chinese 4K + 臻彩 -> 4K + HDR",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr",
+          "label": "HDR"
+        }
+      ]
+    },
+    {
+      "id": "G134",
+      "category": "cms_chinese",
+      "input": "蓝光1080高码立体声",
+      "note": "Chinese 蓝光1080 + 立体声 -> 1080p + 2.0",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "ch_2_0",
+          "label": "2.0"
+        }
+      ]
+    },
+    {
+      "id": "G135",
+      "category": "cms_chinese",
+      "input": "B站4K杜比视界60帧",
+      "note": "Chinese B站 + 4K + 杜比视界",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_dv",
+          "label": "DV"
+        },
+        {
+          "id": "plt_bili",
+          "label": "BILI"
+        }
+      ]
+    },
+    {
+      "id": "G136",
+      "category": "cms_chinese",
+      "input": "Web站点备份1080p视频",
+      "note": "Web站点 substring must NOT match BILI (B站)",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        }
+      ]
+    },
+    {
+      "id": "G137",
+      "category": "cms_chinese",
+      "input": "第12集（样片完结篇）4K/DV/ATMOS",
+      "note": "Slash-delimited 4K/DV/ATMOS in episode title",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        }
+      ]
+    },
+    {
+      "id": "G138",
+      "category": "cloud_url",
+      "input": "mmcloud://quark/folder_a1/Example.Episode.01.2160p.WEB-DL.DV.DDP5.1.H265.mkv",
+      "note": "mmcloud:// URI with scene filename",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_ddp",
+          "label": "DV · DD+"
+        },
+        {
+          "id": "src_webdl",
+          "label": "WEB-DL"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G139",
+      "category": "cloud_url",
+      "input": "https://dav.example/library/%E8%93%9D%E5%85%89%E5%8E%9F%E7%9B%98/Sample%202160p%20HDR10%2B%20TrueHD%207.1%20Atmos%20HEVC.mkv",
+      "note": "Percent-encoded UTF-8 + %20 + %2B WebDAV URL",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10plus",
+          "label": "HDR10+"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_atmos",
+          "label": "ATMOS"
+        },
+        {
+          "id": "aud_truehd",
+          "label": "TrueHD"
+        },
+        {
+          "id": "ch_7_1",
+          "label": "7.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G140",
+      "category": "cloud_url",
+      "input": "mmemby://play?itemId=9001&name=Demo%20Item%201080p%20BluRay%20DTS-HD%20MA%205.1%20x265.mkv",
+      "note": "mmemby:// query URI with %20 spaces",
+      "expected": [
+        {
+          "id": "res_1080p",
+          "label": "1080p"
+        },
+        {
+          "id": "src_bluray",
+          "label": "BluRay"
+        },
+        {
+          "id": "aud_dtshd_ma",
+          "label": "DTS-HD MA"
+        },
+        {
+          "id": "ch_5_1",
+          "label": "5.1"
+        },
+        {
+          "id": "vid_hevc",
+          "label": "HEVC"
+        }
+      ]
+    },
+    {
+      "id": "G141",
+      "category": "boundary",
+      "input": "100% Synthetic Demo Clip 4K HDR10+ DD+",
+      "note": "Literal 100% + literal '+' preserved during normalization",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "dr_hdr10plus",
+          "label": "HDR10+"
+        },
+        {
+          "id": "aud_ddp",
+          "label": "DD+"
+        }
+      ]
+    },
+    {
+      "id": "G142",
+      "category": "boundary",
+      "input": "线路一\r\n2160p · DV · Atmos",
+      "note": "CRLF multi-line input normalized cleanly",
+      "expected": [
+        {
+          "id": "res_4k",
+          "label": "4K"
+        },
+        {
+          "id": "combo_dv_atmos",
+          "label": "DV · ATMOS"
+        }
+      ]
+    },
+    {
+      "id": "G143",
+      "category": "boundary",
+      "input": "",
+      "note": "Empty string returns []",
+      "expected": []
+    },
+    {
+      "id": "G144",
+      "category": "boundary",
+      "input": "   \t\r\n  ",
+      "note": "Whitespace-only string returns []",
+      "expected": []
+    },
+    {
+      "id": "G145",
+      "category": "boundary",
+      "input": "第01集 · 正片",
+      "note": "Plain episode label without specs returns []",
+      "expected": []
+    },
+    {
+      "id": "G146",
+      "category": "boundary",
+      "input": "sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_sample_padding_2160p.HDR10.HEVC",
+      "note": "Tokens strictly past 1024-char truncation boundary are ignored identically in Java and Dart",
+      "expected": []
+    }
+  ]
+}

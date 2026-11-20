@@ -1,0 +1,331 @@
+{
+  "schemaVersion": 1,
+  "project": "Marco Movie",
+  "license": "GPL-3.0-only",
+  "description": "Cross-platform motion timings, curves, physical springs, accessibility substitutions, and text-only badge style tokens.",
+  "durationsMs": {
+    "instant": 0,
+    "micro": 90,
+    "fast": 150,
+    "windowsRouteExit": 150,
+    "windowsRouteEnter": 185,
+    "standard": 220,
+    "emphasized": 320,
+    "transitionExit": 300,
+    "transitionEnter": 420,
+    "logoLoop": 1600,
+    "auroraCycle": 16000
+  },
+  "hudTimersMs": {
+    "startSpecFadeIn": 180,
+    "startSpecDisplay": 3000,
+    "startSpecFadeOut": 240,
+    "desktopCursorIdleHide": 2500,
+    "touchControlsIdleHide": 4000,
+    "skipCountdownTotal": 5000,
+    "desktopHoldBoostThreshold": 280,
+    "tvHoldBoostThreshold": 320,
+    "danmuSeekDebounce": 180,
+    "transitionCaptureBudget": 16
+  },
+  "curves": {
+    "standard": {
+      "cubicBezier": [0.2, 0.0, 0.0, 1.0],
+      "android": "new android.view.animation.PathInterpolator(0.2f, 0.0f, 0.0f, 1.0f)",
+      "flutter": "Cubic(0.2, 0.0, 0.0, 1.0)"
+    },
+    "decelerate": {
+      "cubicBezier": [0.05, 0.7, 0.1, 1.0],
+      "android": "new android.view.animation.PathInterpolator(0.05f, 0.7f, 0.1f, 1.0f)",
+      "flutter": "Cubic(0.05, 0.7, 0.1, 1.0)"
+    },
+    "accelerate": {
+      "cubicBezier": [0.3, 0.0, 0.8, 0.15],
+      "android": "new android.view.animation.PathInterpolator(0.3f, 0.0f, 0.8f, 0.15f)",
+      "flutter": "Cubic(0.3, 0.0, 0.8, 0.15)"
+    },
+    "linear": {
+      "cubicBezier": [0.0, 0.0, 1.0, 1.0],
+      "android": "new android.view.animation.LinearInterpolator()",
+      "flutter": "Curves.linear"
+    }
+  },
+  "springs": {
+    "formulas": {
+      "omegaRadPerSec": "2 * pi / response",
+      "stiffness": "mass * pow(2 * pi / response, 2)",
+      "viscousDamping": "2 * dampingRatio * sqrt(stiffness * mass)",
+      "androidSpringForce": "new SpringForce(target).setStiffness(stiffness).setDampingRatio(dampingRatio)",
+      "androidMotionSpring": "new MotionSpring(initial, motionSpringFrequency, 0.0025f) // exact critically damped solver when dampingRatio == 1.0",
+      "flutterSpringDescription": "SpringDescription(mass: mass, stiffness: stiffness, damping: viscousDamping)"
+    },
+    "presets": {
+      "tvFocus": {
+        "response": 0.21,
+        "dampingRatio": 1.0,
+        "mass": 1.0,
+        "stiffness": 894.9,
+        "viscousDamping": 59.83,
+        "motionSpringFrequency": 30.0,
+        "note": "Aligned with FocusMotion.emphasis (MotionSpring frequency 30.0) for zero-overshoot 10-foot D-pad focus."
+      },
+      "pressFeedback": {
+        "response": 0.16,
+        "dampingRatio": 1.0,
+        "mass": 1.0,
+        "stiffness": 1542.1,
+        "viscousDamping": 78.54,
+        "motionSpringFrequency": 40.0,
+        "note": "Aligned with FocusMotion.compression (MotionSpring frequency 40.0) for tactile press/release."
+      },
+      "hudPopup": {
+        "response": 0.28,
+        "dampingRatio": 0.86,
+        "mass": 1.0,
+        "stiffness": 503.6,
+        "viscousDamping": 38.6,
+        "motionSpringFrequency": 22.4,
+        "note": "Used for speed capsule, skip countdown card, and start-up spec banner."
+      },
+      "playerTransition": {
+        "response": 0.42,
+        "dampingRatio": 0.92,
+        "mass": 1.0,
+        "stiffness": 223.8,
+        "viscousDamping": 27.53,
+        "motionSpringFrequency": 15.0,
+        "note": "Used for Detail -> Player transition progress driver on Mobile/Desktop/iOS."
+      }
+    }
+  },
+  "accessibilitySubstitutions": {
+    "reduceMotion": {
+      "androidCondition": "Prefs.REDUCED (MainActivity.reduced == true)",
+      "flutterCondition": "MediaQuery.disableAnimationsOf(context)",
+      "rules": {
+        "pageAndPlayerTransition": {
+          "mode": "crossFade",
+          "durationMs": 150,
+          "curve": "linear",
+          "scale": 1.0,
+          "shaderEnabled": false
+        },
+        "tvAndCardFocus": {
+          "mode": "snap",
+          "durationMs": 0,
+          "focusScale": 1.0,
+          "keepFocusStrokeAndFill": true
+        },
+        "hudOverlays": {
+          "mode": "opacityOnly",
+          "durationMs": 120,
+          "curve": "linear",
+          "translateDp": 0
+        },
+        "auroraBackground": {
+          "mode": "staticFrame",
+          "frozenTimeSec": 0.0,
+          "tickerRunning": false
+        },
+        "brandLogoLoader": {
+          "mode": "staticBreathingAlpha",
+          "cycleMs": 1600,
+          "minAlpha": 0.72,
+          "maxAlpha": 1.0
+        }
+      }
+    },
+    "reduceTransparency": {
+      "androidCondition": "Prefs.REDUCED_TRANSPARENCY",
+      "flutterCondition": "GlassworkBackdrop.reduceTransparency.value || storage.glassBlurLevel == 'solid' || MediaQuery.highContrastOf(context)",
+      "rules": {
+        "glassSurfaceFillArgb": "#F51E1E22",
+        "hudBackdropFillArgb": "#EB16161A",
+        "useBadgeSolidFill": true,
+        "minBorderAlpha": 0.45,
+        "disableShaderRefraction": true
+      }
+    }
+  },
+  "scaleTokens": {
+    "androidUiScalePercent": {
+      "100": 1.0,
+      "110": 1.1,
+      "120": 1.2
+    },
+    "flutterTextScaleClamp": {
+      "min": 0.85,
+      "max": 1.35
+    },
+    "tvFocus": {
+      "posterScale": 1.05,
+      "pillScale": 1.06,
+      "reducedScale": 1.0,
+      "strokeWidthDp": 2.0,
+      "strokeArgb": "#FFF5F5F7"
+    },
+    "badgeMetrics": {
+      "compact": {
+        "height": 20,
+        "paddingHorizontal": 6,
+        "paddingVertical": 2,
+        "cornerRadius": 5,
+        "borderWidth": 1.0,
+        "fontSize": 11,
+        "fontWeight": 600,
+        "letterSpacing": 0.3,
+        "gap": 4
+      },
+      "startSpec": {
+        "height": 24,
+        "paddingHorizontal": 8,
+        "paddingVertical": 3,
+        "cornerRadius": 6,
+        "borderWidth": 1.0,
+        "fontSize": 12,
+        "fontWeight": 700,
+        "letterSpacing": 0.35,
+        "gap": 6
+      },
+      "tv": {
+        "height": 28,
+        "paddingHorizontal": 10,
+        "paddingVertical": 4,
+        "cornerRadius": 7,
+        "borderWidth": 1.5,
+        "fontSize": 14,
+        "fontWeight": 700,
+        "letterSpacing": 0.4,
+        "gap": 8
+      }
+    }
+  },
+  "badgeStyles": {
+    "uhdGold": {
+      "fillArgb": "#2EFF9F0A",
+      "strokeArgb": "#66FF9F0A",
+      "textArgb": "#FFFFB340",
+      "solidFillArgb": "#EB3A2810",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "hdCyan": {
+      "fillArgb": "#2964D2FF",
+      "strokeArgb": "#5C64D2FF",
+      "textArgb": "#FF70D7FF",
+      "solidFillArgb": "#EB142C38",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "sdNeutral": {
+      "fillArgb": "#33787884",
+      "strokeArgb": "#4DEBEBF5",
+      "textArgb": "#FFD1D1DA",
+      "solidFillArgb": "#EB25252B",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "premiumCombo": {
+      "fillArgb": "#335E5CE6",
+      "strokeArgb": "#73BF5AF2",
+      "textArgb": "#FFE5C7FF",
+      "solidFillArgb": "#EB261F42",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "visionPurple": {
+      "fillArgb": "#2EBF5AF2",
+      "strokeArgb": "#66BF5AF2",
+      "textArgb": "#FFDEB0FF",
+      "solidFillArgb": "#EB2D1B38",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "hdrBlue": {
+      "fillArgb": "#2E0A84FF",
+      "strokeArgb": "#660A84FF",
+      "textArgb": "#FF64D2FF",
+      "solidFillArgb": "#EB122640",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "discEmerald": {
+      "fillArgb": "#2930D158",
+      "strokeArgb": "#5C30D158",
+      "textArgb": "#FF63E682",
+      "solidFillArgb": "#EB142E1C",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "streamTeal": {
+      "fillArgb": "#265AC8FA",
+      "strokeArgb": "#525AC8FA",
+      "textArgb": "#FF82D7FF",
+      "solidFillArgb": "#EB152936",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "spatialAudio": {
+      "fillArgb": "#2E0A84FF",
+      "strokeArgb": "#665AC8FA",
+      "textArgb": "#FF8AE0FF",
+      "solidFillArgb": "#EB13283D",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "standardAudio": {
+      "fillArgb": "#38787884",
+      "strokeArgb": "#3BFFFFFF",
+      "textArgb": "#FFF5F5F7",
+      "solidFillArgb": "#EB28282E",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "codecSlate": {
+      "fillArgb": "#29787884",
+      "strokeArgb": "#29FFFFFF",
+      "textArgb": "#FFD1D1DA",
+      "solidFillArgb": "#EB222228",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "platformTag": {
+      "fillArgb": "#2E36363D",
+      "strokeArgb": "#45FFFFFF",
+      "textArgb": "#FFEBEBF5",
+      "solidFillArgb": "#EB28282E",
+      "focusedFillArgb": "#FFF5F5F7",
+      "focusedStrokeArgb": "#FFF5F5F7",
+      "focusedTextArgb": "#FF101013"
+    },
+    "liteTextOnly": {
+      "separator": " · ",
+      "metaTextArgb": "#FF64D2FF",
+      "chipIdleTextArgb": "#FFEEEEF2",
+      "chipSelectedFillArgb": "#FF0A84FF",
+      "chipFocusedFillArgb": "#FFF5F5F7",
+      "chipFocusedTextArgb": "#FF101013",
+      "maxInlineBadges": 4,
+      "note": "Aligned with LiteActivity.java COLOR_FOCUS (0xfff5f5f7), COLOR_ACCENT (0xff0a84ff), and metaView (0xff64d2ff)."
+    }
+  },
+  "auroraPalette": {
+    "baseCanvasArgb": "#FF09090C",
+    "waveBlueArgb": "#FF0A84FF",
+    "waveTealArgb": "#FF5AC8FA",
+    "waveIndigoArgb": "#FF5E5CE6",
+    "wavePurpleArgb": "#FFBF5AF2",
+    "timeRateRadPerSec": 0.38
+  }
+}
