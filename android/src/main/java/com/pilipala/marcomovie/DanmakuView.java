@@ -5,6 +5,13 @@ import android.graphics.*;
 import android.os.SystemClock;
 import android.view.View;
 import com.pilipala.marcomovie.DanmakuData.Comment;
+import com.pilipala.marcomovie.DanmuProvider.BlockFilter;
+import com.pilipala.marcomovie.DanmuProvider.DanmuItem;
+import com.pilipala.marcomovie.DanmuSegmentCache.ActiveSlot;
+import com.pilipala.marcomovie.DanmuSegmentCache.FramePacingMonitor;
+import com.pilipala.marcomovie.DanmuSegmentCache.LayoutEngine;
+import com.pilipala.marcomovie.DanmuSegmentCache.SmoothClock;
+import com.pilipala.marcomovie.DanmuSegmentCache.TextWidthMeasurer;
 import java.io.*;
 import java.net.*;
 import java.util.*;
@@ -13,7 +20,11 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.Inflater;
 import java.util.zip.InflaterInputStream;
 
-/** A bounded source-provided comment overlay; animation is derived from the media clock. */
+/**
+ * Bounded danmu overlay supporting both legacy full-episode {@link DanmakuData} loading and
+ * segmented {@link DanmuSegmentCache} playback with collision-free linear kinematics lane
+ * allocation and Android TV P90 adaptive row degradation. Zero allocations on {@link #onDraw}.
+ */
 final class DanmakuView extends View implements AutoCloseable {
     interface Clock {
         int position();
@@ -28,17 +39,45 @@ final class DanmakuView extends View implements AutoCloseable {
     }
 
     private static final Typeface DANMAKU_TYPEFACE = Typeface.create("sans-serif", Typeface.BOLD);
+    private static final float MIN_BOTTOM_SAFE_INSET_DP = 44f;
 
     final Clock clock;
     final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
     final Paint strokePaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
     final ExecutorService loader = Executors.newSingleThreadExecutor();
+    final LayoutEngine layoutEngine = new LayoutEngine();
+    final FramePacingMonitor tvPacingMonitor = new FramePacingMonitor();
+    final SmoothClock smoothClock = new SmoothClock();
+    private final ArrayList<DanmuItem> frameItems = new ArrayList<>(128);
+    private final TextWidthMeasurer widthMeasurer =
+            new TextWidthMeasurer() {
+                @Override
+                public float measureWidth(String text) {
+                    return text == null ? 0f : paint.measureText(text);
+                }
+            };
+
     List<Comment> comments = Collections.emptyList();
+    List<DanmuItem> legacyItems = Collections.emptyList();
+    private DanmuSegmentCache segmentCache;
+    private BlockFilter blockFilter = BlockFilter.EMPTY;
+
     boolean closed, enabled;
+    boolean tvMode = false;
+    boolean showScroll = true;
+    boolean showTop = true;
+    boolean showBottom = true;
     int request;
-    float textSize = 22, opacity = .88f, area = .5f;
-    private int lastClockPos = -1;
-    private long lastClockSampleMs = 0L;
+    float textSize = 20f;
+    float opacity = 0.85f;
+    float area = 0.50f;
+    float speedMultiplier = 1.0f;
+    float playSpeed = 1.0f;
+    long timeOffsetMs = 0L;
+    int configuredMaxRows = 14;
+    float subtitleBottomClearanceDp = MIN_BOTTOM_SAFE_INSET_DP;
+
+    private long lastDrawNanos = 0L;
 
     DanmakuView(Context context, Clock clock) {
         super(context);
@@ -56,7 +95,141 @@ final class DanmakuView extends View implements AutoCloseable {
     void enabled(boolean value) {
         enabled = value;
         setVisibility(value ? VISIBLE : GONE);
-        if (value) invalidate();
+        if (!value) {
+            lastDrawNanos = 0L;
+        } else {
+            invalidate();
+        }
+    }
+
+    void setTvMode(boolean isTv) {
+        tvMode = isTv;
+        if (isTv) {
+            configuredMaxRows = Math.max(2, Math.min(8, configuredMaxRows));
+            tvPacingMonitor.setCeilingRows(configuredMaxRows);
+        }
+        layoutEngine.reset();
+        invalidate();
+    }
+
+    void setPlaySpeed(float speed) {
+        playSpeed = Math.max(0.5f, Math.min(2.0f, speed));
+        smoothClock.setPlaySpeed(
+                playSpeed, clock.position(), clock.playing(), SystemClock.elapsedRealtime());
+    }
+
+    void setTimeOffsetMs(long offsetMs) {
+        timeOffsetMs = Math.max(-30000L, Math.min(30000L, offsetMs));
+        if (segmentCache != null) {
+            segmentCache.setTimeOffsetMs(timeOffsetMs);
+            segmentCache.onPlaybackTick(clock.position(), clock.playing());
+        }
+        layoutEngine.reset();
+        invalidate();
+    }
+
+    void setSubtitleBottomClearanceDp(float clearanceDp) {
+        subtitleBottomClearanceDp = Math.max(MIN_BOTTOM_SAFE_INSET_DP, clearanceDp);
+        layoutEngine.reset();
+        invalidate();
+    }
+
+    void setBlockFilter(BlockFilter filter) {
+        blockFilter = filter == null ? BlockFilter.EMPTY : filter;
+        if (segmentCache != null) {
+            segmentCache.setBlockFilter(blockFilter);
+        }
+        layoutEngine.purgeBlocked(blockFilter);
+        invalidate();
+    }
+
+    void applyConfig(DanmuSettingsPanel.DanmuConfig config) {
+        if (config == null) return;
+        boolean offsetChanged = timeOffsetMs != config.timeOffsetMs;
+        tvMode = config.tvProfile;
+        opacity = config.opacity;
+        area = config.displayArea;
+        textSize = config.fontSizeSp;
+        speedMultiplier = config.speedMultiplier;
+        timeOffsetMs = config.timeOffsetMs;
+        showScroll = config.showScroll;
+        showTop = config.showTop;
+        showBottom = config.showBottom;
+        configuredMaxRows = config.maxRows;
+        if (tvMode) {
+            tvPacingMonitor.setCeilingRows(configuredMaxRows);
+        }
+        blockFilter = config.createBlockFilter();
+        if (segmentCache != null) {
+            segmentCache.setTimeOffsetMs(timeOffsetMs);
+            segmentCache.setBlockFilter(blockFilter);
+            if (offsetChanged) {
+                segmentCache.onPlaybackTick(clock.position(), clock.playing());
+            }
+        }
+        if (offsetChanged) {
+            layoutEngine.reset();
+        } else {
+            layoutEngine.purgeBlocked(blockFilter);
+        }
+        enabled(config.enabled);
+    }
+
+    void attachSegmentCache(DanmuSegmentCache cache) {
+        if (segmentCache != null && segmentCache != cache) {
+            segmentCache.setListener(null);
+        }
+        segmentCache = cache;
+        layoutEngine.reset();
+        if (cache != null) {
+            cache.setTimeOffsetMs(timeOffsetMs);
+            cache.setBlockFilter(blockFilter);
+            cache.setListener(
+                    new DanmuSegmentCache.Listener() {
+                        @Override
+                        public void onWindowReady(int windowIndex, int count) {
+                            if (!closed) postInvalidate();
+                        }
+
+                        @Override
+                        public void onSessionReady(boolean segmented) {
+                            if (!closed) postInvalidate();
+                        }
+
+                        @Override
+                        public void onError(String message) {
+                            AppLog.w("DanmakuView", "Segmented danmu error: " + message, null);
+                        }
+                    });
+            invalidate();
+        }
+    }
+
+    void detachSegmentCache() {
+        if (segmentCache != null) {
+            segmentCache.setListener(null);
+            segmentCache = null;
+        }
+        layoutEngine.reset();
+    }
+
+    void onSeekInitiated() {
+        layoutEngine.reset();
+        if (segmentCache != null) {
+            segmentCache.onSeekInitiated();
+        }
+    }
+
+    void onSeekSettled(long targetRawPositionMs) {
+        layoutEngine.reset();
+        if (segmentCache != null) {
+            segmentCache.onSeekSettled(targetRawPositionMs);
+        }
+        invalidate();
+    }
+
+    int getEffectiveMaxRows() {
+        return tvMode ? tvPacingMonitor.getEffectiveMaxRows() : configuredMaxRows;
     }
 
     private static String decodeResponseStream(InputStream rawStream, String encoding)
@@ -214,6 +387,22 @@ final class DanmakuView extends View implements AutoCloseable {
         }
     }
 
+    private static List<DanmuItem> convertLegacyComments(List<Comment> values) {
+        if (values == null || values.isEmpty()) return Collections.emptyList();
+        List<DanmuItem> items = new ArrayList<>(values.size());
+        for (int i = 0; i < values.size(); i++) {
+            Comment c = values.get(i);
+            items.add(
+                    new DanmuItem(
+                            "legacy_" + i + "_" + c.time,
+                            c.time,
+                            DandanplayProvider.normalizeMode(c.mode),
+                            c.color & 0xFFFFFF,
+                            c.text));
+        }
+        return items;
+    }
+
     void load(String url, Map<String, String> headers, Listener listener) {
         final int ticket = ++request;
         loader.execute(
@@ -221,10 +410,13 @@ final class DanmakuView extends View implements AutoCloseable {
                     try {
                         String body = fetchDanmaku(url, headers);
                         List<Comment> values = DanmakuData.parse(body);
+                        List<DanmuItem> converted = convertLegacyComments(values);
                         post(
                                 () -> {
                                     if (!closed && ticket == request) {
                                         comments = values;
+                                        legacyItems = converted;
+                                        layoutEngine.reset();
                                         listener.loaded(values.size());
                                         invalidate();
                                     }
@@ -250,10 +442,13 @@ final class DanmakuView extends View implements AutoCloseable {
                 () -> {
                     try {
                         List<Comment> values = DanmakuData.parse(text);
+                        List<DanmuItem> converted = convertLegacyComments(values);
                         post(
                                 () -> {
                                     if (!closed && ticket == request) {
                                         comments = values;
+                                        legacyItems = converted;
+                                        layoutEngine.reset();
                                         listener.loaded(values.size());
                                         invalidate();
                                     }
@@ -268,81 +463,134 @@ final class DanmakuView extends View implements AutoCloseable {
     }
 
     private long smoothNow() {
-        int raw = clock.position();
-        long wall = SystemClock.elapsedRealtime();
-        if (!clock.playing()) {
-            lastClockPos = raw;
-            lastClockSampleMs = wall;
-            return raw;
+        return smoothClock.sample(clock.position(), clock.playing(), SystemClock.elapsedRealtime());
+    }
+
+    private void populateLegacyFrameItems(long effectiveMs) {
+        frameItems.clear();
+        if (effectiveMs < 0L || legacyItems.isEmpty()) return;
+        long minTimeMs = effectiveMs - DanmuSegmentCache.MAX_COMMENT_LIFETIME_MS;
+        int lo = 0;
+        int hi = legacyItems.size();
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (legacyItems.get(mid).timeMs < minTimeMs) lo = mid + 1;
+            else hi = mid;
         }
-        if (lastClockPos < 0 || Math.abs(raw - lastClockPos) > 1200) {
-            lastClockPos = raw;
-            lastClockSampleMs = wall;
-            return raw;
+        boolean hasFilter = blockFilter != null && !blockFilter.isEmpty();
+        for (int i = lo; i < legacyItems.size(); i++) {
+            DanmuItem item = legacyItems.get(i);
+            if (item.timeMs > effectiveMs) break;
+            if (item.timeMs < minTimeMs) continue;
+            if (hasFilter && blockFilter.isBlocked(item.text)) continue;
+            frameItems.add(item);
         }
-        if (raw != lastClockPos) {
-            lastClockPos = raw;
-            lastClockSampleMs = wall;
-            return raw;
-        }
-        long elapsed = Math.max(0L, Math.min(500L, wall - lastClockSampleMs));
-        return raw + elapsed;
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        if (!enabled || closed || comments.isEmpty()) return;
-        long now = smoothNow();
+        if (!enabled || closed) return;
+
+        boolean playing = clock.playing();
+        if (tvMode && playing) {
+            long nowNanos = SystemClock.elapsedRealtimeNanos();
+            if (lastDrawNanos > 0L) {
+                double dtMs = (nowNanos - lastDrawNanos) / 1_000_000.0;
+                tvPacingMonitor.recordFrameIntervalMs(dtMs);
+            }
+            lastDrawNanos = nowNanos;
+        } else {
+            lastDrawNanos = 0L;
+        }
+
+        long rawNow = smoothNow();
+        DanmuSegmentCache cache = segmentCache;
+        if (cache != null) {
+            cache.onPlaybackTick(rawNow, playing);
+            cache.fillVisibleWindowSnapshot(rawNow, frameItems);
+        } else {
+            if (legacyItems.isEmpty()) return;
+            populateLegacyFrameItems(DanmuSegmentCache.computeEffectiveMs(rawNow, timeOffsetMs));
+        }
+
+        long effectiveMs =
+                cache != null
+                        ? DanmuSegmentCache.computeEffectiveMs(rawNow, cache.getTimeOffsetMs())
+                        : DanmuSegmentCache.computeEffectiveMs(rawNow, timeOffsetMs);
+        if (effectiveMs < 0L) {
+            if (playing) postInvalidateOnAnimation();
+            return;
+        }
+
+        int viewW = getWidth();
+        int viewH = getHeight();
+        if (viewW <= 0 || viewH <= 0) return;
+
         float density = getResources().getDisplayMetrics().density;
-        float pxSize = textSize * density;
+        float scaledDensity = getResources().getDisplayMetrics().scaledDensity;
+        float pxSize = textSize * (scaledDensity > 0f ? scaledDensity : density);
         paint.setTextSize(pxSize);
         strokePaint.setTextSize(pxSize);
-        strokePaint.setStrokeWidth(Math.max(2f, 2.6f * density));
-        int alpha = (int) (opacity * 255);
-        strokePaint.setAlpha(Math.min(255, (int) (alpha * 0.92f)));
-        int lanes = Math.max(1, Math.min(8, (int) (getHeight() * area / (pxSize * 1.48f))));
-        int lo = 0, hi = comments.size();
-        while (lo < hi) {
-            int middle = (lo + hi) >>> 1;
-            if (comments.get(middle).time < now - 8500) lo = middle + 1;
-            else hi = middle;
-        }
-        int drawn = 0;
-        int viewW = getWidth(), viewH = getHeight();
-        for (int i = lo; i < comments.size() && drawn < 56; i++) {
-            Comment c = comments.get(i);
-            long age = now - c.time;
-            if (age < 0) break;
-            long duration = c.mode == 4 || c.mode == 5 ? 4000 : 8000;
-            if (age > duration) continue;
-            if (c.cachedWidth <= 0f || c.cachedTextSize != pxSize) {
-                c.cachedWidth = paint.measureText(c.text);
-                c.cachedTextSize = pxSize;
-            }
-            float width = c.cachedWidth;
-            float x = (viewW + width) * (1 - age / (float) duration) - width;
-            float y = (i % lanes + 1) * pxSize * 1.45f;
-            if (c.mode == 4) {
-                x = (viewW - width) / 2f;
-                y = viewH - pxSize * (1.5f + i % 2);
-            } else if (c.mode == 5) {
-                x = (viewW - width) / 2f;
-            }
-            canvas.drawText(c.text, x, y, strokePaint);
-            paint.setColor(0xff000000 | (c.color & 0xffffff));
+        strokePaint.setStrokeWidth(Math.max(2f, 2.4f * density));
+
+        int alpha = Math.max(0, Math.min(255, Math.round(opacity * 255f)));
+        strokePaint.setAlpha(Math.min(255, Math.round(alpha * 0.90f)));
+
+        int rowCap = tvMode ? tvPacingMonitor.getEffectiveMaxRows() : configuredMaxRows;
+        int itemCap = tvMode ? tvPacingMonitor.getEffectiveMaxItems() : 120;
+        long scrollDurationMs = LayoutEngine.computeScrollDurationMs(tvMode, speedMultiplier);
+        float bottomSafeInsetPx =
+                Math.max(MIN_BOTTOM_SAFE_INSET_DP, subtitleBottomClearanceDp) * density;
+
+        layoutEngine.step(
+                effectiveMs,
+                frameItems,
+                viewW,
+                viewH,
+                pxSize,
+                getPaddingTop(),
+                bottomSafeInsetPx,
+                area,
+                rowCap,
+                itemCap,
+                scrollDurationMs,
+                showScroll,
+                showTop,
+                showBottom,
+                widthMeasurer);
+
+        ActiveSlot[] slots = layoutEngine.getSlots();
+        for (int i = 0; i < slots.length; i++) {
+            ActiveSlot slot = slots[i];
+            if (!slot.active || slot.text == null) continue;
+            canvas.drawText(slot.text, slot.x, slot.y, strokePaint);
+            paint.setColor(0xff000000 | (slot.rgbColor & 0xffffff));
             paint.setAlpha(alpha);
-            canvas.drawText(c.text, x, y, paint);
-            drawn++;
+            canvas.drawText(slot.text, slot.x, slot.y, paint);
         }
-        if (clock.playing()) postInvalidateOnAnimation();
+
+        if (playing) postInvalidateOnAnimation();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        lastDrawNanos = 0L;
+        smoothClock.reset();
+        super.onDetachedFromWindow();
     }
 
     @Override
     public void close() {
         closed = true;
         request++;
+        lastDrawNanos = 0L;
+        smoothClock.reset();
+        detachSegmentCache();
         loader.shutdownNow();
         comments = Collections.emptyList();
+        legacyItems = Collections.emptyList();
+        frameItems.clear();
+        layoutEngine.reset();
     }
 }
