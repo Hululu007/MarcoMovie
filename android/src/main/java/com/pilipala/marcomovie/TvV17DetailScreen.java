@@ -64,6 +64,7 @@ final class TvV17DetailScreen {
     private final TextView doubanBadge;
     private final TextView rtBadge;
     private final LinearLayout ratingRow;
+    private final LinearLayout specBadgeRow;
     private final TextView synopsisView;
     private final Button synopsisMoreBtn;
     private final LinearLayout castSection;
@@ -225,6 +226,23 @@ final class TvV17DetailScreen {
             ratingRow.addView(siteLabel);
         }
         applyRatings(0.0, -1);
+
+        // 3b. Plain-text Media Spec Badges (bypassing URLDecoder so '+' in HDR10+/DD+ stays intact)
+        specBadgeRow = MediaBadgeView.createRow(a, "detail-spec-badges");
+        LinearLayout.LayoutParams specLp = new LinearLayout.LayoutParams(-2, -2);
+        specLp.topMargin = a.dp(10);
+        heroColumn.addView(specBadgeRow, specLp);
+        Cms.Line initialLine =
+                video.lines != null && !video.lines.isEmpty()
+                        ? video.lines.get(SourcePreferences.lineIndex(a, video))
+                        : null;
+        MediaBadgeView.populateRow(
+                a,
+                specBadgeRow,
+                MediaBadgeView.extractForLine(a, video.remarks, initialLine, null),
+                5,
+                false,
+                true);
 
         // 4. Dedicated Action Row directly below ratings: Play + Episodes/Lines Popup Button
         LinearLayout buttons = a.row();

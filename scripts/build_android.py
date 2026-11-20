@@ -84,6 +84,12 @@ def main():
     native_files_mobile.update(catpaw_files)
     catpaw_tv_assets = assets_for_package(catpaw_assets, native_files, BUILD/'catpaw/assets-tv')
     catpaw_mobile_assets = assets_for_package(catpaw_assets, native_files_mobile, BUILD/'catpaw/assets-mobile')
+    ui_spec_assets = BUILD / 'ui-spec-assets'
+    badge_rules_src = ROOT / 'shared/ui-spec/badge-rules.json'
+    if badge_rules_src.exists():
+        (ui_spec_assets / 'ui-spec').mkdir(parents=True, exist_ok=True)
+        (ui_spec_assets / 'ui-spec/badge-rules.json').write_bytes(badge_rules_src.read_bytes())
+    ui_spec_asset_args = ['-A', ui_spec_assets] if (ui_spec_assets / 'ui-spec/badge-rules.json').exists() else []
     for p in (exe(JDK/'bin','java'), exe(SDK,'aapt2'), ANDROID):
         if not p.exists(): raise RuntimeError(f'Required existing tool missing: {p}')
     for folder in (BUILD, BUILD/'classes', BUILD/'dex', DIST): folder.mkdir(parents=True, exist_ok=True)
@@ -99,7 +105,7 @@ def main():
     generated=BUILD/'generated';generated.mkdir(exist_ok=True)
     for old in generated.rglob('*.java'):old.unlink()
     extra=['--extra-packages',':'.join(sorted(set(packages)))] if packages else []
-    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources.apk','--manifest',SRC/'AndroidManifest.xml','-I',ANDROID,'-A',SRC/'assets','-A',catpaw_tv_assets,'--java',generated,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
+    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources.apk','--manifest',SRC/'AndroidManifest.xml','-I',ANDROID,'-A',SRC/'assets','-A',catpaw_tv_assets,*ui_spec_asset_args,'--java',generated,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
     sources=sorted((SRC/'java').rglob('*.java'))+sorted((ROOT/'shared/java').rglob('*.java'))+sorted(generated.rglob('*.java'))
     run(exe(JDK/'bin','javac'),'-encoding','UTF-8','-source','8','-target','8','-Xlint:-options','-classpath',os.pathsep.join(str(p) for p in [ANDROID,*dependencies]),'-d',BUILD/'classes',*sources)
     with zipfile.ZipFile(BUILD/'classes.jar','w',zipfile.ZIP_DEFLATED) as z:
@@ -133,7 +139,7 @@ def main():
         tv_xml = re.sub(r'android:versionCode="[^"]+"', f'android:versionCode="{tv_version_code}"', tv_xml)
         tv_xml = re.sub(r'android:versionName="[^"]+"', f'android:versionName="{tv_version}"', tv_xml)
         tv_manifest.write_text(tv_xml, encoding='utf-8')
-        run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources.apk','--manifest',tv_manifest,'-I',ANDROID,'-A',SRC/'assets','-A',catpaw_tv_assets,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
+        run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources.apk','--manifest',tv_manifest,'-I',ANDROID,'-A',SRC/'assets','-A',catpaw_tv_assets,*ui_spec_asset_args,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
         with zipfile.ZipFile(BUILD/'resources.apk') as source, zipfile.ZipFile(BUILD/'unsigned.apk','w',zipfile.ZIP_DEFLATED) as dest:
             for entry in source.infolist():dest.writestr(entry,source.read(entry.filename))
             for dex in (BUILD/'dex').glob('*.dex'):dest.write(dex,dex.name)
@@ -166,7 +172,7 @@ def main():
     mobile_xml=re.sub(r'android:versionCode="[^"]+"', f'android:versionCode="{mobile_version_code}"', mobile_xml)
     mobile_xml=re.sub(r'android:versionName="[^"]+"', f'android:versionName="{mobile_version}"', mobile_xml)
     mobile_manifest.write_text(mobile_xml,encoding='utf-8')
-    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources-mobile.apk','--manifest',mobile_manifest,'-I',ANDROID,'-A',SRC/'assets','-A',catpaw_mobile_assets,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
+    run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources-mobile.apk','--manifest',mobile_manifest,'-I',ANDROID,'-A',SRC/'assets','-A',catpaw_mobile_assets,*ui_spec_asset_args,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
     with zipfile.ZipFile(BUILD/'resources-mobile.apk') as source, zipfile.ZipFile(BUILD/'unsigned-mobile.apk','w',zipfile.ZIP_DEFLATED) as dest:
         for entry in source.infolist():dest.writestr(entry,source.read(entry.filename))
         for dex in (BUILD/'dex').glob('*.dex'):dest.write(dex,dex.name)

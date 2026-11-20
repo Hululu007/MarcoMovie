@@ -1045,6 +1045,11 @@ def main() -> None:
                         assets_dir / 'js-host' / name)
     if LOGO_MARK.exists():
         shutil.copy2(LOGO_MARK, assets_dir / "logo_mark.png")
+    badge_rules = REPO_ROOT / "shared" / "ui-spec" / "badge-rules.json"
+    if badge_rules.exists():
+        ui_spec_dir = assets_dir / "ui-spec"
+        ui_spec_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(badge_rules, ui_spec_dir / "badge-rules.json")
     widget_test = ROOT / "test" / "widget_test.dart"
     if widget_test.exists():
         widget_test.unlink()

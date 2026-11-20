@@ -703,6 +703,20 @@ final class MobileDetailScreen {
                         updateRatingBadges(
                                 doubanBadge, rtBadge, listing, ratings.douban, ratings.rtPercent));
 
+        final LinearLayout specBadgeRow = MediaBadgeView.createRow(a, "detail-spec-badges");
+        specBadgeRow.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams specRowLp = new LinearLayout.LayoutParams(-2, -2);
+        specRowLp.gravity = Gravity.CENTER_HORIZONTAL;
+        specRowLp.topMargin = a.dp(8);
+        heroCenterCol.addView(specBadgeRow, specRowLp);
+        MediaBadgeView.populateRow(
+                a,
+                specBadgeRow,
+                MediaBadgeView.extractForLine(a, listing.remarks, null, null),
+                5,
+                false,
+                false);
+
         // 2B. Lower Content Column (Synopsis + White Capsule Play Button + Episodes Section)
         LinearLayout lowerBody = a.vertical();
         lowerBody.setPadding(a.dp(18), 0, a.dp(18), 0);
@@ -1165,6 +1179,18 @@ final class MobileDetailScreen {
                             }
                         });
             }
+            View heroSpecView = a.root.findViewWithTag("detail-spec-badges");
+            if (heroSpecView instanceof android.view.ViewGroup) {
+                Cms.Episode activeEp =
+                        line.episodes.isEmpty() ? null : line.episodes.get(activeEpIdx);
+                MediaBadgeView.populateRow(
+                        a,
+                        (android.view.ViewGroup) heroSpecView,
+                        MediaBadgeView.extractForLine(a, video.remarks, line, activeEp),
+                        5,
+                        false,
+                        false);
+            }
             View topSourceView = a.root.findViewWithTag("detail-source-picker");
             if (topSourceView instanceof TextView) {
                 TextView sourceTopBtn = (TextView) topSourceView;
@@ -1174,8 +1200,16 @@ final class MobileDetailScreen {
                             String[] names = new String[video.lines.size()];
                             for (int i = 0; i < video.lines.size(); i++) {
                                 Cms.Line l = video.lines.get(i);
+                                String lineSpec =
+                                        MediaBadges.formatDotJoined(
+                                                MediaBadgeView.extractForLine(
+                                                        a, video.remarks, l, null),
+                                                3);
                                 names[i] =
                                         l.name
+                                                + (lineSpec.isEmpty()
+                                                        ? ""
+                                                        : ("  [" + lineSpec + "]"))
                                                 + "  (共 "
                                                 + l.episodes.size()
                                                 + " 集 · "

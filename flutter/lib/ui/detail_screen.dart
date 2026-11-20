@@ -9,13 +9,16 @@ import '../core/cms_client.dart';
 import '../core/cms_parser.dart';
 import '../core/csp_bridge.dart';
 import '../core/download_service.dart';
+import '../core/media_badges.dart';
 import '../core/models.dart';
+import '../core/ohos_runtime.dart';
 import '../core/storage_service.dart';
 import '../core/web_media_resolver.dart';
 import '../core/wogg_source.dart';
 import 'apple_theme.dart';
 import 'desktop_horizontal_scroller.dart';
 import 'ios_liquid_glass.dart';
+import 'media_badge.dart';
 import 'netdisk_sheet.dart';
 import 'player_screen.dart';
 import 'poster_image.dart';
@@ -201,6 +204,9 @@ class _DetailScreenState extends State<DetailScreen> {
       ),
     ];
     _descending = widget.storage.episodesDescending;
+    if (!OhosRuntime.isOhos) {
+      unawaited(MediaBadges.ensureInitialized());
+    }
     _isFavorite = widget.storage.isFavorite(
       _activeSite.key,
       _video.id,
@@ -1224,6 +1230,15 @@ class _DetailScreenState extends State<DetailScreen> {
                 final line = _video.lines[i];
                 final selected = i == safeLineIdx;
                 final lineReason = _lineUnavailableReason(line);
+                final lineSpec = OhosRuntime.isOhos
+                    ? ''
+                    : MediaBadges.formatDotJoined(
+                        _specBadgesForLine(line),
+                        maxBadges: 3,
+                      );
+                final baseSubtitle = lineReason != null
+                    ? '共 ${line.episodes.length} 集 · $lineReason'
+                    : '共 ${line.episodes.length} 集 · ${_activeSite.name}';
                 final tile = Container(
                   decoration: BoxDecoration(
                     color: selected
@@ -1237,9 +1252,9 @@ class _DetailScreenState extends State<DetailScreen> {
                         ? AppleColors.systemBlue
                         : AppleColors.groupedTertiary,
                     title: line.name,
-                    subtitle: lineReason != null
-                        ? '共 ${line.episodes.length} 集 · $lineReason'
-                        : '共 ${line.episodes.length} 集 · ${_activeSite.name}',
+                    subtitle: lineSpec.isEmpty
+                        ? baseSubtitle
+                        : '$baseSubtitle · $lineSpec',
                     trailing: _activeSite.isEffectivelyPrivate ? null : IconButton(
                       tooltip: widget.storage.preferredLineName == line.name ? '取消默认播放线路' : '设为默认播放线路',
                       icon: Icon(widget.storage.preferredLineName == line.name ? Icons.star_rounded : Icons.star_border_rounded,
@@ -2320,11 +2335,42 @@ class _DetailScreenState extends State<DetailScreen> {
               ],
               const SizedBox(height: 10),
               _buildRatingsAndSiteWrap(alignment: WrapAlignment.center),
+              if (!OhosRuntime.isOhos) ...[
+                Builder(
+                  builder: (_) {
+                    final activeLine = _video.lines.isEmpty
+                        ? null
+                        : _video.lines[safeLineIdx];
+                    final specBadges = _specBadgesForLine(activeLine);
+                    if (specBadges.isEmpty) return const SizedBox.shrink();
+                    return Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: MediaBadgeRow(
+                        badges: specBadges,
+                        maxBadges: 5,
+                        alignment: WrapAlignment.center,
+                      ),
+                    );
+                  },
+                ),
+              ],
             ],
           ),
         ),
       ),
     );
+  }
+
+  List<MediaBadge> _specBadgesForLine(CmsLine? line) {
+    if (OhosRuntime.isOhos) return const <MediaBadge>[];
+    final firstEp =
+        (line != null && line.episodes.isNotEmpty) ? line.episodes.first : null;
+    return MediaBadges.extractBadgesFromSources(<String?>[
+      _video.remarks,
+      line?.name,
+      firstEp?.name,
+      firstEp?.url,
+    ]);
   }
 
   double? _effectiveDoubanScore() {

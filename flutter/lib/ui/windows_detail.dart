@@ -125,6 +125,23 @@ extension _WindowsDetail on _DetailScreenState {
                     fontWeight: FontWeight.w600)),
         ]),
       ],
+      if (!OhosRuntime.isOhos) ...[
+        Builder(builder: (_) {
+          final activeLine = _video.lines.isEmpty
+              ? null
+              : _video.lines[_selectedLine.clamp(0, _video.lines.length - 1)];
+          final specBadges = _specBadgesForLine(activeLine);
+          if (specBadges.isEmpty) return const SizedBox.shrink();
+          return Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: MediaBadgeRow(
+              badges: specBadges,
+              maxBadges: 5,
+              windowsSolid: true,
+            ),
+          );
+        }),
+      ],
       if (!stacked) ...[
         const SizedBox(height: 12),
         Text(_effectiveSeriesSynopsis().replaceAll(RegExp('<[^>]+>'), ''),
@@ -217,17 +234,27 @@ extension _WindowsDetail on _DetailScreenState {
           const SizedBox(height: 12),
           Wrap(spacing: 7, runSpacing: 7, children: [
             for (var i = 0; i < _video.lines.length; i++)
-              ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 260),
-                  child: Tooltip(
-                      message: _video.lines[i].name,
-                      child: WinButton(_video.lines[i].name,
-                          selected: i == _selectedLine,
-                          onPressed: () => _updateWindowsState(() {
-                                _selectedLine = i;
-                                _selectedPage = 0;
-                                _selectedInLineSeason = null;
-                              })))),
+              Builder(builder: (_) {
+                final line = _video.lines[i];
+                final spec = OhosRuntime.isOhos
+                    ? ''
+                    : MediaBadges.formatDotJoined(
+                        _specBadgesForLine(line),
+                        maxBadges: 2,
+                      );
+                final label = spec.isEmpty ? line.name : '${line.name} · $spec';
+                return ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 280),
+                    child: Tooltip(
+                        message: label,
+                        child: WinButton(label,
+                            selected: i == _selectedLine,
+                            onPressed: () => _updateWindowsState(() {
+                                  _selectedLine = i;
+                                  _selectedPage = 0;
+                                  _selectedInLineSeason = null;
+                                }))));
+              }),
           ]),
           const SizedBox(height: 12),
           Wrap(spacing: 7, runSpacing: 7, children: [

@@ -3972,6 +3972,15 @@ public final class LiteActivity extends Activity {
         appendMeta(metaLine, video.optString("vod_area", ""));
         appendMeta(metaLine, video.optString("type_name", video.optString("vod_class", "")));
         appendMeta(metaLine, vodRemarks);
+        String activeLineName =
+                (activeDetailLine >= 0 && activeDetailLine < names.length)
+                        ? names[activeDetailLine]
+                        : "";
+        String firstEpName = currentLineEpisodes.isEmpty() ? "" : currentLineEpisodes.get(0).name;
+        String firstEpUrl = currentLineEpisodes.isEmpty() ? "" : currentLineEpisodes.get(0).url;
+        appendMeta(
+                metaLine,
+                LiteBadges.formatFromSources(4, vodRemarks, activeLineName, firstEpName, firstEpUrl));
         if (metaLine.length() > 0) {
             TextView metaView = text(metaLine.toString(), 14);
             metaView.setTextColor(0xff64d2ff);
@@ -4111,9 +4120,18 @@ public final class LiteActivity extends Activity {
             for (int i = 0; i < lines.length; i++) {
                 final int lineIdx = i;
                 int epCount = countEpisodes(lines[i]);
+                int hash = lines[i].indexOf('#');
+                String firstSeg = hash >= 0 ? lines[i].substring(0, hash) : lines[i];
+                String lineSpec = LiteBadges.formatFromSources(3, names[i], firstSeg);
+                String chipLabel =
+                        names[i]
+                                + " ("
+                                + epCount
+                                + ")"
+                                + (lineSpec.length() > 0 ? " · " + lineSpec : "");
                 addInteractiveChip(
                         lineRow,
-                        names[i] + " (" + epCount + ")",
+                        chipLabel,
                         i == activeDetailLine,
                         new Runnable() {
                             public void run() {
