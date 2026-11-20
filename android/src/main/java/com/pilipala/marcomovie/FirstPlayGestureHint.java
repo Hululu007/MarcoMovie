@@ -17,8 +17,8 @@ import java.util.Locale;
  * Lightweight first-play gesture hint capsule mounted above the player bottom control bar.
  *
  * <p>Displays at most {@link Policy#MAX_SHOW_COUNT} (3) times across playback sessions and offers a
- * one-tap "不再提示 / Don't show again" button. Backed by {@link OnboardingScreen#PREFS_FILE} so
- * {@code Prefs.java} remains untouched.
+ * one-tap "不再提示 / Don't show again" button with visible Android TV D-pad focus highlight. Backed
+ * by {@link OnboardingScreen#PREFS_FILE} so {@code Prefs.java} remains untouched.
  */
 public final class FirstPlayGestureHint extends LinearLayout {
 
@@ -92,6 +92,7 @@ public final class FirstPlayGestureHint extends LinearLayout {
     private Runnable dwellTask;
     private Runnable autoHideTask;
     private boolean countedThisSession;
+    private boolean reduceMotionActive;
 
     public FirstPlayGestureHint(Context context) {
         this(context, new OnboardingScreen.SharedPrefsStore(context), isChineseLocale());
@@ -105,13 +106,17 @@ public final class FirstPlayGestureHint extends LinearLayout {
         setOrientation(HORIZONTAL);
         setGravity(Gravity.CENTER_VERTICAL);
         setVisibility(GONE);
+        setClipChildren(false);
+        setClipToPadding(false);
         setPadding(dp(14), dp(8), dp(10), dp(8));
 
         this.messageView = new TextView(context);
         messageView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         messageView.setTextColor(0xFFF5F5F7);
+        // Weight=1 ensures narrow 360dp portrait phones wrap messageView instead of clipping
+        // dismissButton off-screen.
         LinearLayout.LayoutParams msgLp =
-                new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+                new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
         msgLp.rightMargin = dp(10);
         addView(messageView, msgLp);
 
@@ -119,16 +124,45 @@ public final class FirstPlayGestureHint extends LinearLayout {
         dismissButton.setText(Policy.dismissLabel(zh));
         dismissButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         dismissButton.setTypeface(Typeface.DEFAULT_BOLD);
-        dismissButton.setTextColor(0xFF64D2FF);
+        dismissButton.setSingleLine(true);
         dismissButton.setFocusable(true);
         dismissButton.setClickable(true);
         dismissButton.setPadding(dp(10), dp(5), dp(10), dp(5));
+        styleDismissButton(false);
+        dismissButton.setOnFocusChangeListener(
+                new OnFocusChangeListener() {
+                    @Override
+                    public void onFocusChange(View v, boolean hasFocus) {
+                        styleDismissButton(hasFocus);
+                        float scale = (hasFocus && !reduceMotionActive) ? 1.05f : 1.0f;
+                        v.animate().cancel();
+                        if (reduceMotionActive) {
+                            v.setScaleX(1.0f);
+                            v.setScaleY(1.0f);
+                        } else {
+                            v.animate().scaleX(scale).scaleY(scale).setDuration(160L).start();
+                        }
+                    }
+                });
+        addView(
+                dismissButton,
+                new LinearLayout.LayoutParams(
+                        LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT));
+    }
+
+    private void styleDismissButton(boolean focused) {
         GradientDrawable btnBg = new GradientDrawable();
-        btnBg.setColor(0x2E0A84FF);
         btnBg.setCornerRadius(dp(14));
-        btnBg.setStroke(dp(1), 0x665AC8FA);
+        if (focused) {
+            btnBg.setColor(0xFFF5F5F7);
+            btnBg.setStroke(dp(2), 0xFFF5F5F7);
+            dismissButton.setTextColor(0xFF101013);
+        } else {
+            btnBg.setColor(0x2E0A84FF);
+            btnBg.setStroke(dp(1), 0x665AC8FA);
+            dismissButton.setTextColor(0xFF64D2FF);
+        }
         UiCompat.setBackground(dismissButton, btnBg);
-        addView(dismissButton);
     }
 
     /**
@@ -142,6 +176,7 @@ public final class FirstPlayGestureHint extends LinearLayout {
             boolean reduceTransparency,
             final Runnable onDismissed) {
         cancelTimers();
+        this.reduceMotionActive = reduceMotion;
         if (!Policy.shouldShow(store)) {
             setVisibility(GONE);
             return false;
@@ -149,6 +184,7 @@ public final class FirstPlayGestureHint extends LinearLayout {
         countedThisSession = false;
         applySurface(reduceTransparency);
         messageView.setText(Policy.hintCopy(tvMode, zh));
+        styleDismissButton(dismissButton.hasFocus());
 
         dismissButton.setOnClickListener(
                 new OnClickListener() {
@@ -162,7 +198,7 @@ public final class FirstPlayGestureHint extends LinearLayout {
         setVisibility(VISIBLE);
         setAlpha(0f);
         animate().cancel();
-        animate().alpha(1f).setDuration(reduceMotion ? 120L : 180L).start();
+        animate().alpha(1f).setDuration(reduceMotion ? 120L : 180L).withEndAction(null).start();
 
         dwellTask =
                 new Runnable() {
@@ -190,6 +226,7 @@ public final class FirstPlayGestureHint extends LinearLayout {
     public void hideImmediate() {
         cancelTimers();
         animate().cancel();
+        animate().withEndAction(null);
         setVisibility(GONE);
     }
 
@@ -235,6 +272,7 @@ public final class FirstPlayGestureHint extends LinearLayout {
     protected void onDetachedFromWindow() {
         cancelTimers();
         animate().cancel();
+        dismissButton.animate().cancel();
         super.onDetachedFromWindow();
     }
 

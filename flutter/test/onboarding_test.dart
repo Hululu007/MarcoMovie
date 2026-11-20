@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/ohos_runtime.dart';
+import 'package:marco_movie/ui/apple_theme.dart';
 import 'package:marco_movie/ui/onboarding/first_play_gesture_hint.dart';
 import 'package:marco_movie/ui/onboarding/onboarding_prefs.dart';
 import 'package:marco_movie/ui/onboarding/onboarding_screen.dart';
@@ -12,11 +13,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   setUp(() {
     OhosRuntime.resetForTesting();
+    GlassworkBackdrop.reduceTransparency.value = false;
     SharedPreferences.setMockInitialValues(<String, Object>{});
   });
 
   tearDown(() {
     OhosRuntime.resetForTesting();
+    GlassworkBackdrop.reduceTransparency.value = false;
   });
 
   group('OnboardingPrefs', () {
@@ -58,6 +61,7 @@ void main() {
       expect(manifestFile.existsSync(), isTrue);
       final items = DemoPosterItem.parseManifest(manifestFile.readAsStringSync());
       expect(items.length, 14);
+      expect(kFallbackDemoPosters.length, 14);
       for (final item in items) {
         expect(item.badgeZh, '示例');
         expect(item.badgeEn, 'DEMO');
@@ -69,7 +73,7 @@ void main() {
   });
 
   group('OnboardingScreen widget', () {
-    testWidgets('walks through all 5 acts, callbacks, and persists completion',
+    testWidgets('walks through all 5 acts, 14-poster grid, HUD demo, and callbacks',
         (tester) async {
       final prefs = await OnboardingPrefs.load();
       String? importedUrl;
@@ -87,7 +91,7 @@ void main() {
           home: OnboardingScreen(
             prefs: prefs,
             isChinese: true,
-            platformOverride: FirstPlayHintPlatform.touch,
+            platformOverride: FirstPlayHintPlatform.desktop,
             onImportConfig: (url) => importedUrl = url,
             onOpenSync: () => syncOpened = true,
             onFinished: (skipped) => finishedSkipped = skipped,
@@ -103,11 +107,13 @@ void main() {
       await tester.pump();
       expect(importedUrl, '');
 
-      // Act 2: poster wall with mandatory "示例" badge
+      // Act 2: all 14 demo posters in adaptive grid + mandatory "示例" badge + desktop Tooltip
       await tester.tap(find.byKey(const Key('onboarding_next_button')));
       await tester.pumpAndSettle();
+      expect(find.byKey(const Key('onboarding_demo_poster_grid')), findsOneWidget);
       expect(find.byKey(const Key('demo_badge_demo_01')), findsOneWidget);
-      expect(find.text('示例'), findsWidgets);
+      expect(find.byKey(const Key('demo_badge_demo_14')), findsOneWidget);
+      expect(find.byType(Tooltip), findsNWidgets(14));
 
       // Act 3: WebDAV / LAN sync
       await tester.tap(find.byKey(const Key('onboarding_next_button')));
@@ -117,10 +123,14 @@ void main() {
       await tester.pump();
       expect(syncOpened, isTrue);
 
-      // Act 4: Playback HUD & touch long-press speed lock
+      // Act 4: Component-level mock HUD preview + interactive state cycling
       await tester.tap(find.byKey(const Key('onboarding_next_button')));
       await tester.pumpAndSettle();
-      expect(find.textContaining('2.0×'), findsOneWidget);
+      expect(find.byKey(const Key('onboarding_act4_hud_preview')), findsOneWidget);
+      expect(find.textContaining('状态 1/3'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('onboarding_act4_cycle_button')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('状态 2/3'), findsOneWidget);
 
       // Act 5: Personalize & finish
       await tester.tap(find.byKey(const Key('onboarding_next_button')));
@@ -133,12 +143,12 @@ void main() {
       expect(prefs.shouldShowOnboarding(), isFalse);
     });
 
-    testWidgets('uses single-column layout on compact mobile and supports Skip',
+    testWidgets('renders cleanly at 320pt narrow Split-View width without overflow',
         (tester) async {
       final prefs = await OnboardingPrefs.load();
       bool? finishedSkipped;
 
-      tester.view.physicalSize = const Size(390, 844);
+      tester.view.physicalSize = const Size(320, 640);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
@@ -159,11 +169,14 @@ void main() {
         find.byKey(const Key('onboarding_compact_single_column')),
         findsOneWidget,
       );
-      expect(find.text('Skip'), findsOneWidget);
+      // Advance to Act 2 so Back + Dots + Next are all shown simultaneously at 320pt.
+      await tester.tap(find.byKey(const Key('onboarding_next_button')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('onboarding_prev_button')), findsOneWidget);
+      expect(tester.takeException(), isNull);
 
       await tester.tap(find.byKey(const Key('onboarding_skip_button')));
       await tester.pumpAndSettle();
-
       expect(finishedSkipped, isTrue);
       expect(prefs.shouldShowOnboarding(), isFalse);
     });
@@ -191,42 +204,55 @@ void main() {
   });
 
   group('FirstPlayGestureHint widget', () {
-    testWidgets('records dwell, auto-hides, and respects one-tap dismiss',
+    testWidgets('fades in, records dwell, fades out on dismiss, and works without Material ancestor',
         (tester) async {
       final prefs = await OnboardingPrefs.load();
       bool dismissedCallbackFired = false;
 
+      // Mount directly under Directionality (like an OverlayEntry without Material).
       await tester.pumpWidget(
-        MaterialApp(
-          theme: ThemeData(splashFactory: NoSplash.splashFactory),
-          home: Scaffold(
-            body: Center(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: MediaQuery(
+            data: const MediaQueryData(),
+            child: Center(
               child: FirstPlayGestureHint(
                 prefs: prefs,
                 isChinese: true,
                 platformOverride: FirstPlayHintPlatform.desktop,
                 dwellDuration: const Duration(milliseconds: 50),
-                displayDuration: const Duration(milliseconds: 200),
+                displayDuration: const Duration(milliseconds: 400),
                 onDismissed: () => dismissedCallbackFired = true,
               ),
             ),
           ),
         ),
       );
-      await tester.pump();
 
-      expect(
-        find.byKey(const Key('first_play_gesture_hint_capsule')),
-        findsOneWidget,
+      // Starts at opacity 0.0 for fade-in, then animates to 1.0 post-frame.
+      final initialOpacity = tester.widget<AnimatedOpacity>(
+        find.byKey(const Key('first_play_gesture_hint_opacity')),
       );
+      expect(initialOpacity.opacity, 0.0);
+      await tester.pump();
+      final fadedInOpacity = tester.widget<AnimatedOpacity>(
+        find.byKey(const Key('first_play_gesture_hint_opacity')),
+      );
+      expect(fadedInOpacity.opacity, 1.0);
       expect(find.textContaining('滚轮音量'), findsOneWidget);
 
       await tester.pump(const Duration(milliseconds: 60));
       expect(prefs.playHintShownCount, 1);
 
+      // Tap dismiss -> animates opacity to 0.0 first, then unmounts on animation end.
       await tester.tap(find.byKey(const Key('first_play_gesture_hint_dismiss')));
-      await tester.pumpAndSettle();
+      await tester.pump();
+      final fadingOutOpacity = tester.widget<AnimatedOpacity>(
+        find.byKey(const Key('first_play_gesture_hint_opacity')),
+      );
+      expect(fadingOutOpacity.opacity, 0.0);
 
+      await tester.pumpAndSettle();
       expect(prefs.playHintDismissed, isTrue);
       expect(prefs.shouldShowFirstPlayHint(), isFalse);
       expect(dismissedCallbackFired, isTrue);

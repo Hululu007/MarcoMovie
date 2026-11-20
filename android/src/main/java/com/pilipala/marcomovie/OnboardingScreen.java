@@ -6,7 +6,7 @@ import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Color;
+import android.graphics.Outline;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
@@ -16,8 +16,9 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
+import android.view.animation.PathInterpolator;
 import android.widget.FrameLayout;
-import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -40,8 +41,9 @@ import org.json.JSONObject;
  * Standalone 5-act story onboarding view for Android Mobile, Tablet, and Android TV.
  *
  * <p>Uses a dedicated device-local {@link SharedPreferences} file ({@link #PREFS_FILE}) and never
- * touches {@code Prefs.java} or cross-device backup keys. TV mode enforces zero blur/shaders and a
- * full D-pad focus chain with Back-key skip/step-back support.
+ * touches {@code Prefs.java} or cross-device backup keys. TV mode enforces zero blur/shaders, a
+ * full D-pad focus chain with visible focus stroke/fill even under {@code reduceMotion}, and
+ * Back-key step-back/skip support.
  */
 public final class OnboardingScreen extends FrameLayout {
 
@@ -67,6 +69,11 @@ public final class OnboardingScreen extends FrameLayout {
     private static final int COLOR_WHITE = 0xFFF5F5F7;
     private static final int COLOR_MUTED = 0xFFB0B3C2;
     private static final int COLOR_FOCUS_TEXT = 0xFF101013;
+
+    private static final String FOCUS_TAG_REDUCE_MOTION = "act5_reduce_motion";
+    private static final String FOCUS_TAG_REDUCE_TRANS = "act5_reduce_trans";
+    private static final String FOCUS_TAG_SCALE_PREFIX = "act5_scale_";
+    private static final String FOCUS_TAG_HUD_STEP = "act4_hud_step";
 
     /** Device-local key-value abstraction so state logic is unit-testable on the JVM. */
     public interface Store {
@@ -182,6 +189,7 @@ public final class OnboardingScreen extends FrameLayout {
     public static final class Controller {
         private final Store store;
         private int currentAct;
+        private int hudDemoStep;
         private boolean reduceMotion;
         private boolean reduceTransparency;
         private int uiScalePercent = 100;
@@ -249,6 +257,15 @@ public final class OnboardingScreen extends FrameLayout {
             }
         }
 
+        public int getHudDemoStep() {
+            return hudDemoStep;
+        }
+
+        public int cycleHudDemoStep() {
+            hudDemoStep = (hudDemoStep + 1) % 3;
+            return hudDemoStep;
+        }
+
         public void complete(boolean wasSkipped) {
             finished = true;
             skipped = wasSkipped;
@@ -257,7 +274,7 @@ public final class OnboardingScreen extends FrameLayout {
 
         /**
          * Handles hardware Back key: steps back to previous act if past Act 1, otherwise skips
-         * onboarding cleanly (satisfying TV Back-key contract).
+         * onboarding cleanly (satisfying TV & mobile Back-key contract).
          */
         public boolean handleBack() {
             if (currentAct > 0) {
@@ -325,10 +342,13 @@ public final class OnboardingScreen extends FrameLayout {
     private final LinearLayout rootColumn;
     private final FrameLayout stageContainer;
     private final LinearLayout dotsRow;
+    private final TextView brandView;
     private final TextView skipButton;
     private final TextView prevButton;
     private final TextView nextButton;
     private TextView primaryCtaButton;
+    private Runnable pendingFocusTask;
+    private boolean backDownTracked;
 
     public OnboardingScreen(
             Context context,
@@ -368,7 +388,10 @@ public final class OnboardingScreen extends FrameLayout {
         this.demoItems = loadDemoItems(context);
 
         setClickable(true);
-        setFocusable(false);
+        setFocusable(true);
+        setFocusableInTouchMode(true);
+        setClipChildren(false);
+        setClipToPadding(false);
 
         // Background layer: static dark gradient (zero blur/shaders on TV).
         this.backgroundSlot = new FrameLayout(context);
@@ -383,22 +406,26 @@ public final class OnboardingScreen extends FrameLayout {
 
         this.rootColumn = new LinearLayout(context);
         rootColumn.setOrientation(LinearLayout.VERTICAL);
+        rootColumn.setClipChildren(false);
+        rootColumn.setClipToPadding(false);
         int padH = dp(tvMode ? 44 : 20);
         int padV = dp(tvMode ? 28 : 18);
         rootColumn.setPadding(padH, padV, padH, padV);
         addView(rootColumn, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
-        // Top bar: brand label + step indicator + Skip button (available on every act).
+        // Top bar: brand label + Skip button (available on every act).
         LinearLayout topBar = new LinearLayout(context);
         topBar.setOrientation(LinearLayout.HORIZONTAL);
         topBar.setGravity(Gravity.CENTER_VERTICAL);
+        topBar.setClipChildren(false);
+        topBar.setClipToPadding(false);
 
-        TextView brand =
+        this.brandView =
                 makeText(
                         zh ? "Marco Movie · 新手引导" : "Marco Movie · Welcome", 15, COLOR_WHITE, true);
         LinearLayout.LayoutParams brandLp =
                 new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
-        topBar.addView(brand, brandLp);
+        topBar.addView(brandView, brandLp);
 
         this.skipButton = makeActionPill(zh ? "跳过" : "Skip", false);
         skipButton.setId(UiCompat.generateViewId());
@@ -417,6 +444,8 @@ public final class OnboardingScreen extends FrameLayout {
 
         // Center stage container (rebuilt on act change).
         this.stageContainer = new FrameLayout(context);
+        stageContainer.setClipChildren(false);
+        stageContainer.setClipToPadding(false);
         LinearLayout.LayoutParams stageLp =
                 new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f);
         stageLp.topMargin = dp(14);
@@ -427,6 +456,8 @@ public final class OnboardingScreen extends FrameLayout {
         LinearLayout bottomBar = new LinearLayout(context);
         bottomBar.setOrientation(LinearLayout.HORIZONTAL);
         bottomBar.setGravity(Gravity.CENTER_VERTICAL);
+        bottomBar.setClipChildren(false);
+        bottomBar.setClipToPadding(false);
 
         this.prevButton = makeActionPill(zh ? "上一幕" : "Back", false);
         prevButton.setId(UiCompat.generateViewId());
@@ -435,7 +466,7 @@ public final class OnboardingScreen extends FrameLayout {
                     @Override
                     public void onClick(View v) {
                         if (controller.previousAct()) {
-                            renderAct();
+                            renderAct(null);
                         }
                     }
                 });
@@ -453,7 +484,7 @@ public final class OnboardingScreen extends FrameLayout {
                     @Override
                     public void onClick(View v) {
                         if (controller.nextAct()) {
-                            renderAct();
+                            renderAct(null);
                         } else {
                             finishOnboarding(false);
                         }
@@ -465,7 +496,7 @@ public final class OnboardingScreen extends FrameLayout {
                 new LinearLayout.LayoutParams(
                         LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
-        renderAct();
+        renderAct(null);
     }
 
     /** Optional Wave 2 hook to mount AuroraSurfaceView on non-TV devices. */
@@ -490,24 +521,49 @@ public final class OnboardingScreen extends FrameLayout {
         Controller.resetForReplay(new SharedPrefsStore(context));
     }
 
+    /**
+     * Public Back-press handler for Wave 2 {@code Activity.onBackPressed()} / Android 10–15
+     * predictive gesture back and touch-mode navigation.
+     *
+     * @return always {@code true} indicating the Back event was handled by onboarding.
+     */
+    public boolean handleBackPressed() {
+        boolean exited = controller.handleBack();
+        if (exited) {
+            notifyFinished(true);
+        } else {
+            renderAct(null);
+        }
+        return true;
+    }
+
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        if (event != null
-                && event.getAction() == KeyEvent.ACTION_UP
-                && event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
-            boolean exited = controller.handleBack();
-            if (exited) {
-                notifyFinished(true);
-            } else {
-                renderAct();
+        if (event != null && event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                if (event.getRepeatCount() == 0) {
+                    event.startTracking();
+                    backDownTracked = true;
+                }
+                return true;
             }
-            return true;
+            if (event.getAction() == KeyEvent.ACTION_UP) {
+                boolean wasTracked = backDownTracked;
+                backDownTracked = false;
+                if (wasTracked && !event.isCanceled()) {
+                    return handleBackPressed();
+                }
+                return true;
+            }
         }
         return super.dispatchKeyEvent(event);
     }
 
     @Override
     protected void onDetachedFromWindow() {
+        cancelPendingFocus();
+        // Detach ImageViews before recycling bitmaps to prevent draw-after-recycle crashes.
+        stageContainer.removeAllViews();
         super.onDetachedFromWindow();
         for (Bitmap bmp : posterBitmaps.values()) {
             if (bmp != null && !bmp.isRecycled()) {
@@ -515,6 +571,13 @@ public final class OnboardingScreen extends FrameLayout {
             }
         }
         posterBitmaps.clear();
+    }
+
+    private void cancelPendingFocus() {
+        if (pendingFocusTask != null) {
+            removeCallbacks(pendingFocusTask);
+            pendingFocusTask = null;
+        }
     }
 
     private void finishOnboarding(boolean skipped) {
@@ -528,7 +591,25 @@ public final class OnboardingScreen extends FrameLayout {
         }
     }
 
-    private void renderAct() {
+    private void refreshChromeStyles() {
+        float scale = controller.getUiScalePercent() / 100f;
+        brandView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * scale);
+        float btnSp = (tvMode ? 15f : 14f) * scale;
+        skipButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, btnSp);
+        prevButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, btnSp);
+        nextButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, btnSp);
+        stylePill(skipButton, false, skipButton.hasFocus());
+        stylePill(prevButton, false, prevButton.hasFocus());
+        stylePill(nextButton, true, nextButton.hasFocus());
+    }
+
+    /**
+     * Rebuilds the active act view. When {@code preserveFocusTag} is non-null (e.g., after toggling
+     * an Act 5 personalization control or cycling Act 4 HUD preview), focus stays on the matching
+     * tagged control instead of jumping back to the default CTA.
+     */
+    private void renderAct(final String preserveFocusTag) {
+        cancelPendingFocus();
         stageContainer.removeAllViews();
         primaryCtaButton = null;
 
@@ -557,6 +638,8 @@ public final class OnboardingScreen extends FrameLayout {
         ScrollView scroll = new ScrollView(getContext());
         scroll.setFillViewport(true);
         scroll.setVerticalScrollBarEnabled(false);
+        scroll.setClipChildren(false);
+        scroll.setClipToPadding(false);
         scroll.addView(
                 actView, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         stageContainer.addView(
@@ -567,21 +650,32 @@ public final class OnboardingScreen extends FrameLayout {
         nextButton.setText(
                 controller.isLastAct() ? (zh ? "先进入首页" : "Enter Home") : (zh ? "下一幕" : "Next"));
 
+        refreshChromeStyles();
         renderDots(act);
         wireFocusChain();
 
-        if (tvMode) {
+        if (tvMode || preserveFocusTag != null) {
+            final View preserved =
+                    preserveFocusTag != null
+                            ? stageContainer.findViewWithTag(preserveFocusTag)
+                            : null;
             final View target =
-                    (act == ACT_COUNT - 1 && primaryCtaButton != null)
-                            ? primaryCtaButton
-                            : nextButton;
-            post(
+                    preserved != null
+                            ? preserved
+                            : ((act == ACT_COUNT - 1 && primaryCtaButton != null)
+                                    ? primaryCtaButton
+                                    : nextButton);
+            pendingFocusTask =
                     new Runnable() {
                         @Override
                         public void run() {
-                            target.requestFocus();
+                            pendingFocusTask = null;
+                            if (UiCompat.isAttached(OnboardingScreen.this) && target != null) {
+                                target.requestFocus();
+                            }
                         }
-                    });
+                    };
+            post(pendingFocusTask);
         }
     }
 
@@ -608,6 +702,8 @@ public final class OnboardingScreen extends FrameLayout {
         if (prevButton.getVisibility() == View.VISIBLE) {
             prevButton.setNextFocusRightId(nextButton.getId());
             nextButton.setNextFocusLeftId(prevButton.getId());
+        } else {
+            nextButton.setNextFocusLeftId(View.NO_ID);
         }
     }
 
@@ -645,13 +741,7 @@ public final class OnboardingScreen extends FrameLayout {
                         COLOR_TEAL,
                         true));
         TextView inputBox =
-                makeText(
-                        zh
-                                ? "https://your-own-config.example/config.json"
-                                : "https://your-own-config.example/config.json",
-                        13,
-                        COLOR_MUTED,
-                        false);
+                makeText("https://your-own-config.example/config.json", 13, COLOR_MUTED, false);
         GradientDrawable boxBg = new GradientDrawable();
         boxBg.setColor(0x6609090C);
         boxBg.setCornerRadius(dp(10));
@@ -690,46 +780,72 @@ public final class OnboardingScreen extends FrameLayout {
                                 : "These 14 procedurally generated abstract posters are fictional samples showcasing text-only spec badges (4K, DV · ATMOS, HDR10+, REMUX) and continue-watching progress.");
 
         LinearLayout right = makeGlassCard();
+        right.setClipChildren(false);
+        right.setClipToPadding(false);
         right.addView(
                 makeText(
-                        zh ? "示例海报墙（全部为虚构占位素材）" : "Sample Poster Wall (Fictional Placeholders)",
+                        zh
+                                ? "14 张示例海报网格（全部为虚构占位素材）"
+                                : "14 Sample Posters Grid (Fictional Placeholders)",
                         13,
                         COLOR_GOLD,
                         true));
 
-        HorizontalScrollView hsv = new HorizontalScrollView(getContext());
-        hsv.setHorizontalScrollBarEnabled(false);
-        LinearLayout row = new LinearLayout(getContext());
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        int previewCount = Math.min(demoItems.size(), 6);
-        for (int i = 0; i < previewCount; i++) {
-            View card = buildDemoPosterCard(demoItems.get(i));
-            LinearLayout.LayoutParams lp =
-                    new LinearLayout.LayoutParams(
-                            dp(tvMode ? 132 : 114), LayoutParams.WRAP_CONTENT);
-            if (i > 0) {
-                lp.leftMargin = dp(10);
-            }
-            row.addView(card, lp);
-        }
-        hsv.addView(row);
-        LinearLayout.LayoutParams hsvLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        hsvLp.topMargin = dp(10);
-        right.addView(hsv, hsvLp);
+        int columns = wide ? 4 : 3;
+        LinearLayout grid = new LinearLayout(getContext());
+        grid.setOrientation(LinearLayout.VERTICAL);
+        grid.setClipChildren(false);
+        grid.setClipToPadding(false);
+        grid.setPadding(dp(4), dp(8), dp(4), dp(4));
 
+        int count = demoItems.size();
+        for (int start = 0; start < count; start += columns) {
+            LinearLayout row = new LinearLayout(getContext());
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setClipChildren(false);
+            row.setClipToPadding(false);
+            for (int col = 0; col < columns; col++) {
+                int idx = start + col;
+                LinearLayout.LayoutParams cellLp =
+                        new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
+                if (col > 0) {
+                    cellLp.leftMargin = dp(8);
+                }
+                if (idx < count) {
+                    row.addView(buildDemoPosterCard(demoItems.get(idx)), cellLp);
+                } else {
+                    row.addView(new View(getContext()), cellLp);
+                }
+            }
+            LinearLayout.LayoutParams rowLp =
+                    new LinearLayout.LayoutParams(
+                            LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+            if (start > 0) {
+                rowLp.topMargin = dp(10);
+            }
+            grid.addView(row, rowLp);
+        }
+
+        right.addView(
+                grid,
+                new LinearLayout.LayoutParams(
+                        LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         return assembleSplit(wide, left, right);
     }
 
     private View buildDemoPosterCard(DemoItem item) {
-        LinearLayout card = new LinearLayout(getContext());
+        final LinearLayout card = new LinearLayout(getContext());
         card.setOrientation(LinearLayout.VERTICAL);
         card.setFocusable(tvMode);
-        card.setPadding(dp(4), dp(4), dp(4), dp(6));
+        card.setClickable(tvMode);
+        card.setClipChildren(false);
+        card.setClipToPadding(false);
+        card.setPadding(dp(5), dp(5), dp(5), dp(6));
+        styleCardContainer(card, false);
 
         FrameLayout posterWrap = new FrameLayout(getContext());
-        int posterW = dp(tvMode ? 124 : 106);
-        int posterH = (int) (posterW * 1.5f);
+        int posterH = dp(tvMode ? 128 : 112);
+        applyRoundedClip(posterWrap, dp(8));
 
         ImageView img = new ImageView(getContext());
         img.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -741,63 +857,110 @@ public final class OnboardingScreen extends FrameLayout {
                     new GradientDrawable(
                             GradientDrawable.Orientation.TL_BR,
                             new int[] {COLOR_BG_TOP, item.accentColor});
-            fallback.setCornerRadius(dp(10));
+            fallback.setCornerRadius(dp(8));
             UiCompat.setBackground(img, fallback);
         }
-        posterWrap.addView(img, new LayoutParams(posterW, posterH));
+        posterWrap.addView(
+                img, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
         // Mandatory UI-layer "示例 / DEMO" badge in top-right corner.
-        TextView demoBadge = makeText(zh ? "示例" : "DEMO", 10, COLOR_WHITE, true);
+        TextView demoBadge = makeText(zh ? "示例" : "DEMO", 9.5f, COLOR_WHITE, true);
         GradientDrawable badgeBg = new GradientDrawable();
         badgeBg.setColor(0xD9101218);
-        badgeBg.setCornerRadius(dp(6));
+        badgeBg.setCornerRadius(dp(5));
         badgeBg.setStroke(dp(1), 0x80FFFFFF);
         UiCompat.setBackground(demoBadge, badgeBg);
-        demoBadge.setPadding(dp(6), dp(2), dp(6), dp(2));
+        demoBadge.setPadding(dp(5), dp(2), dp(5), dp(2));
         LayoutParams badgeLp =
                 new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
         badgeLp.gravity = Gravity.TOP | Gravity.END;
-        badgeLp.topMargin = dp(6);
-        badgeLp.rightMargin = dp(6);
+        badgeLp.topMargin = dp(5);
+        badgeLp.rightMargin = dp(5);
         posterWrap.addView(demoBadge, badgeLp);
 
         // Continue-watching progress bar when progress > 0.
         if (item.progress > 0f) {
-            FrameLayout track = new FrameLayout(getContext());
+            LinearLayout track = new LinearLayout(getContext());
+            track.setOrientation(LinearLayout.HORIZONTAL);
             track.setBackgroundColor(0x66000000);
             View fill = new View(getContext());
             fill.setBackgroundColor(COLOR_ACCENT);
-            track.addView(fill, new LayoutParams(Math.round(posterW * item.progress), dp(4)));
-            LayoutParams trackLp = new LayoutParams(posterW, dp(4));
+            track.addView(
+                    fill,
+                    new LinearLayout.LayoutParams(0, LayoutParams.MATCH_PARENT, item.progress));
+            View rest = new View(getContext());
+            track.addView(
+                    rest,
+                    new LinearLayout.LayoutParams(
+                            0, LayoutParams.MATCH_PARENT, 1f - item.progress));
+            LayoutParams trackLp = new LayoutParams(LayoutParams.MATCH_PARENT, dp(4));
             trackLp.gravity = Gravity.BOTTOM;
             posterWrap.addView(track, trackLp);
         }
 
-        card.addView(posterWrap, new LinearLayout.LayoutParams(posterW, posterH));
+        card.addView(posterWrap, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, posterH));
 
-        TextView title = makeText(item.title(zh), 12, COLOR_WHITE, true);
+        TextView title = makeText(item.title(zh), 11, COLOR_WHITE, true);
         title.setSingleLine(true);
         LinearLayout.LayoutParams titleLp =
-                new LinearLayout.LayoutParams(posterW, LayoutParams.WRAP_CONTENT);
-        titleLp.topMargin = dp(6);
+                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+        titleLp.topMargin = dp(5);
         card.addView(title, titleLp);
 
-        // Pure-text spec badges row.
+        // Compact pill-styled text-only spec badges per motion-tokens.json.
         if (!item.specs.isEmpty()) {
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < Math.min(item.specs.size(), 2); i++) {
-                if (i > 0) sb.append(" · ");
-                sb.append(item.specs.get(i));
+            LinearLayout badgeRow = new LinearLayout(getContext());
+            badgeRow.setOrientation(LinearLayout.HORIZONTAL);
+            int maxSpecs = Math.min(item.specs.size(), 2);
+            for (int i = 0; i < maxSpecs; i++) {
+                TextView pill = makeSpecBadgePill(item.specs.get(i));
+                LinearLayout.LayoutParams pLp =
+                        new LinearLayout.LayoutParams(
+                                LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+                if (i > 0) {
+                    pLp.leftMargin = dp(4);
+                }
+                badgeRow.addView(pill, pLp);
             }
-            TextView specView = makeText(sb.toString(), 10, COLOR_TEAL, true);
-            specView.setSingleLine(true);
-            card.addView(specView);
+            LinearLayout.LayoutParams brLp =
+                    new LinearLayout.LayoutParams(
+                            LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+            brLp.topMargin = dp(4);
+            card.addView(badgeRow, brLp);
         }
 
         if (tvMode) {
-            attachFocusHighlight(card, false);
+            card.setOnFocusChangeListener(
+                    new OnFocusChangeListener() {
+                        @Override
+                        public void onFocusChange(View v, boolean hasFocus) {
+                            styleCardContainer(card, hasFocus);
+                            animateFocusScale(card, hasFocus);
+                        }
+                    });
         }
         return card;
+    }
+
+    private TextView makeSpecBadgePill(String spec) {
+        boolean isGold = spec.contains("4K");
+        boolean isPurple = spec.contains("DV") || spec.contains("ATMOS");
+        int fill =
+                controller.isReduceTransparency()
+                        ? (isGold ? 0xEB3A2810 : (isPurple ? 0xEB261F42 : 0xEB122640))
+                        : (isGold ? 0x2EFF9F0A : (isPurple ? 0x335E5CE6 : 0x2E0A84FF));
+        int stroke = isGold ? 0x66FF9F0A : (isPurple ? 0x73BF5AF2 : 0x660A84FF);
+        int text = isGold ? 0xFFFFB340 : (isPurple ? 0xFFE5C7FF : 0xFF64D2FF);
+
+        TextView pill = makeText(spec, 9.5f, text, true);
+        pill.setSingleLine(true);
+        pill.setPadding(dp(5), dp(1.5f), dp(5), dp(1.5f));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(fill);
+        bg.setCornerRadius(dp(5));
+        bg.setStroke(dp(1), stroke);
+        UiCompat.setBackground(pill, bg);
+        return pill;
     }
 
     private View buildAct3Sync(boolean wide) {
@@ -900,58 +1063,138 @@ public final class OnboardingScreen extends FrameLayout {
                                         : "Hold Speed, Slide Adjust & Swipe-Up Lock"),
                         body);
 
-        LinearLayout right = makeGlassCard();
-        right.addView(
-                makeText(
-                        zh
-                                ? "4K · DV · ATMOS   |   3s 跳过片头   |   分片弹幕"
-                                : "4K · DV · ATMOS   |   3s Skip Intro   |   Danmaku",
-                        12,
-                        COLOR_GOLD,
-                        true));
-
-        String[] items =
-                tvMode
+        int step = controller.getHudDemoStep();
+        String[] touchStates =
+                zh
                         ? new String[] {
-                            zh ? "短按 ← / →：快进 / 快退 15 秒" : "Short Left / Right: Seek 15s",
-                            zh
-                                    ? "长按 ← / →：加速快进/快退预览，松手即播"
-                                    : "Hold Left / Right: Accelerated scrub, release to play",
-                            zh
-                                    ? "返回键：立即取消预览，恢复原播放位置"
-                                    : "Back key: Cancel scrub and restore position",
+                            "状态 1/3：长按触发 2.0× 临时倍速",
+                            "状态 2/3：左右滑调速（1.25× / 1.5× / 2.0× / 3.0×）",
+                            "状态 3/3：🔒 2.0× 锁定中 · 点击胶囊恢复",
                         }
                         : new String[] {
-                            zh
-                                    ? "长按屏幕：临时 2.0× 倍速，左右滑切换 1.25×/1.5×/2.0×/3.0×"
-                                    : "Hold screen: 2.0× boost, slide for 1.25×–3.0×",
-                            zh
-                                    ? "按住上滑：锁定当前倍速，点击顶部胶囊恢复"
-                                    : "Swipe up while holding: Lock speed, tap top pill to reset",
-                            zh
-                                    ? "两侧双击快进/快退 · 左右半屏调节亮度与音量"
-                                    : "Double-tap sides to seek · Vertical drag for brightness/volume",
+                            "Step 1/3: Hold for 2.0× boost",
+                            "Step 2/3: Slide horizontally (1.25×–3.0×)",
+                            "Step 3/3: 🔒 2.0× Locked · Tap pill to reset",
                         };
+        String[] tvStates =
+                zh
+                        ? new String[] {
+                            "状态 1/3：短按 ← / → 快进快退 15 秒",
+                            "状态 2/3：长按 ← / → 加速预览，松手即播",
+                            "状态 3/3：按返回键取消预览，恢复原位置",
+                        }
+                        : new String[] {
+                            "Step 1/3: Short Left/Right seeks 15s",
+                            "Step 2/3: Hold Left/Right scrubs, release to play",
+                            "Step 3/3: Press Back to cancel & restore",
+                        };
+        String activeStateText = (tvMode ? tvStates : touchStates)[step % 3];
 
-        for (String line : items) {
-            TextView tv = makeText("•  " + line, 13, COLOR_WHITE, false);
-            LinearLayout.LayoutParams lp =
-                    new LinearLayout.LayoutParams(
-                            LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-            lp.topMargin = dp(10);
-            right.addView(tv, lp);
-        }
+        // Component-level mock player HUD preview frame.
+        LinearLayout right = makeGlassCard();
+        FrameLayout mockScreen = new FrameLayout(getContext());
+        GradientDrawable screenBg =
+                new GradientDrawable(
+                        GradientDrawable.Orientation.TL_BR,
+                        new int[] {0xFF0C1222, 0xFF162238, 0xFF0A0D14});
+        screenBg.setCornerRadius(dp(12));
+        screenBg.setStroke(dp(1), COLOR_BORDER);
+        UiCompat.setBackground(mockScreen, screenBg);
+        mockScreen.setPadding(dp(12), dp(10), dp(12), dp(10));
 
-        // Thin progress bar preview
-        FrameLayout barTrack = new FrameLayout(getContext());
+        // Top-left StartSpecOverlay pill
+        LinearLayout topSpecRow = new LinearLayout(getContext());
+        topSpecRow.setOrientation(LinearLayout.HORIZONTAL);
+        topSpecRow.addView(makeSpecBadgePill("4K"));
+        TextView dvPill = makeSpecBadgePill("DV · ATMOS");
+        LinearLayout.LayoutParams dvLp =
+                new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        dvLp.leftMargin = dp(5);
+        topSpecRow.addView(dvPill, dvLp);
+        LayoutParams topSpecLp =
+                new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        topSpecLp.gravity = Gravity.TOP | Gravity.START;
+        mockScreen.addView(topSpecRow, topSpecLp);
+
+        // Floating danmaku lane preview
+        TextView danmakuPill =
+                makeText(
+                        zh ? "弹幕示例 · 画面细节很清晰" : "Sample Danmaku · Crisp cinema detail",
+                        11,
+                        0xDDFFFFFF,
+                        false);
+        LayoutParams dmLp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        dmLp.gravity = Gravity.TOP | Gravity.END;
+        dmLp.topMargin = dp(26);
+        mockScreen.addView(danmakuPill, dmLp);
+
+        // Center active gesture/remote state pill
+        TextView stateCapsule = makeText(activeStateText, 12, COLOR_WHITE, true);
+        GradientDrawable capBg = new GradientDrawable();
+        capBg.setColor(0xD9101626);
+        capBg.setCornerRadius(dp(16));
+        capBg.setStroke(dp(1), COLOR_ACCENT);
+        UiCompat.setBackground(stateCapsule, capBg);
+        stateCapsule.setPadding(dp(12), dp(6), dp(12), dp(6));
+        LayoutParams capLp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        capLp.gravity = Gravity.CENTER;
+        mockScreen.addView(stateCapsule, capLp);
+
+        // Bottom-right 3s skip-intro countdown pill
+        TextView skipIntroPill =
+                makeText(zh ? "3s 跳过片头" : "Skip Intro 3s", 10.5f, COLOR_GOLD, true);
+        GradientDrawable skipBg = new GradientDrawable();
+        skipBg.setColor(0xD9241B10);
+        skipBg.setCornerRadius(dp(12));
+        skipBg.setStroke(dp(1), 0x88FF9F0A);
+        UiCompat.setBackground(skipIntroPill, skipBg);
+        skipIntroPill.setPadding(dp(8), dp(3), dp(8), dp(3));
+        LayoutParams siLp = new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        siLp.gravity = Gravity.BOTTOM | Gravity.END;
+        siLp.bottomMargin = dp(12);
+        mockScreen.addView(skipIntroPill, siLp);
+
+        // Bottom persistent thin progress bar
+        float progressRatio = step == 0 ? 0.35f : (step == 1 ? 0.58f : 0.72f);
+        LinearLayout barTrack = new LinearLayout(getContext());
+        barTrack.setOrientation(LinearLayout.HORIZONTAL);
         barTrack.setBackgroundColor(0x44FFFFFF);
         View barFill = new View(getContext());
         barFill.setBackgroundColor(COLOR_ACCENT);
-        barTrack.addView(barFill, new LayoutParams(dp(140), dp(4)));
-        LinearLayout.LayoutParams barLp =
-                new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(4));
-        barLp.topMargin = dp(16);
-        right.addView(barTrack, barLp);
+        barTrack.addView(
+                barFill,
+                new LinearLayout.LayoutParams(0, LayoutParams.MATCH_PARENT, progressRatio));
+        barTrack.addView(
+                new View(getContext()),
+                new LinearLayout.LayoutParams(0, LayoutParams.MATCH_PARENT, 1f - progressRatio));
+        LayoutParams barLp = new LayoutParams(LayoutParams.MATCH_PARENT, dp(4));
+        barLp.gravity = Gravity.BOTTOM;
+        mockScreen.addView(barTrack, barLp);
+
+        right.addView(
+                mockScreen, new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(164)));
+
+        // Interactive cycle button (clickable & TV focusable) to step through HUD gesture states.
+        TextView cycleBtn =
+                makeActionPill(
+                        zh
+                                ? "切换操控演示状态 (" + (step + 1) + "/3)"
+                                : "Cycle Control Demo (" + (step + 1) + "/3)",
+                        false);
+        cycleBtn.setTag(FOCUS_TAG_HUD_STEP);
+        cycleBtn.setId(UiCompat.generateViewId());
+        cycleBtn.setOnClickListener(
+                new OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        controller.cycleHudDemoStep();
+                        renderAct(FOCUS_TAG_HUD_STEP);
+                    }
+                });
+        LinearLayout.LayoutParams cyLp =
+                new LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        cyLp.topMargin = dp(12);
+        right.addView(cycleBtn, cyLp);
 
         return assembleSplit(wide, left, right);
     }
@@ -967,6 +1210,8 @@ public final class OnboardingScreen extends FrameLayout {
 
         LinearLayout ctaRow = new LinearLayout(getContext());
         ctaRow.setOrientation(LinearLayout.HORIZONTAL);
+        ctaRow.setClipChildren(false);
+        ctaRow.setClipToPadding(false);
         TextView importNow = makeActionPill(zh ? "立即导入配置" : "Import Config Now", true);
         importNow.setId(UiCompat.generateViewId());
         importNow.setOnClickListener(
@@ -975,8 +1220,8 @@ public final class OnboardingScreen extends FrameLayout {
                     public void onClick(View v) {
                         controller.complete(false);
                         if (callbacks != null) {
-                            callbacks.onImportConfig("");
                             callbacks.onFinished(false);
+                            callbacks.onImportConfig("");
                         }
                     }
                 });
@@ -989,30 +1234,36 @@ public final class OnboardingScreen extends FrameLayout {
         left.addView(ctaRow, ctaLp);
 
         LinearLayout right = makeGlassCard();
-        right.addView(
+        right.setClipChildren(false);
+        right.setClipToPadding(false);
+
+        LinearLayout motionRow =
                 makeToggleRow(
                         zh ? "减少动态效果" : "Reduce Motion",
                         controller.isReduceMotion(),
+                        FOCUS_TAG_REDUCE_MOTION,
                         new OnClickListener() {
                             @Override
                             public void onClick(View v) {
                                 controller.setReduceMotion(!controller.isReduceMotion());
                                 notifyPersonalization();
-                                renderAct();
+                                renderAct(FOCUS_TAG_REDUCE_MOTION);
                             }
-                        }));
+                        });
+        right.addView(motionRow);
 
         LinearLayout transRow =
                 makeToggleRow(
                         zh ? "降低透明度（高对比纯色）" : "Reduce Transparency",
                         controller.isReduceTransparency(),
+                        FOCUS_TAG_REDUCE_TRANS,
                         new OnClickListener() {
                             @Override
                             public void onClick(View v) {
                                 controller.setReduceTransparency(
                                         !controller.isReduceTransparency());
                                 notifyPersonalization();
-                                renderAct();
+                                renderAct(FOCUS_TAG_REDUCE_TRANS);
                             }
                         });
         LinearLayout.LayoutParams tLp =
@@ -1028,17 +1279,21 @@ public final class OnboardingScreen extends FrameLayout {
 
         LinearLayout scaleRow = new LinearLayout(getContext());
         scaleRow.setOrientation(LinearLayout.HORIZONTAL);
+        scaleRow.setClipChildren(false);
+        scaleRow.setClipToPadding(false);
         for (int i = 0; i < SUPPORTED_UI_SCALES.length; i++) {
             final int pct = SUPPORTED_UI_SCALES[i];
+            final String tag = FOCUS_TAG_SCALE_PREFIX + pct;
             boolean selected = controller.getUiScalePercent() == pct;
             TextView chip = makeActionPill(pct + "%", selected);
+            chip.setTag(tag);
             chip.setOnClickListener(
                     new OnClickListener() {
                         @Override
                         public void onClick(View v) {
                             controller.setUiScalePercent(pct);
                             notifyPersonalization();
-                            renderAct();
+                            renderAct(tag);
                         }
                     });
             LinearLayout.LayoutParams cLp =
@@ -1066,45 +1321,84 @@ public final class OnboardingScreen extends FrameLayout {
         }
     }
 
-    private LinearLayout makeToggleRow(String label, boolean enabled, OnClickListener listener) {
-        LinearLayout row = new LinearLayout(getContext());
+    private LinearLayout makeToggleRow(
+            String label, final boolean enabled, String focusTag, OnClickListener listener) {
+        final LinearLayout row = new LinearLayout(getContext());
+        row.setTag(focusTag);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setFocusable(true);
         row.setClickable(true);
         row.setOnClickListener(listener);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0x5509090C);
-        bg.setCornerRadius(dp(12));
-        bg.setStroke(dp(1), enabled ? COLOR_ACCENT : COLOR_BORDER);
-        UiCompat.setBackground(row, bg);
         row.setPadding(dp(14), dp(12), dp(14), dp(12));
 
-        TextView title = makeText(label, 14, COLOR_WHITE, false);
+        final TextView title = makeText(label, 14, COLOR_WHITE, false);
         row.addView(title, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView state =
+        final TextView state =
                 makeText(
                         enabled ? (zh ? "已开启" : "ON") : (zh ? "已关闭" : "OFF"),
                         12,
                         enabled ? COLOR_TEAL : COLOR_MUTED,
                         true);
         row.addView(state);
-        attachFocusHighlight(row, false);
+
+        styleToggleRow(row, title, state, enabled, false);
+        row.setOnFocusChangeListener(
+                new OnFocusChangeListener() {
+                    @Override
+                    public void onFocusChange(View v, boolean hasFocus) {
+                        styleToggleRow(row, title, state, enabled, hasFocus);
+                        animateFocusScale(row, hasFocus);
+                    }
+                });
         return row;
+    }
+
+    private void styleToggleRow(
+            LinearLayout row, TextView title, TextView state, boolean enabled, boolean focused) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(12));
+        if (focused) {
+            bg.setColor(COLOR_WHITE);
+            bg.setStroke(dp(2), COLOR_WHITE);
+            title.setTextColor(COLOR_FOCUS_TEXT);
+            state.setTextColor(COLOR_ACCENT);
+        } else {
+            bg.setColor(controller.isReduceTransparency() ? 0xE6141418 : 0x5509090C);
+            bg.setStroke(dp(1), enabled ? COLOR_ACCENT : COLOR_BORDER);
+            title.setTextColor(COLOR_WHITE);
+            state.setTextColor(enabled ? COLOR_TEAL : COLOR_MUTED);
+        }
+        UiCompat.setBackground(row, bg);
+    }
+
+    private void styleCardContainer(LinearLayout card, boolean focused) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(10));
+        if (focused) {
+            bg.setColor(0x33F5F5F7);
+            bg.setStroke(dp(2), COLOR_WHITE);
+        } else {
+            bg.setColor(0x2209090C);
+            bg.setStroke(dp(1), 0x1FFFFFFF);
+        }
+        UiCompat.setBackground(card, bg);
     }
 
     private View assembleSplit(boolean wide, View left, View right) {
         LinearLayout container = new LinearLayout(getContext());
         container.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
         container.setGravity(wide ? Gravity.CENTER_VERTICAL : Gravity.TOP);
+        container.setClipChildren(false);
+        container.setClipToPadding(false);
         if (wide) {
             LinearLayout.LayoutParams leftLp =
-                    new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 0.95f);
+                    new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 0.9f);
             leftLp.rightMargin = dp(24);
             container.addView(left, leftLp);
             container.addView(
-                    right, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.05f));
+                    right, new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1.1f));
         } else {
             container.addView(
                     left,
@@ -1122,6 +1416,8 @@ public final class OnboardingScreen extends FrameLayout {
     private LinearLayout makeInfoColumn(String eyebrow, String headline, String body) {
         LinearLayout col = new LinearLayout(getContext());
         col.setOrientation(LinearLayout.VERTICAL);
+        col.setClipChildren(false);
+        col.setClipToPadding(false);
         col.addView(makeText(eyebrow, 13, COLOR_TEAL, true));
 
         TextView h = makeText(headline, tvMode ? 28 : 24, COLOR_WHITE, true);
@@ -1158,7 +1454,7 @@ public final class OnboardingScreen extends FrameLayout {
         btn.setClickable(true);
         btn.setPadding(dp(18), dp(10), dp(18), dp(10));
         stylePill(btn, primary, false);
-        attachFocusHighlight(btn, primary);
+        attachPillFocusHighlight(btn, primary);
         return btn;
     }
 
@@ -1181,20 +1477,48 @@ public final class OnboardingScreen extends FrameLayout {
         UiCompat.setBackground(btn, bg);
     }
 
-    private void attachFocusHighlight(final View view, final boolean primary) {
-        view.setOnFocusChangeListener(
+    private void attachPillFocusHighlight(final TextView btn, final boolean primary) {
+        btn.setOnFocusChangeListener(
                 new OnFocusChangeListener() {
                     @Override
                     public void onFocusChange(View v, boolean hasFocus) {
-                        if (v instanceof TextView) {
-                            stylePill((TextView) v, primary, hasFocus);
-                        }
-                        float targetScale =
-                                (hasFocus && !controller.isReduceMotion()) ? 1.05f : 1.0f;
-                        v.setScaleX(targetScale);
-                        v.setScaleY(targetScale);
+                        stylePill(btn, primary, hasFocus);
+                        animateFocusScale(btn, hasFocus);
                     }
                 });
+    }
+
+    private void animateFocusScale(View view, boolean focused) {
+        view.animate().cancel();
+        if (controller.isReduceMotion()) {
+            view.setScaleX(1.0f);
+            view.setScaleY(1.0f);
+            return;
+        }
+        float targetScale = focused ? 1.05f : 1.0f;
+        if (Build.VERSION.SDK_INT >= 21) {
+            view.animate()
+                    .scaleX(targetScale)
+                    .scaleY(targetScale)
+                    .setDuration(210L)
+                    .setInterpolator(new PathInterpolator(0.2f, 0.0f, 0.0f, 1.0f))
+                    .start();
+        } else {
+            view.animate().scaleX(targetScale).scaleY(targetScale).setDuration(210L).start();
+        }
+    }
+
+    private void applyRoundedClip(View view, final int radiusPx) {
+        if (Build.VERSION.SDK_INT >= 21) {
+            view.setOutlineProvider(
+                    new ViewOutlineProvider() {
+                        @Override
+                        public void getOutline(View v, Outline outline) {
+                            outline.setRoundRect(0, 0, v.getWidth(), v.getHeight(), radiusPx);
+                        }
+                    });
+            UiCompat.setClipToOutline(view, true);
+        }
     }
 
     private TextView makeText(String text, float sp, int color, boolean bold) {
@@ -1226,13 +1550,15 @@ public final class OnboardingScreen extends FrameLayout {
 
     private Bitmap loadPosterBitmap(String file) {
         Bitmap cached = posterBitmaps.get(file);
-        if (cached != null) {
+        if (cached != null && !cached.isRecycled()) {
             return cached;
         }
         try {
             InputStream in = getContext().getAssets().open("demo/" + file);
             try {
-                Bitmap bmp = BitmapFactory.decodeStream(in);
+                BitmapFactory.Options opts = new BitmapFactory.Options();
+                opts.inSampleSize = 2; // 180x270 keeps all 14 posters under ~1.2MB RAM.
+                Bitmap bmp = BitmapFactory.decodeStream(in, null, opts);
                 if (bmp != null) {
                     posterBitmaps.put(file, bmp);
                 }

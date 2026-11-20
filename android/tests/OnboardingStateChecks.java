@@ -49,16 +49,22 @@ public final class OnboardingStateChecks {
                         == OnboardingScreen.CURRENT_VERSION,
                 "Stored onboarding_done_version == 1");
 
-        // 3. Personalization constraints
+        // 3. Personalization constraints & Act 4 HUD demo cycle
+        ctrl.goToAct(4);
         ctrl.setReduceMotion(true);
         ctrl.setReduceTransparency(true);
         ctrl.setUiScalePercent(120);
+        check(ctrl.getCurrentAct() == 4, "Personalization changes keep active act on Act 5");
         check(
                 ctrl.isReduceMotion() && ctrl.isReduceTransparency(),
                 "Accessibility flags persisted in controller");
         check(ctrl.getUiScalePercent() == 120, "Valid scale 120% accepted");
         ctrl.setUiScalePercent(999);
         check(ctrl.getUiScalePercent() == 120, "Invalid scale ignored");
+        check(ctrl.getHudDemoStep() == 0, "HUD demo starts at step 0");
+        check(ctrl.cycleHudDemoStep() == 1, "HUD demo cycles to step 1");
+        check(ctrl.cycleHudDemoStep() == 2, "HUD demo cycles to step 2");
+        check(ctrl.cycleHudDemoStep() == 0, "HUD demo wraps back to step 0");
 
         // 4. FirstPlayGestureHint max-3-displays policy
         OnboardingScreen.MemoryStore hintStore = new OnboardingScreen.MemoryStore();

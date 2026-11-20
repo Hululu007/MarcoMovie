@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/ohos_runtime.dart';
+import '../apple_theme.dart';
 import 'onboarding_prefs.dart';
 
 enum FirstPlayHintPlatform { touch, tv, desktop }
@@ -25,6 +26,19 @@ FirstPlayHintPlatform resolveFirstPlayHintPlatform({
     case TargetPlatform.fuchsia:
       return FirstPlayHintPlatform.touch;
   }
+}
+
+/// Resolves whether Chinese copy should be used, matching Android's `startsWith("zh")`
+/// behavior even when `MaterialApp` does not configure `supportedLocales`.
+bool resolveOnboardingChineseLocale(BuildContext context, bool? override) {
+  if (override != null) return override;
+  final widgetLocale = Localizations.maybeLocaleOf(context);
+  if (widgetLocale != null &&
+      widgetLocale.languageCode.toLowerCase().startsWith('zh')) {
+    return true;
+  }
+  final platformLocale = WidgetsBinding.instance.platformDispatcher.locale;
+  return platformLocale.languageCode.toLowerCase().startsWith('zh');
 }
 
 /// Lightweight first-play gesture hint capsule mounted above the player bottom
@@ -78,8 +92,11 @@ class FirstPlayGestureHint extends StatefulWidget {
 }
 
 class _FirstPlayGestureHintState extends State<FirstPlayGestureHint> {
-  bool _visible = false;
+  bool _mountedInTree = false;
+  double _opacity = 0.0;
+  bool _fadingOut = false;
   bool _counted = false;
+  bool _dismissNotified = false;
   Timer? _dwellTimer;
   Timer? _hideTimer;
 
@@ -87,22 +104,29 @@ class _FirstPlayGestureHintState extends State<FirstPlayGestureHint> {
   void initState() {
     super.initState();
     if (!OhosRuntime.isOhos && widget.prefs.shouldShowFirstPlayHint()) {
-      _visible = true;
+      _mountedInTree = true;
+      _opacity = 0.0;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_mountedInTree || _fadingOut) return;
+        setState(() => _opacity = 1.0);
+      });
       _dwellTimer = Timer(widget.dwellDuration, _recordDwell);
-      _hideTimer = Timer(widget.displayDuration, _autoHide);
+      _hideTimer = Timer(widget.displayDuration, _beginFadeOut);
     }
   }
 
   Future<void> _recordDwell() async {
-    if (!mounted || !_visible || _counted) return;
+    if (!mounted || !_mountedInTree || _fadingOut || _counted) return;
     _counted = true;
     await widget.prefs.recordFirstPlayHintShown();
   }
 
-  void _autoHide() {
-    if (!mounted || !_visible) return;
-    setState(() => _visible = false);
-    widget.onDismissed?.call();
+  void _beginFadeOut() {
+    if (!mounted || !_mountedInTree || _fadingOut) return;
+    setState(() {
+      _fadingOut = true;
+      _opacity = 0.0;
+    });
   }
 
   Future<void> _dismissForever() async {
@@ -110,8 +134,16 @@ class _FirstPlayGestureHintState extends State<FirstPlayGestureHint> {
     _hideTimer?.cancel();
     await widget.prefs.dismissFirstPlayHintForever();
     if (!mounted) return;
-    setState(() => _visible = false);
-    widget.onDismissed?.call();
+    _beginFadeOut();
+  }
+
+  void _handleFadeEnd() {
+    if (!_fadingOut || !mounted) return;
+    setState(() => _mountedInTree = false);
+    if (!_dismissNotified) {
+      _dismissNotified = true;
+      widget.onDismissed?.call();
+    }
   }
 
   @override
@@ -123,84 +155,99 @@ class _FirstPlayGestureHintState extends State<FirstPlayGestureHint> {
 
   @override
   Widget build(BuildContext context) {
-    if (OhosRuntime.isOhos || !_visible) {
+    if (OhosRuntime.isOhos || !_mountedInTree) {
       return const SizedBox.shrink();
     }
 
-    final locale = Localizations.maybeLocaleOf(context);
-    final zh = widget.isChinese ?? (locale?.languageCode.toLowerCase() != 'en');
+    final zh = resolveOnboardingChineseLocale(context, widget.isChinese);
     final platform = widget.platformOverride ??
         resolveFirstPlayHintPlatform(platform: Theme.of(context).platform);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final highContrast =
-        widget.reduceTransparency || MediaQuery.highContrastOf(context);
 
-    final bgColor = highContrast
-        ? const Color(0xEB16161A)
-        : const Color(0xCC12141C);
-    final borderColor = highContrast
-        ? const Color(0x73FFFFFF)
-        : const Color(0x38FFFFFF);
+    return ValueListenableBuilder<bool>(
+      valueListenable: GlassworkBackdrop.reduceTransparency,
+      builder: (context, globalReduceTrans, _) {
+        final highContrast = widget.reduceTransparency ||
+            globalReduceTrans ||
+            MediaQuery.highContrastOf(context);
 
-    return AnimatedOpacity(
-      opacity: _visible ? 1.0 : 0.0,
-      duration: Duration(milliseconds: reduceMotion ? 120 : 180),
-      curve: reduceMotion ? Curves.linear : const Cubic(0.2, 0.0, 0.0, 1.0),
-      child: Semantics(
-        liveRegion: true,
-        label: FirstPlayGestureHint.hintCopy(platform, zh: zh),
-        child: Container(
-          key: const Key('first_play_gesture_hint_capsule'),
-          constraints: const BoxConstraints(maxWidth: 680),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-          decoration: BoxDecoration(
-            color: bgColor,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: borderColor, width: 1),
-          ),
-          child: Wrap(
-            alignment: WrapAlignment.center,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 10,
-            runSpacing: 6,
-            children: [
-              Text(
-                FirstPlayGestureHint.hintCopy(platform, zh: zh),
-                style: const TextStyle(
-                  color: Color(0xFFF5F5F7),
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w500,
+        final bgColor = highContrast
+            ? const Color(0xEB16161A)
+            : const Color(0xCC12141C);
+        final borderColor = highContrast
+            ? const Color(0x73FFFFFF)
+            : const Color(0x38FFFFFF);
+
+        return AnimatedOpacity(
+          key: const Key('first_play_gesture_hint_opacity'),
+          opacity: _opacity,
+          duration: Duration(milliseconds: reduceMotion ? 120 : 180),
+          curve: reduceMotion ? Curves.linear : const Cubic(0.2, 0.0, 0.0, 1.0),
+          onEnd: _handleFadeEnd,
+          child: Semantics(
+            liveRegion: true,
+            label: FirstPlayGestureHint.hintCopy(platform, zh: zh),
+            child: Material(
+              type: MaterialType.transparency,
+              child: Container(
+                key: const Key('first_play_gesture_hint_capsule'),
+                constraints: const BoxConstraints(maxWidth: 680),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: bgColor,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: borderColor, width: 1),
+                ),
+                child: Wrap(
+                  alignment: WrapAlignment.center,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 10,
+                  runSpacing: 6,
+                  children: [
+                    Text(
+                      FirstPlayGestureHint.hintCopy(platform, zh: zh),
+                      style: const TextStyle(
+                        color: Color(0xFFF5F5F7),
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    InkWell(
+                      key: const Key('first_play_gesture_hint_dismiss'),
+                      splashFactory: NoSplash.splashFactory,
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: _dismissForever,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0x2E0A84FF),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                            color: const Color(0x665AC8FA),
+                            width: 1,
+                          ),
+                        ),
+                        child: Text(
+                          FirstPlayGestureHint.dismissLabel(zh: zh),
+                          style: const TextStyle(
+                            color: Color(0xFF64D2FF),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              InkWell(
-                key: const Key('first_play_gesture_hint_dismiss'),
-                borderRadius: BorderRadius.circular(14),
-                onTap: _dismissForever,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: const Color(0x2E0A84FF),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: const Color(0x665AC8FA),
-                      width: 1,
-                    ),
-                  ),
-                  child: Text(
-                    FirstPlayGestureHint.dismissLabel(zh: zh),
-                    style: const TextStyle(
-                      color: Color(0xFF64D2FF),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 }

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../core/ohos_runtime.dart';
+import '../apple_theme.dart';
 import '../ios_liquid_glass.dart';
 import 'first_play_gesture_hint.dart';
 import 'onboarding_prefs.dart';
@@ -86,8 +87,9 @@ class DemoPosterItem {
   }
 }
 
-/// Built-in fictional fallback list used before Wave 2 registers `assets/demo/`
-/// in `flutter/pubspec.yaml` or in isolated widget tests.
+/// Complete 14-item fictional fallback list matching `assets/demo/manifest.json`
+/// used before Wave 2 registers `assets/demo/` in `flutter/pubspec.yaml` or in
+/// isolated widget tests.
 const List<DemoPosterItem> kFallbackDemoPosters = <DemoPosterItem>[
   DemoPosterItem(
     id: 'demo_01',
@@ -130,7 +132,7 @@ const List<DemoPosterItem> kFallbackDemoPosters = <DemoPosterItem>[
     file: 'demo_05.png',
     titleZh: '示例 · 静夜回响',
     titleEn: 'Sample · Night Echo',
-    specs: ['1080P', 'REMUX'],
+    specs: ['1080P', 'REMUX', 'DD+ 5.1'],
     progress: 0.81,
     accentColor: Color(0xFF5E5CE6),
   ),
@@ -142,6 +144,78 @@ const List<DemoPosterItem> kFallbackDemoPosters = <DemoPosterItem>[
     specs: ['4K', 'HDR10'],
     progress: 0.0,
     accentColor: Color(0xFFFF9F0A),
+  ),
+  DemoPosterItem(
+    id: 'demo_07',
+    file: 'demo_07.png',
+    titleZh: '示例 · 折光之境',
+    titleEn: 'Sample · Prism Field',
+    specs: ['4K', 'DV · ATMOS'],
+    progress: 0.24,
+    accentColor: Color(0xFFFF6482),
+  ),
+  DemoPosterItem(
+    id: 'demo_08',
+    file: 'demo_08.png',
+    titleZh: '示例 · 极昼航线',
+    titleEn: 'Sample · Solstice Line',
+    specs: ['4K', 'HDR10+', 'REMUX'],
+    progress: 0.0,
+    accentColor: Color(0xFF64D2FF),
+  ),
+  DemoPosterItem(
+    id: 'demo_09',
+    file: 'demo_09.png',
+    titleZh: '示例 · 琥珀潮汐',
+    titleEn: 'Sample · Amber Tide',
+    specs: ['4K', 'HDR10', 'ATMOS'],
+    progress: 0.45,
+    accentColor: Color(0xFFFFB340),
+  ),
+  DemoPosterItem(
+    id: 'demo_10',
+    file: 'demo_10.png',
+    titleZh: '示例 · 雾港灯塔',
+    titleEn: 'Sample · Mist Harbor',
+    specs: ['1080P', 'HEVC'],
+    progress: 0.0,
+    accentColor: Color(0xFF5AC8FA),
+  ),
+  DemoPosterItem(
+    id: 'demo_11',
+    file: 'demo_11.png',
+    titleZh: '示例 · 星环纪事',
+    titleEn: 'Sample · Orbital Notes',
+    specs: ['4K', 'DV · ATMOS'],
+    progress: 0.0,
+    accentColor: Color(0xFFBF5AF2),
+  ),
+  DemoPosterItem(
+    id: 'demo_12',
+    file: 'demo_12.png',
+    titleZh: '示例 · 砾石山谷',
+    titleEn: 'Sample · Slate Valley',
+    specs: ['4K', 'REMUX'],
+    progress: 0.0,
+    accentColor: Color(0xFF63E682),
+  ),
+  DemoPosterItem(
+    id: 'demo_13',
+    file: 'demo_13.png',
+    titleZh: '示例 · 晨曦画幅',
+    titleEn: 'Sample · Dawn Frame',
+    specs: ['4K', 'HDR10+'],
+    progress: 0.0,
+    accentColor: Color(0xFFFF6482),
+  ),
+  DemoPosterItem(
+    id: 'demo_14',
+    file: 'demo_14.png',
+    titleZh: '示例 · 漫游声景',
+    titleEn: 'Sample · Drift Soundscape',
+    specs: ['1080P', 'DD+ 5.1'],
+    progress: 0.0,
+    accentColor: Color(0xFF0A84FF),
   ),
 ];
 
@@ -189,11 +263,13 @@ class OnboardingScreen extends StatefulWidget {
 
 class _OnboardingScreenState extends State<OnboardingScreen> {
   int _act = 0;
+  int _hudDemoStep = 0;
   late bool _reduceMotion;
   late bool _reduceTransparency;
   late double _textScale;
   List<DemoPosterItem> _demoItems = kFallbackDemoPosters;
   bool _ohosBypassSent = false;
+  bool _completing = false;
 
   @override
   void initState() {
@@ -224,10 +300,17 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     }
   }
 
-  Future<void> _finish({required bool skipped}) async {
+  Future<void> _finish({required bool skipped, bool openImportAfter = false}) async {
+    if (_completing) return;
+    _completing = true;
     await widget.prefs.markOnboardingCompleted();
     if (!mounted) return;
+    // Call onFinished first so Wave 2 can pop the onboarding route before
+    // opening the import modal on the underlying shell.
     widget.onFinished?.call(skipped);
+    if (openImportAfter) {
+      widget.onImportConfig?.call('');
+    }
   }
 
   void _nextAct() {
@@ -241,6 +324,14 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   void _prevAct() {
     if (_act > 0) {
       setState(() => _act--);
+    }
+  }
+
+  void _handleSystemBack() {
+    if (_act > 0) {
+      _prevAct();
+    } else {
+      _finish(skipped: true);
     }
   }
 
@@ -258,77 +349,94 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       return const SizedBox.shrink();
     }
 
-    final locale = Localizations.maybeLocaleOf(context);
-    final zh = widget.isChinese ?? (locale?.languageCode.toLowerCase() != 'en');
+    final zh = resolveOnboardingChineseLocale(context, widget.isChinese);
     final platform = widget.platformOverride ??
         resolveFirstPlayHintPlatform(platform: Theme.of(context).platform);
+    final isIos = Theme.of(context).platform == TargetPlatform.iOS;
     final disableAnimations =
         _reduceMotion || MediaQuery.disableAnimationsOf(context);
-    final highContrast =
-        _reduceTransparency || MediaQuery.highContrastOf(context);
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF09090C),
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (widget.backgroundBuilder != null)
-            widget.backgroundBuilder!(context)
-          else
-            const DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    Color(0xFF09090C),
-                    Color(0xFF101829),
-                    Color(0xFF09090C),
-                  ],
-                ),
-              ),
-            ),
-          SafeArea(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final wide = constraints.maxWidth >= 720;
-                return Padding(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: wide ? 40 : 20,
-                    vertical: wide ? 24 : 16,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _buildTopBar(zh),
-                      const SizedBox(height: 16),
-                      Expanded(
-                        child: AnimatedSwitcher(
-                          duration: Duration(
-                            milliseconds: disableAnimations ? 120 : 220,
-                          ),
-                          child: SingleChildScrollView(
-                            key: ValueKey<int>(_act),
-                            child: _buildActContent(
-                              act: _act,
-                              wide: wide,
-                              zh: zh,
-                              platform: platform,
-                              highContrast: highContrast,
-                            ),
-                          ),
-                        ),
+    return ValueListenableBuilder<bool>(
+      valueListenable: GlassworkBackdrop.reduceTransparency,
+      builder: (context, globalReduceTrans, _) {
+        final highContrast = _reduceTransparency ||
+            globalReduceTrans ||
+            MediaQuery.highContrastOf(context);
+
+        return PopScope(
+          canPop: false,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop) {
+              _handleSystemBack();
+            }
+          },
+          child: Scaffold(
+            backgroundColor: const Color(0xFF09090C),
+            body: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (widget.backgroundBuilder != null)
+                  widget.backgroundBuilder!(context)
+                else
+                  const DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          Color(0xFF09090C),
+                          Color(0xFF101829),
+                          Color(0xFF09090C),
+                        ],
                       ),
-                      const SizedBox(height: 16),
-                      _buildBottomBar(zh),
-                    ],
+                    ),
                   ),
-                );
-              },
+                SafeArea(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final wide = constraints.maxWidth >= 720;
+                      return Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: wide ? 40 : 16,
+                          vertical: wide ? 24 : 14,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _buildTopBar(zh),
+                            const SizedBox(height: 14),
+                            Expanded(
+                              child: AnimatedSwitcher(
+                                duration: Duration(
+                                  milliseconds: disableAnimations ? 120 : 220,
+                                ),
+                                child: SingleChildScrollView(
+                                  key: ValueKey<int>(_act),
+                                  child: _buildActContent(
+                                    act: _act,
+                                    wide: wide,
+                                    zh: zh,
+                                    platform: platform,
+                                    isIos: isIos,
+                                    highContrast: highContrast,
+                                    disableAnimations: disableAnimations,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            _buildBottomBar(zh, disableAnimations),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -338,6 +446,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         Expanded(
           child: Text(
             zh ? 'Marco Movie · 新手引导' : 'Marco Movie · Welcome',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: const TextStyle(
               color: Color(0xFFF5F5F7),
               fontSize: 15,
@@ -361,51 +471,62 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     );
   }
 
-  Widget _buildBottomBar(bool zh) {
+  Widget _buildBottomBar(bool zh, bool disableAnimations) {
     return Row(
       children: [
-        SizedBox(
-          width: 96,
-          child: _act > 0
-              ? TextButton(
-                  key: const Key('onboarding_prev_button'),
-                  onPressed: _prevAct,
-                  child: Text(
-                    zh ? '上一幕' : 'Back',
-                    style: const TextStyle(color: Color(0xFFF5F5F7)),
-                  ),
-                )
-              : const SizedBox.shrink(),
-        ),
+        if (_act > 0)
+          TextButton(
+            key: const Key('onboarding_prev_button'),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              minimumSize: const Size(48, 36),
+            ),
+            onPressed: _prevAct,
+            child: Text(
+              zh ? '上一幕' : 'Back',
+              style: const TextStyle(color: Color(0xFFF5F5F7)),
+            ),
+          )
+        else
+          const SizedBox(width: 8),
         Expanded(
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(OnboardingScreen.actCount, (index) {
-              final active = index == _act;
-              return AnimatedContainer(
-                duration: Duration(milliseconds: _reduceMotion ? 0 : 180),
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-                width: active ? 22 : 7,
-                height: 7,
-                decoration: BoxDecoration(
-                  color: active
-                      ? const Color(0xFF0A84FF)
-                      : const Color(0x55FFFFFF),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-              );
-            }),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(OnboardingScreen.actCount, (index) {
+                  final active = index == _act;
+                  return AnimatedContainer(
+                    duration: Duration(milliseconds: disableAnimations ? 0 : 180),
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    width: active ? 22 : 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: active
+                          ? const Color(0xFF0A84FF)
+                          : const Color(0x55FFFFFF),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  );
+                }),
+              ),
+            ),
           ),
         ),
-        _buildPrimaryCta(
-          key: const Key('onboarding_next_button'),
-          label: _act == OnboardingScreen.actCount - 1
-              ? (zh ? '先进入首页' : 'Enter Home')
-              : (zh ? '下一幕' : 'Next'),
-          symbol: _act == OnboardingScreen.actCount - 1
-              ? 'checkmark.circle.fill'
-              : 'chevron.right',
-          onTap: _nextAct,
+        Flexible(
+          flex: 0,
+          child: _buildPrimaryCta(
+            key: const Key('onboarding_next_button'),
+            label: _act == OnboardingScreen.actCount - 1
+                ? (zh ? '先进入首页' : 'Enter Home')
+                : (zh ? '下一幕' : 'Next'),
+            symbol: _act == OnboardingScreen.actCount - 1
+                ? 'checkmark.circle.fill'
+                : 'chevron.right',
+            onTap: _nextAct,
+          ),
         ),
       ],
     );
@@ -420,28 +541,30 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     required VoidCallback onTap,
   }) {
     final fallback = FilledButton(
-      key: key,
       onPressed: onTap,
       style: FilledButton.styleFrom(
         backgroundColor: const Color(0xFF0A84FF),
         foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(20),
         ),
       ),
       child: Text(
         label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
         style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
       ),
     );
 
     return IosNativeGlassButton(
+      key: key,
       style: 'capsule',
       label: label,
       trailingSymbol: symbol,
       tintColor: const Color(0xFF0A84FF),
-      maxWidth: 200,
+      maxWidth: 184,
       height: 40,
       onTap: onTap,
       fallback: fallback,
@@ -453,17 +576,32 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     required bool wide,
     required bool zh,
     required FirstPlayHintPlatform platform,
+    required bool isIos,
     required bool highContrast,
+    required bool disableAnimations,
   }) {
     switch (act) {
       case 0:
         return _buildAct1EmptyShell(wide, zh, platform, highContrast);
       case 1:
-        return _buildAct2PosterWall(wide, zh, highContrast);
+        return _buildAct2PosterWall(
+          wide,
+          zh,
+          platform,
+          isIos,
+          highContrast,
+        );
       case 2:
         return _buildAct3Sync(wide, zh, highContrast);
       case 3:
-        return _buildAct4PlaybackHud(wide, zh, platform, highContrast);
+        return _buildAct4PlaybackHud(
+          wide,
+          zh,
+          platform,
+          isIos,
+          highContrast,
+          disableAnimations,
+        );
       default:
         return _buildAct5Personalize(wide, zh, highContrast);
     }
@@ -633,8 +771,16 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     );
   }
 
-  Widget _buildAct2PosterWall(bool wide, bool zh, bool highContrast) {
-    final previewItems = _demoItems.take(6).toList();
+  Widget _buildAct2PosterWall(
+    bool wide,
+    bool zh,
+    FirstPlayHintPlatform platform,
+    bool isIos,
+    bool highContrast,
+  ) {
+    final columns = wide ? 4 : 3;
+    final isDesktop = platform == FirstPlayHintPlatform.desktop;
+
     return _buildSplit(
       wide: wide,
       left: _buildActCopy(
@@ -650,7 +796,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              zh ? '示例海报墙（全部为虚构占位素材）' : 'Sample Poster Wall (Fictional)',
+              zh
+                  ? '14 张示例海报网格（全部为虚构占位素材）'
+                  : '14 Sample Posters Grid (Fictional)',
               style: const TextStyle(
                 color: Color(0xFFFFB340),
                 fontSize: 13,
@@ -658,14 +806,23 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               ),
             ),
             const SizedBox(height: 12),
-            SizedBox(
-              height: 224,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: previewItems.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 10),
-                itemBuilder: (context, index) =>
-                    _buildDemoPosterCard(previewItems[index], zh),
+            GridView.builder(
+              key: const Key('onboarding_demo_poster_grid'),
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _demoItems.length,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                crossAxisSpacing: 10,
+                mainAxisSpacing: 12,
+                childAspectRatio: 0.52,
+              ),
+              itemBuilder: (context, index) => _buildDemoPosterCard(
+                _demoItems[index],
+                zh: zh,
+                isDesktop: isDesktop,
+                isIos: isIos,
+                highContrast: highContrast,
               ),
             ),
           ],
@@ -674,106 +831,161 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     );
   }
 
-  Widget _buildDemoPosterCard(DemoPosterItem item, bool zh) {
-    return SizedBox(
-      width: 112,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ClipRRect(
+  Widget _buildDemoPosterCard(
+    DemoPosterItem item, {
+    required bool zh,
+    required bool isDesktop,
+    required bool isIos,
+    required bool highContrast,
+  }) {
+    final card = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: ClipRRect(
             borderRadius: BorderRadius.circular(10),
-            child: SizedBox(
-              width: 112,
-              height: 168,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Image.asset(
-                    item.assetPath,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                          colors: [
-                            const Color(0xFF09090C),
-                            item.accentColor,
-                          ],
-                        ),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.asset(
+                  item.assetPath,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: [
+                          const Color(0xFF09090C),
+                          item.accentColor,
+                        ],
                       ),
                     ),
                   ),
-                  // Mandatory UI-layer "示例 / DEMO" badge on every card.
+                ),
+                // Mandatory UI-layer "示例 / DEMO" badge on every card.
+                Positioned(
+                  top: 6,
+                  right: 6,
+                  child: Container(
+                    key: Key('demo_badge_${item.id}'),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xD9101218),
+                      borderRadius: BorderRadius.circular(isIos ? 999 : 6),
+                      border: Border.all(
+                        color: const Color(0x80FFFFFF),
+                        width: 1,
+                      ),
+                    ),
+                    child: Text(
+                      item.badge(zh: zh),
+                      style: const TextStyle(
+                        color: Color(0xFFF5F5F7),
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+                if (item.progress > 0)
                   Positioned(
-                    top: 6,
-                    right: 6,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
                     child: Container(
-                      key: Key('demo_badge_${item.id}'),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 6,
-                        vertical: 2,
-                      ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xD9101218),
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(
-                          color: const Color(0x80FFFFFF),
-                          width: 1,
-                        ),
-                      ),
-                      child: Text(
-                        item.badge(zh: zh),
-                        style: const TextStyle(
-                          color: Color(0xFFF5F5F7),
-                          fontSize: 10,
-                          fontWeight: FontWeight.w700,
-                        ),
+                      height: 4,
+                      color: const Color(0x66000000),
+                      alignment: Alignment.centerLeft,
+                      child: FractionallySizedBox(
+                        widthFactor: item.progress,
+                        child: Container(color: const Color(0xFF0A84FF)),
                       ),
                     ),
                   ),
-                  if (item.progress > 0)
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: Container(
-                        height: 4,
-                        color: const Color(0x66000000),
-                        alignment: Alignment.centerLeft,
-                        child: FractionallySizedBox(
-                          widthFactor: item.progress,
-                          child: Container(color: const Color(0xFF0A84FF)),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
+              ],
             ),
           ),
-          const SizedBox(height: 6),
-          Text(
-            item.title(zh: zh),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: Color(0xFFF5F5F7),
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
+        ),
+        const SizedBox(height: 5),
+        Text(
+          item.title(zh: zh),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Color(0xFFF5F5F7),
+            fontSize: 11.5,
+            fontWeight: FontWeight.w600,
           ),
-          if (item.specs.isNotEmpty)
-            Text(
-              item.specs.take(2).join(' · '),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Color(0xFF5AC8FA),
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+        ),
+        if (item.specs.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Wrap(
+            spacing: 4,
+            runSpacing: 3,
+            children: item.specs
+                .take(2)
+                .map(
+                  (spec) => _buildSpecPill(
+                    spec,
+                    isIos: isIos,
+                    highContrast: highContrast,
+                  ),
+                )
+                .toList(),
+          ),
         ],
+      ],
+    );
+
+    if (isDesktop) {
+      return Tooltip(
+        message: '${item.title(zh: zh)} · ${item.specs.join(' · ')}',
+        child: card,
+      );
+    }
+    return card;
+  }
+
+  Widget _buildSpecPill(
+    String spec, {
+    required bool isIos,
+    required bool highContrast,
+  }) {
+    final isGold = spec.contains('4K');
+    final isPurple = spec.contains('DV') || spec.contains('ATMOS');
+    final fill = highContrast
+        ? (isGold
+            ? const Color(0xEB3A2810)
+            : (isPurple ? const Color(0xEB261F42) : const Color(0xEB122640)))
+        : (isGold
+            ? const Color(0x2EFF9F0A)
+            : (isPurple ? const Color(0x335E5CE6) : const Color(0x2E0A84FF)));
+    final stroke = isGold
+        ? const Color(0x66FF9F0A)
+        : (isPurple ? const Color(0x73BF5AF2) : const Color(0x660A84FF));
+    final text = isGold
+        ? const Color(0xFFFFB340)
+        : (isPurple ? const Color(0xFFE5C7FF) : const Color(0xFF64D2FF));
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+      decoration: BoxDecoration(
+        color: fill,
+        borderRadius: BorderRadius.circular(isIos ? 999 : 5),
+        border: Border.all(color: stroke, width: 1),
+      ),
+      child: Text(
+        spec,
+        style: TextStyle(
+          color: text,
+          fontSize: 9.5,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.3,
+        ),
       ),
     );
   }
@@ -874,43 +1086,49 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     bool wide,
     bool zh,
     FirstPlayHintPlatform platform,
+    bool isIos,
     bool highContrast,
+    bool disableAnimations,
   ) {
-    final bullets = switch (platform) {
+    final states = switch (platform) {
       FirstPlayHintPlatform.desktop => zh
           ? [
-              '短按 / 长按 ← / →：快进快退与加速预览',
-              'Space 暂停 · S / [ ] 切换倍速 · D 开关弹幕',
-              '鼠标滚轮调节音量 · 静止 2.5 秒自动隐藏光标',
+              '状态 1/3：短按 / 长按 ← / → 快进预览',
+              '状态 2/3：Space 暂停 · S / [ ] 倍速 · D 弹幕',
+              '状态 3/3：滚轮调音量 · 光标静止 2.5s 自动隐去',
             ]
           : [
-              'Short / Hold ← / →: Seek & accelerated scrub preview',
-              'Space play/pause · S / [ ] speed · D toggle danmaku',
-              'Scroll wheel volume · Cursor auto-hides after 2.5s idle',
+              'Step 1/3: Short / Hold ← / → scrub preview',
+              'Step 2/3: Space · S / [ ] speed · D danmaku',
+              'Step 3/3: Scroll volume · Cursor hides after 2.5s',
             ],
       FirstPlayHintPlatform.tv => zh
           ? [
-              '短按左右键：快进 / 快退 15 秒',
-              '长按左右键：加速快进/快退预览，松手即播',
-              '返回键：立即取消预览并恢复原位置',
+              '状态 1/3：短按 ← / → 快进快退 15 秒',
+              '状态 2/3：长按 ← / → 加速预览，松手即播',
+              '状态 3/3：按返回键取消预览，恢复原位置',
             ]
           : [
-              'Short Left / Right: Seek 15s',
-              'Hold Left / Right: Accelerated scrub preview, release to play',
-              'Back key: Cancel preview and restore position',
+              'Step 1/3: Short Left/Right seeks 15s',
+              'Step 2/3: Hold Left/Right scrubs, release to play',
+              'Step 3/3: Press Back to cancel & restore',
             ],
       FirstPlayHintPlatform.touch => zh
           ? [
-              '长按 2.0× 倍速 → 左右滑调速（1.25×–3.0×）→ 上滑锁定',
-              '画面两侧双击快进 / 快退，点击顶部锁定胶囊恢复',
-              '左右半屏上下滑动分别调节亮度与音量',
+              '状态 1/3：长按 2.0× 倍速 · 左右滑调速 (1.25×–3.0×)',
+              '状态 2/3：按住上滑锁定 · 🔒 2.0× 锁定中，点击恢复',
+              '状态 3/3：两侧双击快进快退 · 左右半屏调节亮/音',
             ]
           : [
-              'Hold 2.0× speed -> slide to adjust (1.25×–3.0×) -> swipe up to lock',
-              'Double-tap left/right sides to seek; tap top lock pill to reset',
-              'Vertical drag on left/right halves adjusts brightness & volume',
+              'Step 1/3: Hold 2.0× · Slide horizontally (1.25×–3.0×)',
+              'Step 2/3: Swipe up to lock · 🔒 2.0× Locked, tap to reset',
+              'Step 3/3: Double-tap sides to seek · Drag edges for bright/vol',
             ],
     };
+
+    final stepIndex = _hudDemoStep % states.length;
+    final progressValue =
+        stepIndex == 0 ? 0.35 : (stepIndex == 1 ? 0.58 : 0.76);
 
     return _buildSplit(
       wide: wide,
@@ -924,38 +1142,147 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       right: _buildGlassCard(
         highContrast: highContrast,
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              zh
-                  ? '4K · DV · ATMOS   |   3s 跳过片头   |   分片弹幕'
-                  : '4K · DV · ATMOS   |   3s Skip Intro   |   Danmaku',
-              style: const TextStyle(
-                color: Color(0xFFFFB340),
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
+            // Lightweight component-level mock player HUD preview frame.
+            Container(
+              key: const Key('onboarding_act4_hud_preview'),
+              height: 176,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    Color(0xFF0C1222),
+                    Color(0xFF162238),
+                    Color(0xFF0A0D14),
+                  ],
+                ),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0x38FFFFFF)),
+              ),
+              child: Stack(
+                children: [
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    child: Wrap(
+                      spacing: 5,
+                      children: [
+                        _buildSpecPill(
+                          '4K',
+                          isIos: isIos,
+                          highContrast: highContrast,
+                        ),
+                        _buildSpecPill(
+                          'DV · ATMOS',
+                          isIos: isIos,
+                          highContrast: highContrast,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Positioned(
+                    top: 26,
+                    right: 4,
+                    child: Text(
+                      zh ? '弹幕示例 · 画面细节很清晰' : 'Sample Danmaku · Crisp cinema detail',
+                      style: const TextStyle(
+                        color: Color(0xDDFFFFFF),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                  Center(
+                    child: AnimatedSwitcher(
+                      duration: Duration(
+                        milliseconds: disableAnimations ? 0 : 180,
+                      ),
+                      child: Container(
+                        key: ValueKey<int>(stepIndex),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xD9101626),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: const Color(0xFF0A84FF)),
+                        ),
+                        child: Text(
+                          states[stepIndex],
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Color(0xFFF5F5F7),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    right: 0,
+                    bottom: 12,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xD9241B10),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0x88FF9F0A)),
+                      ),
+                      child: Text(
+                        zh ? '3s 跳过片头' : 'Skip Intro 3s',
+                        style: const TextStyle(
+                          color: Color(0xFFFFB340),
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: LinearProgressIndicator(
+                        value: progressValue,
+                        minHeight: 4,
+                        backgroundColor: const Color(0x38FFFFFF),
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                          Color(0xFF0A84FF),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
             const SizedBox(height: 12),
-            for (final line in bullets) ...[
-              Text(
-                '•  $line',
-                style: const TextStyle(
-                  color: Color(0xFFF5F5F7),
-                  fontSize: 13,
-                  height: 1.45,
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton(
+                key: const Key('onboarding_act4_cycle_button'),
+                onPressed: () =>
+                    setState(() => _hudDemoStep = (_hudDemoStep + 1) % 3),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFF5F5F7),
+                  side: const BorderSide(color: Color(0x55FFFFFF)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 8),
-            ],
-            const SizedBox(height: 6),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(2),
-              child: const LinearProgressIndicator(
-                value: 0.42,
-                minHeight: 4,
-                backgroundColor: Color(0x38FFFFFF),
-                valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF0A84FF)),
+                child: Text(
+                  zh
+                      ? '切换操控演示状态 (${stepIndex + 1}/3)'
+                      : 'Cycle Control Demo (${stepIndex + 1}/3)',
+                ),
               ),
             ),
           ],
@@ -977,11 +1304,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           key: const Key('onboarding_act5_import_button'),
           label: zh ? '立即导入配置' : 'Import Config Now',
           symbol: 'square.and.arrow.down',
-          onTap: () async {
-            await widget.prefs.markOnboardingCompleted();
-            widget.onImportConfig?.call('');
-            widget.onFinished?.call(false);
-          },
+          onTap: () => _finish(skipped: false, openImportAfter: true),
         ),
       ),
       right: _buildGlassCard(
