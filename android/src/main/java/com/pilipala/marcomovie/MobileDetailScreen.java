@@ -575,7 +575,7 @@ final class MobileDetailScreen {
                 Math.max(a.dp(510), Math.min(a.dp(660), Math.round(posterWindowH * 0.81f)));
         final int initAmbient = defaultAmbientForTitle(listing.title);
 
-        a.root = new FrameLayout(a);
+        a.root = a.newGlassBackdropRoot();
         a.root.setBackgroundColor(initAmbient);
         a.setContentView(a.root);
 
@@ -625,6 +625,12 @@ final class MobileDetailScreen {
                         () -> backdropView.setScrollOffset(scrollView.getScrollY()));
         a.scroll = scrollView;
         a.root.addView(scrollView, new FrameLayout.LayoutParams(-1, -1));
+        android.graphics.Rect pendingOrigin = a.consumePendingDetailOrigin();
+        if (pendingOrigin != null) {
+            a.activeTransition =
+                    PlayerTransitionHelper.animateSharedBoundsEnter(
+                            a.root, backdropView, pendingOrigin, a.reduced, null);
+        }
 
         LinearLayout mainCol = a.vertical();
         mainCol.setPadding(0, 0, 0, a.dp(46));

@@ -568,10 +568,17 @@ public final class CompatChecks {
 
                 Path deps = root.resolve("tools/java-dependencies");
                 Path jsonJar = root.resolve("android/tests/lib/json-20240303.jar");
+                String envAndroidJar = System.getenv("MARCOMOVIE_ANDROID_JAR");
+                Path androidJar =
+                        (envAndroidJar != null
+                                        && !envAndroidJar.trim().isEmpty()
+                                        && Files.isRegularFile(Paths.get(envAndroidJar)))
+                                ? Paths.get(envAndroidJar)
+                                : root.resolve("tools/android-35/android.jar");
                 List<Path> cpEntries =
                         Arrays.asList(
                                 jsonJar,
-                                root.resolve("tools/android-35/android.jar"),
+                                androidJar,
                                 deps.resolve("okhttp-3.14.9.jar"),
                                 deps.resolve("okio-1.17.2.jar"),
                                 deps.resolve("gson-2.10.1.jar"),

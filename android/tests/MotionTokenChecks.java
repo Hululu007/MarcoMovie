@@ -780,6 +780,45 @@ public final class MotionTokenChecks {
         check(agsl.contains("uBackdropTex.eval("), "AGSL scales eval with uBackdropTexSize");
         check(agsl.contains("uPosterAspect"), "AGSL preserves poster BoxFit.cover aspect");
         check(agsl.contains("composed.rgb * handoffAlpha"), "AGSL outputs premultiplied alpha");
+        // S-02 hardening: NEVER paint opaque #121216 gray slab when poster is unavailable, and
+        // gate portalPresence on uPosterAvailable > 0.5.
+        check(
+                !agsl.contains("0.071, 0.071, 0.086"),
+                "S-02 AGSL must NOT paint opaque #121216 gray slab when poster is unavailable");
+        check(
+                agsl.contains("step(0.5, uPosterAvailable)") && agsl.contains("* hasPoster;"),
+                "S-02 AGSL gates portalPresence on uPosterAvailable");
+
+        // S-02 bounded poster card guard rejects full-bleed backdrops and accepts local cards.
+        checkEq(
+                false,
+                PlayerTransitionHelper.isBoundedPosterCardBounds(1080f, 2400f, 1080f, 2400f),
+                "S-02 rejects full-screen backdrop rect");
+        checkEq(
+                false,
+                PlayerTransitionHelper.isBoundedPosterCardBounds(1080f, 1850f, 1080f, 2400f),
+                "S-02 rejects 77%-height full-bleed portrait backdrop");
+        checkEq(
+                false,
+                PlayerTransitionHelper.isBoundedPosterCardBounds(0f, 0f, 1080f, 2400f),
+                "S-02 rejects empty rect");
+        checkEq(
+                true,
+                PlayerTransitionHelper.isBoundedPosterCardBounds(240f, 360f, 1280f, 800f),
+                "S-02 accepts bounded tablet 2:3 poster card");
+
+        // S-02 BoxFit.cover UV math: 2:3 poster expanded into 16:9 viewport crops vertically
+        // without horizontal stretching.
+        float[] uvTopLeft = new float[2];
+        float[] uvBotRight = new float[2];
+        PlayerTransitionHelper.computePosterCoverUv(
+                0f, 0f, 0f, 0f, 1280f, 720f, 2f / 3f, uvTopLeft);
+        PlayerTransitionHelper.computePosterCoverUv(
+                1280f, 720f, 0f, 0f, 1280f, 720f, 2f / 3f, uvBotRight);
+        checkClose(0.0, uvTopLeft[0], 1e-4, "S-02 BoxFit.cover u left=0");
+        checkClose(1.0, uvBotRight[0], 1e-4, "S-02 BoxFit.cover u right=1");
+        checkClose(0.3125, uvTopLeft[1], 1e-4, "S-02 BoxFit.cover v top=0.3125");
+        checkClose(0.6875, uvBotRight[1], 1e-4, "S-02 BoxFit.cover v bottom=0.6875");
 
         String helperSrc =
                 new String(

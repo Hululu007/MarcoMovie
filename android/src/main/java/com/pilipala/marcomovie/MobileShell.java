@@ -698,7 +698,7 @@ final class MobileShell {
 
         resolveActiveSite();
 
-        a.root = new FrameLayout(a);
+        a.root = a.newGlassBackdropRoot();
         a.root.setBackgroundColor(0xff070c0a);
         a.setContentView(a.root);
         a.watchRootLayout(a.root);
@@ -1772,7 +1772,11 @@ final class MobileShell {
         card.setBackground(glassBg(0xff141c19, 0xff0d1311, a.dp(24), a.dp(0.8f), 0x38ffffff));
         card.setClipToOutline(true);
         MobileDetailScreen.bindTouchFeedback(card);
-        card.setOnClickListener(v -> a.openListing(site, featured));
+        card.setOnClickListener(
+                v -> {
+                    a.capturePendingDetailOrigin(card);
+                    a.openListing(site, featured);
+                });
 
         // Ambient backdrop image
         ImageView bgImg = new ImageView(a);
@@ -1960,7 +1964,11 @@ final class MobileShell {
             LinearLayout card = a.vertical();
             card.setTag(i == 0 ? "primary" : "video:" + v.id);
             MobileDetailScreen.bindTouchFeedback(card);
-            card.setOnClickListener(view -> a.openListing(site, v));
+            card.setOnClickListener(
+                    view -> {
+                        a.capturePendingDetailOrigin(card);
+                        a.openListing(site, v);
+                    });
 
             FrameLayout art = new FrameLayout(a);
             art.setBackground(glassBg(0xff1c2421, 0xff141a18, a.dp(12), a.dp(0.6f), 0x26ffffff));
@@ -2057,6 +2065,11 @@ final class MobileShell {
     }
 
     private void renderEmptyWelcome() {
+        if (!a.isTvDevice() && !a.prefs.getBoolean(Prefs.WALLPAPER_ENABLED, false)) {
+            AuroraSurfaceView aurora = new AuroraSurfaceView(a);
+            aurora.setReducedMotion(a.reduced);
+            contentContainer.addView(aurora, new FrameLayout.LayoutParams(-1, -1));
+        }
         ScrollView sv = new ScrollView(a);
         sv.setFillViewport(true);
         sv.setClipToPadding(false);
@@ -2910,6 +2923,7 @@ final class MobileShell {
                         activeSearchCoordinator = null;
                     }
                     activeTab = 1;
+                    a.capturePendingDetailOrigin(row);
                     a.openListing(site, v);
                 });
 
@@ -3689,6 +3703,7 @@ final class MobileShell {
                                             }
                                             final Cms.Site resolvedSite = targetSite;
                                             Cms.Video video = f.video();
+                                            a.capturePendingDetailOrigin(row);
                                             a.openListing(resolvedSite, video);
                                         });
 

@@ -209,6 +209,12 @@ final class MobileIosSettings {
         }
         MobileShell.settingsSubPage = activePane != null ? 1 : 0;
 
+        if (!a.isTvDevice() && activePane != null && "关于与更新".equals(activePane.title)) {
+            AuroraSurfaceView aurora = new AuroraSurfaceView(a);
+            aurora.setReducedMotion(a.reduced);
+            contentContainer.addView(aurora, 0, new FrameLayout.LayoutParams(-1, -1));
+        }
+
         if (activePane == null) {
             // ==================== LEVEL 1: PRIMARY SETTINGS PAGE ====================
             TextView largeTitle = a.text("设置", 32f, 0xfff5f5f7);
@@ -888,6 +894,36 @@ final class MobileIosSettings {
                                         ctl.rerenderInPlace();
                                     });
 
+                            DanmuSettingsPanel.DanmuConfig dmCfg =
+                                    DanmuSettingsPanel.loadConfig(a, false);
+                            int dmOrigins = dmCfg.createProvider().getConfiguredOrigins().size();
+                            String dmSummary =
+                                    (dmCfg.enabled ? "已开启" : "已关闭")
+                                            + " · "
+                                            + (dmOrigins > 0
+                                                    ? "已配置 " + dmOrigins + " 个自定义服务源"
+                                                    : "未配置自定义服务源");
+                            addActionCapsule(
+                                    a,
+                                    body,
+                                    ICON_LAYERS,
+                                    COLOR_TEAL,
+                                    "弹幕外观与自定义服务设置",
+                                    dmSummary,
+                                    () -> {
+                                        android.app.AlertDialog dlg =
+                                                DanmuSettingsPanel.showDialog(a, false, null);
+                                        dlg.setOnDismissListener(
+                                                d -> {
+                                                    if (!a.isFinishing()
+                                                            && (android.os.Build.VERSION.SDK_INT
+                                                                            < 17
+                                                                    || !a.isDestroyed())) {
+                                                        ctl.rerenderInPlace();
+                                                    }
+                                                });
+                                    });
+
                             boolean alwaysClock =
                                     a.prefs.getBoolean(Prefs.PLAYER_ALWAYS_SHOW_CLOCK, false);
                             addChoices(
@@ -1561,6 +1597,18 @@ final class MobileIosSettings {
                                                     new MainActivity.Screen(
                                                             () -> new UpdateScreen(a).show()),
                                                     true));
+
+                            addActionCapsule(
+                                    a,
+                                    body,
+                                    ICON_SPARKLES,
+                                    COLOR_INDIGO,
+                                    "重新查看新手引导",
+                                    "重温 5 幕功能导览并重新启用首播手势提示",
+                                    () -> {
+                                        OnboardingScreen.resetForReplay(a);
+                                        a.showOnboarding(true);
+                                    });
 
                             TextView legal =
                                     a.text(

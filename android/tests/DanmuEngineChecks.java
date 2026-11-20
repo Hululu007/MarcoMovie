@@ -89,6 +89,7 @@ public final class DanmuEngineChecks {
         testConcurrent410SingleflightAndCap();
         testSeekStormDebounceAndCancellation();
         testRateLimitingAnd429RetryAfter();
+        testTvPerFrameZeroRepeatFilterAndZeroAllocPast64Min();
         System.out.println("ALL DANMU ENGINE CHECKS PASSED (" + passed + " assertions)");
     }
 
@@ -1349,6 +1350,374 @@ public final class DanmuEngineChecks {
         } finally {
             server.stop(0);
         }
+    }
+
+    private static com.sun.management.ThreadMXBean resolveSunThreadMxBean() {
+        try {
+            java.lang.management.ThreadMXBean mx =
+                    java.lang.management.ManagementFactory.getThreadMXBean();
+            if (mx instanceof com.sun.management.ThreadMXBean) {
+                com.sun.management.ThreadMXBean sunMx = (com.sun.management.ThreadMXBean) mx;
+                if (sunMx.isThreadAllocatedMemorySupported()) {
+                    if (!sunMx.isThreadAllocatedMemoryEnabled()) {
+                        sunMx.setThreadAllocatedMemoryEnabled(true);
+                    }
+                    return sunMx;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private static void testTvPerFrameZeroRepeatFilterAndZeroAllocPast64Min() throws Exception {
+        // M-01 & L-04: TV-side steady-state zero-repeat-filter & zero-allocation verification with
+        // active `re:` regex block rules, including past 64 minutes (windowIndex = 180 >= 128).
+        final int targetWindow = 180; // 90 minutes (5,400,000 ms), well past Integer cache 127
+        final long baseMs = (long) targetWindow * DanmuSegmentCache.WINDOW_DURATION_MS;
+        final List<DanmuItem> winPrev = new ArrayList<>();
+        final List<DanmuItem> winCurr = new ArrayList<>();
+        for (int i = 0; i < 60; i++) {
+            String text;
+            if (i % 5 == 0) {
+                text = "广告推广" + i + "链接点这里";
+            } else if (i % 5 == 1) {
+                text = "SPOILER 剧透预警 " + i;
+            } else if (i % 5 == 2) {
+                text = "请看第二章内容 " + i;
+            } else {
+                text = "正常电视弹幕内容 " + i;
+            }
+            winPrev.add(new DanmuItem("p_" + i, baseMs - 6000L + i * 90L, 1, 0xFFFFFF, text));
+            winCurr.add(new DanmuItem("c_" + i, baseMs + 500L + i * 90L, 1, 0xFFFFFF, text));
+        }
+
+        DanmuProvider mockProvider =
+                new DanmuProvider() {
+                    @Override
+                    public List<Candidate> matchOrSearch(
+                            MatchQuery query, CancellationToken token) {
+                        return Collections.emptyList();
+                    }
+
+                    @Override
+                    public List<Candidate> listEpisodes(
+                            String sourceOrigin, String animeId, CancellationToken token) {
+                        return Collections.emptyList();
+                    }
+
+                    @Override
+                    public EpisodeSession openSession(
+                            String boundEpisodeId, CancellationToken token) {
+                        return new EpisodeSession(
+                                boundEpisodeId,
+                                true,
+                                Collections.<SegmentDescriptor>emptyList(),
+                                Collections.<DanmuItem>emptyList());
+                    }
+
+                    @Override
+                    public List<DanmuItem> fetchWindow(
+                            EpisodeSession session, int windowIndex, CancellationToken token) {
+                        if (windowIndex == targetWindow - 1) return winPrev;
+                        if (windowIndex == targetWindow) return winCurr;
+                        return Collections.emptyList();
+                    }
+                };
+
+        BlockFilter initialFilter =
+                BlockFilter.compile(Arrays.asList("spoiler", "re:广告.*链接", "re:第(一|二)章"));
+        try (DanmuSegmentCache cache = new DanmuSegmentCache(mockProvider, 0L)) {
+            cache.setBlockFilter(initialFilter);
+            cache.bindSession("mmdanmu://v1?src=dGVzdA&ep=tv90m");
+            check(cache.awaitIdle(2000L), "M-01 mock segmented session initialized");
+
+            // Load both w-1 (179) and w (180) plus prefetch w+1 (181)
+            cache.onPlaybackTick(baseMs - 5000L, true);
+            check(cache.awaitIdle(2000L), "M-01 window 179 ingested");
+            cache.onPlaybackTick(baseMs + 20000L, true);
+            check(cache.awaitIdle(2000L), "M-01 windows 180 and 181 ingested");
+
+            long evalAfterIngest = initialFilter.getEvaluationCount();
+            check(
+                    evalAfterIngest == winPrev.size() + winCurr.size(),
+                    "M-01 filter evaluated each ingested item exactly once (actual="
+                            + evalAfterIngest
+                            + ", expected="
+                            + (winPrev.size() + winCurr.size())
+                            + ")");
+
+            LayoutEngine tvEngine = new LayoutEngine();
+            TextWidthMeasurer tvMeasurer =
+                    new TextWidthMeasurer() {
+                        @Override
+                        public float measureWidth(String text) {
+                            return text.length() * 24f;
+                        }
+                    };
+            ArrayList<DanmuItem> frameBuf = new ArrayList<>(128);
+
+            // Warm up JIT & fastWindowIndex cache so HotSpot C1/C2 compilation settles before
+            // measuring strict 0-byte per-frame heap allocation.
+            for (int w = 0; w < 400; w++) {
+                long t = baseMs + 4000L + (w % 10) * 16L;
+                cache.onPlaybackTick(t, true);
+                cache.fillVisibleWindowSnapshot(t, frameBuf);
+                tvEngine.step(
+                        t,
+                        frameBuf,
+                        1920,
+                        1080,
+                        24f,
+                        0f,
+                        44f,
+                        0.50f,
+                        6,
+                        48,
+                        8200L,
+                        true,
+                        true,
+                        true,
+                        tvMeasurer);
+            }
+            tvEngine.reset();
+            cache.onPlaybackTick(baseMs + 4084L, true);
+            cache.fillVisibleWindowSnapshot(baseMs + 4084L, frameBuf);
+            tvEngine.step(
+                    baseMs + 4084L,
+                    frameBuf,
+                    1920,
+                    1080,
+                    24f,
+                    0f,
+                    44f,
+                    0.50f,
+                    6,
+                    48,
+                    8200L,
+                    true,
+                    true,
+                    true,
+                    tvMeasurer);
+
+            com.sun.management.ThreadMXBean sunMx = resolveSunThreadMxBean();
+            long tid = Thread.currentThread().getId();
+            if (sunMx != null) {
+                sunMx.getThreadAllocatedBytes(tid);
+                sunMx.getThreadAllocatedBytes(tid);
+            }
+            long evalBeforeSteady = initialFilter.getEvaluationCount();
+            long allocBefore = sunMx != null ? sunMx.getThreadAllocatedBytes(tid) : -1L;
+            for (int f = 0; f < 120; f++) {
+                long t = baseMs + 4100L + f * 16L;
+                cache.onPlaybackTick(t, true);
+                cache.fillVisibleWindowSnapshot(t, frameBuf);
+                tvEngine.step(
+                        t,
+                        frameBuf,
+                        1920,
+                        1080,
+                        24f,
+                        0f,
+                        44f,
+                        0.50f,
+                        6,
+                        48,
+                        8200L,
+                        true,
+                        true,
+                        true,
+                        tvMeasurer);
+            }
+            long allocAfter = sunMx != null ? sunMx.getThreadAllocatedBytes(tid) : -1L;
+            long evalAfterSteady = initialFilter.getEvaluationCount();
+
+            check(
+                    evalAfterSteady == evalBeforeSteady,
+                    "M-01 steady-state 120 TV frames invoke BlockFilter.isBlocked 0 times (delta="
+                            + (evalAfterSteady - evalBeforeSteady)
+                            + ")");
+            check(
+                    !frameBuf.isEmpty(),
+                    "M-01 steady-state TV window still yields safe unblocked danmu ("
+                            + frameBuf.size()
+                            + ")");
+            for (DanmuItem item : frameBuf) {
+                if (item.text.contains("广告")
+                        || item.text.contains("SPOILER")
+                        || item.text.contains("第二章")) {
+                    throw new AssertionError("M-01 blocked item leaked into frame: " + item.text);
+                }
+            }
+            if (allocBefore >= 0L && allocAfter >= 0L) {
+                long deltaBytes = allocAfter - allocBefore;
+                check(
+                        deltaBytes == 0L,
+                        "M-01 + L-04 steady-state 120 TV frames at 90min (w=180>=128) allocated 0 bytes (delta="
+                                + deltaBytes
+                                + ")");
+            }
+
+            // Seek within already-cached window 180 must also invoke isBlocked 0 times
+            cache.onSeekInitiated();
+            cache.onSeekSettled(baseMs + 2000L);
+            check(cache.awaitIdle(1000L), "M-01 seek settled inside cached window");
+            tvEngine.reset();
+            for (int f = 0; f < 30; f++) {
+                long t = baseMs + 2000L + f * 16L;
+                cache.fillVisibleWindowSnapshot(t, frameBuf);
+                tvEngine.step(
+                        t,
+                        frameBuf,
+                        1920,
+                        1080,
+                        24f,
+                        0f,
+                        44f,
+                        0.50f,
+                        6,
+                        48,
+                        8200L,
+                        true,
+                        true,
+                        true,
+                        tvMeasurer);
+            }
+            check(
+                    initialFilter.getEvaluationCount() == evalBeforeSteady,
+                    "M-01 seek inside cached window invokes isBlocked 0 times");
+
+            // Applying an identical rule set must NOT redundantly re-filter cached windows
+            BlockFilter identicalFilter =
+                    BlockFilter.compile(Arrays.asList("spoiler", "re:广告.*链接", "re:第(一|二)章"));
+            cache.setBlockFilter(identicalFilter);
+            check(
+                    identicalFilter.getEvaluationCount() == 0L,
+                    "M-01 identical rule re-apply skips redundant cached window re-filtering");
+
+            // Changing rules (removing re:广告.*链接, adding re:正常电视弹幕.*0$) re-evaluates once
+            BlockFilter updatedFilter =
+                    BlockFilter.compile(Arrays.asList("spoiler", "re:正常电视弹幕.*3$"));
+            cache.setBlockFilter(updatedFilter);
+            long evalAfterRuleChange = updatedFilter.getEvaluationCount();
+            check(
+                    evalAfterRuleChange == winPrev.size() + winCurr.size(),
+                    "M-01 rule change re-evaluates cached windows exactly once (actual="
+                            + evalAfterRuleChange
+                            + ")");
+            cache.fillVisibleWindowSnapshot(baseMs + 5000L, frameBuf);
+            boolean sawRestoredAd = false;
+            boolean sawNewlyBlocked3 = false;
+            for (DanmuItem item : frameBuf) {
+                if (item.text.contains("广告推广")) sawRestoredAd = true;
+                if (item.text.endsWith(" 3")) sawNewlyBlocked3 = true;
+            }
+            check(
+                    sawRestoredAd && !sawNewlyBlocked3,
+                    "M-01 rule change restores unblocked items and hides newly blocked regex matches");
+            for (int f = 0; f < 60; f++) {
+                cache.fillVisibleWindowSnapshot(baseMs + 5000L + f * 16L, frameBuf);
+            }
+            check(
+                    updatedFilter.getEvaluationCount() == evalAfterRuleChange,
+                    "M-01 60 frames after rule change invoke updatedFilter.isBlocked 0 times");
+        }
+
+        // Direct LayoutEngine.step(..., entryBlockFilter) evaluates each newly arriving item at
+        // most once and records blocked IDs in droppedIds so subsequent steady-state frames call
+        // isBlocked 0 times.
+        LayoutEngine directEngine = new LayoutEngine();
+        BlockFilter entryFilter = BlockFilter.compile(Arrays.asList("re:剧透|广告", "spam"));
+        List<DanmuItem> rawFeed = new ArrayList<>();
+        for (int i = 0; i < 40; i++) {
+            String txt = (i < 3) ? ("安全弹幕" + i) : ("剧透第" + i + "集");
+            rawFeed.add(new DanmuItem("d_" + i, 1000L + i * 20L, 1, 0xFFFFFF, txt));
+        }
+        TextWidthMeasurer simpleMeasurer =
+                new TextWidthMeasurer() {
+                    @Override
+                    public float measureWidth(String text) {
+                        return 160f;
+                    }
+                };
+        directEngine.step(
+                2000L,
+                rawFeed,
+                1920,
+                1080,
+                24f,
+                0f,
+                44f,
+                0.50f,
+                6,
+                48,
+                8200L,
+                true,
+                true,
+                true,
+                simpleMeasurer,
+                entryFilter);
+        long afterEntryEvals = entryFilter.getEvaluationCount();
+        check(
+                afterEntryEvals == rawFeed.size(),
+                "M-01 direct LayoutEngine.step evaluates each arriving item once (actual="
+                        + afterEntryEvals
+                        + ")");
+        for (ActiveSlot slot : directEngine.getSlots()) {
+            if (slot.active && slot.text != null && slot.text.contains("剧透")) {
+                throw new AssertionError("M-01 direct LayoutEngine admitted blocked item");
+            }
+        }
+        for (int f = 1; f <= 60; f++) {
+            directEngine.step(
+                    2000L + f * 16L,
+                    rawFeed,
+                    1920,
+                    1080,
+                    24f,
+                    0f,
+                    44f,
+                    0.50f,
+                    6,
+                    48,
+                    8200L,
+                    true,
+                    true,
+                    true,
+                    simpleMeasurer,
+                    entryFilter);
+        }
+        check(
+                entryFilter.getEvaluationCount() == afterEntryEvals,
+                "M-01 direct LayoutEngine.step invokes entryFilter 0 times across 60 steady frames");
+        directEngine.onBlockFilterChanged(BlockFilter.EMPTY);
+        directEngine.step(
+                3000L,
+                rawFeed,
+                1920,
+                1080,
+                24f,
+                0f,
+                44f,
+                0.50f,
+                6,
+                48,
+                8200L,
+                true,
+                true,
+                true,
+                simpleMeasurer,
+                BlockFilter.EMPTY);
+        boolean admittedPreviouslyBlocked = false;
+        for (ActiveSlot slot : directEngine.getSlots()) {
+            if (slot.active && slot.text != null && slot.text.contains("剧透")) {
+                admittedPreviouslyBlocked = true;
+                break;
+            }
+        }
+        check(
+                admittedPreviouslyBlocked,
+                "M-01 LayoutEngine.onBlockFilterChanged clears droppedIds when rules relax");
     }
 
     private static String repeatChar(char c, int count) {

@@ -45,6 +45,16 @@ final class PlaybackControls {
     final PlaybackEffects effects = new PlaybackEffects();
     final DanmakuView danmaku;
     boolean danmakuLoaded;
+    private DanmuSegmentCache danmuSegmentCache;
+    private DanmuProvider.CancellationToken danmuMatchToken;
+    private DanmuProvider.Candidate activeDanmuCandidate;
+    private int danmuSessionSerial;
+    private String activeDanmuServerSignature = "";
+    private String lastObservedDanmuServerSignature = "";
+    private boolean lastDanmuTvSeeking;
+    private boolean lastDanmuPlaying;
+    private float lastDanmuSpeed = 1f;
+    private FirstPlayGestureHint firstPlayGestureHint;
     boolean currentMobileLandscape;
     final Map<String, Button> buttons = new LinkedHashMap<>();
     Button lastFocusedModernButton;
@@ -164,16 +174,77 @@ final class PlaybackControls {
         }
     }
 
+    private static int findDanmakuOverlayIndex(ViewGroup playbackLayer) {
+        if (playbackLayer == null) return -1;
+        int found = -1;
+        for (int i = 0; i < playbackLayer.getChildCount(); i++) {
+            View child = playbackLayer.getChildAt(i);
+            if (child instanceof DanmakuView || "danmaku-view".equals(child.getTag())) {
+                found = i;
+            }
+        }
+        return found;
+    }
+
+    /**
+     * Enforces strict playback layer Z-order: Video surface (0) -> DanmakuView (1) ->
+     * SubtitleOverlayView (2) -> HUD overlays (3+), ensuring subtitles always render above danmaku.
+     */
+    static void mountMediaOverlaysInZOrder(
+            ViewGroup playbackLayer,
+            View danmakuView,
+            ViewGroup.LayoutParams danmakuLp,
+            View subtitleView,
+            ViewGroup.LayoutParams subtitleLp) {
+        if (playbackLayer == null) return;
+        if (danmakuView != null) {
+            if (danmakuView.getParent() instanceof ViewGroup) {
+                ((ViewGroup) danmakuView.getParent()).removeView(danmakuView);
+            }
+            int danmakuIndex = Math.min(1, playbackLayer.getChildCount());
+            if (danmakuLp != null) {
+                playbackLayer.addView(danmakuView, danmakuIndex, danmakuLp);
+            } else {
+                playbackLayer.addView(danmakuView, danmakuIndex);
+            }
+        }
+        if (subtitleView != null) {
+            if (subtitleView.getParent() instanceof ViewGroup) {
+                ((ViewGroup) subtitleView.getParent()).removeView(subtitleView);
+            }
+            int subtitleIndex;
+            if (danmakuView != null) {
+                int dmIdx = playbackLayer.indexOfChild(danmakuView);
+                subtitleIndex = dmIdx >= 0 ? dmIdx + 1 : Math.min(2, playbackLayer.getChildCount());
+            } else {
+                int existingDmIdx = findDanmakuOverlayIndex(playbackLayer);
+                subtitleIndex =
+                        existingDmIdx >= 0
+                                ? existingDmIdx + 1
+                                : Math.min(1, playbackLayer.getChildCount());
+            }
+            if (subtitleLp != null) {
+                playbackLayer.addView(subtitleView, subtitleIndex, subtitleLp);
+            } else {
+                playbackLayer.addView(subtitleView, subtitleIndex);
+            }
+        }
+    }
+
     void onScreenLockRequested() {
         if (skipCountdownPill != null) {
             skipCountdownPill.dismissSilently();
         }
+        hideFirstPlayGestureHint();
     }
 
     void resetEpisodeTransientState() {
         outroSkipCancelledForEpisode = false;
         pendingIntroSkipMs = 0;
         if (skipCountdownPill != null) skipCountdownPill.dismissSilently();
+        closeSegmentedDanmuSession();
+        danmakuLoaded = false;
+        hideFirstPlayGestureHint();
     }
 
     TvMarkerHost markers() {
@@ -223,6 +294,149 @@ final class PlaybackControls {
         lastSeekTimeMs = android.os.SystemClock.uptimeMillis();
         lastSeekTargetMs = Math.max(0, targetMs);
         timeline.setProgress(lastSeekTargetMs);
+        onDanmuSeekSettled(lastSeekTargetMs);
+    }
+
+    void onDanmuSeekInitiated() {
+        if (danmaku != null) {
+            danmaku.onSeekInitiated();
+        }
+    }
+
+    void onDanmuSeekSettled(long targetRawPositionMs) {
+        if (danmaku != null) {
+            danmaku.onSeekSettled(Math.max(0L, targetRawPositionMs));
+        }
+    }
+
+    void onDanmuPlaySpeedChanged(float speed) {
+        if (speed <= 0f) return;
+        lastDanmuSpeed = speed;
+        if (danmaku != null) {
+            danmaku.setPlaySpeed(speed);
+        }
+    }
+
+    void syncDanmuPlaybackState() {
+        if (danmaku == null || danmaku.closed) return;
+        reconcileDetachedSegmentedDanmuSession();
+        boolean tvSeeking = a.isTvDevice() && a.seekGesture.active;
+        if (tvSeeking && !lastDanmuTvSeeking) {
+            onDanmuSeekInitiated();
+        } else if (!tvSeeking && lastDanmuTvSeeking) {
+            long pos = a.player != null && a.prepared ? a.player.getCurrentPosition() : 0L;
+            onDanmuSeekSettled(pos);
+        }
+        lastDanmuTvSeeking = tvSeeking;
+
+        if (a.player != null && a.prepared) {
+            float speed = a.player.getSpeed();
+            if (speed > 0f && Math.abs(speed - lastDanmuSpeed) > 0.01f) {
+                onDanmuPlaySpeedChanged(speed);
+            }
+        }
+
+        boolean nowPlaying = a.playing && a.player != null && a.prepared;
+        if (nowPlaying != lastDanmuPlaying) {
+            lastDanmuPlaying = nowPlaying;
+            if (danmaku.enabled) {
+                if (danmuSegmentCache != null
+                        && danmaku.hasSegmentCache()
+                        && a.player != null
+                        && a.prepared) {
+                    danmuSegmentCache.onPlaybackTick(a.player.getCurrentPosition(), nowPlaying);
+                }
+                danmaku.invalidate();
+            }
+        }
+    }
+
+    static boolean shouldCloseDetachedSegmentCache(
+            boolean hasTrackedCache, boolean viewHasSegmentCache) {
+        return hasTrackedCache && !viewHasSegmentCache;
+    }
+
+    private void reconcileDetachedSegmentedDanmuSession() {
+        if (shouldCloseDetachedSegmentCache(
+                danmuSegmentCache != null, danmaku != null && danmaku.hasSegmentCache())) {
+            closeSegmentedDanmuSession();
+        }
+    }
+
+    void closeSegmentedDanmuSession() {
+        danmuSessionSerial++;
+        if (danmuMatchToken != null) {
+            danmuMatchToken.cancel();
+            danmuMatchToken = null;
+        }
+        activeDanmuCandidate = null;
+        activeDanmuServerSignature = "";
+        DanmuSegmentCache cache = danmuSegmentCache;
+        danmuSegmentCache = null;
+        if (danmaku != null) {
+            danmaku.detachSegmentCache();
+        }
+        if (cache != null) {
+            cache.close();
+        }
+    }
+
+    void loadLocalDanmakuText(String text) {
+        closeSegmentedDanmuSession();
+        danmaku.enabled(true);
+        danmaku.loadText(
+                text,
+                new DanmakuView.Listener() {
+                    public void loaded(int count) {
+                        danmakuLoaded = count > 0;
+                        a.toast("已加载 " + count + " 条弹幕");
+                    }
+
+                    public void error(String message) {
+                        a.notice(message);
+                    }
+                });
+    }
+
+    private void maybeShowFirstPlayGestureHint() {
+        if (a.isLive() || a.isCast() || a.miniMode || a.playerLocked || transitioning) return;
+        FrameLayout slot = firstPlayGestureHintSlot();
+        if (slot == null) return;
+        if (firstPlayGestureHint == null) {
+            firstPlayGestureHint = new FirstPlayGestureHint(a);
+            firstPlayGestureHint.setTag("first-play-gesture-hint");
+            FrameLayout.LayoutParams lp =
+                    new FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            lp.leftMargin = a.dp(16);
+            lp.rightMargin = a.dp(16);
+            lp.bottomMargin = a.dp(a.isTvDevice() ? 132 : 96);
+            slot.addView(firstPlayGestureHint, lp);
+        }
+        boolean reducedTransparency =
+                a.prefs != null && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        boolean shown =
+                firstPlayGestureHint.showIfEligible(
+                        a.isTvDevice(),
+                        a.reduced,
+                        reducedTransparency,
+                        () -> {
+                            FrameLayout s = firstPlayGestureHintSlot();
+                            if (s != null) s.setVisibility(View.GONE);
+                        });
+        slot.setVisibility(shown ? View.VISIBLE : View.GONE);
+    }
+
+    private void hideFirstPlayGestureHint() {
+        if (firstPlayGestureHint != null) {
+            firstPlayGestureHint.hideImmediate();
+        }
+        FrameLayout slot = firstPlayGestureHintSlot();
+        if (slot != null) {
+            slot.setVisibility(View.GONE);
+        }
     }
 
     int displayPosition(int actualPositionMs) {
@@ -272,14 +486,18 @@ final class PlaybackControls {
                                 return a.player != null && a.player.isPlaying();
                             }
                         });
-        a.playbackLayer.addView(danmaku, 1, new FrameLayout.LayoutParams(-1, -1));
-        danmaku.enabled(false);
+        danmaku.setTag("danmaku-view");
         subtitle = new SubtitleOverlayView(a);
         subtitle.setUserDefaultStyle();
         subtitle.setPadding(a.dp(40), 0, a.dp(40), a.dp(12));
         FrameLayout.LayoutParams caption = new FrameLayout.LayoutParams(-1, -1, Gravity.BOTTOM);
         caption.bottomMargin = a.dp(168);
-        a.playbackLayer.addView(subtitle, 1, caption);
+        mountMediaOverlaysInZOrder(
+                a.playbackLayer, danmaku, new FrameLayout.LayoutParams(-1, -1), subtitle, caption);
+        DanmuSettingsPanel.DanmuConfig initialDanmuCfg =
+                DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
+        lastObservedDanmuServerSignature = danmuServerSignature(initialDanmuCfg);
+        danmaku.applyConfig(initialDanmuCfg);
         applySubtitleStyle();
         boolean reducedTransparency =
                 a.prefs != null && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
@@ -436,6 +654,7 @@ final class PlaybackControls {
                             a.touchPlayerGesture.cancelActiveGesture();
                         }
                         sliderSeeking = true;
+                        onDanmuSeekInitiated();
                         a.finishSeek(false);
                         a.scheduleHide();
                     }
@@ -454,6 +673,11 @@ final class PlaybackControls {
                                                 + PlaybackController.formatTime(
                                                         a.player.getDuration()));
                             }
+                        } else if (wasDragging) {
+                            onDanmuSeekSettled(
+                                    a.player != null && a.prepared
+                                            ? a.player.getCurrentPosition()
+                                            : 0L);
                         }
                         a.scheduleHide();
                     }
@@ -1557,6 +1781,7 @@ final class PlaybackControls {
                 current,
                 i -> {
                     if (a.player != null) a.player.setSpeed(speeds[i]);
+                    onDanmuPlaySpeedChanged(speeds[i]);
                     a.prefs.edit().putFloat(Prefs.PLAY_SPEED, speeds[i]).apply();
                     if (a.touchPlayerGesture != null) {
                         a.touchPlayerGesture.onManualSpeedChanged();
@@ -1655,17 +1880,235 @@ final class PlaybackControls {
                 });
     }
 
+    private DanmuProvider.MatchQuery buildDanmuMatchQuery() {
+        String title = video != null && video.title != null ? video.title.trim() : "";
+        Cms.Episode ep = a.activeEpisode != null ? a.activeEpisode : resolved;
+        String epTitle = ep != null && ep.name != null ? ep.name.trim() : "";
+        int epNum = Math.max(1, episodeIndex() + 1);
+        long durSec =
+                (a.player != null && a.prepared && a.player.getDuration() > 0)
+                        ? (a.player.getDuration() / 1000L)
+                        : 0L;
+        return new DanmuProvider.MatchQuery(title, epTitle, epNum, durSec);
+    }
+
+    static String danmuServerSignature(DanmuSettingsPanel.DanmuConfig cfg) {
+        if (cfg == null) return "";
+        return cfg.serverUrls + "|" + cfg.appId + "|" + cfg.appSecret;
+    }
+
+    static boolean shouldApplyAsyncMatchResult(
+            DanmuSettingsPanel.DanmuConfig requestCfg, DanmuSettingsPanel.DanmuConfig latestCfg) {
+        if (requestCfg == null || latestCfg == null || !latestCfg.enabled) {
+            return false;
+        }
+        return danmuServerSignature(requestCfg).equals(danmuServerSignature(latestCfg));
+    }
+
+    static boolean shouldStartSegmentedSessionOnConfigUpdate(
+            boolean enabled,
+            String serverUrls,
+            boolean hasActiveSegmentedSession,
+            boolean hasLegacyLoadedDanmaku,
+            String previousServerSignature,
+            String nextServerSignature) {
+        if (!enabled || serverUrls == null || serverUrls.trim().isEmpty()) {
+            return false;
+        }
+        String prev = previousServerSignature == null ? "" : previousServerSignature;
+        String next = nextServerSignature == null ? "" : nextServerSignature;
+        boolean serverChanged = !prev.equals(next);
+        if (hasLegacyLoadedDanmaku) {
+            return serverChanged;
+        }
+        return !hasActiveSegmentedSession || serverChanged;
+    }
+
+    private void startSegmentedDanmuSession(
+            final DanmuSettingsPanel.DanmuConfig cfg, final boolean showFeedback) {
+        closeSegmentedDanmuSession();
+        if (cfg == null || !cfg.enabled) {
+            danmaku.enabled(false);
+            return;
+        }
+        danmaku.applyConfig(cfg);
+        final DandanplayProvider provider = cfg.createProvider();
+        if (provider.getConfiguredOrigins().isEmpty()) {
+            if (showFeedback) {
+                a.toast("未配置自定义弹幕服务源，请在弹幕设置中填写服务地址或导入本地文件");
+            }
+            return;
+        }
+        final int serial = ++danmuSessionSerial;
+        final DanmuProvider.CancellationToken token = new DanmuProvider.CancellationToken();
+        danmuMatchToken = token;
+        String sig = danmuServerSignature(cfg);
+        activeDanmuServerSignature = sig;
+        lastObservedDanmuServerSignature = sig;
+        final DanmuProvider.MatchQuery query = buildDanmuMatchQuery();
+        a.worker.execute(
+                () -> {
+                    try {
+                        List<DanmuProvider.Candidate> candidates =
+                                provider.matchOrSearch(query, token);
+                        final DanmuProvider.Candidate best =
+                                (candidates != null && !candidates.isEmpty())
+                                        ? candidates.get(0)
+                                        : null;
+                        a.ui.post(
+                                () -> {
+                                    if (token.isCancelled()
+                                            || serial != danmuSessionSerial
+                                            || a.playbackControls != PlaybackControls.this
+                                            || danmaku.closed) {
+                                        return;
+                                    }
+                                    danmuMatchToken = null;
+                                    DanmuSettingsPanel.DanmuConfig latestCfg =
+                                            DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
+                                    if (!shouldApplyAsyncMatchResult(cfg, latestCfg)) {
+                                        return;
+                                    }
+                                    if (best == null
+                                            || best.boundEpisodeId == null
+                                            || best.boundEpisodeId.isEmpty()) {
+                                        if (showFeedback) {
+                                            a.toast("未匹配到弹幕剧集，可调整自定义服务源或导入本地文件");
+                                        }
+                                        return;
+                                    }
+                                    DanmuSegmentCache cache = new DanmuSegmentCache(provider);
+                                    danmuSegmentCache = cache;
+                                    danmakuLoaded = false;
+                                    activeDanmuCandidate = best;
+                                    danmaku.applyConfig(latestCfg);
+                                    danmaku.attachSegmentCache(cache);
+                                    danmaku.enabled(true);
+                                    cache.bindSession(best.boundEpisodeId);
+                                    if (a.player != null && a.prepared) {
+                                        danmaku.setPlaySpeed(a.player.getSpeed());
+                                        cache.onPlaybackTick(
+                                                a.player.getCurrentPosition(),
+                                                a.player.isPlaying());
+                                    }
+                                    if (showFeedback) {
+                                        String label =
+                                                best.animeTitle
+                                                        + (best.episodeTitle.isEmpty()
+                                                                ? ""
+                                                                : " · " + best.episodeTitle);
+                                        a.toast("已匹配分片弹幕：" + label);
+                                    }
+                                });
+                    } catch (DanmuProvider.CancelledException ignored) {
+                    } catch (Exception error) {
+                        AppLog.w("PlaybackControls", "Segmented danmu match failed", error);
+                        if (showFeedback) {
+                            a.ui.post(
+                                    () -> {
+                                        if (!token.isCancelled()
+                                                && serial == danmuSessionSerial
+                                                && a.playbackControls == PlaybackControls.this) {
+                                            a.toast("弹幕服务连接失败，请检查自定义服务地址");
+                                        }
+                                    });
+                        }
+                    }
+                });
+    }
+
+    private void onDanmuConfigUpdated(DanmuSettingsPanel.DanmuConfig config) {
+        if (config == null || danmaku.closed) return;
+        danmaku.applyConfig(config);
+        String prevSig = lastObservedDanmuServerSignature;
+        String nextSig = danmuServerSignature(config);
+        lastObservedDanmuServerSignature = nextSig;
+        if (!config.enabled) {
+            closeSegmentedDanmuSession();
+            return;
+        }
+        if (a.isLive() || a.isCast()) return;
+        if (config.serverUrls.isEmpty()) {
+            if (danmuSegmentCache != null) {
+                closeSegmentedDanmuSession();
+            }
+            return;
+        }
+        if (shouldStartSegmentedSessionOnConfigUpdate(
+                config.enabled,
+                config.serverUrls,
+                danmuSegmentCache != null || danmuMatchToken != null,
+                danmakuLoaded,
+                prevSig,
+                nextSig)) {
+            startSegmentedDanmuSession(config, false);
+        }
+    }
+
+    void openDanmuSettingsPanel() {
+        if (activeDialog != null) {
+            activeDialog.dismiss();
+            activeDialog = null;
+        }
+        if (skipCountdownPill != null) {
+            skipCountdownPill.dismissSilently();
+        }
+        if (a.touchPlayerGesture != null) {
+            a.touchPlayerGesture.onDialogOpened();
+        }
+        lastObservedDanmuServerSignature =
+                danmuServerSignature(DanmuSettingsPanel.loadConfig(a, a.isTvDevice()));
+        dialogOpen = true;
+        if (a.hideControls != null) a.ui.removeCallbacks(a.hideControls);
+        final Dialog[] holder = new Dialog[1];
+        android.app.AlertDialog dlg =
+                DanmuSettingsPanel.showDialog(a, a.isTvDevice(), this::onDanmuConfigUpdated);
+        holder[0] = dlg;
+        dlg.setOnDismissListener(
+                d -> {
+                    if (activeDialog == holder[0]) {
+                        activeDialog = null;
+                        dialogOpen = false;
+                        if (!a.isFinishing()
+                                && (android.os.Build.VERSION.SDK_INT < 17 || !a.isDestroyed())) {
+                            a.scheduleHide();
+                            if (a.isTvDevice() && a.controlsVisible) {
+                                if (modernTv
+                                        && lastFocusedModernButton != null
+                                        && lastFocusedModernButton.getVisibility()
+                                                == View.VISIBLE) {
+                                    lastFocusedModernButton.requestFocus();
+                                } else if (timeline != null) {
+                                    timeline.requestFocus();
+                                }
+                            }
+                        }
+                    }
+                });
+        activeDialog = dlg;
+    }
+
     void danmaku() {
         choose(
                 "弹幕",
-                new String[] {"开启 / 重新加载来源弹幕", "关闭弹幕", "导入本地弹幕 XML / JSON"},
+                new String[] {"弹幕外观与自定义服务设置", "开启 / 重新加载弹幕", "关闭弹幕", "导入本地弹幕 XML / JSON"},
                 -1,
                 i -> {
-                    if (i == 1) {
-                        danmaku.enabled(false);
+                    if (i == 0) {
+                        openDanmuSettingsPanel();
                         return;
                     }
                     if (i == 2) {
+                        closeSegmentedDanmuSession();
+                        danmaku.enabled(false);
+                        DanmuSettingsPanel.DanmuConfig cur =
+                                DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
+                        DanmuSettingsPanel.DanmuConfig.Builder b = cur.toBuilder();
+                        b.enabled = false;
+                        DanmuSettingsPanel.saveConfig(a, b.build());
+                        return;
+                    }
+                    if (i == 3) {
                         a.pickDanmaku();
                         return;
                     }
@@ -1680,23 +2123,36 @@ final class PlaybackControls {
                             }
                         }
                     }
-                    if (address.isEmpty()) {
-                        message("当前来源没有提供弹幕，可导入本地 XML / JSON。");
+                    if (!address.isEmpty()) {
+                        closeSegmentedDanmuSession();
+                        danmaku.enabled(true);
+                        danmaku.load(
+                                address,
+                                resolved.headers,
+                                new DanmakuView.Listener() {
+                                    public void loaded(int count) {
+                                        danmakuLoaded = count > 0;
+                                        a.toast("已加载 " + count + " 条弹幕");
+                                    }
+
+                                    public void error(String message) {
+                                        message(message);
+                                    }
+                                });
                         return;
                     }
-                    danmaku.enabled(true);
-                    danmaku.load(
-                            address,
-                            resolved.headers,
-                            new DanmakuView.Listener() {
-                                public void loaded(int count) {
-                                    a.toast("已加载 " + count + " 条弹幕");
-                                }
-
-                                public void error(String message) {
-                                    message(message);
-                                }
-                            });
+                    DanmuSettingsPanel.DanmuConfig cur =
+                            DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
+                    DanmuSettingsPanel.DanmuConfig.Builder b = cur.toBuilder();
+                    b.enabled = true;
+                    DanmuSettingsPanel.DanmuConfig enabledCfg = b.build();
+                    DanmuSettingsPanel.saveConfig(a, enabledCfg);
+                    if (!enabledCfg.serverUrls.isEmpty()) {
+                        startSegmentedDanmuSession(enabledCfg, true);
+                    } else {
+                        openDanmuSettingsPanel();
+                        a.toast("请先填写自定义弹幕服务地址，或导入本地 XML / JSON");
+                    }
                 });
     }
 
@@ -1761,6 +2217,8 @@ final class PlaybackControls {
             preserveSleepTimerForInPlaceSwitch = false;
         }
         effects.close();
+        closeSegmentedDanmuSession();
+        hideFirstPlayGestureHint();
         danmaku.close();
     }
 
@@ -1779,6 +2237,9 @@ final class PlaybackControls {
         subtitle.setSubtitleSizeValue(size);
         subtitle.setSubtitleBottomDp(bottomDp);
         subtitle.setHorizontalOffsetPercent(offsetX);
+        if (danmaku != null) {
+            danmaku.setSubtitleBottomClearanceDp(bottomDp + 28f);
+        }
         visible(a.controlsVisible);
     }
 
@@ -3502,6 +3963,7 @@ final class PlaybackControls {
         }
         if (a.prefs.getBoolean(Prefs.DANMAKU_DEFAULT, true)
                 && (!danmakuLoaded || !rewritten.equals(previous))) {
+            closeSegmentedDanmuSession();
             danmakuLoaded = true;
             danmaku.enabled(true);
             danmaku.load(
@@ -3553,6 +4015,15 @@ final class PlaybackControls {
 
                         public void error(String message) {}
                     });
+        } else if (!danmakuLoaded && !a.isLive() && !a.isCast()) {
+            DanmuSettingsPanel.DanmuConfig dmCfg = DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
+            danmaku.applyConfig(dmCfg);
+            if (dmCfg.enabled && !dmCfg.serverUrls.isEmpty()) {
+                startSegmentedDanmuSession(dmCfg, false);
+            }
+        }
+        if (danmuMountHook != null) {
+            danmuMountHook.run();
         }
         PlaybackEffects.picture(surface, a.prefs.getInt(Prefs.PICTURE_EFFECT, 0));
         try {
@@ -3603,7 +4074,9 @@ final class PlaybackControls {
             }
         }
         if (!"live".equals(site.key)) {
-            a.player.setSpeed(a.prefs.getFloat(Prefs.PLAY_SPEED, 1));
+            float speed = a.prefs.getFloat(Prefs.PLAY_SPEED, 1);
+            a.player.setSpeed(speed);
+            onDanmuPlaySpeedChanged(speed);
             a.player.setRepeatOne(
                     a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1
                             && (a.isTvDevice()
@@ -3612,6 +4085,7 @@ final class PlaybackControls {
         }
         syncModernActionVisibility();
         refreshPlayPauseGlyph();
+        maybeShowFirstPlayGestureHint();
     }
 
     private void tickSleepTimer() {
@@ -3653,6 +4127,7 @@ final class PlaybackControls {
         if (a.touchPlayerGesture != null) {
             a.touchPlayerGesture.syncRuntimeState();
         }
+        syncDanmuPlaybackState();
         syncSkipCountdownLifecycle();
         tickSleepTimer();
         if (a.isTvDevice() && (a.markerHost != null || a.seekGesture.active)) return;
@@ -3672,6 +4147,10 @@ final class PlaybackControls {
             }
         }
         int actualPosition = a.player.getCurrentPosition();
+        reconcileDetachedSegmentedDanmuSession();
+        if (danmuSegmentCache != null && danmaku.enabled && danmaku.hasSegmentCache()) {
+            danmuSegmentCache.onPlaybackTick(actualPosition, a.player.isPlaying());
+        }
         int position = displayPosition(actualPosition);
         if (duration > 0) {
             timeline.setEnabled(true);

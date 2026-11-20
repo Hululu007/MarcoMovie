@@ -494,7 +494,7 @@ final class AccountPanel {
         final LinearLayout drivesHolder = a.vertical();
 
         FrameLayout pageRoot =
-                new FrameLayout(a) {
+                new MainActivity.GlassFreezeFrameLayout(a, a.glassFreezeController) {
                     @Override
                     public void onWindowFocusChanged(boolean hasWindowFocus) {
                         super.onWindowFocusChanged(hasWindowFocus);

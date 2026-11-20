@@ -46,7 +46,14 @@ final class DetailScreen {
 
         final ImmersivePoster cover = new ImmersivePoster(a, "detail-cover");
         cover.immersiveMode = true;
+        cover.backdrop.setTag("detail-backdrop");
         a.root.addView(cover.backdrop, 1, new FrameLayout.LayoutParams(-1, -1));
+        android.graphics.Rect pendingOrigin = a.consumePendingDetailOrigin();
+        if (pendingOrigin != null) {
+            a.activeTransition =
+                    PlayerTransitionHelper.animateSharedBoundsEnter(
+                            a.root, cover.backdrop, pendingOrigin, a.reduced, null);
+        }
         // Invisible fixed carrier in root keeps detail-cover bounds & decode policy active
         // without rendering any boxed poster card on screen.
         FrameLayout.LayoutParams coverLp =
@@ -463,12 +470,13 @@ final class DetailScreen {
         if (focused) {
             d.setColor(MainActivity.WHITE);
             b.setTextColor(MainActivity.DARK);
-            b.animate().scaleX(1.04f).scaleY(1.04f).setDuration(130).start();
+            float scale = a.reduced ? 1f : 1.04f;
+            b.animate().scaleX(scale).scaleY(scale).setDuration(a.reduced ? 0 : 130).start();
         } else {
             d.setColor(activeAccent ? 0xcc3a4e68 : 0x781c202c);
             d.setStroke(Math.max(1, a.dp(1)), activeAccent ? 0x8082b4ff : 0x38ffffff);
             b.setTextColor(MainActivity.WHITE);
-            b.animate().scaleX(1f).scaleY(1f).setDuration(130).start();
+            b.animate().scaleX(1f).scaleY(1f).setDuration(a.reduced ? 0 : 130).start();
         }
         b.setBackground(d);
         b.setPadding(pl, pt, pr, pb);
@@ -508,12 +516,13 @@ final class DetailScreen {
         if (focused) {
             d.setColor(MainActivity.WHITE);
             b.setTextColor(0xff090c14);
-            b.animate().scaleX(1.05f).scaleY(1.05f).setDuration(140).start();
+            float scale = a.reduced ? 1f : 1.05f;
+            b.animate().scaleX(scale).scaleY(scale).setDuration(a.reduced ? 0 : 140).start();
         } else {
             d.setColor(0xd8ffffff);
             d.setStroke(Math.max(1, a.dp(1)), 0x66ffffff);
             b.setTextColor(0xff0c101a);
-            b.animate().scaleX(1f).scaleY(1f).setDuration(140).start();
+            b.animate().scaleX(1f).scaleY(1f).setDuration(a.reduced ? 0 : 140).start();
         }
         b.setBackground(d);
         b.setPadding(a.dp(32), a.dp(9), a.dp(32), a.dp(9));
@@ -649,19 +658,20 @@ final class DetailScreen {
             d.setStroke(Math.max(1, a.dp(1)), 0xffffffff);
             b.setTextColor(0xff0b0e14);
             b.setTypeface(null, Typeface.BOLD);
-            b.animate().scaleX(1.035f).scaleY(1.035f).setDuration(130).start();
+            float scale = a.reduced ? 1f : 1.035f;
+            b.animate().scaleX(scale).scaleY(scale).setDuration(a.reduced ? 0 : 130).start();
         } else if (selected) {
             d.setColor(0x36ffffff);
             d.setStroke(Math.max(1, a.dp(1)), 0x70ffffff);
             b.setTextColor(0xfff5f5f7);
             b.setTypeface(null, Typeface.BOLD);
-            b.animate().scaleX(1f).scaleY(1f).setDuration(130).start();
+            b.animate().scaleX(1f).scaleY(1f).setDuration(a.reduced ? 0 : 130).start();
         } else {
             d.setColor(0x16ffffff);
             d.setStroke(Math.max(1, a.dp(1)), 0x22ffffff);
             b.setTextColor(0xd2ebebf5);
             b.setTypeface(null, Typeface.NORMAL);
-            b.animate().scaleX(1f).scaleY(1f).setDuration(130).start();
+            b.animate().scaleX(1f).scaleY(1f).setDuration(a.reduced ? 0 : 130).start();
         }
         b.setBackground(d);
         b.setPadding(a.dp(16), a.dp(7), a.dp(16), a.dp(7));
@@ -678,19 +688,20 @@ final class DetailScreen {
             d.setStroke(Math.max(1, a.dp(1)), 0xffffffff);
             b.setTextColor(0xff0b0e14);
             b.setTypeface(null, Typeface.BOLD);
-            b.animate().scaleX(1.03f).scaleY(1.03f).setDuration(130).start();
+            float scale = a.reduced ? 1f : 1.03f;
+            b.animate().scaleX(scale).scaleY(scale).setDuration(a.reduced ? 0 : 130).start();
         } else if (activeBookmark) {
             d.setColor(0x340a84ff);
             d.setStroke(Math.max(1, a.dp(1)), 0x883898ff);
             b.setTextColor(0xfff5f5f7);
             b.setTypeface(null, Typeface.BOLD);
-            b.animate().scaleX(1f).scaleY(1f).setDuration(130).start();
+            b.animate().scaleX(1f).scaleY(1f).setDuration(a.reduced ? 0 : 130).start();
         } else {
             d.setColor(0x1effffff);
             d.setStroke(Math.max(1, a.dp(1)), 0x20ffffff);
             b.setTextColor(0xedf5f5f7);
             b.setTypeface(null, Typeface.NORMAL);
-            b.animate().scaleX(1f).scaleY(1f).setDuration(130).start();
+            b.animate().scaleX(1f).scaleY(1f).setDuration(a.reduced ? 0 : 130).start();
         }
         b.setBackground(d);
         b.setPadding(a.dp(13), a.dp(10), a.dp(13), a.dp(10));

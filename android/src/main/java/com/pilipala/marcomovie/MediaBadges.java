@@ -481,7 +481,10 @@ public final class MediaBadges {
                 || ch == 0xFEFF;
     }
 
-    private static String percentDecodeUtf8PreservePlus(String input) {
+    public static String percentDecodeUtf8PreservePlus(String input) {
+        if (input == null) {
+            return "";
+        }
         int pct = input.indexOf('%');
         if (pct < 0) {
             return input;

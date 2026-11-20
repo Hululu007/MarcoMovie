@@ -872,18 +872,7 @@ final class SourceController {
                                 a.ui.post(
                                         () -> {
                                             if (controls == a.playbackControls) {
-                                                controls.danmaku.enabled(true);
-                                                controls.danmaku.loadText(
-                                                        text,
-                                                        new DanmakuView.Listener() {
-                                                            public void loaded(int count) {
-                                                                a.toast("已加载 " + count + " 条弹幕");
-                                                            }
-
-                                                            public void error(String message) {
-                                                                a.notice(message);
-                                                            }
-                                                        });
+                                                controls.loadLocalDanmakuText(text);
                                             }
                                         });
                             } catch (Exception error) {

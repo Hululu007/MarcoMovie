@@ -220,9 +220,10 @@ final class SettingsScreen {
                                 TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(1)));
                         label.setTextColor(0xff101013);
                         row.setElevation(a.dp(8));
+                        float scale = a.reduced ? 1f : 1.03f;
                         row.animate()
-                                .scaleX(1.03f)
-                                .scaleY(1.03f)
+                                .scaleX(scale)
+                                .scaleY(scale)
                                 .setDuration(a.reduced ? 0 : 130)
                                 .start();
                     } else {
@@ -314,9 +315,10 @@ final class SettingsScreen {
                         if (rightValue != null) rightValue.setTextColor(0xff3a3a3c);
                         chevron.setTextColor(0xff636366);
                         row.setElevation(a.dp(8));
+                        float scale = a.reduced ? 1f : 1.016f;
                         row.animate()
-                                .scaleX(1.016f)
-                                .scaleY(1.016f)
+                                .scaleX(scale)
+                                .scaleY(scale)
                                 .setDuration(a.reduced ? 0 : 125)
                                 .start();
                     } else {
@@ -879,9 +881,10 @@ final class SettingsScreen {
                                 TvV17Surface.rounded(0xfff5f5f7, a.dp(20), 0xffffffff, a.dp(1)));
                         b.setTextColor(0xff101013);
                         b.setElevation(a.dp(6));
+                        float scale = a.reduced ? 1f : 1.04f;
                         b.animate()
-                                .scaleX(1.04f)
-                                .scaleY(1.04f)
+                                .scaleX(scale)
+                                .scaleY(scale)
                                 .setDuration(a.reduced ? 0 : 120)
                                 .start();
                     } else {
@@ -1118,9 +1121,10 @@ final class SettingsScreen {
                         titleView.setTextColor(0xff101013);
                         subView.setTextColor(0xff48484a);
                         card.setElevation(a.dp(8));
+                        float scale = a.reduced ? 1f : 1.035f;
                         card.animate()
-                                .scaleX(1.035f)
-                                .scaleY(1.035f)
+                                .scaleX(scale)
+                                .scaleY(scale)
                                 .setDuration(a.reduced ? 0 : 125)
                                 .start();
                         if (a.homeAmbient != null) {
@@ -1553,6 +1557,28 @@ final class SettingsScreen {
                 new int[] {0, 1, 2, 3, 4, 5, 6, 7},
                 0);
         toggle("自动加载来源弹幕", Prefs.DANMAKU_DEFAULT, true, null);
+        DanmuSettingsPanel.DanmuConfig dmCfg = DanmuSettingsPanel.loadConfig(a, a.isTvDevice());
+        int dmServerCount = dmCfg.createProvider().getConfiguredOrigins().size();
+        String dmSummary =
+                (dmCfg.enabled ? "已开启" : "已关闭")
+                        + " · "
+                        + (dmServerCount > 0 ? "已配置 " + dmServerCount + " 个自定义服务源" : "未配置自定义服务源");
+        link(
+                "弹幕设置与自定义服务源",
+                dmSummary,
+                "setting-danmu-panel",
+                () -> {
+                    android.app.AlertDialog dlg =
+                            DanmuSettingsPanel.showDialog(a, a.isTvDevice(), null);
+                    dlg.setOnDismissListener(
+                            d -> {
+                                if (!a.isFinishing()
+                                        && (android.os.Build.VERSION.SDK_INT < 17
+                                                || !a.isDestroyed())) {
+                                    a.refresh();
+                                }
+                            });
+                });
         ints(
                 "画面色彩",
                 Prefs.PICTURE_EFFECT,
@@ -1719,6 +1745,14 @@ final class SettingsScreen {
                 });
         link("运行日志", "查看本机最近异常与诊断记录", "settings-logs", this::diagnostics);
         link(
+                "重新查看新手引导",
+                "重温功能导览并重新启用首播手势提示",
+                "settings-replay-onboarding",
+                () -> {
+                    OnboardingScreen.resetForReplay(a);
+                    a.showOnboarding(true);
+                });
+        link(
                 "恢复播放与外观默认设置",
                 "保留来源配置和网盘登录",
                 "settings-reset",
@@ -1830,9 +1864,10 @@ final class SettingsScreen {
                         titleView.setTextColor(0xff101013);
                         caption.setTextColor(0xff48484a);
                         row.setElevation(a.dp(8));
+                        float scale = a.reduced ? 1f : 1.016f;
                         row.animate()
-                                .scaleX(1.016f)
-                                .scaleY(1.016f)
+                                .scaleX(scale)
+                                .scaleY(scale)
                                 .setDuration(a.reduced ? 0 : 125)
                                 .start();
                     } else {

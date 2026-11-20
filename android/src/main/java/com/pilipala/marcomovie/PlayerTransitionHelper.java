@@ -124,7 +124,8 @@ public final class PlayerTransitionHelper {
                     + "        : float2(rectAspect / safePosterAspect, 1.0);\n"
                     + "    float2 posterUv = clamp((localUv - 0.5) * coverScale + 0.5, float2(0.0), float2(1.0));\n"
                     + "    float posterFade = 1.0 - smoothstep(0.45, 0.80, progress);\n"
-                    + "    float3 posterRgb = float3(0.071, 0.071, 0.086) * posterFade;\n"
+                    + "    float hasPoster = step(0.5, uPosterAvailable);\n"
+                    + "    float3 posterRgb = float3(0.0);\n"
                     + "    if (uPosterAvailable > 0.5) {\n"
                     + "        half4 ps = uPosterTex.eval(posterUv * uPosterTexSize);\n"
                     + "        posterRgb = float3(ps.rgb) * posterFade;\n"
@@ -138,7 +139,7 @@ public final class PlayerTransitionHelper {
                     + "        * sin(3.14159265 * progress)\n"
                     + "        * (1.0 - smoothstep(0.55, 0.85, progress));\n"
                     + "    float3 portalRgb = clamp(posterRgb + float3(0.16, 0.18, 0.22) * rimBand, float3(0.0), float3(1.0));\n"
-                    + "    float portalPresence = step(1.0, uPosterOrigin.z) * step(1.0, uPosterOrigin.w);\n"
+                    + "    float portalPresence = step(1.0, uPosterOrigin.z) * step(1.0, uPosterOrigin.w) * hasPoster;\n"
                     + "    float effMask = mask * portalPresence;\n"
                     + "    float4 bgPremul = float4(clamp(bgRgb, float3(0.0), float3(1.0)), 1.0);\n"
                     + "    float4 fgPremul = float4(portalRgb * effMask, effMask);\n"
@@ -194,6 +195,163 @@ public final class PlayerTransitionHelper {
         float scale = (float) cap / (float) longest;
         outWidthHeight[0] = Math.max(1, Math.round(w * scale));
         outWidthHeight[1] = Math.max(1, Math.round(h * scale));
+    }
+
+    /** Resolved Cinema Portal parameters passed to the API 33+ AGSL shader. */
+    public static final class PortalParams {
+        public final float originLeft;
+        public final float originTop;
+        public final float originWidth;
+        public final float originHeight;
+        public final float radiusPx;
+        public final float posterAvailable;
+        public final float posterAspect;
+        public final boolean portalActive;
+
+        PortalParams(
+                float originLeft,
+                float originTop,
+                float originWidth,
+                float originHeight,
+                float radiusPx,
+                float posterAvailable,
+                float posterAspect,
+                boolean portalActive) {
+            this.originLeft = originLeft;
+            this.originTop = originTop;
+            this.originWidth = originWidth;
+            this.originHeight = originHeight;
+            this.radiusPx = radiusPx;
+            this.posterAvailable = posterAvailable;
+            this.posterAspect = posterAspect;
+            this.portalActive = portalActive;
+        }
+    }
+
+    /**
+     * Returns {@code true} only when {@code candidateRect} describes a bounded local independent
+     * poster card inside {@code viewportWidth x viewportHeight} — never a full-bleed backdrop
+     * covering the screen (which would occlude titles/buttons on frame 0 if passed as {@code
+     * uPosterOrigin}).
+     */
+    public static boolean isBoundedPosterCardBounds(
+            float cardWidth, float cardHeight, float viewportWidth, float viewportHeight) {
+        if (viewportWidth <= 1f || viewportHeight <= 1f) {
+            return false;
+        }
+        if (cardWidth <= 1f || cardHeight <= 1f) {
+            return false;
+        }
+        float widthRatio = cardWidth / viewportWidth;
+        float heightRatio = cardHeight / viewportHeight;
+        float areaRatio = (cardWidth * cardHeight) / (viewportWidth * viewportHeight);
+        if (widthRatio >= 0.85f && heightRatio >= 0.60f) {
+            return false;
+        }
+        if (areaRatio >= 0.65f) {
+            return false;
+        }
+        return true;
+    }
+
+    public static boolean isBoundedPosterCardRect(
+            RectF candidateRect, float viewportWidth, float viewportHeight) {
+        if (candidateRect == null) {
+            return false;
+        }
+        return isBoundedPosterCardBounds(
+                candidateRect.width(), candidateRect.height(), viewportWidth, viewportHeight);
+    }
+
+    /**
+     * Normalizes AGSL Cinema Portal uniforms so full-bleed detail pages (or layouts whose poster
+     * bitmap is not ready) always resolve to {@code portalActive == false} ({@code uPosterOrigin =
+     * (0, 0, 0, 0)}, {@code uPosterAvailable = 0}) and execute depth recession + vignette only.
+     */
+    public static PortalParams resolvePortalParams(
+            RectF candidateOriginPx,
+            float candidateRadiusPx,
+            float viewportWidth,
+            float viewportHeight,
+            boolean posterReady,
+            int posterBitmapWidth,
+            int posterBitmapHeight) {
+        if (!posterReady
+                || !isBoundedPosterCardRect(candidateOriginPx, viewportWidth, viewportHeight)) {
+            return new PortalParams(0f, 0f, 0f, 0f, 0f, 0f, 2f / 3f, false);
+        }
+        float aspect =
+                posterBitmapWidth > 0 && posterBitmapHeight > 0
+                        ? (float) posterBitmapWidth / (float) posterBitmapHeight
+                        : (2f / 3f);
+        return new PortalParams(
+                candidateOriginPx.left,
+                candidateOriginPx.top,
+                candidateOriginPx.width(),
+                candidateOriginPx.height(),
+                Math.max(0f, candidateRadiusPx),
+                1f,
+                aspect,
+                true);
+    }
+
+    /**
+     * Computes aspect-preserving {@code BoxFit.cover} UV coordinates inside a portal rectangle,
+     * mirroring {@link #AGSL_PLAYER_ENTER_SOURCE}.
+     */
+    public static void computePosterCoverUv(
+            float fragX,
+            float fragY,
+            float rectLeft,
+            float rectTop,
+            float rectWidth,
+            float rectHeight,
+            float posterAspect,
+            float[] outUv2) {
+        float safeW = Math.max(1f, rectWidth);
+        float safeH = Math.max(1f, rectHeight);
+        float localU = (fragX - rectLeft) / safeW;
+        float localV = (fragY - rectTop) / safeH;
+        float rectAspect = safeW / safeH;
+        float safePosterAspect = Math.max(posterAspect, 0.0001f);
+        float coverScaleX = rectAspect > safePosterAspect ? 1f : (rectAspect / safePosterAspect);
+        float coverScaleY = rectAspect > safePosterAspect ? (safePosterAspect / rectAspect) : 1f;
+        float u = (localU - 0.5f) * coverScaleX + 0.5f;
+        float v = (localV - 0.5f) * coverScaleY + 0.5f;
+        outUv2[0] = Math.max(0f, Math.min(1f, u));
+        outUv2[1] = Math.max(0f, Math.min(1f, v));
+    }
+
+    /** Returns {@code true} if {@code candidate} is a strict descendant of {@code ancestor}. */
+    static boolean isDescendantOf(View ancestor, View candidate) {
+        if (ancestor == null || candidate == null || ancestor == candidate) {
+            return false;
+        }
+        ViewParent p = candidate.getParent();
+        while (p instanceof View) {
+            if (p == ancestor) {
+                return true;
+            }
+            p = p.getParent();
+        }
+        return false;
+    }
+
+    /**
+     * Determines whether {@code detailLayer} may safely use {@code LAYER_TYPE_HARDWARE}: never
+     * promote an ancestor whose descendant {@code posterView} is scaled/transformed per frame, as
+     * doing so invalidates and rebuilds the parent's full-screen hardware FBO every single frame.
+     */
+    static boolean shouldPromoteDetailHardwareLayer(View detailLayer, View posterView) {
+        if (detailLayer == null) return false;
+        if (posterView == null || posterView == detailLayer) return true;
+        return !isDescendantOf(detailLayer, posterView);
+    }
+
+    static boolean shouldPromotePosterHardwareLayer(View detailLayer, View posterView) {
+        if (posterView == null || posterView == detailLayer) return false;
+        if (detailLayer != null && isDescendantOf(posterView, detailLayer)) return false;
+        return true;
     }
 
     /** Computes centered 16:9 cinema target rectangle inside safe insets into {@code outRect4}. */
@@ -416,13 +574,15 @@ public final class PlayerTransitionHelper {
                         finish.runOnce();
                     }
                 });
+        final AnimatorHandle handle = new AnimatorHandle(animator, finish);
+        finish.bindDetachCancel(detailRoot, handle);
         try {
             animator.start();
         } catch (RuntimeException error) {
             finish.runOnce();
             throw error;
         }
-        return new AnimatorHandle(animator, finish);
+        return handle;
     }
 
     /** Lightweight Android TV page transition ({@code 180ms} pure alpha, zero shader/blur). */
@@ -579,31 +739,38 @@ public final class PlayerTransitionHelper {
                         finish.runOnce();
                     }
                 });
+        final AnimatorHandle handle = new AnimatorHandle(animator, finish);
+        finish.bindDetachCancel(target, handle);
         try {
             animator.start();
         } catch (RuntimeException error) {
             finish.runOnce();
             throw error;
         }
-        return new AnimatorHandle(animator, finish);
+        return handle;
     }
 
     /**
      * Android TV lightweight exit ({@code 220ms}): poster scales {@code 1.0 -> 1.08} while fading
      * smoothly into pure black player layer. Zero blur, zero shader, zero screenshot.
      */
-    private static TransitionHandle runTvLightweightExit(
+    static TransitionHandle runTvLightweightExit(
             final View detailLayer, final View posterView, final Runnable onComplete) {
         if (detailLayer == null && posterView == null) {
             if (onComplete != null) onComplete.run();
             return NO_OP_HANDLE;
         }
+        final boolean animatePoster = posterView != null && posterView != detailLayer;
+        final boolean promoteDetailLayer =
+                shouldPromoteDetailHardwareLayer(detailLayer, animatePoster ? posterView : null);
+        final boolean promotePosterLayer =
+                shouldPromotePosterHardwareLayer(detailLayer, animatePoster ? posterView : null);
         final int prevDetailLayer =
                 detailLayer != null ? detailLayer.getLayerType() : View.LAYER_TYPE_NONE;
         final int prevPosterLayer =
-                posterView != null ? posterView.getLayerType() : View.LAYER_TYPE_NONE;
-        if (detailLayer != null) detailLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        if (posterView != null) posterView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+                animatePoster ? posterView.getLayerType() : View.LAYER_TYPE_NONE;
+        if (promoteDetailLayer) detailLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        if (promotePosterLayer) posterView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
         final ValueAnimator animator = ValueAnimator.ofFloat(0f, 1f);
         animator.setDuration(MotionTokens.DURATION_TV_PLAY_EXIT_MS);
@@ -616,14 +783,18 @@ public final class PlayerTransitionHelper {
                                 if (onComplete != null) onComplete.run();
                             } finally {
                                 if (detailLayer != null) {
-                                    detailLayer.setLayerType(prevDetailLayer, null);
+                                    if (promoteDetailLayer) {
+                                        detailLayer.setLayerType(prevDetailLayer, null);
+                                    }
                                     detailLayer.setScaleX(1f);
                                     detailLayer.setScaleY(1f);
                                     detailLayer.setTranslationY(0f);
                                     detailLayer.setAlpha(1f);
                                 }
-                                if (posterView != null) {
-                                    posterView.setLayerType(prevPosterLayer, null);
+                                if (animatePoster) {
+                                    if (promotePosterLayer) {
+                                        posterView.setLayerType(prevPosterLayer, null);
+                                    }
                                     posterView.setScaleX(1f);
                                     posterView.setScaleY(1f);
                                     posterView.setAlpha(1f);
@@ -636,7 +807,7 @@ public final class PlayerTransitionHelper {
                     if (detailLayer != null) {
                         detailLayer.setAlpha(1f - t);
                     }
-                    if (posterView != null) {
+                    if (animatePoster) {
                         float s = 1f + 0.08f * t;
                         posterView.setScaleX(s);
                         posterView.setScaleY(s);
@@ -654,13 +825,15 @@ public final class PlayerTransitionHelper {
                         finish.runOnce();
                     }
                 });
+        final AnimatorHandle handle = new AnimatorHandle(animator, finish);
+        finish.bindDetachCancel(detailLayer != null ? detailLayer : posterView, handle);
         try {
             animator.start();
         } catch (RuntimeException error) {
             finish.runOnce();
             throw error;
         }
-        return new AnimatorHandle(animator, finish);
+        return handle;
     }
 
     /**
@@ -669,7 +842,7 @@ public final class PlayerTransitionHelper {
      * GlassFreezeCallback} freeze/unfreeze — zero software Camera+Matrix and zero allocations per
      * frame.
      */
-    private static TransitionHandle runApi23HardwareRenderNodeTransition(
+    static TransitionHandle runApi23HardwareRenderNodeTransition(
             final View detailLayer,
             final View posterView,
             final GlassFreezeCallback glassFreezeCallback,
@@ -683,16 +856,21 @@ public final class PlayerTransitionHelper {
                         ? detailLayer.getResources().getDisplayMetrics().density
                         : posterView.getResources().getDisplayMetrics().density;
         final float maxTranslateY = 18f * density;
+        final boolean animatePoster = posterView != null && posterView != detailLayer;
+        final boolean promoteDetailLayer =
+                shouldPromoteDetailHardwareLayer(detailLayer, animatePoster ? posterView : null);
+        final boolean promotePosterLayer =
+                shouldPromotePosterHardwareLayer(detailLayer, animatePoster ? posterView : null);
         final int prevDetailLayer =
                 detailLayer != null ? detailLayer.getLayerType() : View.LAYER_TYPE_NONE;
         final int prevPosterLayer =
-                posterView != null ? posterView.getLayerType() : View.LAYER_TYPE_NONE;
+                animatePoster ? posterView.getLayerType() : View.LAYER_TYPE_NONE;
 
         if (glassFreezeCallback != null) {
             glassFreezeCallback.setGlassFrozen(true);
         }
-        if (detailLayer != null) detailLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        if (posterView != null) posterView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        if (promoteDetailLayer) detailLayer.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        if (promotePosterLayer) posterView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
 
         final ValueAnimator animator = ValueAnimator.ofFloat(0f, 1f);
         animator.setDuration(MotionTokens.DURATION_EMPHASIZED_MS);
@@ -706,14 +884,18 @@ public final class PlayerTransitionHelper {
                             } finally {
                                 try {
                                     if (detailLayer != null) {
-                                        detailLayer.setLayerType(prevDetailLayer, null);
+                                        if (promoteDetailLayer) {
+                                            detailLayer.setLayerType(prevDetailLayer, null);
+                                        }
                                         detailLayer.setScaleX(1f);
                                         detailLayer.setScaleY(1f);
                                         detailLayer.setTranslationY(0f);
                                         detailLayer.setAlpha(1f);
                                     }
-                                    if (posterView != null) {
-                                        posterView.setLayerType(prevPosterLayer, null);
+                                    if (animatePoster) {
+                                        if (promotePosterLayer) {
+                                            posterView.setLayerType(prevPosterLayer, null);
+                                        }
                                         posterView.setScaleX(1f);
                                         posterView.setScaleY(1f);
                                         posterView.setAlpha(1f);
@@ -735,7 +917,7 @@ public final class PlayerTransitionHelper {
                         detailLayer.setTranslationY(maxTranslateY * t);
                         detailLayer.setAlpha(1f - t);
                     }
-                    if (posterView != null) {
+                    if (animatePoster) {
                         float posterScale = 1f + 0.10f * t;
                         posterView.setScaleX(posterScale);
                         posterView.setScaleY(posterScale);
@@ -755,13 +937,15 @@ public final class PlayerTransitionHelper {
                         finish.runOnce();
                     }
                 });
+        final AnimatorHandle handle = new AnimatorHandle(animator, finish);
+        finish.bindDetachCancel(detailLayer != null ? detailLayer : posterView, handle);
         try {
             animator.start();
         } catch (RuntimeException error) {
             finish.runOnce();
             throw error;
         }
-        return new AnimatorHandle(animator, finish);
+        return handle;
     }
 
     /** Isolated API 33+ AGSL runner so Dalvik/ART on API 23-32 never resolves RuntimeShader. */
@@ -855,17 +1039,18 @@ public final class PlayerTransitionHelper {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Bitmap backdropBitmap;
         private final Bitmap placeholderPoster;
-        private final float posterLeft;
-        private final float posterTop;
-        private final float posterWidth;
-        private final float posterHeight;
-        private final float posterRadius;
+        private final RectF candidatePosterOrigin;
+        private final float candidatePosterRadius;
+        private final boolean hasPosterBitmap;
+        private final int posterBitmapWidth;
+        private final int posterBitmapHeight;
         private final float padLeft;
         private final float padTop;
         private final float padRight;
         private final float padBottom;
-        private final float posterAvailable;
-        private final float posterAspect;
+        private int cachedViewportW = -1;
+        private int cachedViewportH = -1;
+        private PortalParams cachedPortal;
         private float progress;
         private boolean released;
         private Runnable onDetachCancel;
@@ -889,37 +1074,31 @@ public final class PlayerTransitionHelper {
             shader.setFloatUniform(
                     "uBackdropTexSize", (float) backdrop.getWidth(), (float) backdrop.getHeight());
 
-            boolean hasPoster = poster != null && !poster.isRecycled();
+            this.hasPosterBitmap = poster != null && !poster.isRecycled();
             Bitmap boundPoster;
-            if (hasPoster) {
+            if (this.hasPosterBitmap) {
                 boundPoster = poster;
                 this.placeholderPoster = null;
             } else {
                 this.placeholderPoster = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
                 boundPoster = this.placeholderPoster;
             }
+            this.posterBitmapWidth = boundPoster.getWidth();
+            this.posterBitmapHeight = boundPoster.getHeight();
             BitmapShader posterShader =
                     new BitmapShader(boundPoster, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
             shader.setInputShader("uPosterTex", posterShader);
             shader.setFloatUniform(
                     "uPosterTexSize",
-                    (float) boundPoster.getWidth(),
-                    (float) boundPoster.getHeight());
+                    (float) this.posterBitmapWidth,
+                    (float) this.posterBitmapHeight);
 
-            this.posterLeft = posterOriginPx != null ? posterOriginPx.left : 0f;
-            this.posterTop = posterOriginPx != null ? posterOriginPx.top : 0f;
-            this.posterWidth = posterOriginPx != null ? Math.max(0f, posterOriginPx.width()) : 0f;
-            this.posterHeight = posterOriginPx != null ? Math.max(0f, posterOriginPx.height()) : 0f;
-            this.posterRadius = Math.max(0f, posterRadiusPx);
+            this.candidatePosterOrigin = posterOriginPx != null ? new RectF(posterOriginPx) : null;
+            this.candidatePosterRadius = Math.max(0f, posterRadiusPx);
             this.padLeft = safeInsetsPx != null ? Math.max(0, safeInsetsPx.left) : 0f;
             this.padTop = safeInsetsPx != null ? Math.max(0, safeInsetsPx.top) : 0f;
             this.padRight = safeInsetsPx != null ? Math.max(0, safeInsetsPx.right) : 0f;
             this.padBottom = safeInsetsPx != null ? Math.max(0, safeInsetsPx.bottom) : 0f;
-            this.posterAvailable = hasPoster ? 1f : 0f;
-            this.posterAspect =
-                    hasPoster && boundPoster.getHeight() > 0
-                            ? (float) boundPoster.getWidth() / (float) boundPoster.getHeight()
-                            : (2f / 3f);
 
             paint.setShader(shader);
         }
@@ -961,16 +1140,34 @@ public final class PlayerTransitionHelper {
             int w = getWidth();
             int h = getHeight();
             if (w <= 0 || h <= 0) return;
+            if (cachedPortal == null || w != cachedViewportW || h != cachedViewportH) {
+                cachedViewportW = w;
+                cachedViewportH = h;
+                cachedPortal =
+                        resolvePortalParams(
+                                candidatePosterOrigin,
+                                candidatePosterRadius,
+                                (float) w,
+                                (float) h,
+                                hasPosterBitmap,
+                                posterBitmapWidth,
+                                posterBitmapHeight);
+            }
+            PortalParams portal = cachedPortal;
             float tilt = (float) (0.10 * Math.sin(Math.PI * progress));
             shader.setFloatUniform("uViewport", (float) w, (float) h);
             shader.setFloatUniform("uProgress", progress);
             shader.setFloatUniform("uRecedeTilt", tilt);
             shader.setFloatUniform(
-                    "uPosterOrigin", posterLeft, posterTop, posterWidth, posterHeight);
+                    "uPosterOrigin",
+                    portal.originLeft,
+                    portal.originTop,
+                    portal.originWidth,
+                    portal.originHeight);
             shader.setFloatUniform("uSafePadding", padLeft, padTop, padRight, padBottom);
-            shader.setFloatUniform("uPosterRadius", posterRadius);
-            shader.setFloatUniform("uPosterAvailable", posterAvailable);
-            shader.setFloatUniform("uPosterAspect", posterAspect);
+            shader.setFloatUniform("uPosterRadius", portal.radiusPx);
+            shader.setFloatUniform("uPosterAvailable", portal.posterAvailable);
+            shader.setFloatUniform("uPosterAspect", portal.posterAspect);
             canvas.drawRect(0f, 0f, (float) w, (float) h, paint);
         }
     }
@@ -1062,11 +1259,29 @@ public final class PlayerTransitionHelper {
     private static final class AtomicFinish {
         private final ValueAnimator animator;
         private final Runnable action;
+        private View detachWatchView;
+        private View.OnAttachStateChangeListener detachListener;
         private boolean done;
 
         AtomicFinish(ValueAnimator animator, Runnable action) {
             this.animator = animator;
             this.action = action;
+        }
+
+        void bindDetachCancel(View watchView, final TransitionHandle handle) {
+            if (watchView == null || handle == null || done) return;
+            detachWatchView = watchView;
+            detachListener =
+                    new View.OnAttachStateChangeListener() {
+                        @Override
+                        public void onViewAttachedToWindow(View v) {}
+
+                        @Override
+                        public void onViewDetachedFromWindow(View v) {
+                            handle.cancel();
+                        }
+                    };
+            watchView.addOnAttachStateChangeListener(detachListener);
         }
 
         void runOnce() {
@@ -1075,6 +1290,11 @@ public final class PlayerTransitionHelper {
             try {
                 action.run();
             } finally {
+                if (detachWatchView != null && detachListener != null) {
+                    detachWatchView.removeOnAttachStateChangeListener(detachListener);
+                    detachWatchView = null;
+                    detachListener = null;
+                }
                 if (animator != null) {
                     animator.removeAllUpdateListeners();
                     animator.removeAllListeners();
