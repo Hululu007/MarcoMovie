@@ -1345,6 +1345,64 @@ public final class MainActivity extends Activity {
         }
     }
 
+    static boolean shouldPostOnboardingContainerFocus(boolean tvMode) {
+        return !tvMode;
+    }
+
+    static final class OnboardingFinishCoordinator {
+        private final int initialScale;
+        private boolean followUpActionRequested;
+        private boolean recreateScheduled;
+        private boolean recreateExecuted;
+
+        OnboardingFinishCoordinator(int initialScale) {
+            this.initialScale = initialScale;
+        }
+
+        boolean onFinished(int currentScale, Runnable postDeferredRecreate, Runnable restoreFocus) {
+            if (currentScale != initialScale) {
+                if (!followUpActionRequested && !recreateScheduled) {
+                    recreateScheduled = true;
+                    if (postDeferredRecreate != null) {
+                        postDeferredRecreate.run();
+                    }
+                }
+                return true;
+            }
+            if (!followUpActionRequested && restoreFocus != null) {
+                restoreFocus.run();
+            }
+            return false;
+        }
+
+        boolean runDeferredRecreateIfStillNeeded(boolean activityAlive, Runnable recreateAction) {
+            if (followUpActionRequested || recreateExecuted || !activityAlive) {
+                recreateScheduled = false;
+                return false;
+            }
+            recreateScheduled = false;
+            recreateExecuted = true;
+            if (recreateAction != null) {
+                recreateAction.run();
+            }
+            return true;
+        }
+
+        boolean beginFollowUpAction(boolean activityAlive) {
+            followUpActionRequested = true;
+            recreateScheduled = false;
+            return activityAlive && !recreateExecuted;
+        }
+
+        boolean isRecreateScheduled() {
+            return recreateScheduled;
+        }
+
+        boolean isRecreateExecuted() {
+            return recreateExecuted;
+        }
+    }
+
     void showOnboarding(boolean isReplay) {
         if (isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) return;
         if (root == null) return;
@@ -1353,6 +1411,8 @@ public final class MainActivity extends Activity {
         cancelActiveTransition();
 
         final int initialScale = prefs.getInt(Prefs.UI_SCALE_PERCENT, 100);
+        final OnboardingFinishCoordinator finishCoordinator =
+                new OnboardingFinishCoordinator(initialScale);
         boolean reduceTransparency = prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
         OnboardingScreen screen =
                 new OnboardingScreen(
@@ -1368,7 +1428,12 @@ public final class MainActivity extends Activity {
                                     activeOnboarding.getController().complete(false);
                                 }
                                 dismissOnboarding();
-                                importDialog();
+                                boolean alive =
+                                        !isFinishing()
+                                                && (Build.VERSION.SDK_INT < 17 || !isDestroyed());
+                                if (finishCoordinator.beginFollowUpAction(alive)) {
+                                    importDialog();
+                                }
                             }
 
                             @Override
@@ -1377,7 +1442,10 @@ public final class MainActivity extends Activity {
                                     activeOnboarding.getController().complete(false);
                                 }
                                 dismissOnboarding();
-                                if (!privateMode) {
+                                boolean alive =
+                                        !isFinishing()
+                                                && (Build.VERSION.SDK_INT < 17 || !isDestroyed());
+                                if (finishCoordinator.beginFollowUpAction(alive) && !privateMode) {
                                     CloudSyncDialog.show(
                                             MainActivity.this, MainActivity.this::refresh);
                                 }
@@ -1407,15 +1475,34 @@ public final class MainActivity extends Activity {
                             public void onFinished(boolean skipped) {
                                 dismissOnboarding();
                                 int nextScale = prefs.getInt(Prefs.UI_SCALE_PERCENT, 100);
-                                if (nextScale != initialScale) {
-                                    recreate();
-                                } else if (current != null) {
-                                    restore(current);
-                                }
+                                finishCoordinator.onFinished(
+                                        nextScale,
+                                        () ->
+                                                ui.post(
+                                                        () -> {
+                                                            boolean alive =
+                                                                    !isFinishing()
+                                                                            && (Build.VERSION
+                                                                                                    .SDK_INT
+                                                                                            < 17
+                                                                                    || !isDestroyed());
+                                                            finishCoordinator
+                                                                    .runDeferredRecreateIfStillNeeded(
+                                                                            alive,
+                                                                            MainActivity.this
+                                                                                    ::recreate);
+                                                        }),
+                                        () -> {
+                                            if (current != null) {
+                                                restore(current);
+                                            }
+                                        });
                             }
                         });
         screen.setTag("onboarding-screen");
-        if (!isTvDevice()) {
+        if (isTvDevice()) {
+            screen.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
+        } else {
             AuroraSurfaceView aurora = new AuroraSurfaceView(this);
             aurora.setReducedMotion(reduced);
             onboardingAurora = aurora;
@@ -1437,7 +1524,9 @@ public final class MainActivity extends Activity {
         }
         activeOnboarding = screen;
         root.addView(screen, new FrameLayout.LayoutParams(-1, -1));
-        screen.post(screen::requestFocus);
+        if (shouldPostOnboardingContainerFocus(isTvDevice())) {
+            screen.post(screen::requestFocus);
+        }
     }
 
     void dismissOnboarding() {

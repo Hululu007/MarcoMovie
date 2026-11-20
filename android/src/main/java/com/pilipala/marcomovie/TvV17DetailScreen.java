@@ -489,16 +489,18 @@ final class TvV17DetailScreen {
         return "";
     }
 
-    private static String extractRawHttpPath(String url) {
+    static String extractRawHttpPath(String url) {
+        if (url == null) return "";
         int schemeEnd = url.indexOf("://");
         if (schemeEnd < 0) return "";
-        int pathStart = url.indexOf('/', schemeEnd + 3);
-        if (pathStart < 0) return "";
+        int authorityStart = schemeEnd + 3;
         int end = url.length();
-        int queryIdx = url.indexOf('?', pathStart);
+        int queryIdx = url.indexOf('?', authorityStart);
         if (queryIdx >= 0 && queryIdx < end) end = queryIdx;
-        int hashIdx = url.indexOf('#', pathStart);
+        int hashIdx = url.indexOf('#', authorityStart);
         if (hashIdx >= 0 && hashIdx < end) end = hashIdx;
+        int pathStart = url.indexOf('/', authorityStart);
+        if (pathStart < 0 || pathStart >= end) return "";
         return url.substring(pathStart, end);
     }
 

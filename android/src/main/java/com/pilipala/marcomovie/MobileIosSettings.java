@@ -913,7 +913,15 @@ final class MobileIosSettings {
                                     () -> {
                                         android.app.AlertDialog dlg =
                                                 DanmuSettingsPanel.showDialog(a, false, null);
-                                        dlg.setOnDismissListener(d -> ctl.rerenderInPlace());
+                                        dlg.setOnDismissListener(
+                                                d -> {
+                                                    if (!a.isFinishing()
+                                                            && (android.os.Build.VERSION.SDK_INT
+                                                                            < 17
+                                                                    || !a.isDestroyed())) {
+                                                        ctl.rerenderInPlace();
+                                                    }
+                                                });
                                     });
 
                             boolean alwaysClock =

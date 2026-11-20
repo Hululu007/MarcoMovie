@@ -1570,7 +1570,14 @@ final class SettingsScreen {
                 () -> {
                     android.app.AlertDialog dlg =
                             DanmuSettingsPanel.showDialog(a, a.isTvDevice(), null);
-                    dlg.setOnDismissListener(d -> a.refresh());
+                    dlg.setOnDismissListener(
+                            d -> {
+                                if (!a.isFinishing()
+                                        && (android.os.Build.VERSION.SDK_INT < 17
+                                                || !a.isDestroyed())) {
+                                    a.refresh();
+                                }
+                            });
                 });
         ints(
                 "画面色彩",

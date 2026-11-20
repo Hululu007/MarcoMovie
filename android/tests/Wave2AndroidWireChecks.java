@@ -139,6 +139,46 @@ public final class Wave2AndroidWireChecks {
         checkEq(1, playbackLayer.indexOfChild(danmakuView), "remount.zorder.danmaku");
         checkEq(2, playbackLayer.indexOfChild(subtitleView), "remount.zorder.subtitle");
         checkEq(3, playbackLayer.indexOfChild(hudOverlay), "remount.zorder.hud");
+
+        // Defensive Z-order check (#12): mounting subtitle alone when a DanmakuView child is
+        // already attached at index 1 must place Subtitle strictly ABOVE DanmakuView (index 2).
+        FrameLayout incrementalLayer = new FrameLayout(ctx);
+        View incVideo = new View(ctx);
+        View incDanmaku = new View(ctx);
+        incDanmaku.setTag("danmaku-view");
+        View incHud = new View(ctx);
+        incrementalLayer.addView(incVideo, new FrameLayout.LayoutParams(-1, -1));
+        incrementalLayer.addView(incDanmaku, new FrameLayout.LayoutParams(-1, -1));
+        incrementalLayer.addView(incHud, new FrameLayout.LayoutParams(-1, -1));
+        View incSubtitle = new View(ctx);
+        PlaybackControls.mountMediaOverlaysInZOrder(
+                incrementalLayer, null, null, incSubtitle, new FrameLayout.LayoutParams(-1, -1));
+        checkEq(0, incrementalLayer.indexOfChild(incVideo), "incremental.zorder.video");
+        checkEq(1, incrementalLayer.indexOfChild(incDanmaku), "incremental.zorder.danmaku");
+        checkEq(2, incrementalLayer.indexOfChild(incSubtitle), "incremental.zorder.subtitle");
+        checkEq(3, incrementalLayer.indexOfChild(incHud), "incremental.zorder.hud");
+
+        // Defensive Z-order check: inverted [Video, Subtitle, Danmaku, HUD] restored cleanly.
+        FrameLayout invertedLayer = new FrameLayout(ctx);
+        View invVideo = new View(ctx);
+        View invSubtitle = new View(ctx);
+        View invDanmaku = new View(ctx);
+        invDanmaku.setTag("danmaku-view");
+        View invHud = new View(ctx);
+        invertedLayer.addView(invVideo, new FrameLayout.LayoutParams(-1, -1));
+        invertedLayer.addView(invSubtitle, new FrameLayout.LayoutParams(-1, -1));
+        invertedLayer.addView(invDanmaku, new FrameLayout.LayoutParams(-1, -1));
+        invertedLayer.addView(invHud, new FrameLayout.LayoutParams(-1, -1));
+        PlaybackControls.mountMediaOverlaysInZOrder(
+                invertedLayer,
+                invDanmaku,
+                new FrameLayout.LayoutParams(-1, -1),
+                invSubtitle,
+                new FrameLayout.LayoutParams(-1, -1));
+        checkEq(0, invertedLayer.indexOfChild(invVideo), "inverted.zorder.video");
+        checkEq(1, invertedLayer.indexOfChild(invDanmaku), "inverted.zorder.danmaku");
+        checkEq(2, invertedLayer.indexOfChild(invSubtitle), "inverted.zorder.subtitle");
+        checkEq(3, invertedLayer.indexOfChild(invHud), "inverted.zorder.hud");
     }
 
     private static void testApi23GlassFreezeLifecycle() {
@@ -371,6 +411,32 @@ public final class Wave2AndroidWireChecks {
                         "https://media.test/v/0123456789abcdef1234.mp4"),
                 "caption.hexHashIgnored");
 
+        // Minor 3 (#11 & #14): Pathless URLs carrying '/' in query or fragment must NOT extract
+        // fake filenames.
+        String pathlessHost = "https://host.example";
+        checkEq(
+                "",
+                TvV17DetailScreen.extractRawHttpPath(pathlessHost + "?file=/a/b.mkv"),
+                "caption.pathlessQuerySlash.rawPathEmpty");
+        checkEq(
+                "",
+                TvV17DetailScreen.extractFilenameFromUrl(pathlessHost + "?file=/a/b.mkv"),
+                "caption.pathlessQuerySlash.ignored");
+        checkEq(
+                "",
+                TvV17DetailScreen.extractFilenameFromUrl(pathlessHost + "#x/b.mkv"),
+                "caption.pathlessFragmentSlash.ignored");
+        checkEq(
+                "",
+                TvV17DetailScreen.extractFilenameFromUrl(
+                        pathlessHost + "?redirect=/clip.HDR10+.mp4"),
+                "caption.pathlessQueryRedirect.ignored");
+        checkEq(
+                "Film.HDR10+.mkv",
+                TvV17DetailScreen.extractFilenameFromUrl(
+                        "https://host.example/v/Film.HDR10+.mkv?redirect=/other.mp4#frag/foo.mkv"),
+                "caption.realPathWithQueryAndFragmentSlashes");
+
         // Full formatEpisodeFileCaption integration test.
         Cms.Line line = new Cms.Line();
         line.name = "原画线路";
@@ -457,6 +523,206 @@ public final class Wave2AndroidWireChecks {
         }
         int downgraded = pacing.getEffectiveMaxRows();
         check(downgraded >= 2 && downgraded < 8, "danmu.tv.p90DowngradedWithin2To8=" + downgraded);
+
+        // 4. Gate 2 Review Fix Regressions (Majors 1-3 + Minors 1-2).
+        // Major 1: TV Onboarding must NOT post container requestFocus over OnboardingScreen's
+        // nextButton focus.
+        checkEq(
+                false,
+                MainActivity.shouldPostOnboardingContainerFocus(true),
+                "onboarding.tv.noContainerFocusSteal");
+        checkEq(
+                true,
+                MainActivity.shouldPostOnboardingContainerFocus(false),
+                "onboarding.mobile.postsContainerFocus");
+
+        // Major 2: Act 5 "立即导入配置" after UI scale change must cancel deferred recreate() so
+        // importDialog() stays open without WindowLeaked.
+        final AtomicInteger recreateCalls = new AtomicInteger();
+        final AtomicInteger restoreCalls = new AtomicInteger();
+        final Runnable[] queuedRecreate = new Runnable[1];
+        MainActivity.OnboardingFinishCoordinator importCoord =
+                new MainActivity.OnboardingFinishCoordinator(100);
+        checkEq(
+                true,
+                importCoord.onFinished(
+                        120,
+                        () ->
+                                queuedRecreate[0] =
+                                        () ->
+                                                importCoord.runDeferredRecreateIfStillNeeded(
+                                                        true, recreateCalls::incrementAndGet),
+                        restoreCalls::incrementAndGet),
+                "onboarding.act5ImportAfterScale.schedulesDeferredRecreate");
+        checkEq(
+                true,
+                importCoord.beginFollowUpAction(true),
+                "onboarding.act5ImportAfterScale.allowsImportDialog");
+        check(queuedRecreate[0] != null, "onboarding.act5ImportAfterScale.deferredTaskPosted");
+        queuedRecreate[0].run();
+        checkEq(0, recreateCalls.get(), "onboarding.act5ImportAfterScale.recreateCancelled");
+        checkEq(0, restoreCalls.get(), "onboarding.act5ImportAfterScale.noSpuriousRestore");
+
+        // Act 5 finish/skip WITHOUT follow-up import after scale change MUST execute recreate().
+        final AtomicInteger finishRecreateCalls = new AtomicInteger();
+        final Runnable[] queuedFinishRecreate = new Runnable[1];
+        MainActivity.OnboardingFinishCoordinator finishCoord =
+                new MainActivity.OnboardingFinishCoordinator(100);
+        finishCoord.onFinished(
+                110,
+                () ->
+                        queuedFinishRecreate[0] =
+                                () ->
+                                        finishCoord.runDeferredRecreateIfStillNeeded(
+                                                true, finishRecreateCalls::incrementAndGet),
+                restoreCalls::incrementAndGet);
+        checkEq(true, finishCoord.isRecreateScheduled(), "onboarding.finishScale.scheduled");
+        queuedFinishRecreate[0].run();
+        checkEq(1, finishRecreateCalls.get(), "onboarding.finishScale.recreatedOnce");
+        checkEq(true, finishCoord.isRecreateExecuted(), "onboarding.finishScale.markedExecuted");
+        checkEq(
+                false,
+                finishCoord.beginFollowUpAction(true),
+                "onboarding.postRecreate.blocksFollowUpDialog");
+
+        // Unchanged scale restores focus directly with zero recreate.
+        final AtomicInteger unchangedRestore = new AtomicInteger();
+        MainActivity.OnboardingFinishCoordinator unchangedCoord =
+                new MainActivity.OnboardingFinishCoordinator(100);
+        checkEq(
+                false,
+                unchangedCoord.onFinished(100, () -> {}, unchangedRestore::incrementAndGet),
+                "onboarding.unchangedScale.noRecreate");
+        checkEq(1, unchangedRestore.get(), "onboarding.unchangedScale.restoresFocus");
+
+        // Major 3: Detached DanmuSegmentCache detection prevents 4-thread pool & tick leak.
+        checkEq(
+                true,
+                PlaybackControls.shouldCloseDetachedSegmentCache(true, false),
+                "danmu.detachedCache.triggersClose");
+        checkEq(
+                false,
+                PlaybackControls.shouldCloseDetachedSegmentCache(true, true),
+                "danmu.attachedCache.staysOpen");
+        checkEq(
+                false,
+                PlaybackControls.shouldCloseDetachedSegmentCache(false, false),
+                "danmu.noCache.noop");
+
+        // Minor 1: Appearance tweak in DanmuSettingsPanel must NOT overwrite loaded source/local
+        // danmaku when server signature is unchanged.
+        String savedUrl = "https://danmu.example";
+        String changedUrl = "https://danmu2.example";
+        String savedSig = savedUrl + "||";
+        String changedSig = changedUrl + "||";
+        checkEq(
+                false,
+                PlaybackControls.shouldStartSegmentedSessionOnConfigUpdate(
+                        true, savedUrl, false, true, savedSig, savedSig),
+                "danmu.appearanceTweak.preservesLoadedLegacyDanmaku");
+        checkEq(
+                true,
+                PlaybackControls.shouldStartSegmentedSessionOnConfigUpdate(
+                        true, changedUrl, false, true, savedSig, changedSig),
+                "danmu.serverChange.startsNewSegmentedSession");
+        checkEq(
+                true,
+                PlaybackControls.shouldStartSegmentedSessionOnConfigUpdate(
+                        true, savedUrl, false, false, savedSig, savedSig),
+                "danmu.noLegacyLoaded.startsSegmentedSession");
+        checkEq(
+                false,
+                PlaybackControls.shouldStartSegmentedSessionOnConfigUpdate(
+                        false, savedUrl, false, false, "", savedSig),
+                "danmu.disabled.neverStartsSession");
+        checkEq(
+                false,
+                PlaybackControls.shouldStartSegmentedSessionOnConfigUpdate(
+                        true, "", false, false, "", ""),
+                "danmu.emptyServer.neverStartsSession");
+
+        // Minor 2: Async match completion checks latest config (rejects if disabled or server
+        // changed while match was in flight; accepts appearance tweaks so latestCfg applies).
+        DanmuSettingsPanel.DanmuConfig reqCfg =
+                new DanmuSettingsPanel.DanmuConfig(
+                        true,
+                        "https://danmu.example",
+                        "",
+                        "",
+                        0.85f,
+                        0.50f,
+                        20f,
+                        1.0f,
+                        0L,
+                        true,
+                        true,
+                        true,
+                        10,
+                        java.util.Collections.emptyList(),
+                        false);
+        DanmuSettingsPanel.DanmuConfig tweakedCfg =
+                new DanmuSettingsPanel.DanmuConfig(
+                        true,
+                        "https://danmu.example",
+                        "",
+                        "",
+                        0.50f,
+                        0.75f,
+                        24f,
+                        1.25f,
+                        500L,
+                        true,
+                        false,
+                        true,
+                        8,
+                        java.util.Collections.emptyList(),
+                        false);
+        DanmuSettingsPanel.DanmuConfig disabledCfg =
+                new DanmuSettingsPanel.DanmuConfig(
+                        false,
+                        "https://danmu.example",
+                        "",
+                        "",
+                        0.85f,
+                        0.50f,
+                        20f,
+                        1.0f,
+                        0L,
+                        true,
+                        true,
+                        true,
+                        10,
+                        java.util.Collections.emptyList(),
+                        false);
+        DanmuSettingsPanel.DanmuConfig switchedServerCfg =
+                new DanmuSettingsPanel.DanmuConfig(
+                        true,
+                        "https://danmu2.example",
+                        "",
+                        "",
+                        0.85f,
+                        0.50f,
+                        20f,
+                        1.0f,
+                        0L,
+                        true,
+                        true,
+                        true,
+                        10,
+                        java.util.Collections.emptyList(),
+                        false);
+        checkEq(
+                true,
+                PlaybackControls.shouldApplyAsyncMatchResult(reqCfg, tweakedCfg),
+                "danmu.asyncMatch.acceptsLatestAppearanceEdits");
+        checkEq(
+                false,
+                PlaybackControls.shouldApplyAsyncMatchResult(reqCfg, disabledCfg),
+                "danmu.asyncMatch.abortsIfDisabledInFlight");
+        checkEq(
+                false,
+                PlaybackControls.shouldApplyAsyncMatchResult(reqCfg, switchedServerCfg),
+                "danmu.asyncMatch.abortsIfServerChangedInFlight");
     }
 
     private static String readUtf8(Path path) throws Exception {
@@ -497,6 +763,22 @@ public final class Wave2AndroidWireChecks {
         check(
                 !playbackControls.contains("AuroraSurfaceView"),
                 "playbackControls.neverMountsAurora");
+        check(
+                playbackControls.contains("loadLocalDanmakuText(")
+                        && playbackControls.contains("reconcileDetachedSegmentedDanmuSession()"),
+                "playbackControls.closesSegmentedSessionOnLocalAndExternalLoad");
+        check(
+                playbackControls.contains("shouldApplyAsyncMatchResult(")
+                        && playbackControls.contains("danmaku.applyConfig(latestCfg)"),
+                "playbackControls.appliesLatestConfigAfterAsyncMatch");
+        check(
+                playbackControls.contains("shouldStartSegmentedSessionOnConfigUpdate("),
+                "playbackControls.guardsAppearanceTweakAgainstLegacyOverwrite");
+
+        String sourceController = readUtf8(src.resolve("SourceController.java"));
+        check(
+                sourceController.contains("controls.loadLocalDanmakuText(text)"),
+                "sourceController.delegatesLocalDanmakuThroughControls");
 
         // PlayerChrome & PlaybackLoading wiring: BrandLogoLoaderView, NO Aurora.
         String playerChrome = readUtf8(src.resolve("PlayerChrome.java"));
@@ -522,6 +804,10 @@ public final class Wave2AndroidWireChecks {
                 settingsScreen.contains("DanmuSettingsPanel.showDialog("),
                 "settingsScreen.wiresDanmuPanel");
         check(
+                settingsScreen.contains("a.isFinishing()")
+                        && settingsScreen.contains("a.isDestroyed()"),
+                "settingsScreen.guardsDanmuDismissListener");
+        check(
                 settingsScreen.contains("重新查看新手引导")
                         && settingsScreen.contains("OnboardingScreen.resetForReplay("),
                 "settingsScreen.wiresReplayOnboarding");
@@ -530,6 +816,10 @@ public final class Wave2AndroidWireChecks {
         check(
                 mobileSettings.contains("DanmuSettingsPanel.showDialog("),
                 "mobileSettings.wiresDanmuPanel");
+        check(
+                mobileSettings.contains("a.isFinishing()")
+                        && mobileSettings.contains("a.isDestroyed()"),
+                "mobileSettings.guardsDanmuDismissListener");
         check(
                 mobileSettings.contains("重新查看新手引导")
                         && mobileSettings.contains("OnboardingScreen.resetForReplay("),
@@ -542,6 +832,13 @@ public final class Wave2AndroidWireChecks {
         // mobile-only Aurora.
         String mainActivity = readUtf8(src.resolve("MainActivity.java"));
         check(mainActivity.contains("GlassFreezeController"), "mainActivity.hasGlassFreeze");
+        check(
+                mainActivity.contains("FOCUS_AFTER_DESCENDANTS")
+                        && mainActivity.contains("shouldPostOnboardingContainerFocus("),
+                "mainActivity.preservesTvOnboardingInitialFocus");
+        check(
+                mainActivity.contains("OnboardingFinishCoordinator"),
+                "mainActivity.coordinatesOnboardingScaleRecreateAndImport");
         check(
                 mainActivity.contains("PlayerTransitionHelper.startDetailToPlayerTransition("),
                 "mainActivity.wiresDetailToPlayerTransition");
