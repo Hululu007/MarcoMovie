@@ -1121,4 +1121,122 @@ void main() {
       expect(networkCalled, isFalse);
     });
   });
+
+  group('L-04 Dart: DanmuSegmentCache cached snapshot reuse & invalidation', () {
+    test(
+      'reuses cached snapshot reference across steady frames and invalidates on filter/offset/window changes',
+      () async {
+        final client = MockClient((req) async {
+          if (req.url.path == '/api/v2/comment/ep-cache') {
+            return http.Response(
+              jsonEncode(<String, dynamic>{
+                'segments': <Map<String, dynamic>>[
+                  <String, dynamic>{
+                    'startMs': 0,
+                    'endMs': 30000,
+                    'segmentUrl': '/cseg/0',
+                  },
+                  <String, dynamic>{
+                    'startMs': 30000,
+                    'endMs': 60000,
+                    'segmentUrl': '/cseg/1',
+                  },
+                ],
+              }),
+              200,
+            );
+          }
+          if (req.url.path == '/cseg/0') {
+            return http.Response(
+              jsonEncode(<String, dynamic>{
+                'comments': <Map<String, dynamic>>[
+                  <String, dynamic>{
+                    'cid': 'a1',
+                    'p': '2.0,1,16777215',
+                    'm': 'hello world',
+                  },
+                  <String, dynamic>{
+                    'cid': 'a2',
+                    'p': '6.0,1,16777215',
+                    'm': 'spoiler alert',
+                  },
+                  <String, dynamic>{
+                    'cid': 'a3',
+                    'p': '29.0,1,16777215',
+                    'm': 'near boundary',
+                  },
+                ],
+              }),
+              200,
+            );
+          }
+          if (req.url.path == '/cseg/1') {
+            return http.Response(
+              jsonEncode(<String, dynamic>{
+                'comments': <Map<String, dynamic>>[
+                  <String, dynamic>{
+                    'cid': 'b1',
+                    'p': '31.0,1,16777215',
+                    'm': 'next window',
+                  },
+                ],
+              }),
+              200,
+            );
+          }
+          return http.Response('not found', 404);
+        });
+
+        final provider = DandanplayProvider(
+          multilineServerUrls: 'https://node-a.danmu.test',
+          minRequestIntervalMs: 0,
+          client: client,
+        );
+        final cache = DanmuSegmentCache(provider: provider);
+        addTearDown(cache.dispose);
+
+        final boundId = DandanplayProvider.encodeBoundEpisodeId(
+          'https://node-a.danmu.test',
+          'ep-cache',
+        );
+        await cache.bindSession(boundId);
+        cache.onPlaybackTick(3000, playing: true);
+        await cache.waitUntilIdle();
+
+        // Steady frames within the same visible slice [2s] reuse exact list instance.
+        final s1 = cache.snapshotForPosition(3000);
+        final s2 = cache.snapshotForPosition(3016);
+        final s3 = cache.snapshotForPosition(3032);
+        expect(s1.map((e) => e.id).toList(), <String>['a1']);
+        expect(identical(s1, s2), isTrue);
+        expect(identical(s2, s3), isTrue);
+
+        // Advancing past 6.0s brings in a2.
+        final s4 = cache.snapshotForPosition(6500);
+        expect(s4.map((e) => e.id).toList(), <String>['a1', 'a2']);
+        expect(identical(s4, cache.snapshotForPosition(6516)), isTrue);
+
+        // Updating block filter immediately invalidates cached window pair.
+        cache.setBlockFilter(DanmuBlockFilter.compile(<String>['spoiler']));
+        final s5 = cache.snapshotForPosition(6516);
+        expect(s5.map((e) => e.id).toList(), <String>['a1']);
+
+        // Updating time offset invalidates slice immediately.
+        cache.setTimeOffsetMs(-5000);
+        expect(cache.snapshotForPosition(6516), isEmpty);
+        cache.setTimeOffsetMs(0);
+
+        // Boundary crossing into window 1 merges prev + curr sorted cleanly.
+        cache.onPlaybackTick(31500, playing: true);
+        await cache.waitUntilIdle();
+        final cross = cache.snapshotForPosition(31500);
+        expect(cross.map((e) => e.id).toList(), <String>['a3', 'b1']);
+        expect(identical(cross, cache.snapshotForPosition(31516)), isTrue);
+
+        // Rebinding empty session clears cached snapshot.
+        await cache.bindSession('');
+        expect(cache.snapshotForPosition(31500), isEmpty);
+      },
+    );
+  });
 }

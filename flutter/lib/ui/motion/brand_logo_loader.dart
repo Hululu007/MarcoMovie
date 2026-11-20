@@ -123,9 +123,8 @@ class BrandLogoLoader extends StatefulWidget {
 
 @visibleForTesting
 class BrandLogoLoaderState extends State<BrandLogoLoader>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final AnimationController _controller;
-  late final AppLifecycleListener _lifecycleListener;
 
   bool _lifecycleResumed = true;
   bool _tickerModeEnabled = true;
@@ -147,12 +146,11 @@ class BrandLogoLoaderState extends State<BrandLogoLoader>
       vsync: this,
       duration: MotionTokens.durationLogoLoop,
     );
-    _lifecycleListener = AppLifecycleListener(
-      onStateChange: _handleLifecycleState,
-    );
+    WidgetsBinding.instance.addObserver(this);
   }
 
-  void _handleLifecycleState(AppLifecycleState state) {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
     final resumed = state == AppLifecycleState.resumed;
     if (_lifecycleResumed == resumed) return;
     _lifecycleResumed = resumed;
@@ -199,7 +197,7 @@ class BrandLogoLoaderState extends State<BrandLogoLoader>
 
   @override
   void dispose() {
-    _lifecycleListener.dispose();
+    WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
     super.dispose();
   }

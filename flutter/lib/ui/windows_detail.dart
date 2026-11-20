@@ -69,7 +69,9 @@ extension _WindowsDetail on _DetailScreenState {
         : compact
             ? 112.0
             : 144.0;
-    final poster = SizedBox(
+    final poster = KeyedSubtree(
+      key: _transitionPosterKey,
+      child: SizedBox(
         key: const ValueKey('windows-detail-poster'),
         width: posterWidth,
         height: posterWidth * 1.5,
@@ -83,7 +85,9 @@ extension _WindowsDetail on _DetailScreenState {
                 placeholder: ColoredBox(
                     color: winMuted(context).withValues(alpha: .1),
                     child: Icon(CupertinoIcons.film,
-                        color: winMuted(context), size: 40)))));
+                        color: winMuted(context), size: 40)))),
+      ),
+    );
     final douban = _effectiveDoubanScore();
     final rt = _effectiveRtScore();
     final metadata =

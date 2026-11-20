@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, defaultTargetPlatform, kIsWeb, visibleForTesting;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
 import '../../core/ohos_runtime.dart';
+import '../ios_liquid_glass.dart';
 import 'motion_tokens.dart';
 
 /// Resolved execution tier for Detail -> Player transitions.
@@ -127,21 +131,27 @@ class PlayerEnterShaderUniforms {
     final safeAspect = (posterAspect.isFinite && posterAspect > 0.0001)
         ? posterAspect
         : (2.0 / 3.0);
+    final bool hasValidPortal = posterAvailable &&
+        posterOriginLogical.width >= 1.0 &&
+        posterOriginLogical.height >= 1.0;
+    final Rect effectiveOrigin =
+        hasValidPortal ? posterOriginLogical : Rect.zero;
+    final double effectiveRadius = hasValidPortal ? posterRadiusLogical : 0.0;
     return PlayerEnterShaderUniforms._(<double>[
       math.max(viewportLogical.width, 1.0), // 0: uViewport.x (lp)
       math.max(viewportLogical.height, 1.0), // 1: uViewport.y (lp)
       p, // 2: uProgress
       recedeTilt, // 3: uRecedeTilt
-      posterOriginLogical.left, // 4: uPosterOrigin.x (lp)
-      posterOriginLogical.top, // 5: uPosterOrigin.y (lp)
-      math.max(posterOriginLogical.width, 0.0), // 6: uPosterOrigin.z (lp)
-      math.max(posterOriginLogical.height, 0.0), // 7: uPosterOrigin.w (lp)
+      effectiveOrigin.left, // 4: uPosterOrigin.x (lp)
+      effectiveOrigin.top, // 5: uPosterOrigin.y (lp)
+      math.max(effectiveOrigin.width, 0.0), // 6: uPosterOrigin.z (lp)
+      math.max(effectiveOrigin.height, 0.0), // 7: uPosterOrigin.w (lp)
       math.max(safePaddingLogical.left, 0.0), // 8: uSafePadding.x (lp)
       math.max(safePaddingLogical.top, 0.0), // 9: uSafePadding.y (lp)
       math.max(safePaddingLogical.right, 0.0), // 10: uSafePadding.z (lp)
       math.max(safePaddingLogical.bottom, 0.0), // 11: uSafePadding.w (lp)
-      math.max(posterRadiusLogical, 0.0), // 12: uPosterRadius (lp)
-      posterAvailable ? 1.0 : 0.0, // 13: uPosterAvailable
+      math.max(effectiveRadius, 0.0), // 12: uPosterRadius (lp)
+      hasValidPortal ? 1.0 : 0.0, // 13: uPosterAvailable
       safeAspect, // 14: uPosterAspect
     ]);
   }
@@ -242,13 +252,117 @@ class PlayerEnterTransition extends StatefulWidget {
     return math.min(safeDpr, maxAllowedRatio).clamp(0.25, safeDpr);
   }
 
+  /// Returns `true` only on iOS / iPadOS when HarmonyOS is inactive AND native
+  /// iOS 26+ Liquid Glass (`UiKitView`) surfaces are active. Avoids an extra
+  /// ~16.7ms `postFrameCallback` wait on iOS 15–18 devices without `UiKitView`.
+  static bool shouldUseIosRouteGate({bool? isOhosOverride}) {
+    final isOhos = isOhosOverride ?? OhosRuntime.isOhos;
+    return !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        !isOhos &&
+        IosLiquidGlassBridge.isAvailable;
+  }
+
+  /// Synchronously clones an already-decoded [ui.Image] currently painted by a
+  /// [RenderImage] inside [key]'s subtree (zero decode latency, zero network).
+  /// Caller owns the returned handle and MUST dispose it on every exit path.
+  static ui.Image? cloneRenderedImage(GlobalKey? key) {
+    if (OhosRuntime.isOhos || key == null) return null;
+    final root = key.currentContext?.findRenderObject();
+    if (root == null) return null;
+    ui.Image? cloned;
+    void visit(RenderObject node) {
+      if (cloned != null) return;
+      if (node is RenderImage) {
+        final img = node.image;
+        if (img != null && img.width > 0 && img.height > 0) {
+          try {
+            cloned = img.clone();
+            return;
+          } catch (_) {
+            // Fall through if the render image was disposed mid-frame.
+          }
+        }
+      }
+      node.visitChildren(visit);
+    }
+
+    visit(root);
+    return cloned;
+  }
+
+  /// Decodes already-loaded in-memory poster bytes into a bounded [ui.Image]
+  /// without network I/O. Guarantees disposal of intermediate codec buffers and
+  /// disposes any late-arriving image if [timeout] expires first.
+  static Future<ui.Image?> decodePosterBytes(
+    Uint8List bytes, {
+    int maxEdgePx = 720,
+    Duration timeout = const Duration(milliseconds: 50),
+  }) async {
+    if (OhosRuntime.isOhos || bytes.isEmpty) return null;
+    var timedOut = false;
+    final decodeFuture =
+        _decodeBoundedPosterBytes(bytes, maxEdgePx: maxEdgePx).then((img) {
+      if (timedOut) {
+        img?.dispose();
+        return null;
+      }
+      return img;
+    });
+    try {
+      return await decodeFuture.timeout(timeout, onTimeout: () {
+        timedOut = true;
+        return null;
+      });
+    } catch (_) {
+      timedOut = true;
+      return null;
+    }
+  }
+
+  static Future<ui.Image?> _decodeBoundedPosterBytes(
+    Uint8List bytes, {
+    required int maxEdgePx,
+  }) async {
+    ui.ImmutableBuffer? buffer;
+    ui.ImageDescriptor? descriptor;
+    ui.Codec? codec;
+    try {
+      buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+      descriptor = await ui.ImageDescriptor.encoded(buffer);
+      final w = descriptor.width;
+      final h = descriptor.height;
+      if (w <= 0 || h <= 0) return null;
+      int? targetWidth;
+      int? targetHeight;
+      final longest = math.max(w, h);
+      if (maxEdgePx > 0 && longest > maxEdgePx) {
+        final scale = maxEdgePx / longest;
+        targetWidth = math.max(1, (w * scale).round());
+        targetHeight = math.max(1, (h * scale).round());
+      }
+      codec = await descriptor.instantiateCodec(
+        targetWidth: targetWidth,
+        targetHeight: targetHeight,
+      );
+      final frame = await codec.getNextFrame();
+      return frame.image;
+    } catch (_) {
+      return null;
+    } finally {
+      codec?.dispose();
+      descriptor?.dispose();
+      buffer?.dispose();
+    }
+  }
+
   /// Captures a bounded backdrop screenshot with `Stopwatch` budget enforcement.
   ///
   /// - Skips capture immediately when [reduceMotion], [OhosRuntime.isOhos],
   ///   [preferFastTransition], or [useFastWindowsMode] is active.
   /// - Enforces `<= 16ms` capture budget (`MotionTokens.hudTransitionCaptureBudgetMs`):
   ///   when exceeded, marks [preferFastTransition] = `true` and immediately disposes
-  ///   the captured [ui.Image] in `try/finally`.
+  ///   both the captured backdrop [ui.Image] and any owned [posterImage] in `try/finally`.
   /// - Accepts optional [routeGateWrapper] for iOS 26 `IosNativeRouteGate.runWithPlaceholders`.
   static Future<PlayerTransitionSnapshot> captureBackdrop({
     RenderRepaintBoundary? boundary,
@@ -267,57 +381,54 @@ class PlayerEnterTransition extends StatefulWidget {
     int budgetMs = MotionTokens.hudTransitionCaptureBudgetMs,
     Duration Function(Duration measured)? debugElapsedOverride,
   }) async {
-    if (reduceMotion ||
-        OhosRuntime.isOhos ||
-        _preferFastTransition ||
-        useFastWindowsMode ||
-        _shaderLoadFailed) {
-      return PlayerTransitionSnapshot(
-        posterImage: posterImage,
-        ownsPoster: ownsPoster,
-        posterOriginLogical: posterOriginLogical,
-        posterRadiusLogical: posterRadiusLogical,
-        posterAspect: posterAspect,
-        exceededBudget: _preferFastTransition,
-      );
-    }
-
-    final targetSize =
-        logicalSize ?? (boundary != null && boundary.hasSize ? boundary.size : Size.zero);
-    final pixelRatio = computeCapturePixelRatio(
-      logicalSize: targetSize,
-      devicePixelRatio: devicePixelRatio,
-      maxEdgePx: maxEdgePx,
-    );
-
-    final capturer = customCapturer ??
-        (boundary != null
-            ? (double ratio) => boundary.toImage(pixelRatio: ratio)
-            : null);
-    if (capturer == null) {
-      return PlayerTransitionSnapshot(
-        posterImage: posterImage,
-        ownsPoster: ownsPoster,
-        posterOriginLogical: posterOriginLogical,
-        posterRadiusLogical: posterRadiusLogical,
-        posterAspect: posterAspect,
-      );
-    }
-
     ui.Image? captured;
-    bool ownershipTransferred = false;
+    bool backdropOwnershipTransferred = false;
+    bool posterOwnershipTransferred = false;
     Duration measuredCapture = Duration.zero;
-    Future<ui.Image?> runTimedCapture() async {
-      final sw = Stopwatch()..start();
-      try {
-        return await capturer(pixelRatio);
-      } finally {
-        sw.stop();
-        measuredCapture = sw.elapsed;
-      }
-    }
-
     try {
+      if (reduceMotion ||
+          OhosRuntime.isOhos ||
+          _preferFastTransition ||
+          useFastWindowsMode ||
+          _shaderLoadFailed) {
+        return PlayerTransitionSnapshot(
+          posterOriginLogical: posterOriginLogical,
+          posterRadiusLogical: posterRadiusLogical,
+          posterAspect: posterAspect,
+          exceededBudget: _preferFastTransition,
+        );
+      }
+
+      final targetSize = logicalSize ??
+          (boundary != null && boundary.hasSize ? boundary.size : Size.zero);
+      final pixelRatio = computeCapturePixelRatio(
+        logicalSize: targetSize,
+        devicePixelRatio: devicePixelRatio,
+        maxEdgePx: maxEdgePx,
+      );
+
+      final capturer = customCapturer ??
+          (boundary != null
+              ? (double ratio) => boundary.toImage(pixelRatio: ratio)
+              : null);
+      if (capturer == null) {
+        return PlayerTransitionSnapshot(
+          posterOriginLogical: posterOriginLogical,
+          posterRadiusLogical: posterRadiusLogical,
+          posterAspect: posterAspect,
+        );
+      }
+
+      Future<ui.Image?> runTimedCapture() async {
+        final sw = Stopwatch()..start();
+        try {
+          return await capturer(pixelRatio);
+        } finally {
+          sw.stop();
+          measuredCapture = sw.elapsed;
+        }
+      }
+
       if (routeGateWrapper != null) {
         captured = await routeGateWrapper(runTimedCapture);
       } else {
@@ -330,13 +441,19 @@ class PlayerEnterTransition extends StatefulWidget {
       if (exceeded) {
         _preferFastTransition = true;
         return PlayerTransitionSnapshot(
-          posterImage: posterImage,
-          ownsPoster: ownsPoster,
           posterOriginLogical: posterOriginLogical,
           posterRadiusLogical: posterRadiusLogical,
           posterAspect: posterAspect,
           captureDuration: elapsed,
           exceededBudget: true,
+        );
+      }
+      if (captured == null) {
+        return PlayerTransitionSnapshot(
+          posterOriginLogical: posterOriginLogical,
+          posterRadiusLogical: posterRadiusLogical,
+          posterAspect: posterAspect,
+          captureDuration: elapsed,
         );
       }
       final snapshot = PlayerTransitionSnapshot(
@@ -350,20 +467,25 @@ class PlayerEnterTransition extends StatefulWidget {
         captureDuration: elapsed,
         exceededBudget: false,
       );
-      ownershipTransferred = true;
+      backdropOwnershipTransferred = true;
+      posterOwnershipTransferred = true;
       return snapshot;
     } catch (_) {
       return PlayerTransitionSnapshot(
-        posterImage: posterImage,
-        ownsPoster: ownsPoster,
         posterOriginLogical: posterOriginLogical,
         posterRadiusLogical: posterRadiusLogical,
         posterAspect: posterAspect,
         captureDuration: measuredCapture,
       );
     } finally {
-      if (!ownershipTransferred && captured != null) {
-        captured.dispose();
+      try {
+        if (!backdropOwnershipTransferred && captured != null) {
+          captured.dispose();
+        }
+      } finally {
+        if (!posterOwnershipTransferred && ownsPoster && posterImage != null) {
+          posterImage.dispose();
+        }
       }
     }
   }
@@ -480,12 +602,14 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
   PlayerTransitionMode? _lastReportedMode;
   bool _snapshotReleased = false;
   bool _enterCompleted = false;
+  ModalRoute<dynamic>? _route;
   late CurvedAnimation _linearAnimation;
   late CurvedAnimation _scaleFadeAnimation;
   late Animation<double> _scaleTweenAnimation;
 
   PlayerTransitionMode? get lastResolvedMode => _lastReportedMode;
   bool get hasActiveShader => _shader != null;
+  bool get _isRouteOffstage => _route?.offstage ?? false;
 
   @override
   void initState() {
@@ -494,6 +618,20 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
     _initAnimations();
     widget.animation.addStatusListener(_handleAnimationStatus);
     if (!_enterCompleted) {
+      _syncShader();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _route = ModalRoute.of(context);
+    if (!_isRouteOffstage &&
+        _enterCompleted &&
+        !_snapshotReleased &&
+        (widget.animation.status == AnimationStatus.forward ||
+            widget.animation.status == AnimationStatus.dismissed)) {
+      _enterCompleted = false;
       _syncShader();
     }
   }
@@ -565,7 +703,25 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
   }
 
   void _handleAnimationStatus(AnimationStatus status) {
+    // ModalRoute builds its first frame offstage with kAlwaysCompleteAnimation
+    // (for Hero layout) before switching the ProxyAnimation to the real forward
+    // transition controller. Re-arm the shader when transitioning out of that
+    // offstage measurement frame so Navigator.push runs the Cinema Portal shader.
+    if ((status == AnimationStatus.forward ||
+            status == AnimationStatus.dismissed) &&
+        _enterCompleted &&
+        !_snapshotReleased) {
+      _enterCompleted = false;
+      _syncShader();
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
     if (status == AnimationStatus.completed) {
+      if (_isRouteOffstage) {
+        return;
+      }
       final hadActiveOverlay = !_enterCompleted ||
           _shader != null ||
           (widget.disposeSnapshotOnComplete &&
@@ -618,7 +774,9 @@ class PlayerEnterTransitionState extends State<PlayerEnterTransition> {
       preferFast: snapshot?.exceededBudget ?? false,
       useFastWindowsMode: widget.useFastWindowsMode,
     );
-    _reportMode(mode);
+    if (!_isRouteOffstage) {
+      _reportMode(mode);
+    }
 
     final bool showPortalOverlay = mode == PlayerTransitionMode.shaderPortal &&
         !_enterCompleted &&
@@ -837,5 +995,162 @@ class PlayerEnterPageRoute<T> extends PageRoute<T> {
     } finally {
       super.dispose();
     }
+  }
+}
+
+Rect _resolvePosterOriginLogical({
+  GlobalKey? posterKey,
+  RenderRepaintBoundary? backdropBoundary,
+  Size? viewportSize,
+}) {
+  final posterCtx = posterKey?.currentContext;
+  if (posterCtx == null) return Rect.zero;
+  final ro = posterCtx.findRenderObject();
+  if (ro is! RenderBox || !ro.hasSize || ro.size.isEmpty) return Rect.zero;
+  try {
+    final origin = backdropBoundary != null && backdropBoundary.attached
+        ? ro.localToGlobal(Offset.zero, ancestor: backdropBoundary)
+        : ro.localToGlobal(Offset.zero);
+    final rect = origin & ro.size;
+    final bounds = backdropBoundary != null && backdropBoundary.hasSize
+        ? backdropBoundary.size
+        : viewportSize;
+    if (bounds != null && !bounds.isEmpty && !(Offset.zero & bounds).overlaps(rect)) {
+      return Rect.zero;
+    }
+    return rect;
+  } catch (_) {
+    return Rect.zero;
+  }
+}
+
+/// Unified no-black-hole Detail -> Player route helper combining:
+/// 1. [IosNativeRouteGate.runWithPlaceholders] (strict `try/finally` guarantee
+///    to restore native iOS 26 `UiKitView`s even on exception or cancellation),
+/// 2. Bounded [PlayerEnterTransition.captureBackdrop] (`<= 1280px` longest edge,
+///    `16ms` capture budget -> session `preferFastTransition` latch, immediate
+///    `ui.Image.dispose()` on budget overrun / error / unmount / completion),
+/// 3. Triple automatic degradation:
+///    - Tier 1: `MediaQuery.disableAnimationsOf(context)` -> `150ms` linear fade
+///    - Tier 2: shader failure / `OhosRuntime.isOhos` / Windows fast mode ->
+///      `220ms` (`185ms` Windows fast) scale + fade
+///    - Tier 3: `toImage() > 16ms` -> session `preferFastTransition` scale + fade
+Future<T?> pushPlayerRoute<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+  GlobalKey? backdropBoundaryKey,
+  GlobalKey? posterKey,
+  double posterRadiusLogical = 12.0,
+  ui.Image? posterImage,
+  bool ownsPoster = false,
+  bool? useFastWindowsMode,
+  RouteSettings? settings,
+  bool fullscreenDialog = false,
+  TransitionCaptureGate<ui.Image?>? captureGateOverride,
+  BackdropImageCapturer? debugCapturer,
+  Duration Function(Duration measured)? debugElapsedOverride,
+  ValueChanged<PlayerTransitionMode>? onModeResolved,
+  ui.FragmentProgram? debugShaderProgram,
+}) async {
+  bool posterOwnershipTransferred = false;
+  PlayerTransitionSnapshot? snapshot;
+  ui.FragmentProgram? program;
+  late final bool reduceMotion;
+  late final bool fastWindows;
+  late final NavigatorState navigator;
+
+  try {
+    reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final viewportSize = MediaQuery.sizeOf(context);
+    final isOhos = OhosRuntime.isOhos;
+    fastWindows = useFastWindowsMode ??
+        (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows);
+    navigator = Navigator.of(context);
+
+    if (!reduceMotion && !isOhos && !fastWindows) {
+      program = debugShaderProgram ?? PlayerEnterTransition.cachedProgram;
+      if (program == null && !PlayerEnterTransition.shaderLoadFailed) {
+        // Trigger non-blocking warmup for subsequent entries; fall back to
+        // 220ms scale + fade on the cold frame rather than stalling playback.
+        unawaited(PlayerEnterTransition.prewarmShader());
+      }
+
+      if (program != null && !PlayerEnterTransition.preferFastTransition) {
+        RenderRepaintBoundary? boundary;
+        final boundaryObj =
+            backdropBoundaryKey?.currentContext?.findRenderObject();
+        if (boundaryObj is RenderRepaintBoundary && boundaryObj.hasSize) {
+          boundary = boundaryObj;
+        }
+        final posterOrigin = _resolvePosterOriginLogical(
+          posterKey: posterKey,
+          backdropBoundary: boundary,
+          viewportSize: viewportSize,
+        );
+        final hasPortalOrigin =
+            posterOrigin.width >= 1.0 && posterOrigin.height >= 1.0;
+        final ui.Image? effectivePoster = hasPortalOrigin ? posterImage : null;
+        final bool effectiveOwnsPoster =
+            hasPortalOrigin && ownsPoster && effectivePoster != null;
+
+        final shouldUseIosGate =
+            PlayerEnterTransition.shouldUseIosRouteGate(isOhosOverride: isOhos);
+        final TransitionCaptureGate<ui.Image?>? gate = captureGateOverride ??
+            (shouldUseIosGate
+                ? (Future<ui.Image?> Function() action) =>
+                    IosNativeRouteGate.runWithPlaceholders<ui.Image?>(action)
+                : null);
+
+        if (effectiveOwnsPoster) {
+          posterOwnershipTransferred = true;
+        }
+        snapshot = await PlayerEnterTransition.captureBackdrop(
+          boundary: boundary,
+          customCapturer: debugCapturer,
+          routeGateWrapper: gate,
+          logicalSize: boundary != null ? boundary.size : viewportSize,
+          devicePixelRatio: dpr,
+          posterOriginLogical: hasPortalOrigin ? posterOrigin : Rect.zero,
+          posterRadiusLogical: posterRadiusLogical,
+          posterImage: effectivePoster,
+          ownsPoster: effectiveOwnsPoster,
+          reduceMotion: reduceMotion,
+          useFastWindowsMode: fastWindows,
+          debugElapsedOverride: debugElapsedOverride,
+        );
+      }
+    }
+  } finally {
+    // If capture was skipped, threw before captureBackdrop took ownership, or
+    // posterOrigin resolved to Rect.zero, immediately release caller-owned
+    // posterImage so GPU textures never leak on any early-exit path.
+    if (!posterOwnershipTransferred && ownsPoster && posterImage != null) {
+      posterOwnershipTransferred = true;
+      posterImage.dispose();
+    }
+  }
+
+  if (!context.mounted) {
+    snapshot?.dispose();
+    return null;
+  }
+
+  final route = PlayerEnterPageRoute<T>(
+    builder: builder,
+    snapshot: snapshot,
+    shaderProgram: program,
+    reduceMotion: reduceMotion,
+    useFastWindowsMode: fastWindows,
+    onModeResolved: onModeResolved,
+    settings: settings,
+    fullscreenDialog: fullscreenDialog,
+  );
+
+  try {
+    return await navigator.push<T>(route);
+  } catch (_) {
+    snapshot?.dispose();
+    rethrow;
   }
 }

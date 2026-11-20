@@ -2705,6 +2705,27 @@ class PosterLoader {
     }
   }
 
+  @visibleForTesting
+  static void seedMemoryForTest(
+    String rawUrl,
+    Uint8List bytes, {
+    String title = '',
+    String year = '',
+    bool asHd = false,
+  }) {
+    final u = upgradeUrlToHd(rawUrl);
+    if (u.isNotEmpty && !_isKnownDeadPosterHost(u)) {
+      _remember(u, bytes);
+      if (asHd) _remember('hd_url:$u', bytes);
+    }
+    final clean = _cleanTitle(title);
+    final scoped = _scopedTitleToken(clean, _extractTargetYear(title, year));
+    if (scoped.isNotEmpty) {
+      _remember('title:$scoped', bytes);
+      if (asHd) _remember('title_hd:$scoped', bytes);
+    }
+  }
+
   static void _remember(String key, Uint8List bytes) {
     if (key.isEmpty) return;
     final old = _memory.remove(key);

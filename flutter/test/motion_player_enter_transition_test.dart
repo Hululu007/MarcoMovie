@@ -1,11 +1,14 @@
 // Copyright (C) 2026 Pilipala
 // SPDX-License-Identifier: GPL-3.0-only
+import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/ohos_runtime.dart';
+import 'package:marco_movie/ui/ios_liquid_glass.dart';
 import 'package:marco_movie/ui/motion/motion_tokens.dart';
 import 'package:marco_movie/ui/motion/player_enter_transition.dart';
 
@@ -24,10 +27,50 @@ ui.Image _createSolidTestImage(int width, int height, Color color) {
   }
 }
 
+ui.Image _createStripedPosterImage(int width, int height) {
+  final recorder = ui.PictureRecorder();
+  final canvas = Canvas(recorder);
+  final third = height / 3.0;
+  canvas.drawRect(
+    Rect.fromLTWH(0, 0, width.toDouble(), third),
+    Paint()..color = const Color(0xFFE02020),
+  );
+  canvas.drawRect(
+    Rect.fromLTWH(0, third, width.toDouble(), third),
+    Paint()..color = const Color(0xFF20D050),
+  );
+  canvas.drawRect(
+    Rect.fromLTWH(0, third * 2, width.toDouble(), height - third * 2),
+    Paint()..color = const Color(0xFFE02020),
+  );
+  final picture = recorder.endRecording();
+  try {
+    return picture.toImageSync(width, height);
+  } finally {
+    picture.dispose();
+  }
+}
+
+(int r, int g, int b, int a) _readPixel(
+  ByteData rgba,
+  int width,
+  int x,
+  int y,
+) {
+  final offset = (y * width + x) * 4;
+  return (
+    rgba.getUint8(offset),
+    rgba.getUint8(offset + 1),
+    rgba.getUint8(offset + 2),
+    rgba.getUint8(offset + 3),
+  );
+}
+
 void main() {
   tearDown(() {
     PlayerEnterTransition.resetForTesting();
     OhosRuntime.resetForTesting();
+    IosLiquidGlassBridge.setAvailableForTest(null);
   });
 
   test('player_enter.frag source satisfies OpenGLES Y-flip, premul alpha & clean-room contracts',
@@ -501,6 +544,351 @@ void main() {
       lessThanOrEqualTo(MotionTokens.hudTransitionCaptureBudgetMs),
     );
   });
+
+  test(
+    'M-03: player_enter.frag flips Y under IMPELLER_TARGET_OPENGLES ONLY in sampleBackdrop and NEVER in samplePoster',
+    () {
+      final shaderSrc = File('shaders/player_enter.frag').readAsStringSync();
+      final backdropFn = RegExp(
+        r'vec4\s+sampleBackdrop\s*\([^)]*\)\s*\{[\s\S]*?\}',
+      ).firstMatch(shaderSrc);
+      final posterFn = RegExp(
+        r'vec4\s+samplePoster\s*\([^)]*\)\s*\{[\s\S]*?\}',
+      ).firstMatch(shaderSrc);
+
+      expect(backdropFn, isNotNull);
+      expect(posterFn, isNotNull);
+
+      final backdropBody = backdropFn!.group(0)!;
+      final posterBody = posterFn!.group(0)!;
+
+      expect(backdropBody, contains('#ifdef IMPELLER_TARGET_OPENGLES'));
+      expect(backdropBody, contains('uv.y = 1.0 - uv.y;'));
+      expect(posterBody, isNot(contains('IMPELLER_TARGET_OPENGLES')));
+      expect(posterBody, isNot(contains('uv.y = 1.0 - uv.y')));
+      // S-01(c): must never embed the opaque #121216 placeholder slab.
+      expect(shaderSrc, isNot(contains('vec3(0.071, 0.071, 0.086)')));
+    },
+  );
+
+  testWidgets(
+    'S-01(c): real player_enter.frag suppresses portal when uPosterAvailable == 0 (zero #121216 occlusion) and preserves BoxFit.cover when ready',
+    (tester) async {
+      final program = await PlayerEnterTransition.prewarmShader();
+      expect(program, isNotNull);
+
+      // Verify Dart-side uniform guard zeroes poster origin when posterAvailable == false.
+      final disabledUniforms = PlayerEnterShaderUniforms.fromLayout(
+        viewportLogical: const Size(200, 200),
+        progress: 0.0,
+        posterOriginLogical: const Rect.fromLTWH(20, 30, 80, 120),
+        safePaddingLogical: EdgeInsets.zero,
+        posterRadiusLogical: 18.0,
+        posterAvailable: false,
+        posterAspect: 2.0 / 3.0,
+      );
+      expect(disabledUniforms.floats[4], 0.0);
+      expect(disabledUniforms.floats[5], 0.0);
+      expect(disabledUniforms.floats[6], 0.0);
+      expect(disabledUniforms.floats[7], 0.0);
+      expect(disabledUniforms.floats[13], 0.0);
+
+      final backdrop = _createSolidTestImage(200, 200, const Color(0xFF2890E0));
+      final poster = _createStripedPosterImage(60, 90);
+      addTearDown(backdrop.dispose);
+      addTearDown(poster.dispose);
+
+      // 1) Even if raw shader uniforms pass non-zero uPosterOrigin + uPosterAvailable = 0.0,
+      // GLSL MUST suppress foreground portal (zero #121216 gray block over backdrop).
+      ByteData? noPosterRgba;
+      await tester.runAsync(() async {
+        final shader = program!.fragmentShader();
+        try {
+          const rawFloats = <double>[
+            200.0, 200.0, // uViewport
+            0.0, // uProgress
+            0.0, // uRecedeTilt
+            20.0, 30.0, 80.0, 120.0, // non-zero uPosterOrigin
+            0.0, 0.0, 0.0, 0.0, // uSafePadding
+            18.0, // uPosterRadius
+            0.0, // uPosterAvailable == false
+            2.0 / 3.0, // uPosterAspect
+          ];
+          for (var i = 0; i < rawFloats.length; i++) {
+            shader.setFloat(i, rawFloats[i]);
+          }
+          shader.setImageSampler(0, backdrop);
+          shader.setImageSampler(1, poster);
+
+          final recorder = ui.PictureRecorder();
+          final canvas = Canvas(recorder);
+          canvas.drawRect(
+            const Rect.fromLTWH(0, 0, 200, 200),
+            Paint()..shader = shader,
+          );
+          final picture = recorder.endRecording();
+          final rendered = picture.toImageSync(200, 200);
+          picture.dispose();
+          try {
+            noPosterRgba = await rendered.toByteData(
+              format: ui.ImageByteFormat.rawRgba,
+            );
+          } finally {
+            rendered.dispose();
+          }
+        } finally {
+          shader.dispose();
+        }
+      });
+
+      expect(noPosterRgba, isNotNull);
+      final insideNoPoster = _readPixel(noPosterRgba!, 200, 60, 90);
+      final outsideNoPoster = _readPixel(noPosterRgba!, 200, 160, 40);
+      expect(insideNoPoster.$1, inInclusiveRange(32, 48));
+      expect(insideNoPoster.$2, inInclusiveRange(136, 152));
+      expect(insideNoPoster.$3, inInclusiveRange(216, 232));
+      expect(outsideNoPoster.$1, inInclusiveRange(32, 48));
+      expect(outsideNoPoster.$2, inInclusiveRange(136, 152));
+      expect(outsideNoPoster.$3, inInclusiveRange(216, 232));
+
+      // 2) With posterAvailable == true, frame 0 shows 2:3 striped poster inside card rect
+      // and unoccluded backdrop outside; mid-flight expands with BoxFit.cover vertical crop.
+      final snapshot = PlayerTransitionSnapshot(
+        backdropImage: backdrop,
+        posterImage: poster,
+        ownsBackdrop: false,
+        ownsPoster: false,
+        posterOriginLogical: const Rect.fromLTWH(20, 40, 60, 90),
+        posterRadiusLogical: 8.0,
+      );
+      ByteData? readyFrame0Rgba;
+      ByteData? readyMidRgba;
+      await tester.runAsync(() async {
+        for (final entry in <(double, void Function(ByteData?))>[
+          (0.0, (d) => readyFrame0Rgba = d),
+          (0.45, (d) => readyMidRgba = d),
+        ]) {
+          final shader = program!.fragmentShader();
+          try {
+            final painter = PlayerEnterShaderPainter(
+              shader: shader,
+              progress: entry.$1,
+              snapshot: snapshot,
+              safePaddingLogical: EdgeInsets.zero,
+            );
+            final recorder = ui.PictureRecorder();
+            final canvas = Canvas(recorder);
+            painter.paint(canvas, const Size(200, 200));
+            final picture = recorder.endRecording();
+            final rendered = picture.toImageSync(200, 200);
+            picture.dispose();
+            try {
+              entry.$2(
+                await rendered.toByteData(format: ui.ImageByteFormat.rawRgba),
+              );
+            } finally {
+              rendered.dispose();
+            }
+          } finally {
+            shader.dispose();
+          }
+        }
+      });
+
+      expect(readyFrame0Rgba, isNotNull);
+      expect(readyMidRgba, isNotNull);
+      // Frame 0: center of poster card (50, 85) -> green middle stripe; top (50, 50) -> red stripe;
+      // outside card (160, 85) -> backdrop blue.
+      final f0Center = _readPixel(readyFrame0Rgba!, 200, 50, 85);
+      final f0Top = _readPixel(readyFrame0Rgba!, 200, 50, 50);
+      final f0Outside = _readPixel(readyFrame0Rgba!, 200, 160, 85);
+      expect(f0Center.$2, greaterThan(f0Center.$1 + 100));
+      expect(f0Center.$2, greaterThan(f0Center.$3 + 80));
+      expect(f0Top.$1, greaterThan(f0Top.$2 + 100));
+      expect(f0Outside.$3, greaterThan(f0Outside.$1 + 120));
+
+      // Progress 0.45: expanded toward centered 16:9 viewport -> center of viewport (100, 100)
+      // shows BoxFit.cover cropped green middle stripe (G dominant over R and B).
+      final midCenter = _readPixel(readyMidRgba!, 200, 100, 100);
+      expect(midCenter.$2, greaterThan(midCenter.$1 + 60));
+      expect(midCenter.$2, greaterThan(midCenter.$3 + 40));
+    },
+  );
+
+  testWidgets(
+    'S-01(a): captureBackdrop immediately disposes caller-owned posterImage on >16ms timeout, error, null capture, and skip paths',
+    (tester) async {
+      // 1) Budget overrun (>16ms) disposes both backdrop and owned poster immediately.
+      final slowPoster = _createSolidTestImage(40, 60, const Color(0xFFAA4422));
+      ui.Image? slowBackdrop;
+      final slowSnap = await PlayerEnterTransition.captureBackdrop(
+        posterImage: slowPoster,
+        ownsPoster: true,
+        posterOriginLogical: const Rect.fromLTWH(10, 10, 40, 60),
+        customCapturer: (_) async {
+          slowBackdrop = _createSolidTestImage(80, 80, const Color(0xFF102030));
+          return slowBackdrop;
+        },
+        debugElapsedOverride: (_) => const Duration(milliseconds: 25),
+      );
+      expect(slowSnap.exceededBudget, isTrue);
+      expect(slowBackdrop!.debugDisposed, isTrue);
+      expect(slowPoster.debugDisposed, isTrue);
+      slowSnap.dispose(); // idempotent, zero double-dispose
+
+      // 2) Early-skip (preferFastTransition latched) disposes owned poster immediately.
+      final skipPoster = _createSolidTestImage(40, 60, const Color(0xFFAA4422));
+      final skipSnap = await PlayerEnterTransition.captureBackdrop(
+        posterImage: skipPoster,
+        ownsPoster: true,
+      );
+      expect(skipPoster.debugDisposed, isTrue);
+      skipSnap.dispose();
+
+      // 3) Capturer throws -> owned poster disposed immediately.
+      PlayerEnterTransition.resetForTesting();
+      final errPoster = _createSolidTestImage(40, 60, const Color(0xFFAA4422));
+      final errSnap = await PlayerEnterTransition.captureBackdrop(
+        posterImage: errPoster,
+        ownsPoster: true,
+        customCapturer: (_) async => throw StateError('boom'),
+      );
+      expect(errPoster.debugDisposed, isTrue);
+      expect(errSnap.hasBackdrop, isFalse);
+      errSnap.dispose();
+
+      // 4) Null capture -> owned poster disposed immediately.
+      final nullPoster = _createSolidTestImage(40, 60, const Color(0xFFAA4422));
+      final nullSnap = await PlayerEnterTransition.captureBackdrop(
+        posterImage: nullPoster,
+        ownsPoster: true,
+        customCapturer: (_) async => null,
+      );
+      expect(nullPoster.debugDisposed, isTrue);
+      expect(nullSnap.hasPoster, isFalse);
+      nullSnap.dispose();
+    },
+  );
+
+  testWidgets(
+    'S-01(a): decodePosterBytes downscales oversized posters, handles corrupt bytes, honors OHOS guard, and pushPlayerRoute disposes on unmount',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      // 1) Valid & oversized PNG decoding via decodePosterBytes
+      late Uint8List largePng;
+      await tester.runAsync(() async {
+        final raw = _createSolidTestImage(800, 1200, const Color(0xFF336699));
+        try {
+          largePng = (await raw.toByteData(format: ui.ImageByteFormat.png))!
+              .buffer
+              .asUint8List();
+        } finally {
+          raw.dispose();
+        }
+      });
+
+      ui.Image? decoded;
+      await tester.runAsync(() async {
+        decoded = await PlayerEnterTransition.decodePosterBytes(
+          largePng,
+          maxEdgePx: 720,
+        );
+      });
+      expect(decoded, isNotNull);
+      expect(decoded!.width, 480);
+      expect(decoded!.height, 720);
+      decoded!.dispose();
+      expect(decoded!.debugDisposed, isTrue);
+
+      // Corrupt & empty bytes -> returns null cleanly
+      expect(
+        await PlayerEnterTransition.decodePosterBytes(Uint8List(0)),
+        isNull,
+      );
+      expect(
+        await PlayerEnterTransition.decodePosterBytes(
+          Uint8List.fromList(<int>[1, 2, 3, 4, 5]),
+        ),
+        isNull,
+      );
+
+      // OHOS guard -> returns null without decoding
+      OhosRuntime.debugIsOhosOverride = true;
+      expect(
+        await PlayerEnterTransition.decodePosterBytes(largePng),
+        isNull,
+      );
+      OhosRuntime.resetForTesting();
+
+      // 2) Unmounting host context mid-capture MUST dispose both backdrop & owned poster.
+      final program = await PlayerEnterTransition.prewarmShader();
+      expect(program, isNotNull);
+      final posterKey = GlobalKey();
+      late BuildContext hostCtx;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) {
+                hostCtx = ctx;
+                return SizedBox(key: posterKey, width: 120, height: 180);
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final ownedPoster = _createSolidTestImage(60, 90, const Color(0xFF44AA66));
+      ui.Image? capturedBackdrop;
+      final captureCompleter = Completer<ui.Image?>();
+
+      final routeFuture = pushPlayerRoute<void>(
+        context: hostCtx,
+        posterKey: posterKey,
+        posterImage: ownedPoster,
+        ownsPoster: true,
+        debugShaderProgram: program,
+        debugCapturer: (_) => captureCompleter.future,
+        builder: (_) => const Scaffold(body: Text('never-mounted')),
+      );
+      await tester.pump();
+
+      // Unmount host while capture is still pending, then complete capture.
+      await tester.pumpWidget(const SizedBox.shrink());
+      capturedBackdrop = _createSolidTestImage(100, 100, const Color(0xFF102030));
+      captureCompleter.complete(capturedBackdrop);
+      await routeFuture;
+
+      expect(capturedBackdrop.debugDisposed, isTrue);
+      expect(ownedPoster.debugDisposed, isTrue);
+    },
+  );
+
+  testWidgets(
+    'L-02: shouldUseIosRouteGate is true ONLY for iOS + !OhosRuntime.isOhos + IosLiquidGlassBridge.isAvailable',
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    (tester) async {
+      IosLiquidGlassBridge.setAvailableForTest(false);
+      expect(PlayerEnterTransition.shouldUseIosRouteGate(), isFalse);
+
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      expect(PlayerEnterTransition.shouldUseIosRouteGate(), isTrue);
+
+      OhosRuntime.debugIsOhosOverride = true;
+      expect(PlayerEnterTransition.shouldUseIosRouteGate(), isFalse);
+      OhosRuntime.resetForTesting();
+    },
+  );
+
+  testWidgets(
+    'L-02: shouldUseIosRouteGate is false on macOS even if bridge override is true',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      IosLiquidGlassBridge.setAvailableForTest(true);
+      expect(PlayerEnterTransition.shouldUseIosRouteGate(), isFalse);
+    },
+  );
 }
 
 class _LifecycleProbeChild extends StatefulWidget {

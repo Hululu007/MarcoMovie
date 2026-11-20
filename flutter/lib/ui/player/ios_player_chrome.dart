@@ -973,6 +973,9 @@ class _IosFluidScrubberCapsuleState extends State<IosFluidScrubberCapsule>
   @override
   void didUpdateWidget(covariant IosFluidScrubberCapsule oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.isScrubbing && !widget.isScrubbing) {
+      _activePointerId = null;
+    }
     if (oldWidget.isScrubbing != widget.isScrubbing ||
         oldWidget.reduceMotion != widget.reduceMotion) {
       _syncSpringExpansion();

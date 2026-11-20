@@ -64,7 +64,7 @@ class AuroraShaderUniforms {
 ///
 /// Intended strictly for onboarding, about, and empty-state screens (never
 /// during active video playback). Stops its [Ticker] immediately when hidden,
-/// occluded by another route, backgrounded via [AppLifecycleListener], running
+/// occluded by another route, backgrounded via [WidgetsBindingObserver], running
 /// under reduce-motion, on HarmonyOS (`OhosRuntime.isOhos`), or on Windows.
 class AuroraBackground extends StatefulWidget {
   static const String shaderAssetPath = 'shaders/aurora.frag';
@@ -173,9 +173,8 @@ class AuroraBackground extends StatefulWidget {
 
 @visibleForTesting
 class AuroraBackgroundState extends State<AuroraBackground>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final Ticker _ticker;
-  late final AppLifecycleListener _lifecycleListener;
   final ValueNotifier<double> _elapsedNotifier = ValueNotifier<double>(0.0);
 
   ui.FragmentShader? _shader;
@@ -204,9 +203,7 @@ class AuroraBackgroundState extends State<AuroraBackground>
         initialState == null || initialState == AppLifecycleState.resumed;
 
     _ticker = createTicker(_onTick);
-    _lifecycleListener = AppLifecycleListener(
-      onStateChange: _handleLifecycleState,
-    );
+    WidgetsBinding.instance.addObserver(this);
     _initShader();
   }
 
@@ -250,7 +247,8 @@ class AuroraBackgroundState extends State<AuroraBackground>
     shader?.dispose();
   }
 
-  void _handleLifecycleState(AppLifecycleState state) {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
     final resumed = state == AppLifecycleState.resumed;
     if (_lifecycleResumed == resumed) return;
     _lifecycleResumed = resumed;
@@ -326,7 +324,7 @@ class AuroraBackgroundState extends State<AuroraBackground>
 
   @override
   void dispose() {
-    _lifecycleListener.dispose();
+    WidgetsBinding.instance.removeObserver(this);
     _ticker.dispose();
     _elapsedNotifier.dispose();
     _disposeShader();

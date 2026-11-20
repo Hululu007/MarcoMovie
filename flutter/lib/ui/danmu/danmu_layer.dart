@@ -607,13 +607,13 @@ class DanmuClockInterpolator {
 }
 
 class _DanmuLayerState extends State<DanmuLayer>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final DanmuLayoutEngine _layoutEngine = DanmuLayoutEngine();
   final DanmuTextPainterPool _painterPool = DanmuTextPainterPool();
   final ValueNotifier<int> _frameTick = ValueNotifier<int>(0);
   late final DanmuClockInterpolator _clock;
   Ticker? _ticker;
-  AppLifecycleListener? _lifecycleListener;
+  bool _lifecycleObserverRegistered = false;
   bool _appBackgrounded = false;
   DanmuBlockFilter _blockFilter = DanmuBlockFilter.empty;
 
@@ -636,18 +636,14 @@ class _DanmuLayerState extends State<DanmuLayer>
     _attachCache(widget.segmentCache);
     if (!OhosRuntime.isOhos) {
       _ticker = createTicker(_onTick);
-      _lifecycleListener = AppLifecycleListener(
-        onPause: _onAppBackgrounded,
-        onInactive: _onAppBackgrounded,
-        onHide: _onAppBackgrounded,
-        onResume: _onAppResumed,
-      );
+      WidgetsBinding.instance.addObserver(this);
+      _lifecycleObserverRegistered = true;
       _syncTickerState();
     }
   }
 
   void _attachCache(DanmuSegmentCache? cache) {
-    if (cache == null) return;
+    if (cache == null || cache.isDisposed) return;
     cache.addListener(_onCacheUpdated);
     cache.setTimeOffsetMs(widget.settings.timeOffsetMs);
     cache.setBlockFilter(_blockFilter);
@@ -659,13 +655,11 @@ class _DanmuLayerState extends State<DanmuLayer>
     }
   }
 
-  void _onAppBackgrounded() {
-    _appBackgrounded = true;
-    _syncTickerState();
-  }
-
-  void _onAppResumed() {
-    _appBackgrounded = false;
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final backgrounded = state != AppLifecycleState.resumed;
+    if (_appBackgrounded == backgrounded) return;
+    _appBackgrounded = backgrounded;
     _syncTickerState();
   }
 
@@ -675,7 +669,10 @@ class _DanmuLayerState extends State<DanmuLayer>
     var shouldRepaint = false;
 
     if (oldWidget.segmentCache != widget.segmentCache) {
-      oldWidget.segmentCache?.removeListener(_onCacheUpdated);
+      final oldCache = oldWidget.segmentCache;
+      if (oldCache != null && !oldCache.isDisposed) {
+        oldCache.removeListener(_onCacheUpdated);
+      }
       _layoutEngine.reset();
       _attachCache(widget.segmentCache);
       shouldRepaint = true;
@@ -804,8 +801,14 @@ class _DanmuLayerState extends State<DanmuLayer>
 
   @override
   void dispose() {
-    widget.segmentCache?.removeListener(_onCacheUpdated);
-    _lifecycleListener?.dispose();
+    final cache = widget.segmentCache;
+    if (cache != null && !cache.isDisposed) {
+      cache.removeListener(_onCacheUpdated);
+    }
+    if (_lifecycleObserverRegistered) {
+      WidgetsBinding.instance.removeObserver(this);
+      _lifecycleObserverRegistered = false;
+    }
     _ticker?.dispose();
     _painterPool.dispose();
     _frameTick.dispose();

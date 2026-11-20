@@ -99,7 +99,13 @@ class DandanplayProvider implements DanmuProvider {
         _ownedIoHttpClient = ownedIoHttpClient,
         _ownsClient = ownsClient;
 
+  bool _closed = false;
+
+  bool get isClosed => _closed;
+
   void close() {
+    if (_closed) return;
+    _closed = true;
     if (_ownsClient) {
       _client.close();
       _ownedIoHttpClient?.close(force: true);
