@@ -1034,11 +1034,18 @@ class InlineSpecBadgeRow extends StatelessWidget {
 
 /// Standalone top-left start-of-playback spec banner.
 ///
-/// Per `player-hud-spec.md §4.1`, mounts ONLY when `controlsVisible == false`
-/// so it can never overlap the top-left return button! When `controlsVisible`
-/// becomes `true`, it immediately hides and the top header renders
-/// [InlineSpecBadgeRow] instead.
-class StartSpecOverlay extends StatelessWidget {
+/// Per `player-hud-spec.md §4.1` and `motion-tokens.json`:
+/// - Fades in over `180ms` (`Curves.easeOutCubic`) and fades out over `240ms`
+///   (`Curves.easeInCubic`) when `controlsVisible == false` (instant snap under
+///   `MediaQuery.disableAnimationsOf(context)`).
+/// - Unmounts the subtree strictly once `AnimationStatus.dismissed` is reached.
+/// - Immediately hides (`value = 0.0`) whenever `controlsVisible == true` so it
+///   can never overlap the top-left return button, handing off cleanly to
+///   [InlineSpecBadgeRow] inside the top header.
+/// - Constrains width via `Positioned(left: left, right: left, top: top)` +
+///   `Align(alignment: Alignment.topLeft)` so 4–5 badges wrap cleanly at `320pt`
+///   iPad Split-View without horizontal overflow.
+class StartSpecOverlay extends StatefulWidget {
   final List<PlayerSpecBadge> badges;
   final bool highlightActive;
   final bool controlsVisible;
@@ -1054,20 +1061,108 @@ class StartSpecOverlay extends StatelessWidget {
     this.reduceTransparency = false,
   });
 
+  @override
+  State<StartSpecOverlay> createState() => _StartSpecOverlayState();
+}
+
+class _StartSpecOverlayState extends State<StartSpecOverlay>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _fadeCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 180),
+    reverseDuration: const Duration(milliseconds: 240),
+  );
+  late final CurvedAnimation _opacityAnim = CurvedAnimation(
+    parent: _fadeCtrl,
+    curve: Curves.easeOutCubic,
+    reverseCurve: Curves.easeInCubic,
+  );
+  bool _initialized = false;
+  bool _reduceMotion = false;
+
   bool get _shouldShow =>
       !OhosRuntime.isOhos &&
-      badges.isNotEmpty &&
-      highlightActive &&
-      !controlsVisible;
+      widget.badges.isNotEmpty &&
+      widget.highlightActive &&
+      !widget.controlsVisible;
+
+  @override
+  void initState() {
+    super.initState();
+    _fadeCtrl.addStatusListener(_handleAnimationStatus);
+  }
+
+  void _handleAnimationStatus(AnimationStatus status) {
+    if (mounted && status == AnimationStatus.dismissed) {
+      setState(() {});
+    }
+  }
+
+  void _syncAnimation({required bool immediateHide}) {
+    if (immediateHide || OhosRuntime.isOhos || widget.badges.isEmpty) {
+      _fadeCtrl.stop();
+      if (_fadeCtrl.value != 0.0) {
+        _fadeCtrl.value = 0.0;
+      }
+      return;
+    }
+    if (_shouldShow) {
+      if (_reduceMotion) {
+        _fadeCtrl.stop();
+        _fadeCtrl.value = 1.0;
+      } else if (_fadeCtrl.status != AnimationStatus.forward &&
+          _fadeCtrl.status != AnimationStatus.completed) {
+        _fadeCtrl.forward();
+      }
+    } else {
+      if (_reduceMotion) {
+        _fadeCtrl.stop();
+        _fadeCtrl.value = 0.0;
+      } else if (_fadeCtrl.status != AnimationStatus.reverse &&
+          _fadeCtrl.status != AnimationStatus.dismissed) {
+        _fadeCtrl.reverse();
+      }
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _reduceMotion = MediaQuery.disableAnimationsOf(context);
+    if (!_initialized) {
+      _initialized = true;
+      _syncAnimation(immediateHide: widget.controlsVisible);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant StartSpecOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final controlsJustOpened = widget.controlsVisible;
+    _syncAnimation(immediateHide: controlsJustOpened);
+  }
+
+  @override
+  void dispose() {
+    _fadeCtrl.removeStatusListener(_handleAnimationStatus);
+    _opacityAnim.dispose();
+    _fadeCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (!_shouldShow) return const SizedBox.shrink();
+    if (OhosRuntime.isOhos ||
+        widget.badges.isEmpty ||
+        widget.controlsVisible ||
+        (!_shouldShow && _fadeCtrl.status == AnimationStatus.dismissed)) {
+      return const SizedBox.shrink();
+    }
     final viewPadding = MediaQuery.viewPaddingOf(context);
     final left = math.max(16.0, viewPadding.left + 12.0);
     final top = math.max(16.0, viewPadding.top + 12.0);
-    final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final effectiveReduce = reduceTransparency ||
+    final effectiveReduce = widget.reduceTransparency ||
         IosLiquidGlassBridge.reduceTransparency ||
         GlassworkBackdrop.reduceTransparency.value ||
         GlassworkBackdrop.intensity.value <= 0.02 ||
@@ -1075,38 +1170,42 @@ class StartSpecOverlay extends StatelessWidget {
 
     return Positioned(
       left: left,
+      right: left,
       top: top,
-      child: IgnorePointer(
-        child: AnimatedOpacity(
-          key: const Key('player-start-spec-overlay'),
-          opacity: 1.0,
-          duration: Duration(milliseconds: reduceMotion ? 120 : 180),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: effectiveReduce
-                  ? const Color(0xEB16161A)
-                  : const Color(0x99121318),
-              borderRadius: BorderRadius.circular(concentric ? 999 : 12),
-              border: Border.all(
-                color: Colors.white.withValues(
-                  alpha: effectiveReduce ? 0.45 : 0.18,
-                ),
-                width: 0.75,
-              ),
-            ),
-            child: Wrap(
-              spacing: 6,
-              runSpacing: 4,
-              children: [
-                for (final badge in badges.take(5))
-                  SpecBadgePill(
-                    badge: badge,
-                    compact: false,
-                    concentric: concentric,
-                    reduceTransparency: effectiveReduce,
+      child: Align(
+        alignment: Alignment.topLeft,
+        child: IgnorePointer(
+          child: FadeTransition(
+            key: const Key('player-start-spec-overlay'),
+            opacity: _opacityAnim,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: effectiveReduce
+                    ? const Color(0xEB16161A)
+                    : const Color(0x99121318),
+                borderRadius:
+                    BorderRadius.circular(widget.concentric ? 18 : 12),
+                border: Border.all(
+                  color: Colors.white.withValues(
+                    alpha: effectiveReduce ? 0.45 : 0.18,
                   ),
-              ],
+                  width: 0.75,
+                ),
+              ),
+              child: Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: [
+                  for (final badge in widget.badges.take(5))
+                    SpecBadgePill(
+                      badge: badge,
+                      compact: false,
+                      concentric: widget.concentric,
+                      reduceTransparency: effectiveReduce,
+                    ),
+                ],
+              ),
             ),
           ),
         ),

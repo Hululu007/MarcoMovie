@@ -48,6 +48,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
 
     private final Runnable fsmTickRunnable = this::handleFsmTick;
     private final Runnable hideNoticeRunnable = this::handleHideNotice;
+    private final Runnable runtimeSyncRunnable = this::syncRuntimeState;
 
     private void handleFsmTick() {
         fsm.onTick(SystemClock.uptimeMillis());
@@ -147,27 +148,45 @@ final class TouchPlayerGesture implements View.OnTouchListener {
                                         ? PlayerGestureStateMachine.InterruptReason
                                                 .WINDOW_FOCUS_LOST
                                         : PlayerGestureStateMachine.InterruptReason.BACKGROUND);
+                        // onWindowFocusChanged(false) often fires before MainActivity.onStop()
+                        // clears a.foreground or enters PiP; re-check shortly after focus loss.
+                        a.ui.removeCallbacks(runtimeSyncRunnable);
+                        a.ui.postDelayed(runtimeSyncRunnable, 150L);
+                        a.ui.postDelayed(runtimeSyncRunnable, 450L);
+                    } else {
+                        a.ui.removeCallbacks(runtimeSyncRunnable);
+                        syncRuntimeState();
                     }
                 };
+        final boolean[] focusRegistered = {false};
+        final Runnable registerFocus =
+                () -> {
+                    if (focusRegistered[0] || Build.VERSION.SDK_INT < 18) return;
+                    ViewTreeObserver vto = hostRoot.getViewTreeObserver();
+                    if (vto != null && vto.isAlive()) {
+                        vto.addOnWindowFocusChangeListener(focusListener);
+                        focusRegistered[0] = true;
+                    }
+                };
+        if (UiCompat.isAttached(hostRoot)) {
+            registerFocus.run();
+        }
         hostRoot.addOnAttachStateChangeListener(
                 new View.OnAttachStateChangeListener() {
                     @Override
                     public void onViewAttachedToWindow(View v) {
-                        if (Build.VERSION.SDK_INT >= 18) {
-                            ViewTreeObserver vto = v.getViewTreeObserver();
-                            if (vto != null && vto.isAlive()) {
-                                vto.addOnWindowFocusChangeListener(focusListener);
-                            }
-                        }
+                        registerFocus.run();
                     }
 
                     @Override
                     public void onViewDetachedFromWindow(View v) {
-                        if (Build.VERSION.SDK_INT >= 18) {
+                        a.ui.removeCallbacks(runtimeSyncRunnable);
+                        if (focusRegistered[0] && Build.VERSION.SDK_INT >= 18) {
                             ViewTreeObserver vto = v.getViewTreeObserver();
                             if (vto != null && vto.isAlive()) {
                                 vto.removeOnWindowFocusChangeListener(focusListener);
                             }
+                            focusRegistered[0] = false;
                         }
                         cancelWithReason(PlayerGestureStateMachine.InterruptReason.EXIT_PLAYER);
                     }
@@ -450,6 +469,47 @@ final class TouchPlayerGesture implements View.OnTouchListener {
         cancelWithReason(PlayerGestureStateMachine.InterruptReason.DIALOG_OPEN);
     }
 
+    /**
+     * Synchronizes gesture/speed-lock state with external runtime transitions (miniMode/PiP entry,
+     * Home backgrounding after focus loss, screen lock, or external pause/audio-focus loss).
+     */
+    void syncRuntimeState() {
+        boolean inPip = Build.VERSION.SDK_INT >= 24 && a.isInPictureInPictureMode();
+        if (a.miniMode || inPip) {
+            if (fsm.getState() != PlayerGestureStateMachine.State.IDLE
+                    || fsm.isAnySpeedOverrideActive()) {
+                cancelWithReason(PlayerGestureStateMachine.InterruptReason.PIP_OR_MINI);
+            }
+            return;
+        }
+        if (!a.foreground) {
+            if (fsm.getState() != PlayerGestureStateMachine.State.IDLE
+                    || fsm.isAnySpeedOverrideActive()) {
+                cancelWithReason(PlayerGestureStateMachine.InterruptReason.BACKGROUND);
+            }
+            return;
+        }
+        if (a.playerLocked) {
+            if (fsm.getState() != PlayerGestureStateMachine.State.LOCKED_IDLE
+                    || fsm.isAnySpeedOverrideActive()) {
+                cancelWithReason(PlayerGestureStateMachine.InterruptReason.SCREEN_LOCKED);
+            }
+            return;
+        }
+        if (fsm.isAnySpeedOverrideActive()) {
+            boolean playerPlaying = a.playing;
+            if (playerPlaying && a.player != null && a.prepared) {
+                try {
+                    playerPlaying = a.player.isPlaying();
+                } catch (Exception ignored) {
+                }
+            }
+            if (!playerPlaying) {
+                cancelWithReason(PlayerGestureStateMachine.InterruptReason.PLAYBACK_PAUSED);
+            }
+        }
+    }
+
     void cancelActiveGesture() {
         cancelWithReason(
                 a.playerLocked
@@ -542,6 +602,18 @@ final class TouchPlayerGesture implements View.OnTouchListener {
                 && isTouchInsideView(speedLockCapsule, rawX, rawY)) {
             return true;
         }
+        if (a.playbackControls != null) {
+            if (a.playbackControls.skipCountdownPill != null
+                    && a.playbackControls.skipCountdownPill.getVisibility() == View.VISIBLE
+                    && isTouchInsideView(a.playbackControls.skipCountdownPill, rawX, rawY)) {
+                return true;
+            }
+            if (a.playbackControls.sleepWarningPill != null
+                    && a.playbackControls.sleepWarningPill.getVisibility() == View.VISIBLE
+                    && isTouchInsideView(a.playbackControls.sleepWarningPill, rawX, rawY)) {
+                return true;
+            }
+        }
         if (!a.controlsVisible || a.playerChrome == null) return false;
         return isTouchInsideView(a.playerChrome.dock, rawX, rawY)
                 || isTouchInsideView(a.playerChrome.heading, rawX, rawY)
@@ -577,6 +649,7 @@ final class TouchPlayerGesture implements View.OnTouchListener {
     @Override
     public boolean onTouch(View v, MotionEvent event) {
         if (a.miniMode) {
+            syncRuntimeState();
             return handleMiniModeTouch(event);
         }
         long nowMs = SystemClock.uptimeMillis();

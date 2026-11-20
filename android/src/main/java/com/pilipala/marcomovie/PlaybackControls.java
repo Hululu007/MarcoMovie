@@ -76,6 +76,11 @@ final class PlaybackControls {
         if (sleepWarningPill != null) sleepWarningPill.hide();
     }
 
+    void resetEpisodeTransientState() {
+        outroSkipCancelledForEpisode = false;
+        if (skipCountdownPill != null) skipCountdownPill.dismissSilently();
+    }
+
     TvMarkerHost markers() {
         if (markerState == null) markerState = new TvMarkerHost(a, this);
         return markerState;
@@ -1322,7 +1327,7 @@ final class PlaybackControls {
             next = (next + line.episodes.size()) % line.episodes.size();
         if (next < 0 || next >= line.episodes.size()) return false;
         transitioning = true;
-        if (skipCountdownPill != null) skipCountdownPill.dismissSilently();
+        resetEpisodeTransientState();
         if (a.touchPlayerGesture != null) a.touchPlayerGesture.onEpisodeSwitch();
         a.changeEpisode(site, video, line, line.episodes.get(next), 0);
         return true;
@@ -3002,6 +3007,10 @@ final class PlaybackControls {
             }
             return;
         }
+        if (SESSION_SLEEP_TIMER.onEpisodeCompleted()) {
+            triggerSleepExpiry();
+            return;
+        }
         int duration = a.player.getDuration();
         long tailNode = outroPosition(duration);
         if (a.prefs.getInt(Prefs.REPEAT_MODE, 0) == 1) {
@@ -3289,6 +3298,7 @@ final class PlaybackControls {
     }
 
     void prepared() {
+        resetEpisodeTransientState();
         if (a.isTvDevice() && !a.isLive() && !a.isCast()) {
             markerObservedPlayer = a.player;
             final MoviePlayer owner = markerObservedPlayer;
@@ -3401,6 +3411,9 @@ final class PlaybackControls {
     }
 
     void tick() {
+        if (a.touchPlayerGesture != null) {
+            a.touchPlayerGesture.syncRuntimeState();
+        }
         tickSleepTimer();
         if (a.isTvDevice() && (a.markerHost != null || a.seekGesture.active)) return;
         if ("live".equals(site.key)) return;

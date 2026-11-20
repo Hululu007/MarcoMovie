@@ -212,6 +212,7 @@ public final class PlayerGestureChecks {
         testSkipCountdownControllerAndTvKeyRouting();
         testSleepTimerControllerPresetsWarningExtendAndExpiry();
         testPrefsNormalizersAndScrubFormatting();
+        testRound2Regressions();
         System.out.println("ALL PASS (" + checks + " Android M2 HUD & gesture checks)");
     }
 
@@ -525,11 +526,14 @@ public final class PlayerGestureChecks {
                         && Math.abs(spy.lastUnlockedSpeed - 1.5f) < 0.001f,
                 "Clicking unlock capsule restores userNormalSpeed (1.5x) and exits SPEED_LOCKED");
 
-        // Auto-unlock matrix: episode switch, exit, background, lock, multi-touch, PiP, manual
+        // Auto-unlock matrix: episode switch, exit, background, audio focus, pause, lock,
+        // multi-touch, PiP, manual
         InterruptReason[] autoUnlockReasons = {
             InterruptReason.EPISODE_SWITCH,
             InterruptReason.EXIT_PLAYER,
             InterruptReason.BACKGROUND,
+            InterruptReason.AUDIO_FOCUS_LOST,
+            InterruptReason.PLAYBACK_PAUSED,
             InterruptReason.SCREEN_LOCKED,
             InterruptReason.MULTI_TOUCH,
             InterruptReason.PIP_OR_MINI,
@@ -564,6 +568,7 @@ public final class PlayerGestureChecks {
             InterruptReason.WINDOW_FOCUS_LOST,
             InterruptReason.BACKGROUND,
             InterruptReason.AUDIO_FOCUS_LOST,
+            InterruptReason.PLAYBACK_PAUSED,
             InterruptReason.PIP_OR_MINI,
             InterruptReason.DIALOG_OPEN,
             InterruptReason.EPISODE_SWITCH,
@@ -784,5 +789,54 @@ public final class PlayerGestureChecks {
         check(
                 StartSpecBanner.fuseSpecBadges(Collections.emptyList(), 0, 0, "", "").isEmpty(),
                 "Empty track & metadata fusion returns empty list safely");
+    }
+
+    private static void testRound2Regressions() {
+        // 1. Slow stationary tap (260ms <= elapsed < 350ms) toggles controls instead of dropping
+        Spy slowSpy = new Spy();
+        PlayerGestureStateMachine slowFsm = new PlayerGestureStateMachine(slowSpy);
+        Env env = defaultEnv();
+        slowFsm.onPointerDown(0, 1, 500, 250, 1000, env);
+        slowFsm.onPointerUp(0, 502, 251, 1300, env);
+        check(
+                slowSpy.singleTaps == 1 && slowFsm.getState() == State.IDLE,
+                "Slow stationary tap (300ms, 260..350ms) fires single-tap instead of dropping");
+
+        // 2. isSpeedBoostActive / isAnySpeedOverrideActive across boost, lock-ready, locked, pause
+        Spy spdSpy = new Spy();
+        PlayerGestureStateMachine spdFsm = new PlayerGestureStateMachine(spdSpy);
+        env.userNormalSpeed = 1.25f;
+        check(
+                !spdFsm.isSpeedBoostActive() && !spdFsm.isAnySpeedOverrideActive(),
+                "Idle FSM reports no active speed override");
+        spdFsm.onPointerDown(0, 1, 500, 300, 2000, env);
+        spdFsm.onTick(2350);
+        check(
+                spdFsm.isSpeedBoostActive() && spdFsm.isAnySpeedOverrideActive(),
+                "LONG_PRESS_SPEED reports both speedBoostActive and anySpeedOverrideActive");
+        spdFsm.onPointerMove(0, 1, 500, 240, 2400, env);
+        check(
+                spdFsm.isSpeedBoostActive() && spdFsm.isAnySpeedOverrideActive(),
+                "SPEED_LOCK_READY reports both speedBoostActive and anySpeedOverrideActive");
+        spdFsm.onPointerUp(0, 500, 240, 2450, env);
+        check(
+                !spdFsm.isSpeedBoostActive()
+                        && spdFsm.isSpeedLocked()
+                        && spdFsm.isAnySpeedOverrideActive(),
+                "SPEED_LOCKED reports speedLocked & anySpeedOverrideActive");
+        // External pause / audio-focus loss unlocks SPEED_LOCKED and restores 1.25x
+        spdFsm.cancel(InterruptReason.PLAYBACK_PAUSED, 3000);
+        check(
+                !spdFsm.isAnySpeedOverrideActive()
+                        && spdFsm.getState() == State.IDLE
+                        && Math.abs(spdSpy.lastUnlockedSpeed - 1.25f) < 0.001f,
+                "PLAYBACK_PAUSED auto-unlocks SPEED_LOCKED and restores userNormalSpeed");
+
+        // 3. Outro skip honors end-of-episode sleep timer once, preventing episode advance
+        SleepTimerSheet.Controller sleep = new SleepTimerSheet.Controller();
+        sleep.selectPreset(SleepTimerSheet.MODE_END_OF_EPISODE, 1000L);
+        check(
+                sleep.onEpisodeCompleted() && !sleep.isActive() && !sleep.onEpisodeCompleted(),
+                "End-of-episode sleep timer fires once on outro skip and does not double-fire");
     }
 }

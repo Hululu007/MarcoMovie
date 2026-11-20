@@ -81,8 +81,8 @@ class TouchGestureConfig {
     this.longPressRestoreMode = 'previous',
     this.enableVerticalDrags = true,
     this.enableLongPressSpeed = true,
-    this.leftZoneRatio = 0.30,
-    this.rightZoneRatio = 0.70,
+    this.leftZoneRatio = 0.28,
+    this.rightZoneRatio = 0.72,
   });
 
   TouchGestureConfig copyWith({

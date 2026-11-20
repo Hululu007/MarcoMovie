@@ -440,11 +440,17 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   private let sheetTitle: String
   private let sheetSubtitle: String?
   private let cancelTitle: String
+  private let forceOpaque: Bool
   private let sections: [OptionSection]
   private let tableView = UITableView(frame: .zero, style: .insetGrouped)
 
   private var completion: FlutterResult?
   private var resolved = false
+  private var dismissing = false
+
+  private var isOpaqueMode: Bool {
+    return forceOpaque || UIAccessibility.isReduceTransparencyEnabled
+  }
 
   static func present(args: [String: Any], completion: @escaping FlutterResult) {
     guard let host = MarcoLiquidGlassSupport.topPresenter() else {
@@ -462,7 +468,14 @@ private final class MarcoNativeOptionSheetController: UIViewController,
       sheet.preferredCornerRadius = 28.0
       sheet.prefersScrollingExpandsWhenScrolledToEdge = true
     }
-    host.present(nav, animated: true, completion: nil)
+    if let existing = host.presentedViewController, existing.isBeingDismissed,
+       let coordinator = existing.transitionCoordinator {
+      coordinator.animate(alongsideTransition: nil) { _ in
+        host.present(nav, animated: true, completion: nil)
+      }
+    } else {
+      host.present(nav, animated: true, completion: nil)
+    }
   }
 
   init(args: [String: Any], completion: @escaping FlutterResult) {
@@ -470,6 +483,7 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     let rawSubtitle = (args["subtitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
     self.sheetSubtitle = (rawSubtitle?.isEmpty ?? true) ? nil : rawSubtitle
     self.cancelTitle = (args["cancelTitle"] as? String) ?? "关闭"
+    self.forceOpaque = (args["forceOpaque"] as? Bool) ?? false
     let rawItems = (args["items"] as? [[String: Any]]) ?? []
     var builtSections: [OptionSection] = []
     var currentKey: Int?
@@ -528,7 +542,7 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     overrideUserInterfaceStyle = .dark
     let opaqueFallback = UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
     #if compiler(>=6.2)
-    if #available(iOS 26.0, *), !UIAccessibility.isReduceTransparencyEnabled {
+    if #available(iOS 26.0, *), !isOpaqueMode {
       view.backgroundColor = .clear
     } else {
       view.backgroundColor = opaqueFallback
@@ -603,21 +617,35 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     cell.contentConfiguration = cfg
     cell.accessoryType = item.checked ? .checkmark : .none
     cell.tintColor = UIColor.systemBlue
-    cell.backgroundColor = UIColor(white: 0.16, alpha: UIAccessibility.isReduceTransparencyEnabled ? 0.96 : 0.72)
+    cell.backgroundColor = UIColor(white: 0.16, alpha: isOpaqueMode ? 0.96 : 0.72)
     return cell
   }
 
   func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
+    guard !resolved, !dismissing else { return }
+    dismissing = true
     let item = sections[indexPath.section].items[indexPath.row]
     UISelectionFeedbackGenerator().selectionChanged()
-    finish(selectedId: item.id)
-    dismiss(animated: true, completion: nil)
+    if presentingViewController != nil {
+      dismiss(animated: true) {
+        self.finish(selectedId: item.id)
+      }
+    } else {
+      finish(selectedId: item.id)
+    }
   }
 
   @objc private func closeTapped() {
-    finish(selectedId: nil)
-    dismiss(animated: true, completion: nil)
+    guard !resolved, !dismissing else { return }
+    dismissing = true
+    if presentingViewController != nil {
+      dismiss(animated: true) {
+        self.finish(selectedId: nil)
+      }
+    } else {
+      finish(selectedId: nil)
+    }
   }
 
   func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {

@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart' show Colors;
+import 'package:flutter/physics.dart';
 import 'package:flutter/services.dart';
 
 import '../apple_theme.dart';
@@ -216,6 +217,7 @@ class IosPlayerChrome extends StatelessWidget {
                       top: topInset,
                       child: _buildTopSpatialHeader(
                         context,
+                        width: width,
                         isCompactWidth: isCompactWidth,
                         isUltraCompact: isUltraCompact,
                         ios26Visual: ios26Visual,
@@ -260,6 +262,7 @@ class IosPlayerChrome extends StatelessWidget {
                                   ios26Visual: ios26Visual,
                                   reduceTransparency: reduceTransparency,
                                   reduceMotion: reduceMotion,
+                                  onInteraction: onInteraction,
                                   onScrubStart: onScrubStart,
                                   onScrubUpdate: onScrubUpdate,
                                   onScrubEnd: onScrubEnd,
@@ -290,15 +293,20 @@ class IosPlayerChrome extends StatelessWidget {
 
   Widget _buildTopSpatialHeader(
     BuildContext context, {
+    required double width,
     required bool isCompactWidth,
     required bool isUltraCompact,
     required bool ios26Visual,
     required bool reduceTransparency,
     required bool reduceMotion,
   }) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
+    return Listener(
+      key: const Key('ios-player-top-header-hit-area'),
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (_) => onInteraction(),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
         // Left: 40pt concentric rounded glass back capsule (radius = 20pt).
         _IosRefractivePressButton(
           key: const Key('ios-player-back-button'),
@@ -513,7 +521,7 @@ class IosPlayerChrome extends StatelessWidget {
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (!isUltraCompact && (!isCompactWidth || widthIsAtLeast370(context))) ...[
+            if (!isUltraCompact && (!isCompactWidth || width >= 370)) ...[
               _buildTopCircleButton(
                 key: const Key('ios-player-danmu-quick'),
                 icon: danmuEnabled
@@ -555,11 +563,8 @@ class IosPlayerChrome extends StatelessWidget {
           ],
         ),
       ],
+      ),
     );
-  }
-
-  bool widthIsAtLeast370(BuildContext context) {
-    return MediaQuery.sizeOf(context).width >= 370;
   }
 
   Widget _buildTopCircleButton({
@@ -794,22 +799,26 @@ class IosPlayerChrome extends StatelessWidget {
               ),
     ];
 
-    return _IosSpatialGlassSurface(
-      key: dockKey,
-      borderRadius: Ios26PlayerGlassMetrics.dockCapsuleRadiusPt,
-      ios26Visual: ios26Visual,
-      reduceTransparency: reduceTransparency,
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      child: useScrollable
-          ? SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              physics: const BouncingScrollPhysics(),
-              child: Row(mainAxisSize: MainAxisSize.min, children: rowChildren),
-            )
-          : Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: rowChildren,
-            ),
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (_) => onInteraction(),
+      child: _IosSpatialGlassSurface(
+        key: dockKey,
+        borderRadius: Ios26PlayerGlassMetrics.dockCapsuleRadiusPt,
+        ios26Visual: ios26Visual,
+        reduceTransparency: reduceTransparency,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: useScrollable
+            ? SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                physics: const BouncingScrollPhysics(),
+                child: Row(mainAxisSize: MainAxisSize.min, children: rowChildren),
+              )
+            : Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: rowChildren,
+              ),
+      ),
     );
   }
 
@@ -882,7 +891,10 @@ class _IosDockAction {
 /// Interactive fluid expanding scrubber capsule for iOS/iPadOS 26:
 /// - Resting track height: `5pt` (`scrubberTrackIdleHeightPt`).
 /// - Active touch/drag height: springs to `10pt` (`scrubberTrackExpandedHeightPt`)
-///   with subtle luminous glow, tabular numeric timestamps, and intro/outro ticks.
+///   via the `hudPopup` physical spring (`response: 0.28, dampingRatio: 0.86`,
+///   instant snap when `reduceMotion` is enabled) with subtle luminous glow,
+///   tabular numeric timestamps, strict single-pointer `pointerId` tracking,
+///   opaque capsule hit absorption, and intro/outro ticks.
 class IosFluidScrubberCapsule extends StatefulWidget {
   final Duration position;
   final Duration duration;
@@ -893,6 +905,7 @@ class IosFluidScrubberCapsule extends StatefulWidget {
   final bool ios26Visual;
   final bool reduceTransparency;
   final bool reduceMotion;
+  final VoidCallback? onInteraction;
   final ValueChanged<double> onScrubStart;
   final ValueChanged<double> onScrubUpdate;
   final ValueChanged<double> onScrubEnd;
@@ -909,6 +922,7 @@ class IosFluidScrubberCapsule extends StatefulWidget {
     required this.ios26Visual,
     required this.reduceTransparency,
     required this.reduceMotion,
+    this.onInteraction,
     required this.onScrubStart,
     required this.onScrubUpdate,
     required this.onScrubEnd,
@@ -920,11 +934,56 @@ class IosFluidScrubberCapsule extends StatefulWidget {
       _IosFluidScrubberCapsuleState();
 }
 
-class _IosFluidScrubberCapsuleState extends State<IosFluidScrubberCapsule> {
-  bool _pointerActive = false;
+class _IosFluidScrubberCapsuleState extends State<IosFluidScrubberCapsule>
+    with SingleTickerProviderStateMixin {
+  static final SpringDescription _hudPopupSpring =
+      SpringDescription.withDampingRatio(
+    mass: 1.0,
+    stiffness: (2 * math.pi / 0.28) * (2 * math.pi / 0.28),
+    ratio: 0.86,
+  );
+
+  late final AnimationController _expandCtrl = AnimationController.unbounded(
+    vsync: this,
+    value: widget.isScrubbing ? 1.0 : 0.0,
+  );
+
+  int? _activePointerId;
   double _localDragMs = 0;
 
+  bool get _pointerActive => _activePointerId != null;
   bool get _expanded => _pointerActive || widget.isScrubbing;
+
+  void _syncSpringExpansion() {
+    final target = _expanded ? 1.0 : 0.0;
+    if (widget.reduceMotion) {
+      _expandCtrl.stop();
+      _expandCtrl.value = target;
+      return;
+    }
+    final sim = SpringSimulation(
+      _hudPopupSpring,
+      _expandCtrl.value,
+      target,
+      _expandCtrl.velocity,
+    );
+    _expandCtrl.animateWith(sim);
+  }
+
+  @override
+  void didUpdateWidget(covariant IosFluidScrubberCapsule oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isScrubbing != widget.isScrubbing ||
+        oldWidget.reduceMotion != widget.reduceMotion) {
+      _syncSpringExpansion();
+    }
+  }
+
+  @override
+  void dispose() {
+    _expandCtrl.dispose();
+    super.dispose();
+  }
 
   double _valueForLocalX(double localX, double trackWidth) {
     final durMs = widget.duration.inMilliseconds;
@@ -950,10 +1009,6 @@ class _IosFluidScrubberCapsuleState extends State<IosFluidScrubberCapsule> {
         ? '-${IosPlayerChrome.formatTimestamp(Duration(milliseconds: remainingMs))}'
         : '--:--';
 
-    final trackHeight = _expanded
-        ? Ios26PlayerGlassMetrics.scrubberTrackExpandedHeightPt
-        : Ios26PlayerGlassMetrics.scrubberTrackIdleHeightPt;
-
     final introFrac = hasDuration && widget.skipIntroSec > 0
         ? ((widget.skipIntroSec * 1000) / durMs).clamp(0.0, 1.0)
         : null;
@@ -962,134 +1017,161 @@ class _IosFluidScrubberCapsuleState extends State<IosFluidScrubberCapsule> {
             ? ((durMs - widget.skipOutroSec * 1000) / durMs).clamp(0.0, 1.0)
             : null;
 
-    return _IosSpatialGlassSurface(
-      borderRadius: Ios26PlayerGlassMetrics.dockCapsuleRadiusPt,
-      ios26Visual: widget.ios26Visual,
-      reduceTransparency: widget.reduceTransparency,
-      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
-      child: Row(
-        children: [
-          Text(
-            IosPlayerChrome.formatTimestamp(currentDuration),
-            style: const TextStyle(
-              color: AppleColors.labelPrimary,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              fontFeatures: [FontFeature.tabularFigures()],
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (_) {
+        if (!_pointerActive) {
+          widget.onInteraction?.call();
+        }
+      },
+      child: _IosSpatialGlassSurface(
+        borderRadius: Ios26PlayerGlassMetrics.dockCapsuleRadiusPt,
+        ios26Visual: widget.ios26Visual,
+        reduceTransparency: widget.reduceTransparency,
+        padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
+        child: Row(
+          children: [
+            Text(
+              IosPlayerChrome.formatTimestamp(currentDuration),
+              key: const Key('ios-fluid-scrubber-elapsed'),
+              style: const TextStyle(
+                color: AppleColors.labelPrimary,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
             ),
-          ),
-          const SizedBox(width: 11),
-          Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final trackW = math.max(1.0, constraints.maxWidth);
-                return Listener(
-                  behavior: HitTestBehavior.opaque,
-                  onPointerDown: hasDuration
-                      ? (event) {
-                          final nextMs =
-                              _valueForLocalX(event.localPosition.dx, trackW);
-                          HapticFeedback.selectionClick();
-                          setState(() {
-                            _pointerActive = true;
-                            _localDragMs = nextMs;
-                          });
-                          widget.onScrubStart(nextMs);
-                        }
-                      : null,
-                  onPointerMove: hasDuration
-                      ? (event) {
-                          if (!_pointerActive) return;
-                          final nextMs =
-                              _valueForLocalX(event.localPosition.dx, trackW);
-                          setState(() => _localDragMs = nextMs);
-                          widget.onScrubUpdate(nextMs);
-                        }
-                      : null,
-                  onPointerUp: hasDuration
-                      ? (event) {
-                          if (!_pointerActive) return;
-                          final nextMs =
-                              _valueForLocalX(event.localPosition.dx, trackW);
-                          setState(() => _pointerActive = false);
-                          widget.onScrubEnd(nextMs);
-                        }
-                      : null,
-                  onPointerCancel: hasDuration
-                      ? (_) {
-                          if (_pointerActive) {
-                            setState(() => _pointerActive = false);
+            const SizedBox(width: 11),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final trackW = math.max(1.0, constraints.maxWidth);
+                  return Listener(
+                    behavior: HitTestBehavior.opaque,
+                    onPointerDown: hasDuration
+                        ? (event) {
+                            if (_activePointerId != null) return;
+                            final nextMs =
+                                _valueForLocalX(event.localPosition.dx, trackW);
+                            HapticFeedback.selectionClick();
+                            setState(() {
+                              _activePointerId = event.pointer;
+                              _localDragMs = nextMs;
+                            });
+                            _syncSpringExpansion();
+                            widget.onScrubStart(nextMs);
+                          }
+                        : null,
+                    onPointerMove: hasDuration
+                        ? (event) {
+                            if (event.pointer != _activePointerId) return;
+                            final nextMs =
+                                _valueForLocalX(event.localPosition.dx, trackW);
+                            setState(() => _localDragMs = nextMs);
+                            widget.onScrubUpdate(nextMs);
+                          }
+                        : null,
+                    onPointerUp: hasDuration
+                        ? (event) {
+                            if (event.pointer != _activePointerId) return;
+                            final nextMs =
+                                _valueForLocalX(event.localPosition.dx, trackW);
+                            setState(() => _activePointerId = null);
+                            _syncSpringExpansion();
+                            widget.onScrubEnd(nextMs);
+                          }
+                        : null,
+                    onPointerCancel: hasDuration
+                        ? (event) {
+                            if (event.pointer != _activePointerId) return;
+                            setState(() => _activePointerId = null);
+                            _syncSpringExpansion();
                             widget.onScrubCancel();
                           }
-                        }
-                      : null,
-                  child: GestureDetector(
-                    key: const Key('ios-fluid-scrubber-hit-area'),
-                    behavior: HitTestBehavior.opaque,
-                    // Claim horizontal drag in gesture arena so parent scroll/
-                    // video gestures never steal active scrubber drags.
-                    onHorizontalDragStart: hasDuration ? (_) {} : null,
-                    onHorizontalDragUpdate: hasDuration ? (_) {} : null,
-                    onHorizontalDragEnd: hasDuration ? (_) {} : null,
-                    child: SizedBox(
-                      height: 28,
-                      child: Center(
-                        child: AnimatedContainer(
-                          key: const Key('ios-fluid-scrubber-track'),
-                          duration: Duration(
-                            milliseconds: widget.reduceMotion ? 0 : 220,
-                          ),
-                          curve: Curves.easeOutCubic,
-                          height: trackHeight,
-                          width: double.infinity,
-                          decoration: BoxDecoration(
-                            color: widget.reduceTransparency
-                                ? const Color(0x66FFFFFF)
-                                : const Color(0x3DFFFFFF),
-                            borderRadius:
-                                BorderRadius.circular(trackHeight * 0.5),
-                            boxShadow: _expanded && !widget.reduceTransparency
-                                ? [
-                                    BoxShadow(
-                                      color:
-                                          Colors.white.withValues(alpha: 0.22),
-                                      blurRadius: 10,
+                        : null,
+                    child: GestureDetector(
+                      key: const Key('ios-fluid-scrubber-hit-area'),
+                      behavior: HitTestBehavior.opaque,
+                      // Claim horizontal drag in gesture arena so parent scroll/
+                      // video gestures never steal active scrubber drags.
+                      onHorizontalDragStart: hasDuration ? (_) {} : null,
+                      onHorizontalDragUpdate: hasDuration ? (_) {} : null,
+                      onHorizontalDragEnd: hasDuration ? (_) {} : null,
+                      child: SizedBox(
+                        height: 28,
+                        child: Center(
+                          child: AnimatedBuilder(
+                            animation: _expandCtrl,
+                            builder: (context, _) {
+                              final t = _expandCtrl.value;
+                              final trackHeight =
+                                  (Ios26PlayerGlassMetrics.scrubberTrackIdleHeightPt +
+                                          (Ios26PlayerGlassMetrics
+                                                      .scrubberTrackExpandedHeightPt -
+                                                  Ios26PlayerGlassMetrics
+                                                      .scrubberTrackIdleHeightPt) *
+                                              t)
+                                      .clamp(3.0, 14.0);
+                              final glowActive =
+                                  t > 0.15 && !widget.reduceTransparency;
+                              return Container(
+                                key: const Key('ios-fluid-scrubber-track'),
+                                height: trackHeight,
+                                width: double.infinity,
+                                decoration: BoxDecoration(
+                                  color: widget.reduceTransparency
+                                      ? const Color(0x66FFFFFF)
+                                      : const Color(0x3DFFFFFF),
+                                  borderRadius:
+                                      BorderRadius.circular(trackHeight * 0.5),
+                                  boxShadow: glowActive
+                                      ? [
+                                          BoxShadow(
+                                            color: Colors.white.withValues(
+                                              alpha: (0.22 * t).clamp(0.0, 0.28),
+                                            ),
+                                            blurRadius: 10,
+                                          ),
+                                        ]
+                                      : null,
+                                ),
+                                child: ClipRRect(
+                                  borderRadius:
+                                      BorderRadius.circular(trackHeight * 0.5),
+                                  child: CustomPaint(
+                                    painter: _FluidTrackPainter(
+                                      fraction: fraction,
+                                      expanded: _expanded,
+                                      introMarker: introFrac,
+                                      outroMarker: outroFrac,
+                                      reduceTransparency:
+                                          widget.reduceTransparency,
                                     ),
-                                  ]
-                                : null,
-                          ),
-                          child: ClipRRect(
-                            borderRadius:
-                                BorderRadius.circular(trackHeight * 0.5),
-                            child: CustomPaint(
-                              painter: _FluidTrackPainter(
-                                fraction: fraction,
-                                expanded: _expanded,
-                                introMarker: introFrac,
-                                outroMarker: outroFrac,
-                                reduceTransparency: widget.reduceTransparency,
-                              ),
-                            ),
+                                  ),
+                                ),
+                              );
+                            },
                           ),
                         ),
                       ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
-          ),
-          const SizedBox(width: 11),
-          Text(
-            remainingLabel,
-            style: const TextStyle(
-              color: AppleColors.labelSecondary,
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              fontFeatures: [FontFeature.tabularFigures()],
+            const SizedBox(width: 11),
+            Text(
+              remainingLabel,
+              key: const Key('ios-fluid-scrubber-remaining'),
+              style: const TextStyle(
+                color: AppleColors.labelSecondary,
+                fontSize: 12,
+                fontWeight: FontWeight.w500,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

@@ -395,7 +395,7 @@ void main() {
         );
         final drag = await tester.startGesture(hitCenter, kind: PointerDeviceKind.touch);
         await tester.pump();
-        await tester.pump(const Duration(milliseconds: 260));
+        await tester.pump(const Duration(milliseconds: 300));
         expect(
           tester.getSize(find.byKey(const Key('ios-fluid-scrubber-track'))).height,
           closeTo(10.0, 0.5),
@@ -404,7 +404,7 @@ void main() {
         await tester.pump(const Duration(milliseconds: 60));
         await drag.up();
         await tester.pump();
-        await tester.pump(const Duration(milliseconds: 260));
+        await tester.pump(const Duration(milliseconds: 300));
         expect(
           tester.getSize(find.byKey(const Key('ios-fluid-scrubber-track'))).height,
           closeTo(5.0, 0.5),
@@ -424,7 +424,7 @@ void main() {
     );
 
     testWidgets(
-      'iOS 26+ dispatches showOptionSheet for Speed & More, while reduceTransparency disables GlassworkBackdrop and uses Flutter fallback',
+      'iOS 26+ dispatches showOptionSheet (including forceOpaque under reduceTransparency) while iOS 15-18 uses Flutter fallback',
       variant: TargetPlatformVariant.only(TargetPlatform.iOS),
       (tester) async {
         IosLiquidGlassBridge.setAvailableForTest(true);
@@ -432,7 +432,10 @@ void main() {
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
             .setMockMethodCallHandler(IosLiquidGlassBridge.channel, (call) async {
           calls.add(call);
-          if (call.method == 'showOptionSheet') return '4'; // 1.5x in speeds list
+          if (call.method == 'showOptionSheet') {
+            final args = call.arguments as Map<dynamic, dynamic>;
+            if (args['title'] == '播放倍速') return '4'; // 1.5x in speeds list
+          }
           return null;
         });
 
@@ -445,20 +448,138 @@ void main() {
 
         await tester.tap(find.byKey(const ValueKey('ios-dock-action-speed')));
         await tester.pump(const Duration(milliseconds: 100));
-        expect(calls.any((c) => c.method == 'showOptionSheet'), isTrue);
+        final speedCall = calls.firstWhere((c) => c.method == 'showOptionSheet');
+        expect((speedCall.arguments as Map)['forceOpaque'], isFalse);
         expect(player.rates.last, 1.5);
 
-        // Enable reduceTransparency -> GlassworkBackdrop unmounts and fallback Flutter sheet opens!
+        // Enable reduceTransparency on iOS 26 -> GlassworkBackdrop unmounts,
+        // AND native showOptionSheet STILL dispatches with forceOpaque: true!
         calls.clear();
         IosLiquidGlassBridge.setReduceTransparencyForTest(true);
         await tester.pump();
         expect(find.byType(GlassworkBackdrop), findsNothing);
 
         await tester.tap(find.byKey(const Key('ios-player-more-button')));
+        await tester.pump(const Duration(milliseconds: 100));
+        final opaqueCall = calls.firstWhere((c) => c.method == 'showOptionSheet');
+        expect((opaqueCall.arguments as Map)['title'], '播放选项');
+        expect((opaqueCall.arguments as Map)['forceOpaque'], isTrue);
+
+        // On iOS 15-18 (isAvailable == false) -> Flutter AppleModalSheet fallback opens.
+        calls.clear();
+        IosLiquidGlassBridge.setAvailableForTest(false);
+        await tester.pump();
+        await tester.tap(find.byKey(const Key('ios-player-more-button')));
         await tester.pumpAndSettle();
         expect(calls.where((c) => c.method == 'showOptionSheet'), isEmpty);
         expect(find.text('播放选项'), findsOneWidget);
         expect(find.text('定时关闭'), findsOneWidget);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 100));
+      },
+    );
+
+    testWidgets(
+      'opaque hit absorbers block touches on top header, scrubber timestamps & dock padding from leaking to video surface',
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      (tester) async {
+        IosLiquidGlassBridge.setAvailableForTest(true);
+        final player = _IosFakePlayer();
+        await mountIosPlayer(
+          tester,
+          surfaceSize: const Size(844, 390),
+          player: player,
+        );
+        player.seeks.clear();
+        player.rates.clear();
+
+        // 1. Tap on scrubber elapsed timestamp -> must NOT toggle HUD off.
+        final elapsedCenter = tester.getCenter(
+          find.byKey(const Key('ios-fluid-scrubber-elapsed')),
+        );
+        await tester.tapAt(elapsedCenter);
+        await tester.pump(const Duration(milliseconds: 320));
+        expect(find.byType(IosPlayerChrome), findsOneWidget);
+
+        // 2. Tap on bottom dock outer left padding edge -> must NOT toggle HUD off.
+        final dockRect = tester.getRect(
+          find.byKey(const Key('ios-player-primary-dock')),
+        );
+        await tester.tapAt(Offset(dockRect.left + 3, dockRect.center.dy));
+        await tester.pump(const Duration(milliseconds: 320));
+        expect(find.byType(IosPlayerChrome), findsOneWidget);
+
+        // 3. Hold >= 380ms on top header title area -> must NOT trigger 2.0x speed boost or horizontal seek!
+        final titleCenter = tester.getCenter(find.text('星海旅途'));
+        final hold = await tester.startGesture(
+          titleCenter,
+          kind: PointerDeviceKind.touch,
+        );
+        await tester.pump(const Duration(milliseconds: 420));
+        await hold.moveBy(const Offset(50, 0));
+        await tester.pump(const Duration(milliseconds: 60));
+        await hold.up();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(player.rates, isEmpty);
+        expect(player.seeks, isEmpty);
+        expect(find.byType(IosPlayerChrome), findsOneWidget);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 100));
+      },
+    );
+
+    testWidgets(
+      'IosFluidScrubberCapsule tracks active pointerId so second finger cannot jump or prematurely commit scrub',
+      variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+      (tester) async {
+        IosLiquidGlassBridge.setAvailableForTest(true);
+        final player = _IosFakePlayer();
+        await mountIosPlayer(
+          tester,
+          surfaceSize: const Size(844, 390),
+          player: player,
+        );
+        player.seeks.clear();
+
+        final trackRect = tester.getRect(
+          find.byKey(const Key('ios-fluid-scrubber-hit-area')),
+        );
+        // Primary finger touches near 50% and drags right to 75%.
+        final p1 = await tester.startGesture(
+          Offset(trackRect.left + trackRect.width * 0.5, trackRect.center.dy),
+          kind: PointerDeviceKind.touch,
+          pointer: 11,
+        );
+        await tester.pump();
+        await p1.moveTo(
+          Offset(trackRect.left + trackRect.width * 0.75, trackRect.center.dy),
+        );
+        await tester.pump(const Duration(milliseconds: 50));
+
+        // Second finger touches at 10% and lifts -> must NOT commit or reset scrub!
+        final p2 = await tester.startGesture(
+          Offset(trackRect.left + trackRect.width * 0.1, trackRect.center.dy),
+          kind: PointerDeviceKind.touch,
+          pointer: 22,
+        );
+        await tester.pump(const Duration(milliseconds: 30));
+        await p2.moveTo(
+          Offset(trackRect.left + trackRect.width * 0.15, trackRect.center.dy),
+        );
+        await p2.up();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(player.seeks, isEmpty);
+
+        // Lifting primary finger commits near 75% (~22:30 of 30:00).
+        await p1.up();
+        await tester.pump(const Duration(milliseconds: 50));
+        expect(player.seeks, hasLength(1));
+        expect(
+          player.seeks.single.inSeconds,
+          closeTo(const Duration(minutes: 30).inSeconds * 0.75, 45),
+        );
 
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump(const Duration(milliseconds: 100));
@@ -526,6 +647,25 @@ void main() {
 
         // Tap unlock capsule -> restores 1.0x.
         await tester.tap(find.byKey(const Key('player-speed-locked-capsule')));
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(player.rates.last, 1.0);
+        expect(find.byKey(const Key('player-speed-locked-capsule')), findsNothing);
+
+        // Re-lock 2.0x then simulate external AVAudioSession / headset pause (!playing stream)
+        // -> speed-lock MUST auto-unlock cleanly and restore 1.0x.
+        final gesture2 = await tester.startGesture(
+          const Offset(420, 220),
+          kind: PointerDeviceKind.touch,
+        );
+        await tester.pump(const Duration(milliseconds: 380));
+        await gesture2.moveTo(const Offset(420, 165));
+        await tester.pump(const Duration(milliseconds: 50));
+        await gesture2.up();
+        await tester.pump(const Duration(milliseconds: 100));
+        expect(player.rates.last, 2.0);
+        expect(find.byKey(const Key('player-speed-locked-capsule')), findsOneWidget);
+
+        await player.pause();
         await tester.pump(const Duration(milliseconds: 100));
         expect(player.rates.last, 1.0);
         expect(find.byKey(const Key('player-speed-locked-capsule')), findsNothing);

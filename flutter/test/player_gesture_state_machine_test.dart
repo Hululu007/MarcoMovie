@@ -110,7 +110,9 @@ void main() {
       final fsm = PlayerGestureStateMachine(
         config: const TouchGestureConfig(doubleTapSidesAction: 'seek_10s'),
       );
-      // Right side double tap (x = 740 / 844 > 0.70)
+      // Right side double tap (x = 740 / 844 > 0.72)
+      expect(fsm.config.leftZoneRatio, 0.28);
+      expect(fsm.config.rightZoneRatio, 0.72);
       fsm.onPointerDown(_ctx(x: 740, y: 200, nowMs: 1000));
       fsm.onPointerUp(pointerId: 1, x: 740, y: 200, nowMs: 1040);
       fsm.onPointerDown(_ctx(x: 745, y: 202, nowMs: 1150));

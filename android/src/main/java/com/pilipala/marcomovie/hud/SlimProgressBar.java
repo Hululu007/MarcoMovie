@@ -62,7 +62,12 @@ public final class SlimProgressBar extends View {
         long dur = reducedMotion ? REDUCED_FADE_MS : FADE_OUT_MS;
         if (visible) {
             setVisibility(View.VISIBLE);
-            animate().alpha(1f).setDuration(dur).setInterpolator(new LinearInterpolator()).start();
+            animate()
+                    .alpha(1f)
+                    .setDuration(dur)
+                    .setInterpolator(new LinearInterpolator())
+                    .withEndAction(null)
+                    .start();
         } else {
             animate()
                     .alpha(0f)
@@ -74,6 +79,12 @@ public final class SlimProgressBar extends View {
                             })
                     .start();
         }
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        animate().withEndAction(null).cancel();
+        super.onDetachedFromWindow();
     }
 
     @Override

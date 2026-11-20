@@ -1741,19 +1741,23 @@ class AppleNativePickerOption<T> {
 
 /// Presents a native iOS 26 `UISheetPresentationController` Liquid Glass
 /// half-sheet option picker (with SF Symbols, subtitles, sections, and native
-/// checkmarks). When running on iOS 15–18, non-iOS platforms, or when system
-/// `reduceTransparency` is enabled, delegates to [fallback] if provided or
-/// falls back cleanly to `CupertinoActionSheet`.
+/// checkmarks). On iOS 26 with `reduceTransparency` or `forceOpaque` enabled,
+/// continues presenting the native sheet with opaque dark styling via
+/// `forceOpaque: true`. When running on iOS 15–18 or non-iOS platforms,
+/// delegates to [fallback] if provided or falls back cleanly to
+/// `CupertinoActionSheet`.
 Future<T?> showAppleNativeOptionSheet<T>(
   BuildContext context, {
   required String title,
   String? subtitle,
   required List<AppleNativePickerOption<T>> options,
   String cancelLabel = '关闭',
+  bool forceOpaque = false,
   Future<T?> Function()? fallback,
 }) async {
-  if (IosLiquidGlassBridge.isAvailable &&
-      !IosLiquidGlassBridge.reduceTransparency) {
+  if (IosLiquidGlassBridge.isAvailable) {
+    final effectiveOpaque =
+        forceOpaque || IosLiquidGlassBridge.reduceTransparency;
     try {
       final pickedId = await IosLiquidGlassBridge.channel.invokeMethod<String>(
         'showOptionSheet',
@@ -1761,6 +1765,7 @@ Future<T?> showAppleNativeOptionSheet<T>(
           'title': title,
           if (subtitle != null && subtitle.isNotEmpty) 'subtitle': subtitle,
           'cancelTitle': cancelLabel,
+          'forceOpaque': effectiveOpaque,
           'items': [
             for (var i = 0; i < options.length; i++)
               <String, dynamic>{

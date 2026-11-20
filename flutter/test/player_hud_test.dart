@@ -261,43 +261,173 @@ void main() {
   });
 
   group('StartSpecOverlay, SlimProgressBar, SpeedCapsule, SkipCountdown, SleepTimer', () {
-    testWidgets('StartSpecOverlay hides immediately when controlsVisible becomes true', (tester) async {
-      final badges = MediaSpecFusion.fuse(
-        videoWidth: 3840,
-        videoHeight: 2160,
-        videoCodec: 'hevc',
-      );
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Stack(
-            children: [
-              StartSpecOverlay(
-                badges: badges,
-                highlightActive: true,
-                controlsVisible: false,
-              ),
-            ],
-          ),
-        ),
-      );
-      expect(find.byKey(const Key('player-start-spec-overlay')), findsOneWidget);
-      expect(find.text('4K'), findsOneWidget);
+    testWidgets(
+      'StartSpecOverlay animates 180ms fade-in & 240ms fade-out until dismissed, hides immediately on controlsVisible, and wraps cleanly at 320pt',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(320, 640);
+        await tester.binding.setSurfaceSize(const Size(320, 640));
+        addTearDown(() async {
+          await tester.binding.setSurfaceSize(null);
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
 
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Stack(
-            children: [
-              StartSpecOverlay(
-                badges: badges,
-                highlightActive: true,
-                controlsVisible: true,
-              ),
-            ],
+        final badges = MediaSpecFusion.fuse(
+          videoWidth: 3840,
+          videoHeight: 2160,
+          videoCodec: 'hevc',
+          audioCodec: 'eac3',
+          extraTrackInfo: 'Dolby Vision Atmos 5.1',
+          lineName: '4K REMUX 原盘',
+          episodeName: 'Sample.2026.HDR10%2B.5.1.mkv',
+        );
+        expect(badges.length, 5);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Stack(
+              children: [
+                StartSpecOverlay(
+                  badges: badges,
+                  highlightActive: true,
+                  controlsVisible: false,
+                  concentric: true,
+                ),
+              ],
+            ),
           ),
-        ),
-      );
-      expect(find.byKey(const Key('player-start-spec-overlay')), findsNothing);
-    });
+        );
+        expect(find.byKey(const Key('player-start-spec-overlay')), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        final fadeInStart = tester
+            .widget<FadeTransition>(find.byKey(const Key('player-start-spec-overlay')))
+            .opacity
+            .value;
+        expect(fadeInStart, lessThan(0.5));
+        // Mid-fade-in (90ms of 180ms)
+        await tester.pump(const Duration(milliseconds: 90));
+        final fadeInMid = tester
+            .widget<FadeTransition>(find.byKey(const Key('player-start-spec-overlay')))
+            .opacity
+            .value;
+        expect(fadeInMid, greaterThan(0.0));
+        expect(fadeInMid, lessThan(1.0));
+        // Complete fade-in (180ms)
+        await tester.pump(const Duration(milliseconds: 120));
+        expect(
+          tester
+              .widget<FadeTransition>(find.byKey(const Key('player-start-spec-overlay')))
+              .opacity
+              .value,
+          closeTo(1.0, 0.01),
+        );
+        // Verify Wrap fits strictly inside 320pt viewport with zero right overflow.
+        final overlayRect = tester.getRect(
+          find.byKey(const Key('player-start-spec-overlay')),
+        );
+        expect(overlayRect.right, lessThanOrEqualTo(320.0));
+
+        // Transition highlightActive -> false while controls stay hidden -> 240ms fade-out.
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Stack(
+              children: [
+                StartSpecOverlay(
+                  badges: badges,
+                  highlightActive: false,
+                  controlsVisible: false,
+                  concentric: true,
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 120));
+        expect(find.byKey(const Key('player-start-spec-overlay')), findsOneWidget);
+        final fadeOutMid = tester
+            .widget<FadeTransition>(find.byKey(const Key('player-start-spec-overlay')))
+            .opacity
+            .value;
+        expect(fadeOutMid, greaterThan(0.0));
+        expect(fadeOutMid, lessThan(1.0));
+        // Finish 240ms fade-out -> unmounts strictly on dismissed.
+        await tester.pump(const Duration(milliseconds: 160));
+        await tester.pump();
+        expect(find.byKey(const Key('player-start-spec-overlay')), findsNothing);
+
+        // Re-show then flip controlsVisible = true -> hides IMMEDIATELY (no back-button overlap).
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Stack(
+              children: [
+                StartSpecOverlay(
+                  badges: badges,
+                  highlightActive: true,
+                  controlsVisible: false,
+                ),
+              ],
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(find.byKey(const Key('player-start-spec-overlay')), findsOneWidget);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Stack(
+              children: [
+                StartSpecOverlay(
+                  badges: badges,
+                  highlightActive: true,
+                  controlsVisible: true,
+                ),
+              ],
+            ),
+          ),
+        );
+        expect(find.byKey(const Key('player-start-spec-overlay')), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'SleepTimerWarningBanner fits 320pt Split-View under 1.35x text scale with zero overflow',
+      (tester) async {
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(320, 640);
+        await tester.binding.setSurfaceSize(const Size(320, 640));
+        addTearDown(() async {
+          await tester.binding.setSurfaceSize(null);
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                textScaler: const TextScaler.linear(1.35),
+              ),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: SleepTimerWarningBanner(
+                    remainingSeconds: 25,
+                    onExtend15m: () {},
+                    onCancel: () {},
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        expect(find.byKey(const Key('sleep-timer-warning-banner')), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
 
     testWidgets('SlimProgressBar respects visibility, live stream, and OHOS guard', (tester) async {
       await tester.pumpWidget(
@@ -347,7 +477,7 @@ void main() {
           ),
         ),
       );
-      expect(find.text('⏩ 2.0× 倍速播放中'), findsOneWidget);
+      expect(find.text('2.0× 倍速播放中'), findsOneWidget);
       expect(find.text('左右滑动调速 · 上滑锁定'), findsOneWidget);
 
       await tester.pumpWidget(

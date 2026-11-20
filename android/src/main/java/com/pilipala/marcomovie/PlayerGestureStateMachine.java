@@ -32,6 +32,7 @@ public final class PlayerGestureStateMachine {
         WINDOW_FOCUS_LOST,
         BACKGROUND,
         AUDIO_FOCUS_LOST,
+        PLAYBACK_PAUSED,
         PIP_OR_MINI,
         DIALOG_OPEN,
         EPISODE_SWITCH,
@@ -259,6 +260,14 @@ public final class PlayerGestureStateMachine {
 
     public boolean isSpeedLocked() {
         return speedLocked;
+    }
+
+    public boolean isSpeedBoostActive() {
+        return state == State.LONG_PRESS_SPEED || state == State.SPEED_LOCK_READY;
+    }
+
+    public boolean isAnySpeedOverrideActive() {
+        return isSpeedBoostActive() || speedLocked;
     }
 
     public float getLockedSpeed() {
@@ -631,6 +640,10 @@ public final class PlayerGestureStateMachine {
                     waitDoubleTapDeadlineMs = nowMs + DOUBLE_TAP_TIMEOUT_MS;
                     transition(State.WAIT_DOUBLE_TAP);
                 }
+            } else if (withinSlop) {
+                // Slow stationary tap (260ms <= elapsed < 350ms): toggle controls cleanly.
+                transition(restingState());
+                listener.onSingleTap();
             } else {
                 transition(restingState());
             }
@@ -780,6 +793,8 @@ public final class PlayerGestureStateMachine {
                         && (reason == InterruptReason.EPISODE_SWITCH
                                 || reason == InterruptReason.EXIT_PLAYER
                                 || reason == InterruptReason.BACKGROUND
+                                || reason == InterruptReason.AUDIO_FOCUS_LOST
+                                || reason == InterruptReason.PLAYBACK_PAUSED
                                 || reason == InterruptReason.SCREEN_LOCKED
                                 || reason == InterruptReason.MULTI_TOUCH
                                 || reason == InterruptReason.PIP_OR_MINI

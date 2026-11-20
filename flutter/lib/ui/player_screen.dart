@@ -244,10 +244,13 @@ class _PlayerScreenState extends State<PlayerScreen>
       widget.storage.glassBlurLevel == 'solid';
 
   bool get _canUseNativeIosSheet =>
-      _useIos26PlayerChrome &&
-      IosLiquidGlassBridge.isAvailable &&
-      !IosLiquidGlassBridge.reduceTransparency &&
-      !_storageReduceTransparency;
+      _useIos26PlayerChrome && IosLiquidGlassBridge.isAvailable;
+
+  bool get _effectiveSheetForceOpaque =>
+      _storageReduceTransparency ||
+      IosLiquidGlassBridge.reduceTransparency ||
+      GlassworkBackdrop.reduceTransparency.value ||
+      GlassworkBackdrop.intensity.value <= 0.02;
 
   List<PlayerSpecBadge> get _fusedSpecBadges => MediaSpecFusion.fuse(
         videoWidth: _videoWidth,
@@ -716,6 +719,14 @@ class _PlayerScreenState extends State<PlayerScreen>
         });
         PlaybackWakelock.setEnabled(playing);
         if (!playing) {
+          if (_useEnhancedHud &&
+              (_gestureFsm.isSpeedBoosting ||
+                  _gestureFsm.isSpeedLockReady ||
+                  _gestureFsm.isSpeedLocked)) {
+            _cancelTransientInteractions(
+              GestureInterruptReason.playbackPaused,
+            );
+          }
           _saveProgress(immediate: true, syncImmediate: false);
         } else if (!_loading && !_buffering) {
           _scheduleHide();
@@ -802,6 +813,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   void didChangeDependencies() {
     super.didChangeDependencies();
     _syncMobileSystemBars();
+  }
+
+  @override
+  void didUpdateWidget(covariant PlayerScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.embedded && widget.embedded) {
+      _cancelTransientInteractions(GestureInterruptReason.pipEntered);
+    }
   }
 
   void _syncMobileSystemBars({bool force = false}) {
@@ -2368,6 +2387,10 @@ class _PlayerScreenState extends State<PlayerScreen>
             ),
           ),
         ),
+        // Wave 2 reserved DanmuLayer slot: strictly below brightness dimming,
+        // HUD controls & subtitles so dimming applies uniformly.
+        if (widget.danmuLayer != null && !OhosRuntime.isOhos)
+          Positioned.fill(child: IgnorePointer(child: widget.danmuLayer!)),
         if (_playerBrightness < 0.995)
           IgnorePointer(
             child: ColoredBox(
@@ -2377,9 +2400,6 @@ class _PlayerScreenState extends State<PlayerScreen>
               child: const SizedBox.expand(),
             ),
           ),
-        // Wave 2 reserved DanmuLayer slot: strictly below HUD controls & subtitles.
-        if (widget.danmuLayer != null && !OhosRuntime.isOhos)
-          Positioned.fill(child: IgnorePointer(child: widget.danmuLayer!)),
         if (_hudText.isNotEmpty &&
             speedCapsuleMode == SpeedCapsuleMode.hidden &&
             desktopPreview == null)
@@ -2919,13 +2939,18 @@ class _PlayerScreenState extends State<PlayerScreen>
             return KeyEventResult.handled;
           }
           if (event is! KeyDownEvent) return KeyEventResult.ignored;
+          final editingText =
+              FocusManager.instance.primaryFocus?.context?.widget
+                  is EditableText;
           if (!isCtrlOrCmd &&
+              !editingText &&
               _useEnhancedHud &&
               event.logicalKey == LogicalKeyboardKey.keyS) {
             _cycleDesktopSpeedKey();
             return KeyEventResult.handled;
           }
           if (!isCtrlOrCmd &&
+              !editingText &&
               _useEnhancedHud &&
               event.logicalKey == LogicalKeyboardKey.keyD) {
             _handleDanmuToggle();
@@ -3556,6 +3581,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _windowsMoreControls = false;
 
   void _showWindowsVolume() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     showAppleModalSheet<void>(context: context, title: '音量', maxWidth: 420,
       builder: (_) => StreamBuilder<double>(stream: _player.stream.volume,
         initialData: _player.state.volume, builder: (context, snapshot) =>
@@ -4388,6 +4414,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _showPrecisionSkipSheet({required bool isIntro}) {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     const presets = [0, 15, 30, 45, 60, 90, 120, 150, 180, 240];
     final previousSec = (isIntro ? _skipIntroSec : _skipOutroSec).clamp(0, 600);
     final effectiveDur = _duration.inMilliseconds > 0
@@ -4692,6 +4719,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _showQualityChoices() async {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final session = _playSession;
     final selected = await showAppleNativeActionSheet<CmsEpisode>(
       context,
@@ -4736,6 +4764,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final picked = await showAppleNativeOptionSheet<AudioTrack>(
           context,
           title: '切换音轨',
+          forceOpaque: _effectiveSheetForceOpaque,
           options: [
             for (final t in tracks)
               AppleNativePickerOption<AudioTrack>(
@@ -4820,6 +4849,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final picked = await showAppleNativeOptionSheet<SubtitleTrack>(
           context,
           title: '切换字幕',
+          forceOpaque: _effectiveSheetForceOpaque,
           options: [
             AppleNativePickerOption<SubtitleTrack>(
               value: SubtitleTrack.no(),
@@ -4956,6 +4986,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             ({String key, String title, String subtitle})>(
           context,
           title: '切换播放策略',
+          forceOpaque: _effectiveSheetForceOpaque,
           options: [
             for (final k in kernels)
               AppleNativePickerOption(
@@ -5052,6 +5083,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final picked = await showAppleNativeOptionSheet<double>(
           context,
           title: '播放倍速',
+          forceOpaque: _effectiveSheetForceOpaque,
           options: [
             for (final s in speeds)
               AppleNativePickerOption<double>(
@@ -5121,6 +5153,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           subtitle: _sleepTimer.isActive
               ? '当前：${_sleepTimer.shortStatusLabel}'
               : '仅在本次播放会话生效',
+          forceOpaque: _effectiveSheetForceOpaque,
           options: [
             for (final m in modes)
               AppleNativePickerOption<SleepTimerMode>(
@@ -5267,6 +5300,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final picked = await showAppleNativeOptionSheet<String>(
           context,
           title: '画面与播放策略',
+          forceOpaque: _effectiveSheetForceOpaque,
           options: options,
           fallback: () async {
             _showAspectAndStrategyFallbackSheet(applyChoice);
@@ -5371,6 +5405,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final picked = await showAppleNativeOptionSheet<String>(
           context,
           title: '音轨与字幕',
+          forceOpaque: _effectiveSheetForceOpaque,
           options: options,
           fallback: () async {
             _showSubtitleTracksSheet();
@@ -5455,6 +5490,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final picked = await showAppleNativeOptionSheet<String>(
           context,
           title: '双击手势行为',
+          forceOpaque: _effectiveSheetForceOpaque,
           options: options,
           fallback: () async {
             _showDoubleTapFallbackSheet(options);
@@ -5661,6 +5697,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final picked = await showAppleNativeOptionSheet<String>(
           context,
           title: '播放选项',
+          forceOpaque: _effectiveSheetForceOpaque,
           options: options,
           fallback: () async {
             _showIosMoreFallbackSheet(options, handleAction);
@@ -5740,6 +5777,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _showLinesSheet() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final parses = widget.storage.loadSavedConfig()?.parses ?? const [];
     final lineReasons = List<String?>.generate(
       _lines.length,
@@ -5820,6 +5858,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _showEpisodesSheet() {
+    _cancelTransientInteractions(GestureInterruptReason.dialogOpened);
     final screenSize = MediaQuery.sizeOf(context);
     final isLandscape = screenSize.width > screenSize.height;
     final parses = widget.storage.loadSavedConfig()?.parses ?? const [];

@@ -211,13 +211,17 @@ class SleepTimerWarningBanner extends StatelessWidget {
             size: 15,
           ),
           const SizedBox(width: 7),
-          Text(
-            '定时关闭还剩 ${remainingSeconds}s',
-            style: const TextStyle(
-              color: AppleColors.labelPrimary,
-              fontSize: 12.5,
-              fontWeight: FontWeight.w600,
-              fontFeatures: [FontFeature.tabularFigures()],
+          Flexible(
+            child: Text(
+              '定时关闭还剩 ${remainingSeconds}s',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: AppleColors.labelPrimary,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
             ),
           ),
           const SizedBox(width: 10),

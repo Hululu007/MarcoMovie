@@ -1271,6 +1271,9 @@ final class PlayerChrome {
         if (a.touchPlayerGesture != null) {
             a.touchPlayerGesture.onEpisodeSwitch();
         }
+        if (a.playbackControls != null) {
+            a.playbackControls.resetEpisodeTransientState();
+        }
         String lineName = line == null || line.name == null ? "" : line.name;
         String epName = episode == null || episode.name == null ? "" : episode.name;
         episodeLabel.setText(epName + (lineName.isEmpty() ? "" : "  ·  " + lineName));
@@ -1344,6 +1347,9 @@ final class PlayerChrome {
     }
 
     void syncClockViews() {
+        if (a.touchPlayerGesture != null) {
+            a.touchPlayerGesture.syncRuntimeState();
+        }
         String now = formatWallTime();
         boolean timeChanged = !now.equals(lastWallClock);
         if (timeChanged) {

@@ -685,7 +685,7 @@ public final class StartSpecBanner extends LinearLayout {
     public void cancel() {
         removeCallbacks(showRunnable);
         removeCallbacks(hideRunnable);
-        animate().cancel();
+        animate().withEndAction(null).cancel();
         activeDisplay = false;
         setVisibility(View.GONE);
         setAlpha(0f);
@@ -792,6 +792,7 @@ public final class StartSpecBanner extends LinearLayout {
                     .alpha(1f)
                     .setDuration(REDUCED_FADE_MS)
                     .setInterpolator(new LinearInterpolator())
+                    .withEndAction(null)
                     .start();
         } else {
             setTranslationY(-dp(6));
@@ -800,6 +801,7 @@ public final class StartSpecBanner extends LinearLayout {
                     .translationY(0f)
                     .setDuration(FADE_IN_MS)
                     .setInterpolator(new DecelerateInterpolator())
+                    .withEndAction(null)
                     .start();
         }
         removeCallbacks(hideRunnable);

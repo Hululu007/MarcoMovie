@@ -145,7 +145,7 @@ class _PlayerSpeedCapsuleState extends State<PlayerSpeedCapsule> {
                 ),
                 const SizedBox(width: 6),
                 Text(
-                  '🔒 $speedLabel× 锁定中 · 点击恢复',
+                  '$speedLabel× 锁定中 · 点击恢复',
                   style: const TextStyle(
                     color: AppleColors.labelPrimary,
                     fontSize: 12.5,
@@ -214,7 +214,7 @@ class _PlayerSpeedCapsuleState extends State<PlayerSpeedCapsule> {
                   ),
                   const SizedBox(width: 6),
                   Text(
-                    '⏩ $speedLabel× 倍速播放中',
+                    '$speedLabel× 倍速播放中',
                     style: const TextStyle(
                       color: AppleColors.labelPrimary,
                       fontSize: 13.5,
