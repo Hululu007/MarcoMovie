@@ -1336,18 +1336,10 @@ final class CloudSyncDialog {
         lanRow.addView(connectLanBtn, new LinearLayout.LayoutParams(-1, a.dp(42)));
         panel.addView(lanRow, new LinearLayout.LayoutParams(-1, -2));
 
-        ScrollView scroll = new TvScrollView(a);
-        scroll.setVerticalScrollBarEnabled(false);
-        scroll.addView(panel, new ScrollView.LayoutParams(-1, -2));
-
-        int maxHeight = Math.max(a.dp(260), Math.round(a.windowHeight() * 0.72f));
-        LinearLayout wrapper = a.vertical();
-        wrapper.addView(scroll, new LinearLayout.LayoutParams(-1, maxHeight));
-
         AppDialog dialog =
                 new AppDialog.Builder(a)
                         .setTitle("多端网络同步")
-                        .setView(wrapper)
+                        .setView(panel)
                         .setNegativeButton("关闭", null)
                         .create();
         holder[0] = dialog;

@@ -401,6 +401,7 @@ final class CatalogScreen {
                 card.setFocusable(true);
                 card.setFocusableInTouchMode(true);
                 card.setClickable(true);
+                TvFocusFrame.attachCard(card, "history-grid");
 
                 FrameLayout art = new FrameLayout(a);
                 GradientDrawable artBg =

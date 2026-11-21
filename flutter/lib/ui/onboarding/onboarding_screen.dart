@@ -974,7 +974,10 @@ class _OnboardingScreenState extends State<OnboardingScreen>
           ),
         ],
       ),
-      child: child,
+      child: Material(
+        type: MaterialType.transparency,
+        child: child,
+      ),
     );
   }
 

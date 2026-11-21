@@ -18,6 +18,11 @@ class WindowsImmersiveFrame extends StatefulWidget {
     false,
   );
 
+  /// Reference count of mounted full-bleed dark immersive pages (e.g. Windows
+  /// Detail / Player) so caption icons stay light even when a light desktop
+  /// theme is active on the main shell.
+  static final ValueNotifier<int> darkSurfaceDepth = ValueNotifier<int>(0);
+
   final Widget child;
   final bool attachWindowListener;
 
@@ -179,19 +184,36 @@ class WindowsTitleBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final winAppearance = WindowsAppearanceScope.maybeOf(context);
+    return ValueListenableBuilder<int>(
+      valueListenable: WindowsImmersiveFrame.darkSurfaceDepth,
+      builder: (context, darkDepth, _) {
+        final isDark = darkDepth > 0 || (winAppearance?.dark ?? true);
+        return _buildBar(context, winAppearance: winAppearance, isDark: isDark);
+      },
+    );
+  }
+
+  Widget _buildBar(
+    BuildContext context, {
+    required WindowsAppearance? winAppearance,
+    required bool isDark,
+  }) {
     return Material(
       type: MaterialType.transparency,
       child: DecoratedBox(
         key: const ValueKey('windows-immersive-title-bar'),
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Color(0x5806070A),
-              Color(0x0006070A),
-            ],
-          ),
+        decoration: BoxDecoration(
+          gradient: winAppearance != null
+              ? null
+              : const LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Color(0x5806070A),
+                    Color(0x0006070A),
+                  ],
+                ),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -202,7 +224,7 @@ class WindowsTitleBar extends StatelessWidget {
                   padding: const EdgeInsets.only(left: 14),
                   child: Align(
                     alignment: Alignment.centerLeft,
-                    child: WindowsAppearanceScope.maybeOf(context) != null
+                    child: winAppearance != null
                         ? const SizedBox.expand()
                         : Opacity(
                       opacity: isFocused ? 0.78 : 0.45,
@@ -233,6 +255,7 @@ class WindowsTitleBar extends StatelessWidget {
               onTap: onMinimize,
               icon: CupertinoIcons.minus,
               iconSize: 13,
+              darkSurface: isDark,
             ),
             _WindowsCaptionButton(
               key: const ValueKey('win-titlebar-maximize'),
@@ -242,6 +265,7 @@ class WindowsTitleBar extends StatelessWidget {
                   ? CupertinoIcons.uiwindow_split_2x1
                   : CupertinoIcons.square,
               iconSize: 12,
+              darkSurface: isDark,
             ),
             _WindowsCaptionButton(
               key: const ValueKey('win-titlebar-close'),
@@ -250,6 +274,7 @@ class WindowsTitleBar extends StatelessWidget {
               onTap: onClose,
               icon: CupertinoIcons.xmark,
               iconSize: 13,
+              darkSurface: isDark,
             ),
           ],
         ),
@@ -263,6 +288,7 @@ class _WindowsCaptionButton extends StatefulWidget {
   final IconData icon;
   final double iconSize;
   final bool isClose;
+  final bool darkSurface;
   final VoidCallback onTap;
 
   const _WindowsCaptionButton({
@@ -272,6 +298,7 @@ class _WindowsCaptionButton extends StatefulWidget {
     required this.iconSize,
     required this.onTap,
     this.isClose = false,
+    this.darkSurface = true,
   });
 
   @override
@@ -286,12 +313,26 @@ class _WindowsCaptionButtonState extends State<_WindowsCaptionButton> {
   Widget build(BuildContext context) {
     final Color bg;
     if (_pressed) {
-      bg = widget.isClose ? const Color(0xFFC50F1F) : const Color(0x2EFFFFFF);
+      bg = widget.isClose
+          ? const Color(0xFFC50F1F)
+          : (widget.darkSurface
+              ? const Color(0x2EFFFFFF)
+              : const Color(0x1E0F172A));
     } else if (_hovered) {
-      bg = widget.isClose ? const Color(0xFFE81123) : const Color(0x1FFFFFFF);
+      bg = widget.isClose
+          ? const Color(0xFFE81123)
+          : (widget.darkSurface
+              ? const Color(0x1FFFFFFF)
+              : const Color(0x120F172A));
     } else {
       bg = Colors.transparent;
     }
+
+    final iconColor = (_hovered && widget.isClose)
+        ? Colors.white
+        : (widget.darkSurface
+            ? const Color(0xD8FFFFFF)
+            : const Color(0xD818212F));
 
     final buttonBox = AnimatedContainer(
       duration: const Duration(milliseconds: 110),
@@ -302,9 +343,7 @@ class _WindowsCaptionButtonState extends State<_WindowsCaptionButton> {
       child: Icon(
         widget.icon,
         size: widget.iconSize,
-        color: (_hovered && widget.isClose)
-            ? Colors.white
-            : const Color(0xD8FFFFFF),
+        color: iconColor,
       ),
     );
 

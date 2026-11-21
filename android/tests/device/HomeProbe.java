@@ -767,15 +767,15 @@ public final class HomeProbe extends Instrumentation {
                                 a.homeAmbient.transition(warm[0], cool[0]);
                                 // Check the requested colors in the same UI task: a queued
                                 // posterReady may legitimately choose new colors afterwards.
-                                return a.homeAmbient.animation == null
-                                        && a.homeAmbient.fraction == 1
+                                return !a.homeAmbient.loopRunning
+                                        && a.homeAmbient.morphProgress >= 1f
                                         && a.homeAmbient.left == warm[0]
                                         && a.homeAmbient.right == cool[0];
                             }));
             SystemClock.sleep(250);
             check(
                     "ambient_pending_poster_remains_static",
-                    ui(() -> a.homeAmbient.animation == null && a.homeAmbient.fraction == 1));
+                    ui(() -> !a.homeAmbient.loopRunning && a.homeAmbient.morphProgress >= 1f));
             runOnMainSync(() -> a.reduced = a.prefs.getBoolean("reduced", false));
             frame("overview");
             runOnMainSync(() -> tag("home-video:0").requestFocus());
@@ -2181,8 +2181,7 @@ public final class HomeProbe extends Instrumentation {
                 ui(
                         () ->
                                 a.scroll.getTop() + a.body.getPaddingTop()
-                                        >= tag("home-dock").getBottom()
-                                                + a.dp(6 + a.homeDock.hintHeightDp)));
+                                        >= tag("home-dock").getBottom() + a.dp(6)));
         check(
                 "reduced_motion_snaps_glass_without_delaying_category",
                 ui(

@@ -7,21 +7,28 @@ import android.widget.ScrollView;
 /** A single focus reveal policy; retargeting retains position and velocity. */
 final class TvScrollView extends ScrollView {
     final MainActivity a;
-    final MotionSpring spring = new MotionSpring(0, 20, .4f);
+    final MotionSpring spring = new MotionSpring(0, 28, .4f);
     final Rect tempRect = new Rect();
+    final TvFocusFrame focusFrame;
     MotionLoop.Step motion;
     boolean focusing, layingOut;
     boolean readingMode;
+    boolean suppressNextReveal;
     long lastReadingStep;
     int goal;
 
     TvScrollView(MainActivity host) {
         super(host);
         a = host;
+        focusFrame = (host != null && host.isTvDevice()) ? new TvFocusFrame(host, this) : null;
         setOverScrollMode(OVER_SCROLL_NEVER);
         setSmoothScrollingEnabled(false);
         setClipChildren(false);
         setClipToPadding(false);
+    }
+
+    void setFocusFrameEnabled(boolean enabled) {
+        if (focusFrame != null) focusFrame.setEnabled(enabled);
     }
 
     @Override
@@ -30,6 +37,7 @@ final class TvScrollView extends ScrollView {
         canvas.clipRect(
                 getScrollX(), getScrollY(), getScrollX() + getWidth(), getScrollY() + getHeight());
         super.dispatchDraw(canvas);
+        if (focusFrame != null) focusFrame.draw(canvas);
         canvas.restoreToCount(save);
     }
 
@@ -85,6 +93,10 @@ final class TvScrollView extends ScrollView {
     }
 
     void reveal(View focused) {
+        if (suppressNextReveal) {
+            suppressNextReveal = false;
+            return;
+        }
         if (focused == null || getHeight() == 0) return;
         tempRect.set(0, 0, focused.getWidth(), focused.getHeight());
         offsetDescendantRectToMyCoords(focused, tempRect);
@@ -92,7 +104,7 @@ final class TvScrollView extends ScrollView {
     }
 
     void reveal(Rect area) {
-        int margin = a.dp(14);
+        int margin = readingMode ? a.dp(56) : a.dp(14);
         int reference = motion == null ? getScrollY() : goal;
         int top = reference + margin, bottom = reference + getHeight() - margin;
         int y = reference;
@@ -113,6 +125,7 @@ final class TvScrollView extends ScrollView {
         } finally {
             focusing = false;
         }
+        if (focusFrame != null) focusFrame.follow(focused);
         reveal(focused);
     }
 
@@ -165,7 +178,7 @@ final class TvScrollView extends ScrollView {
     }
 
     boolean readingKey(KeyEvent event, int direction, View focused, View next) {
-        if (event.getRepeatCount() > 0 && event.getEventTime() - lastReadingStep < 120) return true;
+        if (event.getRepeatCount() > 0 && event.getEventTime() - lastReadingStep < 90) return true;
         lastReadingStep = event.getEventTime();
         int reference = motion == null ? getScrollY() : goal;
         int top = reference + a.dp(12), bottom = reference + getHeight() - a.dp(12);
@@ -184,7 +197,6 @@ final class TvScrollView extends ScrollView {
                 offsetDescendantRectToMyCoords(next, area);
                 if (direction == FOCUS_UP && area.height() > getHeight() - a.dp(28))
                     moveTo(area.bottom - getHeight() + a.dp(14));
-                else reveal(next);
                 return true;
             }
         }
@@ -223,13 +235,26 @@ final class TvScrollView extends ScrollView {
     }
 
     @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        if (getAlpha() < 0.05f) return false;
+        return super.dispatchTouchEvent(ev);
+    }
+
+    @Override
     public boolean onTouchEvent(MotionEvent event) {
         if (event.getActionMasked() == MotionEvent.ACTION_DOWN) cancelMotion();
         return super.onTouchEvent(event);
     }
 
     @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        if (focusFrame != null) focusFrame.onAttachedToWindow();
+    }
+
+    @Override
     protected void onDetachedFromWindow() {
+        if (focusFrame != null) focusFrame.onDetachedFromWindow();
         cancelMotion();
         super.onDetachedFromWindow();
     }

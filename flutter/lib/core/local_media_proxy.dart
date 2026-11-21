@@ -192,6 +192,7 @@ class LocalMediaLease {
     this._isCancelled,
     this._capability,
     this._clock,
+    this._isLive,
   )   : _initialOrigin = _originOf(initialTarget),
         _created = _clock() {
     _initialUrl = _register(initialTarget, _inferInitialKind(initialTarget));
@@ -201,6 +202,7 @@ class LocalMediaLease {
 
   static const int _maxConcurrentRequests = 24;
   static const int _flushThresholdBytes = 4 * 1024 * 1024;
+  static const int _liveFlushThresholdBytes = 64 * 1024;
   static const int _maxPlaylistBytes = 4 * 1024 * 1024;
   static const int _sniffPrefixBytes = 4096;
   static const String _defaultBrowserUa =
@@ -237,6 +239,7 @@ class LocalMediaLease {
   final bool Function() _isCancelled;
   final String _capability;
   final DateTime Function() _clock;
+  final bool _isLive;
   final DateTime _created;
   final _cookieJar = _SessionCookieJar();
   final _targets = <String, _RegisteredTarget>{};
@@ -247,9 +250,15 @@ class LocalMediaLease {
   http.Client? _directOnlyClient;
   Timer? _timer;
   bool _closed = false;
+  int? _lastUpstreamStatusCode;
+  String? _lastUpstreamHost;
+  Object? _lastUpstreamError;
 
   Uri get url => _initialUrl;
   bool get isClosed => _closed;
+  int? get lastUpstreamStatusCode => _lastUpstreamStatusCode;
+  String? get lastUpstreamHost => _lastUpstreamHost;
+  Object? get lastUpstreamError => _lastUpstreamError;
 
   /// Registers a companion stream (e.g. separate DASH `.m4s` audio track) onto
   /// this session's loopback gateway so it receives the same anti-leech headers.
@@ -389,6 +398,7 @@ class LocalMediaLease {
     required bool Function() isCancelled,
     DateTime Function()? clock,
     http.Client? client,
+    bool isLive = false,
   }) async {
     if (!shouldProxy(target)) {
       throw const FormatException('本地媒体代理仅接受远程 HTTP/HTTPS 流地址');
@@ -415,7 +425,8 @@ class LocalMediaLease {
       (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
     ).join();
     final ownsClient = client == null;
-    final transport = client ?? _createDirectFallbackHttpClient();
+    final transport =
+        client ?? _createDirectFallbackHttpClient(isLive: isLive);
     return LocalMediaLease._(
       server,
       transport,
@@ -425,14 +436,18 @@ class LocalMediaLease {
       isCancelled,
       capability,
       clock ?? DateTime.now,
+      isLive,
     );
   }
 
-  static http.Client _createDirectFallbackHttpClient({bool directOnly = false}) {
+  static http.Client _createDirectFallbackHttpClient({
+    bool directOnly = false,
+    bool isLive = false,
+  }) {
     final io = HttpClient()
       ..autoUncompress = true
       ..maxConnectionsPerHost = 12
-      ..connectionTimeout = const Duration(seconds: 15)
+      ..connectionTimeout = Duration(seconds: isLive ? 12 : 15)
       ..idleTimeout = const Duration(seconds: 30);
     if (directOnly) {
       io.findProxy = (_) => 'DIRECT';
@@ -637,22 +652,26 @@ class LocalMediaLease {
           ifRange: ifRange,
           allowRange: allowRange,
         ));
+      final requestTimeout = Duration(seconds: _isLive ? 15 : 25);
       http.StreamedResponse response;
       try {
         final activeTransport = _directOnlyClient ?? _client;
         response = await activeTransport
             .send(makeReq())
-            .timeout(const Duration(seconds: 25));
+            .timeout(requestTimeout);
       } catch (error) {
         if (_ownsClient &&
             _directOnlyClient == null &&
             !_closed &&
             !_isCancelled() &&
             _isDeadLocalProxyError(current, error)) {
-          _directOnlyClient = _createDirectFallbackHttpClient(directOnly: true);
+          _directOnlyClient = _createDirectFallbackHttpClient(
+            directOnly: true,
+            isLive: _isLive,
+          );
           response = await _directOnlyClient!
               .send(makeReq())
-              .timeout(const Duration(seconds: 25));
+              .timeout(requestTimeout);
         } else {
           rethrow;
         }
@@ -668,7 +687,7 @@ class LocalMediaLease {
       }
       await response.stream.listen((_) {}).cancel();
       final location = response.headers['location'];
-      if (location == null || location.trim().isEmpty || redirects >= 6) {
+      if (location == null || location.trim().isEmpty || redirects >= 10) {
         throw const FormatException('媒体重定向次数过多或地址缺失');
       }
       final next = current.resolve(location.trim()).removeFragment();
@@ -696,6 +715,31 @@ class LocalMediaLease {
     }
     if (bytes.length - i < 7) return false;
     return latin1.decode(bytes.sublist(i, i + 7)) == '#EXTM3U';
+  }
+
+  static bool _couldBeM3u8Prefix(List<int> bytes) {
+    var i = 0;
+    if (bytes.length >= 3 &&
+        bytes[0] == 0xEF &&
+        bytes[1] == 0xBB &&
+        bytes[2] == 0xBF) {
+      i = 3;
+    }
+    while (i < bytes.length &&
+        (bytes[i] == 0x20 ||
+            bytes[i] == 0x09 ||
+            bytes[i] == 0x0D ||
+            bytes[i] == 0x0A)) {
+      i++;
+    }
+    if (i >= bytes.length) return true;
+    const magic = <int>[0x23, 0x45, 0x58, 0x54, 0x4D, 0x33, 0x55]; // #EXTM3U
+    final remaining = bytes.length - i;
+    final checkLen = remaining < magic.length ? remaining : magic.length;
+    for (var j = 0; j < checkLen; j++) {
+      if (bytes[i + j] != magic[j]) return false;
+    }
+    return true;
   }
 
   static bool _hasNonZeroRangeStart(String? range) {
@@ -744,7 +788,7 @@ class LocalMediaLease {
         method: request.method,
         range: range,
         ifRange: ifRange,
-        allowRange: !isExplicitPlaylist,
+        allowRange: !isExplicitPlaylist && !_isLive,
       );
 
       if (_closed || _isCancelled()) {
@@ -754,10 +798,15 @@ class LocalMediaLease {
       }
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
+        _lastUpstreamStatusCode = response.statusCode;
+        _lastUpstreamHost = finalTarget.host;
         await response.stream.listen((_) {}).cancel();
         request.response.statusCode = response.statusCode;
         return;
       }
+      _lastUpstreamStatusCode = response.statusCode;
+      _lastUpstreamHost = finalTarget.host;
+      _lastUpstreamError = null;
 
       final mime = (response.headers['content-type'] ?? '').toLowerCase();
       final knownPlaylist = isExplicitPlaylist ||
@@ -787,12 +836,14 @@ class LocalMediaLease {
         return;
       }
 
-      // Sniff prefix for extensionless #EXTM3U playlists or disguised TS segments.
+      // Sniff prefix for extensionless #EXTM3U playlists (including PHP/text/html
+      // dynamic IPTV gateways) or disguised TS segments.
       final shouldSniffPrefix = !_hasNonZeroRangeStart(range) &&
           (registered.kind == _TargetKind.tsSegment ||
               (registered.kind == _TargetKind.auto &&
                   (mime.isEmpty ||
-                      mime.contains('text/plain') ||
+                      mime.startsWith('text/') ||
+                      mime.contains('application/text') ||
                       mime.contains('octet-stream'))));
 
       if (shouldSniffPrefix) {
@@ -813,7 +864,8 @@ class LocalMediaLease {
       try {
         request.response.statusCode = HttpStatus.gone;
       } catch (_) {}
-    } catch (_) {
+    } catch (error) {
+      _lastUpstreamError = error;
       try {
         request.response.statusCode = HttpStatus.badGateway;
       } catch (_) {}
@@ -828,6 +880,8 @@ class LocalMediaLease {
   void _copyResponseHeaders(
       http.StreamedResponse upstream, HttpResponse downstream) {
     downstream.statusCode = upstream.statusCode;
+    final encoding = (upstream.headers['content-encoding'] ?? '').trim().toLowerCase();
+    final isCompressed = encoding.isNotEmpty && encoding != 'identity';
     for (final key in const [
       'content-type',
       'content-length',
@@ -836,6 +890,7 @@ class LocalMediaLease {
       'etag',
       'last-modified',
     ]) {
+      if (key == 'content-length' && isCompressed) continue;
       final value = upstream.headers[key];
       if (value != null && value.isNotEmpty) {
         downstream.headers.set(key, value);
@@ -961,6 +1016,10 @@ class LocalMediaLease {
               playlistBuilder.add(taken);
               return;
             }
+            if (kind == _TargetKind.auto && !_couldBeM3u8Prefix(currentBytes)) {
+              beginBinaryStream(prefixBuilder.takeBytes());
+              return;
+            }
             if (prefixBuilder.length >= _sniffPrefixBytes) {
               final prefix = prefixBuilder.takeBytes();
               if (_startsWithM3u8Magic(prefix)) {
@@ -990,7 +1049,9 @@ class LocalMediaLease {
           }
           downstream.add(chunk);
           pendingBytes += chunk.length;
-          if (pendingBytes >= _flushThresholdBytes) {
+          final flushThreshold =
+              _isLive ? _liveFlushThresholdBytes : _flushThresholdBytes;
+          if (pendingBytes >= flushThreshold) {
             pendingBytes = 0;
             subscription?.pause(
               downstream
@@ -1093,7 +1154,9 @@ class LocalMediaLease {
           return;
         }
         pendingBytes += chunk.length;
-        if (pendingBytes >= _flushThresholdBytes) {
+        final flushThreshold =
+            _isLive ? _liveFlushThresholdBytes : _flushThresholdBytes;
+        if (pendingBytes >= flushThreshold) {
           pendingBytes = 0;
           subscription?.pause(
             sink

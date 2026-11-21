@@ -99,7 +99,8 @@ final class PhoneConfigDialog {
                     a.text("手机与电视连接同一网络，扫码粘贴配置地址。新源会单独保存，旧源可在「已添加源」中切换。", 15, MainActivity.MUTED);
             panel.addView(note);
             a.gap(panel, 12);
-            int qrSize = a.dp(190);
+            int qrSize =
+                    Math.min(a.dp(172), Math.max(a.dp(132), Math.round(a.windowHeight() * 0.29f)));
             BitMatrix matrix =
                     new QRCodeWriter().encode(address, BarcodeFormat.QR_CODE, qrSize, qrSize);
             int[] pixels = new int[qrSize * qrSize];
@@ -110,7 +111,7 @@ final class PhoneConfigDialog {
             qr.setTag("config-qr");
             qr.setContentDescription("手机扫码配置二维码");
             qr.setImageBitmap(Bitmap.createBitmap(pixels, qrSize, qrSize, Bitmap.Config.ARGB_8888));
-            panel.addView(qr, new LinearLayout.LayoutParams(a.dp(190), a.dp(190)));
+            panel.addView(qr, new LinearLayout.LayoutParams(qrSize, qrSize));
             TextView url = a.text(address, 12, MainActivity.WHITE);
             url.setTag("config-phone-address");
             url.setGravity(android.view.Gravity.CENTER);
@@ -185,7 +186,8 @@ final class PhoneConfigDialog {
             note.setLineSpacing(a.dp(3), 1f);
             panel.addView(note);
             a.gap(panel, 12);
-            int qrSize = a.dp(186);
+            int qrSize =
+                    Math.min(a.dp(172), Math.max(a.dp(132), Math.round(a.windowHeight() * 0.29f)));
             BitMatrix matrix =
                     new QRCodeWriter().encode(address, BarcodeFormat.QR_CODE, qrSize, qrSize);
             int[] pixels = new int[qrSize * qrSize];

@@ -48,8 +48,10 @@ final class SourceController {
     }
 
     static boolean available(MainActivity a, Cms.Config cfg, Cms.Site s) {
-        return s.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)
-                || s.api.startsWith("catpaw://")
+        if (s == null) return false;
+        String api = s.api == null ? "" : s.api;
+        return api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)
+                || api.startsWith("catpaw://")
                 || HttpT4Engine.eligible(s)
                 || s.supported()
                 || (a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true)
@@ -94,9 +96,10 @@ final class SourceController {
                         if (existing != null) return existing;
                     }
                     SourceEngine raw;
-                    if (s.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX))
+                    String api = s.api == null ? "" : s.api;
+                    if (api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX))
                         raw = new EmbyEngine(a, s);
-                    else if (s.api.startsWith("catpaw://")) raw = new CatPawEngine(a, s);
+                    else if (api.startsWith("catpaw://")) raw = new CatPawEngine(a, s);
                     else if (HttpT4Engine.eligible(s)) raw = new HttpT4Engine(s);
                     else if (s.supported()) raw = new JsonCmsEngine(s);
                     else if (a.prefs.getBoolean(Prefs.EXPERIMENTAL_CSP, true)
@@ -263,6 +266,58 @@ final class SourceController {
                 || lowerId.contains("register");
     }
 
+    private static final long DETAIL_DISK_TTL_MS = 15L * 60L * 1000L;
+
+    private static java.io.File detailDiskFile(MainActivity a, Cms.Site site, String id) {
+        if (a == null || a.privateMode || a.reduced || site == null || id == null || id.isEmpty()) {
+            return null;
+        }
+        if (isConfigOrNetdiskSite(site)) return null;
+        if (site.api != null && site.api.contains("fixture.test")) return null;
+        java.io.File cacheRoot = a.getCacheDir();
+        if (cacheRoot == null) return null;
+        java.io.File dir = new java.io.File(cacheRoot, "detail_v1");
+        String material = (site.key == null ? "" : site.key) + "\u0000" + id;
+        long h1 = 1125899906842597L;
+        for (int i = 0; i < material.length(); i++) {
+            h1 = h1 * 31L + material.charAt(i);
+        }
+        String name =
+                Long.toHexString(h1) + "_" + Integer.toHexString(material.hashCode()) + ".json";
+        return new java.io.File(dir, name);
+    }
+
+    private static String readDetailDiskCache(MainActivity a, Cms.Site site, String id) {
+        java.io.File f = detailDiskFile(a, site, id);
+        if (f == null || !f.isFile() || f.length() < 16 || f.length() > 1024 * 1024) return null;
+        long age = System.currentTimeMillis() - f.lastModified();
+        if (age < 0 || age > DETAIL_DISK_TTL_MS) return null;
+        try (java.io.FileInputStream in = new java.io.FileInputStream(f);
+                java.io.ByteArrayOutputStream out =
+                        new java.io.ByteArrayOutputStream((int) f.length())) {
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            return new String(out.toByteArray(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static void writeDetailDiskCache(MainActivity a, Cms.Site site, String id, String raw) {
+        if (raw == null || raw.length() < 16 || raw.length() > 1024 * 1024) return;
+        java.io.File f = detailDiskFile(a, site, id);
+        if (f == null) return;
+        try {
+            java.io.File dir = f.getParentFile();
+            if (dir != null && !dir.isDirectory()) dir.mkdirs();
+            try (java.io.FileOutputStream fos = new java.io.FileOutputStream(f)) {
+                fos.write(raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     static void prefetchDetail(MainActivity a, Cms.Site site, Cms.Video video) {
         if (a == null
                 || a.reduced
@@ -272,19 +327,22 @@ final class SourceController {
                 || video.id.isEmpty()) return;
         if (isConfigOrNetdiskSite(site) || isConfigOrNetdiskActionCard(site, video)) return;
         if (ListingRoute.isRedirect(video.tag, video.action, video.id)) return;
-        // Speculation must never occupy a serialized plugin or initialize another source.
-        // Keep one optional request at most, leaving the detail workers available for clicks.
+        if (SearchCoordinator.isSiteWedged(site.key)) return;
+        // Speculation must never initialize a new source, and keeps at most one in-flight request.
+        // Already-initialized engines (including TV CSP/JS/CatPaw sites) may safely prefetch while
+        // idle so pressing OK opens the detail page immediately.
         final SourceEngine source;
         synchronized (a) {
             source = a.engines.get(site.key);
         }
-        if (source == null || source.requiresExternalRuntime()) return;
+        if (source == null) return;
         if (a.detailPrefetch != null && !a.detailPrefetch.isDone()) return;
         if (video.lines != null
                 && !video.lines.isEmpty()
                 && video.description != null
                 && !video.description.trim().isEmpty()) return;
         final int epoch = a.engineEpoch;
+        final boolean privateAtStart = a.privateMode;
         final String id = video.id;
         final String key = epoch + ":" + site.key.length() + ":" + site.key + id;
         if (a.detailCache.get(key) != null) return;
@@ -294,6 +352,13 @@ final class SourceController {
                         () -> {
                             try {
                                 if (a.detailCache.get(key) != null) return;
+                                String disk = readDetailDiskCache(a, site, id);
+                                if (disk != null
+                                        && epoch == a.engineEpoch
+                                        && !Cms.listing(disk).videos.isEmpty()) {
+                                    a.detailCache.put(key, disk);
+                                    return;
+                                }
                                 String raw =
                                         a.detailFlights.get(
                                                 key,
@@ -311,6 +376,10 @@ final class SourceController {
                                                                     .videos
                                                                     .isEmpty()) {
                                                         a.detailCache.put(key, fetched);
+                                                        if (!privateAtStart && !a.privateMode) {
+                                                            writeDetailDiskCache(
+                                                                    a, site, id, fetched);
+                                                        }
                                                     }
                                                     return fetched;
                                                 });
@@ -333,6 +402,16 @@ final class SourceController {
                             try {
                                 timing.dispatched = SystemClock.elapsedRealtime();
                                 String raw = a.detailCache.get(key);
+                                if (raw == null) {
+                                    String disk = readDetailDiskCache(a, site, id);
+                                    if (disk != null && !Cms.listing(disk).videos.isEmpty()) {
+                                        raw = disk;
+                                        if (detailContext.matches(
+                                                a.config, a.privateMode, a.engineEpoch)) {
+                                            a.detailCache.put(key, disk);
+                                        }
+                                    }
+                                }
                                 timing.cached = raw != null;
                                 if (raw == null) {
                                     final long[] phases = new long[2];
@@ -366,8 +445,12 @@ final class SourceController {
                                 timing.parsed = SystemClock.elapsedRealtime();
                                 if (!timing.cached
                                         && detailContext.matches(
-                                                a.config, a.privateMode, a.engineEpoch))
+                                                a.config, a.privateMode, a.engineEpoch)) {
                                     a.detailCache.put(key, raw);
+                                    if (!a.privateMode) {
+                                        writeDetailDiskCache(a, site, id, raw);
+                                    }
+                                }
                                 Cms.Video video = listing.videos.get(0);
                                 if ((video.id == null || video.id.trim().isEmpty()) && id != null) {
                                     video.id = id.trim();
@@ -396,8 +479,10 @@ final class SourceController {
                                                             a.config, a.privateMode, a.engineEpoch))
                                                 return;
                                             View state = a.root.findViewWithTag("detail-loading");
-                                            if (state instanceof TextView)
+                                            if (state instanceof TextView) {
+                                                state.setVisibility(View.VISIBLE);
                                                 ((TextView) state).setText(a.message(error));
+                                            }
                                             LinearLayout target =
                                                     state != null
                                                                     && state.getParent()

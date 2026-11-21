@@ -75,6 +75,7 @@ final class FavoritesScreen {
             card.setFocusable(a.isTvDevice());
             card.setFocusableInTouchMode(a.isTvDevice());
             card.setClickable(true);
+            if (a.isTvDevice()) TvFocusFrame.attachCard(card, "favorites-grid");
             ImageView poster = new ImageView(a);
             poster.setScaleType(ImageView.ScaleType.CENTER_CROP);
             poster.setBackground(a.bg(0xff29292e, 10));

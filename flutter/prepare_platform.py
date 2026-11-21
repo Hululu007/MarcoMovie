@@ -1548,10 +1548,51 @@ def main() -> None:
                 1,
             )
         win_main.write_text(text, encoding="utf-8")
+    win_fw_h = win_runner / "flutter_window.h"
+    if win_fw_h.exists():
+        h_text = win_fw_h.read_text(encoding="utf-8")
+        h_changed = False
+        if "tray_channel_" not in h_text:
+            if "<shellapi.h>" not in h_text:
+                h_text = h_text.replace(
+                    "#include <memory>",
+                    "#include <flutter/method_channel.h>\n"
+                    "#include <flutter/standard_method_codec.h>\n"
+                    "#include <shellapi.h>\n\n"
+                    "#include <memory>\n"
+                    "#include <string>",
+                    1,
+                )
+            h_text = h_text.replace(
+                "  std::unique_ptr<flutter::FlutterViewController> flutter_controller_;",
+                "  std::unique_ptr<flutter::FlutterViewController> flutter_controller_;\n"
+                "  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> tray_channel_;\n"
+                "  NOTIFYICONDATAW tray_data_{};\n"
+                "  bool tray_icon_added_ = false;\n"
+                "  UINT taskbar_created_msg_ = 0;\n"
+                "  static constexpr UINT kTrayCallbackMsg = WM_APP + 101;\n"
+                "  static constexpr UINT kTrayMenuRestoreId = 1001;\n"
+                "  static constexpr UINT kTrayMenuQuitId = 1002;\n\n"
+                "  bool AddTrayIcon(const std::wstring& tooltip);\n"
+                "  void RemoveTrayIcon();\n"
+                "  void RestoreFromTray();\n"
+                "  void ShowTrayContextMenu(HWND hwnd);",
+                1,
+            )
+            h_changed = True
+        if h_changed:
+            win_fw_h.write_text(h_text, encoding="utf-8")
     win_fw = win_runner / "flutter_window.cpp"
     if win_fw.exists():
         text = win_fw.read_text(encoding="utf-8")
         changed = False
+        if '"resource.h"' not in text:
+            text = text.replace(
+                '#include "flutter_window.h"',
+                '#include "flutter_window.h"\n#include "resource.h"',
+                1,
+            )
+            changed = True
         if "marco_movie/wakelock" not in text and "RegisterPlugins(flutter_controller_->engine());" in text:
             if "<flutter/method_channel.h>" not in text:
                 text = "#include <flutter/method_channel.h>\n#include <flutter/standard_method_codec.h>\n" + text
@@ -1577,6 +1618,167 @@ def main() -> None:
                 1,
             )
             changed = True
+        if "marco_movie/windows_tray" not in text and "RegisterPlugins(flutter_controller_->engine());" in text:
+            tray_setup = (
+                "  taskbar_created_msg_ = ::RegisterWindowMessageW(L\"TaskbarCreated\");\n"
+                "  tray_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(\n"
+                "      flutter_controller_->engine()->messenger(), \"marco_movie/windows_tray\",\n"
+                "      &flutter::StandardMethodCodec::GetInstance());\n"
+                "  tray_channel_->SetMethodCallHandler(\n"
+                "      [this](const flutter::MethodCall<flutter::EncodableValue>& call,\n"
+                "             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {\n"
+                "        if (call.method_name() == \"hideToTray\") {\n"
+                "          std::wstring tip = L\"Marco Movie\";\n"
+                "          if (const auto* map = std::get_if<flutter::EncodableMap>(call.arguments())) {\n"
+                "            auto it = map->find(flutter::EncodableValue(\"tooltip\"));\n"
+                "            if (it != map->end()) {\n"
+                "              if (const auto* utf8 = std::get_if<std::string>(&it->second); utf8 && !utf8->empty()) {\n"
+                "                int needed = ::MultiByteToWideChar(CP_UTF8, 0, utf8->c_str(), -1, nullptr, 0);\n"
+                "                if (needed > 1) {\n"
+                "                  std::wstring converted(static_cast<size_t>(needed - 1), L'\\0');\n"
+                "                  ::MultiByteToWideChar(CP_UTF8, 0, utf8->c_str(), -1, converted.data(), needed);\n"
+                "                  tip = converted;\n"
+                "                }\n"
+                "              }\n"
+                "            }\n"
+                "          }\n"
+                "          bool ok = AddTrayIcon(tip);\n"
+                "          if (ok && GetHandle()) {\n"
+                "            ::ShowWindow(GetHandle(), SW_HIDE);\n"
+                "          }\n"
+                "          result->Success(flutter::EncodableValue(ok));\n"
+                "        } else if (call.method_name() == \"showFromTray\") {\n"
+                "          RestoreFromTray();\n"
+                "          result->Success(flutter::EncodableValue(true));\n"
+                "        } else if (call.method_name() == \"removeTray\") {\n"
+                "          RemoveTrayIcon();\n"
+                "          result->Success(flutter::EncodableValue(true));\n"
+                "        } else {\n"
+                "          result->NotImplemented();\n"
+                "        }\n"
+                "      });\n"
+            )
+            text = text.replace(
+                "  SetChildContent(flutter_controller_->view()->GetNativeWindow());",
+                tray_setup + "  SetChildContent(flutter_controller_->view()->GetNativeWindow());",
+                1,
+            )
+            changed = True
+        if "tray_channel_.reset();" not in text and "void FlutterWindow::OnDestroy()" in text:
+            text = text.replace(
+                "void FlutterWindow::OnDestroy() {",
+                "void FlutterWindow::OnDestroy() {\n"
+                "  RemoveTrayIcon();\n"
+                "  tray_channel_.reset();",
+                1,
+            )
+            changed = True
+        if "case kTrayCallbackMsg:" not in text and "switch (message) {" in text:
+            text = text.replace(
+                "  switch (message) {",
+                "  if (taskbar_created_msg_ != 0 && message == taskbar_created_msg_ && tray_icon_added_) {\n"
+                "    ::Shell_NotifyIconW(NIM_ADD, &tray_data_);\n"
+                "    return 0;\n"
+                "  }\n\n"
+                "  switch (message) {\n"
+                "    case kTrayCallbackMsg: {\n"
+                "      const UINT evt = LOWORD(lparam);\n"
+                "      if (evt == WM_LBUTTONUP || evt == WM_LBUTTONDBLCLK) {\n"
+                "        RestoreFromTray();\n"
+                "        return 0;\n"
+                "      }\n"
+                "      if (evt == WM_RBUTTONUP || evt == WM_CONTEXTMENU) {\n"
+                "        ShowTrayContextMenu(hwnd);\n"
+                "        return 0;\n"
+                "      }\n"
+                "      return 0;\n"
+                "    }",
+                1,
+            )
+            changed = True
+        if "bool FlutterWindow::AddTrayIcon(" not in text:
+            text = (
+                text.rstrip()
+                + "\n\n"
+                + "bool FlutterWindow::AddTrayIcon(const std::wstring& tooltip) {\n"
+                + "  HWND hwnd = GetHandle();\n"
+                + "  if (!hwnd) {\n"
+                + "    return false;\n"
+                + "  }\n"
+                + "  if (tray_icon_added_) {\n"
+                + "    wcsncpy_s(tray_data_.szTip,\n"
+                + "              tooltip.empty() ? L\"Marco Movie\" : tooltip.c_str(), _TRUNCATE);\n"
+                + "    ::Shell_NotifyIconW(NIM_MODIFY, &tray_data_);\n"
+                + "    return true;\n"
+                + "  }\n"
+                + "  tray_data_ = {};\n"
+                + "  tray_data_.cbSize = sizeof(NOTIFYICONDATAW);\n"
+                + "  tray_data_.hWnd = hwnd;\n"
+                + "  tray_data_.uID = 1;\n"
+                + "  tray_data_.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;\n"
+                + "  tray_data_.uCallbackMessage = kTrayCallbackMsg;\n"
+                + "  tray_data_.hIcon = ::LoadIconW(::GetModuleHandleW(nullptr),\n"
+                + "                                 MAKEINTRESOURCEW(IDI_APP_ICON));\n"
+                + "  if (!tray_data_.hIcon) {\n"
+                + "    tray_data_.hIcon = ::LoadIconW(nullptr, IDI_APPLICATION);\n"
+                + "  }\n"
+                + "  wcsncpy_s(tray_data_.szTip,\n"
+                + "            tooltip.empty() ? L\"Marco Movie\" : tooltip.c_str(), _TRUNCATE);\n"
+                + "  tray_icon_added_ = (::Shell_NotifyIconW(NIM_ADD, &tray_data_) == TRUE);\n"
+                + "  return tray_icon_added_;\n"
+                + "}\n\n"
+                + "void FlutterWindow::RemoveTrayIcon() {\n"
+                + "  if (tray_icon_added_) {\n"
+                + "    ::Shell_NotifyIconW(NIM_DELETE, &tray_data_);\n"
+                + "    tray_icon_added_ = false;\n"
+                + "  }\n"
+                + "}\n\n"
+                + "void FlutterWindow::RestoreFromTray() {\n"
+                + "  RemoveTrayIcon();\n"
+                + "  HWND hwnd = GetHandle();\n"
+                + "  if (hwnd) {\n"
+                + "    ::ShowWindow(hwnd, SW_SHOW);\n"
+                + "    if (::IsIconic(hwnd)) {\n"
+                + "      ::ShowWindow(hwnd, SW_RESTORE);\n"
+                + "    }\n"
+                + "    ::SetForegroundWindow(hwnd);\n"
+                + "  }\n"
+                + "  if (tray_channel_) {\n"
+                + "    tray_channel_->InvokeMethod(\"restore\", nullptr);\n"
+                + "  }\n"
+                + "}\n\n"
+                + "void FlutterWindow::ShowTrayContextMenu(HWND hwnd) {\n"
+                + "  HMENU menu = ::CreatePopupMenu();\n"
+                + "  if (!menu) {\n"
+                + "    return;\n"
+                + "  }\n"
+                + "  ::AppendMenuW(menu, MF_STRING, kTrayMenuRestoreId,\n"
+                + "                L\"\\u663e\\u793a Marco Movie\");\n"
+                + "  ::AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);\n"
+                + "  ::AppendMenuW(menu, MF_STRING, kTrayMenuQuitId,\n"
+                + "                L\"\\u9000\\u51fa Marco Movie\");\n"
+                + "  ::SetMenuDefaultItem(menu, kTrayMenuRestoreId, FALSE);\n"
+                + "  POINT pt{};\n"
+                + "  ::GetCursorPos(&pt);\n"
+                + "  ::SetForegroundWindow(hwnd);\n"
+                + "  UINT cmd = static_cast<UINT>(::TrackPopupMenu(\n"
+                + "      menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,\n"
+                + "      pt.x, pt.y, 0, hwnd, nullptr));\n"
+                + "  ::PostMessageW(hwnd, WM_NULL, 0, 0);\n"
+                + "  ::DestroyMenu(menu);\n"
+                + "  if (cmd == kTrayMenuRestoreId) {\n"
+                + "    RestoreFromTray();\n"
+                + "  } else if (cmd == kTrayMenuQuitId) {\n"
+                + "    RemoveTrayIcon();\n"
+                + "    if (tray_channel_) {\n"
+                + "      tray_channel_->InvokeMethod(\"quit\", nullptr);\n"
+                + "    } else {\n"
+                + "      ::PostMessageW(hwnd, WM_CLOSE, 0, 0);\n"
+                + "    }\n"
+                + "  }\n"
+                + "}\n"
+            )
+            changed = True
         if "this->Show();" in text and "// Immediate Show on Windows" not in text:
             text = text.replace(
                 "SetChildContent(flutter_controller_->view()->GetNativeWindow());",
@@ -1588,6 +1790,16 @@ def main() -> None:
             changed = True
         if changed:
             win_fw.write_text(text, encoding="utf-8")
+    win_runner_cmake = win_runner / "CMakeLists.txt"
+    if win_runner_cmake.exists():
+        cmake_text = win_runner_cmake.read_text(encoding="utf-8")
+        if '"shell32.lib"' not in cmake_text and '"dwmapi.lib"' in cmake_text:
+            cmake_text = cmake_text.replace(
+                'target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")',
+                'target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib" "shell32.lib")',
+                1,
+            )
+            win_runner_cmake.write_text(cmake_text, encoding="utf-8")
 
 if __name__ == "__main__":
     main()

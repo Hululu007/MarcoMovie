@@ -261,51 +261,81 @@ final class DanmakuView extends View implements AutoCloseable {
         return tvMode ? tvPacingMonitor.getEffectiveMaxRows() : configuredMaxRows;
     }
 
-    private static String decodeResponseStream(InputStream rawStream, String encoding)
-            throws IOException {
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        byte[] chunk = new byte[8192];
-        int total = 0, read;
-        while ((read = rawStream.read(chunk)) != -1) {
-            total += read;
-            if (total > 8 * 1024 * 1024) throw new IOException("弹幕文件过大");
-            buffer.write(chunk, 0, read);
-        }
-        byte[] bytes = buffer.toByteArray();
-        if (bytes.length == 0) return "";
-        String enc = encoding == null ? "" : encoding.toLowerCase(Locale.ROOT);
-        if (enc.contains("gzip")
-                || (bytes.length >= 2 && (bytes[0] & 0xff) == 0x1f && (bytes[1] & 0xff) == 0x8b)) {
-            try (InputStream gz = new GZIPInputStream(new ByteArrayInputStream(bytes))) {
-                return Cms.read(gz, 8 * 1024 * 1024);
-            } catch (Exception ignored) {
+    static String decodeResponseStream(InputStream rawStream, String encoding) throws IOException {
+        return LocalProxy.decodeDanmakuResponseStream(rawStream, encoding);
+    }
+
+    static Map<String, String> sanitizeDanmakuHeaders(
+            String danmakuUrl, String videoUrl, Map<String, String> videoHeaders) {
+        if (videoHeaders == null || videoHeaders.isEmpty()) return Collections.emptyMap();
+        boolean sameOrigin = sameHttpOrigin(danmakuUrl, videoUrl);
+        Map<String, String> clean = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : videoHeaders.entrySet()) {
+            String k = e.getKey();
+            String v = e.getValue();
+            if (k == null || v == null || v.isEmpty()) continue;
+            String lower = k.toLowerCase(Locale.ROOT);
+            if (lower.equals("range")
+                    || lower.equals("if-range")
+                    || lower.equals("host")
+                    || lower.equals("origin")
+                    || lower.equals("content-length")
+                    || lower.equals("accept-encoding")) {
+                continue;
             }
-        }
-        byte firstNonSpace = 0;
-        for (byte b : bytes) {
-            if (b != ' ' && b != '\t' && b != '\r' && b != '\n') {
-                firstNonSpace = b;
-                break;
+            // Never leak netdisk / video-CDN Cookie, Referer, Authorization, or client UA
+            // to a different danmaku server or loopback proxy route.
+            if (!sameOrigin
+                    && (lower.equals("cookie")
+                            || lower.equals("authorization")
+                            || lower.equals("referer")
+                            || lower.equals("user-agent"))) {
+                continue;
             }
+            clean.put(k, v);
         }
-        if (enc.contains("deflate")
-                || (firstNonSpace != '<' && firstNonSpace != '{' && firstNonSpace != '[')) {
-            for (boolean nowrap : new boolean[] {true, false}) {
-                try (InputStream inf =
-                        new InflaterInputStream(
-                                new ByteArrayInputStream(bytes), new Inflater(nowrap))) {
-                    String inflated = Cms.read(inf, 8 * 1024 * 1024);
-                    String trimmed = inflated.trim();
-                    if (trimmed.startsWith("<")
-                            || trimmed.startsWith("{")
-                            || trimmed.startsWith("[")) {
-                        return inflated;
-                    }
-                } catch (Exception ignored) {
-                }
+        return clean;
+    }
+
+    private static boolean sameHttpOrigin(String aUrl, String bUrl) {
+        if (aUrl == null || bUrl == null || aUrl.isEmpty() || bUrl.isEmpty()) return false;
+        try {
+            URL u1 = new URL(aUrl);
+            URL u2 = new URL(bUrl);
+            if (!u1.getProtocol().equalsIgnoreCase(u2.getProtocol())) return false;
+            if (!u1.getHost().equalsIgnoreCase(u2.getHost())) return false;
+            int p1 = u1.getPort() > 0 ? u1.getPort() : u1.getDefaultPort();
+            int p2 = u2.getPort() > 0 ? u2.getPort() : u2.getDefaultPort();
+            return p1 == p2;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    static String encodeDanmakuUrl(String raw) {
+        return LocalProxy.encodeDanmakuUrl(raw);
+    }
+
+    private static String describeUrlForLog(String url) {
+        if (url == null || url.isEmpty()) return "<empty>";
+        try {
+            URL u = new URL(url);
+            String query = u.getQuery();
+            String qHint = "";
+            if (query != null && !query.isEmpty()) {
+                int amp = query.indexOf('&');
+                qHint = "?" + (amp > 0 ? query.substring(0, amp) : query);
+                if (qHint.length() > 48) qHint = qHint.substring(0, 48);
             }
+            return u.getProtocol()
+                    + "://"
+                    + u.getHost()
+                    + (u.getPort() > 0 ? ":" + u.getPort() : "")
+                    + u.getPath()
+                    + qHint;
+        } catch (Exception ignored) {
+            return url.length() > 48 ? url.substring(0, 48) : url;
         }
-        return new String(bytes, "UTF-8");
     }
 
     static String fetchDanmaku(String candidate, Map<String, String> headers) throws Exception {
@@ -317,10 +347,41 @@ final class DanmakuView extends View implements AutoCloseable {
             } catch (Exception ignored) {
             }
         }
+        // Support local XML/JSON danmaku files pushed by CSP plugins (file:// or absolute path).
+        if (input.startsWith("file://") || input.startsWith("/")) {
+            String filePath =
+                    input.startsWith("file://")
+                            ? java.net.URLDecoder.decode(input.substring(7), "UTF-8")
+                            : input;
+            java.io.File file = new java.io.File(filePath);
+            if (!file.isFile() || !file.canRead()) {
+                throw new IOException("本地弹幕文件不可读: " + file.getName());
+            }
+            try (InputStream fis = new java.io.FileInputStream(file)) {
+                return decodeResponseStream(fis, "");
+            }
+        }
         String address = LocalProxy.rewrite(input);
         if (!Cms.isHttp(address)) {
             throw new IOException("来源没有提供有效弹幕地址");
         }
+        String encodedAddress = encodeDanmakuUrl(address);
+        String body = fetchDanmakuOnce(encodedAddress, headers, true);
+        if (body == null || body.trim().isEmpty()) {
+            // Retry once cleanly with identity encoding and empty headers after brief wait
+            // (handles async plugin cache warm-up and servers sensitive to gzip/extra headers).
+            try {
+                Thread.sleep(650);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+            body = fetchDanmakuOnce(encodedAddress, Collections.emptyMap(), false);
+        }
+        return body == null ? "" : body;
+    }
+
+    private static String fetchDanmakuOnce(
+            String address, Map<String, String> headers, boolean allowCompressed) throws Exception {
         Map<String, String> reqHeaders =
                 ProxyAddress.requestHeaders(
                         address,
@@ -340,7 +401,9 @@ final class DanmakuView extends View implements AutoCloseable {
                 connection.setConnectTimeout(12000);
                 connection.setReadTimeout(25000);
                 connection.setRequestProperty("User-Agent", Cms.USER_AGENT);
-                connection.setRequestProperty("Accept-Encoding", "gzip, deflate");
+                connection.setRequestProperty("Accept", "*/*");
+                connection.setRequestProperty(
+                        "Accept-Encoding", allowCompressed ? "gzip, deflate" : "identity");
                 for (Map.Entry<String, String> h : reqHeaders.entrySet()) {
                     String k = h.getKey();
                     if (k == null) continue;
@@ -385,7 +448,7 @@ final class DanmakuView extends View implements AutoCloseable {
                     if (loc == null || loc.trim().isEmpty()) {
                         throw new IOException("弹幕重定向缺少地址");
                     }
-                    URL targetUrl = new URL(currentUrl, loc.trim());
+                    URL targetUrl = new URL(currentUrl, encodeDanmakuUrl(loc.trim()));
                     if (!Cms.isHttp(targetUrl.toString())) {
                         throw new IOException("不支持此弹幕重定向协议: " + targetUrl.getProtocol());
                     }
@@ -401,11 +464,32 @@ final class DanmakuView extends View implements AutoCloseable {
                 }
 
                 if (status < 200 || status >= 300) {
-                    throw new IOException("弹幕服务器返回 HTTP " + status);
+                    throw new IOException(
+                            "弹幕服务器返回 HTTP "
+                                    + status
+                                    + " ("
+                                    + describeUrlForLog(currentUrl.toString())
+                                    + ")");
                 }
 
+                String encoding = connection.getContentEncoding();
+                String contentType = connection.getContentType();
                 try (InputStream in = connection.getInputStream()) {
-                    return decodeResponseStream(in, connection.getContentEncoding());
+                    String text = decodeResponseStream(in, encoding);
+                    if (text == null || text.trim().isEmpty()) {
+                        AppLog.w(
+                                "DanmakuView",
+                                "Empty danmaku body from "
+                                        + describeUrlForLog(currentUrl.toString())
+                                        + " status="
+                                        + status
+                                        + " ct="
+                                        + contentType
+                                        + " enc="
+                                        + encoding,
+                                null);
+                    }
+                    return text;
                 }
             }
             throw new IOException("弹幕重定向次数过多");

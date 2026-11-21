@@ -6,6 +6,7 @@ import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -170,6 +171,28 @@ final class PluginDialogStyler {
         return Collections.emptyList();
     }
 
+    static int resolveDialogWidthPx(int winW, int marginH, int maxCap) {
+        int safeWin = Math.max(240, winW);
+        int bounded = safeWin - Math.max(0, marginH);
+        return Math.max(200, Math.min(bounded, maxCap));
+    }
+
+    static int resolveMaxQrSizePx(int winH, int dpMin, int dpMax, boolean tv) {
+        int ratio = Math.round(Math.max(1, winH) * (tv ? 0.27f : 0.30f));
+        return Math.min(dpMax, Math.max(dpMin, ratio));
+    }
+
+    static void applyHorizontalMargins(
+            ViewGroup.MarginLayoutParams mlp, int left, int top, int right, int bottom) {
+        if (mlp == null) return;
+        zeroRelativeMargins(mlp);
+        mlp.setMargins(left, top, right, bottom);
+        if (Build.VERSION.SDK_INT >= 17) {
+            mlp.setMarginStart(left);
+            mlp.setMarginEnd(right);
+        }
+    }
+
     private static void stylePluginDecor(
             final MainActivity a, final ViewGroup decor, final ViewGroup content) {
         try {
@@ -177,13 +200,16 @@ final class PluginDialogStyler {
             DisplayMetrics dm = a.getResources().getDisplayMetrics();
             int winW = a.windowWidth() > 0 ? a.windowWidth() : dm.widthPixels;
             int winH = a.windowHeight() > 0 ? a.windowHeight() : dm.heightPixels;
+            final boolean tv = a.isTvDevice();
             final int maxDialogWidth =
-                    a.isTvDevice()
-                            ? Math.min(winW - a.dp(96), a.dp(540))
-                            : Math.min(winW - a.dp(24), a.dp(396));
+                    tv
+                            ? resolveDialogWidthPx(winW, a.dp(88), a.dp(660))
+                            : resolveDialogWidthPx(winW, a.dp(24), a.dp(408));
 
             decor.setBackground(new ColorDrawable(Color.TRANSPARENT));
             decor.setPadding(0, 0, 0, 0);
+            decor.setMinimumWidth(0);
+            decor.setMinimumHeight(0);
             adjustWindowLayoutParams(a, decor, maxDialogWidth, winH);
 
             if (firstPass) {
@@ -238,7 +264,7 @@ final class PluginDialogStyler {
                 wlp.width = targetWidth;
                 changed = true;
             }
-            int maxHeight = Math.round(screenHeight * 0.84f);
+            int maxHeight = Math.round(screenHeight * (a.isTvDevice() ? 0.88f : 0.84f));
             if (wlp.height > maxHeight) {
                 wlp.height = maxHeight;
                 changed = true;
@@ -262,6 +288,7 @@ final class PluginDialogStyler {
             if (changed) {
                 WindowManager wm = (WindowManager) a.getSystemService(Context.WINDOW_SERVICE);
                 if (wm != null) wm.updateViewLayout(decor, wlp);
+                decor.requestLayout();
             }
         } catch (Throwable ignored) {
         }
@@ -303,15 +330,19 @@ final class PluginDialogStyler {
                     new GradientDrawable(
                             GradientDrawable.Orientation.TOP_BOTTOM,
                             new int[] {0xf524242a, 0xf816161b});
-            glassCard.setCornerRadius(a.dp(26));
-            glassCard.setStroke(Math.max(1, a.dp(0.9f)), 0x2effffff);
+            glassCard.setCornerRadius(a.dp(24));
+            glassCard.setStroke(Math.max(1, a.dp(0.9f)), 0x34ffffff);
             cardRoot.setBackground(glassCard);
-            cardRoot.setPadding(a.dp(16), a.dp(16), a.dp(16), a.dp(14));
+            boolean tv = a.isTvDevice();
+            cardRoot.setPadding(
+                    a.dp(tv ? 20 : 16), a.dp(tv ? 16 : 16), a.dp(tv ? 20 : 16), a.dp(tv ? 14 : 14));
+            cardRoot.setMinimumWidth(0);
             cardRoot.setClipToPadding(true);
         }
 
         styleSubtree(a, cardRoot, cardRoot, winH, 0);
         styleAlertButtonBar(a, cardRoot);
+        cardRoot.requestLayout();
     }
 
     private static void clearAncestorsUpToDecor(View start, View stop) {
@@ -541,15 +572,13 @@ final class PluginDialogStyler {
         if (firstPass) {
             row.setBackgroundColor(Color.TRANSPARENT);
             row.setMinimumWidth(0);
+            row.setWeightSum(-1f);
             row.setPadding(0, a.dp(6), 0, a.dp(2));
             ViewGroup.LayoutParams rawLp = row.getLayoutParams();
             if (rawLp != null) {
                 rawLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
                 if (rawLp instanceof ViewGroup.MarginLayoutParams) {
-                    ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) rawLp;
-                    mlp.leftMargin = 0;
-                    mlp.rightMargin = 0;
-                    zeroRelativeMargins(mlp);
+                    applyHorizontalMargins((ViewGroup.MarginLayoutParams) rawLp, 0, 0, 0, 0);
                 }
                 row.setLayoutParams(rawLp);
             }
@@ -561,15 +590,15 @@ final class PluginDialogStyler {
             if (c instanceof Button && c.getVisibility() != View.GONE) {
                 buttons.add((Button) c);
             } else if (firstPass && !(c instanceof Button)) {
-                // Collapse fixed-width spacers that push trailing [取消] off screen
+                // Collapse fixed-width spacers that push trailing buttons off screen
                 ViewGroup.LayoutParams slp = c.getLayoutParams();
                 if (slp instanceof LinearLayout.LayoutParams) {
                     LinearLayout.LayoutParams lslp = (LinearLayout.LayoutParams) slp;
                     lslp.width = 0;
-                    lslp.weight = 1f;
-                    lslp.setMargins(0, 0, 0, 0);
-                    zeroRelativeMargins(lslp);
+                    lslp.weight = 0f;
+                    applyHorizontalMargins(lslp, 0, 0, 0, 0);
                     c.setLayoutParams(lslp);
+                    c.setVisibility(View.GONE);
                 }
             }
         }
@@ -588,8 +617,7 @@ final class PluginDialogStyler {
                     blp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
                     blp.height = a.dp(36);
                     blp.weight = 0f;
-                    blp.setMargins(0, 0, 0, 0);
-                    zeroRelativeMargins(blp);
+                    applyHorizontalMargins(blp, 0, 0, 0, 0);
                     only.setLayoutParams(blp);
                 }
                 only.setPadding(a.dp(18), 0, a.dp(18), 0);
@@ -598,25 +626,27 @@ final class PluginDialogStyler {
         } else if (buttons.size() > 1) {
             if (firstPass) {
                 row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setWeightSum((float) buttons.size());
             }
+            int gap = a.dp(a.isTvDevice() ? 10 : 8);
+            int btnH = a.dp(a.isTvDevice() ? 40 : 38);
             for (int i = 0; i < buttons.size(); i++) {
                 Button b = buttons.get(i);
                 if (firstPass) {
                     b.setMinWidth(0);
                     b.setMinimumWidth(0);
-                    b.setMinHeight(a.dp(38));
-                    b.setMinimumHeight(a.dp(38));
+                    b.setMinHeight(btnH);
+                    b.setMinimumHeight(btnH);
                     if (b.getLayoutParams() instanceof LinearLayout.LayoutParams) {
                         LinearLayout.LayoutParams blp =
                                 (LinearLayout.LayoutParams) b.getLayoutParams();
                         blp.width = 0;
-                        blp.height = a.dp(38);
+                        blp.height = btnH;
                         blp.weight = 1f;
-                        blp.setMargins(0, 0, i < buttons.size() - 1 ? a.dp(8) : 0, 0);
-                        zeroRelativeMargins(blp);
+                        applyHorizontalMargins(blp, 0, 0, i < buttons.size() - 1 ? gap : 0, 0);
                         b.setLayoutParams(blp);
                     }
-                    b.setPadding(a.dp(8), 0, a.dp(8), 0);
+                    b.setPadding(a.dp(10), 0, a.dp(10), 0);
                 }
                 applyIosActionCapsuleStyle(a, b, i == 0 && !isCancelLabel(textOf(b)));
             }
@@ -660,18 +690,16 @@ final class PluginDialogStyler {
 
         if (firstPass) {
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setPadding(a.dp(10), a.dp(7), a.dp(9), a.dp(7));
+            row.setMinimumWidth(0);
+            row.setWeightSum(-1f);
+            boolean tv = a.isTvDevice();
+            row.setPadding(a.dp(12), a.dp(8), a.dp(10), a.dp(8));
 
             ViewGroup.LayoutParams rawLp = row.getLayoutParams();
             if (rawLp != null) {
                 rawLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
                 if (rawLp instanceof ViewGroup.MarginLayoutParams) {
-                    ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) rawLp;
-                    mlp.leftMargin = 0;
-                    mlp.rightMargin = 0;
-                    mlp.topMargin = 0;
-                    mlp.bottomMargin = a.dp(9);
-                    zeroRelativeMargins(mlp);
+                    applyHorizontalMargins((ViewGroup.MarginLayoutParams) rawLp, 0, 0, 0, a.dp(9));
                 }
                 row.setLayoutParams(rawLp);
             }
@@ -685,12 +713,11 @@ final class PluginDialogStyler {
                         (LinearLayout.LayoutParams) accountBtn.getLayoutParams();
                 leftLp.width = 0;
                 leftLp.weight = 1f;
-                leftLp.height = a.dp(38);
-                leftLp.setMargins(0, 0, a.dp(8), 0);
-                zeroRelativeMargins(leftLp);
+                leftLp.height = a.dp(tv ? 42 : 38);
+                applyHorizontalMargins(leftLp, 0, 0, a.dp(10), 0);
                 accountBtn.setLayoutParams(leftLp);
             }
-            accountBtn.setPadding(a.dp(8), 0, a.dp(6), 0);
+            accountBtn.setPadding(a.dp(12), 0, a.dp(10), 0);
 
             statusBtn.setMinWidth(0);
             statusBtn.setMinimumWidth(0);
@@ -699,14 +726,13 @@ final class PluginDialogStyler {
             if (statusBtn.getLayoutParams() instanceof LinearLayout.LayoutParams) {
                 LinearLayout.LayoutParams rightLp =
                         (LinearLayout.LayoutParams) statusBtn.getLayoutParams();
-                rightLp.width = a.dp(68);
+                rightLp.width = a.dp(tv ? 86 : 72);
                 rightLp.weight = 0f;
-                rightLp.height = a.dp(32);
-                rightLp.setMargins(0, 0, 0, 0);
-                zeroRelativeMargins(rightLp);
+                rightLp.height = a.dp(tv ? 36 : 32);
+                applyHorizontalMargins(rightLp, 0, 0, 0, 0);
                 statusBtn.setLayoutParams(rightLp);
             }
-            statusBtn.setPadding(a.dp(6), 0, a.dp(6), 0);
+            statusBtn.setPadding(a.dp(8), 0, a.dp(8), 0);
         }
 
         applySpiderDriveAccountButton(a, accountBtn);
@@ -753,21 +779,67 @@ final class PluginDialogStyler {
         }
     }
 
+    private static final class StyledSpiderStateBg extends StateListDrawable {
+        final String appliedKey;
+
+        StyledSpiderStateBg(String appliedKey, Drawable normal, Drawable focused) {
+            this.appliedKey = appliedKey;
+            addState(new int[] {android.R.attr.state_focused}, focused);
+            addState(new int[] {android.R.attr.state_pressed}, focused);
+            addState(new int[] {}, normal);
+        }
+    }
+
+    private static Drawable buildStatefulPill(
+            MainActivity a,
+            String stateKey,
+            int radiusPx,
+            int normalFill,
+            int normalStroke,
+            float normalStrokeDp,
+            int focusFill,
+            int focusStroke) {
+        GradientDrawable normal = new GradientDrawable();
+        normal.setShape(GradientDrawable.RECTANGLE);
+        normal.setCornerRadius(radiusPx);
+        normal.setColor(normalFill);
+        if (normalStroke != 0) normal.setStroke(Math.max(1, a.dp(normalStrokeDp)), normalStroke);
+
+        GradientDrawable focused = new GradientDrawable();
+        focused.setShape(GradientDrawable.RECTANGLE);
+        focused.setCornerRadius(radiusPx);
+        focused.setColor(focusFill);
+        focused.setStroke(Math.max(2, a.dp(2f)), focusStroke);
+
+        return new StyledSpiderStateBg(stateKey, normal, focused);
+    }
+
+    private static boolean hasAppliedKey(Drawable existing, String stateKey) {
+        if (existing instanceof StyledSpiderStateBg) {
+            return stateKey.equals(((StyledSpiderStateBg) existing).appliedKey);
+        }
+        return existing instanceof StyledSpiderButtonBg
+                && stateKey.equals(((StyledSpiderButtonBg) existing).appliedKey);
+    }
+
     private static void applySpiderDriveAccountButton(MainActivity a, Button btn) {
         String label = textOf(btn);
         String stateKey = "acct:" + label;
-        Drawable existing = btn.getBackground();
-        if (existing instanceof StyledSpiderButtonBg
-                && stateKey.equals(((StyledSpiderButtonBg) existing).appliedKey)) {
+        if (hasAppliedKey(btn.getBackground(), stateKey)) {
             return;
         }
         boolean loggedIn = label.contains("已登录") || label.contains("已绑定") || label.contains("已配置");
 
-        StyledSpiderButtonBg gd = new StyledSpiderButtonBg(stateKey);
-        gd.setShape(GradientDrawable.RECTANGLE);
-        gd.setCornerRadius(a.dp(11));
-        gd.setColor(loggedIn ? 0x1c30d158 : 0x10ffffff);
-        gd.setStroke(Math.max(1, a.dp(0.6f)), loggedIn ? 0x4230d158 : 0x16ffffff);
+        Drawable bg =
+                buildStatefulPill(
+                        a,
+                        stateKey,
+                        a.dp(11),
+                        loggedIn ? 0x1c30d158 : 0x10ffffff,
+                        loggedIn ? 0x4230d158 : 0x16ffffff,
+                        0.6f,
+                        loggedIn ? 0x4230d158 : 0x36ffffff,
+                        0xffffffff);
 
         btn.setAllCaps(false);
         btn.setIncludeFontPadding(false);
@@ -781,24 +853,27 @@ final class PluginDialogStyler {
             btn.setStateListAnimator(null);
             btn.setElevation(0f);
         }
-        btn.setBackground(gd);
+        btn.setBackground(bg);
     }
 
     private static void applySpiderDriveStatusPill(MainActivity a, Button btn) {
         String label = textOf(btn);
         String stateKey = "pill:" + label;
-        Drawable existing = btn.getBackground();
-        if (existing instanceof StyledSpiderButtonBg
-                && stateKey.equals(((StyledSpiderButtonBg) existing).appliedKey)) {
+        if (hasAppliedKey(btn.getBackground(), stateKey)) {
             return;
         }
         boolean enabled = label.contains("启用中") || label.contains("已启用");
 
-        StyledSpiderButtonBg gd = new StyledSpiderButtonBg(stateKey);
-        gd.setShape(GradientDrawable.RECTANGLE);
-        gd.setCornerRadius(a.dp(999));
-        gd.setColor(enabled ? 0x3330d158 : 0xa63a3a42);
-        gd.setStroke(Math.max(1, a.dp(0.6f)), enabled ? 0x7330d158 : 0x24ffffff);
+        Drawable bg =
+                buildStatefulPill(
+                        a,
+                        stateKey,
+                        a.dp(999),
+                        enabled ? 0x3330d158 : 0xa63a3a42,
+                        enabled ? 0x7330d158 : 0x24ffffff,
+                        0.6f,
+                        enabled ? 0x6630d158 : 0xd04f5564,
+                        0xffffffff);
 
         btn.setAllCaps(false);
         btn.setIncludeFontPadding(false);
@@ -806,22 +881,20 @@ final class PluginDialogStyler {
         btn.setEllipsize(TextUtils.TruncateAt.END);
         btn.setGravity(Gravity.CENTER);
         btn.setTypeface(null, Typeface.BOLD);
-        btn.setTextSize(11.8f);
-        btn.setTextColor(enabled ? 0xff30d158 : 0x99ebebf5);
+        btn.setTextSize(a.isTvDevice() ? 12.5f : 11.8f);
+        btn.setTextColor(enabled ? 0xff4ade80 : 0xd9f5f5f7);
         if (Build.VERSION.SDK_INT >= 21) {
             btn.setStateListAnimator(null);
             btn.setElevation(0f);
         }
-        btn.setBackground(gd);
+        btn.setBackground(bg);
     }
 
     private static void applyIosActionCapsuleStyle(
             MainActivity a, Button btn, boolean highlightPrimary) {
         String label = textOf(btn);
         String stateKey = (highlightPrimary ? "pri:" : "sec:") + label;
-        Drawable existing = btn.getBackground();
-        if (existing instanceof StyledSpiderButtonBg
-                && stateKey.equals(((StyledSpiderButtonBg) existing).appliedKey)) {
+        if (hasAppliedKey(btn.getBackground(), stateKey)) {
             return;
         }
 
@@ -830,30 +903,40 @@ final class PluginDialogStyler {
 
         int fill;
         int stroke;
+        int focusFill;
         int textCol;
         if (highlightPrimary && !cancel) {
             fill = 0xfff5f5f7;
             stroke = 0x00000000;
+            focusFill = 0xffffffff;
             textCol = 0xff111114;
         } else if (positive) {
             fill = 0x3330d158;
             stroke = 0x7330d158;
-            textCol = 0xff30d158;
+            focusFill = 0x6630d158;
+            textCol = 0xff4ade80;
         } else if (cancel) {
             fill = 0x8c3a3a42;
             stroke = 0x26ffffff;
+            focusFill = 0xcc505664;
             textCol = 0xe6f5f5f7;
         } else {
             fill = 0x280a84ff;
             stroke = 0x660a84ff;
-            textCol = 0xff64b5ff;
+            focusFill = 0x5c0a84ff;
+            textCol = 0xff82c4ff;
         }
 
-        StyledSpiderButtonBg gd = new StyledSpiderButtonBg(stateKey);
-        gd.setShape(GradientDrawable.RECTANGLE);
-        gd.setCornerRadius(a.dp(999));
-        gd.setColor(fill);
-        if (stroke != 0) gd.setStroke(Math.max(1, a.dp(0.8f)), stroke);
+        Drawable bg =
+                buildStatefulPill(
+                        a,
+                        stateKey,
+                        a.dp(999),
+                        fill,
+                        stroke,
+                        0.8f,
+                        focusFill,
+                        highlightPrimary && !cancel ? 0xff0a84ff : 0xffffffff);
 
         btn.setAllCaps(false);
         btn.setIncludeFontPadding(false);
@@ -867,7 +950,7 @@ final class PluginDialogStyler {
             btn.setStateListAnimator(null);
             btn.setElevation(0f);
         }
-        btn.setBackground(gd);
+        btn.setBackground(bg);
     }
 
     private static void styleGenericPluginButton(MainActivity a, Button btn, boolean inHScroll) {
@@ -921,16 +1004,20 @@ final class PluginDialogStyler {
                 }
             }
             boolean primary = (id == android.R.id.button1);
-            GradientDrawable pill = new GradientDrawable();
-            pill.setShape(GradientDrawable.RECTANGLE);
-            pill.setCornerRadius(a.dp(999));
-            pill.setColor(primary ? 0xff0a84ff : 0x8c3a3a42);
-            if (!primary) {
-                pill.setStroke(Math.max(1, a.dp(0.8f)), 0x26ffffff);
-            }
+            Drawable pill =
+                    buildStatefulPill(
+                            a,
+                            "alert:" + id,
+                            a.dp(999),
+                            primary ? 0xff0a84ff : 0x8c3a3a42,
+                            primary ? 0 : 0x26ffffff,
+                            0.8f,
+                            primary ? 0xff309cff : 0xcc505664,
+                            0xffffffff);
             b.setAllCaps(false);
             b.setIncludeFontPadding(false);
             b.setSingleLine(true);
+            b.setEllipsize(TextUtils.TruncateAt.END);
             b.setTypeface(null, Typeface.BOLD);
             b.setTextSize(13f);
             b.setTextColor(primary ? Color.WHITE : 0xe6f5f5f7);
@@ -946,16 +1033,8 @@ final class PluginDialogStyler {
             b.setBackground(pill);
             ViewGroup.LayoutParams lp = b.getLayoutParams();
             if (lp instanceof ViewGroup.MarginLayoutParams) {
-                ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) lp;
-                mlp.leftMargin = a.dp(8);
-                mlp.rightMargin = 0;
-                mlp.topMargin = a.dp(2);
-                mlp.bottomMargin = 0;
-                if (Build.VERSION.SDK_INT >= 17) {
-                    mlp.setMarginStart(a.dp(8));
-                    mlp.setMarginEnd(0);
-                }
-                b.setLayoutParams(mlp);
+                applyHorizontalMargins((ViewGroup.MarginLayoutParams) lp, a.dp(8), a.dp(2), 0, 0);
+                b.setLayoutParams(lp);
             }
         }
     }
@@ -1032,14 +1111,15 @@ final class PluginDialogStyler {
                                                         - iv.getDrawable().getIntrinsicHeight())
                                         <= 36);
         if (likelyQr) {
-            int maxQr = Math.min(a.dp(196), Math.max(a.dp(150), Math.round(winH * 0.30f)));
+            boolean tv = a.isTvDevice();
+            int maxQr = resolveMaxQrSizePx(winH, a.dp(tv ? 132 : 148), a.dp(tv ? 168 : 196), tv);
             if (lp != null) {
                 lp.width = maxQr;
                 lp.height = maxQr;
                 if (lp instanceof LinearLayout.LayoutParams) {
                     ((LinearLayout.LayoutParams) lp).gravity = Gravity.CENTER_HORIZONTAL;
-                    ((LinearLayout.LayoutParams) lp).topMargin = a.dp(10);
-                    ((LinearLayout.LayoutParams) lp).bottomMargin = a.dp(10);
+                    ((LinearLayout.LayoutParams) lp).topMargin = a.dp(tv ? 6 : 10);
+                    ((LinearLayout.LayoutParams) lp).bottomMargin = a.dp(tv ? 6 : 10);
                 } else if (lp instanceof FrameLayout.LayoutParams) {
                     ((FrameLayout.LayoutParams) lp).gravity = Gravity.CENTER_HORIZONTAL;
                 }
@@ -1047,10 +1127,10 @@ final class PluginDialogStyler {
             }
             GradientDrawable qrPad = new GradientDrawable();
             qrPad.setShape(GradientDrawable.RECTANGLE);
-            qrPad.setCornerRadius(a.dp(18));
+            qrPad.setCornerRadius(a.dp(16));
             qrPad.setColor(Color.WHITE);
             iv.setBackground(qrPad);
-            iv.setPadding(a.dp(10), a.dp(10), a.dp(10), a.dp(10));
+            iv.setPadding(a.dp(8), a.dp(8), a.dp(8), a.dp(8));
             iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
         }
     }

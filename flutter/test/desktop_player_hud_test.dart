@@ -416,10 +416,10 @@ void main() {
         await mountWindowsPlayer(tester, player: player);
         player.volumes.clear();
 
-        // Open '更多' scrollable horizontal toolbar.
+        // Open '更多' desktop popover menu.
         await tester.tap(find.text('更多'));
         await tester.pump(const Duration(milliseconds: 100));
-        final dockFinder = find.byKey(const Key('player-tool-dock-portrait'));
+        final dockFinder = find.byKey(const Key('desktop-more-menu-popover'));
         expect(dockFinder, findsOneWidget);
         final dockCenter = tester.getCenter(dockFinder);
 

@@ -71,6 +71,7 @@ public final class SearchCoordinator implements AutoCloseable {
     private final Runner runner;
     private final Listener listener;
     private final int resultLimit;
+    private final int maxConcurrency;
     private volatile boolean closed;
     private ScheduledFuture<?> deadline;
     private int nextJob, inFlight;
@@ -80,16 +81,27 @@ public final class SearchCoordinator implements AutoCloseable {
     }
 
     SearchCoordinator(Runner runner, Listener listener, long requestMs, long sessionMs) {
-        this(runner, listener, requestMs, sessionMs, 24);
+        this(runner, listener, requestMs, sessionMs, 24, 0);
     }
 
     SearchCoordinator(
             Runner runner, Listener listener, long requestMs, long sessionMs, int resultLimit) {
+        this(runner, listener, requestMs, sessionMs, resultLimit, 0);
+    }
+
+    SearchCoordinator(
+            Runner runner,
+            Listener listener,
+            long requestMs,
+            long sessionMs,
+            int resultLimit,
+            int maxConcurrency) {
         this.runner = runner;
         this.listener = listener;
         this.requestMs = requestMs;
         this.sessionMs = sessionMs;
         this.resultLimit = Math.max(1, resultLimit);
+        this.maxConcurrency = Math.max(0, maxConcurrency);
     }
 
     static synchronized void configureThreads(int count) {
@@ -157,7 +169,8 @@ public final class SearchCoordinator implements AutoCloseable {
     }
 
     private synchronized void pump() {
-        while (!closed && inFlight < baseThreads && nextJob < jobs.size()) {
+        int limit = maxConcurrency > 0 ? Math.min(maxConcurrency, baseThreads) : baseThreads;
+        while (!closed && inFlight < limit && nextJob < jobs.size()) {
             Job job = jobs.get(nextJob++);
             if (job.done.get()) continue;
             if (isSiteWedged(job.site.key)) {
@@ -232,7 +245,7 @@ public final class SearchCoordinator implements AutoCloseable {
                             if (videos.size() == resultLimit) break;
                         }
                 finish(videos, videos.isEmpty() ? Outcome.EMPTY : Outcome.RESULT);
-            } catch (Exception error) {
+            } catch (Throwable error) {
                 finish(
                         Collections.emptyList(),
                         Thread.currentThread().isInterrupted()

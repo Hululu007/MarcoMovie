@@ -336,9 +336,203 @@ public final class MainActivity extends Activity {
         return scoped;
     }
 
+    static final int REQ_STORAGE_PERMISSION = 1409;
+    private Runnable pendingStorageAction;
+
+    static boolean isManageAllFilesAction(String action) {
+        return "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION".equals(action)
+                || "android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION".equals(action);
+    }
+
+    static List<String> storagePermissionFallbackActions(int sdkInt) {
+        List<String> actions = new ArrayList<>();
+        if (sdkInt >= 30) {
+            actions.add("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION");
+            actions.add("android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION");
+        }
+        actions.add(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+        return actions;
+    }
+
+    boolean hasFullStoragePermission() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                if (android.os.Environment.isExternalStorageManager()) return true;
+            } catch (Throwable ignored) {
+            }
+            return false;
+        }
+        if (Build.VERSION.SDK_INT >= 23) {
+            return super.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                            == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    && super.checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                            == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
+    }
+
+    boolean hasLegacyStorageWritePermission() {
+        if (hasFullStoragePermission()) return true;
+        if (Build.VERSION.SDK_INT >= 23
+                && super.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return false;
+        }
+        try {
+            File tvDir = new File(android.os.Environment.getExternalStorageDirectory(), "TV");
+            if (!tvDir.exists()) tvDir.mkdirs();
+            if (!tvDir.isDirectory() || !tvDir.canWrite()) return false;
+            File probe = new File(tvDir, ".mm_perm_probe");
+            if (probe.createNewFile() || probe.exists()) {
+                probe.delete();
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    String storagePermissionStatusText() {
+        if (hasFullStoragePermission()) return "已授权（扫码 Cookie 可正常保存）";
+        if (hasLegacyStorageWritePermission()) return "已授权文件读写（部分扩展可能仍需「管理所有文件」）";
+        return Build.VERSION.SDK_INT >= 30
+                ? "未开启「管理所有文件」权限，扫码 Cookie 可能无法保存"
+                : "未开启存储权限，扫码 Cookie 可能无法保存";
+    }
+
+    void requestRuntimeStoragePermission(Runnable onAfter) {
+        pendingStorageAction = onAfter;
+        if (Build.VERSION.SDK_INT < 23) {
+            CspEngine.prepareHostStorage(getApplication());
+            Runnable next = pendingStorageAction;
+            pendingStorageAction = null;
+            if (next != null) next.run();
+            return;
+        }
+        if (super.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        == android.content.pm.PackageManager.PERMISSION_GRANTED
+                && super.checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                        == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            CspEngine.prepareHostStorage(getApplication());
+            Runnable next = pendingStorageAction;
+            pendingStorageAction = null;
+            if (next != null) next.run();
+            return;
+        }
+        try {
+            requestPermissions(
+                    new String[] {
+                        android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                        android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    },
+                    REQ_STORAGE_PERMISSION);
+        } catch (Throwable t) {
+            AppLog.w("StoragePerm", "requestPermissions failed", t);
+            pendingStorageAction = null;
+            openTvStoragePermissionSettings();
+        }
+    }
+
+    boolean openTvStoragePermissionSettings() {
+        android.net.Uri pkgUri = android.net.Uri.parse("package:" + getPackageName());
+        for (String action : storagePermissionFallbackActions(Build.VERSION.SDK_INT)) {
+            Intent intent =
+                    "android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION".equals(action)
+                            ? new Intent(action)
+                            : new Intent(action, pkgUri);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                if (intent.resolveActivity(getPackageManager()) == null) continue;
+                super.startActivity(intent, null);
+                if (android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS.equals(action)) {
+                    toast("请在「权限 → 文件和媒体 / 存储」中选择「始终允许」，完成后按返回键");
+                } else {
+                    toast("请开启 Marco Movie 的「允许管理所有文件」开关，完成后按返回键");
+                }
+                return true;
+            } catch (Throwable ignored) {
+            }
+        }
+        toast("当前电视系统未开放文件管理设置页，正在申请应用存储权限…");
+        requestRuntimeStoragePermission(null);
+        return false;
+    }
+
+    void ensureStoragePermissionForNetdisk(final Runnable proceed) {
+        if (proceed == null) return;
+        if (hasFullStoragePermission()) {
+            CspEngine.prepareHostStorage(getApplication());
+            proceed.run();
+            return;
+        }
+        if (Build.VERSION.SDK_INT < 30) {
+            requestRuntimeStoragePermission(proceed);
+            return;
+        }
+        if (hasLegacyStorageWritePermission()) {
+            CspEngine.prepareHostStorage(getApplication());
+            proceed.run();
+            return;
+        }
+        new AppDialog.Builder(this)
+                .setTitle("需要存储权限以保存扫码 Cookie")
+                .setMessage(
+                        "网盘扫码登录获得的 Cookie 需要写入本机存储目录（/sdcard/TV），未授权时电视端会提示无法保存。\n\n"
+                                + "• Android 11 及以上电视：点击「开启文件权限」并在系统页中允许「管理所有文件」或「权限 → 文件和媒体 → 始终允许」\n"
+                                + "• 若电视精简了系统设置页，可点击「快速申请读写」尝试系统授权弹窗")
+                .setPositiveButton("开启文件权限", (d, w) -> openTvStoragePermissionSettings())
+                .setNeutralButton("快速申请读写", (d, w) -> requestRuntimeStoragePermission(proceed))
+                .setNegativeButton("仍要继续", (d, w) -> proceed.run())
+                .show();
+    }
+
+    @Override
+    public void startActivity(Intent intent, Bundle options) {
+        if (intent != null && isManageAllFilesAction(intent.getAction())) {
+            try {
+                if (intent.resolveActivity(getPackageManager()) != null) {
+                    super.startActivity(intent, options);
+                    return;
+                }
+            } catch (Throwable ignored) {
+            }
+            if (openTvStoragePermissionSettings()) {
+                return;
+            }
+        }
+        super.startActivity(intent, options);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_STORAGE_PERMISSION) {
+            boolean granted = false;
+            if (grantResults != null && grantResults.length > 0) {
+                granted = true;
+                for (int r : grantResults) {
+                    if (r != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                        granted = false;
+                        break;
+                    }
+                }
+            }
+            if (granted) {
+                CspEngine.prepareHostStorage(getApplication());
+                toast("存储权限已开启，现在可正常保存扫码 Cookie");
+            } else {
+                toast("未获得存储权限，可在系统「应用详情 → 权限 → 存储」中手动开启");
+            }
+            Runnable next = pendingStorageAction;
+            pendingStorageAction = null;
+            if (next != null) ui.post(next);
+        }
+    }
+
     @Override
     public int checkSelfPermission(String permission) {
-        if (CspEngine.isStoragePermission(permission)) {
+        if (CspEngine.isStoragePermission(permission) && CspEngine.hasGrantedAllFilesAccess()) {
             return android.content.pm.PackageManager.PERMISSION_GRANTED;
         }
         return super.checkSelfPermission(permission);
@@ -346,7 +540,7 @@ public final class MainActivity extends Activity {
 
     @Override
     public int checkPermission(String permission, int pid, int uid) {
-        if (CspEngine.isStoragePermission(permission)) {
+        if (CspEngine.isStoragePermission(permission) && CspEngine.hasGrantedAllFilesAccess()) {
             return android.content.pm.PackageManager.PERMISSION_GRANTED;
         }
         return super.checkPermission(permission, pid, uid);
@@ -498,6 +692,10 @@ public final class MainActivity extends Activity {
                             }
                         }
                     }
+                    AppLog.w(
+                            "FatalCrash",
+                            "uncaught on " + (thread == null ? "?" : thread.getName()),
+                            error);
                     MainActivity activity = activeActivity;
                     if (activity != null && activity.prefs != null) {
                         String currentSite = activity.prefs.getString(Prefs.SELECTED_SITE, "");
@@ -677,14 +875,11 @@ public final class MainActivity extends Activity {
     }
 
     boolean useTopDock() {
-        return isTvDevice() && !useLeftDock() && prefs.getInt(Prefs.TV_DOCK_POSITION, 0) == 1;
+        return isTvDevice() && !useLeftDock();
     }
 
     boolean useLeftDock() {
-        return Prefs.useTvLeftDock(
-                isTvDevice(),
-                prefs.contains(Prefs.TV_DOCK_POSITION),
-                prefs.getInt(Prefs.TV_NAVIGATION_MODE, -1));
+        return isTvDevice() && prefs.getInt(Prefs.TV_NAVIGATION_MODE, 0) == 1;
     }
 
     void applyMobileSystemBars(boolean fullscreenPlayer) {
@@ -824,6 +1019,21 @@ public final class MainActivity extends Activity {
             applyMobileSystemBars(false);
         }
         prefs = getSharedPreferences(privateMode ? "movie-private" : Prefs.FILE, MODE_PRIVATE);
+        final int priorBootCrashes = recordStartupBootGuard(getCacheDir());
+        final boolean priorLoadingCrash = !prefs.getString(Prefs.LOADING_SITE, "").isEmpty();
+        if (priorBootCrashes >= 1 || priorLoadingCrash) {
+            purgeVolatileCrashCaches(getCacheDir());
+            if (priorBootCrashes >= 2) {
+                clearRecoveredCrashSite(prefs);
+            }
+        }
+        if (isTvDevice() && !prefs.getBoolean("tv_top_nav_default_v1", false)) {
+            prefs.edit()
+                    .putInt(Prefs.TV_NAVIGATION_MODE, 0)
+                    .putInt(Prefs.TV_DOCK_POSITION, 1)
+                    .putBoolean("tv_top_nav_default_v1", true)
+                    .apply();
+        }
         WatchHistory.historyCorrupted = prefs.getBoolean(WatchHistory.CORRUPTED_PREF, false);
         if (WatchHistory.historyCorrupted) {
             ui.post(() -> toast("检测到观看历史数据损坏，已自动备份至本地。为保护数据，已暂停历史更新与云端覆盖。"));
@@ -841,7 +1051,9 @@ public final class MainActivity extends Activity {
                 try (InputStream i = new FileInputStream(f)) {
                     config = Cms.parseConfig(Cms.read(i, Cms.MAX_JSON), configOrigin);
                     SourcePicker.applyEdits(this, config, configOrigin);
-                    SourcePreferences.restoreDefault(this);
+                    if (priorBootCrashes == 0 && !priorLoadingCrash) {
+                        SourcePreferences.restoreDefault(this);
+                    }
                 }
         } catch (Exception e) {
             AppLog.w("MainActivity", "load saved config failed", e);
@@ -901,12 +1113,18 @@ public final class MainActivity extends Activity {
                                             () ->
                                                     MagnetStream.cleanStaleSessions(
                                                             MainActivity.this));
-                                    if (!reduced && config != null) {
+                                    if (!reduced
+                                            && !recoveredFromCrash
+                                            && priorBootCrashes == 0
+                                            && config != null) {
                                         final String savedKey =
                                                 prefs.getString(Prefs.SELECTED_SITE, "");
                                         if (savedKey != null && !savedKey.isEmpty()) {
                                             for (final Cms.Site s : config.sites) {
-                                                if (s.key.equals(savedKey) && available(s)) {
+                                                if (s != null
+                                                        && savedKey.equals(s.key)
+                                                        && available(s)
+                                                        && shouldPrewarmSiteOnStartup(s)) {
                                                     worker.execute(
                                                             () -> {
                                                                 try {
@@ -921,11 +1139,17 @@ public final class MainActivity extends Activity {
                                     }
                                     open(new Screen(() -> home()), false);
                                     layoutReady = true;
+                                    ui.postDelayed(
+                                            () -> clearStartupBootGuard(getCacheDir()), 3500);
                                     if (!privateMode) {
                                         CloudSyncDialog.pullOnStartup(MainActivity.this);
                                     }
                                     if (recoveredFromCrash) {
                                         toast("上次加载该片源时异常退出，已自动重置片源选择");
+                                    } else if (priorBootCrashes >= 2) {
+                                        toast("检测到连续异常退出，已清理临时缓存并重置片源");
+                                    } else if (priorBootCrashes == 1) {
+                                        toast("检测到上次异常退出，已自动清理临时缓存");
                                     } else if (!privateMode
                                             && OnboardingScreen.shouldShow(MainActivity.this)) {
                                         showOnboarding(false);
@@ -1207,10 +1431,12 @@ public final class MainActivity extends Activity {
         root = newGlassBackdropRoot();
         root.setClipChildren(false);
         root.setClipToPadding(false);
-        root.setBackgroundColor(DARK);
-        root.addView(ImageLoader.createAtmosphere(this), new FrameLayout.LayoutParams(-1, -1));
-        homeAmbient = null;
+        root.setBackgroundColor(isTvDevice() ? 0xff0d0f14 : DARK);
         int tvBgMode = HomeAmbient.effectiveBgMode(this);
+        if (!isTvDevice() || tvBgMode == Prefs.BG_MODE_WALLPAPER) {
+            root.addView(ImageLoader.createAtmosphere(this), new FrameLayout.LayoutParams(-1, -1));
+        }
+        homeAmbient = null;
         boolean wantAmbient =
                 isTvDevice()
                         ? (tvBgMode == Prefs.BG_MODE_ADAPTIVE || tvBgMode == Prefs.BG_MODE_GRADIENT)
@@ -1221,7 +1447,7 @@ public final class MainActivity extends Activity {
             homeAmbient = new HomeAmbient(this);
             root.addView(homeAmbient, new FrameLayout.LayoutParams(-1, -1));
         }
-        if (navigation || isTvDevice())
+        if (!isTvDevice() && navigation)
             root.addView(homeGradient(), new FrameLayout.LayoutParams(-1, -1));
         scroll = new TvScrollView(this);
         scroll.setClipChildren(false);
@@ -1260,10 +1486,10 @@ public final class MainActivity extends Activity {
                                         + 30);
                 body.setPadding(dp(left), dp(18), dp(34), dp(36));
             } else {
-                body.setPadding(dp(34), dp(18), dp(100), dp(36));
+                body.setPadding(dp(34), dp(18), dp(34), dp(36));
             }
             homeDock = new HomeDock(this);
-            if (!homeDock.tvLeft) {
+            if (!homeDock.tvLeft && !homeDock.tvTopLabeled) {
                 LinearLayout brandRow = row();
                 brandRow.setTag("home-brand");
                 brandRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -2364,36 +2590,73 @@ public final class MainActivity extends Activity {
         screen.show();
     }
 
+    private volatile int castServiceEpoch;
+    private boolean castServiceStarting;
+
     synchronized void syncCastService() {
         if (!isTvDevice()
                 || privateMode
                 || prefs == null
                 || !prefs.getBoolean(Prefs.CAST_ENABLED, true)) {
+            castServiceStarting = false;
+            castServiceEpoch++;
             stopCastService();
             return;
         }
-        if (castService != null && !castService.closed) return;
-        stopCastService();
-        try {
-            castService =
-                    CastService.startForActivity(
-                            this,
+        if ((castService != null && !castService.closed) || castServiceStarting) return;
+        castServiceStarting = true;
+        final int epoch = ++castServiceEpoch;
+        worker.execute(
+                () -> {
+                    CastService started = null;
+                    try {
+                        started =
+                                CastService.startForActivity(
+                                        this,
+                                        () -> {
+                                            if (activeCastScreen != null) {
+                                                activeCastScreen.refreshLiveStatus();
+                                            }
+                                        });
+                    } catch (Throwable ignored) {
+                    }
+                    final CastService ready = started;
+                    synchronized (MainActivity.this) {
+                        if (epoch == castServiceEpoch) {
+                            castServiceStarting = false;
+                        }
+                        if (epoch != castServiceEpoch
+                                || isFinishing()
+                                || isDestroyed()
+                                || privateMode
+                                || prefs == null
+                                || !prefs.getBoolean(Prefs.CAST_ENABLED, true)) {
+                            if (ready != null) ready.close();
+                            return;
+                        }
+                        if (castService != null && castService != ready) {
+                            castService.close();
+                        }
+                        castService = ready;
+                    }
+                    ui.post(
                             () -> {
-                                if (activeCastScreen != null) {
-                                    activeCastScreen.refreshLiveStatus();
+                                if (!isFinishing() && activeCastScreen != null) {
+                                    activeCastScreen.onServiceReady();
                                 }
                             });
-        } catch (Exception ignored) {
-            castService = null;
-        }
+                });
     }
 
     synchronized void restartCastService() {
+        castServiceStarting = false;
+        castServiceEpoch++;
         stopCastService();
         syncCastService();
     }
 
     synchronized void stopCastService() {
+        castServiceStarting = false;
         if (castService != null) {
             castService.close();
             castService = null;
@@ -2517,9 +2780,96 @@ public final class MainActivity extends Activity {
         PlaybackController.finishSeek(this, commit);
     }
 
+    static final String STARTUP_BOOT_GUARD_FILE = "startup_boot_guard_v1";
+
+    static boolean shouldPrewarmSiteOnStartup(Cms.Site s) {
+        return s != null && (s.supported() || HttpT4Engine.eligible(s));
+    }
+
+    static int recordStartupBootGuard(File cacheDir) {
+        if (cacheDir == null) return 0;
+        File guard = new File(cacheDir, STARTUP_BOOT_GUARD_FILE);
+        int prior = 0;
+        if (guard.isFile()) {
+            try (InputStream in = new FileInputStream(guard)) {
+                int b = in.read();
+                if (b >= '1' && b <= '9') prior = b - '0';
+                else prior = 1;
+            } catch (Throwable ignored) {
+                prior = 1;
+            }
+        }
+        int next = Math.min(9, prior + 1);
+        try {
+            if (!cacheDir.exists()) cacheDir.mkdirs();
+            try (FileOutputStream out = new FileOutputStream(guard)) {
+                out.write('0' + next);
+                out.flush();
+            }
+        } catch (Throwable ignored) {
+        }
+        return prior;
+    }
+
+    static void clearStartupBootGuard(File cacheDir) {
+        if (cacheDir == null) return;
+        try {
+            File guard = new File(cacheDir, STARTUP_BOOT_GUARD_FILE);
+            if (guard.exists()) guard.delete();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    static void purgeVolatileCrashCaches(File cacheDir) {
+        if (cacheDir == null || !cacheDir.isDirectory()) return;
+        try {
+            File[] entries = cacheDir.listFiles();
+            if (entries == null) return;
+            for (File f : entries) {
+                String name = f.getName();
+                if ("home_snap_v1".equals(name)
+                        || "detail_v1".equals(name)
+                        || "posters_v2".equals(name)
+                        || "tv_curated_home_v1.json".equals(name)
+                        || name.startsWith("tv_wide_v5_")
+                        || name.startsWith("mob_hd_poster_v4_")) {
+                    deleteRecursivelyQuiet(f);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void deleteRecursivelyQuiet(File target) {
+        if (target == null || !target.exists()) return;
+        if (target.isDirectory()) {
+            File[] children = target.listFiles();
+            if (children != null) {
+                for (File child : children) deleteRecursivelyQuiet(child);
+            }
+        }
+        try {
+            target.delete();
+        } catch (Throwable ignored) {
+        }
+    }
+
     static void clearRecoveredCrashSite(SharedPreferences prefs) {
         if (prefs == null) return;
-        prefs.edit().putString(Prefs.LOADING_SITE, "").putString(Prefs.SELECTED_SITE, "").commit();
+        String crashed = prefs.getString(Prefs.LOADING_SITE, "");
+        String selected = prefs.getString(Prefs.SELECTED_SITE, "");
+        String preferred = prefs.getString(Prefs.PREFERRED_SITE, "");
+        SharedPreferences.Editor editor =
+                prefs.edit().putString(Prefs.LOADING_SITE, "").putString(Prefs.SELECTED_SITE, "");
+        if (preferred != null && !preferred.isEmpty()) {
+            String badKey = crashed != null && !crashed.isEmpty() ? crashed : selected;
+            if (badKey != null
+                    && !badKey.isEmpty()
+                    && (preferred.equals(badKey) || preferred.startsWith(badKey + "\n"))) {
+                editor.putString(Prefs.PREFERRED_SITE, "");
+            }
+        }
+        editor.commit();
     }
 
     WatchHistory.Persistence historyPersistence() {
@@ -2653,6 +3003,14 @@ public final class MainActivity extends Activity {
         smoothHomeScroll(0);
     }
 
+    static boolean isMenuShortPress(int action, boolean canceled, int flags) {
+        if (action != KeyEvent.ACTION_UP) return false;
+        // Xiaomi MiTV firmware re-injects short-press KEYCODE_MENU with internal flag 0x7531
+        // (30001), whose bits overlap KeyEvent.FLAG_CANCELED (0x20) despite being a valid tap.
+        boolean mitvSynthetic = (flags & 0x7531) == 0x7531;
+        return !canceled || mitvSynthetic;
+    }
+
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         if (introSkipKey && event.getAction() == KeyEvent.ACTION_UP) {
@@ -2690,7 +3048,13 @@ public final class MainActivity extends Activity {
             int key = event.getKeyCode();
             if (key == KeyEvent.KEYCODE_MENU) {
                 homeKeys.reset();
-                if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) chooseSources();
+                if (isMenuShortPress(event.getAction(), event.isCanceled(), event.getFlags())) {
+                    if (isTvDevice() && homeDock != null && homeDock.topMode) {
+                        homeDock.focusFromMenuKey();
+                    } else {
+                        chooseSources();
+                    }
+                }
                 return true;
             }
             // TV directional taps always follow focus; the legacy non-TV shortcut is unchanged.
@@ -2727,12 +3091,14 @@ public final class MainActivity extends Activity {
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
         ImageLoader.trimMemory(this, level);
+        ImmersivePoster.trimMemory(level);
     }
 
     @Override
     public void onLowMemory() {
         super.onLowMemory();
         images.evictAll();
+        ImmersivePoster.trimMemory(TRIM_MEMORY_COMPLETE);
     }
 
     @Override
@@ -2768,6 +3134,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        clearStartupBootGuard(getCacheDir());
         cancelActiveTransition();
         if (markerHost != null) markerHost.abort();
         savePlaybackHistory(true);
@@ -2776,6 +3143,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onStop() {
+        clearStartupBootGuard(getCacheDir());
         cancelActiveTransition();
         PrivacySpace.cancelPrompt(this);
         finishSeek(false);
@@ -2852,6 +3220,8 @@ public final class MainActivity extends Activity {
         phoneticWork.shutdownNow();
         ui.removeCallbacksAndMessages(null);
         images.evictAll();
+        ImmersivePoster.trimMemory(TRIM_MEMORY_COMPLETE);
+        clearStartupBootGuard(getCacheDir());
         super.onDestroy();
     }
 

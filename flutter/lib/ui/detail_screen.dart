@@ -30,6 +30,7 @@ import 'player_screen.dart';
 import 'poster_image.dart';
 import 'source_verification_dialog.dart';
 import 'windows_appearance.dart';
+import 'windows_title_bar.dart';
 part 'windows_detail.dart';
 
 /// Apple TV+ / Infuse inspired responsive video detail page for iPhone, iPad, Mac, and Windows.
@@ -163,6 +164,10 @@ class _DetailScreenState extends State<DetailScreen> {
   String _discoveredFranchiseKey = '';
   bool _synopsisExpanded = false;
   bool _sourceWarningsExpanded = false;
+  bool _windowsLinesExpanded = false;
+  bool _windowsEpisodesExpanded = false;
+  bool _windowsSynopsisExpanded = false;
+  bool _windowsHeroHasLandscape = false;
   late bool _descending;
   late bool _isFavorite;
   final ValueNotifier<double> _scrollOffset = ValueNotifier<double>(0.0);
@@ -218,10 +223,19 @@ class _DetailScreenState extends State<DetailScreen> {
     _resolvedRtScore = cachedRatings?.rt;
   }
 
+  bool _windowsDarkSurfaceApplied = false;
+
   void _updateWindowsState(VoidCallback change) => setState(change);
   @override
   void initState() {
     super.initState();
+    if (isWindowsDesktopUi) {
+      scheduleMicrotask(() {
+        if (!mounted || _windowsDarkSurfaceApplied) return;
+        _windowsDarkSurfaceApplied = true;
+        WindowsImmersiveFrame.darkSurfaceDepth.value += 1;
+      });
+    }
     _activeSite = widget.site;
     _video = WoggSource.normalizeCachedVideoLabels(widget.site, widget.initialVideo);
     final curInfo = CmsParser.parseSeriesSeasonInfo(_video.title);
@@ -248,6 +262,12 @@ class _DetailScreenState extends State<DetailScreen> {
       forPrivate: _activeSite.isEffectivelyPrivate,
     );
     _seedCachedExternalFields();
+    _windowsHeroHasLandscape = !_activeSite.isEffectivelyPrivate &&
+        PosterLoader.peekLandscapeMemory(
+              _publicLookupTitle,
+              year: _video.year,
+            ) !=
+            null;
     PosterLoader.metadataRevision.addListener(_onExternalMetadataRevision);
     widget.storage.watchHistoryRevision.addListener(_onWatchHistoryChanged);
     final immediateBytes = PosterLoader.peekMemory(
@@ -308,6 +328,13 @@ class _DetailScreenState extends State<DetailScreen> {
 
   @override
   void dispose() {
+    if (_windowsDarkSurfaceApplied) {
+      _windowsDarkSurfaceApplied = false;
+      scheduleMicrotask(() {
+        final next = WindowsImmersiveFrame.darkSurfaceDepth.value - 1;
+        WindowsImmersiveFrame.darkSurfaceDepth.value = next < 0 ? 0 : next;
+      });
+    }
     _cancelDetailWork();
     PosterLoader.metadataRevision.removeListener(_onExternalMetadataRevision);
     widget.storage.watchHistoryRevision.removeListener(_onWatchHistoryChanged);

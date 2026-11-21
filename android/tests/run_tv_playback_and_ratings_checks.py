@@ -75,6 +75,17 @@ public class LruCache<K, V> {
         return prev;
     }
 
+    protected int sizeOf(K key, V value) {
+        return 1;
+    }
+
+    public synchronized void trimToSize(int targetSize) {
+        while (map.size() > targetSize && !map.isEmpty()) {
+            Map.Entry<K, V> eldest = map.entrySet().iterator().next();
+            map.remove(eldest.getKey());
+        }
+    }
+
     public final synchronized void evictAll() {
         map.clear();
     }

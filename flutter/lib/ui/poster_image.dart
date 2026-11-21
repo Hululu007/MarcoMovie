@@ -146,7 +146,9 @@ class PosterLoader {
   static final Map<String, Future<Uint8List>> _inflight = {};
   static final Map<String, Future<Uint8List>> _inflightTitleBytes = {};
   static final Map<String, Future<Uint8List>> _inflightHdTitleBytes = {};
+  static final Map<String, Future<Uint8List>> _inflightLandscapeTitleBytes = {};
   static final Map<String, List<String>> _titleCoverUrlsCache = LruMap(500);
+  static final Map<String, List<String>> _landscapeCoverUrlsCache = LruMap(500);
   static final Map<String, List<String>> _verifiedTitleCoverUrlsCache = LruMap(500);
   static final Map<String, String> _titleSynopsisCache = LruMap(500);
   static final Map<String, List<String>> _seriesEpisodeStillsCache = LruMap(500);
@@ -164,6 +166,7 @@ class PosterLoader {
       LruMap(500);
   static final Map<int, Color> _ambientColorCache = LruMap(500);
   static final Map<int, bool> _hdDimensionCache = LruMap(500);
+  static final Map<int, bool> _landscapeDimensionCache = LruMap(500);
   static final Map<int, bool> _clearDimensionCache = LruMap(500);
   static int _active = 0;
   static final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
@@ -210,6 +213,7 @@ class PosterLoader {
     _memoryBytes = 0;
     _cleanTitleMemo.clear();
     _titleCoverUrlsCache.clear();
+    _landscapeCoverUrlsCache.clear();
     _verifiedTitleCoverUrlsCache.clear();
     _titleSynopsisCache.clear();
     _seriesEpisodeStillsCache.clear();
@@ -220,6 +224,7 @@ class PosterLoader {
     _doubanSubjectIdCache.clear();
     _ambientColorCache.clear();
     _hdDimensionCache.clear();
+    _landscapeDimensionCache.clear();
     _clearDimensionCache.clear();
     cacheRevision.value++;
     metadataRevision.value++;
@@ -1069,6 +1074,451 @@ class PosterLoader {
     if (hdDisk != null) unawaited(_writeDisk(hdDisk, bytes));
     final titleDisk = await _diskFileFor(tKey);
     if (titleDisk != null) unawaited(_writeDisk(titleDisk, bytes));
+  }
+
+  /// Verifies that [bytes] decodes to a true high-definition landscape image
+  /// (`width >= 560`, `height >= 300`, aspect ratio between `1.15` and `2.65`).
+  @visibleForTesting
+  static Future<bool> isLandscapeHdPoster(Uint8List bytes) async {
+    if (bytes.length < 18 * 1024) return false;
+    final fp = _bytesFingerprint(bytes);
+    final cached = _landscapeDimensionCache[fp];
+    if (cached != null) return cached;
+    final dims = await _decodeDimensions(bytes);
+    if (dims == null || dims.height <= 0) {
+      _landscapeDimensionCache[fp] = false;
+      return false;
+    }
+    final ratio = dims.width / dims.height;
+    final ok = dims.width >= 560 &&
+        dims.height >= 300 &&
+        ratio >= 1.15 &&
+        ratio <= 2.65;
+    _landscapeDimensionCache[fp] = ok;
+    return ok;
+  }
+
+  /// Strict title & entertainment-context matcher for Bing wide still captions
+  /// so unrelated shows or stock-poster templates never pollute a show's hero.
+  @visibleForTesting
+  static bool matchesBingLandscapeCaption(String rawCap, String cleanTitle) {
+    final cap = rawCap.trim();
+    final title = cleanTitle.trim();
+    if (cap.isEmpty || title.isEmpty) return false;
+    if (_isNonEntertainmentBingCaption(cap)) return false;
+    if (RegExp(
+      r'设图网|摄图网|千图网|包图网|昵图网|站酷|花瓣|图行天下|红动中国|素材|模板|广告图|设计图库|海报设计|手抄报|年货节|节气|元旦海报|毛衫|礼盒',
+    ).hasMatch(cap)) {
+      return false;
+    }
+
+    final lowerCap = cap.toLowerCase();
+    final lowerTitle = title.toLowerCase();
+    final stripRe = RegExp(r'[\s·:：\-—_《》「」【】“”"\x27!！?？,，.。]');
+    final normCap = lowerCap.replaceAll(stripRe, '');
+    final normTitle = lowerTitle.replaceAll(stripRe, '');
+    if (normTitle.isEmpty || !normCap.contains(normTitle)) return false;
+
+    if (title.length <= 2) {
+      final hasContext = RegExp(
+        r'剧|集|电影|电视|海报|剧照|番|动画|综|片|预告|饰|演|独播|开机|杀青|官宣|预约|卫视|视频|腾讯|优酷|爱奇艺|芒果',
+      ).hasMatch(cap);
+      if (!hasContext) return false;
+      final explicitlyQuoted = cap.contains('《$title》') ||
+          cap.contains('「$title」') ||
+          cap.contains('【$title】') ||
+          cap.contains('#$title#') ||
+          cap.contains('“$title”');
+      if (!explicitlyQuoted) {
+        final escaped = RegExp.escape(title);
+        final standaloneMatch = RegExp(
+          '(?<![\\u4e00-\\u9fff])$escaped(?![\\u4e00-\\u9fff])',
+        ).hasMatch(cap);
+        if (!standaloneMatch) return false;
+      }
+    }
+    return true;
+  }
+
+  /// Synchronously peeks cached true-landscape HD artwork for [rawTitle].
+  static Uint8List? peekLandscapeMemory(
+    String rawTitle, {
+    String year = '',
+  }) {
+    final clean = _cleanTitle(rawTitle);
+    if (clean.isEmpty) return null;
+    final scoped = _scopedTitleToken(clean, _extractTargetYear(rawTitle, year));
+    if (scoped.isEmpty) return null;
+    final key = 'landscape_hd:$scoped';
+    final hit = _memory.remove(key);
+    if (hit != null) {
+      _memory[key] = hit;
+      return hit;
+    }
+    return null;
+  }
+
+  @visibleForTesting
+  static void debugSeedLandscapeMemory(
+    String rawTitle,
+    Uint8List bytes, {
+    String year = '',
+  }) {
+    final clean = _cleanTitle(rawTitle);
+    final scoped = _scopedTitleToken(clean, _extractTargetYear(rawTitle, year));
+    if (scoped.isEmpty) return;
+    _remember('landscape_hd:$scoped', bytes);
+  }
+
+  /// Resolves a true high-resolution horizontal/landscape poster or official
+  /// key-art still (`width >= 640`, `4:3`–`16:9`) for [rawTitle] using only
+  /// approved domestic endpoints (Bilibili PGC horizontal covers/stills,
+  /// Douban movie/TV subject stills, and Bing wide HD poster search).
+  static Future<Uint8List> loadLandscapeByTitle(
+    String rawTitle, {
+    String year = '',
+    String fallbackUrl = '',
+  }) {
+    final clean = _cleanTitle(rawTitle);
+    if (clean.isEmpty) {
+      return Future<Uint8List>.error(const FormatException('空片名'));
+    }
+    final targetYear = _extractTargetYear(rawTitle, year);
+    final scoped = _scopedTitleToken(clean, targetYear);
+    final cacheKey = 'landscape_hd:$scoped';
+    final hit = peekLandscapeMemory(rawTitle, year: year);
+    if (hit != null) {
+      return SynchronousFuture<Uint8List>(hit);
+    }
+    final pending = _inflightLandscapeTitleBytes[scoped];
+    if (pending != null) return pending;
+
+    final future = () async {
+      // 1. Check disk cache first.
+      final diskFile = await _diskFileFor(cacheKey);
+      if (diskFile != null) {
+        try {
+          if (await diskFile.exists()) {
+            final diskBytes = await diskFile.readAsBytes();
+            if (_looksLikeImage(diskBytes) &&
+                await isLandscapeHdPoster(diskBytes)) {
+              _remember(cacheKey, diskBytes);
+              return diskBytes;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // 2. If the provided URL is already an authentic HD landscape artwork
+      // (e.g. Emby backdrop or horizontal poster), reuse it directly.
+      final upgradedFallback = upgradeUrlToHd(fallbackUrl);
+      if (upgradedFallback.isNotEmpty &&
+          !_isKnownDeadPosterHost(upgradedFallback)) {
+        final inMem = _memory[upgradedFallback];
+        if (inMem != null && await isLandscapeHdPoster(inMem)) {
+          _remember(cacheKey, inMem);
+          if (diskFile != null) unawaited(_writeDisk(diskFile, inMem));
+          return inMem;
+        }
+      }
+
+      // 3. Resolve horizontal HD URLs from Bilibili PGC, Douban stills & Bing wide HD.
+      final urls = await _resolveLandscapeUrlsByTitle(
+        clean,
+        year: year.isNotEmpty ? year : (targetYear?.toString() ?? ''),
+      );
+
+      Uint8List? bestBytes;
+      int bestPixels = 0;
+
+      for (final candidateUrl in urls.take(14)) {
+        if (isPersonOrAvatarImageUrl(candidateUrl)) continue;
+        for (final attempt in _attemptsFor(candidateUrl).take(2)) {
+          try {
+            final bytes = await _fetch(
+              attempt.$1,
+              attempt.$2,
+              timeout: const Duration(milliseconds: 3500),
+            );
+            if (!await isLandscapeHdPoster(bytes)) continue;
+            final dims = await _decodeDimensions(bytes);
+            final pixels = dims != null ? dims.width * dims.height : bytes.length;
+            if (bestBytes == null || pixels > bestPixels) {
+              bestBytes = bytes;
+              bestPixels = pixels;
+            }
+            if (dims != null && dims.width >= 960 && bytes.length >= 45 * 1024) {
+              _remember(cacheKey, bytes);
+              if (diskFile != null) unawaited(_writeDisk(diskFile, bytes));
+              return bytes;
+            }
+            break;
+          } catch (_) {}
+        }
+      }
+
+      if (bestBytes != null) {
+        _remember(cacheKey, bestBytes);
+        if (diskFile != null) unawaited(_writeDisk(diskFile, bestBytes));
+        return bestBytes;
+      }
+
+      throw Exception('未找到「$clean」横向高清海报');
+    }()
+        .whenComplete(() {
+      _inflightLandscapeTitleBytes.remove(scoped);
+    });
+
+    _inflightLandscapeTitleBytes[scoped] = future;
+    return future;
+  }
+
+  static Future<List<String>> _resolveLandscapeUrlsByTitle(
+    String cleanTitle, {
+    String year = '',
+  }) async {
+    final targetYear = _extractTargetYear(cleanTitle, year);
+    final scoped = _scopedTitleToken(cleanTitle, targetYear);
+    final cached = _landscapeCoverUrlsCache[scoped];
+    if (cached != null && cached.isNotEmpty) return cached;
+
+    final primaryUrls = <String>[];
+    final secondaryUrls = <String>[];
+    final seen = <String>{};
+
+    void addUrl(String raw, {bool primary = true}) {
+      final hd = upgradeUrlToHd(raw);
+      if (!hd.startsWith('http') || isPersonOrAvatarImageUrl(hd)) return;
+      if (!seen.add(hd)) return;
+      if (primary) {
+        primaryUrls.add(hd);
+      } else {
+        secondaryUrls.add(hd);
+      }
+    }
+
+    final variants = _queryVariantsForTitle(cleanTitle);
+    final primaryQuery = variants.isNotEmpty ? variants.first : cleanTitle;
+    final bidCookie = 'bid=${_randomDoubanBid()}';
+
+    await Future.wait([
+      // Source 1: Bilibili PGC horizontal covers & 16:9 episode key frames
+      () async {
+        for (final stype in const ['media_bangumi', 'media_ft']) {
+          HttpClientRequest? req;
+          try {
+            final uri = Uri.parse(
+              'https://api.bilibili.com/x/web-interface/search/type?search_type=$stype&keyword=${Uri.encodeQueryComponent(primaryQuery)}',
+            );
+            req = await _client
+                .getUrl(uri)
+                .timeout(const Duration(milliseconds: 2600));
+            req.headers.set('User-Agent', _desktopChromeUa);
+            req.headers.set('Referer', 'https://search.bilibili.com/');
+            req.headers.set('Cookie', _biliCookie);
+            req.headers.set('Accept', 'application/json, text/plain, */*');
+            final resp =
+                await req.close().timeout(const Duration(milliseconds: 2600));
+            if (resp.statusCode >= 200 && resp.statusCode < 300) {
+              final body = await utf8.decoder
+                  .bind(resp)
+                  .join()
+                  .timeout(const Duration(milliseconds: 2600));
+              final decoded = jsonDecode(body);
+              final list = decoded is Map && decoded['data'] is Map
+                  ? decoded['data']['result']
+                  : null;
+              if (list is List) {
+                for (final item in list) {
+                  if (item is! Map) continue;
+                  final t = (item['title'] ?? '').toString().trim();
+                  if (!_isSameWorkTitle(t, cleanTitle)) continue;
+                  for (final field in const [
+                    'horizontal_cover_16_9',
+                    'horizontal_cover_16_10',
+                  ]) {
+                    final u = (item[field] ?? '').toString().trim();
+                    if (u.isNotEmpty) addUrl(u, primary: true);
+                  }
+                  final eps = item['eps'];
+                  if (eps is List) {
+                    for (final ep in eps.take(3)) {
+                      if (ep is Map) {
+                        final cov = (ep['cover'] ?? '').toString().trim();
+                        if (cov.isNotEmpty) addUrl(cov, primary: true);
+                      }
+                    }
+                  }
+                  break;
+                }
+              }
+            } else {
+              await resp.drain<void>();
+            }
+          } catch (_) {
+            try {
+              req?.abort();
+            } catch (_) {}
+          }
+        }
+      }(),
+
+      // Source 2: Douban verified subject official stills (`photos?type=S`)
+      () async {
+        var subject = _doubanSubjectIdCache[scoped];
+        if (subject == null) {
+          final body = await _getRatingTextUrl(
+            Uri.parse(
+              'https://movie.douban.com/j/subject_suggest?q=${Uri.encodeQueryComponent(primaryQuery)}',
+            ),
+            headers: {
+              'User-Agent': _desktopChromeUa,
+              'Referer': 'https://movie.douban.com/',
+              'Cookie': bidCookie,
+              'Accept': 'application/json, text/plain, */*',
+            },
+          );
+          if (body != null) {
+            try {
+              final matched = parseDoubanSuggestSubject(
+                jsonDecode(body),
+                cleanTitle,
+                year: year.isNotEmpty ? year : (targetYear?.toString() ?? ''),
+              );
+              if (matched != null) {
+                subject = matched;
+                _doubanSubjectIdCache[scoped] = matched;
+              }
+            } catch (_) {}
+          }
+        }
+        if (subject != null) {
+          final kind = subject.isTv ? 'tv' : 'movie';
+          final photoBody = await _getRatingTextUrl(
+            Uri.parse(
+              'https://m.douban.com/rexxar/api/v2/$kind/${subject.id}/photos?type=S&start=0&count=6',
+            ),
+            headers: {
+              'User-Agent': _mobileSafariUa,
+              'Referer': 'https://m.douban.com/movie/subject/${subject.id}/',
+              'Cookie': bidCookie,
+              'Accept': 'application/json, text/plain, */*',
+            },
+          );
+          if (photoBody != null) {
+            try {
+              final decoded = jsonDecode(photoBody);
+              final photos = decoded is Map ? decoded['photos'] : null;
+              if (photos is List) {
+                for (final p in photos) {
+                  if (p is! Map) continue;
+                  final img = p['image'];
+                  if (img is! Map) continue;
+                  final large = img['large'] ?? img['normal'];
+                  if (large is Map) {
+                    final w = (large['width'] as num?)?.toInt() ?? 0;
+                    final h = (large['height'] as num?)?.toInt() ?? 0;
+                    final u = (large['url'] ?? '').toString().trim();
+                    if (u.isNotEmpty && (w == 0 || (w > h && w >= 640))) {
+                      addUrl(u, primary: true);
+                    }
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      }(),
+
+      // Source 3: Bing China wide high-resolution horizontal posters & stills
+      // Uses exact-title quoted queries and strict caption verification so we
+      // recover real 16:9 drama stills without ever pulling an unrelated show.
+      () async {
+        final queries = <String>[
+          '"$primaryQuery" 剧照',
+          '"$primaryQuery" 横版海报',
+        ];
+        for (final qText in queries) {
+          if (primaryUrls.length >= 4) break;
+          HttpClientRequest? req;
+          try {
+            final uri = Uri.parse(
+              'https://cn.bing.com/images/async?q=${Uri.encodeQueryComponent(qText)}&first=1&count=24&qft=+filterui:aspect-wide+filterui:imagesize-large',
+            );
+            req = await _client
+                .getUrl(uri)
+                .timeout(const Duration(milliseconds: 2800));
+            req.headers.set('User-Agent', _desktopChromeUa);
+            req.headers.set('Referer', 'https://cn.bing.com/');
+            req.headers.set(
+              'Accept',
+              'text/html,application/xhtml+xml,*/*;q=0.8',
+            );
+            final resp =
+                await req.close().timeout(const Duration(milliseconds: 2800));
+            if (resp.statusCode >= 200 && resp.statusCode < 300) {
+              final html = await utf8.decoder
+                  .bind(resp)
+                  .join()
+                  .timeout(const Duration(milliseconds: 2800));
+              final cardMatches = RegExp(
+                r'm=(?:"|&quot;)(\{[^"]*?\})(?:"|&quot;)',
+              ).allMatches(html);
+              for (final cm in cardMatches) {
+                final cardJsonAttr = cm.group(1) ?? '';
+                final tMatch = RegExp(
+                  r'&quot;t&quot;:&quot;([^&]{2,120})&quot;',
+                ).firstMatch(cardJsonAttr);
+                final rawCap = (tMatch?.group(1) ?? '')
+                    .replaceAll(RegExp(r'[\u0000-\u001f]'), '')
+                    .trim();
+                if (!matchesBingLandscapeCaption(rawCap, cleanTitle) ||
+                    _isNonEntertainmentBingCaption(cardJsonAttr)) {
+                  continue;
+                }
+                final murlMatch = RegExp(
+                  r'&quot;murl&quot;:&quot;(https?://[^&"\x27]+?)&quot;',
+                ).firstMatch(cardJsonAttr);
+                if (murlMatch != null) {
+                  final rawMurl = upgradeUrlToHd(murlMatch.group(1)!);
+                  if (!isPersonOrAvatarImageUrl(rawMurl)) {
+                    addUrl(
+                      rawMurl,
+                      primary: _isFastDomesticHost(rawMurl),
+                    );
+                  }
+                }
+                final oipMatch = RegExp(
+                  r'OIP(?:-C)?\.([A-Za-z0-9_-]+)',
+                ).firstMatch(cardJsonAttr);
+                if (oipMatch != null) {
+                  final fullId = oipMatch.group(0)!;
+                  final coreId = oipMatch.group(1)!;
+                  if (!RegExp(r'Ha[KNLMP][A-Za-z0-9]$').hasMatch(coreId)) {
+                    addUrl(
+                      'https://tse1-mm.cn.bing.net/th/id/$fullId?w=1280&h=720&c=7&r=0&o=5&pid=1.7',
+                      primary: false,
+                    );
+                  }
+                }
+              }
+            } else {
+              await resp.drain<void>();
+            }
+          } catch (_) {
+            try {
+              req?.abort();
+            } catch (_) {}
+          }
+        }
+      }(),
+    ]);
+
+    final combined = [...primaryUrls, ...secondaryUrls];
+    if (combined.isNotEmpty) {
+      _landscapeCoverUrlsCache[scoped] = combined;
+    }
+    return combined;
   }
 
   /// Synchronously peeks cached ambient color extracted from poster [bytes].
@@ -1963,7 +2413,7 @@ class PosterLoader {
             // Parse each Bing image card (`m="{...}"`) so we can verify its caption
             // before accepting its OIP or murl still
             final cardMatches = RegExp(
-              r'm=&quot;(\{[^"]*?\})&quot;',
+              r'm=(?:"|&quot;)(\{[^"]*?\})(?:"|&quot;)',
             ).allMatches(html);
             for (final cm in cardMatches) {
               final cardJsonAttr = cm.group(1) ?? '';
@@ -2710,7 +3160,7 @@ class PosterLoader {
                   .join()
                   .timeout(const Duration(milliseconds: 2400));
               final cardMatches = RegExp(
-                r'm=&quot;(\{[^"]*?\})&quot;',
+                r'm=(?:"|&quot;)(\{[^"]*?\})(?:"|&quot;)',
               ).allMatches(html);
               for (final cm in cardMatches) {
                 final cardJsonAttr = cm.group(1) ?? '';
@@ -3650,5 +4100,361 @@ class _EpisodeStillImageState extends State<EpisodeStillImage>
       );
     }
     return fallbackPosterWidget;
+  }
+}
+
+/// High-resolution landscape (`4:3` / `16:9`) poster & backdrop widget for
+/// Windows desktop featured recommendation cards and detail hero stages.
+///
+/// Actively resolves true landscape HD artwork via [PosterLoader.loadLandscapeByTitle]
+/// instead of stretching a 360px low-res portrait thumbnail. While resolving (or
+/// when external title lookup is disabled in private mode), renders the high-res
+/// source artwork cleanly with `FilterQuality.high` and upper-center framing.
+class LandscapePosterImage extends StatefulWidget {
+  final String url;
+  final String title;
+  final String year;
+  final Widget placeholder;
+  final BoxFit fit;
+  final AlignmentGeometry alignment;
+  final bool allowExternalLookup;
+  final ValueChanged<Uint8List>? onBytesLoaded;
+  /// Notifies the parent whenever the displayed artwork switches between a
+  /// verified true-landscape HD image (`true`) and a portrait fallback (`false`).
+  final ValueChanged<bool>? onLandscapeStatusChanged;
+  /// When `true` and only a portrait fallback poster is available, renders it
+  /// as a deep cinema ambient blur instead of stretching/cropping a 2:3 vertical
+  /// poster across a widescreen canvas.
+  final bool blurPortraitFallback;
+  /// When `true` alongside [blurPortraitFallback], floats a crisp uncropped
+  /// vertical key-art poster card on the right side of wide hero cards.
+  final bool showRightFramedPortraitFallback;
+
+  const LandscapePosterImage({
+    super.key,
+    required this.url,
+    required this.placeholder,
+    this.title = '',
+    this.year = '',
+    this.fit = BoxFit.cover,
+    this.alignment = const Alignment(0.0, -0.2),
+    this.allowExternalLookup = true,
+    this.onBytesLoaded,
+    this.onLandscapeStatusChanged,
+    this.blurPortraitFallback = false,
+    this.showRightFramedPortraitFallback = false,
+  });
+
+  @override
+  State<LandscapePosterImage> createState() => _LandscapePosterImageState();
+}
+
+class _LandscapePosterImageState extends State<LandscapePosterImage>
+    with AutomaticKeepAliveClientMixin {
+  Uint8List? _landscapeBytes;
+  Uint8List? _fallbackBytes;
+  bool _loadedSync = false;
+  bool? _lastNotifiedLandscape;
+  String _subscribedKey = '';
+
+  @override
+  bool get wantKeepAlive => _landscapeBytes != null;
+
+  String _computeKey() {
+    if (!widget.allowExternalLookup) return '';
+    final clean = PosterLoader.cleanTitleForQuery(widget.title);
+    if (clean.isEmpty) return '';
+    final scoped = PosterLoader._scopedTitleToken(
+      clean,
+      PosterLoader._extractTargetYear(widget.title, widget.year),
+    );
+    return scoped.isEmpty ? '' : 'landscape_hd:$scoped';
+  }
+
+  void _resubscribe() {
+    if (_subscribedKey.isNotEmpty) {
+      PosterLoader.removeKeyListener(_subscribedKey, _onLandscapeUpdated);
+    }
+    _subscribedKey = _computeKey();
+    if (_subscribedKey.isNotEmpty) {
+      PosterLoader.addKeyListener(_subscribedKey, _onLandscapeUpdated);
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _resubscribe();
+    _initLoad();
+  }
+
+  @override
+  void didUpdateWidget(covariant LandscapePosterImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.url.trim() != widget.url.trim() ||
+        oldWidget.title.trim() != widget.title.trim() ||
+        oldWidget.year.trim() != widget.year.trim() ||
+        oldWidget.allowExternalLookup != widget.allowExternalLookup) {
+      _resubscribe();
+      _initLoad();
+    }
+  }
+
+  @override
+  void dispose() {
+    if (_subscribedKey.isNotEmpty) {
+      PosterLoader.removeKeyListener(_subscribedKey, _onLandscapeUpdated);
+    }
+    super.dispose();
+  }
+
+  void _notifyLandscapeStatus(bool hasLandscape) {
+    if (_lastNotifiedLandscape == hasLandscape) return;
+    _lastNotifiedLandscape = hasLandscape;
+    final cb = widget.onLandscapeStatusChanged;
+    if (cb != null) {
+      scheduleMicrotask(() {
+        if (mounted) cb(hasLandscape);
+      });
+    }
+  }
+
+  void _onLandscapeUpdated() {
+    if (!mounted || !widget.allowExternalLookup) return;
+    final hit = PosterLoader.peekLandscapeMemory(
+      widget.title,
+      year: widget.year,
+    );
+    if (hit != null && !identical(hit, _landscapeBytes)) {
+      setState(() => _landscapeBytes = hit);
+      updateKeepAlive();
+      _notifyLandscapeStatus(true);
+      _notify(hit);
+    }
+  }
+
+  void _notify(Uint8List data) {
+    final cb = widget.onBytesLoaded;
+    if (cb != null) {
+      scheduleMicrotask(() {
+        if (mounted) cb(data);
+      });
+    }
+  }
+
+  void _onFallbackBytesLoaded(Uint8List data) {
+    if (mounted && !identical(_fallbackBytes, data)) {
+      setState(() => _fallbackBytes = data);
+    }
+    _notify(data);
+    if (_landscapeBytes != null) return;
+    final reqUrl = widget.url.trim();
+    final reqTitle = widget.title.trim();
+    unawaited(
+      PosterLoader.isLandscapeHdPoster(data).then((isWide) {
+        if (!mounted ||
+            widget.url.trim() != reqUrl ||
+            widget.title.trim() != reqTitle ||
+            _landscapeBytes != null) {
+          return;
+        }
+        if (isWide) {
+          setState(() => _landscapeBytes = data);
+          updateKeepAlive();
+          _notifyLandscapeStatus(true);
+        } else {
+          _notifyLandscapeStatus(false);
+        }
+      }),
+    );
+  }
+
+  void _initLoad() {
+    _lastNotifiedLandscape = null;
+    _fallbackBytes = null;
+    if (!widget.allowExternalLookup || widget.title.trim().isEmpty) {
+      _landscapeBytes = null;
+      _loadedSync = false;
+      updateKeepAlive();
+      _notifyLandscapeStatus(false);
+      return;
+    }
+    final hit = PosterLoader.peekLandscapeMemory(
+      widget.title,
+      year: widget.year,
+    );
+    if (hit != null) {
+      _landscapeBytes = hit;
+      _loadedSync = true;
+      updateKeepAlive();
+      _notifyLandscapeStatus(true);
+      _notify(hit);
+      return;
+    }
+    _landscapeBytes = null;
+    _loadedSync = false;
+    updateKeepAlive();
+    _notifyLandscapeStatus(false);
+    final reqTitle = widget.title.trim();
+    final reqYear = widget.year.trim();
+    final reqUrl = widget.url.trim();
+    unawaited(
+      PosterLoader.loadLandscapeByTitle(
+        reqTitle,
+        year: reqYear,
+        fallbackUrl: reqUrl,
+      ).then((bytes) {
+        if (!mounted ||
+            widget.title.trim() != reqTitle ||
+            widget.year.trim() != reqYear) {
+          return;
+        }
+        setState(() => _landscapeBytes = bytes);
+        updateKeepAlive();
+        _notifyLandscapeStatus(true);
+        _notify(bytes);
+      }).catchError((Object _) {}),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final bytes = _landscapeBytes;
+    if (bytes != null) {
+      final img = Image(
+        image: MemoryImage(bytes),
+        fit: widget.fit,
+        alignment: widget.alignment,
+        gaplessPlayback: true,
+        isAntiAlias: true,
+        filterQuality: FilterQuality.high,
+        errorBuilder: (_, __, ___) => _buildFallback(),
+      );
+      if (_loadedSync) return img;
+      return TweenAnimationBuilder<double>(
+        tween: Tween<double>(begin: 0.0, end: 1.0),
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOutCubic,
+        builder: (context, opacity, child) => Stack(
+          fit: StackFit.expand,
+          children: [
+            if (opacity < 0.99) Positioned.fill(child: _buildFallback()),
+            Opacity(opacity: opacity, child: child),
+          ],
+        ),
+        child: img,
+      );
+    }
+    return _buildFallback();
+  }
+
+  Widget _buildFallback() {
+    final basePoster = PosterImage(
+      url: widget.url,
+      title: widget.allowExternalLookup ? widget.title : '',
+      year: widget.year,
+      fit: widget.fit,
+      alignment: widget.alignment,
+      highRes: true,
+      forBackdrop: widget.blurPortraitFallback,
+      placeholder: widget.placeholder,
+      onBytesLoaded: _onFallbackBytesLoaded,
+    );
+    if (!widget.blurPortraitFallback) {
+      return basePoster;
+    }
+    final blurredBackdrop = ClipRect(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          Transform.scale(
+            scale: 1.12,
+            child: ImageFiltered(
+              imageFilter: ui.ImageFilter.blur(
+                sigmaX: 38,
+                sigmaY: 38,
+                tileMode: TileMode.clamp,
+              ),
+              child: basePoster,
+            ),
+          ),
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Color(0x4D0A0D13),
+                  Color(0x700A0D13),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (!widget.showRightFramedPortraitFallback || _fallbackBytes == null) {
+      return blurredBackdrop;
+    }
+    return LayoutBuilder(
+      builder: (context, box) {
+        final showInsetPoster = box.maxWidth.isFinite &&
+            box.maxHeight.isFinite &&
+            box.maxWidth >= 250 &&
+            box.maxHeight >= 140;
+        if (!showInsetPoster) return blurredBackdrop;
+        final insetHeight = (box.maxHeight * 0.78).clamp(96.0, 210.0);
+        final insetWidth = insetHeight * 0.68;
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            blurredBackdrop,
+            Positioned(
+              right: 18,
+              top: (box.maxHeight - insetHeight) / 2,
+              width: insetWidth,
+              height: insetHeight,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x80000000),
+                      blurRadius: 24,
+                      offset: Offset(0, 10),
+                    ),
+                  ],
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      PosterImage(
+                        url: widget.url,
+                        title: widget.allowExternalLookup ? widget.title : '',
+                        year: widget.year,
+                        fit: BoxFit.cover,
+                        highRes: true,
+                        placeholder: widget.placeholder,
+                      ),
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: const Color(0x38FFFFFF),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 }

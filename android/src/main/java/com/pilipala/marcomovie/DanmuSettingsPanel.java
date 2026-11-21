@@ -319,14 +319,56 @@ public final class DanmuSettingsPanel {
 
     public static AlertDialog showDialog(
             Context context, boolean isTv, OnConfigChangedListener listener) {
-        View panel = createPanelView(context, isTv, listener);
+        final View panel = createPanelView(context, isTv, listener);
+        android.util.DisplayMetrics dm = context.getResources().getDisplayMetrics();
+        int winW = dm.widthPixels;
+        int winH = dm.heightPixels;
+        if (context instanceof MainActivity) {
+            MainActivity ma = (MainActivity) context;
+            if (ma.windowWidth() > 0) winW = ma.windowWidth();
+            if (ma.windowHeight() > 0) winH = ma.windowHeight();
+        }
+        final float d = dm.density;
+        final int targetW =
+                Math.min(
+                        Math.round((isTv ? 640f : 420f) * d),
+                        Math.max(Math.round(280f * d), winW - Math.round((isTv ? 88f : 32f) * d)));
+        final int maxBodyH = Math.max(Math.round(180f * d), Math.round(winH * 0.68f));
+        android.widget.FrameLayout bounded =
+                new android.widget.FrameLayout(context) {
+                    @Override
+                    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+                        int capped =
+                                View.MeasureSpec.makeMeasureSpec(
+                                        maxBodyH, View.MeasureSpec.AT_MOST);
+                        super.onMeasure(widthMeasureSpec, capped);
+                    }
+                };
+        bounded.addView(
+                panel,
+                new android.widget.FrameLayout.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
         AlertDialog dialog =
-                new AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog)
+                new AlertDialog.Builder(context, R.style.MarcoAlertDialogTheme)
                         .setTitle("弹幕设置")
-                        .setView(panel)
+                        .setView(bounded)
                         .setPositiveButton("完成", null)
                         .create();
         dialog.show();
+        if (dialog.getWindow() != null) {
+            android.view.Window win = dialog.getWindow();
+            win.getDecorView().setTag("app-dialog");
+            win.getDecorView().setMinimumWidth(0);
+            android.graphics.drawable.GradientDrawable card =
+                    new android.graphics.drawable.GradientDrawable();
+            card.setColor(0xf6181c20);
+            card.setCornerRadius(Math.round(22f * d));
+            card.setStroke(Math.max(1, Math.round(d)), 0x33ffffff);
+            win.setBackgroundDrawable(card);
+            win.setLayout(targetW, android.view.WindowManager.LayoutParams.WRAP_CONTENT);
+            win.setGravity(android.view.Gravity.CENTER);
+        }
         return dialog;
     }
 

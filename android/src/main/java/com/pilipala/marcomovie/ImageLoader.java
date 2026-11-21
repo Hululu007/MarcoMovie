@@ -63,7 +63,7 @@ final class ImageLoader {
         Bitmap immediate = a.images.get(initialKey);
         if (immediate != null && !immediate.isRecycled()) {
             image.setImageBitmap(immediate);
-            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(image);
+            if (!a.isTvDevice()) com.pilipala.glass.GlassworkSurface.invalidateBackdrop(image);
             return;
         }
         Bitmap preview = a.images.get(address);
@@ -79,7 +79,7 @@ final class ImageLoader {
         }
         if (preview != null && !preview.isRecycled()) {
             image.setImageBitmap(preview);
-            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(image);
+            if (!a.isTvDevice()) com.pilipala.glass.GlassworkSurface.invalidateBackdrop(image);
             if (!detail || (preview.getWidth() >= initialW && preview.getHeight() >= initialH)) {
                 return;
             }
@@ -97,7 +97,7 @@ final class ImageLoader {
         Bitmap cached = a.images.get(key);
         if (cached != null && !cached.isRecycled()) {
             image.setImageBitmap(cached);
-            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(image);
+            if (!a.isTvDevice()) com.pilipala.glass.GlassworkSurface.invalidateBackdrop(image);
             return;
         }
         final java.util.List<ImageView> owned = new java.util.ArrayList<>(2);
@@ -146,6 +146,9 @@ final class ImageLoader {
                                                 height,
                                                 crop,
                                                 detail);
+                                if (!detail && a.isTvDevice()) {
+                                    options.inPreferredConfig = Bitmap.Config.RGB_565;
+                                }
                                 options.inJustDecodeBounds = false;
                                 RequestScope.current().check();
                                 Bitmap bitmap =
@@ -173,17 +176,20 @@ final class ImageLoader {
                                             () -> {
                                                 if (ticket != a.generation || a.isFinishing())
                                                     return;
+                                                boolean tv = a.isTvDevice();
                                                 for (ImageView target : targets) {
                                                     if (target != null
                                                             && address.equals(target.getTag())) {
                                                         target.setImageBitmap(bitmap);
-                                                        com.pilipala.glass.GlassworkSurface
-                                                                .invalidateBackdrop(target);
+                                                        if (!tv) {
+                                                            com.pilipala.glass.GlassworkSurface
+                                                                    .invalidateBackdrop(target);
+                                                        }
                                                     }
                                                 }
                                             });
                                 }
-                            } catch (Exception ignored) {
+                            } catch (Throwable ignored) {
                             } finally {
                                 synchronized (IN_FLIGHT) {
                                     if (IN_FLIGHT.get(key) == owned) IN_FLIGHT.remove(key);
@@ -455,10 +461,7 @@ final class ImageLoader {
         }
 
         void reloadWallpaper() {
-            if (wallpaper != null) {
-                wallpaper.recycle();
-                wallpaper = null;
-            }
+            wallpaper = null;
             boolean showWallpaper =
                     a.isTvDevice()
                             ? HomeAmbient.effectiveBgMode(a) == Prefs.BG_MODE_WALLPAPER
@@ -466,7 +469,24 @@ final class ImageLoader {
             if (showWallpaper) {
                 File f = new File(a.getFilesDir(), "wallpaper.jpg");
                 if (f.exists()) {
-                    wallpaper = BitmapFactory.decodeFile(f.getAbsolutePath());
+                    try {
+                        BitmapFactory.Options bounds = new BitmapFactory.Options();
+                        bounds.inJustDecodeBounds = true;
+                        BitmapFactory.decodeFile(f.getAbsolutePath(), bounds);
+                        if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                            BitmapFactory.Options opts = new BitmapFactory.Options();
+                            int sample = 1;
+                            while ((bounds.outWidth / (sample * 2)) >= 1280
+                                    && (bounds.outHeight / (sample * 2)) >= 720) {
+                                sample *= 2;
+                            }
+                            opts.inSampleSize = sample;
+                            opts.inPreferredConfig = Bitmap.Config.RGB_565;
+                            wallpaper = BitmapFactory.decodeFile(f.getAbsolutePath(), opts);
+                        }
+                    } catch (Throwable ignored) {
+                        wallpaper = null;
+                    }
                 }
             }
             invalidate();
@@ -475,7 +495,7 @@ final class ImageLoader {
         @Override
         protected void onDraw(Canvas canvas) {
             canvas.drawColor(MainActivity.DARK);
-            if (wallpaper != null) {
+            if (wallpaper != null && !wallpaper.isRecycled()) {
                 float scale =
                         Math.max(
                                 (float) getWidth() / wallpaper.getWidth(),
@@ -498,10 +518,7 @@ final class ImageLoader {
         @Override
         protected void onDetachedFromWindow() {
             super.onDetachedFromWindow();
-            if (wallpaper != null) {
-                wallpaper.recycle();
-                wallpaper = null;
-            }
+            wallpaper = null;
         }
     }
 }

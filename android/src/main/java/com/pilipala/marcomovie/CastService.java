@@ -60,8 +60,11 @@ final class CastService implements Closeable {
 
     static final String NT_ROOT = "upnp:rootdevice";
     static final String NT_RENDERER = "urn:schemas-upnp-org:device:MediaRenderer:1";
+    static final String NT_RENDERER_2 = "urn:schemas-upnp-org:device:MediaRenderer:2";
     static final String NT_AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1";
+    static final String NT_AV_TRANSPORT_2 = "urn:schemas-upnp-org:service:AVTransport:2";
     static final String NT_RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1";
+    static final String NT_RENDERING_CONTROL_2 = "urn:schemas-upnp-org:service:RenderingControl:2";
     static final String NT_CONNECTION_MANAGER = "urn:schemas-upnp-org:service:ConnectionManager:1";
 
     interface Bridge {
@@ -283,16 +286,11 @@ final class CastService implements Closeable {
         scheduler.scheduleWithFixedDelay(() -> sendNotify("ssdp:alive"), 25, 45, TimeUnit.SECONDS);
     }
 
-    private void handleSsdpPacket(DatagramPacket pkt) {
-        InetAddress sender = pkt.getAddress();
-        if (!ConfigTransferServer.isAllowedLanPeer(sender)) return;
-        String text;
-        try {
-            text = new String(pkt.getData(), pkt.getOffset(), pkt.getLength(), "UTF-8");
-        } catch (Exception e) {
-            return;
-        }
-        if (!text.toUpperCase(Locale.ROOT).startsWith("M-SEARCH ")) return;
+    static List<String[]> matchSsdpReplies(String text, String deviceUuid) {
+        List<String[]> replies = new ArrayList<>();
+        if (text == null || text.isEmpty()) return replies;
+        String trimmed = text.trim();
+        if (!trimmed.regionMatches(true, 0, "M-SEARCH", 0, 8)) return replies;
         String man = "";
         String st = "";
         for (String line : text.split("\r?\n")) {
@@ -303,12 +301,8 @@ final class CastService implements Closeable {
             if ("man".equals(k)) man = v;
             else if ("st".equals(k)) st = v;
         }
-        if (!man.toLowerCase(Locale.ROOT).contains("ssdp:discover") || st.isEmpty()) return;
-        String location = dlnaLocationUrl();
-        if (location.isEmpty()) return;
-
-        List<String[]> replies = new ArrayList<>();
-        String udn = "uuid:" + deviceUuid;
+        if (!man.toLowerCase(Locale.ROOT).contains("ssdp:discover") || st.isEmpty()) return replies;
+        String udn = "uuid:" + normalizeUuid(deviceUuid);
         if ("ssdp:all".equalsIgnoreCase(st)) {
             replies.add(new String[] {NT_ROOT, udn + "::" + NT_ROOT});
             replies.add(new String[] {udn, udn});
@@ -320,15 +314,31 @@ final class CastService implements Closeable {
             replies.add(new String[] {NT_ROOT, udn + "::" + NT_ROOT});
         } else if (udn.equalsIgnoreCase(st)) {
             replies.add(new String[] {udn, udn});
-        } else if (NT_RENDERER.equalsIgnoreCase(st)) {
+        } else if (NT_RENDERER.equalsIgnoreCase(st) || NT_RENDERER_2.equalsIgnoreCase(st)) {
             replies.add(new String[] {NT_RENDERER, udn + "::" + NT_RENDERER});
-        } else if (NT_AV_TRANSPORT.equalsIgnoreCase(st)) {
+        } else if (NT_AV_TRANSPORT.equalsIgnoreCase(st) || NT_AV_TRANSPORT_2.equalsIgnoreCase(st)) {
             replies.add(new String[] {NT_AV_TRANSPORT, udn + "::" + NT_AV_TRANSPORT});
-        } else if (NT_RENDERING_CONTROL.equalsIgnoreCase(st)) {
+        } else if (NT_RENDERING_CONTROL.equalsIgnoreCase(st)
+                || NT_RENDERING_CONTROL_2.equalsIgnoreCase(st)) {
             replies.add(new String[] {NT_RENDERING_CONTROL, udn + "::" + NT_RENDERING_CONTROL});
         } else if (NT_CONNECTION_MANAGER.equalsIgnoreCase(st)) {
             replies.add(new String[] {NT_CONNECTION_MANAGER, udn + "::" + NT_CONNECTION_MANAGER});
         }
+        return replies;
+    }
+
+    private void handleSsdpPacket(DatagramPacket pkt) {
+        InetAddress sender = pkt.getAddress();
+        if (!ConfigTransferServer.isAllowedLanPeer(sender)) return;
+        String text;
+        try {
+            text = new String(pkt.getData(), pkt.getOffset(), pkt.getLength(), "UTF-8");
+        } catch (Exception e) {
+            return;
+        }
+        String location = dlnaLocationUrl();
+        if (location.isEmpty()) return;
+        List<String[]> replies = matchSsdpReplies(text, deviceUuid);
         if (replies.isEmpty()) return;
 
         DatagramSocket sock = notifySocket != null ? notifySocket : ssdpSocket;
@@ -358,9 +368,8 @@ final class CastService implements Closeable {
     }
 
     private void sendNotify(String nts) {
-        DatagramSocket sock = notifySocket != null ? notifySocket : ssdpSocket;
         String location = dlnaLocationUrl();
-        if (sock == null || location.isEmpty()) return;
+        if (location.isEmpty()) return;
         try {
             InetAddress group = InetAddress.getByName(SSDP_ADDR);
             String udn = "uuid:" + deviceUuid;
@@ -372,34 +381,57 @@ final class CastService implements Closeable {
                 {NT_RENDERING_CONTROL, udn + "::" + NT_RENDERING_CONTROL},
                 {NT_CONNECTION_MANAGER, udn + "::" + NT_CONNECTION_MANAGER}
             };
-            for (String[] pair : types) {
-                String msg =
-                        "NOTIFY * HTTP/1.1\r\n"
-                                + "HOST: "
-                                + SSDP_ADDR
-                                + ":"
-                                + SSDP_PORT
-                                + "\r\n"
-                                + "CACHE-CONTROL: max-age=1800\r\n"
-                                + "LOCATION: "
-                                + location
-                                + "\r\n"
-                                + "NT: "
-                                + pair[0]
-                                + "\r\n"
-                                + "NTS: "
-                                + nts
-                                + "\r\n"
-                                + "SERVER: Android/12 UPnP/1.0 MarcoMovie/1.0\r\n"
-                                + "USN: "
-                                + pair[1]
-                                + "\r\n"
-                                + "Content-Length: 0\r\n\r\n";
-                byte[] bytes = msg.getBytes("UTF-8");
-                sock.send(new DatagramPacket(bytes, bytes.length, group, SSDP_PORT));
+            List<NetworkInterface> nifs = DlnaCastClient.activeLanInterfaces();
+            boolean sentOnNif = false;
+            for (NetworkInterface nif : nifs) {
+                try (MulticastSocket ms = new MulticastSocket()) {
+                    ms.setNetworkInterface(nif);
+                    ms.setTimeToLive(4);
+                    for (String[] pair : types) {
+                        byte[] bytes = buildNotifyPacket(location, pair[0], pair[1], nts);
+                        ms.send(new DatagramPacket(bytes, bytes.length, group, SSDP_PORT));
+                    }
+                    sentOnNif = true;
+                } catch (Exception ignored) {
+                }
+            }
+            if (!sentOnNif) {
+                DatagramSocket sock = notifySocket != null ? notifySocket : ssdpSocket;
+                if (sock == null) return;
+                for (String[] pair : types) {
+                    byte[] bytes = buildNotifyPacket(location, pair[0], pair[1], nts);
+                    sock.send(new DatagramPacket(bytes, bytes.length, group, SSDP_PORT));
+                }
             }
         } catch (Exception ignored) {
         }
+    }
+
+    private static byte[] buildNotifyPacket(String location, String nt, String usn, String nts)
+            throws Exception {
+        String msg =
+                "NOTIFY * HTTP/1.1\r\n"
+                        + "HOST: "
+                        + SSDP_ADDR
+                        + ":"
+                        + SSDP_PORT
+                        + "\r\n"
+                        + "CACHE-CONTROL: max-age=1800\r\n"
+                        + "LOCATION: "
+                        + location
+                        + "\r\n"
+                        + "NT: "
+                        + nt
+                        + "\r\n"
+                        + "NTS: "
+                        + nts
+                        + "\r\n"
+                        + "SERVER: Android/12 UPnP/1.0 MarcoMovie/1.0\r\n"
+                        + "USN: "
+                        + usn
+                        + "\r\n"
+                        + "Content-Length: 0\r\n\r\n";
+        return msg.getBytes("UTF-8");
     }
 
     static String validateCastMediaUrl(String raw) {
@@ -410,8 +442,27 @@ final class CastService implements Closeable {
             char c = url.charAt(i);
             if (c < 0x20 || c == 0x7f) return "";
         }
+        // Encode unescaped spaces / pipes / braces in path/query (common in CDN cast URLs)
+        // without altering host brackets or IPv6 literals.
+        String parseTarget = url;
+        int schemeEnd = url.indexOf("://");
+        if (schemeEnd > 0) {
+            int pathStart = url.indexOf('/', schemeEnd + 3);
+            if (pathStart > 0) {
+                String head = url.substring(0, pathStart);
+                String tail =
+                        url.substring(pathStart)
+                                .replace(" ", "%20")
+                                .replace("|", "%7C")
+                                .replace("[", "%5B")
+                                .replace("]", "%5D")
+                                .replace("{", "%7B")
+                                .replace("}", "%7D");
+                parseTarget = head + tail;
+            }
+        }
         try {
-            URI uri = new URI(url);
+            URI uri = new URI(parseTarget);
             String scheme = uri.getScheme();
             if (scheme == null) return "";
             String lowerScheme = scheme.toLowerCase(Locale.ROOT);
@@ -431,7 +482,7 @@ final class CastService implements Closeable {
                     || lowerHost.startsWith("127.")) {
                 return "";
             }
-            return url;
+            return parseTarget;
         } catch (Exception bad) {
             return "";
         }
@@ -532,25 +583,40 @@ final class CastService implements Closeable {
             replyHttp(out, 405, "text/plain", "Method Not Allowed", null);
             return;
         }
-        if (headers.containsKey("transfer-encoding")) {
-            replyHttp(out, 415, "text/plain", "Chunked unsupported", null);
-            return;
+        byte[] body;
+        String te = headers.get("transfer-encoding");
+        if (te != null && te.toLowerCase(Locale.ROOT).contains("chunked")) {
+            try {
+                body = readChunkedBody(in, MAX_HTTP_BODY);
+            } catch (IOException err) {
+                replyHttp(out, 413, "text/plain", "Invalid chunked SOAP body", null);
+                return;
+            }
+            if (body.length == 0) {
+                replyHttp(out, 400, "text/plain", "Empty SOAP body", null);
+                return;
+            }
+        } else {
+            if (te != null && !te.trim().isEmpty()) {
+                replyHttp(out, 415, "text/plain", "Unsupported Transfer-Encoding", null);
+                return;
+            }
+            int length;
+            try {
+                length =
+                        Integer.parseInt(
+                                headers.containsKey("content-length")
+                                        ? headers.get("content-length")
+                                        : "-1");
+            } catch (NumberFormatException e) {
+                length = -1;
+            }
+            if (length <= 0 || length > MAX_HTTP_BODY) {
+                replyHttp(out, 413, "text/plain", "Invalid SOAP body length", null);
+                return;
+            }
+            body = readExact(in, length);
         }
-        int length;
-        try {
-            length =
-                    Integer.parseInt(
-                            headers.containsKey("content-length")
-                                    ? headers.get("content-length")
-                                    : "-1");
-        } catch (NumberFormatException e) {
-            length = -1;
-        }
-        if (length <= 0 || length > MAX_HTTP_BODY) {
-            replyHttp(out, 413, "text/plain", "Invalid SOAP body length", null);
-            return;
-        }
-        byte[] body = readExact(in, length);
         String xml = new String(body, "UTF-8");
         Element actionEl;
         try {
@@ -1552,6 +1618,38 @@ final class CastService implements Closeable {
         replyHttp(out, 500, "text/xml", fault, null);
     }
 
+    static byte[] readChunkedBody(InputStream in, int maxBytes) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        while (true) {
+            String sizeLine = ConfigTransferServer.line(in, 256).trim();
+            int semi = sizeLine.indexOf(';');
+            if (semi >= 0) sizeLine = sizeLine.substring(0, semi).trim();
+            if (sizeLine.isEmpty()) throw new IOException("Empty chunk header");
+            int chunkSize;
+            try {
+                chunkSize = Integer.parseInt(sizeLine, 16);
+            } catch (NumberFormatException e) {
+                throw new IOException("Bad chunk size");
+            }
+            if (chunkSize < 0 || out.size() + chunkSize > maxBytes) {
+                throw new IOException("Chunk exceeds max body");
+            }
+            if (chunkSize == 0) {
+                // Consume optional trailer lines until empty line
+                for (int t = 0; t < 32; t++) {
+                    String trailer = ConfigTransferServer.line(in, 512);
+                    if (trailer.isEmpty()) break;
+                }
+                break;
+            }
+            byte[] chunk = readExact(in, chunkSize);
+            out.write(chunk);
+            String crlf = ConfigTransferServer.line(in, 16);
+            if (!crlf.isEmpty()) throw new IOException("Expected CRLF after chunk");
+        }
+        return out.toByteArray();
+    }
+
     private static byte[] readExact(InputStream in, int length) throws IOException {
         byte[] body = new byte[length];
         for (int n = 0; n < length; ) {
@@ -1687,6 +1785,7 @@ final class CastService implements Closeable {
                                     castSite.key = "cast";
                                     castSite.originalKey = "cast";
                                     castSite.name = "无线投屏";
+                                    castSite.api = "";
                                     castSite.type = 1;
                                     castSite.searchable = false;
 

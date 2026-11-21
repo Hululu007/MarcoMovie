@@ -107,7 +107,7 @@ public final class Cms {
         public static final String STATUS_PARSER_REQUIRED = "parser-required";
         public static final int MAX_EXT_SIZE = 128 * 1024;
 
-        public String key, name, api, playUrl, jar = "";
+        public String key = "", name = "", api = "", playUrl = "", jar = "";
         public String originalKey = "", originalApi = "", group = "默认分组";
         public int type;
         public final Map<String, String> headers = new LinkedHashMap<>();

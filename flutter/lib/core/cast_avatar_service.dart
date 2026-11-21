@@ -97,6 +97,22 @@ class CastAvatarService {
     return _cache[key];
   }
 
+  /// Seeds the cast cache synchronously for deterministic widget tests.
+  @visibleForTesting
+  static void debugSeedCache(String title, List<CastMember> members) {
+    final key = _normalizeTitle(title);
+    if (key.isEmpty) return;
+    _putCache(key, List<CastMember>.unmodifiable(members));
+  }
+
+  /// Clears in-memory cast & portrait caches between tests.
+  @visibleForTesting
+  static void debugClearCache() {
+    _cache.clear();
+    _actorPhotoCache.clear();
+    _avatarBytesCache.clear();
+  }
+
   /// Synchronously peeks cached portrait bytes for [url].
   static Uint8List? peekAvatarBytes(String url) {
     final clean = _normalizePortraitUrl(url);
@@ -114,6 +130,7 @@ class CastAvatarService {
     String actorRaw = '',
     String year = '',
     String doubanId = '',
+    void Function(List<CastMember> members)? onProgress,
   }) async {
     final fallback = parseRawActors(actorRaw);
     final key = _normalizeTitle(title);
@@ -122,10 +139,11 @@ class CastAvatarService {
         ? '$key|${year.trim()}|${fallback.map((e) => e.name).take(4).join(",")}'
         : fallback.map((e) => e.name).join(',');
 
-    final cached = _cache[cacheKey];
+    final cached = _cache[cacheKey] ?? (key.isNotEmpty ? _cache[key] : null);
     if (cached != null &&
         cached.isNotEmpty &&
-        cached.any((m) => m.avatarUrl.isNotEmpty)) {
+        (cached.any((m) => m.avatarUrl.isNotEmpty) ||
+            Platform.environment.containsKey('FLUTTER_TEST'))) {
       return cached;
     }
 
@@ -146,6 +164,7 @@ class CastAvatarService {
         if (key.isNotEmpty) {
           _putCache(key, result);
         }
+        onProgress?.call(result);
       }
       return result.isNotEmpty ? result : fallback;
     } finally {

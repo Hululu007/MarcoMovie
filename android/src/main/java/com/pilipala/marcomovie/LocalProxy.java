@@ -311,6 +311,7 @@ public final class LocalProxy implements Closeable {
         boolean isProxyRoute =
                 "/proxy".equals(path) && (method.equals("GET") || method.equals("HEAD"));
         if (!isProxyRoute && !isActionRoute) {
+            AppLog.w("LocalProxy", "404 route method=" + method + " path=" + path, null);
             simple(out, 404, "Not found");
             return false;
         }
@@ -433,10 +434,15 @@ public final class LocalProxy implements Closeable {
                 requestToken,
                 token,
                 isJs)) {
+            AppLog.w("LocalProxy", "403 rejected method=" + method + " path=" + path, null);
             simple(out, 403, "Forbidden");
             return false;
         }
-        if (isActionRoute || "danmaku".equalsIgnoreCase(params.get("do"))) {
+        if (isActionRoute
+                || (("danmaku".equalsIgnoreCase(params.get("do"))
+                                || "danmu".equalsIgnoreCase(params.get("do")))
+                        && (requestToken == null || requestToken.isEmpty())
+                        && (params.get("path") != null || params.get("danmaku") != null))) {
             String actionDo = params.get("do");
             String actionType = params.get("type");
             String mediaPath = params.get("path");
@@ -444,9 +450,13 @@ public final class LocalProxy implements Closeable {
             if (mediaPath == null || mediaPath.trim().isEmpty()) mediaPath = params.get("danmaku");
             boolean isDanmakuPush =
                     "danmaku".equalsIgnoreCase(actionDo)
+                            || "danmu".equalsIgnoreCase(actionDo)
                             || ("refresh".equalsIgnoreCase(actionDo)
-                                    && "danmaku".equalsIgnoreCase(actionType))
-                            || (actionDo == null && "danmaku".equalsIgnoreCase(actionType));
+                                    && ("danmaku".equalsIgnoreCase(actionType)
+                                            || "danmu".equalsIgnoreCase(actionType)))
+                            || (actionDo == null
+                                    && ("danmaku".equalsIgnoreCase(actionType)
+                                            || "danmu".equalsIgnoreCase(actionType)));
             if (isDanmakuPush && mediaPath != null && !mediaPath.trim().isEmpty()) {
                 DanmakuConsumer consumer = danmakuConsumer;
                 if (consumer != null) consumer.accept(mediaPath.trim());
@@ -509,8 +519,26 @@ public final class LocalProxy implements Closeable {
             params = scriptParams;
         }
         Object[] response;
+        String doKey = params.get("do");
+        boolean isDanmuRoute = doKey != null && doKey.toLowerCase(Locale.ROOT).contains("danm");
+        Map<String, String> resolveParams = params;
+        if (isDanmuRoute && !isJs) {
+            // Match standard TVBox/FongMi Proxy.proxy(HashMap) contract without leaking local
+            // Host: 127.0.0.1:9978 or synthetic request-headers into upstream danmaku requests.
+            Map<String, String> cleanDanmuParams = new HashMap<>();
+            cleanDanmuParams.put("remote-addr", "127.0.0.1");
+            cleanDanmuParams.put("http-client-ip", "127.0.0.1");
+            if (headers.containsKey("user-agent")) {
+                cleanDanmuParams.put("user-agent", headers.get("user-agent"));
+            }
+            for (Map.Entry<String, String> qe : queryParams.entrySet()) {
+                if ("_mm_token".equalsIgnoreCase(qe.getKey())) continue;
+                cleanDanmuParams.put(qe.getKey(), qe.getValue());
+            }
+            resolveParams = cleanDanmuParams;
+        }
         try {
-            response = isJs ? scripts.resolve(params) : sources.resolve(app, config, params);
+            response = isJs ? scripts.resolve(params) : sources.resolve(app, config, resolveParams);
         } catch (Throwable e) {
             AppLog.w("LocalProxy", "source proxy failed", e);
             simple(out, 502, "Source proxy failed");
@@ -639,6 +667,35 @@ public final class LocalProxy implements Closeable {
             }
         }
 
+        byte[] prefetched = null;
+        int prefetchedLen = 0;
+        if (fixedBytes == null
+                && (contentLength == 0L || isDanmuRoute)
+                && code == 200
+                && !method.equals("HEAD")) {
+            byte[] probe = new byte[8192];
+            int r = body.read(probe);
+            if (r > 0) {
+                prefetched = probe;
+                prefetchedLen = r;
+                if (contentLength == 0L) {
+                    contentLength = -1L; // Spider returned bogus Content-Length: 0 for live stream
+                }
+            } else if (isDanmuRoute) {
+                // Spider's do=danmu proxy returned 0 bytes; if query url= is an external direct
+                // danmaku XML/JSON endpoint, fetch and return it cleanly.
+                byte[] fallbackBytes = tryDirectDanmuFallback(queryParams.get("url"));
+                if (fallbackBytes != null && fallbackBytes.length > 0) {
+                    try {
+                        body.close();
+                    } catch (Throwable ignored) {
+                    }
+                    body = new ByteArrayInputStream(fallbackBytes);
+                    fixedBytes = fallbackBytes;
+                    contentLength = fallbackBytes.length;
+                }
+            }
+        }
         boolean keepAlive =
                 !closed && !clientWantsClose && !chainChunks && requests.getActiveCount() < 24;
 
@@ -669,6 +726,12 @@ public final class LocalProxy implements Closeable {
                 byte[] buffer = new byte[64 * 1024];
                 int n;
                 if (useChunked) {
+                    if (prefetched != null && prefetchedLen > 0) {
+                        out.write(
+                                (Integer.toHexString(prefetchedLen) + "\r\n").getBytes("US-ASCII"));
+                        out.write(prefetched, 0, prefetchedLen);
+                        out.write(new byte[] {13, 10});
+                    }
                     while ((n = payload.read(buffer)) != -1) {
                         if (n == 0) continue;
                         out.write((Integer.toHexString(n) + "\r\n").getBytes("US-ASCII"));
@@ -679,6 +742,12 @@ public final class LocalProxy implements Closeable {
                 } else {
                     long remaining = contentLength;
                     long currentOffset = cr != null ? cr[0] : 0L;
+                    if (prefetched != null && prefetchedLen > 0 && remaining > 0) {
+                        int firstWrite = (int) Math.min(prefetchedLen, remaining);
+                        out.write(prefetched, 0, firstWrite);
+                        remaining -= firstWrite;
+                        currentOffset += firstWrite;
+                    }
                     while (remaining > 0
                             && (n =
                                             payload.read(
@@ -765,6 +834,125 @@ public final class LocalProxy implements Closeable {
             }
             out.flush();
             return keepAlive;
+        }
+    }
+
+    static String encodeDanmakuUrl(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        String sanitized = ProxyAddress.sanitizePathAndQuery(raw.trim());
+        int schemeEnd = sanitized.indexOf("://");
+        if (schemeEnd < 0) return sanitized;
+        int pathStart = sanitized.indexOf('/', schemeEnd + 3);
+        if (pathStart < 0) return sanitized;
+        String prefix = sanitized.substring(0, pathStart);
+        String tail = sanitized.substring(pathStart);
+        StringBuilder sb = new StringBuilder(sanitized.length() + 16);
+        sb.append(prefix);
+        for (int i = 0; i < tail.length(); i++) {
+            char ch = tail.charAt(i);
+            if (ch < 0x80 && ch > 0x20) {
+                sb.append(ch);
+            } else {
+                byte[] utf8 = String.valueOf(ch).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                for (byte b : utf8) {
+                    sb.append(String.format(Locale.ROOT, "%%%02X", b & 0xff));
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    static String decodeDanmakuResponseStream(InputStream rawStream, String encoding)
+            throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        int total = 0, read;
+        while ((read = rawStream.read(chunk)) != -1) {
+            total += read;
+            if (total > 8 * 1024 * 1024) throw new IOException("弹幕文件过大");
+            buffer.write(chunk, 0, read);
+        }
+        byte[] bytes = buffer.toByteArray();
+        if (bytes.length == 0) return "";
+        String enc = encoding == null ? "" : encoding.toLowerCase(Locale.ROOT);
+        if (enc.contains("gzip")
+                || (bytes.length >= 2 && (bytes[0] & 0xff) == 0x1f && (bytes[1] & 0xff) == 0x8b)) {
+            try (InputStream gz =
+                    new java.util.zip.GZIPInputStream(new ByteArrayInputStream(bytes))) {
+                return Cms.read(gz, 8 * 1024 * 1024);
+            } catch (Exception ignored) {
+            }
+        }
+        byte firstNonSpace = 0;
+        for (byte b : bytes) {
+            if (b != ' ' && b != '\t' && b != '\r' && b != '\n') {
+                firstNonSpace = b;
+                break;
+            }
+        }
+        if (enc.contains("deflate")
+                || (firstNonSpace != '<' && firstNonSpace != '{' && firstNonSpace != '[')) {
+            for (boolean nowrap : new boolean[] {true, false}) {
+                try (InputStream inf =
+                        new java.util.zip.InflaterInputStream(
+                                new ByteArrayInputStream(bytes),
+                                new java.util.zip.Inflater(nowrap))) {
+                    String inflated = Cms.read(inf, 8 * 1024 * 1024);
+                    String trimmed = inflated.trim();
+                    if (trimmed.startsWith("<")
+                            || trimmed.startsWith("{")
+                            || trimmed.startsWith("[")) {
+                        return inflated;
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return new String(bytes, "UTF-8");
+    }
+
+    private static byte[] tryDirectDanmuFallback(String rawUrl) {
+        if (rawUrl == null || rawUrl.trim().isEmpty()) return null;
+        String candidate = rawUrl.trim();
+        if (!Cms.isHttp(candidate)) return null;
+        try {
+            URL u = new URL(encodeDanmakuUrl(candidate));
+            if (loopbackHost(u.getHost())) {
+                return null;
+            }
+            HttpURLConnection conn = ProxyAddress.openHttpConnection(u);
+            try {
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(12000);
+                conn.setInstanceFollowRedirects(true);
+                conn.setRequestProperty("User-Agent", Cms.USER_AGENT);
+                conn.setRequestProperty("Accept", "*/*");
+                conn.setRequestProperty("Accept-Encoding", "gzip, deflate");
+                int status = conn.getResponseCode();
+                if (status < 200 || status >= 300) {
+                    return null;
+                }
+                String text;
+                try (InputStream in = conn.getInputStream()) {
+                    text = decodeDanmakuResponseStream(in, conn.getContentEncoding());
+                }
+                String trimmed = text == null ? "" : text.trim();
+                boolean looksLikeDanmaku =
+                        trimmed.startsWith("<?xml")
+                                || trimmed.startsWith("<i")
+                                || trimmed.startsWith("<d ")
+                                || trimmed.startsWith("<danmaku")
+                                || trimmed.startsWith("{")
+                                || trimmed.startsWith("[");
+                if (looksLikeDanmaku && !trimmed.isEmpty()) {
+                    return text.getBytes("UTF-8");
+                }
+                return null;
+            } finally {
+                conn.disconnect();
+            }
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 

@@ -1596,22 +1596,14 @@ class CmsClient {
     if (site.isEmby) return (await EmbyLibrary.open(site)).list(categoryId, '', page);
     if (_usesJs(site)) {
       final wogg = WoggSource.supports(site);
-      final mappedArea = filter != null &&
-              filter.area.isNotEmpty &&
-              filter.area != '全部'
-          ? (wogg
-              ? switch (filter.area.trim()) {
-                  '大陆' || '内地' => '中国大陆',
-                  '香港' => '中国香港',
-                  '台湾' => '中国台湾',
-                  final other => other,
-                }
-              : filter.area.trim())
-          : '';
-      final effectiveCategoryId =
-          (wogg && !RegExp(r'^\d+$').hasMatch(categoryId.trim()))
-              ? '1'
-              : categoryId;
+      String normalizeWoggArea(String raw) => switch (raw.trim()) {
+            '大陆' || '内地' => '中国大陆',
+            '香港' => '中国香港',
+            '台湾' => '中国台湾',
+            final other => other,
+          };
+      final rawYear = filter?.year.trim() ?? '';
+      final exactYear = RegExp(r'^(?:19|20)\d{2}$').hasMatch(rawYear);
       final extend = <String, String>{
         if (filter != null &&
             filter.genreLabel.isNotEmpty &&
@@ -1621,26 +1613,39 @@ class CmsClient {
             filter != null &&
             filter.genreLabel.isNotEmpty)
           'type': filter.genreLabel,
-        if (mappedArea.isNotEmpty) (wogg ? '1' : 'area'): mappedArea,
+        if (filter != null && filter.area.isNotEmpty && filter.area != '全部')
+          (wogg ? '1' : 'area'):
+              wogg ? normalizeWoggArea(filter.area) : filter.area.trim(),
         if (filter != null &&
-            filter.year.isNotEmpty &&
-            filter.year != '全部')
-          (wogg ? '11' : 'year'): filter.year,
+            rawYear.isNotEmpty &&
+            rawYear != '全部' &&
+            (!wogg || exactYear))
+          (wogg ? '11' : 'year'): rawYear,
       };
-      final listing = CmsParser.parseListing(await _callJs(
-        site,
-        'category',
-        [effectiveCategoryId, page, extend.isNotEmpty, extend],
-      ));
+      final effectiveCategoryId =
+          (wogg && !RegExp(r'^\d+$').hasMatch(categoryId.trim()))
+              ? '1'
+              : categoryId;
+      final listing = CmsParser.parseListing(await _callJs(site, 'category', [
+        effectiveCategoryId,
+        page,
+        extend.isNotEmpty,
+        extend,
+      ]));
       if (filter == null || !filter.hasSubFilter || extend.isEmpty) {
         return listing;
       }
-      final honored = _looksSourceHonoredFilter(listing.videos, filter);
+      // When WoggSource could not send a decade bucket (`2010年代` / `更早`) in slot 11,
+      // apply year-only client-side filtering on the server-filtered result.
+      final filteredVideos =
+          (wogg && rawYear.isNotEmpty && rawYear != '全部' && !exactYear)
+              ? CmsParser.filterVideos(listing.videos, CmsFilter(year: rawYear))
+              : listing.videos;
       return CmsListing(
         page: listing.page,
         pageCount: listing.pageCount,
-        videos: listing.videos,
-        sourceFiltered: honored,
+        videos: filteredVideos,
+        sourceFiltered: true,
       );
     }
     if (site.isM3uVodApi) {
@@ -1666,6 +1671,9 @@ class CmsClient {
         childIds: childIds,
         filter: filter,
       );
+      if (listing.sourceFiltered) {
+        return listing;
+      }
       if (filter != null && filter.hasSubFilter) {
         final filtered = CmsParser.filterVideos(listing.videos, filter);
         if (filtered.isNotEmpty || page > 1) {
@@ -1673,6 +1681,7 @@ class CmsClient {
             page: listing.page,
             pageCount: listing.pageCount,
             videos: filtered,
+            sourceFiltered: filtered.isNotEmpty,
           );
         }
       }
@@ -1686,18 +1695,22 @@ class CmsClient {
       if (id.isNotEmpty) {
         params['t'] = id;
       }
+      var sentServerFilter = false;
       if (filter != null) {
         if (filter.area.isNotEmpty && filter.area != '全部') {
           params['area'] = filter.area;
+          sentServerFilter = true;
         }
         if (filter.year.isNotEmpty &&
             filter.year != '全部' &&
             filter.year != '2010年代' &&
             filter.year != '更早') {
           params['year'] = filter.year;
+          sentServerFilter = true;
         }
         if (filter.genreLabel.isNotEmpty && filter.genreLabel != '全部') {
           params['class'] = filter.genreLabel;
+          sentServerFilter = true;
         }
       }
       final raw = await _getText(
@@ -1712,7 +1725,29 @@ class CmsClient {
             page: parsed.page,
             pageCount: parsed.pageCount,
             videos: filtered,
+            sourceFiltered: true,
           );
+        }
+        // If server accepted filter query params and returned cards that omit
+        // `vod_area`/`vod_year`/`vod_class` fields, trust the server response
+        // instead of discarding every card on empty client metadata.
+        if (sentServerFilter && parsed.videos.isNotEmpty) {
+          final needsArea = filter.area.isNotEmpty && filter.area != '全部';
+          final needsYear = filter.year.isNotEmpty && filter.year != '全部';
+          final needsGenre =
+              filter.genreLabel.isNotEmpty && filter.genreLabel != '全部';
+          final cardsLackMetadata =
+              (needsArea && parsed.videos.every((v) => v.area.trim().isEmpty)) ||
+              (needsYear && parsed.videos.every((v) => v.year.trim().isEmpty)) ||
+              (needsGenre && parsed.videos.every((v) => v.tag.trim().isEmpty));
+          if (cardsLackMetadata) {
+            return CmsListing(
+              page: parsed.page,
+              pageCount: parsed.pageCount,
+              videos: parsed.videos,
+              sourceFiltered: true,
+            );
+          }
         }
       }
       return parsed;

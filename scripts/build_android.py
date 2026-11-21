@@ -110,8 +110,8 @@ def main():
     run(exe(JDK/'bin','javac'),'-encoding','UTF-8','-source','8','-target','8','-Xlint:-options','-classpath',os.pathsep.join(str(p) for p in [ANDROID,*dependencies]),'-d',BUILD/'classes',*sources)
     with zipfile.ZipFile(BUILD/'classes.jar','w',zipfile.ZIP_DEFLATED) as z:
         for p in (BUILD/'classes').rglob('*.class'): z.write(p,p.relative_to(BUILD/'classes').as_posix())
-    run(exe(JDK/'bin','java'),'-cp',SDK/'lib/d8.jar','com.android.tools.r8.D8','--min-api','23','--lib',ANDROID,'--output',BUILD/'dex',BUILD/'classes.jar',*dependencies)
-    with zipfile.ZipFile(BUILD/'resources.apk') as source, zipfile.ZipFile(BUILD/'unsigned.apk','w',zipfile.ZIP_DEFLATED) as dest:
+    run(exe(JDK/'bin','java'),'-cp',SDK/'lib/d8.jar','com.android.tools.r8.D8','--release','--min-api','23','--lib',ANDROID,'--output',BUILD/'dex',BUILD/'classes.jar',*dependencies)
+    with zipfile.ZipFile(BUILD/'resources.apk') as source, zipfile.ZipFile(BUILD/'unsigned.apk','w',zipfile.ZIP_DEFLATED,compresslevel=9) as dest:
         for entry in source.infolist():dest.writestr(entry,source.read(entry.filename))
         for dex in (BUILD/'dex').glob('*.dex'):dest.write(dex,dex.name)
         for name,data in native_files.items():dest.writestr(name,data)
@@ -140,7 +140,7 @@ def main():
         tv_xml = re.sub(r'android:versionName="[^"]+"', f'android:versionName="{tv_version}"', tv_xml)
         tv_manifest.write_text(tv_xml, encoding='utf-8')
         run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources.apk','--manifest',tv_manifest,'-I',ANDROID,'-A',SRC/'assets','-A',catpaw_tv_assets,*ui_spec_asset_args,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
-        with zipfile.ZipFile(BUILD/'resources.apk') as source, zipfile.ZipFile(BUILD/'unsigned.apk','w',zipfile.ZIP_DEFLATED) as dest:
+        with zipfile.ZipFile(BUILD/'resources.apk') as source, zipfile.ZipFile(BUILD/'unsigned.apk','w',zipfile.ZIP_DEFLATED,compresslevel=9) as dest:
             for entry in source.infolist():dest.writestr(entry,source.read(entry.filename))
             for dex in (BUILD/'dex').glob('*.dex'):dest.write(dex,dex.name)
             for name,data in native_files.items():dest.writestr(name,data)
@@ -173,7 +173,7 @@ def main():
     mobile_xml=re.sub(r'android:versionName="[^"]+"', f'android:versionName="{mobile_version}"', mobile_xml)
     mobile_manifest.write_text(mobile_xml,encoding='utf-8')
     run(exe(SDK,'aapt2'),'link','-o',BUILD/'resources-mobile.apk','--manifest',mobile_manifest,'-I',ANDROID,'-A',SRC/'assets','-A',catpaw_mobile_assets,*ui_spec_asset_args,'--auto-add-overlay',*extra,*overlays,'-R',BUILD/'resources.zip')
-    with zipfile.ZipFile(BUILD/'resources-mobile.apk') as source, zipfile.ZipFile(BUILD/'unsigned-mobile.apk','w',zipfile.ZIP_DEFLATED) as dest:
+    with zipfile.ZipFile(BUILD/'resources-mobile.apk') as source, zipfile.ZipFile(BUILD/'unsigned-mobile.apk','w',zipfile.ZIP_DEFLATED,compresslevel=9) as dest:
         for entry in source.infolist():dest.writestr(entry,source.read(entry.filename))
         for dex in (BUILD/'dex').glob('*.dex'):dest.write(dex,dex.name)
         for name,data in native_files_mobile.items():dest.writestr(name,data)

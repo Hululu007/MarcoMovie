@@ -222,7 +222,8 @@ public final class GlobalSearchScreen implements AutoCloseable {
         a.body.addView(split, new LinearLayout.LayoutParams(-1, a.dp(height)));
         LinearLayout left = a.vertical();
         left.setPadding(a.dp(4), a.dp(6), a.dp(30), a.dp(10));
-        ScrollView keyboardScroll = new TvScrollView(a);
+        TvScrollView keyboardScroll = new TvScrollView(a);
+        keyboardScroll.setFocusFrameEnabled(false);
         keyboardScroll.setTag("search-keyboard-scroll");
         keyboardScroll.setVerticalScrollBarEnabled(false);
         keyboardScroll.setClipChildren(false);
@@ -681,7 +682,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
                             MainActivity.WHITE,
                             MainActivity.DARK,
                             false,
-                            1.02f);
+                            1.08f);
                 });
         b.setOnKeyListener((v, key, event) -> physicalKey(key, event));
         LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, a.dp(28), weight);
@@ -1963,6 +1964,7 @@ public final class GlobalSearchScreen implements AutoCloseable {
         card.setFocusable(a.isTvDevice());
         card.setFocusableInTouchMode(a.isTvDevice());
         card.setClickable(true);
+        if (a.isTvDevice()) TvFocusFrame.attachCard(card, "search-results-grid");
         a.pressFeedback(card);
         final String query = submitted;
         card.setOnClickListener(

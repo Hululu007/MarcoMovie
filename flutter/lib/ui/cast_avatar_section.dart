@@ -1,11 +1,14 @@
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import '../core/cast_avatar_service.dart';
 import 'apple_theme.dart';
+import 'desktop_horizontal_scroller.dart';
+import 'windows_appearance.dart';
 
-/// Horizontal circular actor/director avatar carousel used on both the Detail
-/// page (选集页) and the iOS Portrait Companion Player (腾讯视频模式).
+/// Horizontal circular actor/director avatar carousel used on the Detail page
+/// (iOS / macOS / Windows) and the iOS Portrait Companion Player.
 class CastAvatarSection extends StatefulWidget {
   final String title;
   final String actorRaw;
@@ -13,7 +16,11 @@ class CastAvatarSection extends StatefulWidget {
   final String doubanId;
   final List<CastMember>? initialMembers;
   final EdgeInsetsGeometry padding;
+  final EdgeInsetsGeometry? containerMargin;
+  final EdgeInsetsGeometry? containerPadding;
+  final BoxDecoration? containerDecoration;
   final bool forceDark;
+  final bool allowExternalLookup;
   final ValueChanged<CastMember>? onTapMember;
 
   const CastAvatarSection({
@@ -24,7 +31,11 @@ class CastAvatarSection extends StatefulWidget {
     this.doubanId = '',
     this.initialMembers,
     this.padding = const EdgeInsets.symmetric(horizontal: 16),
+    this.containerMargin,
+    this.containerPadding,
+    this.containerDecoration,
     this.forceDark = false,
+    this.allowExternalLookup = true,
     this.onTapMember,
   });
 
@@ -33,6 +44,7 @@ class CastAvatarSection extends StatefulWidget {
 }
 
 class _CastAvatarSectionState extends State<CastAvatarSection> {
+  final ScrollController _scrollController = ScrollController();
   List<CastMember> _members = const [];
   bool _loading = false;
   int _generation = 0;
@@ -44,11 +56,18 @@ class _CastAvatarSectionState extends State<CastAvatarSection> {
   }
 
   @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   void didUpdateWidget(covariant CastAvatarSection oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.title != widget.title ||
         oldWidget.actorRaw != widget.actorRaw ||
         oldWidget.doubanId != widget.doubanId ||
+        oldWidget.allowExternalLookup != widget.allowExternalLookup ||
         oldWidget.initialMembers != widget.initialMembers) {
       _initAndLoad();
     }
@@ -64,12 +83,20 @@ class _CastAvatarSectionState extends State<CastAvatarSection> {
     final cached = CastAvatarService.peekCached(widget.title);
     if (cached != null &&
         cached.isNotEmpty &&
-        cached.any((m) => m.avatarUrl.isNotEmpty)) {
+        (cached.any((m) => m.avatarUrl.isNotEmpty) ||
+            !widget.allowExternalLookup ||
+            Platform.environment.containsKey('FLUTTER_TEST'))) {
       _members = cached;
       _loading = false;
       return;
     }
-    _members = CastAvatarService.parseRawActors(widget.actorRaw);
+    _members = cached != null && cached.isNotEmpty
+        ? cached
+        : CastAvatarService.parseRawActors(widget.actorRaw);
+    if (!widget.allowExternalLookup) {
+      _loading = false;
+      return;
+    }
     _loading = widget.title.trim().isNotEmpty;
     if (!_loading) return;
     CastAvatarService.resolveCast(
@@ -77,6 +104,10 @@ class _CastAvatarSectionState extends State<CastAvatarSection> {
       actorRaw: widget.actorRaw,
       year: widget.year,
       doubanId: widget.doubanId,
+      onProgress: (partial) {
+        if (!mounted || gen != _generation || partial.isEmpty) return;
+        setState(() => _members = partial);
+      },
     ).then((resolved) {
       if (!mounted || gen != _generation) return;
       setState(() {
@@ -91,8 +122,39 @@ class _CastAvatarSectionState extends State<CastAvatarSection> {
   @override
   Widget build(BuildContext context) {
     if (_members.isEmpty && !_loading) return const SizedBox.shrink();
-    final palette = widget.forceDark ? ApplePalette.dark : ApplePalette.of(context);
-    return Column(
+    final winScope = WindowsAppearanceScope.maybeOf(context);
+    final palette = widget.forceDark
+        ? ApplePalette.dark
+        : (winScope != null
+            ? (winScope.dark ? ApplePalette.dark : ApplePalette.light)
+            : ApplePalette.of(context));
+    final list = _members.isEmpty
+        ? ListView.separated(
+            controller: _scrollController,
+            scrollDirection: Axis.horizontal,
+            padding: widget.padding,
+            itemCount: 5,
+            separatorBuilder: (_, __) => const SizedBox(width: 12),
+            itemBuilder: (_, __) => _CastSkeletonItem(palette: palette),
+          )
+        : ListView.separated(
+            controller: _scrollController,
+            scrollDirection: Axis.horizontal,
+            padding: widget.padding,
+            itemCount: _members.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 12),
+            itemBuilder: (context, index) {
+              final member = _members[index];
+              return _CastAvatarCard(
+                member: member,
+                palette: palette,
+                onTap: widget.onTapMember != null
+                    ? () => widget.onTapMember!(member)
+                    : null,
+              );
+            },
+          );
+    Widget body = Column(
       key: const Key('cast-avatar-section'),
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -134,33 +196,24 @@ class _CastAvatarSectionState extends State<CastAvatarSection> {
         const SizedBox(height: 10),
         SizedBox(
           height: 104,
-          child: _members.isEmpty
-              ? ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  padding: widget.padding,
-                  itemCount: 5,
-                  separatorBuilder: (_, __) => const SizedBox(width: 12),
-                  itemBuilder: (_, __) => _CastSkeletonItem(palette: palette),
-                )
-              : ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  padding: widget.padding,
-                  itemCount: _members.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 12),
-                  itemBuilder: (context, index) {
-                    final member = _members[index];
-                    return _CastAvatarCard(
-                      member: member,
-                      palette: palette,
-                      onTap: widget.onTapMember != null
-                          ? () => widget.onTapMember!(member)
-                          : null,
-                    );
-                  },
-                ),
+          child: DesktopHorizontalScroller(
+            controller: _scrollController,
+            child: list,
+          ),
         ),
       ],
     );
+    if (widget.containerDecoration != null ||
+        widget.containerPadding != null ||
+        widget.containerMargin != null) {
+      body = Container(
+        margin: widget.containerMargin,
+        padding: widget.containerPadding,
+        decoration: widget.containerDecoration,
+        child: body,
+      );
+    }
+    return body;
   }
 }
 

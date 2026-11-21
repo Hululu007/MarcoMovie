@@ -93,7 +93,8 @@ final class WallpaperUploadDialog {
             panel.addView(note);
             a.gap(panel, 14);
 
-            int qrSize = a.dp(204);
+            int qrSize =
+                    Math.min(a.dp(176), Math.max(a.dp(136), Math.round(a.windowHeight() * 0.30f)));
             BitMatrix matrix =
                     new QRCodeWriter().encode(urlStr, BarcodeFormat.QR_CODE, qrSize, qrSize);
             int[] pixels = new int[qrSize * qrSize];

@@ -29,7 +29,9 @@ final class HomeAmbient extends View {
     };
 
     private static final float ORB_UNIT = 100f;
-    private static final float MORPH_SECONDS = 0.65f;
+    private static final float MORPH_SECONDS = 0.42f;
+    private static final int TV_CACHE_W = 192;
+    private static final int TV_CACHE_H = 108;
 
     final MainActivity a;
     final LruCache<String, int[]> colors = new LruCache<>(64);
@@ -38,6 +40,13 @@ final class HomeAmbient extends View {
     private final Paint orb1Paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.DITHER_FLAG);
     private final Paint orb2Paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.DITHER_FLAG);
     private final Paint orb3Paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.DITHER_FLAG);
+    private final Paint cacheDrawPaint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
+    private final Paint cacheCrossfadePaint =
+            new Paint(Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
+    private final RectF dstRect = new RectF();
+    private Bitmap cachedPrevBitmap;
+    private Bitmap cachedCurrBitmap;
+    private boolean cachedBitmapDirty = true;
 
     ImageView wanted;
     Runnable pending;
@@ -53,12 +62,36 @@ final class HomeAmbient extends View {
     private int startLeft = left, startRight = right, startMid = deriveTertiary(left, right);
     private int targetMid = deriveTertiary(left, right);
     private int curLeft = left, curRight = right, curMid = targetMid;
-    private float morphProgress = 1f;
+    float morphProgress = 1f;
     private float phase = 0f;
     private float frameAccum = 0f;
     private boolean shadersDirty = true;
     private int lastBaseW = -1, lastBaseH = -1;
-    private boolean loopRunning;
+    boolean loopRunning;
+    private float scrollReveal = 1f;
+
+    static float computeScrollReveal(int scrollY, int heroHeightPx) {
+        if (heroHeightPx <= 0) return 1f;
+        float start = heroHeightPx * 0.12f;
+        float end = heroHeightPx * 0.82f;
+        if (scrollY <= start) return 0.68f;
+        if (scrollY >= end) return 1f;
+        float t = (scrollY - start) / (end - start);
+        float smooth = t * t * (3f - 2f * t);
+        return 0.68f + 0.32f * smooth;
+    }
+
+    void followHeroColors(int first, int second) {
+        if (!adaptivePosterMode) return;
+        transition(first, second);
+    }
+
+    void setScrollReveal(float reveal) {
+        float clamped = Math.max(0f, Math.min(1f, reveal));
+        if (Math.abs(clamped - scrollReveal) < 0.004f) return;
+        scrollReveal = clamped;
+        setAlpha(clamped);
+    }
 
     private final MotionLoop.Step driftStep = this::advanceDrift;
 
@@ -67,6 +100,7 @@ final class HomeAmbient extends View {
             loopRunning = false;
             return false;
         }
+        boolean tv = a.isTvDevice();
         boolean morphing = morphProgress < 1f;
         if (morphing) {
             morphProgress = Math.min(1f, morphProgress + dt / MORPH_SECONDS);
@@ -74,10 +108,22 @@ final class HomeAmbient extends View {
             curLeft = mix(startLeft, left, eased);
             curRight = mix(startRight, right, eased);
             curMid = mix(startMid, targetMid, eased);
-            shadersDirty = true;
-            if (morphProgress >= 1f && a.root != null) {
-                com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
+            if (!tv) {
+                shadersDirty = true;
+                if (morphProgress >= 1f && a.root != null) {
+                    com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
+                }
+            } else if (morphProgress >= 1f) {
+                cachedPrevBitmap = null;
             }
+        }
+        if (tv) {
+            invalidate();
+            if (morphProgress >= 1f) {
+                loopRunning = false;
+                return false;
+            }
+            return true;
         }
         phase += dt;
         if (phase > 6283.185f) phase -= 6283.185f;
@@ -169,11 +215,14 @@ final class HomeAmbient extends View {
             }
         } else {
             shadersDirty = true;
+            cachedBitmapDirty = true;
             invalidate();
             if (wanted != null) posterReady(wanted);
         }
         syncMotionLoop();
-        if (a.root != null) com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
+        if (!a.isTvDevice() && a.root != null) {
+            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
+        }
     }
 
     void previewCustomColors(int leftColor, int rightColor) {
@@ -254,23 +303,26 @@ final class HomeAmbient extends View {
                     final int revision = appearanceRevision;
                     a.artwork.execute(
                             () -> {
-                                if (bitmap.isRecycled()) return;
-                                final int c0 = sample(bitmap, 0);
-                                final int c1 = harmonizeSecondary(c0, sample(bitmap, 1));
-                                final int[] target = new int[] {c0, c1};
-                                colors.put(key, target);
-                                post(
-                                        () -> {
-                                            if (adaptivePosterMode
-                                                    && image == wanted
-                                                    && isAttachedToWindow()
-                                                    && revision == appearanceRevision) {
-                                                transition(c0, c1);
-                                            }
-                                        });
+                                try {
+                                    if (bitmap.isRecycled()) return;
+                                    final int c0 = sample(bitmap, 0);
+                                    final int c1 = harmonizeSecondary(c0, sample(bitmap, 1));
+                                    final int[] target = new int[] {c0, c1};
+                                    colors.put(key, target);
+                                    post(
+                                            () -> {
+                                                if (adaptivePosterMode
+                                                        && image == wanted
+                                                        && isAttachedToWindow()
+                                                        && revision == appearanceRevision) {
+                                                    transition(c0, c1);
+                                                }
+                                            });
+                                } catch (Throwable ignored) {
+                                }
                             });
                 };
-        postDelayed(pending, a.reduced ? 0 : 80);
+        postDelayed(pending, a.reduced ? 0 : (a.isTvDevice() ? 180 : 80));
     }
 
     static int sample(Bitmap bitmap, int side) {
@@ -325,9 +377,12 @@ final class HomeAmbient extends View {
         strength = next;
         appearanceRevision++;
         shadersDirty = true;
+        cachedBitmapDirty = true;
         invalidate();
         syncMotionLoop();
-        if (a.root != null) com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
+        if (!a.isTvDevice() && a.root != null) {
+            com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
+        }
         if (adaptivePosterMode && wanted != null) posterReady(wanted);
     }
 
@@ -340,6 +395,8 @@ final class HomeAmbient extends View {
         startMid = curMid = targetMid;
         morphProgress = 1f;
         shadersDirty = true;
+        cachedBitmapDirty = true;
+        cachedPrevBitmap = null;
         invalidate();
     }
 
@@ -354,12 +411,81 @@ final class HomeAmbient extends View {
         targetMid = deriveTertiary(first, second);
         if (a.reduced) {
             snapColors(first, second);
-            if (a.root != null) com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
+            if (!a.isTvDevice() && a.root != null) {
+                com.pilipala.glass.GlassworkSurface.invalidateBackdrop(a.root);
+            }
             return;
+        }
+        if (a.isTvDevice()) {
+            cachedPrevBitmap = cachedCurrBitmap;
+            cachedCurrBitmap = renderCachedField(left, right);
+            cachedBitmapDirty = false;
         }
         morphProgress = 0f;
         syncMotionLoop();
         invalidate();
+    }
+
+    private Bitmap renderCachedField(int first, int second) {
+        float eff = effectiveStrength();
+        int mid = deriveTertiary(first, second);
+        Bitmap b;
+        try {
+            b = Bitmap.createBitmap(TV_CACHE_W, TV_CACHE_H, Bitmap.Config.ARGB_8888);
+        } catch (Throwable ignored) {
+            return null;
+        }
+        Canvas c = new Canvas(b);
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.DITHER_FLAG);
+        p.setShader(
+                new LinearGradient(
+                        0,
+                        0,
+                        TV_CACHE_W,
+                        TV_CACHE_H,
+                        mix(0xff0d111a, first, eff * 0.56f),
+                        mix(0xff080b12, second, eff * 0.44f),
+                        Shader.TileMode.CLAMP));
+        c.drawRect(0, 0, TV_CACHE_W, TV_CACHE_H, p);
+        if (strength > 0.005f) {
+            p.setShader(makeOrbShader(first, eff, 242, 152, 54));
+            drawOrb(
+                    c,
+                    TV_CACHE_W * 0.24f,
+                    TV_CACHE_H * 0.22f,
+                    TV_CACHE_W * 0.68f,
+                    TV_CACHE_H * 0.86f,
+                    p);
+            p.setShader(makeOrbShader(second, eff, 234, 144, 50));
+            drawOrb(
+                    c,
+                    TV_CACHE_W * 0.78f,
+                    TV_CACHE_H * 0.46f,
+                    TV_CACHE_W * 0.66f,
+                    TV_CACHE_H * 0.84f,
+                    p);
+            p.setShader(makeOrbShader(mid, eff, 200, 110, 34));
+            drawOrb(
+                    c,
+                    TV_CACHE_W * 0.46f,
+                    TV_CACHE_H * 0.84f,
+                    TV_CACHE_W * 0.60f,
+                    TV_CACHE_H * 0.74f,
+                    p);
+        }
+        // Bake subtle cinema depth vignette directly into the cached TV texture so we avoid
+        // stacking a separate 1080p homeGradient() overdraw layer on Android TV.
+        p.setShader(
+                new LinearGradient(
+                        0,
+                        0,
+                        0,
+                        TV_CACHE_H,
+                        new int[] {0x28090c14, 0x0c090c14, 0x48090c14},
+                        new float[] {0f, 0.48f, 1f},
+                        Shader.TileMode.CLAMP));
+        c.drawRect(0, 0, TV_CACHE_W, TV_CACHE_H, p);
+        return b;
     }
 
     private float effectiveStrength() {
@@ -437,11 +563,19 @@ final class HomeAmbient extends View {
     }
 
     private boolean shouldAnimate() {
-        return isAttachedToWindow()
-                && getVisibility() == View.VISIBLE
-                && getWindowVisibility() == View.VISIBLE
-                && !a.reduced
-                && strength > 0.01f;
+        if (!isAttachedToWindow()
+                || getVisibility() != View.VISIBLE
+                || getWindowVisibility() != View.VISIBLE
+                || a.reduced
+                || strength <= 0.01f) {
+            return false;
+        }
+        // On Android TV, only animate during active color transitions; stay completely idle
+        // between focus changes so scrolling and focus hops hold steady 60fps.
+        if (a.isTvDevice()) {
+            return morphProgress < 1f;
+        }
+        return true;
     }
 
     private void syncMotionLoop() {
@@ -461,6 +595,26 @@ final class HomeAmbient extends View {
     protected void onDraw(Canvas c) {
         int w = getWidth(), h = getHeight();
         if (w <= 0 || h <= 0) return;
+        if (a.isTvDevice()) {
+            if (cachedBitmapDirty || cachedCurrBitmap == null || cachedCurrBitmap.isRecycled()) {
+                cachedCurrBitmap = renderCachedField(left, right);
+                cachedBitmapDirty = false;
+            }
+            if (cachedCurrBitmap == null || cachedCurrBitmap.isRecycled()) {
+                c.drawColor(0xff0b0e16);
+                return;
+            }
+            dstRect.set(0, 0, w, h);
+            if (morphProgress < 1f && cachedPrevBitmap != null && !cachedPrevBitmap.isRecycled()) {
+                c.drawBitmap(cachedPrevBitmap, null, dstRect, cacheDrawPaint);
+                cacheCrossfadePaint.setAlpha(
+                        Math.max(0, Math.min(255, Math.round(cubicEaseOut(morphProgress) * 255f))));
+                c.drawBitmap(cachedCurrBitmap, null, dstRect, cacheCrossfadePaint);
+            } else {
+                c.drawBitmap(cachedCurrBitmap, null, dstRect, cacheDrawPaint);
+            }
+            return;
+        }
         if (shadersDirty || w != lastBaseW || h != lastBaseH) {
             rebuildShaders(w, h);
         }
@@ -517,6 +671,9 @@ final class HomeAmbient extends View {
             loopRunning = false;
             MotionLoop.remove(driftStep);
         }
+        cachedPrevBitmap = null;
+        cachedCurrBitmap = null;
+        cachedBitmapDirty = true;
         wanted = null;
         super.onDetachedFromWindow();
     }
