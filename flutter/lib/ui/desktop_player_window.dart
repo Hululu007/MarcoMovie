@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -7,9 +6,11 @@ import 'package:window_manager/window_manager.dart';
 /// so a second double click or leaving the route cannot race a macOS animation.
 class DesktopPlayerWindow extends ChangeNotifier with WindowListener {
   DesktopPlayerWindow({bool? macOS, bool? immersiveFrame})
-      : _macOS = macOS ?? Platform.isMacOS,
+      : _macOS = macOS ?? (defaultTargetPlatform == TargetPlatform.macOS),
         _immersiveFrame =
-            immersiveFrame ?? (!(macOS ?? Platform.isMacOS) && Platform.isWindows) {
+            immersiveFrame ??
+                (!(macOS ?? (defaultTargetPlatform == TargetPlatform.macOS)) &&
+                    defaultTargetPlatform == TargetPlatform.windows) {
     windowManager.addListener(this);
   }
 
@@ -19,6 +20,7 @@ class DesktopPlayerWindow extends ChangeNotifier with WindowListener {
   Future<void> _queue = Future<void>.value();
   Future<void>? _closed;
   Completer<void>? _transition;
+  Timer? _transitionTimer;
   bool? _transitionTarget;
   bool? _initialFullscreen;
   bool _fullscreen = false;
@@ -82,7 +84,18 @@ class DesktopPlayerWindow extends ChangeNotifier with WindowListener {
         // AppKit returns from toggleFullScreen before its animation completes.
         // Do not restore the titlebar or issue another toggle during animation.
         if (_macOS) {
-          await completed.future.timeout(const Duration(seconds: 8));
+          _transitionTimer?.cancel();
+          _transitionTimer = Timer(const Duration(seconds: 8), () {
+            if (!completed.isCompleted) {
+              completed.completeError(
+                TimeoutException(
+                  'macOS fullscreen transition timed out',
+                  const Duration(seconds: 8),
+                ),
+              );
+            }
+          });
+          await completed.future;
         }
       }
       final actual = await windowManager.isFullScreen();
@@ -98,6 +111,8 @@ class DesktopPlayerWindow extends ChangeNotifier with WindowListener {
       _update(actual);
       rethrow;
     } finally {
+      _transitionTimer?.cancel();
+      _transitionTimer = null;
       _transition = null;
       _transitionTarget = null;
       _changing = false;
@@ -113,6 +128,8 @@ class DesktopPlayerWindow extends ChangeNotifier with WindowListener {
   void _nativeFullscreen(bool full) {
     _update(full);
     if (_transitionTarget == full && !(_transition?.isCompleted ?? true)) {
+      _transitionTimer?.cancel();
+      _transitionTimer = null;
       _transition!.complete();
     }
     if (!_changing && !_closing) {

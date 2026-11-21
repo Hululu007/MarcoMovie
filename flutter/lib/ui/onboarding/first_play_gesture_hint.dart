@@ -16,16 +16,12 @@ FirstPlayHintPlatform resolveFirstPlayHintPlatform({
 }) {
   if (isTv) return FirstPlayHintPlatform.tv;
   final target = platform ?? defaultTargetPlatform;
-  switch (target) {
-    case TargetPlatform.windows:
-    case TargetPlatform.macOS:
-    case TargetPlatform.linux:
-      return FirstPlayHintPlatform.desktop;
-    case TargetPlatform.android:
-    case TargetPlatform.iOS:
-    case TargetPlatform.fuchsia:
-      return FirstPlayHintPlatform.touch;
+  if (target == TargetPlatform.windows ||
+      target == TargetPlatform.macOS ||
+      target == TargetPlatform.linux) {
+    return FirstPlayHintPlatform.desktop;
   }
+  return FirstPlayHintPlatform.touch;
 }
 
 /// Resolves whether Chinese copy should be used, matching Android's `startsWith("zh")`
