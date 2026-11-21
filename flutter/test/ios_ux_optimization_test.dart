@@ -12,6 +12,7 @@ import 'package:marco_movie/core/cms_client.dart';
 import 'package:marco_movie/core/curated_discovery.dart';
 import 'package:marco_movie/core/models.dart';
 import 'package:marco_movie/core/storage_service.dart';
+import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:marco_movie/ui/apple_theme.dart';
 import 'package:marco_movie/ui/cast_avatar_section.dart';
 import 'package:marco_movie/ui/curated_discovery_section.dart';
@@ -743,7 +744,7 @@ void main() {
     'Req 9 & 11: Curated Rex discovery renders 6 shelves, DetailScreen shows avatar cast list, and curated playback strictly uses user-added sources only',
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
     (tester) async {
-      // 1. All 6 Rex-style modules exist in CuratedDiscoverySection
+      // 1. All diverse Rex-style discovery modules exist in CuratedDiscoverySection
       await tester.pumpWidget(
         MaterialApp(
           home: Scaffold(
@@ -758,10 +759,12 @@ void main() {
         ),
       );
       await tester.pump();
-      expect(find.text('全部专题'), findsOneWidget);
+      expect(find.byKey(const Key('curated-editorial-collections')), findsOneWidget);
+      expect(find.byKey(const Key('curated-studio-shelf')), findsOneWidget);
+      expect(find.byKey(const Key('curated-category-pills')), findsOneWidget);
+      expect(find.byKey(const Key('curated-mosaic-shelf')), findsOneWidget);
       for (final spec in CuratedDiscoveryService.modules) {
         expect(find.byKey(Key('curated-module-${spec.id}')), findsOneWidget);
-        expect(find.text(spec.title), findsAtLeastNWidgets(1));
       }
 
       // 2. DetailScreen opened from curated card with ZERO user sources -> cannot play!
@@ -1048,4 +1051,177 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
     },
   );
+
+  testWidgets(
+    'Home Redesign: diverse discovery shelves, gravity-drop to poster-wall animation, full-bleed HD hero, and category/filter bar below 片源最新更新',
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    (tester) async {
+      // 1. Douban JSON parser extracts high-res poster, 16:9 widescreen still, and genre metadata
+      final parsed = CuratedDiscoveryService.parseDoubanDiscoveryJson(
+        jsonEncode({
+          'subject_collection_items': [
+            {
+              'id': '999001',
+              'title': '测试横版影片',
+              'year': '2026',
+              'card_subtitle': '2026 / 中国大陆 / 科幻 冒险 / 导演 / 主演',
+              'rating': {'value': 8.9},
+              'pic': {
+                'large':
+                    'https://img1.doubanio.com/view/photo/s_ratio_poster/public/p999001.jpg',
+              },
+              'photos': [
+                'https://img1.doubanio.com/view/photo/l/public/still999001.jpg',
+              ],
+            },
+          ],
+        }),
+        moduleId: 'weekly_trending',
+      );
+      expect(parsed, hasLength(1));
+      expect(
+        parsed.first.poster,
+        contains('/m_ratio_poster/'),
+      );
+      expect(
+        CuratedDiscoveryService.backdropFor(parsed.first),
+        'https://img1.doubanio.com/view/photo/l/public/still999001.jpg',
+      );
+      expect(CuratedDiscoveryService.genreFor(parsed.first), contains('科幻'));
+
+      // 2. Diverse discovery layout + gravity-drop stack -> poster wall transition on iPhone viewport
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(390, 844);
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() async {
+        await tester.binding.setSurfaceSize(null);
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: CuratedDiscoverySection(
+                hasUserSources: true,
+                loadLive: false,
+                onOpenVideo: (_) {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('近期国内热门'), findsOneWidget);
+      expect(find.text('本周趋势'), findsOneWidget);
+      expect(find.text('近一月 · 热门综艺'), findsOneWidget);
+      expect(find.text('精选厂牌'), findsOneWidget);
+      expect(find.text('分类浏览'), findsOneWidget);
+      expect(find.byKey(const Key('curated-module-weekly_trending')), findsOneWidget);
+      expect(find.byKey(const Key('curated-module-cn_variety')), findsOneWidget);
+
+      // Tap the editorial laurel collection card -> launches Gravity Drop -> Poster Wall page
+      await tester.ensureVisible(
+        find.byKey(const Key('curated-module-cn_variety')),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('curated-module-cn_variety')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.byKey(const Key('curated-gravity-wall-page')), findsOneWidget);
+      // Advance through gravity-drop pile (phase 1) & spring expansion (phase 2) into live wall
+      await tester.pump(const Duration(milliseconds: 650));
+      await tester.pump(const Duration(milliseconds: 700));
+      expect(find.byKey(const Key('curated-gravity-wall-grid')), findsOneWidget);
+      expect(find.byKey(const Key('curated-gravity-replay-btn')), findsOneWidget);
+
+      // Tear down the standalone discovery navigator before mounting AdaptiveShell.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+
+      // 3. AdaptiveShell iOS Home: full-bleed top HD Hero + Category/Filter bar BELOW 片源最新更新
+      final storage = await initTestStorage();
+      await storage.saveConfig(
+        '{"sites":[{"key":"ios_home_demo","name":"示例高清源","type":1,"api":"https://demo.invalid/api"}]}',
+      );
+      final fakeClient = _IosHomeRedesignClient();
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.light(),
+          home: AdaptiveShell(storage: storage, client: fakeClient),
+        ),
+      );
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+
+      final heroFinder = find.byKey(const ValueKey('ios-home-immersive-hero'));
+      expect(heroFinder, findsOneWidget);
+      final heroRect = tester.getRect(heroFinder);
+      expect(heroRect.top, closeTo(0.0, 0.5));
+      expect(heroRect.width, closeTo(390.0, 0.5));
+      expect(heroRect.height, greaterThanOrEqualTo(450.0));
+      expect(find.text('罪蓝之路'), findsWidgets);
+
+      // Scroll down to 片源最新更新 and verify Category/Filter bar sits directly BELOW it
+      final updatesHeaderFinder =
+          find.byKey(const ValueKey('home-source-updates-header'));
+      final categoryBarFinder =
+          find.byKey(const ValueKey('home-category-filter-bar'));
+      final homeScrollCtrl =
+          tester.widget<CustomScrollView>(find.byType(CustomScrollView).first).controller!;
+      for (double offset = 350.0;
+          offset <= homeScrollCtrl.position.maxScrollExtent + 350.0 &&
+              categoryBarFinder.evaluate().isEmpty;
+          offset += 350.0) {
+        homeScrollCtrl.jumpTo(
+          offset.clamp(0.0, homeScrollCtrl.position.maxScrollExtent),
+        );
+        await tester.pump();
+      }
+      expect(updatesHeaderFinder, findsOneWidget);
+      expect(categoryBarFinder, findsOneWidget);
+      expect(
+        tester.getTopLeft(categoryBarFinder).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(updatesHeaderFinder).dy - 1.0),
+      );
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.runAsync(() => Future<void>.delayed(Duration.zero));
+      await tester.pump();
+    },
+  );
+}
+
+class _IosHomeRedesignClient extends CmsClient {
+  @override
+  Future<(List<CmsCategory>, CmsListing)> fetchHome(CmsSite site) async {
+    return (
+      const [
+        CmsCategory(id: '1', name: '电影'),
+        CmsCategory(id: '2', name: '剧集'),
+      ],
+      const CmsListing(
+        videos: [
+          CmsVideo(
+            id: 'hero-1',
+            title: '罪蓝之路',
+            year: '2026',
+            area: '中国大陆',
+            remarks: '更新至第12集',
+            description: '两名刑警联手追查跨境悬疑大案的高燃缉凶故事。',
+          ),
+          CmsVideo(
+            id: 'hero-2',
+            title: '星海漫游',
+            year: '2026',
+            area: '美国',
+            remarks: '4K HDR',
+          ),
+        ],
+      ),
+    );
+  }
 }

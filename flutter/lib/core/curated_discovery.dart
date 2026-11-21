@@ -67,20 +67,35 @@ class CuratedDiscoveryService {
   static final Map<String, ({DateTime fetchedAt, List<CmsVideo> items})> _cache =
       {};
   static final Map<String, Future<List<CmsVideo>>> _inflight = {};
+  static final Map<String, String> _backdropById = {};
+  static final Map<String, String> _genreById = {};
   static const Duration _cacheTtl = Duration(minutes: 30);
 
-  /// The 6 Rex-style discovery modules displayed on Home.
+  /// Returns a dedicated 16:9 landscape still URL for [video] when available
+  /// from Douban's `photos` array, falling back to [video.poster].
+  static String backdropFor(CmsVideo video) {
+    final hit = _backdropById[video.id];
+    if (hit != null && hit.isNotEmpty) return hit;
+    return video.poster;
+  }
+
+  /// Returns parsed genre subtitle (e.g. `剧情 / 古装`) when available.
+  static String genreFor(CmsVideo video) {
+    return _genreById[video.id] ?? '';
+  }
+
+  /// Rex-style discovery modules displayed across varied Home discovery layouts.
   static final List<CuratedModuleSpec> modules = [
     CuratedModuleSpec(
       id: 'cn_hot',
       title: '近期国内热门',
-      subtitle: '热播剧集与华语口碑新作',
+      subtitle: '近一月 · 热播剧集与华语口碑新作',
       badgeText: '热播',
       icon: CupertinoIcons.flame_fill,
       accentColor: const Color(0xFFFF5E3A),
       liveUri: Uri.https(
         'm.douban.com',
-        '/rexxar/api/v2/subject_collection/tv_domestic/items',
+        '/rexxar/api/v2/subject_collection/tv_hot/items',
         {'start': '0', 'count': '16'},
       ),
       referer: 'https://m.douban.com/tv/chinese',
@@ -93,6 +108,54 @@ class CuratedDiscoveryService {
         CmsVideo(id: 'curated:cn:6', title: '三体', year: '2023', area: '中国大陆', remarks: '豆瓣 8.7', doubanScore: 8.7, actor: '张鲁一, 于和伟, 陈瑾'),
         CmsVideo(id: 'curated:cn:7', title: '狂飙', year: '2023', area: '中国大陆', remarks: '豆瓣 8.5', doubanScore: 8.5, actor: '张译, 张颂文, 李一桐'),
         CmsVideo(id: 'curated:cn:8', title: '山花烂漫时', year: '2024', area: '中国大陆', remarks: '豆瓣 9.6', doubanScore: 9.6, actor: '宋佳, 兰西雅, 都兰'),
+      ],
+    ),
+    CuratedModuleSpec(
+      id: 'weekly_trending',
+      title: '本周趋势',
+      subtitle: '院线热映与近期飙升佳作',
+      badgeText: '趋势',
+      icon: CupertinoIcons.graph_circle_fill,
+      accentColor: const Color(0xFFFF9F0A),
+      liveUri: Uri.https(
+        'm.douban.com',
+        '/rexxar/api/v2/subject_collection/movie_hot_gaia/items',
+        {'start': '0', 'count': '16'},
+      ),
+      referer: 'https://m.douban.com/movie/',
+      seedItems: const [
+        CmsVideo(id: 'curated:tr:1', title: '沙丘2', year: '2024', area: '美国', remarks: '科幻 / 冒险', doubanScore: 8.2, actor: '提莫西·查拉梅, 赞达亚'),
+        CmsVideo(id: 'curated:tr:2', title: '奥本海默', year: '2023', area: '美国', remarks: '剧情 / 传记', doubanScore: 8.8, actor: '基里安·墨菲, 艾米莉·布朗特'),
+        CmsVideo(id: 'curated:tr:3', title: '周处除三害', year: '2023', area: '中国台湾', remarks: '动作 / 犯罪', doubanScore: 8.1, actor: '阮经天, 袁富华'),
+        CmsVideo(id: 'curated:tr:4', title: '九龙城寨之围城', year: '2024', area: '中国香港', remarks: '动作 / 犯罪', doubanScore: 7.3, actor: '古天乐, 洪金宝, 林峯'),
+        CmsVideo(id: 'curated:tr:5', title: '头脑特工队2', year: '2024', area: '美国', remarks: '动画 / 奇幻', doubanScore: 8.4, actor: '艾米·波勒, 玛雅·霍克'),
+        CmsVideo(id: 'curated:tr:6', title: '荒野机器人', year: '2024', area: '美国', remarks: '科幻 / 动画', doubanScore: 8.0, actor: '露皮塔·尼永奥, 佩德罗·帕斯卡'),
+        CmsVideo(id: 'curated:tr:7', title: '流浪地球2', year: '2023', area: '中国大陆', remarks: '科幻 / 冒险', doubanScore: 8.3, actor: '吴京, 刘德华, 李雪健'),
+        CmsVideo(id: 'curated:tr:8', title: '好东西', year: '2024', area: '中国大陆', remarks: '剧情 / 喜剧', doubanScore: 9.1, actor: '宋佳, 钟楚曦, 曾慕梅'),
+      ],
+    ),
+    CuratedModuleSpec(
+      id: 'cn_variety',
+      title: '近一月 · 热门综艺',
+      subtitle: '真人秀与热门口碑综艺合集',
+      badgeText: '综艺',
+      icon: CupertinoIcons.music_mic,
+      accentColor: const Color(0xFFBF5AF2),
+      liveUri: Uri.https(
+        'm.douban.com',
+        '/rexxar/api/v2/subject_collection/show_domestic/items',
+        {'start': '0', 'count': '16'},
+      ),
+      referer: 'https://m.douban.com/tv/variety',
+      seedItems: const [
+        CmsVideo(id: 'curated:vr:1', title: '现在就出发', year: '2024', area: '中国大陆', remarks: '真人秀', doubanScore: 8.3, actor: '沈腾, 白敬亭, 金晨'),
+        CmsVideo(id: 'curated:vr:2', title: '你好，星期六', year: '2022', area: '中国大陆', remarks: '真人秀', doubanScore: 7.4, actor: '何炅, 檀健次, 丁程鑫'),
+        CmsVideo(id: 'curated:vr:3', title: '毛雪汪', year: '2021', area: '中国大陆', remarks: '真人秀', doubanScore: 8.6, actor: '毛不易, 李雪琴'),
+        CmsVideo(id: 'curated:vr:4', title: '花儿与少年·丝路季', year: '2023', area: '中国大陆', remarks: '旅行 / 真人秀', doubanScore: 9.2, actor: '秦海璐, 秦岚, 辛芷蕾, 迪丽热巴'),
+        CmsVideo(id: 'curated:vr:5', title: '喜人奇妙夜', year: '2024', area: '中国大陆', remarks: '喜剧 / 竞演', doubanScore: 8.0, actor: '马东, 黄渤, 秦昊'),
+        CmsVideo(id: 'curated:vr:6', title: '种地吧', year: '2023', area: '中国大陆', remarks: '真人秀', doubanScore: 9.0, actor: '蒋敦豪, 鹭卓, 李耕耘'),
+        CmsVideo(id: 'curated:vr:7', title: '大侦探', year: '2024', area: '中国大陆', remarks: '悬疑 / 推理', doubanScore: 8.4, actor: '何炅, 张若昀, 大张伟'),
+        CmsVideo(id: 'curated:vr:8', title: '歌手2024', year: '2024', area: '中国大陆', remarks: '音乐 / 竞演', doubanScore: 7.2, actor: '那英, 凡希亚, 香缇莫'),
       ],
     ),
     CuratedModuleSpec(
@@ -289,17 +352,36 @@ class CuratedDiscoveryService {
       if (title.isEmpty || !seen.add(title)) continue;
       final id = (raw['id'] ?? '').toString().trim();
       String poster = '';
-      final cover = raw['cover'];
-      if (cover is Map) {
-        poster = (cover['url'] ?? '').toString().trim();
-      } else if (cover is String) {
-        poster = cover.trim();
-      } else if (raw['pic'] is Map) {
-        poster = ((raw['pic'] as Map)['normal'] ??
-                (raw['pic'] as Map)['large'] ??
+      if (raw['pic'] is Map) {
+        poster = ((raw['pic'] as Map)['large'] ??
+                (raw['pic'] as Map)['normal'] ??
                 '')
             .toString()
             .trim();
+      }
+      if (poster.isEmpty) {
+        final cover = raw['cover'];
+        if (cover is Map) {
+          poster = (cover['url'] ?? '').toString().trim();
+        } else if (cover is String) {
+          poster = cover.trim();
+        }
+      }
+      if (poster.contains('/s_ratio_poster/')) {
+        poster = poster.replaceFirst('/s_ratio_poster/', '/m_ratio_poster/');
+      }
+      String backdrop = '';
+      final photos = raw['photos'];
+      if (photos is List) {
+        for (final entry in photos) {
+          final url = entry is String
+              ? entry.trim()
+              : (entry is Map ? (entry['url'] ?? '').toString().trim() : '');
+          if (url.isNotEmpty) {
+            backdrop = url;
+            break;
+          }
+        }
       }
       double? score;
       final rating = raw['rating'];
@@ -312,20 +394,48 @@ class CuratedDiscoveryService {
       }
       final year = (raw['year'] ?? '').toString().trim();
       final cardSub = (raw['card_subtitle'] ?? '').toString().trim();
+      String parsedArea = '';
+      String parsedGenre = '';
+      if (cardSub.isNotEmpty) {
+        final subParts = cardSub
+            .split('/')
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty)
+            .toList(growable: false);
+        if (subParts.length >= 2) parsedArea = subParts[1];
+        if (subParts.length >= 3) {
+          parsedGenre = subParts[2]
+              .split(RegExp(r'\s+'))
+              .where((e) => e.isNotEmpty)
+              .take(2)
+              .join(' / ');
+        }
+      }
       final actorsRaw = raw['actors'] ?? raw['casts'];
       final actor = actorsRaw is List
           ? actorsRaw.map((e) => e.toString().trim()).where((e) => e.isNotEmpty).join(', ')
           : '';
       final remarks = score != null
           ? '豆瓣 ${score.toStringAsFixed(1)}'
-          : (year.isNotEmpty ? year : '');
+          : (parsedGenre.isNotEmpty
+              ? parsedGenre
+              : (year.isNotEmpty ? year : ''));
+      final videoId =
+          id.isNotEmpty ? 'curated:$moduleId:$id' : 'curated:$moduleId:${out.length}';
+      if (backdrop.isNotEmpty) {
+        _backdropById[videoId] = backdrop;
+      }
+      if (parsedGenre.isNotEmpty) {
+        _genreById[videoId] = parsedGenre;
+      }
       out.add(
         CmsVideo(
-          id: id.isNotEmpty ? 'curated:$moduleId:$id' : 'curated:$moduleId:${out.length}',
+          id: videoId,
           title: title,
           poster: poster,
           remarks: remarks,
           year: year,
+          area: parsedArea,
           actor: actor,
           description: cardSub,
           doubanScore: score,
