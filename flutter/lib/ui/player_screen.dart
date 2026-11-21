@@ -265,6 +265,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _isFavorite = false;
   bool _portraitSynopsisExpanded = false;
   String _activeResolvedMediaUrl = '';
+  Map<String, String> _activeResolvedHeaders = const {};
   int _lastManualOrientationMs = 0;
 
   bool get _useIosPortraitCompanionMode =>
@@ -1676,11 +1677,13 @@ class _PlayerScreenState extends State<PlayerScreen>
           await dyn.setProperty('referrer', ref);
         } catch (_) {}
         _activeResolvedMediaUrl = effectiveOpenUrl;
+        _activeResolvedHeaders = Map<String, String>.from(effectiveOpenHeaders);
         if (_castController.isCasting) {
           unawaited(
             _castController.switchMedia(
               mediaUrl: effectiveOpenUrl,
               title: '${widget.video.title} · ${_currentEpisode.name}',
+              headers: _activeResolvedHeaders,
               totalDuration: _duration,
             ),
           );
@@ -2115,6 +2118,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             device: device,
             mediaUrl: castUrl,
             title: '${widget.video.title} · ${_currentEpisode.name}',
+            headers: _activeResolvedHeaders,
             initialPosition: _position,
             totalDuration: _duration,
           );

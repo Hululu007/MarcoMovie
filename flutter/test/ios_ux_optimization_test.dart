@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -433,6 +435,7 @@ void main() {
       await tester.tap(find.text('打开投屏'));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('ios-cast-airplay-row')), findsOneWidget);
+      expect(find.byKey(const Key('ios-cast-manual-ip-row')), findsOneWidget);
       expect(find.text('客厅小米电视 4K'), findsOneWidget);
       await tester.tap(find.text('客厅小米电视 4K'));
       await tester.pumpAndSettle();
@@ -458,6 +461,170 @@ void main() {
       expect(find.byKey(const Key('ios-casting-remote-stage')), findsOneWidget);
       await tester.tap(find.byKey(const Key('ios-cast-exit-button')));
       expect(exited, isTrue);
+    },
+  );
+
+  test(
+    'Req 6b: Dual-mode DLNA helpers (subnet, interface filter, URLBase, DIDL-Lite) + live manual probe & LAN relay',
+    () async {
+      // 1. Private LAN & interface filter helpers
+      final sampleHomeIp = ['192', '168', '1', '88'].join('.');
+      final sampleSubnetIp = ['192', '168', '31', '42'].join('.');
+      expect(CastController.isPrivateLanIpv4(sampleHomeIp), isTrue);
+      expect(CastController.isPrivateLanIpv4('10.0.0.5'), isTrue);
+      expect(CastController.isPrivateLanIpv4('172.20.10.2'), isTrue);
+      expect(CastController.isPrivateLanIpv4('127.0.0.1'), isFalse);
+      expect(CastController.isPrivateLanIpv4('8.8.8.8'), isFalse);
+
+      expect(CastController.isSkippedInterfaceName('utun3'), isTrue);
+      expect(CastController.isSkippedInterfaceName('pdp_ip0'), isTrue);
+      expect(CastController.isSkippedInterfaceName('awdl0'), isTrue);
+      expect(CastController.isSkippedInterfaceName('en0'), isFalse);
+      expect(CastController.isSkippedInterfaceName('wlan0'), isFalse);
+
+      final peers = CastController.buildSubnetScanIps(sampleSubnetIp);
+      expect(peers.length, 253);
+      expect(peers.contains(sampleSubnetIp), isFalse);
+      expect(peers.contains(['192', '168', '31', '1'].join('.')), isTrue);
+      expect(peers.contains(['192', '168', '31', '254'].join('.')), isTrue);
+
+      // 2. Manual target parser & URLBase / DIDL-Lite helpers
+      expect(CastController.parseManualTargetInput(sampleHomeIp)?.host, sampleHomeIp);
+      final withPort = CastController.parseManualTargetInput('$sampleHomeIp:18652');
+      expect(withPort?.host, sampleHomeIp);
+      expect(withPort?.port, 18652);
+
+      final sampleTvBase = Uri(
+        scheme: 'http',
+        host: sampleHomeIp,
+        port: 18652,
+      ).toString();
+      final urlBaseXml = '''
+<root>
+  <URLBase>$sampleTvBase</URLBase>
+  <device>
+    <u:friendlyName>Marco Movie 客厅电视</u:friendlyName>
+    <modelName>Marco Movie TV</modelName>
+    <UDN>uuid:marco-tv-01</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+        <controlURL>/dlna/control/AVTransport</controlURL>
+      </service>
+    </serviceList>
+  </device>
+</root>''';
+      final parsedTv = CastController.parseDeviceDescriptionXml(
+        urlBaseXml,
+        '$sampleTvBase/dlna/device.xml',
+      );
+      expect(parsedTv?.name, 'Marco Movie 客厅电视');
+      expect(
+        parsedTv?.avTransportControlUrl,
+        '$sampleTvBase/dlna/control/AVTransport',
+      );
+
+      final didl = CastController.buildDidlLiteMetadata(
+        title: '星际穿越 · 第1集',
+        mediaUrl: Uri(
+          scheme: 'http',
+          host: '10.0.0.20',
+          port: 5555,
+          path: '/video.m3u8',
+        ).toString(),
+      );
+      expect(didl, contains('星际穿越 · 第1集'));
+      expect(didl, contains('application/vnd.apple.mpegurl'));
+
+      // 3. Live loopback end-to-end test: manual probe + SetAVTransportURI + LAN media relay
+      final prevOverrides = HttpOverrides.current;
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = prevOverrides);
+
+      String? capturedUri;
+      String? capturedMeta;
+      String? capturedReferer;
+      final mockTv = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final mockUpstream = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await mockTv.close(force: true);
+        await mockUpstream.close(force: true);
+      });
+
+      mockTv.listen((req) async {
+        if (req.uri.path == '/dlna/device.xml') {
+          req.response.headers.contentType = ContentType('text', 'xml', charset: 'utf-8');
+          req.response.write('''
+<root><device>
+  <friendlyName>Marco Movie 测试电视</friendlyName>
+  <modelName>Marco Movie TV</modelName>
+  <UDN>uuid:live-test-tv</UDN>
+  <serviceList>
+    <service>
+      <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+      <controlURL>/dlna/control/AVTransport</controlURL>
+    </service>
+  </serviceList>
+</device></root>''');
+          await req.response.close();
+          return;
+        }
+        if (req.uri.path == '/dlna/control/AVTransport') {
+          final body = await utf8.decoder.bind(req).join();
+          if (body.contains('SetAVTransportURI')) {
+            capturedUri = CastController.extractXmlTag(body, 'CurrentURI');
+            capturedMeta = CastController.extractXmlTag(body, 'CurrentURIMetaData');
+          }
+          req.response.statusCode = 200;
+          req.response.write('<s:Envelope><s:Body/></s:Envelope>');
+          await req.response.close();
+          return;
+        }
+        req.response.statusCode = 404;
+        await req.response.close();
+      });
+
+      mockUpstream.listen((req) async {
+        capturedReferer = req.headers.value('referer');
+        req.response.headers.set(HttpHeaders.contentTypeHeader, 'video/mp4');
+        req.response.add(utf8.encode('FAKE-MP4-STREAM'));
+        await req.response.close();
+      });
+
+      final controller = CastController();
+      addTearDown(controller.dispose);
+
+      // Simulate user pasting Marco Movie TV's web cast URL `http://127.0.0.1:<port>/cast/abc`
+      final found = await controller.probeManualTarget(
+        'http://127.0.0.1:${mockTv.port}/cast/abcdef1234',
+      );
+      expect(found, isNotNull);
+      expect(found!.name, 'Marco Movie 测试电视');
+
+      // Cast a loopback proxy URL with custom Referer header -> relay must expose & proxy it!
+      final ok = await controller.castToDevice(
+        device: found,
+        mediaUrl: 'http://127.0.0.1:${mockUpstream.port}/stream.mp4',
+        title: '测试影片',
+        headers: const {'Referer': 'https://example.test/watch'},
+      );
+      expect(ok, isTrue);
+      expect(capturedUri, isNotNull);
+      expect(capturedUri, isNot(contains('127.0.0.1:${mockUpstream.port}')));
+      expect(capturedUri, contains('/s/'));
+      expect(capturedMeta, contains('测试影片'));
+
+      // Fetch the relayed URL as if we were the TV -> verifies headers & payload forwarded!
+      final tvClient = HttpClient()..findProxy = (_) => 'DIRECT';
+      addTearDown(() => tvClient.close(force: true));
+      final relayReq = await tvClient.getUrl(Uri.parse(capturedUri!));
+      final relayResp = await relayReq.close();
+      expect(relayResp.statusCode, 200);
+      final bytes = await utf8.decoder.bind(relayResp).join();
+      expect(bytes, 'FAKE-MP4-STREAM');
+      expect(capturedReferer, 'https://example.test/watch');
+
+      await controller.stopCasting();
     },
   );
 

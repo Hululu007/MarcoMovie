@@ -319,6 +319,24 @@ private enum MarcoLiquidGlassSupport {
         DispatchQueue.main.async {
           result(triggerFavoriteDynamicIslandFeedback(phase: phase))
         }
+      case "discoverBonjourDevices":
+        let args = (call.arguments as? [String: Any]) ?? [:]
+        let types = (args["serviceTypes"] as? [String]) ?? [
+          "_marcomovie-cast._tcp.",
+          "_airplay._tcp.",
+          "_raop._tcp.",
+          "_lelink._tcp.",
+          "_lebo._tcp.",
+          "_googlecast._tcp.",
+          "_dlna._tcp.",
+          "_upnp._tcp.",
+        ]
+        let timeoutMs = (args["timeoutMs"] as? NSNumber)?.intValue ?? 2200
+        DispatchQueue.main.async {
+          MarcoBonjourScanner.scan(serviceTypes: types, timeoutMs: timeoutMs) { payload in
+            result(payload)
+          }
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -4052,5 +4070,146 @@ private final class MarcoNativeSliderPlatformView: NSObject, FlutterPlatformView
 
   @objc private func touchEnded() {
     channel.invokeMethod("onChangeEnd", arguments: Double(slider.value))
+  }
+}
+
+private final class MarcoBonjourScanner: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
+  private static var activeScanners: [MarcoBonjourScanner] = []
+
+  private var browsers: [NetServiceBrowser] = []
+  private var resolvingServices: [NetService] = []
+  private var discoveredByKey: [String: [String: Any]] = [:]
+  private var permissionDenied: Bool = false
+  private var finished: Bool = false
+  private var completion: (([String: Any]) -> Void)?
+
+  static func scan(
+    serviceTypes: [String],
+    timeoutMs: Int,
+    completion: @escaping ([String: Any]) -> Void
+  ) {
+    let scanner = MarcoBonjourScanner()
+    activeScanners.append(scanner)
+    scanner.start(serviceTypes: serviceTypes, timeoutMs: timeoutMs) { payload in
+      activeScanners.removeAll { $0 === scanner }
+      completion(payload)
+    }
+  }
+
+  private func start(
+    serviceTypes: [String],
+    timeoutMs: Int,
+    completion: @escaping ([String: Any]) -> Void
+  ) {
+    self.completion = completion
+    let clampedMs = min(max(timeoutMs, 600), 6000)
+    for rawType in serviceTypes {
+      let trimmed = rawType.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else { continue }
+      let normalizedType = trimmed.hasSuffix(".") ? trimmed : "\(trimmed)."
+      let browser = NetServiceBrowser()
+      browser.delegate = self
+      browser.schedule(in: .main, forMode: .common)
+      browsers.append(browser)
+      browser.searchForServices(ofType: normalizedType, inDomain: "local.")
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(clampedMs)) { [weak self] in
+      self?.finish()
+    }
+  }
+
+  private func finish() {
+    guard !finished else { return }
+    finished = true
+    for browser in browsers {
+      browser.stop()
+      browser.delegate = nil
+    }
+    browsers.removeAll()
+    for svc in resolvingServices {
+      svc.stop()
+      svc.delegate = nil
+    }
+    resolvingServices.removeAll()
+    let cb = completion
+    completion = nil
+    cb?([
+      "devices": Array(discoveredByKey.values),
+      "permissionDenied": permissionDenied,
+    ])
+  }
+
+  func netServiceBrowser(
+    _ browser: NetServiceBrowser,
+    didNotSearch errorDict: [String: NSNumber]
+  ) {
+    if let code = errorDict[NetService.errorCode]?.intValue, code == -72008 {
+      permissionDenied = true
+    }
+  }
+
+  func netServiceBrowser(
+    _ browser: NetServiceBrowser,
+    didFind service: NetService,
+    moreComing: Bool
+  ) {
+    guard !finished else { return }
+    service.delegate = self
+    service.schedule(in: .main, forMode: .common)
+    resolvingServices.append(service)
+    service.resolve(withTimeout: 1.5)
+  }
+
+  func netServiceDidResolveAddress(_ sender: NetService) {
+    guard !finished else { return }
+    guard let addresses = sender.addresses, !addresses.isEmpty else { return }
+    var resolvedHost: String?
+    for data in addresses {
+      if let ip = Self.ipv4Address(from: data) {
+        if ip.hasPrefix("127.") || ip.hasPrefix("169.254.") { continue }
+        resolvedHost = ip
+        break
+      }
+    }
+    guard let host = resolvedHost, !host.isEmpty else { return }
+    let port = sender.port > 0 ? sender.port : 0
+    var txtDict: [String: String] = [:]
+    if let txtData = sender.txtRecordData() {
+      let rawDict = NetService.dictionary(fromTXTRecord: txtData)
+      for (k, v) in rawDict {
+        if let str = String(data: v, encoding: .utf8), !str.isEmpty {
+          txtDict[k] = str
+        }
+      }
+    }
+    let key = "\(sender.type)|\(host)|\(port)"
+    discoveredByKey[key] = [
+      "name": sender.name,
+      "type": sender.type,
+      "host": host,
+      "port": port,
+      "txt": txtDict,
+    ]
+  }
+
+  func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+    if let code = errorDict[NetService.errorCode]?.intValue, code == -72008 {
+      permissionDenied = true
+    }
+  }
+
+  private static func ipv4Address(from addressData: Data) -> String? {
+    return addressData.withUnsafeBytes { rawBuf -> String? in
+      guard let base = rawBuf.baseAddress else { return nil }
+      let sa = base.assumingMemoryBound(to: sockaddr.self)
+      guard sa.pointee.sa_family == sa_family_t(AF_INET) else { return nil }
+      let sin = base.assumingMemoryBound(to: sockaddr_in.self)
+      var addr = sin.pointee.sin_addr
+      var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+      guard inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else {
+        return nil
+      }
+      return String(cString: buf)
+    }
   }
 }

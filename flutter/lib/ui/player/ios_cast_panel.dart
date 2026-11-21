@@ -20,8 +20,8 @@ Future<void> showIosCastPopover({
     context: context,
     anchorRect: anchorRect,
     title: '选择投屏设备',
-    maxWidth: 310,
-    maxHeight: 340,
+    maxWidth: 316,
+    maxHeight: 380,
     forceDark: true,
     trailing: AnimatedBuilder(
       animation: controller,
@@ -133,7 +133,7 @@ Future<void> showIosCastPopover({
                         ),
                         const SizedBox(height: 4),
                         const Text(
-                          '请确认手机与电视连接同一 Wi-Fi，并在电视端打开投屏 / 乐播 / DLNA 服务',
+                          '请确认手机与电视在同一 Wi-Fi（关闭代理/VPN），并已允许「本地网络」权限',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: Colors.white38,
@@ -177,6 +177,29 @@ Future<void> showIosCastPopover({
                     ),
                     const SizedBox(height: 6),
                   ],
+                const SizedBox(height: 4),
+                _CastRowTile(
+                  key: const Key('ios-cast-manual-ip-row'),
+                  icon: CupertinoIcons.add_circled_solid,
+                  accent: AppleColors.systemTeal,
+                  title: '手动输入电视 IP 连接',
+                  subtitle: '免组播直连 Marco Movie TV 或任意 DLNA 电视',
+                  trailing: const Icon(
+                    CupertinoIcons.chevron_right,
+                    size: 14,
+                    color: Colors.white54,
+                  ),
+                  onTap: () async {
+                    HapticFeedback.selectionClick();
+                    final input = await _promptManualTvAddress(popoverContext);
+                    if (input == null || input.trim().isEmpty) return;
+                    final dev = await controller.probeManualTarget(input);
+                    if (dev != null && popoverContext.mounted) {
+                      Navigator.of(popoverContext).pop();
+                      await onSelectDevice(dev);
+                    }
+                  },
+                ),
               ],
             ),
           );
@@ -184,6 +207,53 @@ Future<void> showIosCastPopover({
       );
     },
   );
+}
+
+Future<String?> _promptManualTvAddress(BuildContext context) async {
+  final textCtrl = TextEditingController();
+  try {
+    return await showCupertinoDialog<String>(
+      context: context,
+      builder: (dialogCtx) => CupertinoAlertDialog(
+        title: const Text('手动连接局域网电视'),
+        content: Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                '输入电视局域网 IP（如 10.0.0.88 或电视端显示的 IP:端口）',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 10),
+              CupertinoTextField(
+                key: const Key('ios-cast-manual-ip-field'),
+                controller: textCtrl,
+                autofocus: true,
+                keyboardType: TextInputType.url,
+                placeholder: '电视局域网 IP 或 IP:18652',
+                clearButtonMode: OverlayVisibilityMode.editing,
+                onSubmitted: (v) => Navigator.of(dialogCtx).pop(v.trim()),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(dialogCtx).pop(),
+            child: const Text('取消'),
+          ),
+          CupertinoDialogAction(
+            isDefaultAction: true,
+            onPressed: () => Navigator.of(dialogCtx).pop(textCtrl.text.trim()),
+            child: const Text('探测并投屏'),
+          ),
+        ],
+      ),
+    );
+  } finally {
+    textCtrl.dispose();
+  }
 }
 
 class _CastRowTile extends StatelessWidget {

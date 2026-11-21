@@ -122,9 +122,18 @@ class DeploymentChecks(unittest.TestCase):
             self.assertEqual(swift.count('final class MarcoNativeLiquidTabCapsuleView'), 1)
             self.assertEqual(swift.count('final class NetdiskWebAuthController'), 1)
             self.assertEqual(swift.count('private final class HeadlessMediaWebSniffer'), 1)
+            self.assertEqual(swift.count('case "discoverBonjourDevices":'), 1)
+            self.assertEqual(swift.count('private final class MarcoBonjourScanner'), 1)
             self.assertEqual(swift.count('{'), swift.count('}'))
             plist = plistlib.loads((runner / 'Info.plist').read_bytes())
             self.assertEqual(len([u for u in plist['CFBundleURLTypes'] if 'marcomovie' in u.get('CFBundleURLSchemes', [])]), 1)
+            for svc in ('_marcomovie-cast._tcp', '_airplay._tcp', '_lelink._tcp', '_googlecast._tcp', '_dlna._tcp', '_upnp._tcp'):
+                self.assertIn(svc, plist['NSBonjourServices'])
+
+    def test_trollstore_entitlements_include_multicast_for_dlna(self):
+        import patch_ios_ipa
+        src = Path(patch_ios_ipa.__file__).read_text(encoding='utf-8')
+        self.assertIn('"com.apple.developer.networking.multicast": True', src)
 
     def test_macos_main_window_injects_wakelock_and_web_sniffer_idempotently(self):
         with tempfile.TemporaryDirectory() as temp:

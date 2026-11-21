@@ -87,17 +87,21 @@ final class CastScreen {
         dlnaBg.setStroke(Math.max(1, a.dp(1)), 0x22ffffff);
         dlnaCard.setBackground(dlnaBg);
 
-        TextView badge =
-                a.text(
-                        !enabled
-                                ? "● 服务已手动关闭"
-                                : (svc != null && !svc.closed
-                                        ? "● DLNA / UPnP 在线监听中 · 同一局域网可见"
-                                        : "● 未检测到局域网连接，请检查 Wi-Fi 或网线"),
-                        13,
-                        !enabled
-                                ? MainActivity.MUTED
-                                : (svc != null && !svc.closed ? 0xff66d4cf : 0xffff9f0a));
+        String statusText;
+        if (!enabled) {
+            statusText = "● 服务已手动关闭";
+        } else if (svc == null || svc.closed) {
+            statusText = "● 未检测到局域网连接，请检查 Wi-Fi 或网线";
+        } else if (svc.ssdpActive) {
+            statusText = "● DLNA / Bonjour 在线监听中 · 同一局域网可见";
+        } else {
+            statusText = "● Bonjour / 局域网直连在线 · Marco Movie iOS 可自动发现";
+        }
+        int statusColor =
+                !enabled
+                        ? MainActivity.MUTED
+                        : (svc != null && !svc.closed ? 0xff66d4cf : 0xffff9f0a);
+        TextView badge = a.text(statusText, 13, statusColor);
         badge.setTypeface(null, Typeface.BOLD);
         dlnaCard.addView(badge);
         a.gap(dlnaCard, 10);
@@ -111,11 +115,8 @@ final class CastScreen {
         nameLabel.setTypeface(null, Typeface.BOLD);
         dlnaCard.addView(nameLabel);
         if (svc != null && !svc.lanIp.isEmpty()) {
-            TextView ipLabel =
-                    a.text(
-                            "本机局域网地址：" + svc.lanIp + "  (端口 " + svc.httpPort() + ")",
-                            13,
-                            MainActivity.MUTED);
+            String addr = "本机局域网地址：" + svc.lanIp + ":" + svc.httpPort();
+            TextView ipLabel = a.text(addr, 13, MainActivity.MUTED);
             ipLabel.setPadding(0, a.dp(4), 0, 0);
             dlnaCard.addView(ipLabel);
         }

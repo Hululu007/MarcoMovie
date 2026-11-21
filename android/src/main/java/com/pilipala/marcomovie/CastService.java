@@ -54,6 +54,8 @@ import org.w3c.dom.NodeList;
 final class CastService implements Closeable {
     static final String SSDP_ADDR = "239.255.255.250";
     static final int SSDP_PORT = 1900;
+    static final int PREFERRED_HTTP_PORT = 18652;
+    static final String BONJOUR_SERVICE_TYPE = "_marcomovie-cast._tcp.";
     static final int MAX_HTTP_BODY = 65536;
 
     static final String NT_ROOT = "upnp:rootdevice";
@@ -108,6 +110,8 @@ final class CastService implements Closeable {
     volatile String nextMetaData = "";
     volatile String lastClientInfo = "等待同一局域网设备投屏…";
     volatile boolean mediaOpened;
+    volatile boolean ssdpActive;
+    volatile boolean bonjourActive;
 
     MulticastSocket ssdpSocket;
     DatagramSocket notifySocket;
@@ -244,6 +248,7 @@ final class CastService implements Closeable {
                 }
             }
             ssdpSocket = ms;
+            ssdpActive = true;
             Thread ssdpReader =
                     new Thread(
                             () -> {
@@ -285,7 +290,7 @@ final class CastService implements Closeable {
         } catch (Exception e) {
             return;
         }
-        if (!text.startsWith("M-SEARCH * HTTP/1.1")) return;
+        if (!text.toUpperCase(Locale.ROOT).startsWith("M-SEARCH ")) return;
         String man = "";
         String st = "";
         for (String line : text.split("\r?\n")) {
@@ -1577,6 +1582,8 @@ final class CastService implements Closeable {
     public void close() {
         if (closed) return;
         closed = true;
+        ssdpActive = false;
+        bonjourActive = false;
         try {
             sendNotify("ssdp:byebye");
         } catch (Exception ignored) {
@@ -1637,6 +1644,7 @@ final class CastService implements Closeable {
         } catch (Throwable ignored) {
         }
         final android.net.wifi.WifiManager.MulticastLock heldLock = mcastLock;
+        final Runnable[] nsdCleanup = new Runnable[1];
         final android.media.AudioManager audio =
                 (android.media.AudioManager)
                         a.getSystemService(android.content.Context.AUDIO_SERVICE);
@@ -1851,6 +1859,14 @@ final class CastService implements Closeable {
 
                     @Override
                     public void onClosed() {
+                        Runnable unreg = nsdCleanup[0];
+                        nsdCleanup[0] = null;
+                        if (unreg != null) {
+                            try {
+                                unreg.run();
+                            } catch (Throwable ignored) {
+                            }
+                        }
                         if (heldLock != null) {
                             try {
                                 if (heldLock.isHeld()) heldLock.release();
@@ -1860,7 +1876,80 @@ final class CastService implements Closeable {
                     }
                 };
 
-        return new CastService(
-                uuid, name, lanIp, bridge, true, new InetSocketAddress("0.0.0.0", 0));
+        CastService svc = startWithPreferredPort(uuid, name, lanIp, bridge);
+        registerBonjour(a, svc, name, lanIp, uiObserver, nsdCleanup);
+        return svc;
+    }
+
+    private static CastService startWithPreferredPort(
+            String uuid, String name, String lanIp, Bridge bridge) throws IOException {
+        int[] ports = {PREFERRED_HTTP_PORT, PREFERRED_HTTP_PORT + 1, 0};
+        IOException last = null;
+        for (int port : ports) {
+            try {
+                return new CastService(
+                        uuid, name, lanIp, bridge, true, new InetSocketAddress("0.0.0.0", port));
+            } catch (IOException err) {
+                last = err;
+            }
+        }
+        throw last != null ? last : new IOException("Unable to bind cast HTTP port");
+    }
+
+    private static void registerBonjour(
+            MainActivity a,
+            CastService svc,
+            String name,
+            String lanIp,
+            Runnable uiObserver,
+            Runnable[] cleanupSlot) {
+        try {
+            android.net.nsd.NsdManager nsd =
+                    (android.net.nsd.NsdManager)
+                            a.getApplicationContext()
+                                    .getSystemService(android.content.Context.NSD_SERVICE);
+            if (nsd == null) return;
+            android.net.nsd.NsdServiceInfo info = new android.net.nsd.NsdServiceInfo();
+            info.setServiceName(name);
+            info.setServiceType(BONJOUR_SERVICE_TYPE);
+            info.setPort(svc.httpPort());
+            info.setAttribute("dlna", "/dlna/device.xml");
+            info.setAttribute("uuid", svc.deviceUuid);
+            if (lanIp != null && !lanIp.isEmpty()) info.setAttribute("ip", lanIp);
+            android.net.nsd.NsdManager.RegistrationListener reg =
+                    new android.net.nsd.NsdManager.RegistrationListener() {
+                        @Override
+                        public void onServiceRegistered(android.net.nsd.NsdServiceInfo s) {
+                            svc.bonjourActive = true;
+                            if (uiObserver != null) a.ui.post(uiObserver);
+                        }
+
+                        @Override
+                        public void onRegistrationFailed(
+                                android.net.nsd.NsdServiceInfo s, int err) {
+                            svc.bonjourActive = false;
+                        }
+
+                        @Override
+                        public void onServiceUnregistered(android.net.nsd.NsdServiceInfo s) {
+                            svc.bonjourActive = false;
+                        }
+
+                        @Override
+                        public void onUnregistrationFailed(
+                                android.net.nsd.NsdServiceInfo s, int err) {}
+                    };
+            nsd.registerService(info, android.net.nsd.NsdManager.PROTOCOL_DNS_SD, reg);
+            cleanupSlot[0] = () -> unregisterBonjour(nsd, reg);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void unregisterBonjour(
+            android.net.nsd.NsdManager nsd, android.net.nsd.NsdManager.RegistrationListener reg) {
+        try {
+            nsd.unregisterService(reg);
+        } catch (Throwable ignored) {
+        }
     }
 }

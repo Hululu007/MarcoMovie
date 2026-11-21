@@ -222,6 +222,30 @@ class IosLiquidGlassBridge {
     }
   }
 
+  /// Discovers LAN cast targets via Apple's native Bonjour (`NetServiceBrowser`)
+  /// API, which works on both TrollStore and standard free/sideload certificates
+  /// without requiring the `com.apple.developer.networking.multicast` entitlement.
+  static Future<Map<String, dynamic>?> discoverBonjourDevices({
+    List<String>? serviceTypes,
+    Duration timeout = const Duration(milliseconds: 2200),
+  }) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return null;
+    try {
+      final res = await channel.invokeMapMethod<String, dynamic>(
+        'discoverBonjourDevices',
+        <String, dynamic>{
+          if (serviceTypes != null) 'serviceTypes': serviceTypes,
+          'timeoutMs': timeout.inMilliseconds,
+        },
+      );
+      return res;
+    } on MissingPluginException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   @visibleForTesting
   static void setAvailableForTest(bool? value) {
     _testOverride = value;
