@@ -74,6 +74,30 @@ class StorageService {
   static const String keyShowHeroBanner = 'show_hero_banner';
   static const String keyShowContinueWatching = 'show_continue_watching';
   static const String keyShowCuratedDiscovery = 'show_curated_discovery';
+  static const String keyHomeSectionOrder = 'home_section_order';
+  static const String keyHomeSectionHidden = 'home_section_hidden';
+
+  /// Stable identifiers for every configurable section on iOS Home.
+  static const String homeSectionHero = 'hero_billboard';
+  static const String homeSectionHistory = 'watch_history';
+  static const String homeSectionWidescreenRadar = 'disc_widescreen_radar';
+  static const String homeSectionEditorialPicks = 'disc_editorial_picks';
+  static const String homeSectionHotStream = 'disc_hot_stream';
+  static const String homeSectionMoodCapsules = 'disc_mood_capsules';
+  static const String homeSectionStudioGalleries = 'disc_studio_galleries';
+  static const String homeSectionPosterMosaics = 'disc_poster_mosaics';
+  static const String homeSectionSourceUpdates = 'source_updates';
+
+  static const List<String> defaultHomeSectionOrder = <String>[
+    homeSectionHistory,
+    homeSectionWidescreenRadar,
+    homeSectionEditorialPicks,
+    homeSectionHotStream,
+    homeSectionMoodCapsules,
+    homeSectionStudioGalleries,
+    homeSectionPosterMosaics,
+    homeSectionSourceUpdates,
+  ];
   static const String keyCardSubtitleMode = 'card_subtitle_mode';
   static const String keyPreferredQuality = 'preferred_quality';
   static const String keyDefaultAspectMode = 'default_aspect_mode';
@@ -717,9 +741,58 @@ class StorageService {
   String get gridDensity => _prefs.getString(keyGridDensity) ?? 'standard';
   bool get showHeroBanner => _prefs.getBool(keyShowHeroBanner) ?? true;
   bool get showContinueWatching =>
-      _prefs.getBool(keyShowContinueWatching) ?? true;
+      _prefs.getBool(keyShowContinueWatching) ??
+      (defaultTargetPlatform != TargetPlatform.iOS);
   bool get showCuratedDiscovery =>
       _prefs.getBool(keyShowCuratedDiscovery) ?? true;
+
+  /// Ordered list of body section IDs rendered below the top Hero on iOS Home.
+  List<String> get homeSectionOrder {
+    final raw = _prefs.getString(keyHomeSectionOrder);
+    if (raw == null || raw.trim().isEmpty) {
+      return List<String>.of(defaultHomeSectionOrder);
+    }
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        final validSet = defaultHomeSectionOrder.toSet();
+        final out = <String>[];
+        for (final item in decoded) {
+          final id = item.toString();
+          if (validSet.contains(id) && !out.contains(id)) {
+            out.add(id);
+          }
+        }
+        for (final id in defaultHomeSectionOrder) {
+          if (!out.contains(id)) out.add(id);
+        }
+        return out;
+      }
+    } catch (_) {}
+    return List<String>.of(defaultHomeSectionOrder);
+  }
+
+  /// Set of explicitly hidden Home section IDs (in addition to legacy flags).
+  Set<String> get hiddenHomeSections {
+    final raw = _prefs.getString(keyHomeSectionHidden);
+    if (raw == null || raw.trim().isEmpty) return <String>{};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return decoded.map((e) => e.toString()).toSet();
+      }
+    } catch (_) {}
+    return <String>{};
+  }
+
+  bool isHomeSectionEnabled(String id) {
+    if (id == homeSectionHero) return showHeroBanner;
+    if (id == homeSectionHistory) return showContinueWatching;
+    if (id.startsWith('disc_')) {
+      return showCuratedDiscovery && !hiddenHomeSections.contains(id);
+    }
+    return !hiddenHomeSections.contains(id);
+  }
   String get cardSubtitleMode =>
       _prefs.getString(keyCardSubtitleMode) ?? 'remarks';
   String get preferredQuality =>
@@ -2245,6 +2318,49 @@ class StorageService {
   }
   Future<void> setShowCuratedDiscovery(bool show) async {
     await _prefs.setBool(keyShowCuratedDiscovery, show);
+  }
+
+  Future<void> setHomeSectionOrder(List<String> order) async {
+    final validSet = defaultHomeSectionOrder.toSet();
+    final normalized = <String>[];
+    for (final id in order) {
+      if (validSet.contains(id) && !normalized.contains(id)) {
+        normalized.add(id);
+      }
+    }
+    for (final id in defaultHomeSectionOrder) {
+      if (!normalized.contains(id)) normalized.add(id);
+    }
+    await _prefs.setString(keyHomeSectionOrder, jsonEncode(normalized));
+  }
+
+  Future<void> setHomeSectionEnabled(String id, bool enabled) async {
+    if (id == homeSectionHero) {
+      await setShowHeroBanner(enabled);
+      return;
+    }
+    if (id == homeSectionHistory) {
+      await setShowContinueWatching(enabled);
+      return;
+    }
+    final hidden = hiddenHomeSections;
+    if (enabled) {
+      hidden.remove(id);
+      if (id.startsWith('disc_') && !showCuratedDiscovery) {
+        await setShowCuratedDiscovery(true);
+      }
+    } else {
+      hidden.add(id);
+    }
+    await _prefs.setString(keyHomeSectionHidden, jsonEncode(hidden.toList()));
+  }
+
+  Future<void> resetHomeSectionPreferences() async {
+    await _prefs.setBool(keyShowHeroBanner, true);
+    await _prefs.setBool(keyShowContinueWatching, false);
+    await _prefs.setBool(keyShowCuratedDiscovery, true);
+    await _prefs.remove(keyHomeSectionOrder);
+    await _prefs.remove(keyHomeSectionHidden);
   }
   Future<void> setCardSubtitleMode(String mode) async {
     await _prefs.setString(keyCardSubtitleMode, mode.trim());

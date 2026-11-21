@@ -42,6 +42,7 @@ import 'netdisk_sheet.dart';
 import 'onboarding/onboarding_prefs.dart';
 import 'onboarding/onboarding_screen.dart';
 import 'player_screen.dart';
+import 'poster_expand_route.dart';
 import 'poster_image.dart';
 import 'release_notes_view.dart';
 import 'source_verification_dialog.dart';
@@ -192,6 +193,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   List<CmsVideo> _windowsRecommendedVideos = const [];
   final PageController _iosHeroPageController = PageController();
   int _iosHeroIndex = 0;
+  bool _homeRefreshing = false;
+  final Map<String, Color> _iosHeroAmbientColors = {};
+  final Set<String> _iosHeroAmbientPending = {};
   int _currentPage = 1;
   int _pageCount = 1;
   bool _homeLoading = false;
@@ -288,6 +292,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _homeScrollController.addListener(_onHomeScroll);
+    PosterLoader.cacheRevision.addListener(_onPosterCacheUpdated);
     _cachedWatchHistory = widget.storage.getWatchHistory();
     if (!kIsWeb &&
         (Platform.isWindows || Platform.isMacOS || Platform.isLinux) &&
@@ -727,6 +732,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     _searchStateRevision.dispose();
     _liveSearchController.dispose();
     _homeScrollController.removeListener(_onHomeScroll);
+    PosterLoader.cacheRevision.removeListener(_onPosterCacheUpdated);
     _homeScrollController.dispose();
     _iosHeroPageController.dispose();
     _continueWatchingScrollController.dispose();
@@ -808,7 +814,80 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     }
     if (mounted) setState(() {});
   }
-  Future<void> _loadSiteHome({bool bypassSnapshot = false}) async {
+  void _onPosterCacheUpdated() {
+    if (!mounted) return;
+    final candidates = _windowsRecommendedVideos.isNotEmpty
+        ? _windowsRecommendedVideos
+        : _homeVideos;
+    if (candidates.isEmpty) return;
+    final idx = _iosHeroIndex.clamp(0, candidates.length - 1);
+    final video = candidates[idx];
+    final key = '${video.poster}|${video.title}|${video.year}';
+    if (_iosHeroAmbientColors.containsKey(key) ||
+        _iosHeroAmbientPending.contains(key)) {
+      return;
+    }
+    final bytes = PosterLoader.peekMemory(
+      video.poster,
+      title: video.title,
+      year: video.year,
+    );
+    if (bytes == null) return;
+    final cached = PosterLoader.peekAmbientColor(bytes);
+    if (cached != null) {
+      setState(() => _iosHeroAmbientColors[key] = cached);
+      return;
+    }
+    _iosHeroAmbientPending.add(key);
+    unawaited(
+      PosterLoader.extractEdgeAmbientColor(bytes).then((color) {
+        _iosHeroAmbientPending.remove(key);
+        if (!mounted) return;
+        if (_iosHeroAmbientColors[key] != color) {
+          setState(() => _iosHeroAmbientColors[key] = color);
+        }
+      }).catchError((_) {
+        _iosHeroAmbientPending.remove(key);
+      }),
+    );
+  }
+
+  Color _resolveHeroAmbientColor(CmsVideo video, ApplePalette palette) {
+    final key = '${video.poster}|${video.title}|${video.year}';
+    final existing = _iosHeroAmbientColors[key];
+    if (existing != null) return existing;
+    final bytes = PosterLoader.peekMemory(
+      video.poster,
+      title: video.title,
+      year: video.year,
+    );
+    if (bytes != null) {
+      final cached = PosterLoader.peekAmbientColor(bytes);
+      if (cached != null) {
+        _iosHeroAmbientColors[key] = cached;
+        return cached;
+      }
+      if (_iosHeroAmbientPending.add(key)) {
+        unawaited(
+          PosterLoader.extractEdgeAmbientColor(bytes).then((color) {
+            _iosHeroAmbientPending.remove(key);
+            if (!mounted) return;
+            if (_iosHeroAmbientColors[key] != color) {
+              setState(() => _iosHeroAmbientColors[key] = color);
+            }
+          }).catchError((_) {
+            _iosHeroAmbientPending.remove(key);
+          }),
+        );
+      }
+    }
+    return palette.isDark ? const Color(0xFF212633) : const Color(0xFFD3DAE7);
+  }
+
+  Future<void> _loadSiteHome({
+    bool bypassSnapshot = false,
+    bool preserveExisting = false,
+  }) async {
     final site = _activeSite;
     if (site == null) return;
     _cancelCatalogue();
@@ -817,6 +896,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     ++_categoryEpoch;
     final cached = bypassSnapshot ? null : widget.storage.getCachedSiteHome(site);
     final hadCached = cached != null && cached.listing.videos.isNotEmpty;
+    final keepVisible =
+        preserveExisting &&
+        (_homeVideos.isNotEmpty || _windowsRecommendedVideos.isNotEmpty);
     setState(() {
       _primaryTab = 'recommend';
       _filterExpanded = false;
@@ -825,7 +907,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _filterGenreLabel = '';
       _filterArea = '';
       _filterYear = '';
-      if (hadCached) {
+      if (keepVisible) {
+        _homeRefreshing = true;
+        _homeLoading = false;
+      } else if (hadCached) {
         _categories = cached.categories;
         _rawCategoryVideos = cached.listing.videos;
         _homeVideos = cached.listing.sourceFiltered
@@ -835,6 +920,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _currentPage = cached.listing.page;
         _pageCount = cached.listing.pageCount;
         _homeLoading = false;
+        _homeRefreshing = false;
       } else {
         _homeVideos = const [];
         _windowsRecommendedVideos = const [];
@@ -842,6 +928,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _rawCategoryVideos = const [];
         _categories = const [];
         _homeLoading = true;
+        _homeRefreshing = false;
         _currentPage = 1;
       }
       _loadingMore = false;
@@ -863,11 +950,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       if (listing.videos.isNotEmpty && !site.isEffectivelyPrivate) {
         unawaited(widget.storage.saveCachedSiteHome(site, cats, listing));
       }
-      if (hadCached && listing.videos.isEmpty && cats.isEmpty) {
+      if ((hadCached || keepVisible) &&
+          listing.videos.isEmpty &&
+          cats.isEmpty) {
+        if (_homeRefreshing) {
+          setState(() => _homeRefreshing = false);
+        }
         return;
       }
       setState(() {
-        if (cats.isNotEmpty || !hadCached) {
+        if (cats.isNotEmpty || (!hadCached && !keepVisible)) {
           _categories = cats;
         }
         _rawCategoryVideos = listing.videos;
@@ -878,21 +970,25 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _currentPage = listing.page;
         _pageCount = listing.pageCount;
         _homeLoading = false;
+        _homeRefreshing = false;
         _loadingMore = false;
       });
     } catch (e) {
       if (!mounted || epoch != _homeEpoch || _activeSite?.key != site.key) {
         return;
       }
-      if (hadCached && !CmsClient.needsSourceVerification(site, e)) {
+      if ((hadCached || keepVisible) &&
+          !CmsClient.needsSourceVerification(site, e)) {
         setState(() {
           _homeLoading = false;
+          _homeRefreshing = false;
           _loadingMore = false;
         });
         return;
       }
       setState(() {
         _homeLoading = false;
+        _homeRefreshing = false;
         _loadingMore = false;
         _homeError =
             '读取片源「${site.name}」失败：${CmsClient.cleanErrorMessage(e)}';
@@ -908,7 +1004,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         _filterGenreLabel.isEmpty &&
         _filterArea.isEmpty &&
         _filterYear.isEmpty) {
-      await _loadSiteHome(bypassSnapshot: true);
+      await _loadSiteHome(bypassSnapshot: true, preserveExisting: true);
       return;
     }
     await _reloadFilteredListing(page: 1);
@@ -1332,7 +1428,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       });
     }
   }
-  void _openVideoDetail(CmsSite site, CmsVideo video) {
+  void _openVideoDetail(
+    CmsSite site,
+    CmsVideo video, {
+    BuildContext? sourceContext,
+    double sourceRadius = 14.0,
+  }) {
     if (!CuratedDiscoveryService.isCuratedSite(site) && !site.supported) {
       _showAppleNotice(site.name, site.unsupportedReason);
       return;
@@ -1366,20 +1467,33 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _categoryAbort!.complete();
       setState(() => _loadingMore = false);
     }
-    Navigator.of(context)
-        .push(
-          buildApplePageRoute<void>(
-            builder: (_) => DetailScreen(
-              site: site,
-              initialVideo: video,
-              client: widget.client,
-              storage: widget.storage,
-            ),
-          ),
-        )
-        .then((_) {
-          if (mounted) setState(() {});
-        });
+    final detailBuilder = (BuildContext _) => DetailScreen(
+          site: site,
+          initialVideo: video,
+          client: widget.client,
+          storage: widget.storage,
+        );
+    final usePosterExpand =
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        !OhosRuntime.isOhos &&
+        sourceContext != null;
+    final initialRect =
+        usePosterExpand ? PosterExpandRoute.captureRect(sourceContext) : null;
+    final Route<void> route = initialRect != null
+        ? PosterExpandRoute<void>(
+            initialSourceRect: initialRect,
+            sourceRectResolver: () =>
+                PosterExpandRoute.captureRect(sourceContext),
+            sourceBorderRadius: sourceRadius,
+            posterUrl: video.poster,
+            title: video.title,
+            year: video.year,
+            builder: detailBuilder,
+          )
+        : buildApplePageRoute<void>(builder: detailBuilder);
+    Navigator.of(context).push(route).then((_) {
+      if (mounted) setState(() {});
+    });
   }
   void _showAppleNotice(String title, String message) {
     if (!mounted) return;
@@ -2047,37 +2161,335 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             compactHeader: compactHeader,
             sourceControls: sourceControls,
           );
+          final iosHeroHeight = (maxH * 0.65).clamp(470.0, 580.0);
+
+          List<Widget> buildSourceCatalogSlivers() {
+            return [
+              if (_homeError != null)
+                SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            CupertinoIcons.exclamationmark_triangle_fill,
+                            color: AppleColors.systemOrange,
+                            size: 38,
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            _homeError!,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: ApplePalette.of(context).labelSecondary,
+                              fontSize: 14,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          Wrap(
+                            spacing: 10,
+                            children: [
+                              AppleCapsuleButton(
+                                label: '重试',
+                                icon: CupertinoIcons.refresh,
+                                primary: true,
+                                compact: true,
+                                onPressed: _retryHomeError ?? _loadSiteHome,
+                              ),
+                              if (CmsClient.needsSourceVerification(
+                                  _activeSite!, _homeErrorCause))
+                                SourceVerificationButton(
+                                  client: widget.client,
+                                  site: _activeSite!,
+                                  onVerified: _retryHomeError ?? _loadSiteHome,
+                                ),
+                              AppleCapsuleButton(
+                                label: '切换其他片源',
+                                icon: CupertinoIcons.layers_alt,
+                                compact: true,
+                                onPressed: _showSitePickerDialog,
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                )
+              else
+                SliverPadding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: horizontalPad,
+                    vertical: 8,
+                  ),
+                  sliver: SliverGrid(
+                    gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+                      maxCrossAxisExtent: switch (widget.storage.gridDensity) {
+                        'comfortable' => useSidebar ? 210 : 162,
+                        'compact' => useSidebar ? 148 : 108,
+                        _ => useSidebar ? 176 : 132,
+                      },
+                      mainAxisSpacing: 16,
+                      crossAxisSpacing: 12,
+                      childAspectRatio: 0.56,
+                    ),
+                    delegate: SliverChildBuilderDelegate(
+                      (context, index) {
+                        final video = _homeVideos[index];
+                        return _buildVideoCard(_activeSite!, video);
+                      },
+                      childCount: _homeVideos.length,
+                      findChildIndexCallback: (Key key) {
+                        if (key is! ValueKey<String>) return null;
+                        final siteKey = _activeSite?.key ?? '';
+                        final target = key.value;
+                        for (int i = 0; i < _homeVideos.length; i++) {
+                          final v = _homeVideos[i];
+                          final expected =
+                              'vcard_${siteKey}_${v.id.isNotEmpty ? v.id : v.title}_';
+                          if (expected == target) return i;
+                        }
+                        return null;
+                      },
+                    ),
+                  ),
+                ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: EdgeInsets.only(
+                    top: 18,
+                    bottom: useSidebar ? 32 : 24,
+                  ),
+                  child: Center(
+                    child: (_homeLoading || _loadingMore)
+                        ? const CupertinoActivityIndicator(radius: 13)
+                        : (_homeVideos.isEmpty && _homeError == null)
+                            ? Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 40,
+                                  horizontal: 20,
+                                ),
+                                child: (_activeSite != null &&
+                                        CspBridge.isSearchOnlySite(_activeSite!))
+                                    ? Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(
+                                            '「${_activeSite!.name}」为网盘搜索专用源，不提供首页推荐片单，请直接搜索影片',
+                                            textAlign: TextAlign.center,
+                                            style: TextStyle(
+                                              color: ApplePalette.of(context)
+                                                  .labelSecondary,
+                                              fontSize: 14,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 14),
+                                          AppleCapsuleButton(
+                                            label: '立即搜索影片',
+                                            icon: CupertinoIcons.search,
+                                            compact: true,
+                                            onPressed: _showGlobalSearchSheet,
+                                          ),
+                                        ],
+                                      )
+                                    : Text(
+                                        '当前筛选条件下暂无影片，试试调整筛选或切换分类',
+                                        style: TextStyle(
+                                          color: ApplePalette.of(context)
+                                              .labelSecondary,
+                                          fontSize: 14,
+                                        ),
+                                      ),
+                              )
+                            : (_loadMoreError != null &&
+                                    _currentPage < _pageCount
+                                ? AppleCapsuleButton(
+                                    label: '重试加载更多',
+                                    icon: CupertinoIcons.refresh,
+                                    compact: true,
+                                    onPressed: () => _reloadFilteredListing(
+                                      page: _currentPage + 1,
+                                    ),
+                                  )
+                                : const SizedBox.shrink()),
+                  ),
+                ),
+              ),
+            ];
+          }
+
+          List<Widget> buildIosConfigurableBodySlivers() {
+            final slivers = <Widget>[];
+            if (_activeSite != null && CspBridge.isMyDriveSite(_activeSite!)) {
+              slivers.add(
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      horizontalPad,
+                      16,
+                      horizontalPad,
+                      0,
+                    ),
+                    child: _buildMyDriveNetdiskBanner(_activeSite!),
+                  ),
+                ),
+              );
+            }
+            final hasSearchable = (_config?.publicAvailableSites ?? const [])
+                .any((s) => s.searchable);
+            final orderedIds = widget.storage.homeSectionOrder;
+            var emittedCount = 0;
+
+            for (final sectionId in orderedIds) {
+              if (!widget.storage.isHomeSectionEnabled(sectionId)) continue;
+
+              if (sectionId == StorageService.homeSectionHistory) {
+                if (!_privateSessionUnlocked && history.isNotEmpty) {
+                  slivers.add(
+                    SliverToBoxAdapter(
+                      key: const ValueKey('home-section-watch_history'),
+                      child: _buildHomeHistoryShelf(
+                        context,
+                        history: history,
+                        horizontalPad: horizontalPad,
+                        topSpacing:
+                            emittedCount == 0 && showIosImmersiveHero ? 4 : 16,
+                      ),
+                    ),
+                  );
+                  emittedCount++;
+                }
+                continue;
+              }
+
+              if (sectionId.startsWith('disc_')) {
+                if (!_privateSessionUnlocked &&
+                    widget.storage.showCuratedDiscovery) {
+                  slivers.add(
+                    SliverToBoxAdapter(
+                      key: ValueKey('home-section-$sectionId'),
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          top: emittedCount == 0 && showIosImmersiveHero
+                              ? 4
+                              : 20,
+                        ),
+                        child: CuratedDiscoverySection(
+                          visibleSectionIds: [sectionId],
+                          hasUserSources: hasSearchable,
+                          loadLive:
+                              !Platform.environment.containsKey('FLUTTER_TEST'),
+                          onOpenVideo: (video) => _openVideoDetail(
+                            CuratedDiscoveryService.curatedSiteSentinel,
+                            video,
+                          ),
+                          onOpenVideoFromCard: (video, cardCtx, radius) =>
+                              _openVideoDetail(
+                            CuratedDiscoveryService.curatedSiteSentinel,
+                            video,
+                            sourceContext: cardCtx,
+                            sourceRadius: radius,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                  emittedCount++;
+                }
+                continue;
+              }
+
+              if (sectionId == StorageService.homeSectionSourceUpdates &&
+                  _activeSite != null) {
+                slivers.add(
+                  SliverToBoxAdapter(
+                    key: const ValueKey('home-section-source_updates'),
+                    child: _buildHomeSourceUpdatesHeader(
+                      context,
+                      horizontalPad: horizontalPad,
+                      topPadding: emittedCount == 0 ? 12 : 22,
+                      bottomPadding: 10,
+                    ),
+                  ),
+                );
+                slivers.add(
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: _buildHomeCategoryFilterSection(
+                        context,
+                        horizontalPad: horizontalPad,
+                        activeFilterCount: activeFilterCount,
+                        topSpacing: 0,
+                      ),
+                    ),
+                  ),
+                );
+                slivers.addAll(buildSourceCatalogSlivers());
+                emittedCount++;
+              }
+            }
+
+            // Generous safe bottom clearance for the floating Liquid Glass Dock.
+            slivers.add(const SliverToBoxAdapter(child: SizedBox(height: 112)));
+            return slivers;
+          }
+
           final homeScrollView = CustomScrollView(
               controller: _homeScrollController,
               physics: const BouncingScrollPhysics(
                 parent: AlwaysScrollableScrollPhysics(),
               ),
               slivers: [
-                if (showIosImmersiveHero)
-                  CupertinoSliverRefreshControl(
-                    onRefresh: _refreshCurrentHomeView,
-                  )
-                else
-                  SliverPadding(
-                    padding: EdgeInsets.only(top: topSafePad),
-                    sliver: CupertinoSliverRefreshControl(
-                      onRefresh: _refreshCurrentHomeView,
-                    ),
-                  ),
                 if (isIosMobileHome) ...[
                   if (showIosImmersiveHero)
-                    SliverToBoxAdapter(
-                      child: _buildIosImmersiveHeroBillboard(
+                    SliverAppBar(
+                      primary: false,
+                      automaticallyImplyLeading: false,
+                      toolbarHeight: 0,
+                      collapsedHeight: 0,
+                      expandedHeight: iosHeroHeight,
+                      floating: false,
+                      pinned: false,
+                      stretch: true,
+                      stretchTriggerOffset: 86,
+                      onStretchTrigger: () {
+                        final done = Completer<void>();
+                        WidgetsBinding.instance.addPostFrameCallback((_) async {
+                          try {
+                            if (mounted) {
+                              await _refreshCurrentHomeView();
+                            }
+                          } finally {
+                            if (!done.isCompleted) done.complete();
+                          }
+                        });
+                        return done.future;
+                      },
+                      backgroundColor: Colors.transparent,
+                      surfaceTintColor: Colors.transparent,
+                      elevation: 0,
+                      scrolledUnderElevation: 0,
+                      flexibleSpace: _buildIosImmersiveHeroBillboard(
                         context,
                         site: _activeSite!,
                         featuredList: heroCandidates,
                         topSafePad: topSafePad,
-                        heroHeight: (maxH * 0.62).clamp(450.0, 560.0),
+                        heroHeight: iosHeroHeight,
                         horizontalPad: horizontalPad,
                         headerOverlay: topHeaderRow,
                       ),
                     )
-                  else
+                  else ...[
+                    SliverPadding(
+                      padding: EdgeInsets.only(top: topSafePad),
+                      sliver: CupertinoSliverRefreshControl(
+                        onRefresh: _refreshCurrentHomeView,
+                      ),
+                    ),
                     SliverPadding(
                       padding: const EdgeInsets.fromLTRB(0, 12, 0, 8),
                       sliver: SliverToBoxAdapter(
@@ -2089,6 +2501,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         ),
                       ),
                     ),
+                  ],
                   if (_activeSite == null)
                     SliverPadding(
                       padding: EdgeInsets.fromLTRB(
@@ -2102,78 +2515,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             ? _buildEmptyPrivacySpaceNotice(context)
                             : _buildPluginOnlyConfigNotice(context),
                       ),
-                    )
-                  else ...[
-                    if (!_privateSessionUnlocked &&
-                        widget.storage.showContinueWatching &&
-                        history.isNotEmpty)
-                      SliverToBoxAdapter(
-                        child: _buildHomeHistoryShelf(
-                          context,
-                          history: history,
-                          horizontalPad: horizontalPad,
-                          topSpacing: showIosImmersiveHero ? 6 : 16,
-                        ),
-                      ),
-                    if (CspBridge.isMyDriveSite(_activeSite!))
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: EdgeInsets.fromLTRB(
-                            horizontalPad,
-                            16,
-                            horizontalPad,
-                            0,
-                          ),
-                          child: _buildMyDriveNetdiskBanner(_activeSite!),
-                        ),
-                      ),
-                    if (showCuratedDiscovery)
-                      SliverToBoxAdapter(
-                        child: Padding(
-                          padding: EdgeInsets.only(
-                            top: showIosImmersiveHero && history.isEmpty
-                                ? 8
-                                : 14,
-                          ),
-                          child: CuratedDiscoverySection(
-                            hasUserSources:
-                                (_config?.publicAvailableSites ?? const [])
-                                    .any((s) => s.searchable),
-                            loadLive:
-                                !Platform.environment.containsKey('FLUTTER_TEST'),
-                            onOpenVideo: (video) => _openVideoDetail(
-                              CuratedDiscoveryService.curatedSiteSentinel,
-                              video,
-                            ),
-                          ),
-                        ),
-                      ),
-                    // Active-source updates header followed directly by the
-                    // Category Tabs + Filter button right above the source grid.
-                    SliverToBoxAdapter(
-                      child: _buildHomeSourceUpdatesHeader(
-                        context,
-                        horizontalPad: horizontalPad,
-                        topPadding: showCuratedDiscovery ? 6 : 16,
-                        bottomPadding: 10,
-                      ),
                     ),
-                    SliverToBoxAdapter(
-                      child: Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: _buildHomeCategoryFilterSection(
-                          context,
-                          horizontalPad: horizontalPad,
-                          activeFilterCount: activeFilterCount,
-                          topSpacing: 0,
-                        ),
-                      ),
-                    ),
-                  ],
+                  ...buildIosConfigurableBodySlivers(),
                 ] else ...[
-                  // Horizontal padding is applied per block so the horizontal shelves
-                  // (继续观看 / 分类) can run edge-to-edge with a soft fade instead of
-                  // being hard-clipped by the page margin.
+                  SliverPadding(
+                    padding: EdgeInsets.only(top: topSafePad),
+                    sliver: CupertinoSliverRefreshControl(
+                      onRefresh: _refreshCurrentHomeView,
+                    ),
+                  ),
                   SliverPadding(
                     padding: EdgeInsets.fromLTRB(
                       0,
@@ -2250,12 +2600,46 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       ),
                     ),
                   ),
-                ],
-                if (_activeSite != null) ...[
-                  if (!isIosMobileHome && showCuratedDiscovery) ...[
+                  if (_activeSite != null) ...[
+                    if (showCuratedDiscovery) ...[
+                      SliverToBoxAdapter(
+                        child: Padding(
+                          padding: const EdgeInsets.only(top: 14),
+                          child: CuratedDiscoverySection(
+                            hasUserSources:
+                                (_config?.publicAvailableSites ?? const [])
+                                    .any((s) => s.searchable),
+                            loadLive:
+                                !Platform.environment.containsKey('FLUTTER_TEST'),
+                            onOpenVideo: (video) => _openVideoDetail(
+                              CuratedDiscoveryService.curatedSiteSentinel,
+                              video,
+                            ),
+                          ),
+                        ),
+                      ),
+                      if (_homeVideos.isNotEmpty)
+                        SliverToBoxAdapter(
+                          child: _buildHomeSourceUpdatesHeader(
+                            context,
+                            horizontalPad: horizontalPad,
+                            topPadding: 4,
+                            bottomPadding: 8,
+                          ),
+                        ),
+                    ],
+                    ...buildSourceCatalogSlivers(),
+                    SliverToBoxAdapter(
+                      child: SizedBox(height: useSidebar ? 12 : 96),
+                    ),
+                  ] else if (!_privateSessionUnlocked &&
+                      widget.storage.showCuratedDiscovery) ...[
                     SliverToBoxAdapter(
                       child: Padding(
-                        padding: const EdgeInsets.only(top: 14),
+                        padding: EdgeInsets.only(
+                          top: 20,
+                          bottom: useSidebar ? 32 : 128,
+                        ),
                         child: CuratedDiscoverySection(
                           hasUserSources:
                               (_config?.publicAvailableSites ?? const [])
@@ -2269,184 +2653,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         ),
                       ),
                     ),
-                    if (_homeVideos.isNotEmpty)
-                      SliverToBoxAdapter(
-                        child: _buildHomeSourceUpdatesHeader(
-                          context,
-                          horizontalPad: horizontalPad,
-                          topPadding: 4,
-                          bottomPadding: 8,
-                        ),
-                      ),
                   ],
-            if (_homeError != null)
-              SliverFillRemaining(
-                hasScrollBody: false,
-                child: Padding(
-                  padding: const EdgeInsets.all(32),
-                  child: Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          CupertinoIcons.exclamationmark_triangle_fill,
-                          color: AppleColors.systemOrange,
-                          size: 38,
-                        ),
-                        SizedBox(height: 12),
-                        Text(
-                          _homeError!,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: ApplePalette.of(context).labelSecondary,
-                            fontSize: 14,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        Wrap(
-                          spacing: 10,
-                          children: [
-                            AppleCapsuleButton(
-                              label: '重试',
-                              icon: CupertinoIcons.refresh,
-                              primary: true,
-                              compact: true,
-                              onPressed: _retryHomeError ?? _loadSiteHome,
-                            ),
-                            if (CmsClient.needsSourceVerification(_activeSite!, _homeErrorCause))
-                              SourceVerificationButton(client: widget.client, site: _activeSite!,
-                                onVerified: _retryHomeError ?? _loadSiteHome),
-                            AppleCapsuleButton(
-                              label: '切换其他片源',
-                              icon: CupertinoIcons.layers_alt,
-                              compact: true,
-                              onPressed: _showSitePickerDialog,
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              )
-            else
-              SliverPadding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: horizontalPad,
-                  vertical: 8,
-                ),
-                sliver: SliverGrid(
-                  gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                    maxCrossAxisExtent: switch (widget.storage.gridDensity) {
-                      'comfortable' => useSidebar ? 210 : 162,
-                      'compact' => useSidebar ? 148 : 108,
-                      _ => useSidebar ? 176 : 132,
-                    },
-                    mainAxisSpacing: 16,
-                    crossAxisSpacing: 12,
-                    childAspectRatio: 0.56,
-                  ),
-                  delegate: SliverChildBuilderDelegate(
-                    (context, index) {
-                      final video = _homeVideos[index];
-                      return _buildVideoCard(_activeSite!, video);
-                    },
-                    childCount: _homeVideos.length,
-                    findChildIndexCallback: (Key key) {
-                      if (key is! ValueKey<String>) return null;
-                      final siteKey = _activeSite?.key ?? '';
-                      final target = key.value;
-                      for (int i = 0; i < _homeVideos.length; i++) {
-                        final v = _homeVideos[i];
-                        final expected =
-                            'vcard_${siteKey}_${v.id.isNotEmpty ? v.id : v.title}_';
-                        if (expected == target) return i;
-                      }
-                      return null;
-                    },
-                  ),
-                ),
-              ),
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.only(
-                  top: 18,
-                  bottom: useSidebar ? 32 : 128,
-                ),
-                child: Center(
-                  child: (_homeLoading || _loadingMore)
-                      ? const CupertinoActivityIndicator(radius: 13)
-                      : (_homeVideos.isEmpty && _homeError == null)
-                          ? Padding(
-                              padding: const EdgeInsets.symmetric(
-                                vertical: 40,
-                                horizontal: 20,
-                              ),
-                              child: (_activeSite != null &&
-                                      CspBridge.isSearchOnlySite(_activeSite!))
-                                  ? Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Text(
-                                          '「${_activeSite!.name}」为网盘搜索专用源，不提供首页推荐片单，请直接搜索影片',
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                            color: ApplePalette.of(context).labelSecondary,
-                                            fontSize: 14,
-                                          ),
-                                        ),
-                                        SizedBox(height: 14),
-                                        AppleCapsuleButton(
-                                          label: '立即搜索影片',
-                                          icon: CupertinoIcons.search,
-                                          compact: true,
-                                          onPressed: _showGlobalSearchSheet,
-                                        ),
-                                      ],
-                                    )
-                                  : Text(
-                                      '当前筛选条件下暂无影片，试试调整筛选或切换分类',
-                                      style: TextStyle(
-                                        color: ApplePalette.of(context).labelSecondary,
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                            )
-                      : (_loadMoreError != null && _currentPage < _pageCount
-                          ? AppleCapsuleButton(
-                              label: '重试加载更多',
-                              icon: CupertinoIcons.refresh,
-                              compact: true,
-                              onPressed: () => _reloadFilteredListing(
-                                page: _currentPage + 1,
-                              ),
-                            )
-                          : const SizedBox.shrink()),
-                ),
-              ),
-            ),
-          ] else if (!_privateSessionUnlocked &&
-              widget.storage.showCuratedDiscovery) ...[
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: EdgeInsets.only(
-                  top: 20,
-                  bottom: useSidebar ? 32 : 128,
-                ),
-                child: CuratedDiscoverySection(
-                  hasUserSources: (_config?.publicAvailableSites ?? const [])
-                      .any((s) => s.searchable),
-                  loadLive: !Platform.environment.containsKey('FLUTTER_TEST'),
-                  onOpenVideo: (video) => _openVideoDetail(
-                    CuratedDiscoveryService.curatedSiteSentinel,
-                    video,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ],
-      );
+                ],
+              ],
+            );
           final autoPagingScrollView = NotificationListener<ScrollNotification>(
             onNotification: (notification) {
               if (notification.metrics.axis == Axis.vertical &&
@@ -3025,11 +3235,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
 
-  /// Full-bleed edge-to-edge HD cinema Hero Billboard for iOS Home.
+  /// Full-bleed elastic-stretch HD cinema Hero Billboard for iOS Home.
   ///
-  /// Uses a top-and-bottom seamless gradient matching [ApplePalette.background]
-  /// so both Dark Mode and Light Mode keep the overlaid top controls, hero
-  /// title/synopsis, and downstream shelves silky-smooth and effortless to read.
+  /// - Shifts the HD artwork downward below the Dynamic Island while extracting
+  ///   the active poster's edge ambient color to tint the status-bar / island
+  ///   backdrop smoothly upward.
+  /// - Applies a `ShaderMask(BlendMode.dstIn)` directly to the poster so BOTH
+  ///   top and bottom edges dissolve to 0% alpha directly into the live
+  ///   [AppleAmbientBackground] with zero horizontal seam in Dark or Light mode.
+  /// - Stretches and zooms smoothly when the user pulls down to refresh, never
+  ///   hiding the cover during refresh.
   Widget _buildIosImmersiveHeroBillboard(
     BuildContext context, {
     required CmsSite site,
@@ -3041,286 +3256,436 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }) {
     final palette = ApplePalette.of(context);
     final isDark = palette.isDark;
-    final bg = palette.background;
     final activeIdx = _iosHeroIndex.clamp(0, featuredList.length - 1);
-    final topFadeMid = ((topSafePad + 54.0) / heroHeight).clamp(0.14, 0.28);
-    final topFadeEnd =
-        ((topSafePad + 114.0) / heroHeight).clamp(topFadeMid + 0.08, 0.42);
+    final activeFeatured = featuredList[activeIdx];
+    final rawAmbient = _resolveHeroAmbientColor(activeFeatured, palette);
+    final topAmbientTint = isDark
+        ? Color.lerp(rawAmbient, const Color(0xFF0A0C12), 0.28)!
+        : Color.lerp(rawAmbient, palette.background, 0.42)!;
     final primaryInk = isDark ? Colors.white : const Color(0xFF14161F);
     final secondaryInk = isDark
-        ? Colors.white.withValues(alpha: 0.84)
+        ? Colors.white.withValues(alpha: 0.86)
         : const Color(0xFF343B49);
     final bodyInk = isDark
-        ? Colors.white.withValues(alpha: 0.74)
+        ? Colors.white.withValues(alpha: 0.76)
         : const Color(0xFF474F5E);
+    final veilColor = isDark ? const Color(0xFF05060A) : palette.background;
+    final posterTopInset = topSafePad + 44.0;
 
-    return SizedBox(
+    return LayoutBuilder(
       key: const ValueKey('ios-home-immersive-hero'),
-      width: double.infinity,
-      height: heroHeight,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          PageView.builder(
-            controller: _iosHeroPageController,
-            physics: const BouncingScrollPhysics(),
-            itemCount: featuredList.length,
-            onPageChanged: (index) {
-              if (mounted && _iosHeroIndex != index) {
-                setState(() => _iosHeroIndex = index);
-              }
-            },
-            itemBuilder: (context, index) {
-              final featured = featuredList[index];
-              final metaParts = <String>[
-                if (featured.year.trim().isNotEmpty) featured.year.trim(),
-                if (featured.area.trim().isNotEmpty) featured.area.trim(),
-                if (featured.remarks.trim().isNotEmpty) featured.remarks.trim(),
-              ];
-              final infoLine = featured.description.trim().isNotEmpty
-                  ? featured.description.trim()
-                  : (featured.actor.trim().isNotEmpty
-                      ? '主演：${featured.actor.trim()}'
-                      : '');
-              return GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => _openVideoDetail(site, featured),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    PosterImage(
-                      url: featured.poster,
-                      title: featured.title,
-                      year: featured.year,
-                      highRes: true,
-                      fit: BoxFit.cover,
-                      alignment: const Alignment(0.0, -0.24),
-                      placeholder: Container(
-                        color: isDark
-                            ? const Color(0xFF14161D)
-                            : const Color(0xFFD6DBE6),
-                      ),
-                    ),
-                    // Top & bottom seamless transition into page background.
-                    IgnorePointer(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [
-                              bg.withValues(alpha: isDark ? 0.78 : 0.88),
-                              bg.withValues(alpha: isDark ? 0.36 : 0.50),
-                              bg.withValues(alpha: 0.0),
-                              bg.withValues(alpha: 0.0),
-                              bg.withValues(alpha: isDark ? 0.42 : 0.58),
-                              bg.withValues(alpha: isDark ? 0.84 : 0.90),
-                              bg.withValues(alpha: isDark ? 0.97 : 0.99),
-                              bg,
-                            ],
-                            stops: [
-                              0.0,
-                              topFadeMid,
-                              topFadeEnd,
-                              0.48,
-                              0.63,
-                              0.77,
-                              0.90,
-                              1.0,
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      left: horizontalPad + 6,
-                      right: horizontalPad + 6,
-                      bottom: featuredList.length > 1 ? 30 : 16,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 9,
-                              vertical: 3.5,
-                            ),
-                            decoration: BoxDecoration(
-                              color: isDark
-                                  ? Colors.white.withValues(alpha: 0.16)
-                                  : Colors.white.withValues(alpha: 0.78),
-                              borderRadius: BorderRadius.circular(999),
-                              border: Border.all(
-                                color: isDark
-                                    ? Colors.white.withValues(alpha: 0.22)
-                                    : Colors.black.withValues(alpha: 0.08),
-                                width: 0.6,
-                              ),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  CupertinoIcons.sparkles,
-                                  color: isDark
-                                      ? const Color(0xFF5AC8FA)
-                                      : palette.accent,
-                                  size: 11,
-                                ),
-                                const SizedBox(width: 4),
-                                Flexible(
-                                  child: Text(
-                                    '今日首推 · ${site.name}',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      color: primaryInk,
-                                      fontSize: 10.5,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            featured.title,
-                            maxLines: 2,
-                            textAlign: TextAlign.center,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              color: primaryInk,
-                              fontSize: 25,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: -0.5,
-                              height: 1.15,
-                              shadows: isDark
-                                  ? const [
-                                      Shadow(
-                                        color: Color(0x88000000),
-                                        blurRadius: 12,
-                                        offset: Offset(0, 2),
-                                      ),
-                                    ]
-                                  : null,
-                            ),
-                          ),
-                          if (metaParts.isNotEmpty) ...[
-                            const SizedBox(height: 6),
-                            Text(
-                              metaParts.join(' · '),
-                              maxLines: 1,
-                              textAlign: TextAlign.center,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: secondaryInk,
-                                fontSize: 12.5,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: 0.1,
-                              ),
-                            ),
-                          ],
-                          if (infoLine.isNotEmpty) ...[
-                            const SizedBox(height: 6),
-                            Text(
-                              infoLine,
-                              maxLines: 2,
-                              textAlign: TextAlign.center,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: bodyInk,
-                                fontSize: 12,
-                                height: 1.38,
-                              ),
-                            ),
-                          ],
-                          const SizedBox(height: 12),
-                          ApplePressableScale(
-                            pressedScale: 0.94,
-                            onTap: () => _openVideoDetail(site, featured),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 18,
-                                vertical: 8,
-                              ),
-                              decoration: BoxDecoration(
-                                color: AppleColors.systemBlue,
-                                borderRadius: BorderRadius.circular(999),
-                                boxShadow: const [
-                                  BoxShadow(
-                                    color: Color(0x4D0A84FF),
-                                    blurRadius: 14,
-                                    offset: Offset(0, 4),
-                                  ),
-                                ],
-                              ),
-                              child: const Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    CupertinoIcons.play_fill,
-                                    color: Colors.white,
-                                    size: 12.5,
-                                  ),
-                                  SizedBox(width: 5),
-                                  Text(
-                                    '立即观看',
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w700,
-                                      letterSpacing: -0.1,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-          // Floating Header Row overlaid seamlessly over the top fade.
-          Positioned(
-            top: topSafePad + 8,
-            left: horizontalPad,
-            right: horizontalPad,
-            child: headerOverlay,
-          ),
-          if (featuredList.length > 1)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 10,
-              child: IgnorePointer(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    for (int i = 0; i < featuredList.length; i++)
-                      AnimatedContainer(
-                        duration: const Duration(milliseconds: 220),
-                        curve: Curves.easeOutCubic,
-                        margin: const EdgeInsets.symmetric(horizontal: 3),
-                        width: i == activeIdx ? 18 : 5.5,
-                        height: 5.5,
-                        decoration: BoxDecoration(
-                          color: i == activeIdx
-                              ? primaryInk
-                              : primaryInk.withValues(alpha: 0.30),
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                      ),
-                  ],
+      builder: (context, constraints) {
+        final currentH =
+            constraints.maxHeight > 0 ? constraints.maxHeight : heroHeight;
+        final overscroll = math.max(0.0, currentH - heroHeight);
+        final stretchScale =
+            (1.0 + (overscroll / math.max(heroHeight, 1.0)) * 0.62)
+                .clamp(1.0, 1.44);
+        final pullProgress = ((overscroll - 10.0) / 68.0).clamp(0.0, 1.0);
+        final showRefreshPill = _homeRefreshing || pullProgress > 0.08;
+        final refreshPillOpacity =
+            _homeRefreshing ? 1.0 : pullProgress.clamp(0.0, 1.0);
+
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            // 1. Poster-extracted ambient color aura rising smoothly behind the
+            //    Dynamic Island and fading completely to transparent at the bottom
+            //    so it blends into AppleAmbientBackground with zero hard seam.
+            IgnorePointer(
+              child: AnimatedContainer(
+                key: const ValueKey('ios-hero-top-ambient-aura'),
+                duration: const Duration(milliseconds: 420),
+                curve: Curves.easeOutCubic,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      topAmbientTint.withValues(alpha: isDark ? 0.96 : 0.94),
+                      topAmbientTint.withValues(alpha: isDark ? 0.76 : 0.74),
+                      topAmbientTint.withValues(alpha: isDark ? 0.30 : 0.26),
+                      Colors.transparent,
+                    ],
+                    stops: const [0.0, 0.28, 0.64, 1.0],
+                  ),
                 ),
               ),
             ),
-        ],
-      ),
+
+            // 2. Swipeable HD Posters shifted below the Dynamic Island, zooming
+            //    smoothly on pull-to-refresh and alpha-feathering at BOTH top &
+            //    bottom edges.
+            PageView.builder(
+              controller: _iosHeroPageController,
+              physics: const BouncingScrollPhysics(),
+              itemCount: featuredList.length,
+              onPageChanged: (index) {
+                if (mounted && _iosHeroIndex != index) {
+                  setState(() => _iosHeroIndex = index);
+                  _onPosterCacheUpdated();
+                }
+              },
+              itemBuilder: (context, index) {
+                final featured = featuredList[index];
+                final metaParts = <String>[
+                  if (featured.year.trim().isNotEmpty) featured.year.trim(),
+                  if (featured.area.trim().isNotEmpty) featured.area.trim(),
+                  if (featured.remarks.trim().isNotEmpty)
+                    featured.remarks.trim(),
+                ];
+                final infoLine = featured.description.trim().isNotEmpty
+                    ? featured.description.trim()
+                    : (featured.actor.trim().isNotEmpty
+                        ? '主演：${featured.actor.trim()}'
+                        : '');
+                return Builder(
+                  builder: (heroTapCtx) => GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => _openVideoDetail(
+                      site,
+                      featured,
+                      sourceContext: heroTapCtx,
+                      sourceRadius: 24.0,
+                    ),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        // Downward-shifted HD poster with intrinsic top+bottom
+                        // alpha feathering & pull-down elastic zoom.
+                        Positioned(
+                          top: posterTopInset,
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: ClipRect(
+                            child: Transform.scale(
+                              key: const ValueKey('ios-hero-stretch-zoom'),
+                              scale: stretchScale,
+                              alignment: const Alignment(0.0, -0.18),
+                              child: ShaderMask(
+                                blendMode: BlendMode.dstIn,
+                                shaderCallback: (rect) => const LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Color(0x00FFFFFF),
+                                    Color(0xA6FFFFFF),
+                                    Color(0xFFFFFFFF),
+                                    Color(0xFFFFFFFF),
+                                    Color(0xB8FFFFFF),
+                                    Color(0x3DFFFFFF),
+                                    Color(0x00FFFFFF),
+                                  ],
+                                  stops: [
+                                    0.0,
+                                    0.10,
+                                    0.20,
+                                    0.58,
+                                    0.76,
+                                    0.90,
+                                    1.0,
+                                  ],
+                                ).createShader(rect),
+                                child: PosterImage(
+                                  url: featured.poster,
+                                  title: featured.title,
+                                  year: featured.year,
+                                  highRes: true,
+                                  fit: BoxFit.cover,
+                                  alignment: const Alignment(0.0, -0.20),
+                                  placeholder: Container(
+                                    color: topAmbientTint.withValues(
+                                      alpha: 0.45,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        // Soft feathered reading veil behind title/synopsis
+                        // (fades back to 0% alpha at both top & bottom edges!).
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          height: 230,
+                          child: IgnorePointer(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Colors.transparent,
+                                    veilColor.withValues(
+                                      alpha: isDark ? 0.56 : 0.70,
+                                    ),
+                                    veilColor.withValues(
+                                      alpha: isDark ? 0.42 : 0.62,
+                                    ),
+                                    Colors.transparent,
+                                  ],
+                                  stops: const [0.0, 0.36, 0.76, 1.0],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          left: horizontalPad + 6,
+                          right: horizontalPad + 6,
+                          bottom: featuredList.length > 1 ? 32 : 18,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 9,
+                                  vertical: 3.5,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: isDark
+                                      ? Colors.white.withValues(alpha: 0.16)
+                                      : Colors.white.withValues(alpha: 0.80),
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(
+                                    color: isDark
+                                        ? Colors.white.withValues(alpha: 0.22)
+                                        : Colors.black.withValues(alpha: 0.08),
+                                    width: 0.6,
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      CupertinoIcons.sparkles,
+                                      color: isDark
+                                          ? const Color(0xFF5AC8FA)
+                                          : palette.accent,
+                                      size: 11,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Flexible(
+                                      child: Text(
+                                        '今日首推 · ${site.name}',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: primaryInk,
+                                          fontSize: 10.5,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                featured.title,
+                                maxLines: 2,
+                                textAlign: TextAlign.center,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: primaryInk,
+                                  fontSize: 25,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: -0.5,
+                                  height: 1.15,
+                                  shadows: isDark
+                                      ? const [
+                                          Shadow(
+                                            color: Color(0x88000000),
+                                            blurRadius: 12,
+                                            offset: Offset(0, 2),
+                                          ),
+                                        ]
+                                      : null,
+                                ),
+                              ),
+                              if (metaParts.isNotEmpty) ...[
+                                const SizedBox(height: 6),
+                                Text(
+                                  metaParts.join(' · '),
+                                  maxLines: 1,
+                                  textAlign: TextAlign.center,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: secondaryInk,
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: 0.1,
+                                  ),
+                                ),
+                              ],
+                              if (infoLine.isNotEmpty) ...[
+                                const SizedBox(height: 6),
+                                Text(
+                                  infoLine,
+                                  maxLines: 2,
+                                  textAlign: TextAlign.center,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: bodyInk,
+                                    fontSize: 12,
+                                    height: 1.38,
+                                  ),
+                                ),
+                              ],
+                              const SizedBox(height: 12),
+                              ApplePressableScale(
+                                pressedScale: 0.94,
+                                onTap: () => _openVideoDetail(
+                                  site,
+                                  featured,
+                                  sourceContext: heroTapCtx,
+                                  sourceRadius: 24.0,
+                                ),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 18,
+                                    vertical: 8,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: AppleColors.systemBlue,
+                                    borderRadius: BorderRadius.circular(999),
+                                    boxShadow: const [
+                                      BoxShadow(
+                                        color: Color(0x4D0A84FF),
+                                        blurRadius: 14,
+                                        offset: Offset(0, 4),
+                                      ),
+                                    ],
+                                  ),
+                                  child: const Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        CupertinoIcons.play_fill,
+                                        color: Colors.white,
+                                        size: 12.5,
+                                      ),
+                                      SizedBox(width: 5),
+                                      Text(
+                                        '立即观看',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w700,
+                                          letterSpacing: -0.1,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+
+            // 3. Floating Header Row comfortably nestled in the top ambient aura
+            Positioned(
+              top: topSafePad + 6,
+              left: horizontalPad,
+              right: horizontalPad,
+              child: headerOverlay,
+            ),
+
+            // 4. Translucent pull-to-refresh pill while pulling/refreshing
+            if (showRefreshPill)
+              Positioned(
+                top: topSafePad + 54,
+                left: 0,
+                right: 0,
+                child: IgnorePointer(
+                  child: Center(
+                    child: Opacity(
+                      opacity: refreshPillOpacity,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 5.5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: isDark
+                              ? Colors.black.withValues(alpha: 0.56)
+                              : Colors.white.withValues(alpha: 0.84),
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: isDark
+                                ? Colors.white.withValues(alpha: 0.16)
+                                : Colors.black.withValues(alpha: 0.08),
+                            width: 0.6,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CupertinoActivityIndicator(
+                              radius: 7.5,
+                              color: primaryInk,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              _homeRefreshing
+                                  ? '正在刷新片单'
+                                  : (pullProgress >= 0.95 ? '松手立即刷新' : '下拉放大刷新'),
+                              textScaler: TextScaler.noScaling,
+                              style: TextStyle(
+                                color: primaryInk,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+            // 5. Centered carousel pagination dots
+            if (featuredList.length > 1)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 12,
+                child: IgnorePointer(
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      for (int i = 0; i < featuredList.length; i++)
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 220),
+                          curve: Curves.easeOutCubic,
+                          margin: const EdgeInsets.symmetric(horizontal: 3),
+                          width: i == activeIdx ? 18 : 5.5,
+                          height: 5.5,
+                          decoration: BoxDecoration(
+                            color: i == activeIdx
+                                ? primaryInk
+                                : primaryInk.withValues(alpha: 0.30),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
   Widget _buildWelcomeOnboarding(BuildContext context) {
@@ -4560,11 +4925,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         'vcard_${site.key}_${video.id.isNotEmpty ? video.id : video.title}_${badge ?? ""}';
     return RepaintBoundary(
       key: ValueKey(cardKey),
-      child: ApplePressableScale(
-        pressedScale: 0.945,
-        pressedOpacity: 0.90,
-        onTap: onTap ?? () => _openVideoDetail(site, video),
-        child: Column(
+      child: Builder(
+        builder: (cardCtx) => ApplePressableScale(
+          pressedScale: 0.945,
+          pressedOpacity: 0.90,
+          onTap: onTap ??
+              () => _openVideoDetail(
+                    site,
+                    video,
+                    sourceContext: cardCtx,
+                    sourceRadius: 20.0,
+                  ),
+          child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(
@@ -4702,6 +5074,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ),
           ],
         ],
+      ),
       ),
       ),
     );
@@ -8121,37 +8494,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           ),
           SettingsPane(
             'home',
-            '首页模块',
-            '自定义主页顶部横幅与观看进度栏',
+            '首页板块与排序',
+            '单独开关首页各板块并自定义展示顺序',
             CupertinoIcons.house_fill,
             AppleColors.systemOrange,
-            content: IosSettingsGroup(
-              header: '主页展示模块',
-              footer: '关闭后对应推荐模块将不在主页顶部显示。',
-              children: [
-                toggleRow(
-                  '今日首推',
-                  CupertinoIcons.star_fill,
-                  AppleColors.systemOrange,
-                  storage.showHeroBanner,
-                  storage.setShowHeroBanner,
-                ),
-                toggleRow(
-                  '继续观看',
-                  CupertinoIcons.play_rectangle_fill,
-                  AppleColors.systemBlue,
-                  storage.showContinueWatching,
-                  storage.setShowContinueWatching,
-                ),
-                toggleRow(
-                  '片单发现模块',
-                  CupertinoIcons.sparkles,
-                  AppleColors.systemPurple,
-                  storage.showCuratedDiscovery,
-                  storage.setShowCuratedDiscovery,
-                ),
-              ],
-            ),
+            content: _buildIosHomeSectionsSettingsBody(refresh),
           ),
         ],
       ),
@@ -8607,13 +8954,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ),
         const SizedBox(height: 22),
         AppleGroupedSection(
-          header: '首页焦点模块',
+          header: '首页板块与排序',
           children: [
             AppleGroupedTile(
               icon: CupertinoIcons.rectangle_on_rectangle_angled,
               iconBgColor: AppleColors.systemOrange,
-              title: '首页「今日首推」巨幕卡片',
-              subtitle: '在首页推荐顶部展示焦点海报横幅',
+              title: '沉浸首推海报',
+              subtitle: '在首页顶部展示全幅高清推荐海报横幅',
               trailing: CupertinoSwitch(
                 value: widget.storage.showHeroBanner,
                 activeTrackColor: AppleColors.systemGreen,
@@ -8626,8 +8973,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             AppleGroupedTile(
               icon: CupertinoIcons.play_rectangle_fill,
               iconBgColor: AppleColors.systemGreen,
-              title: '首页「历史记录」快捷栏',
-              subtitle: '在首页顶部显示最近观看进度以便一键续播',
+              title: '历史记录（默认关闭）',
+              subtitle: '在首页展示最近观看进度以便一键续播',
               trailing: CupertinoSwitch(
                 value: widget.storage.showContinueWatching,
                 activeTrackColor: AppleColors.systemGreen,
@@ -8636,6 +8983,282 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   refreshBoth();
                 },
               ),
+            ),
+            for (final meta in _homeSectionMetas)
+              if (meta.id != StorageService.homeSectionHistory)
+                AppleGroupedTile(
+                  icon: meta.icon,
+                  iconBgColor: meta.color,
+                  title: meta.title,
+                  subtitle: meta.subtitle,
+                  trailing: CupertinoSwitch(
+                    value: widget.storage.isHomeSectionEnabled(meta.id),
+                    activeTrackColor: AppleColors.systemGreen,
+                    onChanged: (v) async {
+                      await widget.storage.setHomeSectionEnabled(meta.id, v);
+                      refreshBoth();
+                    },
+                  ),
+                ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  static const List<({String id, String title, String subtitle, IconData icon, Color color})>
+      _homeSectionMetas = [
+    (
+      id: StorageService.homeSectionHistory,
+      title: '历史记录',
+      subtitle: '最近观看进度与续播卡片（默认关闭）',
+      icon: CupertinoIcons.clock_fill,
+      color: AppleColors.systemBlue,
+    ),
+    (
+      id: StorageService.homeSectionWidescreenRadar,
+      title: '光影风向标',
+      subtitle: '16:9 横版宽银幕热点剧影推荐',
+      icon: CupertinoIcons.film_fill,
+      color: AppleColors.systemIndigo,
+    ),
+    (
+      id: StorageService.homeSectionEditorialPicks,
+      title: '月度策划',
+      subtitle: '藤蔓装饰主题合集大卡（剧集 / 综艺 / 口碑）',
+      icon: CupertinoIcons.sparkles,
+      color: AppleColors.systemTeal,
+    ),
+    (
+      id: StorageService.homeSectionHotStream,
+      title: '热播剧影榜',
+      subtitle: '2:3 竖版精排热播榜单',
+      icon: CupertinoIcons.flame_fill,
+      color: AppleColors.systemOrange,
+    ),
+    (
+      id: StorageService.homeSectionMoodCapsules,
+      title: '灵感片单',
+      subtitle: '斜叠迷你影票情绪与题材分组',
+      icon: CupertinoIcons.collections_solid,
+      color: AppleColors.systemPink,
+    ),
+    (
+      id: StorageService.homeSectionStudioGalleries,
+      title: '影业档案室',
+      subtitle: 'Disney+ / MARVEL / DC 品牌折扇卡',
+      icon: CupertinoIcons.rectangle_stack_fill,
+      color: AppleColors.systemPurple,
+    ),
+    (
+      id: StorageService.homeSectionPosterMosaics,
+      title: '口碑典藏馆',
+      subtitle: '三排交错海报墙马赛克专题',
+      icon: CupertinoIcons.square_grid_3x2_fill,
+      color: AppleColors.systemGreen,
+    ),
+    (
+      id: StorageService.homeSectionSourceUpdates,
+      title: '片源最新更新',
+      subtitle: '当前已选片源的最新片库与分类筛选栏',
+      icon: CupertinoIcons.layers_alt_fill,
+      color: AppleColors.systemRed,
+    ),
+  ];
+
+  Widget _buildIosHomeSectionsSettingsBody(VoidCallback refresh) {
+    final storage = widget.storage;
+    final orderedIds = storage.homeSectionOrder;
+    final metaById = {for (final m in _homeSectionMetas) m.id: m};
+    final palette = ApplePalette.of(context);
+
+    Future<void> moveSection(int index, int delta) async {
+      final target = index + delta;
+      if (target < 0 || target >= orderedIds.length) return;
+      final next = List<String>.of(orderedIds);
+      final moved = next.removeAt(index);
+      next.insert(target, moved);
+      await storage.setHomeSectionOrder(next);
+      HapticFeedback.selectionClick();
+      refresh();
+    }
+
+    return Column(
+      key: const ValueKey('ios-home-sections-settings-body'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        IosSettingsGroup(
+          header: '顶部沉浸首推',
+          footer: '控制首页顶部全幅高清海报横幅的展示状态。',
+          children: [
+            IosSettingsSwitchRow(
+              key: const ValueKey('switch-home-hero'),
+              icon: CupertinoIcons.star_fill,
+              iconColor: AppleColors.systemOrange,
+              title: '沉浸首推海报',
+              subtitle: '顶部高清海报横幅与下拉放大刷新',
+              value: storage.showHeroBanner,
+              onChanged: (v) async {
+                await storage.setShowHeroBanner(v);
+                refresh();
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        IosSettingsGroup(
+          header: '首页板块开关与顺序（拖动或点箭头排序）',
+          footer: '可单独开关每个板块并自由调整上下顺序，历史记录默认关闭。',
+          children: [
+            ReorderableListView.builder(
+              key: const ValueKey('ios-home-sections-reorder-list'),
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              buildDefaultDragHandles: false,
+              itemCount: orderedIds.length,
+              onReorder: (oldIndex, newIndex) async {
+                var target = newIndex;
+                if (target > oldIndex) target -= 1;
+                final next = List<String>.of(orderedIds);
+                final moved = next.removeAt(oldIndex);
+                next.insert(target, moved);
+                await storage.setHomeSectionOrder(next);
+                HapticFeedback.selectionClick();
+                refresh();
+              },
+              itemBuilder: (ctx, index) {
+                final id = orderedIds[index];
+                final meta = metaById[id];
+                if (meta == null) {
+                  return SizedBox.shrink(key: ValueKey('missing-$id'));
+                }
+                final enabled = storage.isHomeSectionEnabled(id);
+                return Container(
+                  key: ValueKey('home-section-row-$id'),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: palette.groupedPrimary,
+                    border: index < orderedIds.length - 1
+                        ? Border(
+                            bottom: BorderSide(
+                              color: palette.separator,
+                              width: 0.5,
+                            ),
+                          )
+                        : null,
+                  ),
+                  child: Row(
+                    children: [
+                      ReorderableDragStartListener(
+                        index: index,
+                        child: Padding(
+                          padding: const EdgeInsets.only(right: 10),
+                          child: Icon(
+                            CupertinoIcons.line_horizontal_3,
+                            size: 16,
+                            color: palette.labelTertiary,
+                          ),
+                        ),
+                      ),
+                      Container(
+                        width: 28,
+                        height: 28,
+                        decoration: BoxDecoration(
+                          color: meta.color,
+                          borderRadius: BorderRadius.circular(7),
+                        ),
+                        child: Icon(
+                          meta.icon,
+                          size: 15,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              meta.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: palette.labelPrimary,
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            Text(
+                              meta.subtitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: palette.labelTertiary,
+                                fontSize: 11.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (index > 0)
+                        CupertinoButton(
+                          key: ValueKey('home-section-up-$id'),
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          minimumSize: const Size(26, 28),
+                          onPressed: () => moveSection(index, -1),
+                          child: Icon(
+                            CupertinoIcons.chevron_up,
+                            size: 14,
+                            color: palette.labelSecondary,
+                          ),
+                        ),
+                      if (index < orderedIds.length - 1)
+                        CupertinoButton(
+                          key: ValueKey('home-section-down-$id'),
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          minimumSize: const Size(26, 28),
+                          onPressed: () => moveSection(index, 1),
+                          child: Icon(
+                            CupertinoIcons.chevron_down,
+                            size: 14,
+                            color: palette.labelSecondary,
+                          ),
+                        ),
+                      const SizedBox(width: 4),
+                      CupertinoSwitch(
+                        key: ValueKey('switch-home-section-$id'),
+                        value: enabled,
+                        activeTrackColor: AppleColors.systemGreen,
+                        onChanged: (v) async {
+                          await storage.setHomeSectionEnabled(id, v);
+                          refresh();
+                        },
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        IosSettingsGroup(
+          children: [
+            IosSettingsRow(
+              key: const ValueKey('home-sections-reset-btn'),
+              icon: CupertinoIcons.arrow_counterclockwise,
+              iconColor: AppleColors.systemRed,
+              title: '恢复默认板块与排序',
+              showChevron: false,
+              onTap: () async {
+                await storage.resetHomeSectionPreferences();
+                HapticFeedback.mediumImpact();
+                refresh();
+              },
             ),
           ],
         ),

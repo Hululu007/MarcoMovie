@@ -25,6 +25,7 @@ import 'package:marco_movie/ui/player/ios_player_chrome.dart';
 import 'package:marco_movie/ui/player/player_hud_prefs.dart';
 import 'package:marco_movie/ui/player/start_spec_overlay.dart';
 import 'package:marco_movie/ui/player_screen.dart';
+import 'package:marco_movie/ui/poster_expand_route.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -916,7 +917,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 350));
 
-      // Shutter triggered + 4:3 branded postcard visible with MARCO stamp
+      // Shutter triggered + wider collector's branded postcard visible with MARCO stamp
       expect(feedbackPhases, contains('shutter'));
       expect(find.byKey(const Key('favorite-postcard-card')), findsOneWidget);
       expect(
@@ -926,7 +927,8 @@ void main() {
       final cardSize = tester.getSize(
         find.byKey(const Key('favorite-postcard-card')),
       );
-      expect(cardSize.width / cardSize.height, closeTo(4 / 3, 0.05));
+      expect(cardSize.width, greaterThanOrEqualTo(290.0));
+      expect(cardSize.width / cardSize.height, closeTo(1.52, 0.08));
 
       // Advance into Dynamic Island arrival & elastic expansion phase
       await tester.pump(const Duration(milliseconds: 900));
@@ -935,13 +937,50 @@ void main() {
         find.byKey(const Key('favorite-dynamic-island-feedback')),
         findsOneWidget,
       );
+      // Dynamic Island shows `已收藏 <剧名>` and NEVER shows `已收藏明信片`
+      expect(find.text('已收藏 星际穿越'), findsOneWidget);
+      expect(find.textContaining('明信片'), findsNothing);
 
       // Animation completes and cleans up overlay cleanly
-      await tester.pump(const Duration(milliseconds: 1400));
+      await tester.pump(const Duration(milliseconds: 1450));
       expect(
         find.byKey(const Key('favorite-dynamic-island-feedback')),
         findsNothing,
       );
+
+      // Verify all 4 randomized designer postcard variants render cleanly with MARCO brand stamp
+      for (final style in FavoritePostcardStyle.values) {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: Builder(
+                builder: (ctx) => Center(
+                  child: ElevatedButton(
+                    onPressed: () {
+                      FavoritePostcardFlightOverlay.show(
+                        ctx,
+                        title: '沙丘2',
+                        year: '2024',
+                        styleOverride: style,
+                      );
+                    },
+                    child: Text('风格-${style.name}'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('风格-${style.name}'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 350));
+        expect(find.byKey(const Key('favorite-postcard-card')), findsOneWidget);
+        expect(
+          find.byKey(const Key('favorite-postcard-brand-stamp')),
+          findsOneWidget,
+        );
+        await tester.pump(const Duration(milliseconds: 2200));
+      }
     },
   );
 
@@ -1114,35 +1153,101 @@ void main() {
         ),
       );
       await tester.pump();
-      expect(find.text('近期国内热门'), findsOneWidget);
-      expect(find.text('本周趋势'), findsOneWidget);
-      expect(find.text('近一月 · 热门综艺'), findsOneWidget);
-      expect(find.text('精选厂牌'), findsOneWidget);
-      expect(find.text('分类浏览'), findsOneWidget);
+      // Original Marco Movie section titles & botanical vines (no copied titles!)
+      expect(find.text('光影风向标'), findsOneWidget);
+      expect(find.text('月度策划'), findsOneWidget);
+      expect(find.text('当月欢笑 · 热门综艺'), findsOneWidget);
+      expect(find.text('热播剧影榜'), findsOneWidget);
+      expect(find.text('灵感片单'), findsOneWidget);
+      expect(find.text('影业档案室'), findsOneWidget);
+      expect(find.text('口碑典藏馆'), findsOneWidget);
+      expect(find.text('本周趋势'), findsNothing);
+      expect(find.text('精选厂牌'), findsNothing);
+      expect(find.text('合家欢'), findsNothing);
+      expect(
+        find.byKey(const Key('editorial-botanical-vine-overlay')),
+        findsAtLeastNWidgets(1),
+      );
       expect(find.byKey(const Key('curated-module-weekly_trending')), findsOneWidget);
       expect(find.byKey(const Key('curated-module-cn_variety')), findsOneWidget);
 
-      // Tap the editorial laurel collection card -> launches Gravity Drop -> Poster Wall page
+      // Tap editorial vine card -> launches Black Hole Vortex -> Poster Wall page,
+      // then cycle replay button through Tetris Tumble and Gravity Stack!
       await tester.ensureVisible(
         find.byKey(const Key('curated-module-cn_variety')),
       );
       await tester.pump();
       await tester.tap(find.byKey(const Key('curated-module-cn_variety')));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pump(const Duration(milliseconds: 360));
       expect(find.byKey(const Key('curated-gravity-wall-page')), findsOneWidget);
-      // Advance through gravity-drop pile (phase 1) & spring expansion (phase 2) into live wall
-      await tester.pump(const Duration(milliseconds: 650));
+      expect(
+        find.byKey(const Key('curated-wall-style-blackHoleVortex')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('curated-black-hole-vortex')), findsOneWidget);
+      // Advance through vortex suction & supernova burst into live wall
       await tester.pump(const Duration(milliseconds: 700));
+      await tester.pump(const Duration(milliseconds: 600));
       expect(find.byKey(const Key('curated-gravity-wall-grid')), findsOneWidget);
       expect(find.byKey(const Key('curated-gravity-replay-btn')), findsOneWidget);
+
+      // Cycle to Tetris Tumble
+      await tester.tap(find.byKey(const Key('curated-gravity-replay-btn')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 420));
+      expect(
+        find.byKey(const Key('curated-wall-style-tetrisTumble')),
+        findsOneWidget,
+      );
+      await tester.pump(const Duration(milliseconds: 1100));
+
+      // Cycle to Gravity Stack
+      await tester.tap(find.byKey(const Key('curated-gravity-replay-btn')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 420));
+      expect(
+        find.byKey(const Key('curated-wall-style-gravityStack')),
+        findsOneWidget,
+      );
+      await tester.pump(const Duration(milliseconds: 1100));
 
       // Tear down the standalone discovery navigator before mounting AdaptiveShell.
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
 
-      // 3. AdaptiveShell iOS Home: full-bleed top HD Hero + Category/Filter bar BELOW 片源最新更新
+      // 3. Storage defaults (History OFF by default on iOS) + per-section toggles & ordering
       final storage = await initTestStorage();
+      expect(storage.showContinueWatching, isFalse);
+      expect(
+        storage.isHomeSectionEnabled(StorageService.homeSectionHistory),
+        isFalse,
+      );
+      expect(
+        storage.isHomeSectionEnabled(StorageService.homeSectionWidescreenRadar),
+        isTrue,
+      );
+      await storage.setHomeSectionEnabled(
+        StorageService.homeSectionStudioGalleries,
+        false,
+      );
+      expect(
+        storage.isHomeSectionEnabled(StorageService.homeSectionStudioGalleries),
+        isFalse,
+      );
+      await storage.setHomeSectionOrder([
+        StorageService.homeSectionHotStream,
+        StorageService.homeSectionWidescreenRadar,
+      ]);
+      expect(storage.homeSectionOrder.first, StorageService.homeSectionHotStream);
+      await storage.resetHomeSectionPreferences();
+      expect(storage.showContinueWatching, isFalse);
+      expect(
+        storage.isHomeSectionEnabled(StorageService.homeSectionStudioGalleries),
+        isTrue,
+      );
+
+      // 4. AdaptiveShell iOS Home: ambient-fused stretchy HD Hero + never vanishes on refresh + Category/Filter bar BELOW 片源最新更新
       await storage.saveConfig(
         '{"sites":[{"key":"ios_home_demo","name":"示例高清源","type":1,"api":"https://demo.invalid/api"}]}',
       );
@@ -1159,11 +1264,26 @@ void main() {
 
       final heroFinder = find.byKey(const ValueKey('ios-home-immersive-hero'));
       expect(heroFinder, findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('ios-hero-top-ambient-aura')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('ios-hero-stretch-zoom')),
+        findsOneWidget,
+      );
       final heroRect = tester.getRect(heroFinder);
       expect(heroRect.top, closeTo(0.0, 0.5));
       expect(heroRect.width, closeTo(390.0, 0.5));
-      expect(heroRect.height, greaterThanOrEqualTo(450.0));
+      expect(heroRect.height, greaterThanOrEqualTo(470.0));
       expect(find.text('罪蓝之路'), findsWidgets);
+
+      // Pull down to trigger stretchy refresh -> Hero stays mounted & visible (never vanishes!)
+      await tester.drag(heroFinder, const Offset(0, 120));
+      await tester.pump(const Duration(milliseconds: 120));
+      expect(heroFinder, findsOneWidget);
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(heroFinder, findsOneWidget);
 
       // Scroll down to 片源最新更新 and verify Category/Filter bar sits directly BELOW it
       final updatesHeaderFinder =
@@ -1186,6 +1306,76 @@ void main() {
       expect(
         tester.getTopLeft(categoryBarFinder).dy,
         greaterThanOrEqualTo(tester.getBottomLeft(updatesHeaderFinder).dy - 1.0),
+      );
+
+      // 5. PosterExpandRoute expands from tapped poster card rect and implodes back to original card on pop
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Align(
+              alignment: const Alignment(-0.5, 0.2),
+              child: Builder(
+                builder: (cardCtx) => GestureDetector(
+                  key: const Key('test-source-poster-card'),
+                  onTap: () {
+                    final rect = PosterExpandRoute.captureRect(cardCtx)!;
+                    Navigator.of(cardCtx).push(
+                      PosterExpandRoute<void>(
+                        initialSourceRect: rect,
+                        sourceRectResolver: () =>
+                            PosterExpandRoute.captureRect(cardCtx),
+                        title: '测试展开剧集',
+                        builder: (_) => Scaffold(
+                          key: const Key('test-expanded-detail-page'),
+                          body: Center(
+                            child: ElevatedButton(
+                              onPressed: () => Navigator.of(cardCtx).pop(),
+                              child: const Text('返回原位'),
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                  child: const SizedBox(
+                    width: 110,
+                    height: 165,
+                    child: ColoredBox(color: Colors.indigo),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      final originalCardRect =
+          tester.getRect(find.byKey(const Key('test-source-poster-card')));
+      await tester.tap(find.byKey(const Key('test-source-poster-card')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 180));
+      expect(
+        find.byKey(const Key('poster-expand-transition-stage')),
+        findsOneWidget,
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('test-expanded-detail-page')),
+        findsOneWidget,
+      );
+      // Pop back -> implodes back toward exact original poster card rect
+      await tester.tap(find.text('返回原位'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 160));
+      expect(
+        find.byKey(const Key('poster-expand-transition-stage')),
+        findsOneWidget,
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester.getRect(find.byKey(const Key('test-source-poster-card'))),
+        originalCardRect,
       );
 
       await tester.pumpWidget(const SizedBox.shrink());
