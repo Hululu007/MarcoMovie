@@ -62,12 +62,12 @@ final class HomeAmbient extends View {
     private int startLeft = left, startRight = right, startMid = deriveTertiary(left, right);
     private int targetMid = deriveTertiary(left, right);
     private int curLeft = left, curRight = right, curMid = targetMid;
-    private float morphProgress = 1f;
+    float morphProgress = 1f;
     private float phase = 0f;
     private float frameAccum = 0f;
     private boolean shadersDirty = true;
     private int lastBaseW = -1, lastBaseH = -1;
-    private boolean loopRunning;
+    boolean loopRunning;
     private float scrollReveal = 1f;
 
     static float computeScrollReveal(int scrollY, int heroHeightPx) {
