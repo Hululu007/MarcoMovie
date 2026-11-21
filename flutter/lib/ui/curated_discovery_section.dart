@@ -6,14 +6,17 @@ import '../core/curated_discovery.dart';
 import '../core/models.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
+import 'poster_expand_route.dart';
 import 'poster_image.dart';
 
-/// Callback carrying the tapped poster card's live [BuildContext] and corner
-/// radius so the host can launch a shared-container [PosterExpandRoute].
+/// Callback carrying the tapped poster card's live [BuildContext], corner
+/// radius, and unique [cardId] so the host can launch a zero-ghosting
+/// [PosterExpandRoute].
 typedef CuratedCardOpenCallback = void Function(
   CmsVideo video,
   BuildContext cardContext,
   double cardRadius,
+  String cardId,
 );
 
 /// Distinct physics entrance styles when opening any discovery collection into
@@ -134,9 +137,10 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
     CmsVideo video,
     BuildContext cardContext,
     double cardRadius,
+    String cardId,
   ) {
     if (widget.onOpenVideoFromCard != null) {
-      widget.onOpenVideoFromCard!(video, cardContext, cardRadius);
+      widget.onOpenVideoFromCard!(video, cardContext, cardRadius, cardId);
     } else {
       widget.onOpenVideo(video);
     }
@@ -629,14 +633,16 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
             separatorBuilder: (_, __) => const SizedBox(width: 11),
             itemBuilder: (context, index) {
               final video = items[index];
+              final cid = 'curated-portrait-${video.id}-$index';
               return _CuratedPosterCard(
                 video: video,
+                cardId: cid,
                 accentColor: accentColor,
                 palette: palette,
                 rankNumber: showRankBadges ? index + 1 : null,
                 onTap: (cardCtx) {
                   HapticFeedback.selectionClick();
-                  onOpenVideo(video, cardCtx, 13.0);
+                  onOpenVideo(video, cardCtx, 13.0, cid);
                 },
               );
             },
@@ -688,12 +694,14 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
             separatorBuilder: (_, __) => const SizedBox(width: 12),
             itemBuilder: (context, index) {
               final video = items[index];
+              final cid = 'curated-landscape-${video.id}-$index';
               return _CuratedLandscapeCard(
                 video: video,
+                cardId: cid,
                 palette: palette,
                 onTap: (cardCtx) {
                   HapticFeedback.selectionClick();
-                  onOpenVideo(video, cardCtx, 14.0);
+                  onOpenVideo(video, cardCtx, 14.0, cid);
                 },
               );
             },
@@ -706,11 +714,13 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
 
 class _CuratedLandscapeCard extends StatelessWidget {
   final CmsVideo video;
+  final String cardId;
   final ApplePalette palette;
   final void Function(BuildContext cardContext) onTap;
 
   const _CuratedLandscapeCard({
     required this.video,
+    required this.cardId,
     required this.palette,
     required this.onTap,
   });
@@ -728,123 +738,130 @@ class _CuratedLandscapeCard extends StatelessWidget {
     final subtitle = metaParts.join(' · ');
     final imgUrl = CuratedDiscoveryService.backdropFor(video);
 
-    return Builder(
-      builder: (cardCtx) => GestureDetector(
-        key: Key('curated-landscape-${video.id}'),
-        onTap: () => onTap(cardCtx),
-        behavior: HitTestBehavior.opaque,
-        child: SizedBox(
-          width: 210,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                width: 210,
-                height: 118,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: palette.isDark
-                        ? Colors.white.withValues(alpha: 0.11)
-                        : Colors.black.withValues(alpha: 0.06),
-                    width: 0.8,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(
-                        alpha: palette.isDark ? 0.32 : 0.10,
+    BuildContext? posterCtx;
+    return GestureDetector(
+      key: Key('curated-landscape-${video.id}'),
+      onTap: () => onTap(posterCtx ?? context),
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        width: 210,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            PosterExpandSourceCard(
+              cardId: cardId,
+              child: Builder(
+                builder: (ctx) {
+                  posterCtx = ctx;
+                  return Container(
+                    width: 210,
+                    height: 118,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: palette.isDark
+                            ? Colors.white.withValues(alpha: 0.11)
+                            : Colors.black.withValues(alpha: 0.06),
+                        width: 0.8,
                       ),
-                      blurRadius: 14,
-                      offset: const Offset(0, 6),
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(13.5),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      PosterImage(
-                        url: imgUrl,
-                        title: video.title,
-                        year: video.year,
-                        fit: BoxFit.cover,
-                        forBackdrop: true,
-                        highRes: true,
-                        placeholder: _buildFallbackThumb(video.title, palette),
-                      ),
-                      Positioned.fill(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.topCenter,
-                              end: Alignment.bottomCenter,
-                              colors: [
-                                Colors.transparent,
-                                Colors.black.withValues(alpha: 0.08),
-                                Colors.black.withValues(alpha: 0.42),
-                              ],
-                              stops: const [0.0, 0.55, 1.0],
-                            ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(
+                            alpha: palette.isDark ? 0.32 : 0.10,
                           ),
+                          blurRadius: 14,
+                          offset: const Offset(0, 6),
                         ),
-                      ),
-                      if (video.doubanScore != null || video.rtScore != null)
-                        Positioned(
-                          top: 7,
-                          right: 7,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 6,
-                              vertical: 2.5,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.65),
-                              borderRadius: BorderRadius.circular(6),
-                            ),
-                            child: Text(
-                              video.rtScore != null
-                                  ? '🍅 ${video.rtScore}%'
-                                  : '豆 ${video.doubanScore!.toStringAsFixed(1)}',
-                              style: const TextStyle(
-                                color: Color(0xFFFFD86B),
-                                fontSize: 9.5,
-                                fontWeight: FontWeight.w700,
+                      ],
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(13.5),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          PosterImage(
+                            url: imgUrl,
+                            title: video.title,
+                            year: video.year,
+                            fit: BoxFit.cover,
+                            forBackdrop: true,
+                            highRes: true,
+                            placeholder: _buildFallbackThumb(video.title, palette),
+                          ),
+                          Positioned.fill(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Colors.transparent,
+                                    Colors.black.withValues(alpha: 0.08),
+                                    Colors.black.withValues(alpha: 0.42),
+                                  ],
+                                  stops: const [0.0, 0.55, 1.0],
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 7),
-              Text(
-                video.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: palette.labelPrimary,
-                  fontSize: 13.5,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.15,
-                ),
-              ),
-              if (subtitle.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 1.5),
-                  child: Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: palette.labelTertiary,
-                      fontSize: 11,
+                          if (video.doubanScore != null || video.rtScore != null)
+                            Positioned(
+                              top: 7,
+                              right: 7,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2.5,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: 0.65),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  video.rtScore != null
+                                      ? '🍅 ${video.rtScore}%'
+                                      : '豆 ${video.doubanScore!.toStringAsFixed(1)}',
+                                  style: const TextStyle(
+                                    color: Color(0xFFFFD86B),
+                                    fontSize: 9.5,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 7),
+            Text(
+              video.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: palette.labelPrimary,
+                fontSize: 13.5,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.15,
+              ),
+            ),
+            if (subtitle.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 1.5),
+                child: Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: palette.labelTertiary,
+                    fontSize: 11,
                   ),
                 ),
-            ],
-          ),
+              ),
+          ],
         ),
       ),
     );
@@ -1064,9 +1081,15 @@ class _EditorialCollectionCard extends StatelessWidget {
                         Expanded(
                           child: _EditorialMiniWideTile(
                             video: subItems[i],
+                            cardId: 'curated-editorial-${title}_${subItems[i].id}_$i',
                             onTap: (cardCtx) {
                               HapticFeedback.selectionClick();
-                              onOpenVideo(subItems[i], cardCtx, 11.0);
+                              onOpenVideo(
+                                subItems[i],
+                                cardCtx,
+                                11.0,
+                                'curated-editorial-${title}_${subItems[i].id}_$i',
+                              );
                             },
                           ),
                         ),
@@ -1085,10 +1108,12 @@ class _EditorialCollectionCard extends StatelessWidget {
 
 class _EditorialMiniWideTile extends StatelessWidget {
   final CmsVideo video;
+  final String cardId;
   final void Function(BuildContext cardContext) onTap;
 
   const _EditorialMiniWideTile({
     required this.video,
+    required this.cardId,
     required this.onTap,
   });
 
@@ -1103,65 +1128,72 @@ class _EditorialMiniWideTile extends StatelessWidget {
         video.remarks,
     ].join(' · ');
 
-    return Builder(
-      builder: (cardCtx) => GestureDetector(
-        onTap: () => onTap(cardCtx),
-        behavior: HitTestBehavior.opaque,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(11),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    PosterImage(
-                      url: CuratedDiscoveryService.backdropFor(video),
-                      title: video.title,
-                      year: video.year,
-                      fit: BoxFit.cover,
-                      forBackdrop: true,
-                      placeholder: Container(
-                        color: Colors.black.withValues(alpha: 0.28),
-                      ),
-                    ),
-                    DecoratedBox(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(11),
-                        border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.14),
-                          width: 0.6,
+    BuildContext? posterCtx;
+    return GestureDetector(
+      onTap: () => onTap(posterCtx ?? context),
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: PosterExpandSourceCard(
+              cardId: cardId,
+              child: Builder(
+                builder: (ctx) {
+                  posterCtx = ctx;
+                  return ClipRRect(
+                    borderRadius: BorderRadius.circular(11),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        PosterImage(
+                          url: CuratedDiscoveryService.backdropFor(video),
+                          title: video.title,
+                          year: video.year,
+                          fit: BoxFit.cover,
+                          forBackdrop: true,
+                          placeholder: Container(
+                            color: Colors.black.withValues(alpha: 0.28),
+                          ),
                         ),
-                      ),
+                        DecoratedBox(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(11),
+                            border: Border.all(
+                              color: Colors.white.withValues(alpha: 0.14),
+                              width: 0.6,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
+                  );
+                },
               ),
             ),
-            const SizedBox(height: 6),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            video.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          if (sub.isNotEmpty)
             Text(
-              video.title,
+              sub,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12.5,
-                fontWeight: FontWeight.w700,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.65),
+                fontSize: 10.5,
               ),
             ),
-            if (sub.isNotEmpty)
-              Text(
-                sub,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.65),
-                  fontSize: 10.5,
-                ),
-              ),
-          ],
-        ),
+        ],
       ),
     );
   }
@@ -1872,6 +1904,7 @@ Widget _buildFallbackThumb(String title, ApplePalette palette) {
 
 class _CuratedPosterCard extends StatelessWidget {
   final CmsVideo video;
+  final String cardId;
   final Color accentColor;
   final ApplePalette palette;
   final int? rankNumber;
@@ -1879,6 +1912,7 @@ class _CuratedPosterCard extends StatelessWidget {
 
   const _CuratedPosterCard({
     required this.video,
+    required this.cardId,
     required this.accentColor,
     required this.palette,
     this.rankNumber,
@@ -1895,135 +1929,142 @@ class _CuratedPosterCard extends StatelessWidget {
 
     final placeholder = _buildFallbackThumb(video.title, palette);
 
-    return Builder(
-      builder: (cardCtx) => GestureDetector(
-        key: Key('curated-poster-${video.id}'),
-        onTap: () => onTap(cardCtx),
-        behavior: HitTestBehavior.opaque,
-        child: SizedBox(
-          width: 114,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Container(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(13),
-                    border: Border.all(
-                      color: palette.isDark
-                          ? Colors.white.withValues(alpha: 0.1)
-                          : Colors.black.withValues(alpha: 0.06),
-                      width: 0.8,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(
-                          alpha: palette.isDark ? 0.32 : 0.09,
+    BuildContext? posterCtx;
+    return GestureDetector(
+      key: Key('curated-poster-${video.id}'),
+      onTap: () => onTap(posterCtx ?? context),
+      behavior: HitTestBehavior.opaque,
+      child: SizedBox(
+        width: 114,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: PosterExpandSourceCard(
+                cardId: cardId,
+                child: Builder(
+                  builder: (ctx) {
+                    posterCtx = ctx;
+                    return Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(13),
+                        border: Border.all(
+                          color: palette.isDark
+                              ? Colors.white.withValues(alpha: 0.1)
+                              : Colors.black.withValues(alpha: 0.06),
+                          width: 0.8,
                         ),
-                        blurRadius: 12,
-                        offset: const Offset(0, 5),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(
+                              alpha: palette.isDark ? 0.32 : 0.09,
+                            ),
+                            blurRadius: 12,
+                            offset: const Offset(0, 5),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12.5),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        PosterImage(
-                          url: video.poster,
-                          title: video.title,
-                          year: video.year,
-                          fit: BoxFit.cover,
-                          fadeIn: true,
-                          highRes: true,
-                          placeholder: placeholder,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12.5),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            PosterImage(
+                              url: video.poster,
+                              title: video.title,
+                              year: video.year,
+                              fit: BoxFit.cover,
+                              fadeIn: true,
+                              highRes: true,
+                              placeholder: placeholder,
+                            ),
+                            if (rankNumber != null)
+                              Positioned(
+                                top: 6,
+                                left: 6,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 5.5,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      colors: rankNumber! <= 3
+                                          ? [
+                                              accentColor.withValues(alpha: 0.92),
+                                              accentColor.withValues(alpha: 0.68),
+                                            ]
+                                          : [
+                                              Colors.black.withValues(alpha: 0.72),
+                                              Colors.black.withValues(alpha: 0.56),
+                                            ],
+                                    ),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    rankNumber!.toString().padLeft(2, '0'),
+                                    textScaler: TextScaler.noScaling,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w800,
+                                      fontFeatures: [FontFeature.tabularFigures()],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            if (badgeText.isNotEmpty)
+                              Positioned(
+                                top: 6,
+                                right: 6,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 5.5,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.black.withValues(alpha: 0.68),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    badgeText,
+                                    style: const TextStyle(
+                                      color: Color(0xFFFFD86B),
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
-                        if (rankNumber != null)
-                          Positioned(
-                            top: 6,
-                            left: 6,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 5.5,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  colors: rankNumber! <= 3
-                                      ? [
-                                          accentColor.withValues(alpha: 0.92),
-                                          accentColor.withValues(alpha: 0.68),
-                                        ]
-                                      : [
-                                          Colors.black.withValues(alpha: 0.72),
-                                          Colors.black.withValues(alpha: 0.56),
-                                        ],
-                                ),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                rankNumber!.toString().padLeft(2, '0'),
-                                textScaler: TextScaler.noScaling,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 9.5,
-                                  fontWeight: FontWeight.w800,
-                                  fontFeatures: [FontFeature.tabularFigures()],
-                                ),
-                              ),
-                            ),
-                          ),
-                        if (badgeText.isNotEmpty)
-                          Positioned(
-                            top: 6,
-                            right: 6,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 5.5,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.black.withValues(alpha: 0.68),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                badgeText,
-                                style: const TextStyle(
-                                  color: Color(0xFFFFD86B),
-                                  fontSize: 9.5,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
+                      ),
+                    );
+                  },
                 ),
               ),
-              const SizedBox(height: 6),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              video.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: palette.labelPrimary,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            if (video.year.isNotEmpty)
               Text(
-                video.title,
+                video.year,
                 maxLines: 1,
-                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: palette.labelPrimary,
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
+                  color: palette.labelTertiary,
+                  fontSize: 10.5,
                 ),
               ),
-              if (video.year.isNotEmpty)
-                Text(
-                  video.year,
-                  maxLines: 1,
-                  style: TextStyle(
-                    color: palette.labelTertiary,
-                    fontSize: 10.5,
-                  ),
-                ),
-            ],
-          ),
+          ],
         ),
       ),
     );
@@ -2354,14 +2395,16 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
               itemCount: widget.items.length,
               itemBuilder: (context, index) {
                 final v = widget.items[index];
+                final cid = 'curated-wall-${widget.title}-${v.id}-$index';
                 return _CuratedPosterCard(
                   video: v,
+                  cardId: cid,
                   accentColor: widget.accentColor,
                   palette: palette,
                   onTap: (cardCtx) {
                     HapticFeedback.selectionClick();
                     if (widget.onOpenVideoFromCard != null) {
-                      widget.onOpenVideoFromCard!(v, cardCtx, 13.0);
+                      widget.onOpenVideoFromCard!(v, cardCtx, 13.0, cid);
                     } else {
                       widget.onOpenVideo(v);
                     }

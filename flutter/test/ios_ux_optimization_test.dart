@@ -1308,7 +1308,9 @@ void main() {
         greaterThanOrEqualTo(tester.getBottomLeft(updatesHeaderFinder).dy - 1.0),
       );
 
-      // 5. PosterExpandRoute expands from tapped poster card rect and implodes back to original card on pop
+      // 5. PosterExpandRoute expands with Apple spring physics, hides source card
+      //    while in-flight (zero stationary ghost), and implodes cleanly back to
+      //    exact original card slot on pop.
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
       await tester.pumpWidget(
@@ -1316,33 +1318,37 @@ void main() {
           home: Scaffold(
             body: Align(
               alignment: const Alignment(-0.5, 0.2),
-              child: Builder(
-                builder: (cardCtx) => GestureDetector(
-                  key: const Key('test-source-poster-card'),
-                  onTap: () {
-                    final rect = PosterExpandRoute.captureRect(cardCtx)!;
-                    Navigator.of(cardCtx).push(
-                      PosterExpandRoute<void>(
-                        initialSourceRect: rect,
-                        sourceRectResolver: () =>
-                            PosterExpandRoute.captureRect(cardCtx),
-                        title: '测试展开剧集',
-                        builder: (_) => Scaffold(
-                          key: const Key('test-expanded-detail-page'),
-                          body: Center(
-                            child: ElevatedButton(
-                              onPressed: () => Navigator.of(cardCtx).pop(),
-                              child: const Text('返回原位'),
+              child: PosterExpandSourceCard(
+                cardId: 'test-card-1',
+                child: Builder(
+                  builder: (cardCtx) => GestureDetector(
+                    key: const Key('test-source-poster-card'),
+                    onTap: () {
+                      final rect = PosterExpandRoute.captureRect(cardCtx)!;
+                      Navigator.of(cardCtx).push(
+                        PosterExpandRoute<void>(
+                          initialSourceRect: rect,
+                          sourceRectResolver: () =>
+                              PosterExpandRoute.captureRect(cardCtx),
+                          sourceCardId: 'test-card-1',
+                          title: '测试展开剧集',
+                          builder: (_) => Scaffold(
+                            key: const Key('test-expanded-detail-page'),
+                            body: Center(
+                              child: ElevatedButton(
+                                onPressed: () => Navigator.of(cardCtx).pop(),
+                                child: const Text('返回原位'),
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    );
-                  },
-                  child: const SizedBox(
-                    width: 110,
-                    height: 165,
-                    child: ColoredBox(color: Colors.indigo),
+                      );
+                    },
+                    child: const SizedBox(
+                      width: 110,
+                      height: 165,
+                      child: ColoredBox(color: Colors.indigo),
+                    ),
                   ),
                 ),
               ),
@@ -1352,8 +1358,10 @@ void main() {
       );
       final originalCardRect =
           tester.getRect(find.byKey(const Key('test-source-poster-card')));
+      expect(PosterExpandRegistry.activeCardId.value, isNull);
       await tester.tap(find.byKey(const Key('test-source-poster-card')));
       await tester.pump();
+      expect(PosterExpandRegistry.activeCardId.value, 'test-card-1');
       await tester.pump(const Duration(milliseconds: 180));
       expect(
         find.byKey(const Key('poster-expand-transition-stage')),
@@ -1364,7 +1372,8 @@ void main() {
         find.byKey(const Key('test-expanded-detail-page')),
         findsOneWidget,
       );
-      // Pop back -> implodes back toward exact original poster card rect
+      // Pop back -> implodes back toward exact original poster card rect and
+      // releases PosterExpandRegistry cleanly upon settle.
       await tester.tap(find.text('返回原位'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 160));
@@ -1373,6 +1382,7 @@ void main() {
         findsOneWidget,
       );
       await tester.pumpAndSettle();
+      expect(PosterExpandRegistry.activeCardId.value, isNull);
       expect(
         tester.getRect(find.byKey(const Key('test-source-poster-card'))),
         originalCardRect,

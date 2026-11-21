@@ -1,33 +1,149 @@
 import 'dart:ui' show lerpDouble;
 
 import 'package:flutter/material.dart';
-import 'poster_image.dart';
+import 'package:flutter/physics.dart';
 
-/// iOS Apple TV / App Store style shared-container route transition:
+/// Tracks the currently expanding/collapsing poster card ID so the originating
+/// card on the Home screen hides itself while in-flight (preserving its exact
+/// layout [RenderBox] for live return-rect lookup) — preventing any stationary
+/// duplicate ghost image behind the flying container.
+class PosterExpandRegistry {
+  PosterExpandRegistry._();
+
+  static final ValueNotifier<String?> activeCardId = ValueNotifier<String?>(null);
+}
+
+/// Wraps a clickable poster card so it hides cleanly without collapsing layout
+/// space while its [PosterExpandRoute] is actively flying or open.
+class PosterExpandSourceCard extends StatelessWidget {
+  final String cardId;
+  final Widget child;
+
+  const PosterExpandSourceCard({
+    super.key,
+    required this.cardId,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<String?>(
+      valueListenable: PosterExpandRegistry.activeCardId,
+      child: child,
+      builder: (context, activeId, cardChild) {
+        final hidden = activeId != null && activeId == cardId;
+        return Visibility(
+          visible: !hidden,
+          maintainSize: true,
+          maintainAnimation: true,
+          maintainState: true,
+          child: cardChild!,
+        );
+      },
+    );
+  }
+}
+
+/// Real physics [SpringSimulation]-backed curve delivering authentic iOS 18
+/// `UIViewControllerTransition.zoom` spring kinematics while staying 100%
+/// compatible with interactive gesture scrubbing and Flutter widget tests.
+class _AppleSpringCurve extends Curve {
+  final SpringSimulation _sim;
+  final double _durationSec;
+  final double _endValue;
+
+  _AppleSpringCurve({
+    required double mass,
+    required double stiffness,
+    required double damping,
+    required double durationSec,
+  })  : _sim = SpringSimulation(
+          SpringDescription(
+            mass: mass,
+            stiffness: stiffness,
+            damping: damping,
+          ),
+          0.0,
+          1.0,
+          0.0,
+        ),
+        _durationSec = durationSec,
+        _endValue = SpringSimulation(
+          SpringDescription(
+            mass: mass,
+            stiffness: stiffness,
+            damping: damping,
+          ),
+          0.0,
+          1.0,
+          0.0,
+        ).x(durationSec);
+
+  @override
+  double transformInternal(double t) {
+    if (t <= 0.0) return 0.0;
+    if (t >= 1.0) return 1.0;
+    final x = _sim.x(t * _durationSec);
+    // Normalize tail smoothly so t = 1.0 lands on exact 1.0 with zero jump.
+    return _endValue > 0.001 ? (x / _endValue) : x;
+  }
+}
+
+/// Native iOS 18 `.zoom` / App Store card-expand shared-container route:
 ///
-/// - **Push (expand)**: Starts from the tapped poster card's exact screen
-///   [Rect] and [sourceBorderRadius], smoothly expanding outward into the full
-///   immersive [DetailScreen] while the poster cross-morphs into the hero.
-/// - **Pop (collapse)**: Queries [sourceRectResolver] live so the entire
-///   [DetailScreen] implodes smoothly right back into the original poster
-///   card's exact on-screen position while keeping the underlying list scroll
-///   position untouched.
-/// - **Interactive edge swipe-back**: Supports dragging horizontally from the
-///   left screen edge on iOS to collapse back smoothly in real time.
+/// - **Zero ghosting ("拖影")**: Composites a single cached [RepaintBoundary]
+///   of the destination [DetailScreen] locked 1:1 to the morphing container via
+///   `FittedBox(fit: BoxFit.cover, alignment: Alignment.topCenter)` at full
+///   `1.0` opacity — NO dual semi-transparent poster cross-fade and NO visible
+///   duplicate source card underneath (`PosterExpandRegistry`).
+/// - **Authentic Apple Spring Physics**: Uses real [SpringSimulation] curves
+///   (snappy micro-overshoot spring on push, critically-damped precision snap
+///   on pop back into the exact live [sourceRectResolver] position).
+/// - **Interactive iOS Edge Swipe-Back**: Left-edge swipe detaches and rounds
+///   the page interactively in 1:1 sync with the finger, then springs back into
+///   the exact original card position on release.
 class PosterExpandRoute<T> extends PageRoute<T> {
   final WidgetBuilder builder;
   final Rect initialSourceRect;
   final Rect? Function()? sourceRectResolver;
   final double sourceBorderRadius;
+  final String? sourceCardId;
   final String posterUrl;
   final String title;
   final String year;
+
+  // Calibrated to Apple iOS 18 UIViewControllerTransition.zoom spring kinematics:
+  // Push: response ≈ 0.36s, dampingFraction ≈ 0.84 (~0.77% subtle breathe-in settle)
+  // Pop:  response ≈ 0.30s, dampingFraction ≈ 0.94 (crisp magnetic snap, zero wobble)
+  static final Curve _pushSpring = _AppleSpringCurve(
+    mass: 1.0,
+    stiffness: 305.0,
+    damping: 29.34,
+    durationSec: 0.46,
+  );
+
+  static final Curve _popSpring = _AppleSpringCurve(
+    mass: 1.0,
+    stiffness: 438.6,
+    damping: 39.37,
+    durationSec: 0.36,
+  );
+
+  // Cached per-route page widget wrapped in a single RepaintBoundary so the
+  // GPU composites one crisp layer at locked 120Hz without re-rasterizing blur.
+  Widget? _cachedPage;
+  bool _claimedRegistry = false;
+  // Tracks the exact animation value where an interactive edge-swipe released so
+  // the post-release spring continues seamlessly with zero visual jump.
+  double? _gestureReleaseRawT;
+  bool _gestureReleasePopping = false;
 
   PosterExpandRoute({
     required this.builder,
     required this.initialSourceRect,
     this.sourceRectResolver,
     this.sourceBorderRadius = 14.0,
+    this.sourceCardId,
     this.posterUrl = '',
     this.title = '',
     this.year = '',
@@ -57,6 +173,33 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     }
   }
 
+  void _claimSourceCard() {
+    final id = sourceCardId;
+    if (id != null && id.isNotEmpty) {
+      _claimedRegistry = true;
+      PosterExpandRegistry.activeCardId.value = id;
+    }
+  }
+
+  void _releaseSourceCard() {
+    if (_claimedRegistry && PosterExpandRegistry.activeCardId.value == sourceCardId) {
+      PosterExpandRegistry.activeCardId.value = null;
+    }
+    _claimedRegistry = false;
+  }
+
+  @override
+  void install() {
+    super.install();
+    _claimSourceCard();
+  }
+
+  @override
+  void dispose() {
+    _releaseSourceCard();
+    super.dispose();
+  }
+
   @override
   bool get opaque => false;
 
@@ -73,12 +216,13 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   bool get maintainState => true;
 
   @override
-  Duration get transitionDuration => const Duration(milliseconds: 420);
+  Duration get transitionDuration => const Duration(milliseconds: 460);
 
   @override
   Duration get reverseTransitionDuration => const Duration(milliseconds: 360);
 
   void _setSwipeProgress(double value) {
+    _gestureReleaseRawT = null;
     controller?.value = value.clamp(0.0, 1.0);
   }
 
@@ -86,7 +230,9 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     final ctrl = controller;
     final nav = navigator;
     if (ctrl == null || nav == null) return;
-    final shouldPop = velocity > 420.0 || ctrl.value < 0.72;
+    final shouldPop = velocity > 380.0 || ctrl.value < 0.72;
+    _gestureReleaseRawT = ctrl.value.clamp(0.0, 1.0);
+    _gestureReleasePopping = shouldPop;
     if (shouldPop) {
       nav.pop();
     } else {
@@ -96,7 +242,12 @@ class PosterExpandRoute<T> extends PageRoute<T> {
   }
 
   void _cancelSwipeGesture() {
-    controller?.forward();
+    final ctrl = controller;
+    if (ctrl != null) {
+      _gestureReleaseRawT = ctrl.value.clamp(0.0, 1.0);
+      _gestureReleasePopping = false;
+      ctrl.forward();
+    }
     navigator?.didStopUserGesture();
   }
 
@@ -106,29 +257,34 @@ class PosterExpandRoute<T> extends PageRoute<T> {
     Animation<double> animation,
     Animation<double> secondaryAnimation,
   ) {
-    return _PosterExpandSwipeBackWrapper<T>(
-      route: this,
-      child: builder(context),
+    return _cachedPage ??= RepaintBoundary(
+      child: _PosterExpandSwipeBackWrapper<T>(
+        route: this,
+        child: builder(context),
+      ),
     );
   }
 
-  Rect _resolveLiveTargetRect(Size screen) {
+  ({Rect rect, bool hasLiveAnchor}) _resolveLiveTargetRect(Size screen) {
     final live = sourceRectResolver?.call();
     if (live != null &&
         live.width >= 8 &&
         live.height >= 8 &&
         live.overlaps((Offset.zero & screen).inflate(80))) {
-      return live;
+      return (rect: live, hasLiveAnchor: true);
     }
     if (initialSourceRect.width >= 8 && initialSourceRect.height >= 8) {
-      return initialSourceRect;
+      return (rect: initialSourceRect, hasLiveAnchor: true);
     }
     final w = screen.width * 0.28;
     final h = w * 1.48;
-    return Rect.fromCenter(
-      center: Offset(screen.width * 0.5, screen.height * 0.5),
-      width: w,
-      height: h,
+    return (
+      rect: Rect.fromCenter(
+        center: Offset(screen.width * 0.5, screen.height * 0.5),
+        width: w,
+        height: h,
+      ),
+      hasLiveAnchor: false,
     );
   }
 
@@ -152,47 +308,110 @@ class PosterExpandRoute<T> extends PageRoute<T> {
       builder: (context, pageChild) {
         final rawT = animation.value.clamp(0.0, 1.0);
 
-        // Once completely settled open, render full page cleanly with zero overhead.
+        // Settled fully open: paint directly with zero clipping or transform overhead.
         if (animation.status == AnimationStatus.completed && rawT >= 0.999) {
+          _gestureReleaseRawT = null;
           return pageChild!;
         }
+        if (animation.status == AnimationStatus.dismissed) {
+          _gestureReleaseRawT = null;
+        }
 
+        final isGesture = navigator?.userGestureInProgress ?? false;
         final isReversing = animation.status == AnimationStatus.reverse;
-        final rectT = isReversing
-            ? Curves.easeInOutCubic.transform(rawT)
-            : Curves.easeOutExpo.transform(rawT);
-        final radiusT = Curves.easeOutCubic.transform(rawT);
 
-        final sourceRect = _resolveLiveTargetRect(screen);
-        final currentRect = Rect.lerp(sourceRect, fullRect, rectT) ?? fullRect;
-        final currentRadius = lerpDouble(sourceBorderRadius, 0.0, radiusT) ?? 0.0;
+        // When interactively swiping, track 1:1 with finger; on release hand off
+        // continuously from the exact release point; otherwise run Apple spring physics.
+        final double springT;
+        final releaseT = _gestureReleaseRawT;
+        if (isGesture) {
+          springT = rawT;
+        } else if (releaseT != null && _gestureReleasePopping && isReversing) {
+          final span = releaseT.clamp(0.001, 1.0);
+          final u = ((releaseT - rawT) / span).clamp(0.0, 1.0);
+          springT = releaseT * (1.0 - _popSpring.transform(u));
+        } else if (releaseT != null && !_gestureReleasePopping && !isReversing) {
+          final span = (1.0 - releaseT).clamp(0.001, 1.0);
+          final u = ((rawT - releaseT) / span).clamp(0.0, 1.0);
+          springT = releaseT + (1.0 - releaseT) * _popSpring.transform(u);
+        } else if (isReversing) {
+          // Run pop spring cleanly from 1 -> 0 so collapse starts briskly and
+          // lands with critically-damped precision directly on targetRect.
+          springT = 1.0 - _popSpring.transform(1.0 - rawT);
+        } else {
+          springT = _pushSpring.transform(rawT);
+        }
 
-        // Poster morph veil: smooth cross-dissolve between the small card
-        // artwork and the full DetailScreen so expand & collapse read as one
-        // continuous surface.
-        final posterVeilOpacity = isReversing
-            ? (1.0 - (rawT / 0.52).clamp(0.0, 1.0)) * 0.92
-            : (1.0 - ((rawT - 0.04) / 0.34).clamp(0.0, 1.0));
-        final contentOpacity = isReversing
-            ? ((rawT - 0.06) / 0.44).clamp(0.0, 1.0)
-            : ((rawT - 0.05) / 0.32).clamp(0.0, 1.0);
-        final containerOpacity = isReversing
-            ? (rawT / 0.14).clamp(0.0, 1.0)
-            : (rawT / 0.10).clamp(0.0, 1.0);
-        final backdropDim = (rawT * 0.42).clamp(0.0, 0.42);
+        final target = _resolveLiveTargetRect(screen);
+        final sourceRect = target.rect;
 
-        final scaleX =
-            screen.width > 0 ? (currentRect.width / screen.width) : 1.0;
-        final scaleY =
-            screen.height > 0 ? (currentRect.height / screen.height) : 1.0;
-        final contentScale =
-            ((scaleX + scaleY) * 0.5).clamp(0.24, 1.0);
+        // Lerp rect using real spring progress (allows subtle ~0.8% micro-overshoot
+        // on push while safely clamping dimensions >= 1.0).
+        final lerpedLeft = lerpDouble(sourceRect.left, fullRect.left, springT)!;
+        final lerpedTop = lerpDouble(sourceRect.top, fullRect.top, springT)!;
+        final lerpedRight =
+            lerpDouble(sourceRect.right, fullRect.right, springT)!;
+        final lerpedBottom =
+            lerpDouble(sourceRect.bottom, fullRect.bottom, springT)!;
+        final currentRect = Rect.fromLTRB(
+          lerpedLeft,
+          lerpedTop,
+          lerpedRight > lerpedLeft + 1 ? lerpedRight : lerpedLeft + 1,
+          lerpedBottom > lerpedTop + 1 ? lerpedBottom : lerpedTop + 1,
+        );
+
+        final clampedT = springT.clamp(0.0, 1.0);
+        // Smooth corner morph: source card radius -> crisp 0 when full-screen
+        // (during interactive swipe, subtly lifts corners up to 28pt like iOS 18).
+        final currentRadius = isGesture
+            ? (lerpDouble(sourceBorderRadius, 28.0, (1.0 - rawT).clamp(0.0, 1.0)) ??
+                    sourceBorderRadius) *
+                (1.0 - (rawT > 0.96 ? (rawT - 0.96) / 0.04 : 0.0))
+            : (lerpDouble(sourceBorderRadius, 0.0, Curves.easeOutCubic.transform(clampedT)) ??
+                0.0);
+
+        final backdropDim =
+            (Curves.easeOut.transform(clampedT) * 0.40).clamp(0.0, 0.40);
+
+        // Single opaque hardware-clipped layer — never allocate an offscreen
+        // Opacity saveLayer when a live anchor exists (eliminates all ghosting).
+        Widget flyingCard = DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(currentRadius),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(
+                  alpha: 0.34 * (1.0 - clampedT * 0.65),
+                ),
+                blurRadius: 26 * (1.0 - clampedT * 0.70),
+                offset: Offset(0, 8 * (1.0 - clampedT * 0.70)),
+              ),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(currentRadius),
+            child: FittedBox(
+              fit: BoxFit.cover,
+              alignment: Alignment.topCenter,
+              clipBehavior: Clip.hardEdge,
+              child: SizedBox(
+                width: screen.width,
+                height: screen.height,
+                child: pageChild,
+              ),
+            ),
+          ),
+        );
+
+        if (!target.hasLiveAnchor) {
+          final fallbackOpacity = (rawT / 0.14).clamp(0.0, 1.0);
+          flyingCard = Opacity(opacity: fallbackOpacity, child: flyingCard);
+        }
 
         return Stack(
           key: const Key('poster-expand-transition-stage'),
           fit: StackFit.expand,
           children: [
-            // Soft depth scrim over the underlying Home page.
             IgnorePointer(
               child: ColoredBox(
                 color: Colors.black.withValues(alpha: backdropDim),
@@ -200,63 +419,7 @@ class PosterExpandRoute<T> extends PageRoute<T> {
             ),
             Positioned.fromRect(
               rect: currentRect,
-              child: Opacity(
-                opacity: containerOpacity,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(currentRadius),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.36 * rawT),
-                        blurRadius: 28 * (1.0 - rawT * 0.5),
-                        offset: Offset(0, 10 * (1.0 - rawT * 0.5)),
-                      ),
-                    ],
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(currentRadius),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        // Full DetailScreen smoothly scaling inside the expanding/collapsing clip.
-                        OverflowBox(
-                          minWidth: screen.width,
-                          maxWidth: screen.width,
-                          minHeight: screen.height,
-                          maxHeight: screen.height,
-                          alignment: Alignment.topCenter,
-                          child: Transform.scale(
-                            scale: contentScale + (1.0 - contentScale) * rectT,
-                            alignment: Alignment.topCenter,
-                            child: Opacity(
-                              opacity: contentOpacity,
-                              child: pageChild,
-                            ),
-                          ),
-                        ),
-                        // Crisp card poster bridge layer for seamless visual continuity.
-                        if (posterVeilOpacity > 0.01)
-                          IgnorePointer(
-                            child: Opacity(
-                              opacity: posterVeilOpacity.clamp(0.0, 1.0),
-                              child: PosterImage(
-                                url: posterUrl,
-                                title: title,
-                                year: year,
-                                highRes: true,
-                                fit: BoxFit.cover,
-                                fadeIn: false,
-                                placeholder: const ColoredBox(
-                                  color: Color(0xFF14161D),
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
+              child: flyingCard,
             ),
           ],
         );
@@ -266,8 +429,8 @@ class PosterExpandRoute<T> extends PageRoute<T> {
 }
 
 /// Interactive left-edge horizontal swipe-back gesture detector so iOS users
-/// can swipe back from the screen edge and watch [DetailScreen] implode right
-/// back into the originating poster card in real time.
+/// can swipe back from the screen edge and watch [DetailScreen] detach and
+/// implode smoothly back into the originating poster card in real time.
 class _PosterExpandSwipeBackWrapper<T> extends StatefulWidget {
   final PosterExpandRoute<T> route;
   final Widget child;

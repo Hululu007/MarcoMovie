@@ -1433,6 +1433,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     CmsVideo video, {
     BuildContext? sourceContext,
     double sourceRadius = 14.0,
+    String? sourceCardId,
   }) {
     if (!CuratedDiscoveryService.isCuratedSite(site) && !site.supported) {
       _showAppleNotice(site.name, site.unsupportedReason);
@@ -1467,7 +1468,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       _categoryAbort!.complete();
       setState(() => _loadingMore = false);
     }
-    final detailBuilder = (BuildContext _) => DetailScreen(
+    Widget detailBuilder(BuildContext _) => DetailScreen(
           site: site,
           initialVideo: video,
           client: widget.client,
@@ -1485,6 +1486,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             sourceRectResolver: () =>
                 PosterExpandRoute.captureRect(sourceContext),
             sourceBorderRadius: sourceRadius,
+            sourceCardId: sourceCardId,
             posterUrl: video.poster,
             title: video.title,
             year: video.year,
@@ -2386,12 +2388,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             CuratedDiscoveryService.curatedSiteSentinel,
                             video,
                           ),
-                          onOpenVideoFromCard: (video, cardCtx, radius) =>
-                              _openVideoDetail(
+                          onOpenVideoFromCard:
+                              (video, cardCtx, radius, cardId) =>
+                                  _openVideoDetail(
                             CuratedDiscoveryService.curatedSiteSentinel,
                             video,
                             sourceContext: cardCtx,
                             sourceRadius: radius,
+                            sourceCardId: cardId,
                           ),
                         ),
                       ),
@@ -4923,159 +4927,179 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }) {
     final cardKey =
         'vcard_${site.key}_${video.id.isNotEmpty ? video.id : video.title}_${badge ?? ""}';
+    BuildContext? posterCtx;
     return RepaintBoundary(
       key: ValueKey(cardKey),
-      child: Builder(
-        builder: (cardCtx) => ApplePressableScale(
-          pressedScale: 0.945,
-          pressedOpacity: 0.90,
-          onTap: onTap ??
-              () => _openVideoDetail(
-                    site,
-                    video,
-                    sourceContext: cardCtx,
-                    sourceRadius: 20.0,
-                  ),
-          child: Column(
+      child: ApplePressableScale(
+        pressedScale: 0.945,
+        pressedOpacity: 0.90,
+        onTap: onTap ??
+            () => _openVideoDetail(
+                  site,
+                  video,
+                  sourceContext: posterCtx ?? context,
+                  sourceRadius: 20.0,
+                  sourceCardId: cardKey,
+                ),
+        child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(
-              child: AppleSmoothClipCard(
-                borderRadius: 20,
-                backgroundColor: const Color(0xFF1C1C20),
-                rimStrength: 0.86,
-                boxShadow: const [
-                  BoxShadow(
-                    color: Color(0x36000000),
-                    blurRadius: 12,
-                    offset: Offset(0, 5),
-                  ),
-                ],
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    video.id.startsWith('netdisk_qr:')
-                        ? _buildNetdiskCardPoster(
-                            video.id.substring('netdisk_qr:'.length).trim(),
-                            video.title,
-                          )
-                        : PosterImage(
-                            url: video.poster,
-                            title: site.isEffectivelyPrivate ? '' : video.title,
-                            year: site.isEffectivelyPrivate ? '' : video.year,
-                            placeholder: _buildPosterPlaceholder(),
-                          ),
-                  if (badge != null && badge.isNotEmpty)
-                    Positioned(
-                      top: 7,
-                      left: 7,
-                      right: 7,
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: GlassworkBackdrop(
-                            radius: 8,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 7.5,
-                                vertical: 3,
-                              ),
-                              decoration: BoxDecoration(
-                                color: const Color(0x701E1E22),
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(
-                                  color: const Color(0x3DFFFFFF),
-                                  width: 0.5,
+              child: PosterExpandSourceCard(
+                cardId: cardKey,
+                child: Builder(
+                  builder: (ctx) {
+                    posterCtx = ctx;
+                    return AppleSmoothClipCard(
+                      borderRadius: 20,
+                      backgroundColor: const Color(0xFF1C1C20),
+                      rimStrength: 0.86,
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x36000000),
+                          blurRadius: 12,
+                          offset: Offset(0, 5),
+                        ),
+                      ],
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          video.id.startsWith('netdisk_qr:')
+                              ? _buildNetdiskCardPoster(
+                                  video.id
+                                      .substring('netdisk_qr:'.length)
+                                      .trim(),
+                                  video.title,
+                                )
+                              : PosterImage(
+                                  url: video.poster,
+                                  title: site.isEffectivelyPrivate
+                                      ? ''
+                                      : video.title,
+                                  year: site.isEffectivelyPrivate
+                                      ? ''
+                                      : video.year,
+                                  placeholder: _buildPosterPlaceholder(),
                                 ),
-                              ),
-                              child: Text(
-                                badge,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: AppleColors.labelPrimary,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.w600,
+                          if (badge != null && badge.isNotEmpty)
+                            Positioned(
+                              top: 7,
+                              left: 7,
+                              right: 7,
+                              child: Align(
+                                alignment: Alignment.centerLeft,
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: GlassworkBackdrop(
+                                    radius: 8,
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 7.5,
+                                        vertical: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0x701E1E22),
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(
+                                          color: const Color(0x3DFFFFFF),
+                                          width: 0.5,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        badge,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          color: AppleColors.labelPrimary,
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                        ),
+                          if (video.remarks.isNotEmpty)
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              child: Container(
+                                padding:
+                                    const EdgeInsets.fromLTRB(8, 16, 8, 6),
+                                decoration: const BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      Color(0x00000000),
+                                      Color(0xBD000000),
+                                    ],
+                                  ),
+                                ),
+                                child: Text(
+                                  video.remarks,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  textAlign: TextAlign.right,
+                                  style: const TextStyle(
+                                    color: AppleColors.labelPrimary,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
-                    ),
-                  if (video.remarks.isNotEmpty)
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: Container(
-                        padding: const EdgeInsets.fromLTRB(8, 16, 8, 6),
-                        decoration: const BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [Color(0x00000000), Color(0xBD000000)],
-                          ),
-                        ),
-                        child: Text(
-                          video.remarks,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.right,
-                          style: const TextStyle(
-                            color: AppleColors.labelPrimary,
-                            fontSize: 10,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
+                    );
+                  },
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 7),
-          Text(
-            video.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: ApplePalette.of(context).labelPrimary,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              letterSpacing: -0.2,
-            ),
-          ),
-          if (widget.storage.cardSubtitleMode != 'none') ...[
-            const SizedBox(height: 2),
+            const SizedBox(height: 7),
             Text(
-              switch (widget.storage.cardSubtitleMode) {
-                'site' => site.name,
-                'year_area' => [
-                    video.year.trim(),
-                    video.area.trim(),
-                    video.tag.trim(),
-                  ].where((s) => s.isNotEmpty).join(' · ').isNotEmpty
-                      ? [
-                          video.year.trim(),
-                          video.area.trim(),
-                          video.tag.trim(),
-                        ].where((s) => s.isNotEmpty).join(' · ')
-                      : (video.remarks.isNotEmpty ? video.remarks : site.name),
-                _ => video.remarks.isNotEmpty ? video.remarks : site.name,
-              },
+              video.title,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                color: ApplePalette.of(context).labelSecondary,
-                fontSize: 11,
+                color: ApplePalette.of(context).labelPrimary,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                letterSpacing: -0.2,
               ),
             ),
+            if (widget.storage.cardSubtitleMode != 'none') ...[
+              const SizedBox(height: 2),
+              Text(
+                switch (widget.storage.cardSubtitleMode) {
+                  'site' => site.name,
+                  'year_area' => [
+                      video.year.trim(),
+                      video.area.trim(),
+                      video.tag.trim(),
+                    ].where((s) => s.isNotEmpty).join(' · ').isNotEmpty
+                        ? [
+                            video.year.trim(),
+                            video.area.trim(),
+                            video.tag.trim(),
+                          ].where((s) => s.isNotEmpty).join(' · ')
+                        : (video.remarks.isNotEmpty
+                            ? video.remarks
+                            : site.name),
+                  _ => video.remarks.isNotEmpty ? video.remarks : site.name,
+                },
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: ApplePalette.of(context).labelSecondary,
+                  fontSize: 11,
+                ),
+              ),
+            ],
           ],
-        ],
-      ),
-      ),
+        ),
       ),
     );
   }
