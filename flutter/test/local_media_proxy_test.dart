@@ -327,4 +327,50 @@ void main() {
       await lease.close();
     }
   });
+
+  test('live mode omits upstream Range and rewrites text/html #EXTM3U playlists',
+      () async {
+    final observedHeaders = <Map<String, String>>[];
+    final lease = await LocalMediaLease.open(
+      target: Uri.parse('https://iptv.example/live.php?id=scws4k'),
+      isLive: true,
+      isCancelled: () => false,
+      client: MockClient((request) async {
+        observedHeaders.add(Map<String, String>.from(request.headers));
+        if (request.url.path == '/live.php') {
+          return http.Response(
+            '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nseg1.ts\n',
+            200,
+            headers: {'content-type': 'text/html; charset=utf-8'},
+          );
+        }
+        if (request.url.path == '/seg1.ts') {
+          return http.Response.bytes(
+            List<int>.filled(376, 0x47),
+            200,
+            headers: {'content-type': 'video/mp2t'},
+          );
+        }
+        return http.Response('not found', 404);
+      }),
+    );
+
+    try {
+      final playlistResp = await http.get(
+        lease.url,
+        headers: const {'Range': 'bytes=0-'},
+      );
+      expect(playlistResp.statusCode, 200);
+      expect(observedHeaders.first.containsKey('Range'), isFalse);
+      expect(observedHeaders.first.containsKey('range'), isFalse);
+      final segLine = playlistResp.body
+          .split('\n')
+          .map((l) => l.trim())
+          .firstWhere((l) => l.startsWith('http://127.0.0.1:'));
+      final segResp = await http.get(Uri.parse(segLine));
+      expect(segResp.statusCode, 200);
+    } finally {
+      await lease.close();
+    }
+  });
 }

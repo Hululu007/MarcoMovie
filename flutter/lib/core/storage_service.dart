@@ -93,6 +93,8 @@ class StorageService {
   static const String keyTvAmbientPosterSync = 'tv_ambient_poster_sync';
   static const String keyHomeSnapshots = 'site_home_snapshots_v1';
   static const String keySpiderAdapterPacks = 'spider_adapter_packs_v1';
+  static const String keyWindowsCloseAction = 'windows_close_action';
+  static const String keyWindowsSearchLayout = 'windows_search_layout';
   static const String keySpiderGatewayEnabled = 'spider_gateway_enabled';
   static const String keySpiderGatewayUrl = 'spider_gateway_url';
   static const String keySpiderGatewayDeviceName = 'spider_gateway_device_name';
@@ -723,6 +725,18 @@ class StorageService {
       _prefs.getString(keyTvAmbientIntensity) ?? 'standard';
   bool get tvAmbientPosterSync =>
       _prefs.getBool(keyTvAmbientPosterSync) ?? true;
+  String get windowsCloseAction {
+    final saved = (_prefs.getString(keyWindowsCloseAction) ?? 'exit')
+        .trim()
+        .toLowerCase();
+    return saved == 'tray' ? 'tray' : 'exit';
+  }
+  String get windowsSearchLayout {
+    final saved = (_prefs.getString(keyWindowsSearchLayout) ?? 'grid')
+        .trim()
+        .toLowerCase();
+    return saved == 'list' ? 'list' : 'grid';
+  }
   String get quarkCookie =>
       _credentialCache[keyQuarkCookie] ?? _prefs.getString(keyQuarkCookie) ?? '';
   String get ucCookie =>
@@ -2246,6 +2260,16 @@ class StorageService {
     OhosRuntime.uiModeRevision.value++;
   }
 
+  Future<void> setWindowsCloseAction(String action) async {
+    final normalized = action.trim().toLowerCase() == 'tray' ? 'tray' : 'exit';
+    await _prefs.setString(keyWindowsCloseAction, normalized);
+  }
+
+  Future<void> setWindowsSearchLayout(String layout) async {
+    final normalized = layout.trim().toLowerCase() == 'list' ? 'list' : 'grid';
+    await _prefs.setString(keyWindowsSearchLayout, normalized);
+  }
+
   Future<void> setTvAmbientTheme(String themeId) async {
     const allowed = {'aurora', 'twilight', 'ocean', 'amber', 'nebula', 'frost'};
     final normalized = themeId.trim().toLowerCase();
@@ -3037,7 +3061,8 @@ class StorageService {
   }
 
   static const _appearanceStrings = [keyWallpaperPreset, keyGlassBlurLevel, keyGridDensity,
-    keyCardSubtitleMode, keyPreferredQuality, keyDefaultAspectMode, keyPreferredLine];
+    keyCardSubtitleMode, keyPreferredQuality, keyDefaultAspectMode, keyPreferredLine,
+    keyWindowsCloseAction, keyWindowsSearchLayout];
   static const _appearanceBooleans = [keyAmbientGlow, keyShowHeroBanner, keyShowContinueWatching];
 
   String exportBackupJson() {

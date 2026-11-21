@@ -652,7 +652,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           width: 1,
         ),
       ),
-      child: child,
+      child: Material(
+        type: MaterialType.transparency,
+        child: child,
+      ),
     );
   }
 

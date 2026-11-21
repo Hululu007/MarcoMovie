@@ -27,6 +27,8 @@ import '../core/ohos_runtime.dart';
 import '../core/spider_plugin_registry.dart';
 import '../core/app_log.dart';
 import '../core/search_source_notice.dart';
+import '../core/windows_tray_service.dart';
+import '../core/wogg_source.dart';
 import 'apple_theme.dart';
 import 'cloud_sync_panel.dart';
 import 'detail_screen.dart';
@@ -81,7 +83,7 @@ class AdaptiveShell extends StatefulWidget {
   });
 
   static const Duration defaultWindowCloseBudget =
-      Duration(milliseconds: 3800);
+      Duration(milliseconds: 1400);
 
   @visibleForTesting
   static Future<void> runWindowCloseSequence({
@@ -91,6 +93,7 @@ class AdaptiveShell extends StatefulWidget {
     required Future<void> Function() closeHost,
     required Future<void> Function() closeScripts,
     required Future<void> Function() destroyWindow,
+    Future<void> Function()? hideWindow,
     Duration totalBudget = defaultWindowCloseBudget,
   }) async {
     final sw = Stopwatch()..start();
@@ -121,29 +124,38 @@ class AdaptiveShell extends StatefulWidget {
       await (() async {
         await runBounded(
           'setPreventClose(true)',
-          const Duration(milliseconds: 250),
+          const Duration(milliseconds: 150),
           (_) => setPreventClose(true),
         );
+        if (hideWindow != null) {
+          await runBounded(
+            'hideWindow',
+            const Duration(milliseconds: 120),
+            (_) => hideWindow(),
+          );
+        }
         await runBounded(
           'flushPendingHistory',
-          const Duration(milliseconds: 1000),
+          const Duration(milliseconds: 300),
           (_) => flushHistory(),
         );
-        await runBounded(
-          'flushPendingSync',
-          const Duration(milliseconds: 1900),
-          (budget) => flushSync(budget),
-        );
-        await runBounded(
-          'CatPawHost.close',
-          const Duration(milliseconds: 450),
-          (_) => closeHost(),
-        );
-        await runBounded(
-          'CmsClient.closeScriptSessions',
-          const Duration(milliseconds: 450),
-          (_) => closeScripts(),
-        );
+        await Future.wait([
+          runBounded(
+            'flushPendingSync',
+            const Duration(milliseconds: 550),
+            (budget) => flushSync(budget),
+          ),
+          runBounded(
+            'CatPawHost.close',
+            const Duration(milliseconds: 350),
+            (_) => closeHost(),
+          ),
+          runBounded(
+            'CmsClient.closeScriptSessions',
+            const Duration(milliseconds: 350),
+            (_) => closeScripts(),
+          ),
+        ]);
       })().timeout(totalBudget);
     } on Object catch (e) {
       debugPrint('AdaptiveShell: onWindowClose total budget reached: $e');
@@ -168,6 +180,7 @@ class AdaptiveShell extends StatefulWidget {
 class _AdaptiveShellState extends State<AdaptiveShell>
     with WindowListener, WidgetsBindingObserver {
   bool _windowListenerAttached = false;
+  bool _isClosingWindow = false;
   Future<void>? _closingHistoryFlush;
   int _tabIndex = 0;
   String _windowsPage = 'home';
@@ -291,6 +304,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       windowManager.addListener(this);
       _windowListenerAttached = true;
       unawaited(windowManager.setPreventClose(true));
+      if (Platform.isWindows) {
+        WindowsTrayService.attach(
+          onRestore: () {
+            unawaited(windowManager.show());
+            unawaited(windowManager.focus());
+          },
+          onQuit: () {
+            unawaited(_executeWindowExit());
+          },
+        );
+      }
     }
     unawaited(_loadInstalledVersion());
     GlassworkBackdrop.reduceTransparency.value =
@@ -550,10 +574,36 @@ class _AdaptiveShellState extends State<AdaptiveShell>
 
   @override
   Future<void> onWindowClose() async {
+    if (!kIsWeb &&
+        (Platform.isWindows || defaultTargetPlatform == TargetPlatform.windows) &&
+        widget.storage.windowsCloseAction == 'tray') {
+      unawaited(widget.storage.flushPendingHistory());
+      final hidden = await WindowsTrayService.hideToTray(tooltip: 'Marco Movie');
+      if (hidden) {
+        return;
+      }
+      try {
+        await windowManager.minimize();
+        return;
+      } catch (_) {}
+    }
+    await _executeWindowExit();
+  }
+
+  Future<void> _executeWindowExit() async {
+    if (_isClosingWindow) return;
+    _isClosingWindow = true;
+    if (!kIsWeb &&
+        (Platform.isWindows || defaultTargetPlatform == TargetPlatform.windows)) {
+      unawaited(WindowsTrayService.removeTray());
+    }
     await AdaptiveShell.runWindowCloseSequence(
       setPreventClose: (prevent) => widget.onSetPreventCloseForTest != null
           ? widget.onSetPreventCloseForTest!(prevent)
           : windowManager.setPreventClose(prevent),
+      hideWindow: widget.onDestroyWindowForTest != null
+          ? null
+          : () => windowManager.hide(),
       flushHistory: _flushPendingHistoryForCloseOrDispose,
       flushSync: (timeout) => widget.onFlushSyncForTest != null
           ? widget.onFlushSyncForTest!(timeout)
@@ -698,6 +748,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     if (_windowListenerAttached) {
       windowManager.removeListener(this);
       _windowListenerAttached = false;
+      if (!kIsWeb && Platform.isWindows) {
+        WindowsTrayService.detach();
+        unawaited(WindowsTrayService.removeTray());
+      }
     }
     if (!kIsWeb &&
         (Platform.isWindows ||
@@ -974,7 +1028,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     });
     try {
       CmsListing listing;
-      if (targetCategoryId.isEmpty && _primaryTab == 'recommend' && page == 1) {
+      if (targetCategoryId.isEmpty &&
+          _primaryTab == 'recommend' &&
+          !filter.hasSubFilter &&
+          page == 1) {
         final (cats, homeListing) = await read(() => widget.client.fetchHome(site));
         if (!mounted || epoch != _categoryEpoch || _activeSite?.key != site.key) return;
         if (_categories.isEmpty && cats.isNotEmpty) {
@@ -982,34 +1039,56 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         }
         listing = homeListing;
       } else if (targetCategoryId.isEmpty) {
-        // Recommend tab pagination (page > 1) or unfiltered query:
-        // First request default feed page (`categoryId: ''`).
-        listing = await read(() => widget.client.fetchCategory(
-          site,
-          '',
-          page,
-          filter: filter,
-        ));
-        final existingKeys = _rawCategoryVideos
-            .map((v) => v.id.isNotEmpty ? v.id : v.title)
-            .toSet();
-        final hasNewItems = listing.videos.any(
-          (v) => !existingKeys.contains(v.id.isNotEmpty ? v.id : v.title),
-        );
-        // If the site's root feed does not paginate directly, fallback to the first category with its childIds.
-        if (!hasNewItems && _categories.isNotEmpty) {
+        // Recommend tab pagination (page > 1) or filtered query from "全部":
+        // Sites backed by WoGG/MacCMS HTML show pages require a concrete
+        // category ID to apply area/year/genre filters.
+        if (filter.hasSubFilter &&
+            _categories.isNotEmpty &&
+            (WoggSource.supports(site) ||
+                CspBridge.usesWoggNetdiskAdapter(site))) {
           final firstCat = _categories.first;
           final firstChildren =
               CmsParser.childCategoryIds(_categories, firstCat.id);
-          final fallbackListing = await read(() => widget.client.fetchCategory(
+          listing = await read(() => widget.client.fetchCategory(
             site,
             firstCat.id,
             page,
             childIds: firstChildren,
             filter: filter,
           ));
-          if (fallbackListing.videos.isNotEmpty) {
-            listing = fallbackListing;
+        } else {
+          listing = await read(() => widget.client.fetchCategory(
+            site,
+            '',
+            page,
+            filter: filter,
+          ));
+          final existingKeys = page > 1
+              ? _rawCategoryVideos
+                  .map((v) => v.id.isNotEmpty ? v.id : v.title)
+                  .toSet()
+              : const <String>{};
+          final hasUsableItems = page > 1
+              ? listing.videos.any(
+                  (v) => !existingKeys.contains(v.id.isNotEmpty ? v.id : v.title),
+                )
+              : listing.videos.isNotEmpty;
+          // If the site's root feed does not paginate or filter directly,
+          // fallback to the first category with its childIds.
+          if (!hasUsableItems && _categories.isNotEmpty) {
+            final firstCat = _categories.first;
+            final firstChildren =
+                CmsParser.childCategoryIds(_categories, firstCat.id);
+            final fallbackListing = await read(() => widget.client.fetchCategory(
+              site,
+              firstCat.id,
+              page,
+              childIds: firstChildren,
+              filter: filter,
+            ));
+            if (fallbackListing.videos.isNotEmpty) {
+              listing = fallbackListing;
+            }
           }
         }
       } else {
@@ -3244,11 +3323,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               for (final genre in extraGenres)
                 _buildMiniFilterChip(
                   label: genre,
-                  selected: _filterGenreLabel == genre &&
-                      _filterSubCategoryId.isEmpty,
+                  selected: _filterGenreLabel == genre,
                   onTap: () {
                     setState(() {
-                      _filterGenreLabel = genre;
+                      _filterGenreLabel =
+                          _filterGenreLabel == genre ? '' : genre;
                     });
                     _reloadFilteredListing(page: 1);
                   },
