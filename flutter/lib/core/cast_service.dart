@@ -131,9 +131,16 @@ class CastController extends ChangeNotifier {
     }
     _notify();
 
+    if (Platform.environment.containsKey('FLUTTER_TEST')) {
+      _scanning = false;
+      _notify();
+      return;
+    }
+
     final seenLocations = <String>{};
     final discovered = List<CastDevice>.of(_devices);
     RawDatagramSocket? socket;
+    Timer? scanTimer;
     try {
       socket = await RawDatagramSocket.bind(
         InternetAddress.anyIPv4,
@@ -145,26 +152,34 @@ class CastController extends ChangeNotifier {
       final completer = Completer<void>();
       final pendingFetches = <Future<void>>[];
 
-      socket.listen((event) {
-        if (event != RawSocketEvent.read) return;
-        final dg = socket?.receive();
-        if (dg == null) return;
-        final text = utf8.decode(dg.data, allowMalformed: true);
-        final location = extractSsdpHeader(text, 'location');
-        if (location == null || !seenLocations.add(location)) return;
-        pendingFetches.add(
-          _fetchDeviceDescription(location).then((dev) {
-            if (dev == null) return;
-            if (!discovered.any((d) => d.id == dev.id)) {
-              discovered.add(dev);
-              _devices
-                ..clear()
-                ..addAll(discovered);
-              _notify();
-            }
-          }),
-        );
-      });
+      socket.listen(
+        (event) {
+          if (event != RawSocketEvent.read) return;
+          final dg = socket?.receive();
+          if (dg == null) return;
+          final text = utf8.decode(dg.data, allowMalformed: true);
+          final location = extractSsdpHeader(text, 'location');
+          if (location == null || !seenLocations.add(location)) return;
+          pendingFetches.add(
+            _fetchDeviceDescription(location).then((dev) {
+              if (dev == null) return;
+              if (!discovered.any((d) => d.id == dev.id)) {
+                discovered.add(dev);
+                _devices
+                  ..clear()
+                  ..addAll(discovered);
+                _notify();
+              }
+            }),
+          );
+        },
+        onError: (Object err) {
+          _statusMessage = '局域网搜索受限，请确认已开启本地网络权限并连接同一 Wi-Fi';
+          debugPrint('DLNA socket error: $err');
+          if (!completer.isCompleted) completer.complete();
+        },
+        cancelOnError: false,
+      );
 
       final target = InternetAddress(_ssdpAddress);
       for (final st in const [
@@ -172,10 +187,15 @@ class CastController extends ChangeNotifier {
         'urn:schemas-upnp-org:device:MediaRenderer:1',
       ]) {
         final payload = buildSsdpSearchPayload(st);
-        socket.send(utf8.encode(payload), target, _ssdpPort);
+        try {
+          socket.send(utf8.encode(payload), target, _ssdpPort);
+        } catch (e) {
+          _statusMessage = '局域网搜索受限，请确认已开启本地网络权限并连接同一 Wi-Fi';
+          debugPrint('DLNA send error: $e');
+        }
       }
 
-      Timer(timeout, () {
+      scanTimer = Timer(timeout, () {
         if (!completer.isCompleted) completer.complete();
       });
       await completer.future;
@@ -190,6 +210,7 @@ class CastController extends ChangeNotifier {
       _statusMessage = '局域网搜索受限，请确认已开启本地网络权限并连接同一 Wi-Fi';
       debugPrint('DLNA scan error: $e');
     } finally {
+      scanTimer?.cancel();
       socket?.close();
       _scanning = false;
       _notify();
