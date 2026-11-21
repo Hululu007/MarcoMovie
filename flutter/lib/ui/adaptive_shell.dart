@@ -19,6 +19,7 @@ import '../core/emby_library.dart';
 import '../core/cms_parser.dart';
 import '../core/app_update.dart';
 import '../core/csp_bridge.dart';
+import '../core/curated_discovery.dart';
 import '../core/download_service.dart';
 import '../core/models.dart';
 import '../core/netdisk_service.dart';
@@ -29,6 +30,7 @@ import '../core/app_log.dart';
 import '../core/search_source_notice.dart';
 import 'apple_theme.dart';
 import 'cloud_sync_panel.dart';
+import 'curated_discovery_section.dart';
 import 'detail_screen.dart';
 import 'ios_liquid_glass.dart';
 import 'ios_search_page.dart';
@@ -2500,6 +2502,25 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ),
               ),
+            if (!_privateSessionUnlocked &&
+                widget.storage.showCuratedDiscovery &&
+                _primaryTab == 'recommend' &&
+                !_currentFilter.hasSubFilter &&
+                _homeError == null)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 16),
+                  child: CuratedDiscoverySection(
+                    hasUserSources: (_config?.publicAvailableSites ?? const [])
+                        .any((s) => s.searchable),
+                    loadLive: !Platform.environment.containsKey('FLUTTER_TEST'),
+                    onOpenVideo: (video) => _openVideoDetail(
+                      CuratedDiscoveryService.curatedSiteSentinel,
+                      video,
+                    ),
+                  ),
+                ),
+              ),
             SliverToBoxAdapter(
               child: Padding(
                 padding: EdgeInsets.only(
@@ -2558,15 +2579,43 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ),
               ),
             ),
+          ] else if (!_privateSessionUnlocked &&
+              widget.storage.showCuratedDiscovery) ...[
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: EdgeInsets.only(
+                  top: 20,
+                  bottom: useSidebar ? 32 : 128,
+                ),
+                child: CuratedDiscoverySection(
+                  hasUserSources: (_config?.publicAvailableSites ?? const [])
+                      .any((s) => s.searchable),
+                  loadLive: !Platform.environment.containsKey('FLUTTER_TEST'),
+                  onOpenVideo: (video) => _openVideoDetail(
+                    CuratedDiscoveryService.curatedSiteSentinel,
+                    video,
+                  ),
+                ),
+              ),
+            ),
           ],
         ],
       );
+          final showCuratedBelowGrid = _activeSite != null &&
+              !_privateSessionUnlocked &&
+              widget.storage.showCuratedDiscovery &&
+              _primaryTab == 'recommend' &&
+              !_currentFilter.hasSubFilter &&
+              _homeError == null;
+          final autoPageExtentThreshold =
+              showCuratedBelowGrid ? 2100.0 : 420.0;
           final autoPagingScrollView = NotificationListener<ScrollNotification>(
             onNotification: (notification) {
               if (notification.metrics.axis == Axis.vertical &&
-                  (notification.metrics.maxScrollExtent > 0 ||
+                  ((!showCuratedBelowGrid &&
+                          notification.metrics.maxScrollExtent > 0) ||
                       notification.metrics.pixels > 16) &&
-                  notification.metrics.extentAfter < 420 &&
+                  notification.metrics.extentAfter < autoPageExtentThreshold &&
                   !_homeLoading &&
                   !_loadingMore &&
                   !_autoPagingScheduled &&
@@ -2867,6 +2916,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required String label,
     required VoidCallback onTap,
   }) {
+    final palette = ApplePalette.of(context);
     return ApplePressableScale(
       pressedScale: 0.93,
       pressedOpacity: 0.86,
@@ -2877,7 +2927,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           borderRadius: 999,
           elevated: false,
           rimStrength: 0.9,
-          tint: const Color(0x281E1E24),
+          tint: palette.isDark
+              ? const Color(0x281E1E24)
+              : const Color(0xCCFFFFFF),
           padding: EdgeInsets.symmetric(
             horizontal: compact ? 8 : 12,
             vertical: 8.5,
@@ -2886,15 +2938,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             mainAxisSize: MainAxisSize.min,
             children: [
               if (!compact || label.isEmpty)
-                Icon(icon, color: AppleColors.labelSecondary, size: 13.5),
+                Icon(icon, color: palette.labelSecondary, size: 13.5),
               if (!compact) const SizedBox(width: 5),
               Flexible(
                 child: Text(
                   label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
+                  style: TextStyle(
+                    color: palette.labelPrimary,
                     fontSize: 12.5,
                     fontWeight: FontWeight.w600,
                   ),
@@ -2902,9 +2954,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
               if (!compact) const SizedBox(width: 4),
               if (!compact)
-                const Icon(
+                Icon(
                   CupertinoIcons.chevron_down,
-                  color: AppleColors.labelSecondary,
+                  color: palette.labelSecondary,
                   size: 11.5,
                 ),
             ],
@@ -3526,6 +3578,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     required bool selected,
     required VoidCallback onTap,
   }) {
+    final palette = ApplePalette.of(context);
     return ApplePressableScale(
       pressedScale: 0.92,
       pressedOpacity: 0.86,
@@ -3534,25 +3587,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           ? Container(
               padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 7),
               decoration: BoxDecoration(
-                gradient: const LinearGradient(
+                gradient: LinearGradient(
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
-                  colors: [
-                    Color(0xFFFFFFFF),
-                    Color(0xFFE7E9EE),
-                  ],
+                  colors: palette.isDark
+                      ? const [Color(0xFFFFFFFF), Color(0xFFE7E9EE)]
+                      : const [Color(0xFF1C1C20), Color(0xFF111114)],
                 ),
                 borderRadius: BorderRadius.circular(999),
                 border: Border.all(
-                  color: const Color(0xB3FFFFFF),
+                  color: palette.isDark
+                      ? const Color(0xB3FFFFFF)
+                      : const Color(0x26000000),
                   width: 0.75,
                 ),
               ),
               alignment: Alignment.center,
               child: Text(
                 label,
-                style: const TextStyle(
-                  color: Color(0xFF0A0A0E),
+                style: TextStyle(
+                  color: palette.isDark
+                      ? const Color(0xFF0A0A0E)
+                      : Colors.white,
                   fontSize: 13,
                   fontWeight: FontWeight.w700,
                 ),
@@ -3562,13 +3618,15 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               borderRadius: 999,
               elevated: false,
               rimStrength: 0.88,
-              tint: const Color(0x241E1E24),
+              tint: palette.isDark
+                  ? const Color(0x241E1E24)
+                  : const Color(0xCCFFFFFF),
               padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 7),
               child: Center(
                 child: Text(
                   label,
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
+                  style: TextStyle(
+                    color: palette.labelPrimary,
                     fontSize: 13,
                     fontWeight: FontWeight.w500,
                   ),
@@ -3855,8 +3913,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             video.title,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: AppleColors.labelPrimary,
+            style: TextStyle(
+              color: ApplePalette.of(context).labelPrimary,
               fontSize: 13,
               fontWeight: FontWeight.w600,
               letterSpacing: -0.2,
@@ -6965,60 +7023,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     );
   }
 
-  Widget _buildIosWallpaperSection(VoidCallback refresh) {
-    const presets = <(String, String, String, Color)>[
-      ('obsidian', '曜石纯黑', '经典深邃纯黑影院底色', Color(0xFF141824)),
-      ('midnight', '午夜深蓝', '静谧冷调深海蓝', Color(0xFF0E2240)),
-      ('aurora', '极光紫韵', '灵动流光暗夜紫', Color(0xFF281542)),
-      ('amber', '流金琥珀', '温暖复古鎏金棕', Color(0xFF382210)),
-      ('emerald', '翡翠幽林', '沉稳护眼墨绿调', Color(0xFF0F3026)),
-    ];
-    final currentPreset = widget.storage.wallpaperPreset;
-    final hasCustom = widget.storage.customWallpaperUrl.isNotEmpty;
-    return IosSettingsGroup(
-      header: '预设主题背景',
-      dividerIndent: 56,
-      children: [
-        for (final (key, label, desc, swatch) in presets)
-          IosSettingsRow(
-            key: ValueKey('choice-壁纸预设-$key'),
-            title: label,
-            subtitle: desc,
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 22,
-                  height: 22,
-                  decoration: BoxDecoration(
-                    color: swatch,
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: const Color(0x55FFFFFF),
-                      width: 0.8,
-                    ),
-                  ),
-                ),
-                if (currentPreset == key && !hasCustom) ...[
-                  const SizedBox(width: 10),
-                  const Icon(
-                    CupertinoIcons.checkmark_alt,
-                    color: AppleColors.systemBlue,
-                    size: 18,
-                  ),
-                ],
-              ],
-            ),
-            onTap: () async {
-              await widget.storage.setCustomWallpaperUrl('');
-              await widget.storage.setWallpaperPreset(key);
-              refresh();
-            },
-          ),
-      ],
-    );
-  }
-
   List<SettingsPane> _iosSettingsPages(VoidCallback refresh) {
     final storage = widget.storage;
     Widget choices<T>(
@@ -7077,49 +7081,64 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       SettingsPane(
         'appearance',
         '外观',
-        '主题壁纸、流光光晕与毛玻璃质感',
+        '深浅主题跟随系统与液态玻璃强度调节',
         CupertinoIcons.sparkles,
         AppleColors.systemPurple,
         sectionGroup: 'core',
-        trailingText: _wallpaperPresetLabel,
+        trailingText: AppleTheme.labelFor(storage.appThemeMode),
         children: [
           SettingsPane(
             'wallpaper',
-            '壁纸与氛围',
-            '切换影院底色、呼吸光晕或自定义高清壁纸',
-            CupertinoIcons.photo_fill,
+            '主题外观',
+            '简约白底与夜间深色，自动跟随系统切换',
+            CupertinoIcons.circle_lefthalf_fill,
             AppleColors.systemPurple,
-            trailingText: _wallpaperPresetLabel,
+            trailingText: AppleTheme.labelFor(storage.appThemeMode),
             content: stack([
-              _buildIosWallpaperSection(refresh),
-              const SizedBox(height: 24),
-              IosSettingsGroup(
-                header: '动态氛围与自定义壁纸',
-                footer: '呼吸式流光随主题呈现柔和影院光晕；也可指定高清图片 URL 或本地路径。',
-                children: [
-                  toggleRow(
-                    '呼吸式流光背景',
-                    CupertinoIcons.sparkles,
-                    AppleColors.systemPurple,
-                    storage.ambientGlowEnabled,
-                    storage.setAmbientGlowEnabled,
-                  ),
-                  IosSettingsRow(
-                    key: const ValueKey('ios-open-custom-wallpaper'),
-                    icon: CupertinoIcons.link,
-                    iconColor: AppleColors.systemBlue,
-                    title: '自定义壁纸地址',
-                    trailingText:
-                        storage.customWallpaperUrl.isNotEmpty ? '已启用' : '未设置',
-                    showChevron: true,
-                    onTap: () async {
-                      await _showWallpaperSettingsSheet(
-                        iosBackLabel: '壁纸与氛围',
-                      );
-                      refresh();
-                    },
-                  ),
-                ],
+              Builder(
+                builder: (ctx) {
+                  final currentMode = storage.appThemeMode;
+                  return IosSettingsGroup(
+                    header: '主题模式',
+                    footer: '默认自动跟随手机系统的浅色 / 深色外观切换，也可手动固定为简约白底或深色夜间模式。',
+                    children: [
+                      for (final opt in const [
+                        (
+                          'system',
+                          '跟随系统',
+                          '随手机日间 / 夜间模式自动切换',
+                          CupertinoIcons.device_phone_portrait,
+                          AppleColors.systemBlue,
+                        ),
+                        (
+                          'light',
+                          '简约白底',
+                          '纯净浅色留白界面，日间阅读更通透',
+                          CupertinoIcons.sun_max_fill,
+                          AppleColors.systemOrange,
+                        ),
+                        (
+                          'dark',
+                          '深色夜间',
+                          '低眩光暗色影院界面，夜间观影更护眼',
+                          CupertinoIcons.moon_stars_fill,
+                          AppleColors.systemIndigo,
+                        ),
+                      ])
+                        IosSettingsChoiceTile(
+                          key: ValueKey('choice-主题模式-${opt.$1}'),
+                          label: opt.$2,
+                          selected: currentMode == opt.$1,
+                          onTap: () async {
+                            await storage.setAppThemeMode(opt.$1);
+                            AppleTheme.mode.value = AppleTheme.fromPref(opt.$1);
+                            await IosLiquidGlassBridge.setAppearanceMode(opt.$1);
+                            refresh();
+                          },
+                        ),
+                    ],
+                  );
+                },
               ),
             ]),
           ),
@@ -7133,61 +7152,149 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             content: stack([
               IosSettingsGroup(
                 header: '毛玻璃折射强度',
-                footer: '支持 0%–100% 连续调节，调至 0% 即切换为不透明实色面板。',
+                footer: '支持 0%–100% 连续调节，点击或拖动滑条即可实时预览全局液态玻璃变化；调至 0% 切换为实色面板。',
                 dividerIndent: 18,
                 children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
-                    child: ValueListenableBuilder<double>(
-                      valueListenable: GlassworkBackdrop.intensity,
-                      builder: (_, value, __) => Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  Builder(
+                    builder: (ctx) {
+                      final palette = ApplePalette.of(ctx);
+                      return Padding(
+                        padding: const EdgeInsets.fromLTRB(18, 14, 18, 14),
+                        child: ValueListenableBuilder<double>(
+                          valueListenable: GlassworkBackdrop.intensity,
+                          builder: (_, value, __) => Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text(
-                                '玻璃强度',
-                                style: TextStyle(
-                                  color: AppleColors.labelPrimary,
-                                  fontSize: 16.5,
-                                  fontWeight: FontWeight.w500,
+                              // Live colorful refraction preview card so every
+                              // slider drag/tap produces immediate visual feedback.
+                              ClipRRect(
+                                key: const ValueKey('ios-glass-live-preview'),
+                                borderRadius: BorderRadius.circular(14),
+                                child: SizedBox(
+                                  height: 68,
+                                  width: double.infinity,
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      const DecoratedBox(
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(
+                                            begin: Alignment.topLeft,
+                                            end: Alignment.bottomRight,
+                                            colors: [
+                                              Color(0xFF0A84FF),
+                                              Color(0xFF5E5CE6),
+                                              Color(0xFFFF375F),
+                                              Color(0xFFFF9F0A),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                      Center(
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 14,
+                                            vertical: 10,
+                                          ),
+                                          child: LiquidGlass(
+                                            borderRadius: 12,
+                                            elevated: false,
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 14,
+                                              vertical: 8,
+                                            ),
+                                              child: Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Icon(
+                                                    CupertinoIcons.drop_fill,
+                                                    size: 15,
+                                                    color: palette.labelPrimary,
+                                                  ),
+                                                  const SizedBox(width: 6),
+                                                  Flexible(
+                                                    child: Text(
+                                                      value <= 0.02
+                                                          ? '实色高对比预览 (0%)'
+                                                          : '液态玻璃实时预览 ${(value * 100).round()}%',
+                                                      maxLines: 1,
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                      style: TextStyle(
+                                                        color:
+                                                            palette.labelPrimary,
+                                                        fontSize: 12.5,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
                               ),
-                              Text(
-                                '${(value * 100).round()}%',
-                                style: const TextStyle(
-                                  color: AppleColors.systemBlue,
-                                  fontSize: 15.5,
-                                  fontWeight: FontWeight.w600,
+                              const SizedBox(height: 14),
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(
+                                    '玻璃强度',
+                                    style: TextStyle(
+                                      color: palette.labelPrimary,
+                                      fontSize: 16.5,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  Text(
+                                    '${(value * 100).round()}%',
+                                    style: TextStyle(
+                                      color: palette.accent,
+                                      fontSize: 15.5,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              SizedBox(
+                                width: double.infinity,
+                                child: IosNativeSlider(
+                                  key: const ValueKey('ios-glass-slider'),
+                                  value: value,
+                                  min: 0,
+                                  max: 1,
+                                  activeColor: palette.accent,
+                                  accessibilityLabel: '玻璃强度',
+                                  onChanged: (v) {
+                                    GlassworkBackdrop.intensity.value = v;
+                                    GlassworkBackdrop.reduceTransparency.value =
+                                        v <= .02;
+                                    unawaited(
+                                      IosLiquidGlassBridge.setGlassIntensity(
+                                        v <= .02 ? 0.0 : v,
+                                      ),
+                                    );
+                                  },
+                                  onChangeEnd: (v) async {
+                                    await storage.setGlassBlurStrength(v);
+                                    await IosLiquidGlassBridge.setGlassIntensity(
+                                      v <= .02 ? 0.0 : v,
+                                    );
+                                    refresh();
+                                  },
                                 ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 10),
-                          SizedBox(
-                            width: double.infinity,
-                            child: IosNativeSlider(
-                              key: const ValueKey('ios-glass-slider'),
-                              value: value,
-                              min: 0,
-                              max: 1,
-                              activeColor: AppleColors.systemBlue,
-                              accessibilityLabel: '玻璃强度',
-                              onChanged: (v) {
-                                GlassworkBackdrop.intensity.value = v;
-                                GlassworkBackdrop.reduceTransparency.value =
-                                    v <= .02;
-                              },
-                              onChangeEnd: (v) async {
-                                await storage.setGlassBlurStrength(v);
-                                refresh();
-                              },
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                        ),
+                      );
+                    },
                   ),
                 ],
               ),
@@ -7203,8 +7310,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ],
                 (String v) async {
                   await storage.setGlassBlurLevel(v);
-                  GlassworkBackdrop.intensity.value = storage.glassBlurStrength;
+                  final strength = storage.glassBlurStrength;
+                  GlassworkBackdrop.intensity.value = strength;
                   GlassworkBackdrop.reduceTransparency.value = v == 'solid';
+                  await IosLiquidGlassBridge.setGlassIntensity(
+                    v == 'solid' ? 0.0 : strength,
+                  );
                 },
               ),
             ]),
@@ -7274,6 +7385,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   AppleColors.systemBlue,
                   storage.showContinueWatching,
                   storage.setShowContinueWatching,
+                ),
+                toggleRow(
+                  '片单发现模块',
+                  CupertinoIcons.sparkles,
+                  AppleColors.systemPurple,
+                  storage.showCuratedDiscovery,
+                  storage.setShowCuratedDiscovery,
                 ),
               ],
             ),

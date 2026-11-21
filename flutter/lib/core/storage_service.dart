@@ -65,6 +65,7 @@ class StorageService {
   static const String keySubscriptions = 'saved_subscriptions';
   static const String keyPrivacyPassword = 'privacy_password';
   static const String keyWallpaperPreset = 'wallpaper_preset';
+  static const String keyAppThemeMode = 'app_theme_mode';
   static const String keyCustomWallpaperUrl = 'custom_wallpaper_url';
   static const String keyAmbientGlow = 'ambient_glow_enabled';
   static const String keyGlassBlurLevel = 'glass_blur_level';
@@ -72,6 +73,7 @@ class StorageService {
   static const String keyGridDensity = 'grid_density';
   static const String keyShowHeroBanner = 'show_hero_banner';
   static const String keyShowContinueWatching = 'show_continue_watching';
+  static const String keyShowCuratedDiscovery = 'show_curated_discovery';
   static const String keyCardSubtitleMode = 'card_subtitle_mode';
   static const String keyPreferredQuality = 'preferred_quality';
   static const String keyDefaultAspectMode = 'default_aspect_mode';
@@ -690,6 +692,13 @@ class StorageService {
   String get repeatMode => _prefs.getString(keyRepeatMode) ?? 'off';
   String get wallpaperPreset =>
       _prefs.getString(keyWallpaperPreset) ?? 'obsidian';
+  String get appThemeMode {
+    final saved = (_prefs.getString(keyAppThemeMode) ?? 'system').trim().toLowerCase();
+    return switch (saved) {
+      'light' || 'dark' || 'system' => saved,
+      _ => 'system',
+    };
+  }
   String get customWallpaperUrl =>
       _prefs.getString(keyCustomWallpaperUrl) ?? '';
   bool get ambientGlowEnabled => _prefs.getBool(keyAmbientGlow) ?? true;
@@ -709,6 +718,8 @@ class StorageService {
   bool get showHeroBanner => _prefs.getBool(keyShowHeroBanner) ?? true;
   bool get showContinueWatching =>
       _prefs.getBool(keyShowContinueWatching) ?? true;
+  bool get showCuratedDiscovery =>
+      _prefs.getBool(keyShowCuratedDiscovery) ?? true;
   String get cardSubtitleMode =>
       _prefs.getString(keyCardSubtitleMode) ?? 'remarks';
   String get preferredQuality =>
@@ -2186,6 +2197,14 @@ class StorageService {
   Future<void> setWallpaperPreset(String preset) async {
     await _prefs.setString(keyWallpaperPreset, preset.trim());
   }
+  Future<void> setAppThemeMode(String mode) async {
+    final normalized = mode.trim().toLowerCase();
+    final safe = switch (normalized) {
+      'light' || 'dark' || 'system' => normalized,
+      _ => 'system',
+    };
+    await _prefs.setString(keyAppThemeMode, safe);
+  }
   Future<void> setCustomWallpaperUrl(String url) async {
     await _prefs.setString(keyCustomWallpaperUrl, url.trim());
   }
@@ -2223,6 +2242,9 @@ class StorageService {
   }
   Future<void> setShowContinueWatching(bool show) async {
     await _prefs.setBool(keyShowContinueWatching, show);
+  }
+  Future<void> setShowCuratedDiscovery(bool show) async {
+    await _prefs.setBool(keyShowCuratedDiscovery, show);
   }
   Future<void> setCardSubtitleMode(String mode) async {
     await _prefs.setString(keyCardSubtitleMode, mode.trim());
@@ -3036,9 +3058,9 @@ class StorageService {
     });
   }
 
-  static const _appearanceStrings = [keyWallpaperPreset, keyGlassBlurLevel, keyGridDensity,
+  static const _appearanceStrings = [keyWallpaperPreset, keyAppThemeMode, keyGlassBlurLevel, keyGridDensity,
     keyCardSubtitleMode, keyPreferredQuality, keyDefaultAspectMode, keyPreferredLine];
-  static const _appearanceBooleans = [keyAmbientGlow, keyShowHeroBanner, keyShowContinueWatching];
+  static const _appearanceBooleans = [keyAmbientGlow, keyShowHeroBanner, keyShowContinueWatching, keyShowCuratedDiscovery];
 
   String exportBackupJson() {
     final all = getSubscriptions();

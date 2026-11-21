@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import '../core/cms_client.dart';
 import '../core/cms_parser.dart';
 import '../core/csp_bridge.dart';
+import '../core/curated_discovery.dart';
 import '../core/download_service.dart';
 import '../core/media_badges.dart';
 import '../core/models.dart';
@@ -18,7 +19,9 @@ import '../core/storage_service.dart';
 import '../core/web_media_resolver.dart';
 import '../core/wogg_source.dart';
 import 'apple_theme.dart';
+import 'cast_avatar_section.dart';
 import 'desktop_horizontal_scroller.dart';
+import 'favorite_postcard_animation.dart';
 import 'ios_liquid_glass.dart';
 import 'media_badge.dart';
 import 'motion/player_enter_transition.dart';
@@ -150,6 +153,7 @@ class _DetailScreenState extends State<DetailScreen> {
   bool _loading = true;
   String? _error;
   Object? _errorCause;
+  String? _curatedUnavailableMessage;
   int _selectedLine = 0;
   int _selectedPage = 0;
   int? _selectedInLineSeason;
@@ -528,8 +532,17 @@ class _DetailScreenState extends State<DetailScreen> {
       }
       _error = null;
       _errorCause = null;
+      _curatedUnavailableMessage = null;
       _discoveringSeasons = false;
     });
+    if (CuratedDiscoveryService.isCuratedSite(targetSite)) {
+      await _resolveCuratedFromUserSources(
+        targetVideo: targetVideo,
+        epoch: epoch,
+        abort: abort,
+      );
+      return;
+    }
     try {
       final (owner, detailed) = await widget.client.runSourceOperation(
         () => widget.client.playableDetail(targetSite, targetVideo,
@@ -585,6 +598,153 @@ class _DetailScreenState extends State<DetailScreen> {
           _error = '读取详情失败：${CmsClient.cleanErrorMessage(e)}';
           _errorCause = e;
         }
+      });
+    }
+  }
+
+  /// Resolves a curated Rex-style discovery card STRICTLY against the user's
+  /// own added CMS sources. Never supplies built-in stream URLs; when no user
+  /// source contains the title, clearly marks playback unavailable.
+  Future<void> _resolveCuratedFromUserSources({
+    required CmsVideo targetVideo,
+    required int epoch,
+    required Completer<void> abort,
+  }) async {
+    if (targetVideo.title.trim().isNotEmpty) {
+      _warmRatings(targetVideo.title, year: targetVideo.year);
+      _warmExternalMetadata(targetVideo.title);
+    }
+    final userSites = widget.storage
+        .prioritizeSites(
+          widget.storage.loadSavedConfig()?.publicAvailableSites ?? const [],
+        )
+        .where((s) => s.searchable && !CuratedDiscoveryService.isCuratedSite(s))
+        .toList();
+    if (userSites.isEmpty) {
+      if (!mounted || abort.isCompleted || epoch != _detailEpoch) return;
+      setState(() {
+        _loading = false;
+        _curatedUnavailableMessage =
+            '您暂未添加可用片源，无法播放《${targetVideo.title}》。请先在「片源」中添加片源。';
+      });
+      return;
+    }
+
+    final query = targetVideo.title
+        .replaceAll(RegExp(r'\s+第[一二三四五六七八九十0-9]+季$'), '')
+        .trim();
+    final searchTargets = userSites.take(8).toList();
+    ({int score, CmsSite site, CmsVideo video})? bestMatch;
+
+    try {
+      await widget.client.runSourceOperation(() async {
+        for (var i = 0; i < searchTargets.length && !abort.isCompleted; i += 2) {
+          final batch = searchTargets.skip(i).take(2).toList();
+          await Future.wait(
+            batch.map((site) async {
+              if (abort.isCompleted) return;
+              final reqAbort = Completer<void>();
+              final timer = Timer(const Duration(seconds: 5), () {
+                if (!reqAbort.isCompleted) reqAbort.complete();
+              });
+              try {
+                final listing = await widget.client.runSourceOperation(
+                  () => widget.client.fetchSearch(
+                    site,
+                    query.isEmpty ? targetVideo.title : query,
+                  ),
+                  cancellation: reqAbort,
+                );
+                for (final candidate in listing.videos) {
+                  final score = CuratedDiscoveryService.titleMatchScore(
+                    targetVideo.title,
+                    candidate.title,
+                  );
+                  if (score >= 60 &&
+                      (bestMatch == null || score > bestMatch!.score)) {
+                    bestMatch = (score: score, site: site, video: candidate);
+                  }
+                }
+              } catch (_) {
+              } finally {
+                timer.cancel();
+              }
+            }),
+          );
+          if (bestMatch != null && bestMatch!.score >= 100) break;
+        }
+      }, cancellation: abort);
+    } catch (_) {}
+
+    if (!mounted || abort.isCompleted || epoch != _detailEpoch) return;
+    if (bestMatch == null) {
+      setState(() {
+        _loading = false;
+        _curatedUnavailableMessage =
+            '您已添加的片源中暂未找到《${targetVideo.title}》的播放资源，无法播放';
+      });
+      return;
+    }
+
+    try {
+      final (owner, detailed) = await widget.client.runSourceOperation(
+        () => widget.client.playableDetail(
+          bestMatch!.site,
+          bestMatch!.video,
+          userSites,
+        ),
+        cancellation: abort,
+      );
+      if (!mounted || abort.isCompleted || epoch != _detailEpoch) return;
+      if (detailed.lines.isEmpty) {
+        setState(() {
+          _loading = false;
+          _curatedUnavailableMessage =
+              '片源「${owner.name}」暂未提供《${targetVideo.title}》的可播放线路，无法播放';
+        });
+        return;
+      }
+      final mergedVideo = CmsVideo(
+        id: detailed.id,
+        title: detailed.title.isNotEmpty ? detailed.title : targetVideo.title,
+        poster:
+            detailed.poster.isNotEmpty ? detailed.poster : targetVideo.poster,
+        remarks:
+            detailed.remarks.isNotEmpty ? detailed.remarks : targetVideo.remarks,
+        year: detailed.year.isNotEmpty ? detailed.year : targetVideo.year,
+        area: detailed.area.isNotEmpty ? detailed.area : targetVideo.area,
+        actor: detailed.actor.isNotEmpty ? detailed.actor : targetVideo.actor,
+        description: detailed.description.isNotEmpty
+            ? detailed.description
+            : targetVideo.description,
+        tag: detailed.tag.isNotEmpty ? detailed.tag : targetVideo.tag,
+        doubanScore: detailed.doubanScore ?? targetVideo.doubanScore,
+        rtScore: detailed.rtScore ?? targetVideo.rtScore,
+        lines: detailed.lines,
+        sourceWarnings: detailed.sourceWarnings,
+      );
+      _activeSite = owner;
+      _isFavorite = widget.storage.isFavorite(
+        owner.key,
+        mergedVideo.id,
+        forPrivate: owner.isEffectivelyPrivate,
+      );
+      final initialLine = _pickRecommendedPlayableLineIndex(
+        mergedVideo.lines,
+        siteOverride: owner,
+      );
+      setState(() {
+        _video = mergedVideo;
+        _selectedLine = initialLine;
+        _loading = false;
+        _curatedUnavailableMessage = null;
+      });
+    } catch (_) {
+      if (!mounted || abort.isCompleted || epoch != _detailEpoch) return;
+      setState(() {
+        _loading = false;
+        _curatedUnavailableMessage =
+            '您已添加的片源中暂无法解析《${targetVideo.title}》的播放资源，无法播放';
       });
     }
   }
@@ -1977,6 +2137,14 @@ class _DetailScreenState extends State<DetailScreen> {
                                 _buildPortraitBookmarkProgress(bookmark),
                               ],
                               const SizedBox(height: 18),
+                              CastAvatarSection(
+                                title: _video.title,
+                                actorRaw: _video.actor,
+                                year: _video.year,
+                                forceDark: true,
+                                padding: EdgeInsets.zero,
+                              ),
+                              const SizedBox(height: 18),
                               if (!_loading && _video.sourceWarnings.isNotEmpty)
                                 _buildSourceWarningsSection(),
                               if (!_loading &&
@@ -1984,13 +2152,30 @@ class _DetailScreenState extends State<DetailScreen> {
                                   _configuredParses.isEmpty)
                                 _buildPlaybackHintBanner(),
                               if (_loading)
-                                const Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 32),
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 32),
                                   child: Center(
-                                    child:
-                                        CupertinoActivityIndicator(radius: 14),
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const CupertinoActivityIndicator(radius: 14),
+                                        if (CuratedDiscoveryService.isCuratedSite(
+                                            _activeSite)) ...[
+                                          const SizedBox(height: 10),
+                                          const Text(
+                                            '正在您添加的片源中匹配播放资源…',
+                                            style: TextStyle(
+                                              color: AppleColors.labelSecondary,
+                                              fontSize: 13,
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
                                   ),
                                 )
+                              else if (_curatedUnavailableMessage != null)
+                                _buildCuratedUnavailableCard()
                               else if (_error != null)
                                 _buildDetailError()
                               else if (_video.lines.isEmpty)
@@ -2299,7 +2484,19 @@ class _DetailScreenState extends State<DetailScreen> {
       );
       if (mounted) {
         setState(() => _isFavorite = fav);
-        _toast(fav ? '已加入收藏片库' : '已从片库移除');
+        if (fav) {
+          unawaited(
+            FavoritePostcardFlightOverlay.show(
+              context,
+              title: _video.title,
+              posterUrl: _video.poster,
+              year: _video.year,
+              cachedBytes: _loadedPosterBytes,
+            ),
+          );
+        } else {
+          _toast('已从片库移除');
+        }
       }
     }
 
@@ -2665,15 +2862,72 @@ class _DetailScreenState extends State<DetailScreen> {
     );
   }
 
+  Widget _buildCuratedUnavailableCard() {
+    return Container(
+      key: const Key('curated-no-source-card'),
+      margin: const EdgeInsets.symmetric(vertical: 10),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.14),
+          width: 0.8,
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(
+            CupertinoIcons.exclamationmark_circle,
+            color: AppleColors.systemOrange,
+            size: 26,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _curatedUnavailableMessage ?? '暂无可播放资源',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13.5,
+              fontWeight: FontWeight.w600,
+              height: 1.45,
+            ),
+          ),
+          const SizedBox(height: 10),
+          CupertinoButton(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            color: Colors.white.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(999),
+            onPressed: _searchOtherSources,
+            child: const Text(
+              '手动检索其他片源',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildPortraitActionRow(WatchHistoryEntry? bookmark) {
     final hasLines = _video.lines.isNotEmpty;
+    final curatedBlocked = _curatedUnavailableMessage != null && !hasLines;
     final selectedBookmark = hasLines &&
             bookmark?.line ==
                 _video.lines[_selectedLine.clamp(0, _video.lines.length - 1)].name
         ? bookmark
         : null;
-    String playLabel = '加载片源中…';
-    if (!_loading && !hasLines) {
+    String playLabel = CuratedDiscoveryService.isCuratedSite(_activeSite)
+        ? '正在匹配已添加片源…'
+        : '加载片源中…';
+    if (curatedBlocked) {
+      playLabel = '暂无片源资源 · 无法播放';
+    } else if (!_loading && !hasLines) {
       playLabel = '搜索其他片源';
     } else if (selectedBookmark != null) {
       final (cleanEp, _) =
@@ -2696,9 +2950,10 @@ class _DetailScreenState extends State<DetailScreen> {
     }
 
     return GestureDetector(
+      key: const Key('detail-primary-play-button'),
       onTap: hasLines
           ? () => _playPrimaryAction(selectedBookmark)
-          : (_loading ? null : _searchOtherSources),
+          : (_loading || curatedBlocked ? null : _searchOtherSources),
       child: Container(
         height: 48,
         padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -3681,6 +3936,14 @@ class _DetailScreenState extends State<DetailScreen> {
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
                               const SizedBox(height: 8),
+                              CastAvatarSection(
+                                title: _video.title,
+                                actorRaw: _video.actor,
+                                year: _video.year,
+                                forceDark: true,
+                                padding: EdgeInsets.zero,
+                              ),
+                              const SizedBox(height: 18),
                               if (!_loading && _video.sourceWarnings.isNotEmpty)
                                 _buildSourceWarningsSection(),
                               if (!_loading &&
@@ -3695,6 +3958,8 @@ class _DetailScreenState extends State<DetailScreen> {
                                         CupertinoActivityIndicator(radius: 14),
                                   ),
                                 )
+                              else if (_curatedUnavailableMessage != null)
+                                _buildCuratedUnavailableCard()
                               else if (_error != null)
                                 _buildDetailError()
                               else if (_video.lines.isEmpty)

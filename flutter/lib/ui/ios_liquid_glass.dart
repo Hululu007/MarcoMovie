@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart' show Colors;
 import 'package:flutter/services.dart';
 
@@ -153,6 +154,63 @@ class IosLiquidGlassBridge {
     } on MissingPluginException {
       // No native sheet bridge registered.
     } catch (_) {}
+  }
+
+  /// Synchronizes light / dark / system interface style to native iOS windows
+  /// and iOS 26 Liquid Glass UIKit controls.
+  static Future<void> setAppearanceMode(String mode) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return;
+    try {
+      await channel.invokeMethod<void>('setAppearanceMode', mode);
+    } on MissingPluginException {
+      // Host tests may not register native channel.
+    } catch (_) {}
+  }
+
+  /// Synchronizes the user's Liquid Glass intensity (`0.0..1.0`) to native
+  /// iOS 26 `UIVisualEffectView` / `UIGlassEffect` views.
+  static Future<void> setGlassIntensity(double intensity) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return;
+    try {
+      await channel.invokeMethod<void>(
+        'setGlassIntensity',
+        intensity.clamp(0.0, 1.0),
+      );
+    } on MissingPluginException {
+      // Host tests may not register native channel.
+    } catch (_) {}
+  }
+
+  /// Presents Apple's native iOS AirPlay route picker (`AVRoutePickerView`).
+  static Future<bool> presentAirPlayPicker() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return false;
+    try {
+      final res = await channel.invokeMethod<bool>('presentAirPlayPicker');
+      return res == true;
+    } on MissingPluginException {
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Fires tactile iOS haptic feedback for the favorite postcard shutter/arrival
+  /// phases and returns the hardware Dynamic Island geometry when available.
+  static Future<Map<String, dynamic>?> triggerFavoriteDynamicIslandFeedback(
+    String phase,
+  ) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return null;
+    try {
+      final res = await channel.invokeMapMethod<String, dynamic>(
+        'triggerFavoriteDynamicIslandFeedback',
+        phase,
+      );
+      return res;
+    } on MissingPluginException {
+      return null;
+    } catch (_) {
+      return null;
+    }
   }
 
   @visibleForTesting
@@ -1089,25 +1147,52 @@ class _IosNativeSliderState extends State<IosNativeSlider> {
         if (!nativeActive) {
           return SizedBox(
             width: double.infinity,
-            height: 36,
-            child: CupertinoSlider(
-              value: widget.value.clamp(widget.min, widget.max).toDouble(),
-              min: widget.min,
-              max: widget.max,
-              activeColor: widget.activeColor,
-              onChanged: widget.onChanged,
-              onChangeEnd: widget.onChangeEnd,
+            height: 44,
+            child: LayoutBuilder(
+              builder: (ctx, constraints) {
+                final maxW = math.max(1.0, constraints.maxWidth);
+                return GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTapUp: widget.onChanged == null
+                      ? null
+                      : (details) {
+                          final ratio =
+                              (details.localPosition.dx / maxW).clamp(0.0, 1.0);
+                          final target = widget.min +
+                              ratio * (widget.max - widget.min);
+                          HapticFeedback.selectionClick();
+                          widget.onChanged?.call(target);
+                          widget.onChangeEnd?.call(target);
+                        },
+                  child: CupertinoSlider(
+                    value: widget.value.clamp(widget.min, widget.max).toDouble(),
+                    min: widget.min,
+                    max: widget.max,
+                    activeColor: widget.activeColor,
+                    onChanged: widget.onChanged,
+                    onChangeEnd: widget.onChangeEnd,
+                  ),
+                );
+              },
             ),
           );
         }
         return RepaintBoundary(
           child: SizedBox(
             width: double.infinity,
-            height: 36,
+            height: 48,
             child: UiKitView(
               viewType: 'marco_movie/ios26_slider',
               creationParams: _buildParams(),
               creationParamsCodec: const StandardMessageCodec(),
+              gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+                Factory<HorizontalDragGestureRecognizer>(
+                  HorizontalDragGestureRecognizer.new,
+                ),
+                Factory<TapGestureRecognizer>(
+                  TapGestureRecognizer.new,
+                ),
+              },
               onPlatformViewCreated: _onViewCreated,
             ),
           ),
@@ -1783,6 +1868,8 @@ Future<T?> showAppleNativeOptionSheet<T>(
   required List<AppleNativePickerOption<T>> options,
   String cancelLabel = '关闭',
   bool forceOpaque = false,
+  Rect? anchorRect,
+  bool forceDark = false,
   Future<T?> Function()? fallback,
 }) async {
   if (IosLiquidGlassBridge.isAvailable) {
@@ -1798,6 +1885,14 @@ Future<T?> showAppleNativeOptionSheet<T>(
           if (subtitle != null && subtitle.isNotEmpty) 'subtitle': subtitle,
           'cancelTitle': cancelLabel,
           'forceOpaque': effectiveOpaque,
+          if (forceDark) 'forceDark': true,
+          if (anchorRect != null)
+            'anchorRect': <String, double>{
+              'x': anchorRect.left,
+              'y': anchorRect.top,
+              'width': anchorRect.width,
+              'height': anchorRect.height,
+            },
           'items': [
             for (var i = 0; i < options.length; i++)
               <String, dynamic>{

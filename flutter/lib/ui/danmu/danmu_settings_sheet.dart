@@ -231,7 +231,9 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
           _sectionTitle(
             '时间轴偏移：${_settings.timeOffsetMs >= 0 ? '+' : ''}${(_settings.timeOffsetMs / 1000).toStringAsFixed(1)}s',
           ),
-          Row(
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
             children: [
               OutlinedButton(
                 onPressed: () => _update(
@@ -239,12 +241,10 @@ class _DanmuSettingsSheetState extends State<DanmuSettingsSheet> {
                 ),
                 child: const Text('-0.5s'),
               ),
-              const SizedBox(width: 8),
               OutlinedButton(
                 onPressed: () => _update(_settings.copyWith(timeOffsetMs: 0)),
                 child: const Text('归零'),
               ),
-              const SizedBox(width: 8),
               OutlinedButton(
                 onPressed: () => _update(
                   _settings.copyWith(timeOffsetMs: _settings.timeOffsetMs + 500),

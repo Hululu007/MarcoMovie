@@ -3,7 +3,174 @@
 private enum MarcoLiquidGlassSupport {
   static var bridgeChannel: FlutterMethodChannel?
   static var brandLogoImage: UIImage?
+  static var interfaceStyle: UIUserInterfaceStyle = .unspecified
+  static var glassIntensity: CGFloat = 0.68
+  static let appearanceChangedNotification = Notification.Name("MarcoLiquidGlassAppearanceChanged")
+  static let glassIntensityChangedNotification = Notification.Name("MarcoLiquidGlassIntensityChanged")
   private static var accessibilityObservers: [NSObjectProtocol] = []
+  private static var hiddenAirPlayPicker: AVRoutePickerView?
+
+  static var isEffectiveDark: Bool {
+    switch interfaceStyle {
+    case .dark:
+      return true
+    case .light:
+      return false
+    default:
+      if let win = UIApplication.shared.connectedScenes
+        .compactMap({ $0 as? UIWindowScene })
+        .flatMap({ $0.windows })
+        .first {
+        return win.traitCollection.userInterfaceStyle != .light
+      }
+      return UITraitCollection.current.userInterfaceStyle != .light
+    }
+  }
+
+  private static func restyleNativeViews(in view: UIView, style: UIUserInterfaceStyle) {
+    if view.overrideUserInterfaceStyle != style && view.tag != 99001 {
+      view.overrideUserInterfaceStyle = style
+    }
+    if let seg = view as? UISegmentedControl {
+      let dark = isEffectiveDark
+      seg.setTitleTextAttributes(
+        [
+          .foregroundColor: dark ? UIColor.white.withAlphaComponent(0.76) : UIColor.label.withAlphaComponent(0.72),
+          .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
+        ],
+        for: .normal
+      )
+      seg.setTitleTextAttributes(
+        [
+          .foregroundColor: dark ? UIColor.white : UIColor.label,
+          .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
+        ],
+        for: .selected
+      )
+    }
+    for sub in view.subviews {
+      restyleNativeViews(in: sub, style: style)
+    }
+  }
+
+  private static func updateNativeGlassIntensity(in view: UIView, intensity: CGFloat) {
+    if let effectView = view as? UIVisualEffectView {
+      let solid = intensity <= 0.02 || UIAccessibility.isReduceTransparencyEnabled
+      let dark = isEffectiveDark
+      if solid {
+        effectView.effect = nil
+        effectView.backgroundColor = dark
+          ? UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 0.96)
+          : UIColor(red: 0.98, green: 0.98, blue: 0.99, alpha: 0.98)
+      } else {
+        effectView.backgroundColor = dark
+          ? UIColor(white: 0.10, alpha: max(0.0, (1.0 - intensity) * 0.62))
+          : UIColor(white: 1.0, alpha: max(0.0, (1.0 - intensity) * 0.56))
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+          let glass = UIGlassEffect(style: .regular)
+          glass.isInteractive = true
+          let veilAlpha = max(0.0, (1.0 - intensity) * (dark ? 0.56 : 0.48))
+          glass.tintColor = dark
+            ? UIColor(white: 0.12, alpha: veilAlpha)
+            : UIColor(white: 1.0, alpha: veilAlpha)
+          effectView.effect = glass
+        } else {
+          effectView.effect = UIBlurEffect(style: dark ? .systemChromeMaterialDark : .systemChromeMaterialLight)
+        }
+        #else
+        effectView.effect = UIBlurEffect(style: dark ? .systemChromeMaterialDark : .systemChromeMaterialLight)
+        #endif
+      }
+    }
+    for sub in view.subviews {
+      updateNativeGlassIntensity(in: sub, intensity: intensity)
+    }
+  }
+
+  static func applyWindowAppearance(_ mode: String) {
+    let style: UIUserInterfaceStyle
+    switch mode.lowercased() {
+    case "light":
+      style = .light
+    case "dark":
+      style = .dark
+    default:
+      style = .unspecified
+    }
+    interfaceStyle = style
+    for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
+      for win in scene.windows {
+        win.overrideUserInterfaceStyle = style
+        restyleNativeViews(in: win, style: style)
+        updateNativeGlassIntensity(in: win, intensity: glassIntensity)
+        if let marcoVC = win.rootViewController as? MarcoFlutterViewController {
+          marcoVC.marcoPreferredInterfaceStyle = style
+        }
+      }
+    }
+    NotificationCenter.default.post(name: appearanceChangedNotification, object: nil)
+  }
+
+  static func applyGlassIntensity(_ value: Double) {
+    glassIntensity = CGFloat(min(max(value, 0.0), 1.0))
+    for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
+      for win in scene.windows {
+        updateNativeGlassIntensity(in: win, intensity: glassIntensity)
+      }
+    }
+    NotificationCenter.default.post(name: glassIntensityChangedNotification, object: nil)
+  }
+
+  static func presentNativeAirPlayPicker() {
+    guard let host = topPresenter() else { return }
+    let picker = hiddenAirPlayPicker ?? AVRoutePickerView(frame: CGRect(x: -100, y: -100, width: 44, height: 44))
+    hiddenAirPlayPicker = picker
+    picker.prioritizesVideoDevices = true
+    picker.isHidden = true
+    if picker.superview == nil {
+      host.view.addSubview(picker)
+    }
+    for sub in picker.subviews {
+      if let btn = sub as? UIButton {
+        btn.sendActions(for: .touchUpInside)
+        return
+      }
+    }
+  }
+
+  static func triggerFavoriteDynamicIslandFeedback(phase: String) -> [String: Any] {
+    let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first
+    let win = scene?.windows.first(where: { $0.isKeyWindow }) ?? scene?.windows.first
+    let topInset = win?.safeAreaInsets.top ?? 0.0
+    let screenW = win?.bounds.width ?? UIScreen.main.bounds.width
+    let isPhone = UIDevice.current.userInterfaceIdiom == .phone
+    let hasIsland = isPhone && topInset >= 52.0
+    if phase == "shutter" {
+      let medium = UIImpactFeedbackGenerator(style: .medium)
+      medium.prepare()
+      medium.impactOccurred(intensity: 0.9)
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.065) {
+        let light = UIImpactFeedbackGenerator(style: .light)
+        light.impactOccurred(intensity: 0.65)
+      }
+    } else if phase == "arrive" {
+      let notif = UINotificationFeedbackGenerator()
+      notif.prepare()
+      notif.notificationOccurred(.success)
+    }
+    let islandW: CGFloat = 126.0
+    let islandH: CGFloat = 37.0
+    let islandY: CGFloat = hasIsland ? 11.0 : max(topInset + 6.0, 12.0)
+    return [
+      "hasDynamicIsland": hasIsland,
+      "islandX": Double((screenW - islandW) * 0.5),
+      "islandTop": Double(islandY),
+      "islandY": Double(islandY),
+      "islandWidth": Double(islandW),
+      "islandHeight": Double(islandH),
+    ]
+  }
 
   static var isAvailable: Bool {
     #if compiler(>=6.2)
@@ -124,6 +291,28 @@ private enum MarcoLiquidGlassSupport {
         DispatchQueue.main.async {
           MarcoNativeSheetCoordinator.dismissAllActive()
           result(nil)
+        }
+      case "setAppearanceMode":
+        let mode = (call.arguments as? String) ?? "system"
+        DispatchQueue.main.async {
+          applyWindowAppearance(mode)
+          result(nil)
+        }
+      case "setGlassIntensity":
+        let val = (call.arguments as? NSNumber)?.doubleValue ?? 0.68
+        DispatchQueue.main.async {
+          applyGlassIntensity(val)
+          result(nil)
+        }
+      case "presentAirPlayPicker":
+        DispatchQueue.main.async {
+          presentNativeAirPlayPicker()
+          result(true)
+        }
+      case "triggerFavoriteDynamicIslandFeedback":
+        let phase = (call.arguments as? String) ?? "shutter"
+        DispatchQueue.main.async {
+          result(triggerFavoriteDynamicIslandFeedback(phase: phase))
         }
       default:
         result(FlutterMethodNotImplemented)
@@ -474,7 +663,7 @@ private enum MarcoNativeAlertPresenter {
     let message = args["message"] as? String
     let actionDicts = (args["actions"] as? [[String: Any]]) ?? []
     let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-    alert.overrideUserInterfaceStyle = .dark
+    alert.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     let alertKey = ObjectIdentifier(alert)
 
     var resolved = false
@@ -547,7 +736,7 @@ private enum MarcoNativeAlertPresenter {
     let cancelTitle = args["cancelTitle"] as? String
     let actionDicts = (args["actions"] as? [[String: Any]]) ?? []
     let sheet = UIAlertController(title: title, message: message, preferredStyle: .actionSheet)
-    sheet.overrideUserInterfaceStyle = .dark
+    sheet.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     let sheetKey = ObjectIdentifier(sheet)
 
     var resolved = false
@@ -625,7 +814,8 @@ private enum MarcoNativeAlertPresenter {
 private final class MarcoNativeOptionSheetController: UIViewController,
   UITableViewDataSource,
   UITableViewDelegate,
-  UIAdaptivePresentationControllerDelegate
+  UIAdaptivePresentationControllerDelegate,
+  UIPopoverPresentationControllerDelegate
 {
   private struct OptionItem {
     let id: String
@@ -645,6 +835,8 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   private let sheetSubtitle: String?
   private let cancelTitle: String
   private let forceOpaque: Bool
+  private let isPopoverPresentation: Bool
+  private let forceDarkSurface: Bool
   private let sections: [OptionSection]
   private let tableView = UITableView(frame: .zero, style: .insetGrouped)
 
@@ -654,7 +846,18 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   private var navIdentity: ObjectIdentifier?
 
   private var isOpaqueMode: Bool {
-    return forceOpaque || UIAccessibility.isReduceTransparencyEnabled
+    return forceOpaque || UIAccessibility.isReduceTransparencyEnabled || MarcoLiquidGlassSupport.glassIntensity <= 0.02
+  }
+
+  private var useDarkColors: Bool {
+    return forceDarkSurface || MarcoLiquidGlassSupport.isEffectiveDark
+  }
+
+  func adaptivePresentationStyle(
+    for controller: UIPresentationController,
+    traitCollection: UITraitCollection
+  ) -> UIModalPresentationStyle {
+    return isPopoverPresentation ? .none : .automatic
   }
 
   static func present(args: [String: Any], completion: @escaping FlutterResult) {
@@ -662,18 +865,55 @@ private final class MarcoNativeOptionSheetController: UIViewController,
       completion(nil)
       return
     }
-    let vc = MarcoNativeOptionSheetController(args: args, completion: completion)
+    let anchorDict = args["anchorRect"] as? [String: Any]
+    let vc = MarcoNativeOptionSheetController(
+      args: args,
+      isPopover: anchorDict != nil,
+      completion: completion
+    )
     let nav = UINavigationController(rootViewController: vc)
     let navId = ObjectIdentifier(nav)
     vc.navIdentity = navId
-    nav.modalPresentationStyle = .pageSheet
-    nav.overrideUserInterfaceStyle = .dark
-    nav.presentationController?.delegate = vc
-    if let sheet = nav.sheetPresentationController {
-      sheet.detents = [.medium(), .large()]
-      sheet.prefersGrabberVisible = true
-      sheet.preferredCornerRadius = 28.0
-      sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+    let style: UIUserInterfaceStyle = vc.forceDarkSurface ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+    nav.overrideUserInterfaceStyle = style
+
+    if let anchor = anchorDict,
+       let ax = (anchor["x"] as? NSNumber)?.doubleValue,
+       let ay = (anchor["y"] as? NSNumber)?.doubleValue,
+       let aw = (anchor["width"] as? NSNumber)?.doubleValue,
+       let ah = (anchor["height"] as? NSNumber)?.doubleValue {
+      nav.modalPresentationStyle = .popover
+      let itemCount = vc.sections.reduce(0) { $0 + $1.items.count }
+      let sectionHeaderCount = vc.sections.filter { !$0.title.isEmpty }.count
+      let subtitleRows = vc.sections.flatMap { $0.items }.filter { $0.subtitle != nil }.count
+      let rawHeight = 52.0 + Double(itemCount) * 44.0 + Double(subtitleRows) * 14.0 + Double(sectionHeaderCount) * 28.0 + 16.0
+      let maxH = min(Double(host.view.bounds.height) * 0.72, 340.0)
+      let maxW = min(Double(host.view.bounds.width) - 24.0, 278.0)
+      nav.preferredContentSize = CGSize(
+        width: max(226.0, maxW),
+        height: min(max(rawHeight, 132.0), max(maxH, 160.0))
+      )
+      if let popover = nav.popoverPresentationController {
+        popover.delegate = vc
+        popover.sourceView = host.view
+        popover.sourceRect = CGRect(
+          x: max(4.0, min(CGFloat(ax), host.view.bounds.width - 8.0)),
+          y: max(4.0, min(CGFloat(ay), host.view.bounds.height - 8.0)),
+          width: max(CGFloat(aw), 1.0),
+          height: max(CGFloat(ah), 1.0)
+        )
+        popover.permittedArrowDirections = [.up, .down, .left, .right]
+        popover.canOverlapSourceViewRect = false
+      }
+    } else {
+      nav.modalPresentationStyle = .pageSheet
+      nav.presentationController?.delegate = vc
+      if let sheet = nav.sheetPresentationController {
+        sheet.detents = [.medium(), .large()]
+        sheet.prefersGrabberVisible = true
+        sheet.preferredCornerRadius = 28.0
+        sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+      }
     }
     guard MarcoNativeSheetCoordinator.tryBeginPresentation(
       host: host,
@@ -691,12 +931,14 @@ private final class MarcoNativeOptionSheetController: UIViewController,
     )
   }
 
-  init(args: [String: Any], completion: @escaping FlutterResult) {
+  init(args: [String: Any], isPopover: Bool = false, completion: @escaping FlutterResult) {
     self.sheetTitle = (args["title"] as? String) ?? ""
     let rawSubtitle = (args["subtitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
     self.sheetSubtitle = (rawSubtitle?.isEmpty ?? true) ? nil : rawSubtitle
     self.cancelTitle = (args["cancelTitle"] as? String) ?? "关闭"
     self.forceOpaque = (args["forceOpaque"] as? Bool) ?? false
+    self.isPopoverPresentation = isPopover
+    self.forceDarkSurface = (args["forceDark"] as? Bool) ?? isPopover
     let rawItems = (args["items"] as? [[String: Any]]) ?? []
     var builtSections: [OptionSection] = []
     var currentKey: Int?
@@ -765,8 +1007,11 @@ private final class MarcoNativeOptionSheetController: UIViewController,
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    overrideUserInterfaceStyle = .dark
-    let opaqueFallback = UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+    let dark = useDarkColors
+    overrideUserInterfaceStyle = forceDarkSurface ? .dark : MarcoLiquidGlassSupport.interfaceStyle
+    let opaqueFallback = dark
+      ? UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+      : UIColor(red: 0.96, green: 0.96, blue: 0.98, alpha: 1.0)
     #if compiler(>=6.2)
     if #available(iOS 26.0, *), !isOpaqueMode {
       view.backgroundColor = .clear
@@ -774,24 +1019,30 @@ private final class MarcoNativeOptionSheetController: UIViewController,
       view.backgroundColor = opaqueFallback
     }
     #else
-    view.backgroundColor = opaqueFallback
+    view.backgroundColor = isPopoverPresentation && !isOpaqueMode
+      ? (dark ? UIColor(white: 0.12, alpha: 0.88) : UIColor(white: 0.98, alpha: 0.92))
+      : opaqueFallback
     #endif
 
     navigationItem.title = sheetTitle
-    if let subtitle = sheetSubtitle {
+    if !isPopoverPresentation, let subtitle = sheetSubtitle {
       navigationItem.prompt = subtitle
     }
-    navigationItem.rightBarButtonItem = UIBarButtonItem(
-      title: cancelTitle,
-      style: .done,
-      target: self,
-      action: #selector(closeTapped)
-    )
+    if !isPopoverPresentation {
+      navigationItem.rightBarButtonItem = UIBarButtonItem(
+        title: cancelTitle,
+        style: .done,
+        target: self,
+        action: #selector(closeTapped)
+      )
+    }
 
     tableView.translatesAutoresizingMaskIntoConstraints = false
-    tableView.overrideUserInterfaceStyle = .dark
+    tableView.overrideUserInterfaceStyle = overrideUserInterfaceStyle
     tableView.backgroundColor = .clear
-    tableView.separatorColor = UIColor.white.withAlphaComponent(0.12)
+    tableView.separatorColor = dark
+      ? UIColor.white.withAlphaComponent(0.12)
+      : UIColor.black.withAlphaComponent(0.10)
     tableView.dataSource = self
     tableView.delegate = self
     tableView.register(UITableViewCell.self, forCellReuseIdentifier: "MarcoOptionCell")
@@ -821,29 +1072,39 @@ private final class MarcoNativeOptionSheetController: UIViewController,
   func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
     let cell = tableView.dequeueReusableCell(withIdentifier: "MarcoOptionCell", for: indexPath)
     let item = sections[indexPath.section].items[indexPath.row]
+    let dark = useDarkColors
     var cfg = cell.defaultContentConfiguration()
     cfg.text = item.title
-    cfg.textProperties.color = item.destructive ? UIColor.systemRed : UIColor.white
+    cfg.textProperties.color = item.destructive
+      ? UIColor.systemRed
+      : (dark ? UIColor.white : UIColor.label)
     cfg.textProperties.font = UIFont.systemFont(
-      ofSize: 15.0,
+      ofSize: isPopoverPresentation ? 14.5 : 15.0,
       weight: item.checked ? .semibold : .regular
     )
     if let sub = item.subtitle {
       cfg.secondaryText = sub
-      cfg.secondaryTextProperties.color = UIColor.white.withAlphaComponent(0.66)
-      cfg.secondaryTextProperties.font = UIFont.systemFont(ofSize: 12.5, weight: .regular)
+      cfg.secondaryTextProperties.color = dark
+        ? UIColor.white.withAlphaComponent(0.66)
+        : UIColor.secondaryLabel
+      cfg.secondaryTextProperties.font = UIFont.systemFont(ofSize: 12.0, weight: .regular)
     }
     if let symbol = item.symbol {
-      let symCfg = UIImage.SymbolConfiguration(pointSize: 16.0, weight: .medium)
+      let symCfg = UIImage.SymbolConfiguration(pointSize: 15.5, weight: .medium)
       cfg.image = UIImage(systemName: symbol, withConfiguration: symCfg)
       cfg.imageProperties.tintColor = item.destructive
         ? UIColor.systemRed
-        : (item.checked ? UIColor.systemBlue : UIColor.white.withAlphaComponent(0.84))
+        : (item.checked
+            ? UIColor.systemBlue
+            : (dark ? UIColor.white.withAlphaComponent(0.84) : UIColor.label))
     }
     cell.contentConfiguration = cfg
     cell.accessoryType = item.checked ? .checkmark : .none
     cell.tintColor = UIColor.systemBlue
-    cell.backgroundColor = UIColor(white: 0.16, alpha: isOpaqueMode ? 0.96 : 0.72)
+    let alpha: CGFloat = isOpaqueMode ? 0.96 : (isPopoverPresentation ? 0.42 : 0.72)
+    cell.backgroundColor = dark
+      ? UIColor(white: 0.16, alpha: alpha)
+      : UIColor(white: 1.0, alpha: isOpaqueMode ? 0.98 : 0.78)
     return cell
   }
 
@@ -3339,21 +3600,22 @@ private final class MarcoNativeSegmentedControlPlatformView: NSObject, FlutterPl
       self.hostView.backgroundColor = .clear
       self.hostView.isOpaque = false
       self.hostView.clipsToBounds = false
-      self.hostView.overrideUserInterfaceStyle = .dark
+      self.hostView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
-      self.control.overrideUserInterfaceStyle = .dark
+      self.control.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
       self.control.apportionsSegmentWidthsByContent = false
       self.control.translatesAutoresizingMaskIntoConstraints = false
+      let segDark = MarcoLiquidGlassSupport.isEffectiveDark
       self.control.setTitleTextAttributes(
         [
-          .foregroundColor: UIColor.white.withAlphaComponent(0.76),
+          .foregroundColor: segDark ? UIColor.white.withAlphaComponent(0.76) : UIColor.label.withAlphaComponent(0.72),
           .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
         ],
         for: .normal
       )
       self.control.setTitleTextAttributes(
         [
-          .foregroundColor: UIColor.white,
+          .foregroundColor: segDark ? UIColor.white : UIColor.label,
           .font: UIFont.systemFont(ofSize: 13.0, weight: .semibold),
         ],
         for: .selected
@@ -3487,9 +3749,9 @@ private final class MarcoNativeSwitchPlatformView: NSObject, FlutterPlatformView
       self.hostView.backgroundColor = .clear
       self.hostView.isOpaque = false
       self.hostView.clipsToBounds = false
-      self.hostView.overrideUserInterfaceStyle = .dark
+      self.hostView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
-      self.toggle.overrideUserInterfaceStyle = .dark
+      self.toggle.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
       self.toggle.onTintColor = UIColor.systemGreen
       self.toggle.translatesAutoresizingMaskIntoConstraints = false
       self.toggle.addTarget(self, action: #selector(self.valueChanged), for: .valueChanged)
@@ -3578,10 +3840,17 @@ private final class MarcoNativeSliderFactory: NSObject, FlutterPlatformViewFacto
   }
 }
 
+private final class MarcoHitExpandedSlider: UISlider {
+  override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+    return bounds.insetBy(dx: -10.0, dy: -16.0).contains(point)
+  }
+}
+
 private final class MarcoNativeSliderPlatformView: NSObject, FlutterPlatformView {
   private let hostView = UIView(frame: .zero)
-  private let slider = UISlider(frame: .zero)
+  private let slider = MarcoHitExpandedSlider(frame: .zero)
   private let channel: FlutterMethodChannel
+  private var appearanceObserver: NSObjectProtocol?
 
   init(
     frame: CGRect,
@@ -3599,34 +3868,53 @@ private final class MarcoNativeSliderPlatformView: NSObject, FlutterPlatformView
       frame,
       args: args,
       defaultWidth: 320.0,
-      defaultHeight: 36.0
+      defaultHeight: 48.0
     )
     MarcoLiquidGlassSupport.withoutAnimations {
       self.hostView.frame = initialFrame
       self.hostView.backgroundColor = .clear
       self.hostView.isOpaque = false
       self.hostView.clipsToBounds = false
-      self.hostView.overrideUserInterfaceStyle = .dark
+      self.hostView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
-      self.slider.overrideUserInterfaceStyle = .dark
+      self.slider.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
       self.slider.minimumTrackTintColor = UIColor.systemBlue
-      self.slider.maximumTrackTintColor = UIColor.white.withAlphaComponent(0.22)
+      self.slider.maximumTrackTintColor = MarcoLiquidGlassSupport.isEffectiveDark
+        ? UIColor.white.withAlphaComponent(0.24)
+        : UIColor.black.withAlphaComponent(0.14)
       self.slider.isContinuous = true
       self.slider.translatesAutoresizingMaskIntoConstraints = false
       self.slider.addTarget(self, action: #selector(self.valueChanged), for: .valueChanged)
       self.slider.addTarget(self, action: #selector(self.touchEnded), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+      let tap = UITapGestureRecognizer(target: self, action: #selector(self.trackTapped(_:)))
+      tap.cancelsTouchesInView = false
+      self.slider.addGestureRecognizer(tap)
       self.hostView.addSubview(self.slider)
 
       NSLayoutConstraint.activate([
         self.slider.leadingAnchor.constraint(equalTo: self.hostView.leadingAnchor),
         self.slider.trailingAnchor.constraint(equalTo: self.hostView.trailingAnchor),
         self.slider.centerYAnchor.constraint(equalTo: self.hostView.centerYAnchor),
+        self.slider.heightAnchor.constraint(greaterThanOrEqualToConstant: 44.0),
       ])
 
       if let args = args {
         self.apply(args)
       }
       self.hostView.layoutIfNeeded()
+    }
+
+    appearanceObserver = NotificationCenter.default.addObserver(
+      forName: MarcoLiquidGlassSupport.appearanceChangedNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      guard let self = self else { return }
+      self.hostView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      self.slider.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      self.slider.maximumTrackTintColor = MarcoLiquidGlassSupport.isEffectiveDark
+        ? UIColor.white.withAlphaComponent(0.24)
+        : UIColor.black.withAlphaComponent(0.14)
     }
 
     channel.setMethodCallHandler { [weak self] call, result in
@@ -3646,6 +3934,9 @@ private final class MarcoNativeSliderPlatformView: NSObject, FlutterPlatformView
   }
 
   deinit {
+    if let obs = appearanceObserver {
+      NotificationCenter.default.removeObserver(obs)
+    }
     channel.setMethodCallHandler(nil)
   }
 
@@ -3671,6 +3962,19 @@ private final class MarcoNativeSliderPlatformView: NSObject, FlutterPlatformView
         slider.setValue(val, animated: false)
       }
     }
+  }
+
+  @objc private func trackTapped(_ gesture: UITapGestureRecognizer) {
+    guard gesture.state == .ended else { return }
+    let trackRect = slider.trackRect(forBounds: slider.bounds)
+    guard trackRect.width > 1.0 else { return }
+    let loc = gesture.location(in: slider)
+    let ratio = min(max((loc.x - trackRect.minX) / trackRect.width, 0.0), 1.0)
+    let newValue = slider.minimumValue + Float(ratio) * (slider.maximumValue - slider.minimumValue)
+    slider.setValue(newValue, animated: true)
+    UISelectionFeedbackGenerator().selectionChanged()
+    channel.invokeMethod("onChanged", arguments: Double(newValue))
+    channel.invokeMethod("onChangeEnd", arguments: Double(newValue))
   }
 
   @objc private func valueChanged() {

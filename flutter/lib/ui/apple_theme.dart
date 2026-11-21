@@ -94,9 +94,124 @@ PageRoute<T> buildApplePageRoute<T>({
   );
 }
 
+/// Runtime theme mode controller supporting automatic system light/dark
+/// appearance (`ThemeMode.system`) as well as explicit minimalist light
+/// (`ThemeMode.light`) and dark night (`ThemeMode.dark`) modes.
+class AppleTheme {
+  static final ValueNotifier<ThemeMode> mode =
+      ValueNotifier<ThemeMode>(ThemeMode.system);
+
+  static ThemeMode fromPref(String value) => switch (value.trim().toLowerCase()) {
+        'light' => ThemeMode.light,
+        'dark' => ThemeMode.dark,
+        _ => ThemeMode.system,
+      };
+
+  static String toPref(ThemeMode value) => switch (value) {
+        ThemeMode.light => 'light',
+        ThemeMode.dark => 'dark',
+        ThemeMode.system => 'system',
+      };
+
+  static String labelFor(String pref) => switch (pref.trim().toLowerCase()) {
+        'light' => '简约白底',
+        'dark' => '深色夜间',
+        _ => '跟随系统',
+      };
+}
+
+/// Resolved semantic color palette for the active Light (简约白底) or Dark
+/// (夜间暗色) theme.
+@immutable
+class ApplePalette {
+  final bool isDark;
+  final Color background;
+  final Color canvas;
+  final Color groupedPrimary;
+  final Color groupedSecondary;
+  final Color groupedTertiary;
+  final Color fill;
+  final Color fillStrong;
+  final Color labelPrimary;
+  final Color labelSecondary;
+  final Color labelTertiary;
+  final Color separator;
+  final Color glassBorder;
+  final Color glassSolid;
+  final Color systemBlue;
+
+  const ApplePalette({
+    required this.isDark,
+    required this.background,
+    required this.canvas,
+    required this.groupedPrimary,
+    required this.groupedSecondary,
+    required this.groupedTertiary,
+    required this.fill,
+    required this.fillStrong,
+    required this.labelPrimary,
+    required this.labelSecondary,
+    required this.labelTertiary,
+    required this.separator,
+    required this.glassBorder,
+    required this.glassSolid,
+    required this.systemBlue,
+  });
+
+  static const ApplePalette dark = ApplePalette(
+    isDark: true,
+    background: Color(0xFF000000),
+    canvas: Color(0xFF09090C),
+    groupedPrimary: Color(0xF51C1C1E),
+    groupedSecondary: Color(0xBF28282E),
+    groupedTertiary: Color(0xFF36363D),
+    fill: Color(0x38787884),
+    fillStrong: Color(0x59787884),
+    labelPrimary: Color(0xFFF5F5F7),
+    labelSecondary: Color(0xFFD1D1DA),
+    labelTertiary: Color(0x66EBEBF5),
+    separator: Color(0x29FFFFFF),
+    glassBorder: Color(0x26FFFFFF),
+    glassSolid: Color(0xF51E1E22),
+    systemBlue: Color(0xFF0A84FF),
+  );
+
+  static const ApplePalette light = ApplePalette(
+    isDark: false,
+    background: Color(0xFFFFFFFF),
+    canvas: Color(0xFFF5F6F8),
+    groupedPrimary: Color(0xFFFFFFFF),
+    groupedSecondary: Color(0xFFF2F2F7),
+    groupedTertiary: Color(0xFFE5E5EA),
+    fill: Color(0x1F767680),
+    fillStrong: Color(0x33767680),
+    labelPrimary: Color(0xFF111114),
+    labelSecondary: Color(0xFF5A5A64),
+    labelTertiary: Color(0xFF8E8E93),
+    separator: Color(0x1F000000),
+    glassBorder: Color(0x1F000000),
+    glassSolid: Color(0xFAFFFFFF),
+    systemBlue: Color(0xFF007AFF),
+  );
+
+  Color get accent => systemBlue;
+  Color get hairline => separator;
+  Color get navBarBg =>
+      isDark ? const Color(0xCC161618) : const Color(0xDCF7F7FA);
+
+  static bool isDarkOf(BuildContext context) {
+    return Theme.of(context).brightness == Brightness.dark;
+  }
+
+  static ApplePalette of(BuildContext context) =>
+      isDarkOf(context) ? dark : light;
+}
+
 /// Apple iOS 27 Liquid Glass design tokens (iOS / iPadOS / macOS dark appearance):
 /// deep obsidian canvas, refractive translucent glass materials, specular rims.
 class AppleColors {
+  static bool isDark(BuildContext context) => ApplePalette.isDarkOf(context);
+  static ApplePalette palette(BuildContext context) => ApplePalette.of(context);
   static const Color background = Color(0xFF000000);
   static const Color canvas = Color(0xFF09090C);
   static const Color groupedPrimary = Color(0xA81C1C21);
@@ -112,6 +227,7 @@ class AppleColors {
   static const Color systemGreen = Color(0xFF30D158);
   static const Color systemOrange = Color(0xFFFF9F0A);
   static const Color systemRed = Color(0xFFFF453A);
+  static const Color systemPink = Color(0xFFFF375F);
   static const Color labelPrimary = Color(0xFFF5F5F7);
   static const Color labelSecondary = Color(0xFFD1D1DA);
   static const Color labelTertiary = Color(0x52EBEBF5);
@@ -150,6 +266,7 @@ class MarcoBrandLogo extends StatelessWidget {
       ),
     );
     if (!showWordmark) return iconWidget;
+    final isDark = ApplePalette.isDarkOf(context);
     final wordmark = Text.rich(
       TextSpan(
         style: TextStyle(
@@ -157,18 +274,18 @@ class MarcoBrandLogo extends StatelessWidget {
           letterSpacing: -0.4,
           height: 1.1,
         ),
-        children: const [
+        children: [
           TextSpan(
             text: 'Marco',
             style: TextStyle(
-              color: Color(0xFFF8FAFC),
+              color: isDark ? const Color(0xFFF8FAFC) : const Color(0xFF111114),
               fontWeight: FontWeight.w700,
             ),
           ),
           TextSpan(
             text: ' Movie',
             style: TextStyle(
-              color: Color(0xFFB8C2D4),
+              color: isDark ? const Color(0xFFB8C2D4) : const Color(0xFF63636C),
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -265,13 +382,19 @@ ImageFilter liquidGlassFilter({double blur = 2, double saturation = 1.6, double 
 class _LiquidRimPainter extends CustomPainter {
   final ShapeBorder shape;
   final double strength;
-  const _LiquidRimPainter({required this.shape, this.strength = 1.0});
+  final bool lightMode;
+  const _LiquidRimPainter({
+    required this.shape,
+    this.strength = 1.0,
+    this.lightMode = false,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
     if (size.isEmpty) return;
     final rect = Offset.zero & size;
     final outer = shape.getOuterPath(rect.deflate(0.5));
+    final s = strength.clamp(0.0, 1.4);
     final rim = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.05
@@ -279,12 +402,19 @@ class _LiquidRimPainter extends CustomPainter {
       ..shader = LinearGradient(
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
-        colors: [
-          Colors.white.withValues(alpha: 0.54 * strength),
-          Colors.white.withValues(alpha: 0.16 * strength),
-          Colors.white.withValues(alpha: 0.06 * strength),
-          Colors.white.withValues(alpha: 0.24 * strength),
-        ],
+        colors: lightMode
+            ? [
+                Colors.white.withValues(alpha: (0.85 * s).clamp(0.0, 1.0)),
+                Colors.black.withValues(alpha: (0.08 * s).clamp(0.0, 0.25)),
+                Colors.black.withValues(alpha: (0.12 * s).clamp(0.0, 0.28)),
+                Colors.white.withValues(alpha: (0.65 * s).clamp(0.0, 1.0)),
+              ]
+            : [
+                Colors.white.withValues(alpha: (0.54 * s).clamp(0.0, 1.0)),
+                Colors.white.withValues(alpha: (0.16 * s).clamp(0.0, 1.0)),
+                Colors.white.withValues(alpha: (0.06 * s).clamp(0.0, 1.0)),
+                Colors.white.withValues(alpha: (0.24 * s).clamp(0.0, 1.0)),
+              ],
         stops: const [0.0, 0.30, 0.68, 1.0],
       ).createShader(rect);
     canvas.drawPath(outer, rim);
@@ -296,11 +426,17 @@ class _LiquidRimPainter extends CustomPainter {
       ..shader = LinearGradient(
         begin: Alignment.topCenter,
         end: Alignment.bottomCenter,
-        colors: [
-          Colors.white.withValues(alpha: 0.26 * strength),
-          Colors.white.withValues(alpha: 0.0),
-          Colors.white.withValues(alpha: 0.08 * strength),
-        ],
+        colors: lightMode
+            ? [
+                Colors.white.withValues(alpha: (0.72 * s).clamp(0.0, 1.0)),
+                Colors.white.withValues(alpha: 0.0),
+                Colors.black.withValues(alpha: (0.04 * s).clamp(0.0, 0.16)),
+              ]
+            : [
+                Colors.white.withValues(alpha: (0.26 * s).clamp(0.0, 1.0)),
+                Colors.white.withValues(alpha: 0.0),
+                Colors.white.withValues(alpha: (0.08 * s).clamp(0.0, 1.0)),
+              ],
         stops: const [0.0, 0.46, 1.0],
       ).createShader(rect);
     canvas.drawPath(inner, glow);
@@ -308,7 +444,9 @@ class _LiquidRimPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _LiquidRimPainter old) =>
-      old.shape != shape || old.strength != strength;
+      old.shape != shape ||
+      old.strength != strength ||
+      old.lightMode != lightMode;
 }
 
 bool _isSystemReduceTransparencyActive() =>
@@ -372,6 +510,7 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
     return AnimatedBuilder(
       animation: _mergedListenable,
       builder: (context, _) {
+        final isDark = ApplePalette.isDarkOf(context);
         final reduce = GlassworkBackdrop.reduceTransparency.value ||
             _isSystemReduceTransparencyActive();
         final strength = GlassworkBackdrop.intensity.value.clamp(0.0, 1.0);
@@ -382,48 +521,72 @@ class _GlassworkBackdropState extends State<GlassworkBackdrop> {
         final winFastGlass = _isWindowsDesktop;
         if (!opaque &&
             !winFastGlass &&
+            isDark &&
             _shader == null &&
             !_loadingLens &&
             ImageFilter.isShaderFilterSupported) {
           _loadLens();
         }
-        final shader = (winFastGlass || opaque) ? null : _shader;
+        // Use true continuous optical blur + intensity-reactive translucency so
+        // dragging the Liquid Glass slider from 0% to 100% produces an immediate,
+        // clearly visible visual transformation in both Light and Dark themes.
+        // The dark lens shader is reserved for high-strength dark mode (>= 0.85)
+        // where its refractive rim shines without masking slider changes.
+        final useLensShader =
+            !winFastGlass && !opaque && isDark && _shader != null && strength >= 0.85;
+        final shader = useLensShader ? _shader : null;
         if (shader != null) {
           shader.setFloat(2, widget.radius);
           shader.setFloat(
             3,
-            MediaQuery.devicePixelRatioOf(context) * (0.25 + 1.35 * strength),
+            MediaQuery.devicePixelRatioOf(context) * (0.45 + 1.25 * strength),
+          );
+        }
+        final blurSigma = 1.5 + 24.5 * strength;
+        final Color veilColor;
+        if (opaque) {
+          veilColor = isDark ? const Color(0xF51E1E22) : const Color(0xFAFFFFFF);
+        } else if (winFastGlass) {
+          veilColor = isDark
+              ? Color.fromRGBO(26, 28, 35, (0.93 - 0.34 * strength).clamp(0.55, 0.94))
+              : Color.fromRGBO(255, 255, 255, (0.96 - 0.30 * strength).clamp(0.62, 0.96));
+        } else if (shader != null) {
+          // Slight subtle depth modulation even at 85%..100%
+          veilColor = Color.fromRGBO(
+            24,
+            24,
+            30,
+            ((1.0 - strength) * 0.65).clamp(0.0, 0.14),
+          );
+        } else if (isDark) {
+          veilColor = Color.fromRGBO(
+            28,
+            28,
+            34,
+            (0.92 - 0.62 * strength).clamp(0.24, 0.93),
+          );
+        } else {
+          veilColor = Color.fromRGBO(
+            255,
+            255,
+            255,
+            (0.94 - 0.54 * strength).clamp(0.36, 0.95),
           );
         }
         return BackdropFilter(
           enabled: !opaque && !winFastGlass,
           filter: shader == null
               ? liquidGlassFilter(
-                  blur: 1.0 + 18.0 * strength,
-                  saturation: 1.05 + 0.80 * strength,
+                  blur: blurSigma,
+                  saturation: isDark ? (1.05 + 0.85 * strength) : (1.08 + 0.45 * strength),
+                  brightness: isDark ? (0.82 + 0.14 * strength) : 1.0,
                 )
               : ImageFilter.shader(shader),
           // Keep the child at the same element-tree depth when the async GPU
           // shader arrives or transparency changes. Reparenting discarded
           // active update checks, text fields and nested settings navigation.
           child: ColoredBox(
-            color: opaque
-                ? const Color(0xF51E1E22)
-                : winFastGlass
-                    ? Color.fromRGBO(
-                        26,
-                        28,
-                        35,
-                        (0.91 - 0.16 * strength).clamp(0.73, 0.93),
-                      )
-                    : shader == null
-                        ? Color.fromRGBO(
-                            30,
-                            30,
-                            34,
-                            (0.88 - 0.34 * strength).clamp(0.45, 0.92),
-                          )
-                        : Colors.transparent,
+            color: veilColor,
             child: widget.child,
           ),
         );
@@ -462,6 +625,7 @@ class LiquidGlass extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = ApplePalette.isDarkOf(context);
     final shape = RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(borderRadius),
     );
@@ -471,18 +635,31 @@ class LiquidGlass extends StatelessWidget {
       decoration: ShapeDecoration(
         shape: shape,
         shadows: elevated
-            ? const [
-                BoxShadow(
-                  color: Color(0x59000000),
-                  blurRadius: 30,
-                  offset: Offset(0, 12),
-                ),
-                BoxShadow(
-                  color: Color(0x26000000),
-                  blurRadius: 6,
-                  offset: Offset(0, 2),
-                ),
-              ]
+            ? (isDark
+                ? const [
+                    BoxShadow(
+                      color: Color(0x59000000),
+                      blurRadius: 30,
+                      offset: Offset(0, 12),
+                    ),
+                    BoxShadow(
+                      color: Color(0x26000000),
+                      blurRadius: 6,
+                      offset: Offset(0, 2),
+                    ),
+                  ]
+                : const [
+                    BoxShadow(
+                      color: Color(0x1C000000),
+                      blurRadius: 24,
+                      offset: Offset(0, 8),
+                    ),
+                    BoxShadow(
+                      color: Color(0x0F000000),
+                      blurRadius: 4,
+                      offset: Offset(0, 1),
+                    ),
+                  ])
             : null,
       ),
       child: ClipPath(
@@ -494,12 +671,14 @@ class LiquidGlass extends StatelessWidget {
             final systemReduce = GlassworkBackdrop.reduceTransparency.value ||
                 _isSystemReduceTransparencyActive();
             if (systemReduce) {
+              final baseOpaque =
+                  isDark ? const Color(0xF51E1E22) : const Color(0xFAFFFFFF);
               final solidBase = tint.a > 0.01
                   ? Color.alphaBlend(
-                      tint.withValues(alpha: math.min(tint.a, 0.35)),
-                      const Color(0xF51E1E22),
+                      tint.withValues(alpha: math.min(tint.a, isDark ? 0.35 : 0.16)),
+                      baseOpaque,
                     )
-                  : const Color(0xF51E1E22);
+                  : baseOpaque;
               return Container(
                 width: width,
                 height: height,
@@ -507,7 +686,9 @@ class LiquidGlass extends StatelessWidget {
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(borderRadius),
                     side: BorderSide(
-                      color: Colors.white.withValues(alpha: 0.48),
+                      color: isDark
+                          ? Colors.white.withValues(alpha: 0.48)
+                          : Colors.black.withValues(alpha: 0.14),
                       width: 1.0,
                     ),
                   ),
@@ -519,8 +700,11 @@ class LiquidGlass extends StatelessWidget {
             if (MediaQuery.highContrastOf(context) ||
                 MediaQuery.disableAnimationsOf(context)) {
               return CustomPaint(
-                foregroundPainter:
-                    _LiquidRimPainter(shape: shape, strength: rimStrength),
+                foregroundPainter: _LiquidRimPainter(
+                  shape: shape,
+                  strength: rimStrength,
+                  lightMode: !isDark,
+                ),
                 child: Container(
                   width: width,
                   height: height,
@@ -529,17 +713,23 @@ class LiquidGlass extends StatelessWidget {
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
-                      colors: [
-                        Color.alphaBlend(
-                          const Color(0x28FFFFFF),
-                          tint.withValues(alpha: 1),
-                        ),
-                        tint.withValues(alpha: 1),
-                        Color.alphaBlend(
-                          const Color(0x10FFFFFF),
-                          tint.withValues(alpha: 1),
-                        ),
-                      ],
+                      colors: isDark
+                          ? [
+                              Color.alphaBlend(
+                                const Color(0x28FFFFFF),
+                                tint.withValues(alpha: 1),
+                              ),
+                              tint.withValues(alpha: 1),
+                              Color.alphaBlend(
+                                const Color(0x10FFFFFF),
+                                tint.withValues(alpha: 1),
+                              ),
+                            ]
+                          : const [
+                              Color(0xFAFFFFFF),
+                              Color(0xF2F6F7FA),
+                              Color(0xFAFFFFFF),
+                            ],
                       stops: const [0.0, 0.55, 1.0],
                     ),
                   ),
@@ -553,10 +743,17 @@ class LiquidGlass extends StatelessWidget {
                 valueListenable: GlassworkBackdrop.intensity,
                 builder: (context, strength, _) {
                   final s = strength.clamp(0.0, 1.0);
+                  final effectiveTint = isDark
+                      ? tint
+                      : (tint.a > 0.01 &&
+                              (tint.r > 0.25 || tint.g > 0.25 || tint.b > 0.25)
+                          ? tint
+                          : const Color(0x00FFFFFF));
                   return CustomPaint(
                     foregroundPainter: _LiquidRimPainter(
                       shape: shape,
                       strength: rimStrength * (0.28 + 0.92 * s),
+                      lightMode: !isDark,
                     ),
                     child: Container(
                       width: width,
@@ -566,17 +763,34 @@ class LiquidGlass extends StatelessWidget {
                         gradient: LinearGradient(
                           begin: Alignment.topLeft,
                           end: Alignment.bottomRight,
-                          colors: [
-                            Color.alphaBlend(
-                              Color.fromRGBO(255, 255, 255, 0.03 + 0.08 * s),
-                              tint.withValues(alpha: math.min(tint.a, 0.08)),
-                            ),
-                            tint.withValues(alpha: math.min(tint.a, 0.04)),
-                            Color.alphaBlend(
-                              Color.fromRGBO(255, 255, 255, 0.015 + 0.045 * s),
-                              tint.withValues(alpha: math.min(tint.a, 0.06)),
-                            ),
-                          ],
+                          colors: isDark
+                              ? [
+                                  Color.alphaBlend(
+                                    Color.fromRGBO(255, 255, 255, 0.03 + 0.10 * s),
+                                    effectiveTint.withValues(
+                                      alpha: math.min(effectiveTint.a, 0.14),
+                                    ),
+                                  ),
+                                  effectiveTint.withValues(
+                                    alpha: math.min(effectiveTint.a, 0.08),
+                                  ),
+                                  Color.alphaBlend(
+                                    Color.fromRGBO(255, 255, 255, 0.015 + 0.05 * s),
+                                    effectiveTint.withValues(
+                                      alpha: math.min(effectiveTint.a, 0.10),
+                                    ),
+                                  ),
+                                ]
+                              : [
+                                  Color.alphaBlend(
+                                    Color.fromRGBO(255, 255, 255, 0.24 + 0.22 * s),
+                                    effectiveTint.withValues(
+                                      alpha: math.min(effectiveTint.a, 0.16),
+                                    ),
+                                  ),
+                                  Color.fromRGBO(255, 255, 255, 0.08 + 0.12 * s),
+                                  Color.fromRGBO(245, 247, 252, 0.14 + 0.14 * s),
+                                ],
                           stops: const [0.0, 0.52, 1.0],
                         ),
                       ),
@@ -1547,6 +1761,7 @@ class _DockSearchCircleButtonState extends State<_DockSearchCircleButton> {
 
   @override
   Widget build(BuildContext context) {
+    final palette = ApplePalette.of(context);
     return GestureDetector(
       key: const ValueKey('home-search-button'),
       behavior: HitTestBehavior.opaque,
@@ -1566,14 +1781,16 @@ class _DockSearchCircleButtonState extends State<_DockSearchCircleButton> {
             width: widget.size,
             height: widget.size,
             borderRadius: widget.size * 0.5,
-            tint: const Color(0x56161414),
+            tint: palette.isDark
+                ? const Color(0x56161414)
+                : const Color(0xD8FFFFFF),
             blur: 20,
             saturation: 1.8,
-            child: const Center(
+            child: Center(
               child: Icon(
                 CupertinoIcons.search,
                 size: 22,
-                color: Color(0xFFFFFFFF),
+                color: palette.labelPrimary,
               ),
             ),
           ),
@@ -1583,27 +1800,37 @@ class _DockSearchCircleButtonState extends State<_DockSearchCircleButton> {
   }
 }
 
-/// Dark translucent inner capsule lens behind the selected tab (iOS 26 style).
+/// Translucent inner capsule lens behind the selected tab (iOS 26 style).
 class _DockSelectionLens extends StatelessWidget {
   const _DockSelectionLens();
   @override
   Widget build(BuildContext context) {
+    final isDark = ApplePalette.isDarkOf(context);
     final shape = RoundedRectangleBorder(
       borderRadius:
           BorderRadius.circular(AppleLiquidGlassDock._lensRadius),
     );
     return CustomPaint(
-      foregroundPainter: _LiquidRimPainter(shape: shape, strength: 0.42),
+      foregroundPainter: _LiquidRimPainter(
+        shape: shape,
+        strength: isDark ? 0.42 : 0.65,
+        lightMode: !isDark,
+      ),
       child: DecoratedBox(
         decoration: ShapeDecoration(
           shape: shape,
-          gradient: const LinearGradient(
+          gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [
-              Color(0x66000000),
-              Color(0x4A000000),
-            ],
+            colors: isDark
+                ? const [
+                    Color(0x66000000),
+                    Color(0x4A000000),
+                  ]
+                : const [
+                    Color(0x1A007AFF),
+                    Color(0x0E007AFF),
+                  ],
           ),
         ),
       ),
@@ -1634,9 +1861,11 @@ class _DockItemState extends State<_DockItem> {
   @override
   Widget build(BuildContext context) {
     const duration = Duration(milliseconds: 240);
+    final palette = ApplePalette.of(context);
     final selected = widget.selected;
-    final color =
-        selected ? const Color(0xFFFFFFFF) : const Color(0xD6F5F5F7);
+    final color = palette.isDark
+        ? (selected ? const Color(0xFFFFFFFF) : const Color(0xD6F5F5F7))
+        : (selected ? palette.accent : const Color(0xFF4B4B55));
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTapDown: (_) => setState(() => _pressed = true),
@@ -2421,15 +2650,15 @@ Future<T?> showAppleModalSheet<T>({
                                   borderRadius: BorderRadius.circular(999),
                                 ),
                               ),
-                              Padding(
+                                Padding(
                                 padding: const EdgeInsets.fromLTRB(20, 10, 12, 10),
                                 child: Row(
                                   children: [
                                     Expanded(
                                       child: Text(
                                         title,
-                                        style: const TextStyle(
-                                          color: AppleColors.labelPrimary,
+                                        style: TextStyle(
+                                          color: ApplePalette.of(ctx).labelPrimary,
                                           fontSize: 17.5,
                                           fontWeight: FontWeight.w700,
                                           letterSpacing: -0.35,
@@ -2441,16 +2670,16 @@ Future<T?> showAppleModalSheet<T>({
                                       padding: const EdgeInsets.all(6),
                                       minSize: 30,
                                       onPressed: () => Navigator.of(ctx).pop(),
-                                      child: const Icon(
+                                      child: Icon(
                                         CupertinoIcons.xmark_circle_fill,
-                                        color: AppleColors.labelTertiary,
+                                        color: ApplePalette.of(ctx).labelTertiary,
                                         size: 26,
                                       ),
                                     ),
                                   ],
                                 ),
                               ),
-                              Container(height: 0.5, color: const Color(0x22FFFFFF)),
+                              Container(height: 0.5, color: ApplePalette.of(ctx).separator),
                               Flexible(
                                 child: TextSelectionMouseGuard(child: builder(ctx)),
                               ),
@@ -2592,6 +2821,46 @@ class _AppleAmbientBackgroundState extends State<AppleAmbientBackground>
 
   @override
   Widget build(BuildContext context) {
+    final isDark = ApplePalette.isDarkOf(context);
+    if (!isDark) {
+      // Minimalist crisp Apple white canvas in Light Mode (简约白底).
+      return RepaintBoundary(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            const DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Color(0xFFFFFFFF),
+                    Color(0xFFF7F8FA),
+                    Color(0xFFF2F3F7),
+                  ],
+                  stops: [0.0, 0.45, 1.0],
+                ),
+              ),
+            ),
+            if (_useAuroraShader)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Opacity(
+                    opacity: 0.08,
+                    child: AuroraBackground(
+                      key: const Key('apple-ambient-aurora'),
+                      active: widget.animate && widget.showAmbientArtwork,
+                      strength: widget.showAmbientArtwork
+                          ? MotionTokens.auroraDefaultStrength
+                          : 0.28,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
+    }
     final (gradientColors, primaryGlow, secondaryGlow, accentGlow) =
         _resolveThemeColors();
     return RepaintBoundary(

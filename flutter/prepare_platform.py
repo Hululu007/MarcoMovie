@@ -1185,9 +1185,15 @@ def main() -> None:
             info.update({
                 'CFBundleDisplayName': 'Marco Movie',
                 'CFBundleAllowMixedLocalizations': True,
-                'UIStatusBarStyle': 'UIStatusBarStyleLightContent',
+                'UIStatusBarStyle': 'UIStatusBarStyleDefault',
                 'UIViewControllerBasedStatusBarAppearance': True,
-                'NSLocalNetworkUsageDescription': '连接你添加的局域网 Emby 服务器及片源。',
+                'NSLocalNetworkUsageDescription': '用于发现局域网投屏电视（DLNA/AirPlay）及连接局域网 Emby 服务器与片源。',
+                'NSBonjourServices': [
+                    '_airplay._tcp',
+                    '_raop._tcp',
+                    '_dlna._tcp',
+                    '_upnp._tcp',
+                ],
                 'UIFileSharingEnabled': True,
                 'LSSupportsOpeningDocumentsInPlace': True,
                 'FlutterDeepLinkingEnabled': False,
@@ -1236,6 +1242,9 @@ def main() -> None:
             if "import WebKit" not in ad_text and "import UIKit" in ad_text:
                 ad_text = ad_text.replace("import UIKit", "import UIKit\nimport WebKit", 1)
                 ad_changed = True
+            if "import AVKit" not in ad_text and "import UIKit" in ad_text:
+                ad_text = ad_text.replace("import UIKit", "import UIKit\nimport AVKit", 1)
+                ad_changed = True
             if "marco_movie/wakelock" not in ad_text and "GeneratedPluginRegistrant.register(with: self)" in ad_text:
                 ad_text = ad_text.replace(
                     "GeneratedPluginRegistrant.register(with: self)",
@@ -1275,6 +1284,20 @@ def main() -> None:
                     "            }\n"
                     "            result(nil)\n"
                     "          }\n"
+                    "        } else if call.method == \"requestOrientation\", let mode = call.arguments as? String {\n"
+                    "          DispatchQueue.main.async {\n"
+                    "            if let marcoVC = controller as? MarcoFlutterViewController {\n"
+                    "              marcoVC.applyRequestedOrientation(mode)\n"
+                    "            }\n"
+                    "            result(nil)\n"
+                    "          }\n"
+                    "        } else if call.method == \"setOrientationMonitoring\", let enabled = call.arguments as? Bool {\n"
+                    "          DispatchQueue.main.async {\n"
+                    "            if let marcoVC = controller as? MarcoFlutterViewController {\n"
+                    "              marcoVC.setPhysicalOrientationMonitoring(enabled, channel: systemChromeChannel)\n"
+                    "            }\n"
+                    "            result(nil)\n"
+                    "          }\n"
                     "        } else {\n"
                     "          result(FlutterMethodNotImplemented)\n"
                     "        }\n"
@@ -1297,8 +1320,95 @@ def main() -> None:
                     "      }\n"
                     "    }\n"
                     "  }\n\n"
+                    "  var marcoPreferredInterfaceStyle: UIUserInterfaceStyle = .unspecified {\n"
+                    "    didSet {\n"
+                    "      setNeedsStatusBarAppearanceUpdate()\n"
+                    "    }\n"
+                    "  }\n\n"
+                    "  private var orientationObserver: NSObjectProtocol?\n"
+                    "  private weak var orientationChannel: FlutterMethodChannel?\n"
+                    "  private var marcoOrientationMask: UIInterfaceOrientationMask?\n\n"
+                    "  deinit {\n"
+                    "    if let obs = orientationObserver {\n"
+                    "      NotificationCenter.default.removeObserver(obs)\n"
+                    "      UIDevice.current.endGeneratingDeviceOrientationNotifications()\n"
+                    "    }\n"
+                    "  }\n\n"
+                    "  override var supportedInterfaceOrientations: UIInterfaceOrientationMask {\n"
+                    "    return marcoOrientationMask ?? super.supportedInterfaceOrientations\n"
+                    "  }\n\n"
+                    "  func setPhysicalOrientationMonitoring(_ enabled: Bool, channel: FlutterMethodChannel) {\n"
+                    "    if let obs = orientationObserver {\n"
+                    "      NotificationCenter.default.removeObserver(obs)\n"
+                    "      orientationObserver = nil\n"
+                    "    }\n"
+                    "    orientationChannel = enabled ? channel : nil\n"
+                    "    guard enabled else {\n"
+                    "      UIDevice.current.endGeneratingDeviceOrientationNotifications()\n"
+                    "      return\n"
+                    "    }\n"
+                    "    UIDevice.current.beginGeneratingDeviceOrientationNotifications()\n"
+                    "    orientationObserver = NotificationCenter.default.addObserver(\n"
+                    "      forName: UIDevice.orientationDidChangeNotification,\n"
+                    "      object: nil,\n"
+                    "      queue: .main\n"
+                    "    ) { [weak self] _ in\n"
+                    "      guard let self = self else { return }\n"
+                    "      let label: String?\n"
+                    "      switch UIDevice.current.orientation {\n"
+                    "      case .portrait:\n"
+                    "        label = \"portrait\"\n"
+                    "      case .landscapeLeft:\n"
+                    "        label = \"landscapeLeft\"\n"
+                    "      case .landscapeRight:\n"
+                    "        label = \"landscapeRight\"\n"
+                    "      default:\n"
+                    "        label = nil\n"
+                    "      }\n"
+                    "      if let label = label {\n"
+                    "        self.orientationChannel?.invokeMethod(\"physicalOrientationChanged\", arguments: label)\n"
+                    "      }\n"
+                    "    }\n"
+                    "  }\n\n"
+                    "  func applyRequestedOrientation(_ mode: String) {\n"
+                    "    let mask: UIInterfaceOrientationMask\n"
+                    "    let fallbackRaw: Int?\n"
+                    "    switch mode {\n"
+                    "    case \"landscape\":\n"
+                    "      mask = .landscape\n"
+                    "      marcoOrientationMask = .landscape\n"
+                    "      fallbackRaw = UIInterfaceOrientation.landscapeRight.rawValue\n"
+                    "    case \"portrait\":\n"
+                    "      mask = .portrait\n"
+                    "      marcoOrientationMask = .portrait\n"
+                    "      fallbackRaw = UIInterfaceOrientation.portrait.rawValue\n"
+                    "    default:\n"
+                    "      mask = .allButUpsideDown\n"
+                    "      marcoOrientationMask = nil\n"
+                    "      fallbackRaw = nil\n"
+                    "    }\n"
+                    "    if #available(iOS 16.0, *) {\n"
+                    "      setNeedsUpdateOfSupportedInterfaceOrientations()\n"
+                    "      if let scene = view.window?.windowScene {\n"
+                    "        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }\n"
+                    "      }\n"
+                    "    } else if let raw = fallbackRaw {\n"
+                    "      UIDevice.current.setValue(raw, forKey: \"orientation\")\n"
+                    "      UIViewController.attemptRotationToDeviceOrientation()\n"
+                    "    }\n"
+                    "  }\n\n"
                     "  override var preferredStatusBarStyle: UIStatusBarStyle {\n"
-                    "    return .lightContent\n"
+                    "    if marcoImmersiveMode {\n"
+                    "      return .lightContent\n"
+                    "    }\n"
+                    "    switch marcoPreferredInterfaceStyle {\n"
+                    "    case .light:\n"
+                    "      return .darkContent\n"
+                    "    case .dark:\n"
+                    "      return .lightContent\n"
+                    "    default:\n"
+                    "      return traitCollection.userInterfaceStyle == .light ? .darkContent : .lightContent\n"
+                    "    }\n"
                     "  }\n\n"
                     "  override var prefersStatusBarHidden: Bool {\n"
                     "    return marcoImmersiveMode || super.prefersStatusBarHidden\n"
