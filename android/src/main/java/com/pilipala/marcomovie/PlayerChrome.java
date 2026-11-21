@@ -14,6 +14,12 @@ import com.pilipala.marcomovie.hud.StartSpecBanner;
 
 /** Three independent floating regions with one visibility/focus owner. */
 final class PlayerChrome {
+    static final boolean TV_TOP_RIGHT_HUD_FRAMELESS = true;
+    static final String HUD_PROGRESS_FONT_FAMILY = "sans-serif-light";
+    static final String HUD_CLOCK_FONT_FAMILY = "sans-serif-condensed";
+    static final float HUD_PROGRESS_SIZE_U = 12.2f;
+    static final float HUD_CLOCK_SIZE_U = 16.5f;
+
     final MainActivity a;
     final boolean modernTv;
     final boolean isLiveStream;
@@ -147,7 +153,7 @@ final class PlayerChrome {
         final int slash = elapsed.length();
         android.text.SpannableString sp = new android.text.SpannableString(raw);
         sp.setSpan(
-                new android.text.style.ForegroundColorSpan(0xf2f5f8fd),
+                new android.text.style.ForegroundColorSpan(0xe2eaf6ff),
                 0,
                 slash,
                 android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
@@ -175,7 +181,7 @@ final class PlayerChrome {
                             int bottom,
                             Paint paint) {
                         int prevColor = paint.getColor();
-                        paint.setColor(0x74c8d1e0);
+                        paint.setColor(0x68c4d0e2);
                         float totalW =
                                 Math.round(paint.measureText("/") + paint.measureText("0") * 0.62f);
                         float sw = paint.measureText("/");
@@ -187,7 +193,7 @@ final class PlayerChrome {
                 slash + 1,
                 android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         sp.setSpan(
-                new android.text.style.ForegroundColorSpan(0xb2cad2e0),
+                new android.text.style.ForegroundColorSpan(0xa0c8d4e6),
                 slash + 1,
                 raw.length(),
                 android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
@@ -708,24 +714,24 @@ final class PlayerChrome {
             tvTopRightHud.setFocusable(false);
             tvTopRightHud.setClickable(false);
             tvTopRightHud.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-            int hudBgColor =
-                    a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false) ? 0xdc161820 : 0x8f12151d;
-            tvTopRightHud.setBackground(modernSurface(hudBgColor, 999f, 0x24ffffff));
-            tvTopRightHud.setPadding(vp(a, 12.5f), vp(a, 5.5f), vp(a, 12.5f), vp(a, 5.5f));
+            // Frameless cinematic floating typography — no outer box or pill border.
+            tvTopRightHud.setBackground(null);
+            tvTopRightHud.setPadding(0, 0, 0, 0);
 
-            hudProgressView = a.text("", 12.5f, 0xf2f5f8fd);
+            hudProgressView = a.text("", HUD_PROGRESS_SIZE_U, 0xd6dce6f4);
             hudProgressView.setTag("player-hud-progress");
             hudProgressView.setFocusable(false);
             hudProgressView.setClickable(false);
-            hudProgressView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 12.5f);
-            hudProgressView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            hudProgressView.setTextSize(
+                    android.util.TypedValue.COMPLEX_UNIT_PX, u * HUD_PROGRESS_SIZE_U);
+            hudProgressView.setTypeface(Typeface.create(HUD_PROGRESS_FONT_FAMILY, Typeface.NORMAL));
             hudProgressView.setFontFeatureSettings("tnum");
             if (android.os.Build.VERSION.SDK_INT >= 21) {
-                hudProgressView.setLetterSpacing(0.022f);
+                hudProgressView.setLetterSpacing(0.025f);
             }
             hudProgressView.setIncludeFontPadding(false);
             hudProgressView.setSingleLine();
-            hudProgressView.setShadowLayer(u * 1.6f, 0, u * 0.6f, 0x55000000);
+            hudProgressView.setShadowLayer(u * 3.2f, 0, u * 1.0f, 0xc0000000);
             String initElapsed =
                     live
                             ? "直播"
@@ -743,28 +749,29 @@ final class PlayerChrome {
 
             hudDivider = new View(a);
             GradientDrawable divBg = new GradientDrawable();
-            divBg.setColor(0x2effffff);
+            divBg.setColor(0x52ffffff);
             divBg.setCornerRadius(u * 1f);
             hudDivider.setBackground(divBg);
             LinearLayout.LayoutParams divLp =
-                    new LinearLayout.LayoutParams(Math.max(1, Math.round(u * 1f)), vp(a, 10.5f));
-            divLp.leftMargin = vp(a, 9);
-            divLp.rightMargin = vp(a, 9);
+                    new LinearLayout.LayoutParams(Math.max(1, Math.round(u * 1f)), vp(a, 12.5f));
+            divLp.leftMargin = vp(a, 10);
+            divLp.rightMargin = vp(a, 10);
             tvTopRightHud.addView(hudDivider, divLp);
 
-            persistentClock = a.text("", 12.5f, 0xf4f6f9fe);
+            persistentClock = a.text("", HUD_CLOCK_SIZE_U, 0xfaffffff);
             persistentClock.setTag("player-persistent-clock");
             persistentClock.setFocusable(false);
             persistentClock.setClickable(false);
-            persistentClock.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, u * 12.5f);
-            persistentClock.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            persistentClock.setTextSize(
+                    android.util.TypedValue.COMPLEX_UNIT_PX, u * HUD_CLOCK_SIZE_U);
+            persistentClock.setTypeface(Typeface.create(HUD_CLOCK_FONT_FAMILY, Typeface.BOLD));
             persistentClock.setFontFeatureSettings("tnum");
             if (android.os.Build.VERSION.SDK_INT >= 21) {
-                persistentClock.setLetterSpacing(0.045f);
+                persistentClock.setLetterSpacing(0.04f);
             }
             persistentClock.setIncludeFontPadding(false);
             persistentClock.setSingleLine();
-            persistentClock.setShadowLayer(u * 1.6f, 0, u * 0.6f, 0x55000000);
+            persistentClock.setShadowLayer(u * 3.8f, 0, u * 1.2f, 0xd4000000);
             persistentClock.setText(styledWallTime(initialPersistentTime));
             tvTopRightHud.addView(persistentClock, new LinearLayout.LayoutParams(-2, -2));
 
@@ -773,8 +780,8 @@ final class PlayerChrome {
             tvTopRightHud.setVisibility(View.GONE);
             FrameLayout.LayoutParams hudLp =
                     new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
-            hudLp.topMargin = vp(a, 20);
-            hudLp.rightMargin = vp(a, 28);
+            hudLp.topMargin = vp(a, 18);
+            hudLp.rightMargin = vp(a, 26);
             a.playbackLayer.addView(tvTopRightHud, hudLp);
         } else {
             tvTopRightHud = null;

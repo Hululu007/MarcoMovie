@@ -297,48 +297,175 @@ final class AccountPanel {
         if (dialog.getWindow() != null) {
             dialog.getWindow().getDecorView().setTag("app-dialog");
         }
+        final Cms.Site configSite = findConfigCenterSite(a);
         LinearLayout panel = a.vertical();
         panel.setTag("account-panel");
-        panel.setPadding(a.dp(24), a.dp(22), a.dp(24), a.dp(18));
-        panel.setBackground(a.bg(0xf5222227, 28));
-        panel.addView(a.text("网盘与账号", 24, MainActivity.WHITE));
-        a.gap(panel, 8);
-        TextView note = a.text("登录与账号状态由你导入的配置提供。", 13, MainActivity.MUTED);
-        panel.addView(note);
-        a.gap(panel, 16);
-        String[] labels = {"网盘登录与启用", "登录凭据配置", "网盘优先顺序", "网盘搜索顺序"};
-        String[] actions = {"LoginShow", "pushCkShow", "panSortShow", "panSourceSortShow"};
-        for (int i = 0; i < labels.length; i++) {
-            final String action = actions[i];
-            final android.widget.Button item =
-                    a.button(
-                            labels[i],
-                            "account-action:" + action,
-                            () -> {
-                                dialog.dismiss();
-                                PluginDialogStyler.watch(a);
-                                new SettingsScreen(a).accountAction(action);
-                            });
-            item.setOnFocusChangeListener(
-                    (v, f) ->
-                            FocusMotion.style(
-                                    a,
-                                    item,
-                                    f,
-                                    0x18ffffff,
-                                    MainActivity.WHITE,
-                                    20,
-                                    MainActivity.WHITE,
-                                    MainActivity.DARK,
-                                    false,
-                                    1.015f));
-            item.setBackground(a.bg(0x18ffffff, 20));
-            item.setMinHeight(a.dp(46));
-            item.setTextSize(15);
-            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, a.dp(48));
-            size.bottomMargin = a.dp(6);
-            panel.addView(item, size);
+        panel.setPadding(a.dp(24), a.dp(20), a.dp(24), a.dp(16));
+        GradientDrawable cardBg =
+                new GradientDrawable(
+                        GradientDrawable.Orientation.TOP_BOTTOM,
+                        new int[] {0xf724242b, 0xfa15161b});
+        cardBg.setCornerRadius(a.dp(24));
+        cardBg.setStroke(Math.max(1, a.dp(0.9f)), 0x34ffffff);
+        panel.setBackground(cardBg);
+
+        // Header row: title + storage permission pill
+        LinearLayout headRow = a.row();
+        headRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout titleCol = a.vertical();
+        TextView heading = a.text("网盘与账号", 22, MainActivity.WHITE);
+        heading.setTypeface(null, Typeface.BOLD);
+        titleCol.addView(heading);
+        TextView note = a.text("扫码登录后 Cookie 保存至本机目录，可在下方直接管理各网盘状态与排序。", 12.5f, MainActivity.MUTED);
+        note.setPadding(0, a.dp(2), 0, 0);
+        titleCol.addView(note);
+        headRow.addView(titleCol, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        final boolean permOk = a.hasFullStoragePermission() || a.hasLegacyStorageWritePermission();
+        final android.widget.Button permBtn =
+                a.button(
+                        permOk ? "✓ 存储权限已就绪" : "⚠ 未开启存储权限 · 去授权",
+                        "account-storage-permission",
+                        () -> {
+                            dialog.dismiss();
+                            if (Build.VERSION.SDK_INT >= 30) {
+                                a.openTvStoragePermissionSettings();
+                            } else {
+                                a.requestRuntimeStoragePermission(() -> show(a, anchor));
+                            }
+                        });
+        permBtn.setTextSize(12f);
+        permBtn.setSingleLine(true);
+        permBtn.setPadding(a.dp(12), 0, a.dp(12), 0);
+        permBtn.setMinHeight(a.dp(34));
+        permBtn.setMinimumHeight(a.dp(34));
+        int permNormalBg = permOk ? 0x2e30d158 : 0x38ff453a;
+        int permNormalFg = permOk ? 0xff4ade80 : 0xffff8a80;
+        permBtn.setBackground(a.bg(permNormalBg, 999));
+        permBtn.setTextColor(permNormalFg);
+        permBtn.setOnFocusChangeListener(
+                (v, f) ->
+                        FocusMotion.style(
+                                a,
+                                permBtn,
+                                f,
+                                permNormalBg,
+                                MainActivity.WHITE,
+                                999,
+                                permNormalFg,
+                                MainActivity.DARK,
+                                false,
+                                1.02f));
+        LinearLayout.LayoutParams permLp = new LinearLayout.LayoutParams(-2, a.dp(34));
+        permLp.leftMargin = a.dp(12);
+        headRow.addView(permBtn, permLp);
+        panel.addView(headRow, new LinearLayout.LayoutParams(-1, -2));
+        a.gap(panel, 14);
+
+        // Scrollable content body
+        LinearLayout body = a.vertical();
+        body.setClipChildren(false);
+        body.setClipToPadding(false);
+        body.setPadding(a.dp(2), a.dp(2), a.dp(2), a.dp(2));
+
+        // 2x2 Drive Cards Grid
+        for (int rowIdx = 0; rowIdx < DRIVES.length; rowIdx += 2) {
+            LinearLayout gridRow = a.row();
+            gridRow.setClipChildren(false);
+            for (int col = 0; col < 2; col++) {
+                int idx = rowIdx + col;
+                if (idx >= DRIVES.length) break;
+                final DriveSpec drive = DRIVES[idx];
+                final boolean loggedIn = isDriveLoggedIn(a, drive.key);
+                final boolean enabled = isDriveEnabled(a, drive.key);
+                String stateBadge = loggedIn ? (enabled ? "已登录 · 启用中" : "已登录") : "未登录 · 点击扫码";
+                final android.widget.Button driveCard =
+                        a.button(
+                                drive.tvAlias + "  (" + drive.providerName + ")\n" + stateBadge,
+                                "account-drive:" + drive.key,
+                                () -> {
+                                    dialog.dismiss();
+                                    a.ensureStoragePermissionForNetdisk(
+                                            () -> dispatchDriveLoginAction(a, configSite, drive));
+                                });
+                driveCard.setSingleLine(false);
+                driveCard.setMaxLines(2);
+                driveCard.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+                driveCard.setTextSize(13.5f);
+                driveCard.setLineSpacing(a.dp(3), 1f);
+                driveCard.setPadding(a.dp(14), a.dp(10), a.dp(14), a.dp(10));
+                int cardNormal = loggedIn ? 0x2630d158 : 0x18ffffff;
+                int cardFg = loggedIn ? 0xffe8fff0 : MainActivity.WHITE;
+                driveCard.setBackground(a.bg(cardNormal, 16));
+                driveCard.setTextColor(cardFg);
+                driveCard.setOnFocusChangeListener(
+                        (v, f) ->
+                                FocusMotion.style(
+                                        a,
+                                        driveCard,
+                                        f,
+                                        cardNormal,
+                                        MainActivity.WHITE,
+                                        16,
+                                        cardFg,
+                                        MainActivity.DARK,
+                                        false,
+                                        1.015f));
+                LinearLayout.LayoutParams dLp = new LinearLayout.LayoutParams(0, a.dp(62), 1f);
+                if (col == 0) dLp.rightMargin = a.dp(10);
+                dLp.bottomMargin = a.dp(10);
+                gridRow.addView(driveCard, dLp);
+            }
+            body.addView(gridRow, new LinearLayout.LayoutParams(-1, -2));
         }
+
+        // Action Buttons (2 rows x 2 columns)
+        String[] labels = {"全部网盘登录与启用", "登录凭据 / Cookie", "网盘优先顺序", "网盘搜索顺序"};
+        String[] actions = {"LoginShow", "pushCkShow", "panSortShow", "panSourceSortShow"};
+        for (int r = 0; r < labels.length; r += 2) {
+            LinearLayout actRow = a.row();
+            actRow.setClipChildren(false);
+            for (int c = 0; c < 2; c++) {
+                int idx = r + c;
+                final String action = actions[idx];
+                final android.widget.Button item =
+                        a.button(
+                                labels[idx],
+                                "account-action:" + action,
+                                () -> {
+                                    dialog.dismiss();
+                                    a.ensureStoragePermissionForNetdisk(
+                                            () -> {
+                                                PluginDialogStyler.watch(a);
+                                                new SettingsScreen(a).accountAction(action);
+                                            });
+                                });
+                item.setSingleLine(true);
+                item.setEllipsize(TextUtils.TruncateAt.END);
+                item.setTextSize(14f);
+                item.setPadding(a.dp(12), 0, a.dp(12), 0);
+                item.setBackground(a.bg(0x1effffff, 14));
+                item.setOnFocusChangeListener(
+                        (v, f) ->
+                                FocusMotion.style(
+                                        a,
+                                        item,
+                                        f,
+                                        0x1effffff,
+                                        MainActivity.WHITE,
+                                        14,
+                                        MainActivity.WHITE,
+                                        MainActivity.DARK,
+                                        false,
+                                        1.015f));
+                LinearLayout.LayoutParams aLp = new LinearLayout.LayoutParams(0, a.dp(44), 1f);
+                if (c == 0) aLp.rightMargin = a.dp(10);
+                aLp.bottomMargin = a.dp(8);
+                actRow.addView(item, aLp);
+            }
+            body.addView(actRow, new LinearLayout.LayoutParams(-1, -2));
+        }
+
         if (CatPawSettings.available(a)) {
             final android.widget.Button catItem =
                     a.button(
@@ -348,16 +475,45 @@ final class AccountPanel {
                                 dialog.dismiss();
                                 CatPawSettings.choose(a);
                             });
-            catItem.setBackground(a.bg(0x18ffffff, 20));
-            catItem.setMinHeight(a.dp(46));
-            catItem.setTextSize(15);
-            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, a.dp(48));
-            size.bottomMargin = a.dp(6);
-            panel.addView(catItem, size);
+            catItem.setBackground(a.bg(0x1effffff, 14));
+            catItem.setOnFocusChangeListener(
+                    (v, f) ->
+                            FocusMotion.style(
+                                    a,
+                                    catItem,
+                                    f,
+                                    0x1effffff,
+                                    MainActivity.WHITE,
+                                    14,
+                                    MainActivity.WHITE,
+                                    MainActivity.DARK,
+                                    false,
+                                    1.015f));
+            catItem.setTextSize(14f);
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, a.dp(44));
+            size.bottomMargin = a.dp(8);
+            body.addView(catItem, size);
         }
-        a.gap(panel, 6);
+
+        ScrollView scroller = new TvScrollView(a);
+        scroller.setVerticalScrollBarEnabled(false);
+        scroller.addView(body, new ScrollView.LayoutParams(-1, -2));
+        int panelW = Math.min(a.dp(660), a.windowWidth() - a.dp(72));
+        int maxBodyH = Math.max(a.dp(160), a.windowHeight() - a.dp(186));
+        body.measure(
+                View.MeasureSpec.makeMeasureSpec(panelW - a.dp(48), View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        panel.addView(
+                scroller,
+                new LinearLayout.LayoutParams(-1, Math.min(maxBodyH, body.getMeasuredHeight())));
+
+        a.gap(panel, 8);
+        LinearLayout footer = a.row();
+        footer.setGravity(Gravity.RIGHT);
         android.widget.Button close = a.navButton("完成", "account-close", dialog::dismiss);
-        panel.addView(close, new LinearLayout.LayoutParams(-1, a.dp(42)));
+        footer.addView(close, new LinearLayout.LayoutParams(a.dp(120), a.dp(40)));
+        panel.addView(footer, new LinearLayout.LayoutParams(-1, -2));
+
         dialog.setContentView(panel);
         dialog.setOnDismissListener(
                 d -> {
@@ -368,118 +524,87 @@ final class AccountPanel {
         final Window window = dialog.getWindow();
         if (window != null) {
             window.getDecorView().setTag("app-dialog");
+            window.getDecorView().setMinimumWidth(0);
             window.setBackgroundDrawableResource(android.R.color.transparent);
-            int panelW = Math.min(a.dp(410), a.windowWidth() - a.dp(48));
-            window.setLayout(panelW, -2);
+            window.setLayout(panelW, WindowManager.LayoutParams.WRAP_CONTENT);
+            window.setGravity(Gravity.CENTER);
             WindowManager.LayoutParams lp = window.getAttributes();
-            window.setGravity(Gravity.TOP | Gravity.RIGHT);
-            int[] point = {0, 0};
-            if (anchor != null) anchor.getLocationInWindow(point);
-            lp.x = a.dp(38);
-            lp.y = anchor == null ? a.dp(80) : point[1] + anchor.getHeight() + a.dp(8);
-            lp.dimAmount = .5f;
+            lp.dimAmount = .58f;
             window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
             window.setAttributes(lp);
         }
         panel.post(
                 () -> {
-                    boolean side =
-                            a.homeDock != null && anchor != null && a.homeDock.contains(anchor);
-                    boolean top = side && a.homeDock.topMode;
-                    int pivotY = 0;
-                    if (side && window != null) {
-                        int[] point = {0, 0};
-                        anchor.getLocationInWindow(point);
-                        int height = a.windowHeight();
-                        WindowManager.LayoutParams position = window.getAttributes();
-                        if (top) {
-                            int left =
-                                    Math.max(
-                                            a.dp(24),
-                                            Math.min(
-                                                    a.windowWidth() - panel.getWidth() - a.dp(24),
-                                                    point[0]
-                                                            + anchor.getWidth() / 2
-                                                            - panel.getWidth() / 2));
-                            position.x = a.windowWidth() - left - panel.getWidth();
-                            position.y =
-                                    Math.max(
-                                            a.dp(24),
-                                            Math.min(
-                                                    height - panel.getHeight() - a.dp(24),
-                                                    point[1] + anchor.getHeight() + a.dp(14)));
-                            panel.setPivotX(point[0] + anchor.getWidth() / 2 - left);
-                        } else {
-                            position.x = a.windowWidth() - point[0] + a.dp(12);
-                            position.y =
-                                    Math.max(
-                                            a.dp(24),
-                                            Math.min(
-                                                    height - panel.getHeight() - a.dp(24),
-                                                    point[1]
-                                                            + anchor.getHeight() / 2
-                                                            - panel.getHeight() / 2));
-                        }
-                        window.setAttributes(position);
-                        pivotY = top ? 0 : point[1] + anchor.getHeight() / 2 - position.y;
-                    }
-                    if (!top)
-                        panel.setPivotX(side ? panel.getWidth() : panel.getWidth() - a.dp(70));
-                    panel.setPivotY(pivotY);
                     if (!a.reduced) {
-                        panel.setScaleX(.88f);
-                        panel.setScaleY(.7f);
+                        panel.setScaleX(.95f);
+                        panel.setScaleY(.95f);
                         panel.setAlpha(0);
                         panel.animate()
                                 .scaleX(1)
                                 .scaleY(1)
                                 .alpha(1)
-                                .setDuration(200)
+                                .setDuration(160)
                                 .setInterpolator(new DecelerateInterpolator())
                                 .start();
                     }
-                    View first = panel.findViewWithTag("account-action:LoginShow");
+                    View first =
+                            permOk
+                                    ? panel.findViewWithTag("account-action:LoginShow")
+                                    : panel.findViewWithTag("account-storage-permission");
                     if (first != null) first.requestFocus();
                 });
     }
 
     private static void runSafeAccountAction(final MainActivity a, final String action) {
-        try {
-            CspEngine.syncAllPluginActivities(a);
-            PluginDialogStyler.watch(a);
-            new SettingsScreen(a).accountAction(action);
-        } catch (Throwable t) {
-            AppLog.w("AccountPanel", "accountAction failed: " + action, t);
-            a.notice(a.message(t));
-        }
+        a.ensureStoragePermissionForNetdisk(
+                () -> {
+                    try {
+                        CspEngine.syncAllPluginActivities(a);
+                        PluginDialogStyler.watch(a);
+                        new SettingsScreen(a).accountAction(action);
+                    } catch (Throwable t) {
+                        AppLog.w("AccountPanel", "accountAction failed: " + action, t);
+                        a.notice(a.message(t));
+                    }
+                });
     }
 
     private static void dispatchDriveLoginAction(
             final MainActivity a, final Cms.Site configSite, final DriveSpec drive) {
-        try {
-            CspEngine.syncAllPluginActivities(a);
-            PluginDialogStyler.watch(a);
-            if (configSite != null) {
-                String api = configSite.api == null ? "" : configSite.api.toLowerCase(Locale.ROOT);
-                String key = configSite.key == null ? "" : configSite.key.toLowerCase(Locale.ROOT);
-                if (api.contains("panconfig") || key.contains("panconfig")) {
-                    if (!"LoginShow".equals(drive.panConfigCode)) {
-                        a.sourceAction(configSite, drive.panConfigCode);
-                        return;
+        a.ensureStoragePermissionForNetdisk(
+                () -> {
+                    try {
+                        CspEngine.syncAllPluginActivities(a);
+                        PluginDialogStyler.watch(a);
+                        if (configSite != null) {
+                            String api =
+                                    configSite.api == null
+                                            ? ""
+                                            : configSite.api.toLowerCase(Locale.ROOT);
+                            String key =
+                                    configSite.key == null
+                                            ? ""
+                                            : configSite.key.toLowerCase(Locale.ROOT);
+                            if (api.contains("panconfig") || key.contains("panconfig")) {
+                                if (!"LoginShow".equals(drive.panConfigCode)) {
+                                    a.sourceAction(configSite, drive.panConfigCode);
+                                    return;
+                                }
+                            } else if (api.contains("wexconfig")
+                                    || api.contains("wexokconfig")
+                                    || key.contains("wexconfig")
+                                    || key.contains("wexokconfig")) {
+                                a.sourceAction(configSite, drive.wexConfigCode);
+                                return;
+                            }
+                        }
+                        new SettingsScreen(a).accountAction("LoginShow");
+                    } catch (Throwable t) {
+                        AppLog.w(
+                                "AccountPanel", "dispatchDriveLoginAction failed: " + drive.key, t);
+                        a.notice(a.message(t));
                     }
-                } else if (api.contains("wexconfig")
-                        || api.contains("wexokconfig")
-                        || key.contains("wexconfig")
-                        || key.contains("wexokconfig")) {
-                    a.sourceAction(configSite, drive.wexConfigCode);
-                    return;
-                }
-            }
-            new SettingsScreen(a).accountAction("LoginShow");
-        } catch (Throwable t) {
-            AppLog.w("AccountPanel", "dispatchDriveLoginAction failed: " + drive.key, t);
-            a.notice(a.message(t));
-        }
+                });
     }
 
     /**

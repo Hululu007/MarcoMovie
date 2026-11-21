@@ -53,6 +53,7 @@ final class TvV17MineScreen {
                             entry.title,
                             CatalogScreen.historyLabel(entry),
                             "mine-history:" + entry.key(),
+                            "mine-history",
                             240);
             row.setOnClickListener(v -> a.resumeHistory(entry));
             // Existing history page owns deletion, sync notification and missing-source recovery.
@@ -79,7 +80,13 @@ final class TvV17MineScreen {
         for (int i = 0; i < count; i++) {
             Favorites.Entry entry = favorites.get(i);
             LinearLayout item =
-                    card(entry.poster, entry.title, "", "mine-favorite:" + entry.key(), 180);
+                    card(
+                            entry.poster,
+                            entry.title,
+                            "",
+                            "mine-favorite:" + entry.key(),
+                            "mine-favorites",
+                            180);
             item.setOnClickListener(v -> handler.open(entry));
             item.setOnLongClickListener(
                     v -> {
@@ -204,12 +211,18 @@ final class TvV17MineScreen {
     }
 
     private LinearLayout card(
-            String poster, String title, String detail, String tag, int heightDp) {
+            String poster,
+            String title,
+            String detail,
+            String tag,
+            String focusGroup,
+            int heightDp) {
         LinearLayout card = a.vertical();
         card.setTag(tag);
         card.setFocusable(true);
         card.setFocusableInTouchMode(true);
         card.setClickable(true);
+        TvFocusFrame.attachCard(card, focusGroup);
         card.setPadding(a.dp(6), a.dp(6), a.dp(6), a.dp(8));
         ImageView art = new ImageView(a);
         TvV17PosterCard.artwork(a, art);

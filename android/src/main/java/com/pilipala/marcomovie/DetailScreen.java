@@ -731,23 +731,34 @@ final class DetailScreen {
             int page,
             LinearLayout panel,
             String focusTag) {
-        if (a.current != null)
-            a.current.selection.select(
-                    video.lines.get(lineIndex).name,
-                    page,
-                    video.lines.get(lineIndex).episodes.size());
         panel.removeAllViews();
-        Cms.Line line = video.lines.get(lineIndex);
+        if (video == null || video.lines == null || video.lines.isEmpty()) {
+            panel.addView(a.text("当前内容没有可选择的剧集。", 15, MainActivity.MUTED));
+            return;
+        }
+        final int safeLineIdx = Math.max(0, Math.min(lineIndex, video.lines.size() - 1));
+        Cms.Line line = video.lines.get(safeLineIdx);
+        if (line == null || line.episodes == null || line.episodes.isEmpty()) {
+            panel.addView(a.text("当前线路暂无可播放剧集。", 15, MainActivity.MUTED));
+            return;
+        }
+        final String safeLineName = line.name == null ? "" : line.name;
+        final int safePage = EpisodeSelection.boundPage(page, line.episodes.size());
+        if (a.current != null)
+            a.current.selection.select(safeLineName, safePage, line.episodes.size());
         final boolean descending = a.prefs.getBoolean(Prefs.EPISODES_DESCENDING, false);
         WatchHistory.Entry currentBookmark = null;
         for (WatchHistory.Entry entry : a.watchHistory()) {
-            if (entry.site.equals(site.key) && entry.id.equals(video.id)) {
+            if (entry != null
+                    && site != null
+                    && Objects.equals(entry.site, site.key)
+                    && Objects.equals(entry.id, video.id)) {
                 currentBookmark = entry;
                 break;
             }
         }
         final String bookmarkedEpisode =
-                currentBookmark != null && line.name.equals(currentBookmark.line)
+                currentBookmark != null && safeLineName.equals(currentBookmark.line)
                         ? currentBookmark.episode
                         : "";
 
@@ -778,16 +789,16 @@ final class DetailScreen {
         panel.addView(sources, new LinearLayout.LayoutParams(-1, -2));
         for (int n = 0; n < video.lines.size(); n++) {
             final int index = n;
-            final boolean selected = n == lineIndex;
+            final boolean selected = n == safeLineIdx;
             final Cms.Line candidateLine = video.lines.get(n);
+            if (candidateLine == null) continue;
+            final String candName = candidateLine.name == null ? "" : candidateLine.name;
             final java.util.List<MediaBadges.Badge> lineBadges =
                     MediaBadgeView.extractForLineOnly(a, candidateLine, null);
             final String lineSpec =
                     MediaBadges.formatDotJoined(lineBadges, MediaBadgeView.LINE_PICKER_MAX_BADGES);
             final String lineBaseLabel =
-                    lineSpec.isEmpty()
-                            ? candidateLine.name
-                            : (candidateLine.name + " · " + lineSpec);
+                    lineSpec.isEmpty() ? candName : (candName + " · " + lineSpec);
             final Button choice =
                     a.button(
                             selected ? "● " + lineBaseLabel : lineBaseLabel,
@@ -799,12 +810,16 @@ final class DetailScreen {
                                     ((Button) play).setText("►  开始播放");
                                     play.setOnClickListener(
                                             v -> {
+                                                Cms.Line targetLine = video.lines.get(index);
+                                                if (targetLine == null
+                                                        || targetLine.episodes == null
+                                                        || targetLine.episodes.isEmpty()) return;
                                                 a.resumeAt = 0;
                                                 a.resolvePlayer(
                                                         site,
                                                         video,
-                                                        video.lines.get(index),
-                                                        video.lines.get(index).episodes.get(0));
+                                                        targetLine,
+                                                        targetLine.episodes.get(0));
                                             });
                                 }
                                 View epFile = a.root.findViewWithTag("detail-episode-file");
@@ -902,14 +917,14 @@ final class DetailScreen {
                         () -> {
                             boolean next = !descending;
                             a.prefs.edit().putBoolean(Prefs.EPISODES_DESCENDING, next).apply();
-                            renderEpisodes(a, site, video, lineIndex, 0, panel, "episodes-order");
+                            renderEpisodes(a, site, video, safeLineIdx, 0, panel, "episodes-order");
                         });
         order.setContentDescription("选集排序：" + (descending ? "倒序，点击改为正序" : "正序，点击改为倒序"));
         orderRow.addView(order);
         panel.addView(orderRow, new LinearLayout.LayoutParams(-1, -2));
 
         int totalEpisodes = line.episodes.size();
-        int start = page * 50, end = Math.min(start + 50, totalEpisodes);
+        int start = safePage * 50, end = Math.min(start + 50, totalEpisodes);
 
         // Apple TV segmented range pills when there are > 50 episodes
         if (totalEpisodes > 50) {
@@ -938,13 +953,13 @@ final class DetailScreen {
                                 a,
                                 segLabel,
                                 "episodes-range:" + p,
-                                p == page,
+                                p == safePage,
                                 () ->
                                         renderEpisodes(
                                                 a,
                                                 site,
                                                 video,
-                                                lineIndex,
+                                                safeLineIdx,
                                                 targetPage,
                                                 panel,
                                                 "episodes-range:" + targetPage));
@@ -953,7 +968,7 @@ final class DetailScreen {
                 pages.addView(seg, segLp);
             }
 
-            if (page > 0) {
+            if (safePage > 0) {
                 Button prevBtn =
                         makeCompactShelfAction(
                                 a,
@@ -962,7 +977,13 @@ final class DetailScreen {
                                 false,
                                 () ->
                                         renderEpisodes(
-                                                a, site, video, lineIndex, page - 1, panel, null));
+                                                a,
+                                                site,
+                                                video,
+                                                safeLineIdx,
+                                                safePage - 1,
+                                                panel,
+                                                null));
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, a.dp(34));
                 lp.leftMargin = a.dp(10);
                 pages.addView(prevBtn, lp);
@@ -976,7 +997,7 @@ final class DetailScreen {
                                 false,
                                 () -> {
                                     renderEpisodes(
-                                            a, site, video, lineIndex, page + 1, panel, null);
+                                            a, site, video, safeLineIdx, safePage + 1, panel, null);
                                     View first =
                                             panel.findViewWithTag(
                                                     "episode:"
@@ -1214,11 +1235,37 @@ final class DetailScreen {
         }
     }
 
-    static void populateTvRelatedSeasons(
+    static final class RelatedSeasons {
+        final int currentSeasonNumber;
+        final List<Integer> seasonNumbers;
+        final Map<Integer, Cms.Video> videosBySeason;
+        final Map<Integer, String> labelsBySeason;
+
+        RelatedSeasons(
+                int currentSeasonNumber,
+                List<Integer> seasonNumbers,
+                Map<Integer, Cms.Video> videosBySeason,
+                Map<Integer, String> labelsBySeason) {
+            this.currentSeasonNumber = currentSeasonNumber;
+            this.seasonNumbers = seasonNumbers;
+            this.videosBySeason = videosBySeason;
+            this.labelsBySeason = labelsBySeason;
+        }
+
+        int count() {
+            return seasonNumbers == null ? 0 : seasonNumbers.size();
+        }
+    }
+
+    static void discoverTvRelatedSeasons(
             final MainActivity a,
             final Cms.Site site,
             final Cms.Video currentVideo,
-            final LinearLayout seasonPanel) {
+            final View anchor,
+            final MainActivity.Done<RelatedSeasons> onFound) {
+        if (a == null || site == null || currentVideo == null || anchor == null || onFound == null)
+            return;
+        if (TvCuratedHome.isCuratedSite(site) || "cast".equals(site.key)) return;
         final MobileDetailScreen.SeasonMeta curMeta =
                 MobileDetailScreen.parseSeasonMeta(currentVideo.title);
         if (!curMeta.explicit) return;
@@ -1231,7 +1278,7 @@ final class DetailScreen {
                                 .trim();
         if (baseKey.isEmpty()) return;
         final int ticket = a.generation;
-        seasonPanel.postDelayed(
+        anchor.postDelayed(
                 () -> {
                     if (a.isFinishing() || a.isDestroyed() || ticket != a.generation) return;
                     a.submitPage(
@@ -1270,80 +1317,157 @@ final class DetailScreen {
                                         }
                                     }
                                     if (bySeason.size() < 2) return;
-                                    final List<Integer> seasonNums =
-                                            new ArrayList<>(bySeason.keySet());
+                                    final RelatedSeasons result =
+                                            new RelatedSeasons(
+                                                    curMeta.seasonNumber,
+                                                    new ArrayList<>(bySeason.keySet()),
+                                                    bySeason,
+                                                    labels);
                                     a.ui.post(
                                             () -> {
                                                 if (a.isFinishing()
                                                         || a.isDestroyed()
                                                         || ticket != a.generation) return;
-                                                seasonPanel.removeAllViews();
-                                                a.gap(seasonPanel, 10);
-                                                CategoryFlow flow = new CategoryFlow(a, () -> {});
-                                                flow.setTag("detail-season-buttons");
-                                                flow.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
-                                                seasonPanel.addView(
-                                                        flow,
-                                                        new LinearLayout.LayoutParams(-1, -2));
-                                                for (final Integer sNum : seasonNums) {
-                                                    final Cms.Video targetVid = bySeason.get(sNum);
-                                                    String sLabel = labels.get(sNum);
-                                                    boolean active =
-                                                            Objects.equals(
-                                                                            targetVid.id,
-                                                                            currentVideo.id)
-                                                                    || sNum == curMeta.seasonNumber;
-                                                    Button btn =
-                                                            a.button(
-                                                                    sLabel,
-                                                                    "detail-season:" + sNum,
-                                                                    () -> {
-                                                                        if (!Objects.equals(
-                                                                                targetVid.id,
-                                                                                currentVideo.id)) {
-                                                                            show(
-                                                                                    a, site,
-                                                                                    targetVid,
-                                                                                    null);
-                                                                        }
-                                                                    });
-                                                    btn.setSingleLine(true);
-                                                    btn.setMinWidth(0);
-                                                    btn.setMinimumWidth(0);
-                                                    btn.setMinHeight(a.dp(36));
-                                                    btn.setMinimumHeight(a.dp(36));
-                                                    btn.setPadding(
-                                                            a.dp(14), a.dp(6), a.dp(14), a.dp(6));
-                                                    if (active) {
-                                                        btn.setBackground(a.bg(0xff465c76, 10));
-                                                        btn.setPadding(
-                                                                a.dp(14), a.dp(6), a.dp(14),
-                                                                a.dp(6));
-                                                        btn.setOnFocusChangeListener(
-                                                                (v, f) -> {
-                                                                    FocusMotion.style(
-                                                                            a,
-                                                                            btn,
-                                                                            f,
-                                                                            0xff465c76,
-                                                                            MainActivity.WHITE,
-                                                                            10,
-                                                                            MainActivity.WHITE,
-                                                                            MainActivity.DARK,
-                                                                            true,
-                                                                            1.02f);
-                                                                    btn.setPadding(
-                                                                            a.dp(14), a.dp(6),
-                                                                            a.dp(14), a.dp(6));
-                                                                });
-                                                    }
-                                                    flow.addView(btn);
+                                                try {
+                                                    onFound.accept(result);
+                                                } catch (Throwable ignored) {
                                                 }
                                             });
-                                } catch (Exception ignored) {
+                                } catch (Throwable ignored) {
                                 }
                             });
                 },
                 450);
+    }
+
+    static void showTvSeasonsPopup(
+            final MainActivity a,
+            final Cms.Site site,
+            final Cms.Video currentVideo,
+            final RelatedSeasons seasons,
+            final boolean fromPlayback) {
+        if (a == null
+                || site == null
+                || currentVideo == null
+                || seasons == null
+                || seasons.count() < 2) {
+            return;
+        }
+        String[] items = new String[seasons.seasonNumbers.size()];
+        for (int i = 0; i < seasons.seasonNumbers.size(); i++) {
+            Integer sNum = seasons.seasonNumbers.get(i);
+            Cms.Video target = seasons.videosBySeason.get(sNum);
+            String label = seasons.labelsBySeason.get(sNum);
+            boolean active =
+                    (target != null && Objects.equals(target.id, currentVideo.id))
+                            || (sNum != null && sNum == seasons.currentSeasonNumber);
+            items[i] = active ? ("● " + label + "（当前）") : label;
+        }
+        new AppDialog.Builder(a)
+                .wrapChoices()
+                .setTitle("选择季数")
+                .setItems(
+                        items,
+                        (dialog, which) -> {
+                            if (which < 0 || which >= seasons.seasonNumbers.size()) return;
+                            Integer sNum = seasons.seasonNumbers.get(which);
+                            Cms.Video targetVid = seasons.videosBySeason.get(sNum);
+                            if (targetVid == null
+                                    || Objects.equals(targetVid.id, currentVideo.id)) {
+                                return;
+                            }
+                            if (fromPlayback) {
+                                PlaybackController.releasePlayer(a);
+                                if (a.current != null && a.current.player && !a.back.isEmpty()) {
+                                    a.current = a.back.pop();
+                                }
+                                a.open(
+                                        new MainActivity.Screen(
+                                                () -> a.detail(site, targetVid, null)),
+                                        false);
+                            } else {
+                                show(a, site, targetVid, null);
+                            }
+                        })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    static void populateTvRelatedSeasons(
+            final MainActivity a,
+            final Cms.Site site,
+            final Cms.Video currentVideo,
+            final LinearLayout seasonPanel) {
+        populateTvRelatedSeasons(a, site, currentVideo, seasonPanel, null);
+    }
+
+    static void populateTvRelatedSeasons(
+            final MainActivity a,
+            final Cms.Site site,
+            final Cms.Video currentVideo,
+            final LinearLayout seasonPanel,
+            final MainActivity.Done<Integer> onSeasonCount) {
+        if (seasonPanel == null) return;
+        discoverTvRelatedSeasons(
+                a,
+                site,
+                currentVideo,
+                seasonPanel,
+                seasons -> {
+                    seasonPanel.removeAllViews();
+                    a.gap(seasonPanel, 10);
+                    CategoryFlow flow = new CategoryFlow(a, () -> {});
+                    flow.setTag("detail-season-buttons");
+                    flow.setPadding(a.dp(4), a.dp(4), a.dp(4), a.dp(4));
+                    seasonPanel.addView(flow, new LinearLayout.LayoutParams(-1, -2));
+                    for (final Integer sNum : seasons.seasonNumbers) {
+                        final Cms.Video targetVid = seasons.videosBySeason.get(sNum);
+                        String sLabel = seasons.labelsBySeason.get(sNum);
+                        boolean active =
+                                Objects.equals(targetVid.id, currentVideo.id)
+                                        || sNum == seasons.currentSeasonNumber;
+                        Button btn =
+                                a.button(
+                                        sLabel,
+                                        "detail-season:" + sNum,
+                                        () -> {
+                                            if (!Objects.equals(targetVid.id, currentVideo.id)) {
+                                                show(a, site, targetVid, null);
+                                            }
+                                        });
+                        btn.setSingleLine(true);
+                        btn.setMinWidth(0);
+                        btn.setMinimumWidth(0);
+                        btn.setMinHeight(a.dp(36));
+                        btn.setMinimumHeight(a.dp(36));
+                        btn.setPadding(a.dp(14), a.dp(6), a.dp(14), a.dp(6));
+                        if (active) {
+                            btn.setBackground(a.bg(0xff465c76, 10));
+                            btn.setPadding(a.dp(14), a.dp(6), a.dp(14), a.dp(6));
+                            btn.setOnFocusChangeListener(
+                                    (v, f) -> {
+                                        FocusMotion.style(
+                                                a,
+                                                btn,
+                                                f,
+                                                0xff465c76,
+                                                MainActivity.WHITE,
+                                                10,
+                                                MainActivity.WHITE,
+                                                MainActivity.DARK,
+                                                true,
+                                                1.02f);
+                                        btn.setPadding(a.dp(14), a.dp(6), a.dp(14), a.dp(6));
+                                    });
+                        }
+                        flow.addView(btn);
+                    }
+                    if (onSeasonCount != null) {
+                        try {
+                            onSeasonCount.accept(seasons.count());
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                });
     }
 }

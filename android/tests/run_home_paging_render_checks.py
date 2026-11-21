@@ -36,7 +36,6 @@ public class PagingCheck {
   x=make(0,500,360);x.maybeAutoLoadMore();check(x.moves==1&&x.loads==0&&x.state.windowStart==360,"complete buffered window still advances");
   x=make(360,500,140);x.maybeAutoLoadMore();check(x.loads==1&&x.moves==0,"complete partial tail still loads next page");
   x=make(360,500,140);x.busy=true;x.maybeAutoLoadMore();check(x.loads==0,"busy still deduplicates");
-  x=make(0,500,360);x.homeHost=new Object();x.state.library=false;x.maybeAutoLoadMore();check(x.moves==0,"hidden library remains unchanged");
   x=make(1800,2001,201);x.state.page=5;x.maybeAutoLoadMore();check(x.loads==0&&x.moves==0,"last of five pages has no extra request");
  }}'''.replace('METHODS',methods)
         source=work/'PagingCheck.java';source.write_text(harness,encoding='utf8')

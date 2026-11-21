@@ -447,6 +447,8 @@ final class PlaybackController {
                                                 JSONObject unused =
                                                         resolved.media.optJSONObject("embySession");
                                                 if (unused != null
+                                                        && s != null
+                                                        && s.api != null
                                                         && s.api.startsWith(
                                                                 com.pilipala.emby.EmbyLibrary
                                                                         .PREFIX))
@@ -1004,7 +1006,10 @@ final class PlaybackController {
         releasePlayer(a);
         a.embyReporter = retained;
         a.playingBookmark = null;
-        if (s.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX) && embySession != null) {
+        if (s != null
+                && s.api != null
+                && s.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)
+                && embySession != null) {
             try {
                 if (a.embyReporter == null)
                     a.embyReporter =
@@ -1771,6 +1776,8 @@ final class PlaybackController {
         if (a.player == null || !a.prepared) return;
         if (a.embyReporter == null
                 && a.playbackControls != null
+                && a.playbackControls.site != null
+                && a.playbackControls.site.api != null
                 && a.playbackControls.site.api.startsWith(com.pilipala.emby.EmbyLibrary.PREFIX)) {
             a.resumeAt = -1;
             resolvePlayer(

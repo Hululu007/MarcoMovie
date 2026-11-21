@@ -10,10 +10,7 @@ final class GlassSelection {
     final float cornerDp;
     final boolean subtle;
     final boolean navigationLens;
-    final MotionSpring left = new MotionSpring(0, 38, .25f),
-            top = new MotionSpring(0, 38, .25f),
-            right = new MotionSpring(0, 38, .25f),
-            bottom = new MotionSpring(0, 38, .25f);
+    final MotionSpring left, top, right, bottom;
     final RectF bounds = new RectF(), drawing = new RectF();
     final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     final Matrix shaderMatrix = new Matrix();
@@ -42,6 +39,12 @@ final class GlassSelection {
         this.cornerDp = cornerDp;
         this.subtle = subtle;
         this.navigationLens = navigationLens;
+        float speed = (a != null && a.isTvDevice()) ? 30f : 38f;
+        float settle = (a != null && a.isTvDevice()) ? 0.35f : 0.25f;
+        left = new MotionSpring(0, speed, settle);
+        top = new MotionSpring(0, speed, settle);
+        right = new MotionSpring(0, speed, settle);
+        bottom = new MotionSpring(0, speed, settle);
         fillShader =
                 subtle
                         ? new LinearGradient(
@@ -96,6 +99,11 @@ final class GlassSelection {
 
     void select(View view) {
         target = view;
+        refresh();
+    }
+
+    void snapToTarget() {
+        positioned = false;
         refresh();
     }
 
@@ -154,6 +162,13 @@ final class GlassSelection {
             float stretchX = Math.min(a.dp(7), Math.abs(left.velocity + right.velocity) * .00065f);
             float stretchY = Math.min(a.dp(4), Math.abs(top.velocity + bottom.velocity) * .00065f);
             drawing.inset(-stretchX, -stretchY);
+        } else if (a.isTvDevice()) {
+            // Subtle kinetic stretch keeps horizontal/vertical TV nav glides crisp and responsive.
+            float stretchX =
+                    Math.min(a.dp(2.5f), Math.abs(left.velocity + right.velocity) * .00028f);
+            float stretchY =
+                    Math.min(a.dp(2.0f), Math.abs(top.velocity + bottom.velocity) * .00028f);
+            drawing.inset(-stretchX, -stretchY);
         }
         float maxRadius = Math.min(drawing.width(), drawing.height()) * .5f;
         float radius = cornerDp > 0 ? Math.min(a.dp(cornerDp), maxRadius) : maxRadius;
@@ -166,6 +181,27 @@ final class GlassSelection {
             paint.setStyle(Paint.Style.STROKE);
             paint.setStrokeWidth(Math.max(1, a.dp(1.25f)));
             paint.setColor(0xffd5e4f5);
+            canvas.drawRoundRect(drawing, radius, radius, paint);
+            return;
+        }
+        // On Android TV, render a single crisp translucent glass plate without per-frame
+        // LinearGradient matrix shader uploads so nav bar & tab glides stay locked at 60fps.
+        if (a.isTvDevice()) {
+            boolean activeFocus = owner.hasFocus();
+            paint.setShader(null);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(
+                    navigationLens
+                            ? (activeFocus ? 0x56eef6ff : 0x24e8f2ff)
+                            : (activeFocus ? 0x38ffffff : 0x24ffffff));
+            canvas.drawRoundRect(drawing, radius, radius, paint);
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(
+                    Math.max(1, a.dp(navigationLens ? (activeFocus ? 1.6f : 1.0f) : 1.0f)));
+            paint.setColor(
+                    navigationLens
+                            ? (activeFocus ? 0xf2f5faff : 0x5ce8f2ff)
+                            : (activeFocus ? 0xa0ffffff : 0x54ffffff));
             canvas.drawRoundRect(drawing, radius, radius, paint);
             return;
         }

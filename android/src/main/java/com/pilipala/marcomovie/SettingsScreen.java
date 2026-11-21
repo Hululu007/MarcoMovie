@@ -53,13 +53,54 @@ final class SettingsScreen {
     }
 
     /** Apple tvOS-style split-view settings shell. Right pane hosts grouped focus-lifted cards. */
-    private View tvActiveCategoryButton;
+    static final int TV_CAT_APPEARANCE = 0;
 
+    static final int TV_CAT_PLAYBACK = 1;
+    static final int TV_CAT_CONTENT = 2;
+    static final int TV_CAT_BACKUP = 3;
+    static final int TV_CAT_UPDATES = 4;
+    static final int TV_CAT_COUNT = 5;
+    private static android.view.animation.DecelerateInterpolator tvDecelCache;
+
+    private static android.view.animation.DecelerateInterpolator tvDecel() {
+        if (tvDecelCache == null) {
+            tvDecelCache = new android.view.animation.DecelerateInterpolator();
+        }
+        return tvDecelCache;
+    }
+
+    static int resolveTvCategoryIndex(String title) {
+        if (title == null) return TV_CAT_APPEARANCE;
+        if (title.equals("播放与字幕") || title.equals("解码组件")) return TV_CAT_PLAYBACK;
+        if (title.equals("内容与连接") || title.equals("片源与直播")) return TV_CAT_CONTENT;
+        if (title.equals("数据与备份") || title.equals("运行日志")) return TV_CAT_BACKUP;
+        if (title.equals("软件更新")) return TV_CAT_UPDATES;
+        return TV_CAT_APPEARANCE;
+    }
+
+    private View tvActiveCategoryButton;
     private View tvFirstRightControl;
+    private FrameLayout tvRightHost;
+    private TvScrollView tvActiveScroll;
+    private int tvSelectedCategory = TV_CAT_APPEARANCE;
+    private int tvBuildingCategory = -1;
+    private final TvScrollView[] tvCategoryScrolls = new TvScrollView[TV_CAT_COUNT];
+    private final LinearLayout[] tvCategoryPanes = new LinearLayout[TV_CAT_COUNT];
+    private final View[] tvCategoryFirstControls = new View[TV_CAT_COUNT];
+    private final java.util.List<Runnable> tvCategoryRefreshers = new java.util.ArrayList<>();
+    private final android.util.SparseArray<View> tvCategoryViews = new android.util.SparseArray<>();
 
     void tvPage(String title, String note) {
         tvActiveCategoryButton = null;
         tvFirstRightControl = null;
+        tvActiveScroll = null;
+        tvBuildingCategory = -1;
+        java.util.Arrays.fill(tvCategoryScrolls, null);
+        java.util.Arrays.fill(tvCategoryPanes, null);
+        java.util.Arrays.fill(tvCategoryFirstControls, null);
+        tvCategoryRefreshers.clear();
+        tvCategoryViews.clear();
+        tvSelectedCategory = resolveTvCategoryIndex(title);
 
         // Replace outer page scroll with a fixed full-screen Apple tvOS split container so the
         // left primary navigation pane stays pinned while the right settings pane scrolls cleanly.
@@ -92,7 +133,8 @@ final class SettingsScreen {
         columns.setClipToPadding(false);
         shell.addView(columns, new LinearLayout.LayoutParams(-1, 0, 1f));
 
-        // Left Fixed Primary Sidebar (never scrolls when navigating right settings list)
+        // Left Fixed Primary Sidebar: each category switches atomically to an Apple tvOS white
+        // pill with instant zero-lag focus handoff (no sliding box, no two-stage dimming).
         LinearLayout navigation = a.vertical();
         navigation.setClipChildren(false);
         navigation.setClipToPadding(false);
@@ -101,33 +143,19 @@ final class SettingsScreen {
         navSize.rightMargin = a.dp(52);
         columns.addView(navigation, navSize);
 
-        // Right Independent Scrollable Content Pane
-        TvScrollView rightScroll = new TvScrollView(a);
-        rightScroll.readingMode = true;
-        rightScroll.setFillViewport(true);
-        rightScroll.setVerticalScrollBarEnabled(false);
-        rightScroll.setClipChildren(false);
-        rightScroll.setClipToPadding(false);
-        a.scroll = rightScroll;
+        // Right Host FrameLayout holds one independent HWUI-cached TvScrollView per category so
+        // switching primary categories flips RenderNode alpha in <0.5ms with zero View.GONE
+        // DisplayList destruction or layout thrashing.
+        tvRightHost = new FrameLayout(a);
+        tvRightHost.setClipChildren(false);
+        tvRightHost.setClipToPadding(false);
+        columns.addView(tvRightHost, new LinearLayout.LayoutParams(0, -1, 1f));
 
-        LinearLayout content = a.vertical();
-        content.setClipChildren(false);
-        content.setClipToPadding(false);
-        content.setPadding(a.dp(8), a.dp(4), a.dp(16), a.dp(56));
-        rightScroll.addView(content, new ScrollView.LayoutParams(-1, -2));
-        columns.addView(rightScroll, new LinearLayout.LayoutParams(0, -1, 1f));
-
-        boolean isAppearance =
-                title.equals("首页与壁纸") || title.equals("首页壁纸") || title.equals("外观与壁纸");
-        boolean isPlayback = title.equals("播放与字幕") || title.equals("解码组件");
-        boolean isContent = title.equals("内容与连接") || title.equals("片源与直播");
-        boolean isBackup = title.equals("数据与备份");
-
-        tvCategory(navigation, "外观与壁纸", "settings-appearance", this::appearance, isAppearance);
-        tvCategory(navigation, "播放与字幕", "settings-playback", this::playback, isPlayback);
-        tvCategory(navigation, "片源与直播", "settings-content", this::content, isContent);
-        tvCategory(navigation, "数据与备份", "settings-backup-page", this::backup, isBackup);
-        tvCategory(navigation, "软件更新", "settings-updates", () -> new UpdateScreen(a).show(), false);
+        tvCategory(navigation, TV_CAT_APPEARANCE, "外观与壁纸", "settings-appearance");
+        tvCategory(navigation, TV_CAT_PLAYBACK, "播放与字幕", "settings-playback");
+        tvCategory(navigation, TV_CAT_CONTENT, "片源与直播", "settings-content");
+        tvCategory(navigation, TV_CAT_BACKUP, "数据与备份", "settings-backup-page");
+        tvCategory(navigation, TV_CAT_UPDATES, "软件更新", "settings-updates");
 
         View navSpacer = new View(a);
         navigation.addView(navSpacer, new LinearLayout.LayoutParams(1, 0, 1f));
@@ -139,16 +167,158 @@ final class SettingsScreen {
                 a.text("Marco Movie  " + UpdateManager.installedVersion(a), 13, 0xd8f5f5f7);
         brandTitle.setTypeface(null, Typeface.BOLD);
         brandFoot.addView(brandTitle);
-        TextView hint = a.text("←→ 切换区域 · OK 确认 · 返回退出", 11.5f, 0x99ebebf5);
+        TextView hint = a.text("↑↓ 即时切换 · → 进入右侧 · 返回退出", 11.5f, 0x99ebebf5);
         hint.setPadding(0, a.dp(5), 0, 0);
         brandFoot.addView(hint);
         navigation.addView(brandFoot, new LinearLayout.LayoutParams(-1, -2));
 
-        a.body = content;
+        TvScrollView initialScroll = createTvRightScroll();
+        LinearLayout initialPane = createTvCategoryPane();
+        initialScroll.addView(initialPane, new ScrollView.LayoutParams(-1, -2));
+        tvRightHost.addView(initialScroll, new FrameLayout.LayoutParams(-1, -1));
+        tvActiveScroll = initialScroll;
+        a.scroll = initialScroll;
+        a.body = initialPane;
+        boolean isDecoders = "解码组件".equals(title);
+        if (!isDecoders && tvSelectedCategory >= 0 && tvSelectedCategory < TV_CAT_COUNT) {
+            tvCategoryScrolls[tvSelectedCategory] = initialScroll;
+            tvCategoryPanes[tvSelectedCategory] = initialPane;
+        }
+        renderTvRightHeader(initialPane, title, note);
+        if (!isDecoders) {
+            scheduleTvCategoryPrewarm();
+        }
+        if (tvActiveCategoryButton != null
+                && (a.current == null || a.current.focus == null || a.current.focus.isEmpty())) {
+            final View initialCat = tvActiveCategoryButton;
+            a.ui.post(
+                    () -> {
+                        if (initialCat.isAttachedToWindow()
+                                && (a.current == null
+                                        || a.current.focus == null
+                                        || a.current.focus.isEmpty())) {
+                            initialCat.requestFocus();
+                        }
+                    });
+        }
+    }
+
+    private TvScrollView createTvRightScroll() {
+        TvScrollView scroller = new TvScrollView(a);
+        scroller.readingMode = true;
+        scroller.setFocusFrameEnabled(false);
+        scroller.setFillViewport(true);
+        scroller.setVerticalScrollBarEnabled(false);
+        scroller.setClipChildren(false);
+        scroller.setClipToPadding(false);
+        return scroller;
+    }
+
+    private LinearLayout createTvCategoryPane() {
+        LinearLayout pane = a.vertical();
+        pane.setClipChildren(false);
+        pane.setClipToPadding(false);
+        pane.setPadding(a.dp(8), a.dp(4), a.dp(16), a.dp(56));
+        return pane;
+    }
+
+    private void scheduleTvCategoryPrewarm() {
+        if (tvRightHost == null || a.isFinishing()) return;
+        final int ticket = a.generation;
+        final FrameLayout host = tvRightHost;
+        host.post(
+                () -> {
+                    if (a.isFinishing() || a.generation != ticket || !host.isAttachedToWindow()) {
+                        return;
+                    }
+                    final int[] nextCat = new int[] {0};
+                    android.os.Looper.myQueue()
+                            .addIdleHandler(
+                                    () -> {
+                                        if (a.isFinishing()
+                                                || a.generation != ticket
+                                                || !host.isAttachedToWindow()) {
+                                            return false;
+                                        }
+                                        while (nextCat[0] < TV_CAT_COUNT
+                                                && tvCategoryScrolls[nextCat[0]] != null) {
+                                            nextCat[0]++;
+                                        }
+                                        if (nextCat[0] >= TV_CAT_COUNT) return false;
+                                        int target = nextCat[0]++;
+                                        ensureTvCategoryScroll(target, false);
+                                        return nextCat[0] < TV_CAT_COUNT;
+                                    });
+                });
+    }
+
+    private TvScrollView ensureTvCategoryScroll(final int catIndex, boolean active) {
+        TvScrollView existing = tvCategoryScrolls[catIndex];
+        if (existing != null) return existing;
+        LinearLayout prevBody = a.body;
+        int prevBuilding = tvBuildingCategory;
+        tvBuildingCategory = catIndex;
+        TvScrollView scroller = createTvRightScroll();
+        LinearLayout pane = createTvCategoryPane();
+        scroller.addView(pane, new ScrollView.LayoutParams(-1, -2));
+        tvCategoryScrolls[catIndex] = scroller;
+        tvCategoryPanes[catIndex] = pane;
+        tvCategoryFirstControls[catIndex] = null;
+        a.body = pane;
+        try {
+            switch (catIndex) {
+                case TV_CAT_PLAYBACK:
+                    renderTvRightHeader(pane, "播放与字幕", "作为之后播放的默认设置；播放界面中仍可随时调整。");
+                    playbackRows();
+                    break;
+                case TV_CAT_CONTENT:
+                    renderTvRightHeader(pane, "片源与直播", "搜索默认识别首拼和全拼，并检索配置中全部可搜索来源。");
+                    contentRows();
+                    break;
+                case TV_CAT_BACKUP:
+                    renderTvRightHeader(pane, "数据与备份", "管理同步、备份和本机记录。");
+                    backupRows();
+                    break;
+                case TV_CAT_UPDATES:
+                    renderTvRightHeader(pane, "软件更新", "镜像站优先加速检查与下载，安装前自动校验 SHA-256 与应用签名。");
+                    tvUpdateInlineRows();
+                    break;
+                default:
+                    renderTvRightHeader(pane, "外观与壁纸", "界面按屏幕分辨率自动适配，支持首页封面自适应柔光、自定义柔光渐变与扫码上传壁纸。");
+                    appearanceRows();
+                    break;
+            }
+        } finally {
+            tvBuildingCategory = prevBuilding;
+            a.body = active ? pane : prevBody;
+        }
+        if (active) {
+            scroller.setFocusable(true);
+            scroller.setAlpha(1f);
+            scroller.setDescendantFocusability(android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS);
+            tvRightHost.addView(scroller, new FrameLayout.LayoutParams(-1, -1));
+        } else {
+            // Prime HWUI RenderNode DisplayLists at an imperceptible alpha (0.002 < 1/255) for one
+            // idle frame, then park at alpha=0 so the very first category visit draws in <1ms.
+            scroller.setFocusable(false);
+            scroller.setDescendantFocusability(android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+            scroller.setAlpha(0.002f);
+            tvRightHost.addView(scroller, 0, new FrameLayout.LayoutParams(-1, -1));
+            scroller.postOnAnimation(
+                    () -> {
+                        if (scroller.isAttachedToWindow() && tvSelectedCategory != catIndex) {
+                            scroller.setAlpha(0f);
+                        }
+                    });
+        }
+        return scroller;
+    }
+
+    private void renderTvRightHeader(LinearLayout content, String title, String note) {
         TextView section = a.text(title, 26, TvV17Theme.TEXT);
         section.setTypeface(null, Typeface.BOLD);
         content.addView(section);
-        if (!note.isEmpty()) {
+        if (note != null && !note.isEmpty()) {
             TextView noteView = a.text(note, 13.5f, 0xa8ebebf5);
             noteView.setLineSpacing(a.dp(2), 1.12f);
             noteView.setPadding(0, a.dp(8), 0, a.dp(22));
@@ -158,23 +328,89 @@ final class SettingsScreen {
         }
     }
 
-    private void registerTvRightControl(View control) {
-        if (!a.isTvDevice() || control == null) return;
-        if (control.getId() == View.NO_ID) control.setId(View.generateViewId());
-        if (tvActiveCategoryButton != null) {
-            control.setNextFocusLeftId(tvActiveCategoryButton.getId());
-        }
-        if (tvFirstRightControl == null) {
-            tvFirstRightControl = control;
-            if (tvActiveCategoryButton != null) {
-                tvActiveCategoryButton.setNextFocusRightId(control.getId());
-            }
+    private void updateTvCategoryRenderBinding(int catIndex) {
+        if (a.current == null) return;
+        switch (catIndex) {
+            case TV_CAT_PLAYBACK:
+                a.current.render = () -> new SettingsScreen(a).playback();
+                break;
+            case TV_CAT_CONTENT:
+                a.current.render = () -> new SettingsScreen(a).content();
+                break;
+            case TV_CAT_BACKUP:
+                a.current.render = () -> new SettingsScreen(a).backup();
+                break;
+            case TV_CAT_UPDATES:
+                a.current.render = () -> new SettingsScreen(a).updatesCategory();
+                break;
+            default:
+                a.current.render = () -> new SettingsScreen(a).appearance();
+                break;
         }
     }
 
-    void tvCategory(
-            LinearLayout parent, String title, String tag, Runnable destination, boolean selected) {
-        LinearLayout row = a.row();
+    private void switchTvCategoryInPlace(int catIndex, boolean moveFocusToRight) {
+        if (tvRightHost == null || a.isFinishing()) return;
+        if (catIndex < 0 || catIndex >= TV_CAT_COUNT) catIndex = TV_CAT_APPEARANCE;
+        TvScrollView targetScroll = ensureTvCategoryScroll(catIndex, true);
+        boolean changed = (catIndex != tvSelectedCategory) || tvActiveScroll != targetScroll;
+        if (changed) {
+            if (tvActiveScroll != null && tvActiveScroll != targetScroll) {
+                tvActiveScroll.cancelMotion();
+                tvActiveScroll.setAlpha(0f);
+                tvActiveScroll.setFocusable(false);
+                tvActiveScroll.setDescendantFocusability(
+                        android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+            }
+            tvSelectedCategory = catIndex;
+            tvActiveCategoryButton = tvCategoryViews.get(catIndex);
+            tvActiveScroll = targetScroll;
+            a.scroll = targetScroll;
+            a.body = tvCategoryPanes[catIndex];
+            if (targetScroll.getScrollY() != 0) targetScroll.scrollTo(0, 0);
+            targetScroll.setFocusable(true);
+            targetScroll.setDescendantFocusability(android.view.ViewGroup.FOCUS_AFTER_DESCENDANTS);
+            targetScroll.setAlpha(1f);
+
+            tvFirstRightControl = tvCategoryFirstControls[catIndex];
+            if (tvActiveCategoryButton != null && tvFirstRightControl != null) {
+                tvActiveCategoryButton.setNextFocusRightId(tvFirstRightControl.getId());
+            }
+            for (Runnable r : tvCategoryRefreshers) r.run();
+            updateTvCategoryRenderBinding(catIndex);
+        }
+        if (moveFocusToRight && tvFirstRightControl != null) {
+            tvFirstRightControl.requestFocus();
+        }
+    }
+
+    private void registerTvRightControl(View control) {
+        if (!a.isTvDevice() || control == null) return;
+        if (control.getId() == View.NO_ID) control.setId(View.generateViewId());
+        int targetCat = tvBuildingCategory >= 0 ? tvBuildingCategory : tvSelectedCategory;
+        View catBtn =
+                (targetCat >= 0 && targetCat < TV_CAT_COUNT)
+                        ? tvCategoryViews.get(targetCat)
+                        : tvActiveCategoryButton;
+        if (catBtn != null) {
+            control.setNextFocusLeftId(catBtn.getId());
+        }
+        if (targetCat >= 0 && targetCat < TV_CAT_COUNT) {
+            if (tvCategoryFirstControls[targetCat] == null) {
+                tvCategoryFirstControls[targetCat] = control;
+                if (catBtn != null) catBtn.setNextFocusRightId(control.getId());
+                if (targetCat == tvSelectedCategory) {
+                    tvFirstRightControl = control;
+                }
+            }
+        } else if (tvFirstRightControl == null) {
+            tvFirstRightControl = control;
+            if (catBtn != null) catBtn.setNextFocusRightId(control.getId());
+        }
+    }
+
+    void tvCategory(LinearLayout parent, final int catIndex, String title, String tag) {
+        final LinearLayout row = a.row();
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(a.dp(14), a.dp(11), a.dp(16), a.dp(11));
         row.setTag(tag);
@@ -191,50 +427,133 @@ final class SettingsScreen {
         iconLp.rightMargin = a.dp(12);
         row.addView(icon, iconLp);
 
-        final TextView label = a.text(title, 15.5f, selected ? MainActivity.WHITE : 0xd0f2f4f5);
-        label.setTypeface(null, selected ? Typeface.BOLD : Typeface.NORMAL);
+        final TextView label = a.text(title, 15.5f, MainActivity.WHITE);
+        label.setTypeface(null, Typeface.BOLD);
         label.setSingleLine(true);
         row.addView(label, new LinearLayout.LayoutParams(0, -2, 1f));
 
-        final int restingBg =
-                selected
-                        ? 0x36ffffff
-                        : (a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
-                                ? 0xee1c212b
-                                : 0x661a1f29);
-        final int restingStroke = selected ? 0x55ffffff : 0x1affffff;
-        Runnable applyResting =
+        final boolean reducedTrans = a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        final android.graphics.drawable.Drawable focusedBg =
+                TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(1));
+        final android.graphics.drawable.Drawable activeBg =
+                TvV17Surface.rounded(0x36ffffff, a.dp(14), 0x55ffffff, a.dp(1));
+        final android.graphics.drawable.Drawable idleBg =
+                TvV17Surface.rounded(
+                        reducedTrans ? 0xee1c212b : 0x661a1f29, a.dp(14), 0x1affffff, a.dp(1));
+        final Runnable applyVisual =
                 () -> {
-                    row.setBackground(
-                            TvV17Surface.rounded(restingBg, a.dp(14), restingStroke, a.dp(1)));
-                    label.setTextColor(selected ? MainActivity.WHITE : 0xd4f2f4f5);
-                    row.setElevation(0);
-                    row.animate().scaleX(1f).scaleY(1f).setDuration(a.reduced ? 0 : 120).start();
+                    boolean active = (catIndex == tvSelectedCategory);
+                    boolean focused = row.hasFocus();
+                    if (focused) {
+                        if (row.getBackground() != focusedBg) row.setBackground(focusedBg);
+                        if (label.getCurrentTextColor() != 0xff101013) {
+                            label.setTextColor(0xff101013);
+                        }
+                    } else {
+                        android.graphics.drawable.Drawable targetBg = active ? activeBg : idleBg;
+                        if (row.getBackground() != targetBg) row.setBackground(targetBg);
+                        int textColor = active ? MainActivity.WHITE : 0xc8e4ebf5;
+                        if (label.getCurrentTextColor() != textColor) {
+                            label.setTextColor(textColor);
+                        }
+                    }
                 };
-        applyResting.run();
+        tvCategoryRefreshers.add(applyVisual);
+        tvCategoryViews.put(catIndex, row);
+        applyVisual.run();
         row.setOnFocusChangeListener(
                 (v, focused) -> {
-                    FocusMotion.unclipAncestors(row);
+                    row.animate().cancel();
                     if (focused) {
-                        row.setBackground(
-                                TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(1)));
-                        label.setTextColor(0xff101013);
-                        row.setElevation(a.dp(8));
-                        float scale = a.reduced ? 1f : 1.03f;
-                        row.animate()
-                                .scaleX(scale)
-                                .scaleY(scale)
-                                .setDuration(a.reduced ? 0 : 130)
-                                .start();
+                        if (catIndex != tvSelectedCategory) {
+                            switchTvCategoryInPlace(catIndex, false);
+                        }
+                        applyVisual.run();
+                        float scale = a.reduced ? 1f : 1.028f;
+                        if (a.reduced) {
+                            row.setScaleX(1f);
+                            row.setScaleY(1f);
+                        } else {
+                            row.animate()
+                                    .scaleX(scale)
+                                    .scaleY(scale)
+                                    .setDuration(70)
+                                    .setInterpolator(tvDecel())
+                                    .start();
+                        }
                     } else {
-                        applyResting.run();
+                        // Snap scale immediately on blur so the previous row never lingers halfway
+                        // down while the newly focused row is already bright white.
+                        row.setScaleX(1f);
+                        row.setScaleY(1f);
+                        applyVisual.run();
                     }
                 });
-        row.setOnClickListener(v -> a.open(new MainActivity.Screen(destination), false));
+        row.setOnClickListener(v -> switchTvCategoryInPlace(catIndex, true));
         LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(-1, a.dp(58));
         size.bottomMargin = a.dp(12);
         parent.addView(row, size);
-        if (selected) tvActiveCategoryButton = row;
+        if (catIndex == tvSelectedCategory) tvActiveCategoryButton = row;
+    }
+
+    void updatesCategory() {
+        page("软件更新", "镜像站优先加速检查与下载，安装前自动校验 SHA-256 与应用签名。");
+        tvUpdateInlineRows();
+    }
+
+    private void tvUpdateInlineRows() {
+        final UpdateManager updates = UpdateManager.get(a);
+        String installed = UpdateManager.installedVersion(a);
+        UpdateManager.Release rel = updates.available;
+        String statusDetail =
+                updates.busy
+                        ? (updates.message
+                                + (updates.percent >= 0 ? " · " + updates.percent + "%" : ""))
+                        : (rel != null
+                                ? ("发现新版 " + rel.version + " · " + updates.message)
+                                : ("当前版本 " + installed + " · " + updates.message));
+        link(
+                rel != null
+                        ? (updates.ready() ? "立即安装新版 " + rel.version : "下载并更新至 " + rel.version)
+                        : "检查软件更新",
+                statusDetail,
+                "settings-update-action",
+                () -> {
+                    if (updates.busy) {
+                        updates.cancel();
+                        a.refresh();
+                    } else if (updates.ready() || rel != null) {
+                        open(() -> new UpdateScreen(a).show());
+                    } else {
+                        updates.check(true);
+                        a.toast("正在检查新版…");
+                        open(() -> new UpdateScreen(a).show());
+                    }
+                });
+        link(
+                "自动更新策略",
+                UpdateScreen.modeName(updates.mode()),
+                "settings-update-mode",
+                () -> {
+                    String[] modes = {"notify", "download", "off"};
+                    new AppDialog.Builder(a)
+                            .setTitle("更新方式")
+                            .setMessage("自动检查至少间隔六小时，仅在应用首页运行时发起。播放过程中不弹出更新窗口；安装始终由你确认。")
+                            .setSingleChoiceItems(
+                                    new String[] {"自动检查并提醒", "自动下载后提醒", "仅手动检查"},
+                                    java.util.Arrays.asList(modes).indexOf(updates.mode()),
+                                    (d, n) -> {
+                                        updates.setMode(modes[n]);
+                                        a.refresh();
+                                    })
+                            .setNegativeButton("返回", null)
+                            .show();
+                });
+        link(
+                "打开完整软件更新中心",
+                "查看版本更新说明、下载进度与安装包校验",
+                "settings-update-full",
+                () -> open(() -> new UpdateScreen(a).show()));
     }
 
     void link(String title, String detail, String key, Runnable action) {
@@ -286,10 +605,13 @@ final class SettingsScreen {
                 tv && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
                         ? 0xee1c212b
                         : 0xbf1a1f29;
-        row.setBackground(
+        final android.graphics.drawable.Drawable restingBg =
                 tv
                         ? TvV17Surface.rounded(surface, a.dp(14), 0x22ffffff, a.dp(1))
-                        : a.bg(0xff222226, 14));
+                        : a.bg(0xff222226, 14);
+        final android.graphics.drawable.Drawable focusedBg =
+                tv ? TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(1)) : null;
+        row.setBackground(restingBg);
         row.setOnFocusChangeListener(
                 (v, f) -> {
                     if (!tv) {
@@ -306,34 +628,33 @@ final class SettingsScreen {
                                 1.008f);
                         return;
                     }
-                    FocusMotion.unclipAncestors(row);
+                    row.animate().cancel();
                     if (f) {
-                        row.setBackground(
-                                TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(1)));
+                        if (row.getBackground() != focusedBg) row.setBackground(focusedBg);
                         titleView.setTextColor(0xff101013);
                         if (caption != null) caption.setTextColor(0xff48484a);
                         if (rightValue != null) rightValue.setTextColor(0xff3a3a3c);
                         chevron.setTextColor(0xff636366);
-                        row.setElevation(a.dp(8));
-                        float scale = a.reduced ? 1f : 1.016f;
-                        row.animate()
-                                .scaleX(scale)
-                                .scaleY(scale)
-                                .setDuration(a.reduced ? 0 : 125)
-                                .start();
+                        float scale = a.reduced ? 1f : 1.014f;
+                        if (a.reduced) {
+                            row.setScaleX(1f);
+                            row.setScaleY(1f);
+                        } else {
+                            row.animate()
+                                    .scaleX(scale)
+                                    .scaleY(scale)
+                                    .setDuration(70)
+                                    .setInterpolator(tvDecel())
+                                    .start();
+                        }
                     } else {
-                        row.setBackground(
-                                TvV17Surface.rounded(surface, a.dp(14), 0x22ffffff, a.dp(1)));
+                        if (row.getBackground() != restingBg) row.setBackground(restingBg);
                         titleView.setTextColor(MainActivity.WHITE);
                         if (caption != null) caption.setTextColor(0xa8ebebf5);
                         if (rightValue != null) rightValue.setTextColor(0xb8ebebf5);
                         chevron.setTextColor(0x88ebebf5);
-                        row.setElevation(0);
-                        row.animate()
-                                .scaleX(1f)
-                                .scaleY(1f)
-                                .setDuration(a.reduced ? 0 : 120)
-                                .start();
+                        row.setScaleX(1f);
+                        row.setScaleY(1f);
                     }
                 });
         if (tv) {
@@ -620,7 +941,7 @@ final class SettingsScreen {
                                 : targetSite.key.toLowerCase(java.util.Locale.ROOT);
                 boolean isMyDrive = api.contains("mydrive") || key.contains("mydrive");
                 if (isMyDrive) {
-                    a.sourceAction(targetSite, action);
+                    a.ensureStoragePermissionForNetdisk(() -> a.sourceAction(targetSite, action));
                     return;
                 }
                 boolean isPanConfig = api.contains("panconfig") || key.contains("panconfig");
@@ -748,6 +1069,10 @@ final class SettingsScreen {
 
     void appearance() {
         page("外观与壁纸", "界面按屏幕分辨率自动适配，支持首页封面自适应柔光、自定义柔光渐变与扫码上传壁纸。");
+        appearanceRows();
+    }
+
+    void appearanceRows() {
         link(
                 "首页壁纸与柔光主题",
                 HomeAmbient.activeBackgroundSummary(a),
@@ -801,19 +1126,33 @@ final class SettingsScreen {
                             .show();
                 });
         if (a.isTvDevice()) {
-            ints(
-                    "电视导航布局",
-                    Prefs.TV_NAVIGATION_MODE,
-                    new String[] {"原有布局", "左侧自动收起"},
-                    new int[] {0, 1},
-                    a.useLeftDock() ? 1 : 0);
-            if (!a.useLeftDock())
-                ints(
-                        "Dock 位置",
-                        Prefs.TV_DOCK_POSITION,
-                        new String[] {"右侧", "顶部"},
-                        new int[] {0, 1},
-                        0);
+            int currentDockStyle = a.useLeftDock() ? 1 : 0;
+            String[] dockLabels = new String[] {"顶部沉浸式导航栏（推荐）", "左侧简洁导航栏"};
+            link(
+                    "首页导航栏位置",
+                    dockLabels[currentDockStyle],
+                    "setting-" + Prefs.TV_DOCK_POSITION,
+                    () ->
+                            new AppDialog.Builder(a)
+                                    .setTitle("首页导航栏位置")
+                                    .setMessage("顶部导航栏常显左上角品牌标识，向下滚动时自动缩小为渐变沉浸样式；也可切换为左侧可展开导航栏。")
+                                    .setSingleChoiceItems(
+                                            dockLabels,
+                                            currentDockStyle,
+                                            (d, which) -> {
+                                                android.content.SharedPreferences.Editor ed =
+                                                        a.prefs.edit();
+                                                if (which == 0) {
+                                                    ed.putInt(Prefs.TV_NAVIGATION_MODE, 0)
+                                                            .putInt(Prefs.TV_DOCK_POSITION, 1);
+                                                } else {
+                                                    ed.putInt(Prefs.TV_NAVIGATION_MODE, 1);
+                                                }
+                                                ed.apply();
+                                                a.refresh();
+                                            })
+                                    .setNegativeButton("返回", null)
+                                    .show());
         }
         ints(
                 "导航栏字体与按钮大小",
@@ -871,28 +1210,35 @@ final class SettingsScreen {
         b.setPadding(a.dp(16), a.dp(8), a.dp(16), a.dp(8));
         final int restBg = active ? 0xff0a84ff : 0x70262c38;
         final int restStroke = active ? 0x9980c2ff : 0x26ffffff;
-        b.setBackground(TvV17Surface.rounded(restBg, a.dp(20), restStroke, a.dp(1)));
+        final android.graphics.drawable.Drawable restingBg =
+                TvV17Surface.rounded(restBg, a.dp(20), restStroke, a.dp(1));
+        final android.graphics.drawable.Drawable focusedBg =
+                TvV17Surface.rounded(0xfff5f5f7, a.dp(20), 0xffffffff, a.dp(1));
+        b.setBackground(restingBg);
         b.setTextColor(MainActivity.WHITE);
         b.setOnFocusChangeListener(
                 (v, focused) -> {
-                    FocusMotion.unclipAncestors(b);
+                    b.animate().cancel();
                     if (focused) {
-                        b.setBackground(
-                                TvV17Surface.rounded(0xfff5f5f7, a.dp(20), 0xffffffff, a.dp(1)));
+                        if (b.getBackground() != focusedBg) b.setBackground(focusedBg);
                         b.setTextColor(0xff101013);
-                        b.setElevation(a.dp(6));
-                        float scale = a.reduced ? 1f : 1.04f;
-                        b.animate()
-                                .scaleX(scale)
-                                .scaleY(scale)
-                                .setDuration(a.reduced ? 0 : 120)
-                                .start();
+                        float scale = a.reduced ? 1f : 1.035f;
+                        if (a.reduced) {
+                            b.setScaleX(1f);
+                            b.setScaleY(1f);
+                        } else {
+                            b.animate()
+                                    .scaleX(scale)
+                                    .scaleY(scale)
+                                    .setDuration(70)
+                                    .setInterpolator(tvDecel())
+                                    .start();
+                        }
                     } else {
-                        b.setBackground(
-                                TvV17Surface.rounded(restBg, a.dp(20), restStroke, a.dp(1)));
+                        if (b.getBackground() != restingBg) b.setBackground(restingBg);
                         b.setTextColor(MainActivity.WHITE);
-                        b.setElevation(0);
-                        b.animate().scaleX(1f).scaleY(1f).setDuration(a.reduced ? 0 : 120).start();
+                        b.setScaleX(1f);
+                        b.setScaleY(1f);
                     }
                 });
         return b;
@@ -1111,36 +1457,39 @@ final class SettingsScreen {
 
         final int restBg = selected ? 0x36ffffff : 0x5512161f;
         final int restStroke = selected ? 0x9980c2ff : 0x22ffffff;
-        card.setBackground(TvV17Surface.rounded(restBg, a.dp(14), restStroke, a.dp(1)));
+        final android.graphics.drawable.Drawable restingBg =
+                TvV17Surface.rounded(restBg, a.dp(14), restStroke, a.dp(1));
+        final android.graphics.drawable.Drawable focusedBg =
+                TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(2));
+        card.setBackground(restingBg);
         card.setOnFocusChangeListener(
                 (v, focused) -> {
-                    FocusMotion.unclipAncestors(card);
+                    card.animate().cancel();
                     if (focused) {
-                        card.setBackground(
-                                TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(2)));
+                        if (card.getBackground() != focusedBg) card.setBackground(focusedBg);
                         titleView.setTextColor(0xff101013);
                         subView.setTextColor(0xff48484a);
-                        card.setElevation(a.dp(8));
-                        float scale = a.reduced ? 1f : 1.035f;
-                        card.animate()
-                                .scaleX(scale)
-                                .scaleY(scale)
-                                .setDuration(a.reduced ? 0 : 125)
-                                .start();
+                        float scale = a.reduced ? 1f : 1.03f;
+                        if (a.reduced) {
+                            card.setScaleX(1f);
+                            card.setScaleY(1f);
+                        } else {
+                            card.animate()
+                                    .scaleX(scale)
+                                    .scaleY(scale)
+                                    .setDuration(70)
+                                    .setInterpolator(tvDecel())
+                                    .start();
+                        }
                         if (a.homeAmbient != null) {
                             a.homeAmbient.previewCustomColors(leftColor, rightColor);
                         }
                     } else {
-                        card.setBackground(
-                                TvV17Surface.rounded(restBg, a.dp(14), restStroke, a.dp(1)));
+                        if (card.getBackground() != restingBg) card.setBackground(restingBg);
                         titleView.setTextColor(MainActivity.WHITE);
                         subView.setTextColor(0xa8ebebf5);
-                        card.setElevation(0);
-                        card.animate()
-                                .scaleX(1f)
-                                .scaleY(1f)
-                                .setDuration(a.reduced ? 0 : 120)
-                                .start();
+                        card.setScaleX(1f);
+                        card.setScaleY(1f);
                     }
                 });
         card.setOnClickListener(
@@ -1337,6 +1686,10 @@ final class SettingsScreen {
 
     void playback() {
         page("播放与字幕", "作为之后播放的默认设置；播放界面中仍可随时调整。");
+        playbackRows();
+    }
+
+    void playbackRows() {
         if (a.isTvDevice()) {
             ints(
                     "播放界面样式",
@@ -1437,7 +1790,7 @@ final class SettingsScreen {
                     a.refresh();
                 });
         link(
-                "隐藏工具栏显示底部细进度条",
+                "播放中底部细进度条",
                 PlayerHudPrefs.isSlimProgressEnabled(a) ? "开启" : "关闭",
                 "setting-" + PlayerHudPrefs.KEY_SLIM_PROGRESS,
                 () -> {
@@ -1671,6 +2024,17 @@ final class SettingsScreen {
                 "网盘扫码登录、凭据与网盘顺序（由配置提供）",
                 "settings-accounts",
                 () -> AccountPanel.show(a, null));
+        link(
+                "存储权限（网盘扫码 Cookie 保存）",
+                a.storagePermissionStatusText(),
+                "settings-storage-permission",
+                () -> {
+                    if (android.os.Build.VERSION.SDK_INT >= 30) {
+                        a.openTvStoragePermissionSettings();
+                    } else {
+                        a.requestRuntimeStoragePermission(a::refresh);
+                    }
+                });
     }
 
     void backupRows() {
@@ -1837,10 +2201,13 @@ final class SettingsScreen {
                 tv && a.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false)
                         ? 0xee1c212b
                         : 0xbf1a1f29;
-        row.setBackground(
+        final android.graphics.drawable.Drawable restingBg =
                 tv
                         ? TvV17Surface.rounded(surface, a.dp(14), 0x22ffffff, a.dp(1))
-                        : a.bg(0xff222226, 14));
+                        : a.bg(0xff222226, 14);
+        final android.graphics.drawable.Drawable focusedBg =
+                tv ? TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(1)) : null;
+        row.setBackground(restingBg);
         row.setOnFocusChangeListener(
                 (v, f) -> {
                     if (!tv) {
@@ -1857,30 +2224,29 @@ final class SettingsScreen {
                                 1.008f);
                         return;
                     }
-                    FocusMotion.unclipAncestors(row);
+                    row.animate().cancel();
                     if (f) {
-                        row.setBackground(
-                                TvV17Surface.rounded(0xfff5f5f7, a.dp(14), 0xffffffff, a.dp(1)));
+                        if (row.getBackground() != focusedBg) row.setBackground(focusedBg);
                         titleView.setTextColor(0xff101013);
                         caption.setTextColor(0xff48484a);
-                        row.setElevation(a.dp(8));
-                        float scale = a.reduced ? 1f : 1.016f;
-                        row.animate()
-                                .scaleX(scale)
-                                .scaleY(scale)
-                                .setDuration(a.reduced ? 0 : 125)
-                                .start();
+                        float scale = a.reduced ? 1f : 1.014f;
+                        if (a.reduced) {
+                            row.setScaleX(1f);
+                            row.setScaleY(1f);
+                        } else {
+                            row.animate()
+                                    .scaleX(scale)
+                                    .scaleY(scale)
+                                    .setDuration(70)
+                                    .setInterpolator(tvDecel())
+                                    .start();
+                        }
                     } else {
-                        row.setBackground(
-                                TvV17Surface.rounded(surface, a.dp(14), 0x22ffffff, a.dp(1)));
+                        if (row.getBackground() != restingBg) row.setBackground(restingBg);
                         titleView.setTextColor(MainActivity.WHITE);
                         caption.setTextColor(0xa8ebebf5);
-                        row.setElevation(0);
-                        row.animate()
-                                .scaleX(1f)
-                                .scaleY(1f)
-                                .setDuration(a.reduced ? 0 : 120)
-                                .start();
+                        row.setScaleX(1f);
+                        row.setScaleY(1f);
                     }
                 });
         if (tv) {

@@ -80,68 +80,102 @@ final class MediaOptions {
             for (int i = 0; i < items.length(); i++) subtitle(normalized, items.opt(i), out.url);
         } else if (subtitles != null) subtitle(normalized, subtitles, out.url);
         out.media.put("subtitles", normalized);
-        String danmakuUrl = extractDanmakuUrl(result);
-        if (!danmakuUrl.isEmpty()) {
-            out.media.put("danmaku", danmakuUrl);
+        List<String> danmakuUrls = extractDanmakuUrls(result);
+        if (!danmakuUrls.isEmpty()) {
+            out.media.put("danmaku", danmakuUrls.get(0));
+            JSONArray dmArr = new JSONArray();
+            for (String u : danmakuUrls) dmArr.put(u);
+            out.media.put("danmakuList", dmArr);
         } else {
             out.media.remove("danmaku");
+            out.media.remove("danmakuList");
         }
         out.url = stripInlineHeaders(out.url, out.headers);
         return out;
     }
 
     static String extractDanmakuUrl(JSONObject result) {
-        if (result == null) return "";
-        Object raw = null;
+        List<String> urls = extractDanmakuUrls(result);
+        return urls.isEmpty() ? "" : urls.get(0);
+    }
+
+    static List<String> extractDanmakuUrls(JSONObject result) {
+        if (result == null) return Collections.emptyList();
+        LinkedHashSet<String> urls = new LinkedHashSet<>();
         for (String key : new String[] {"danmaku", "dm", "danmu", "danmuku", "barrage"}) {
             if (result.has(key) && result.opt(key) != null && result.opt(key) != JSONObject.NULL) {
-                raw = result.opt(key);
-                break;
+                collectDanmakuCandidates(result.opt(key), urls);
             }
         }
-        if (raw == null && result.optJSONObject("extra") != null) {
-            JSONObject extra = result.optJSONObject("extra");
-            for (String key : new String[] {"danmaku", "dm", "danmu", "danmuku"}) {
+        JSONObject extra = result.optJSONObject("extra");
+        if (extra != null) {
+            for (String key : new String[] {"danmaku", "dm", "danmu", "danmuku", "barrage"}) {
                 if (extra.has(key) && extra.opt(key) != null && extra.opt(key) != JSONObject.NULL) {
-                    raw = extra.opt(key);
-                    break;
+                    collectDanmakuCandidates(extra.opt(key), urls);
                 }
             }
         }
-        return unwrapDanmakuCandidate(raw);
+        return new ArrayList<>(urls);
     }
 
-    private static String unwrapDanmakuCandidate(Object raw) {
-        if (raw == null || raw == JSONObject.NULL) return "";
+    private static void collectDanmakuCandidates(Object raw, Set<String> out) {
+        if (raw == null || raw == JSONObject.NULL) return;
         if (raw instanceof String) {
             String s = ((String) raw).trim();
-            if (s.isEmpty()) return "";
+            if (s.isEmpty()) return;
             if (s.startsWith("[")) {
                 try {
-                    return unwrapDanmakuCandidate(new JSONArray(s));
+                    collectDanmakuCandidates(new JSONArray(s), out);
+                    return;
                 } catch (JSONException ignored) {
                 }
             } else if (s.startsWith("{")) {
                 try {
-                    return unwrapDanmakuCandidate(new JSONObject(s));
+                    collectDanmakuCandidates(new JSONObject(s), out);
+                    return;
                 } catch (JSONException ignored) {
                 }
             }
-            return ProxyAddress.rewrite(s);
+            if (s.contains("$$$")) {
+                for (String part : s.split("\\$\\$\\$")) {
+                    collectDanmakuCandidates(part, out);
+                }
+                return;
+            }
+            if (s.contains("$http://") || s.contains("$https://") || s.contains("$proxy://")) {
+                for (String entry : s.split("#")) {
+                    int dollar = entry.indexOf('$');
+                    String cand = dollar >= 0 ? entry.substring(dollar + 1).trim() : entry.trim();
+                    if (!cand.isEmpty()) {
+                        String rewritten = ProxyAddress.rewrite(cand);
+                        if (rewritten != null && !rewritten.isEmpty()) out.add(rewritten);
+                    }
+                }
+                return;
+            }
+            String rewritten = ProxyAddress.rewrite(s);
+            if (rewritten != null && !rewritten.isEmpty()) out.add(rewritten);
+            return;
         }
         if (raw instanceof JSONObject) {
             JSONObject obj = (JSONObject) raw;
-            String u = obj.optString("url", obj.optString("uri", obj.optString("src", ""))).trim();
-            return u.isEmpty() ? "" : ProxyAddress.rewrite(u);
+            String u =
+                    obj.optString(
+                                    "url",
+                                    obj.optString(
+                                            "uri", obj.optString("src", obj.optString("path", ""))))
+                            .trim();
+            if (!u.isEmpty()) {
+                collectDanmakuCandidates(u, out);
+            }
+            return;
         }
         if (raw instanceof JSONArray) {
             JSONArray arr = (JSONArray) raw;
             for (int i = 0; i < arr.length(); i++) {
-                String u = unwrapDanmakuCandidate(arr.opt(i));
-                if (!u.isEmpty()) return u;
+                collectDanmakuCandidates(arr.opt(i), out);
             }
         }
-        return "";
     }
 
     static boolean looksLikePlayableUrl(String s) {

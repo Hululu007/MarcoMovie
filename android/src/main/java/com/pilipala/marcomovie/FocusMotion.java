@@ -3,10 +3,18 @@ package com.pilipala.marcomovie;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.view.*;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.TextView;
 
 /** Shared frame clock and velocity-preserving focus/press springs. No layout animation. */
 final class FocusMotion {
+    private static DecelerateInterpolator tvDecelCache;
+
+    private static DecelerateInterpolator tvDecel() {
+        if (tvDecelCache == null) tvDecelCache = new DecelerateInterpolator();
+        return tvDecelCache;
+    }
+
     static final class State {
         final GradientDrawable background = new GradientDrawable();
         final MotionSpring emphasis = new MotionSpring(0, 30, .0025f),
@@ -16,6 +24,7 @@ final class FocusMotion {
         int appliedRadiusPx = -1, strokeWidthPx = -1;
         float scale = 1, elevation, gain = 1;
         boolean ready, pressed, border, unclipped;
+        String focusFrameGroup;
     }
 
     static int lerpColor(int start, int end, float fraction) {
@@ -90,6 +99,7 @@ final class FocusMotion {
 
                         public void onViewDetachedFromWindow(View v) {
                             cancel(saved);
+                            v.animate().cancel();
                             saved.pressed = false;
                             saved.unclipped = false;
                             saved.compression.snap(0);
@@ -182,9 +192,48 @@ final class FocusMotion {
         boolean reduced = isReducedMotion(a);
         if (reduced || !view.isAttachedToWindow()) {
             cancel(state);
+            view.animate().cancel();
             state.emphasis.snap(state.emphasis.target);
             state.compression.snap(state.compression.target);
             paint(view, state, reduced);
+            return;
+        }
+        // On Android TV, snap static background/stroke/text colors once so the View's
+        // DisplayList never rebuilds per frame, and animate only GPU-composited scale/alpha
+        // on the RenderThread. When TvScrollView's gliding TvFocusFrame wraps a transparent
+        // poster card, suppress the duplicate static stroke so only the smooth gliding ring draws.
+        if (a != null && a.isTvDevice()) {
+            cancel(state);
+            state.emphasis.snap(state.emphasis.target);
+            state.compression.snap(state.compression.target);
+            float f = Math.max(0f, Math.min(1f, state.emphasis.value));
+            float p = Math.max(0f, Math.min(1f, state.compression.value));
+            int color = lerpColor(state.normal, state.active, f);
+            boolean suppressStaticRing = hasScrollFocusFrame(view);
+            int outline =
+                    suppressStaticRing ? 0x00f5f5f7 : resolveStrokeColor(state.border, f, false);
+            int text = resolveTextColor(view, state, color, f);
+            applyStaticAppearance(view, state, color, outline, text);
+            float targetScale = resolveScale(state.gain, f, p, false);
+            float targetAlpha = 1f - .1f * p;
+            state.scale = targetScale;
+            state.elevation = 0;
+            view.animate().cancel();
+            if (Math.abs(view.getScaleX() - targetScale) > 0.001f
+                    || Math.abs(view.getScaleY() - targetScale) > 0.001f
+                    || Math.abs(view.getAlpha() - targetAlpha) > 0.001f) {
+                view.animate()
+                        .scaleX(targetScale)
+                        .scaleY(targetScale)
+                        .alpha(targetAlpha)
+                        .setDuration(120)
+                        .setInterpolator(tvDecel())
+                        .start();
+            } else {
+                if (view.getScaleX() != targetScale) view.setScaleX(targetScale);
+                if (view.getScaleY() != targetScale) view.setScaleY(targetScale);
+                if (view.getAlpha() != targetAlpha) view.setAlpha(targetAlpha);
+            }
             return;
         }
         if (!state.emphasis.step(0) && !state.compression.step(0)) {
@@ -214,11 +263,20 @@ final class FocusMotion {
         MotionLoop.add(state.animator);
     }
 
-    static void paint(View view, State state, boolean reduced) {
-        float f = Math.max(0, Math.min(1, state.emphasis.value)),
-                p = Math.max(0, Math.min(1, state.compression.value));
-        int color = lerpColor(state.normal, state.active, f),
-                outline = resolveStrokeColor(state.border, f, reduced);
+    private static boolean hasScrollFocusFrame(View view) {
+        if (view == null) return false;
+        ViewParent p = view.getParent();
+        while (p instanceof ViewGroup) {
+            if (p instanceof TvScrollView) {
+                TvScrollView sv = (TvScrollView) p;
+                return sv.focusFrame != null && sv.focusFrame.handles(view);
+            }
+            p = p.getParent();
+        }
+        return false;
+    }
+
+    private static int resolveTextColor(View view, State state, int color, float f) {
         int text = f < .5f ? state.idleText : state.activeText;
         if (view instanceof TextView && Color.alpha(color) > 220) {
             float light =
@@ -232,6 +290,47 @@ final class FocusMotion {
                                     ? MainActivity.WHITE
                                     : state.activeText;
         }
+        return text;
+    }
+
+    private static void applyStaticAppearance(
+            View view, State state, int color, int stroke, int text) {
+        if (state.color != color) {
+            state.background.setColor(color);
+            state.color = color;
+        }
+        int maxRadius =
+                view.getWidth() > 0 && view.getHeight() > 0
+                        ? Math.min(view.getWidth(), view.getHeight()) / 2
+                        : state.radiusPx;
+        int effectiveRadius = Math.min(state.radiusPx, maxRadius);
+        if (state.stroke != stroke) {
+            int sw =
+                    state.strokeWidthPx > 0
+                            ? state.strokeWidthPx
+                            : Math.max(
+                                    1,
+                                    Math.round(
+                                            view.getResources().getDisplayMetrics().density * 2));
+            state.background.setStroke(sw, stroke);
+            state.stroke = stroke;
+        }
+        if (state.appliedRadiusPx != effectiveRadius) {
+            state.background.setCornerRadius(effectiveRadius);
+            state.appliedRadiusPx = effectiveRadius;
+        }
+        if (view instanceof TextView && ((TextView) view).getCurrentTextColor() != text)
+            ((TextView) view).setTextColor(text);
+        if (view.getElevation() != 0) view.setElevation(0);
+        state.text = text;
+    }
+
+    static void paint(View view, State state, boolean reduced) {
+        float f = Math.max(0, Math.min(1, state.emphasis.value)),
+                p = Math.max(0, Math.min(1, state.compression.value));
+        int color = lerpColor(state.normal, state.active, f),
+                outline = resolveStrokeColor(state.border, f, reduced);
+        int text = resolveTextColor(view, state, color, f);
         apply(
                 view,
                 state,
@@ -252,24 +351,36 @@ final class FocusMotion {
             float scale,
             float elevation,
             float alpha) {
-        if (state.color != color) state.background.setColor(color);
+        if (state.color != color) {
+            state.background.setColor(color);
+            state.color = color;
+        }
         int maxRadius =
                 view.getWidth() > 0 && view.getHeight() > 0
                         ? Math.min(view.getWidth(), view.getHeight()) / 2
                         : state.radiusPx;
         int effectiveRadius = Math.min(state.radiusPx, maxRadius);
         if (state.stroke != stroke) {
-            int sw =
-                    state.strokeWidthPx > 0
-                            ? state.strokeWidthPx
-                            : Math.max(
-                                    1,
-                                    Math.round(
-                                            view.getResources().getDisplayMetrics().density * 2));
-            state.background.setStroke(sw, stroke);
-            state.background.setCornerRadius(effectiveRadius);
-            state.appliedRadiusPx = effectiveRadius;
-        } else if (state.appliedRadiusPx != effectiveRadius) {
+            int newAlpha = Color.alpha(stroke);
+            int oldAlpha = Color.alpha(state.stroke);
+            boolean endpoint =
+                    newAlpha == 0
+                            || stroke == MotionTokens.TV_FOCUS_STROKE_ARGB
+                            || Math.abs(newAlpha - oldAlpha) >= 64;
+            if (endpoint) {
+                int sw =
+                        state.strokeWidthPx > 0
+                                ? state.strokeWidthPx
+                                : Math.max(
+                                        1,
+                                        Math.round(
+                                                view.getResources().getDisplayMetrics().density
+                                                        * 2));
+                state.background.setStroke(sw, stroke);
+                state.stroke = stroke;
+            }
+        }
+        if (state.appliedRadiusPx != effectiveRadius) {
             state.background.setCornerRadius(effectiveRadius);
             state.appliedRadiusPx = effectiveRadius;
         }
@@ -279,8 +390,6 @@ final class FocusMotion {
         if (view.getScaleY() != scale) view.setScaleY(scale);
         if (view.getElevation() != elevation) view.setElevation(elevation);
         if (view.getAlpha() != alpha) view.setAlpha(alpha);
-        state.color = color;
-        state.stroke = stroke;
         state.text = text;
         state.scale = scale;
         state.elevation = elevation;

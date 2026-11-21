@@ -48,9 +48,19 @@ final class DanmakuData {
     }
 
     static List<Comment> parse(String text) throws Exception {
+        if (text == null) throw new IOException("弹幕返回内容为空");
         if (text.length() > 8 * 1024 * 1024) throw new IOException("弹幕文件过大");
         List<Comment> out = new ArrayList<>();
         String content = text.trim().replaceFirst("^\\uFEFF", "");
+        if (content.isEmpty()) throw new IOException("弹幕返回内容为空");
+        if (!content.startsWith("<") && !content.startsWith("{") && !content.startsWith("[")) {
+            int xmlStart = content.indexOf("<?xml");
+            if (xmlStart < 0) xmlStart = content.indexOf("<i");
+            if (xmlStart < 0) xmlStart = content.indexOf("<d ");
+            if (xmlStart > 0 && xmlStart < 512) {
+                content = content.substring(xmlStart).trim();
+            }
+        }
         if (content.startsWith("<")) {
             if (content.toUpperCase(Locale.ROOT).contains("<!DOCTYPE")
                     || content.toUpperCase(Locale.ROOT).contains("<!ENTITY"))

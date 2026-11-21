@@ -5,7 +5,7 @@ import re, subprocess, sys, hashlib, json
 ROOT=Path(__file__).resolve().parents[1]
 EXCLUDED={'.git','private','tools','dist','build','__pycache__','lib','classes'}
 ALLOWED_HOSTS={'nodejs.org','api.github.com','release-assets.githubusercontent.com','marcotv.wlj9919.top','github.com','raw.githubusercontent.com','chromium.googlesource.com','android.googlesource.com','ffmpeg.org','trac.ffmpeg.org','dl.google.com','repo.maven.apache.org',
- 'dl.frostwire.com','schemas.android.com','schemas.xmlsoap.org','apache.org','xml.org','maven.apache.org','www.apache.org','www.boost.org',
+ 'dl.frostwire.com','schemas.android.com','schemas.xmlsoap.org','purl.org','apache.org','xml.org','maven.apache.org','www.apache.org','www.boost.org',
  'www.unicode.org','unicode.org','opensource.org','jsoup.org','developer.mozilla.org',
  'perfectionkills.com','www.engr.mun.ca','android.git.kernel.org','fsf.org','www.gnu.org',
  'gnu.org','www.fsf.org','barcode4j.sourceforge.net','maven.aliyun.com','10.0.2.2','127.0.0.1','localhost','…','x',
@@ -137,10 +137,6 @@ def paths():
 issues=[];files=paths()
 for p in files:
     relative=p.relative_to(ROOT)
-    # Exact reviewed, owner-supplied brand asset; all other videos remain excluded.
-    if relative.as_posix()=='android/src/main/assets/branding/startup.mp4':
-        if hashlib.sha256(p.read_bytes()).hexdigest()!='915d0b8e337d7980ef67f71864eed346407e0061602ca67ff3272502b5d8ec1b':issues.append(f'{relative}: unreviewed brand video')
-        continue
     # Generated blue frames and a sine tone for native HEVC/HTTP regression.
     # Permit only the reviewed bytes, not arbitrary recorded media in tests.
     if relative.as_posix()=='flutter/test/fixtures/cloud-playback.mkv':

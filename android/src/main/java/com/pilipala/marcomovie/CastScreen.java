@@ -5,6 +5,7 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
+import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
@@ -15,20 +16,30 @@ import com.google.zxing.common.BitMatrix;
 import com.google.zxing.qrcode.QRCodeWriter;
 import java.util.Collections;
 
-/** 10-foot TV Wireless Cast screen reachable from the Home Dock ("nav-cast"). */
+/**
+ * 10-foot TV Wireless Cast Receiver Hub reachable from the Home Dock ("nav-cast").
+ *
+ * <p>Presents this TV exclusively as a cast receiver (matching iQIYI / Youku / Tencent / Bilibili
+ * DLNA discovery &amp; phone selection) alongside a token-scoped QR direct-cast web fallback.
+ */
 final class CastScreen {
     final MainActivity a;
     TextView liveStatusView;
+    TextView receiverBadgeView;
+    TextView receiverIpView;
+    LinearLayout qrHostView;
+    int screenTicket;
 
     CastScreen(MainActivity activity) {
         a = activity;
     }
 
     void show() {
-        a.renderPage("无线投屏", "WIRELESS CAST");
+        a.renderPage("无线投屏", "WIRELESS CAST RECEIVER");
         a.body.setTag("cast-screen");
+        screenTicket = a.generation;
         if (a.privateMode) {
-            a.paragraph("当前处于隐私空间，所有局域网广播与远程接收已严格隔离关闭。退出隐私空间后即可使用无线投屏。");
+            a.paragraph("当前处于隐私空间，所有局域网广播与远程投屏接收已严格隔离关闭。退出隐私空间后即可使用无线投屏。");
             Button backBtn = a.button("返回", "primary", a::onBackPressed);
             a.addButton(a.body, backBtn);
             return;
@@ -36,7 +47,6 @@ final class CastScreen {
 
         boolean enabled = a.prefs.getBoolean(Prefs.CAST_ENABLED, true);
         a.syncCastService();
-        CastService svc = a.castService;
         String deviceName = a.prefs.getString(Prefs.CAST_DEVICE_NAME, "Marco Movie 电视端");
         if (deviceName == null || deviceName.trim().isEmpty()) {
             deviceName = "Marco Movie 电视端";
@@ -45,13 +55,13 @@ final class CastScreen {
         LinearLayout actions = a.row();
         Button toggleBtn =
                 a.button(
-                        enabled ? "投屏接收：已开启" : "投屏接收：已关闭",
+                        enabled ? "本机接收：已开启" : "本机接收：已关闭",
                         "primary",
                         () -> {
                             boolean next = !a.prefs.getBoolean(Prefs.CAST_ENABLED, true);
                             a.prefs.edit().putBoolean(Prefs.CAST_ENABLED, next).apply();
                             a.syncCastService();
-                            a.toast(next ? "已开启无线投屏接收" : "已关闭无线投屏接收");
+                            a.toast(next ? "已开启本机投屏接收" : "已关闭本机投屏接收");
                             show();
                         });
         a.addButton(actions, toggleBtn);
@@ -63,113 +73,131 @@ final class CastScreen {
 
         Button refreshBtn =
                 a.navButton(
-                        "重新广播并刷新",
+                        "重新广播",
                         "cast-refresh",
                         () -> {
                             a.restartCastService();
-                            a.toast("已重新发送局域网投屏广播");
-                            show();
+                            a.toast("已重新发送局域网 DLNA 设备发现广播");
+                            bindReceiverPanel();
                         });
         a.addButton(actions, refreshBtn);
 
-        Button manualBtn = a.navButton("直接输入流地址", "cast-manual-url", this::promptDirectStream);
+        Button manualBtn = a.navButton("播放流地址", "cast-manual-url", this::promptDirectStream);
         a.addButton(actions, manualBtn);
         a.body.addView(actions);
-        a.gap(a.body, 14);
+        a.gap(a.body, 16);
 
         LinearLayout columns = a.row();
         columns.setGravity(Gravity.TOP);
 
-        // Left Card: DLNA / UPnP Video App Cast
-        LinearLayout dlnaCard = a.vertical();
-        dlnaCard.setPadding(a.dp(22), a.dp(20), a.dp(22), a.dp(20));
-        GradientDrawable dlnaBg = a.bg(0xff191b23, 18);
-        dlnaBg.setStroke(Math.max(1, a.dp(1)), 0x22ffffff);
-        dlnaCard.setBackground(dlnaBg);
+        // Left Card: TV Cast Receiver Info & Usage Guide
+        LinearLayout infoCard = a.vertical();
+        infoCard.setPadding(a.dp(24), a.dp(22), a.dp(24), a.dp(22));
+        GradientDrawable infoBg = a.bg(0xc8171c26, 18);
+        infoBg.setStroke(Math.max(1, a.dp(1)), 0x26ffffff);
+        infoCard.setBackground(infoBg);
 
-        TextView badge =
-                a.text(
-                        !enabled
-                                ? "● 服务已手动关闭"
-                                : (svc != null && !svc.closed
-                                        ? "● DLNA / UPnP 在线监听中 · 同一局域网可见"
-                                        : "● 未检测到局域网连接，请检查 Wi-Fi 或网线"),
-                        13,
-                        !enabled
-                                ? MainActivity.MUTED
-                                : (svc != null && !svc.closed ? 0xff66d4cf : 0xffff9f0a));
-        badge.setTypeface(null, Typeface.BOLD);
-        dlnaCard.addView(badge);
-        a.gap(dlnaCard, 10);
+        TextView infoTitle = a.text("手机 / 平板投屏到本机电视", 20, MainActivity.WHITE);
+        infoTitle.setTypeface(null, Typeface.BOLD);
+        infoCard.addView(infoTitle);
+        a.gap(infoCard, 10);
 
-        TextView dlnaTitle = a.text("方式一：主流视频 App 一键投屏", 20, MainActivity.WHITE);
-        dlnaTitle.setTypeface(null, Typeface.BOLD);
-        dlnaCard.addView(dlnaTitle);
-        a.gap(dlnaCard, 8);
-
-        TextView nameLabel = a.text("本机投屏名称：" + deviceName, 16, 0xff7cb8ff);
+        TextView nameLabel = a.text("设备名称：" + deviceName, 16.5f, 0xff7cb8ff);
         nameLabel.setTypeface(null, Typeface.BOLD);
-        dlnaCard.addView(nameLabel);
-        if (svc != null && !svc.lanIp.isEmpty()) {
-            TextView ipLabel =
-                    a.text(
-                            "本机局域网地址：" + svc.lanIp + "  (端口 " + svc.httpPort() + ")",
-                            13,
-                            MainActivity.MUTED);
-            ipLabel.setPadding(0, a.dp(4), 0, 0);
-            dlnaCard.addView(ipLabel);
-        }
-        a.gap(dlnaCard, 14);
+        infoCard.addView(nameLabel);
+        a.gap(infoCard, 8);
 
-        TextView steps =
-                a.text(
-                        "1. 确保手机、平板或电脑与本电视连接同一个路由器 / Wi-Fi。\n"
-                                + "2. 打开哔哩哔哩、腾讯视频、爱奇艺、优酷、夸克网盘、抖音或本地视频播放器，点击播放画面右上角的「TV」投屏图标。\n"
-                                + "3. 在搜索到的设备列表中选择「"
-                                + deviceName
-                                + "」，即可在大屏播放并通过手机控制进度与音量。",
-                        14,
-                        0xffd4d7e2);
-        steps.setLineSpacing(a.dp(5), 1f);
-        dlnaCard.addView(steps);
-        a.gap(dlnaCard, 14);
+        receiverBadgeView = a.text("", 13.5f, MainActivity.MUTED);
+        receiverBadgeView.setLineSpacing(a.dp(3), 1f);
+        infoCard.addView(receiverBadgeView);
 
-        liveStatusView =
-                a.text(
-                        svc != null
-                                ? "当前状态：" + svc.lastClientInfo
-                                : (enabled ? "当前状态：等待局域网连接…" : "当前状态：投屏接收已关闭"),
-                        13,
-                        MainActivity.MUTED);
+        receiverIpView = a.text("", 12.5f, 0xff9fb0cc);
+        receiverIpView.setPadding(0, a.dp(6), 0, 0);
+        infoCard.addView(receiverIpView);
+
+        a.gap(infoCard, 14);
+        liveStatusView = a.text("", 13, 0xffd6e0f2);
         liveStatusView.setTag("cast-live-status");
-        dlnaCard.addView(liveStatusView);
+        infoCard.addView(liveStatusView);
 
-        LinearLayout.LayoutParams leftLp = new LinearLayout.LayoutParams(0, -2, 1.15f);
-        leftLp.rightMargin = a.dp(18);
-        columns.addView(dlnaCard, leftLp);
+        a.gap(infoCard, 16);
+        TextView guideTitle = a.text("投屏方式", 14.5f, MainActivity.WHITE);
+        guideTitle.setTypeface(null, Typeface.BOLD);
+        infoCard.addView(guideTitle);
+        a.gap(infoCard, 6);
+        TextView guide =
+                a.text(
+                        "1. 确保手机与本机电视连接在同一 Wi-Fi / 路由器局域网。\n"
+                                + "2. 在爱奇艺、优酷、腾讯视频、哔哩哔哩或手机端 Marco Movie 播放页点击「投屏」，直接选择「"
+                                + deviceName
+                                + "」。\n"
+                                + "3. 也可使用手机浏览器扫描右侧二维码，直接推送视频链接并远程控制播放进度与音量。",
+                        13,
+                        0xffbcc7dc);
+        guide.setLineSpacing(a.dp(5), 1f);
+        infoCard.addView(guide);
 
-        // Right Card: QR Code Browser Direct Cast & Remote Control
+        LinearLayout.LayoutParams leftLp = new LinearLayout.LayoutParams(0, -2, 1.25f);
+        leftLp.rightMargin = a.dp(20);
+        columns.addView(infoCard, leftLp);
+
+        // Right Card: Token-Scoped QR Web Direct-Cast Fallback
         LinearLayout qrCard = a.vertical();
         qrCard.setGravity(Gravity.CENTER_HORIZONTAL);
-        qrCard.setPadding(a.dp(22), a.dp(20), a.dp(22), a.dp(20));
-        GradientDrawable qrBg = a.bg(0xff191b23, 18);
-        qrBg.setStroke(Math.max(1, a.dp(1)), 0x22ffffff);
+        qrCard.setPadding(a.dp(22), a.dp(22), a.dp(22), a.dp(22));
+        GradientDrawable qrBg = a.bg(0xc8171c26, 18);
+        qrBg.setStroke(Math.max(1, a.dp(1)), 0x26ffffff);
         qrCard.setBackground(qrBg);
 
-        TextView qrTitle = a.text("方式二：扫码网页直投 & 手机遥控", 19, MainActivity.WHITE);
+        TextView qrTitle = a.text("扫码网页直投 / 手机遥控", 17.5f, MainActivity.WHITE);
         qrTitle.setTypeface(null, Typeface.BOLD);
         qrCard.addView(qrTitle);
-        a.gap(qrCard, 6);
+        a.gap(qrCard, 12);
 
-        TextView qrDesc = a.text("手机相机或浏览器扫码，直接推送 m3u8 / mp4 视频链接并遥控播放", 13, MainActivity.MUTED);
-        qrDesc.setGravity(Gravity.CENTER);
-        qrCard.addView(qrDesc);
-        a.gap(qrCard, 14);
+        qrHostView = a.vertical();
+        qrHostView.setGravity(Gravity.CENTER_HORIZONTAL);
+        qrCard.addView(qrHostView, new LinearLayout.LayoutParams(-1, -2));
 
+        LinearLayout.LayoutParams rightLp = new LinearLayout.LayoutParams(0, -2, 0.75f);
+        columns.addView(qrCard, rightLp);
+        a.body.addView(columns, new LinearLayout.LayoutParams(-1, -2));
+
+        bindReceiverPanel();
+    }
+
+    void onServiceReady() {
+        if (a.isFinishing() || screenTicket != a.generation || a.activeCastScreen != this) return;
+        bindReceiverPanel();
+    }
+
+    private void bindReceiverPanel() {
+        if (receiverBadgeView == null || qrHostView == null) return;
+        boolean enabled = a.prefs.getBoolean(Prefs.CAST_ENABLED, true);
+        CastService svc = a.castService;
+        updateReceiverBadge(enabled, svc);
+
+        if (svc != null && !svc.lanIp.isEmpty()) {
+            receiverIpView.setText("局域网地址：" + svc.lanIp + ":" + svc.httpPort());
+            receiverIpView.setVisibility(View.VISIBLE);
+        } else {
+            receiverIpView.setVisibility(View.GONE);
+        }
+
+        if (liveStatusView != null) {
+            liveStatusView.setText(
+                    svc != null
+                            ? "当前状态：" + svc.lastClientInfo
+                            : (enabled ? "当前状态：等待局域网就绪…" : "当前状态：已关闭"));
+        }
+
+        qrHostView.removeAllViews();
         String webUrl = svc != null && enabled ? svc.webCastUrl() : "";
         if (!webUrl.isEmpty()) {
             try {
-                int px = a.dp(158);
+                int px =
+                        Math.min(
+                                a.dp(156),
+                                Math.max(a.dp(120), Math.round(a.windowHeight() * 0.28f)));
                 BitMatrix matrix = new QRCodeWriter().encode(webUrl, BarcodeFormat.QR_CODE, px, px);
                 int[] pixels = new int[px * px];
                 for (int y = 0; y < px; y++) {
@@ -179,36 +207,56 @@ final class CastScreen {
                 }
                 ImageView qr = new ImageView(a);
                 qr.setTag("cast-qr");
-                qr.setContentDescription("扫码无线投屏二维码");
+                qr.setContentDescription("扫码直投二维码");
                 qr.setImageBitmap(Bitmap.createBitmap(pixels, px, px, Bitmap.Config.ARGB_8888));
-                qr.setPadding(a.dp(8), a.dp(8), a.dp(8), a.dp(8));
+                qr.setPadding(a.dp(7), a.dp(7), a.dp(7), a.dp(7));
                 qr.setBackground(a.bg(Color.WHITE, 12));
-                qrCard.addView(qr, new LinearLayout.LayoutParams(px + a.dp(16), px + a.dp(16)));
-                a.gap(qrCard, 10);
+                qrHostView.addView(qr, new LinearLayout.LayoutParams(px + a.dp(14), px + a.dp(14)));
+                a.gap(qrHostView, 8);
                 TextView urlLabel = a.text(webUrl, 11.5f, 0xff7cb8ff);
                 urlLabel.setTag("cast-web-url");
                 urlLabel.setGravity(Gravity.CENTER);
-                qrCard.addView(urlLabel);
+                qrHostView.addView(urlLabel);
             } catch (Exception ignored) {
-                qrCard.addView(a.text("二维码生成失败，请点击上方重新广播并刷新", 13, MainActivity.MUTED));
+                qrHostView.addView(a.text("二维码生成失败，请点击重新广播", 12.5f, MainActivity.MUTED));
             }
         } else {
             TextView offHint =
                     a.text(
-                            enabled ? "连接局域网后将自动生成投屏二维码" : "开启投屏接收后可显示扫码直投二维码",
-                            14,
+                            enabled ? "连接局域网后自动显示扫码直投入口" : "开启本机接收后可用手机选择本机投屏",
+                            12.5f,
                             MainActivity.MUTED);
             offHint.setGravity(Gravity.CENTER);
-            offHint.setPadding(a.dp(12), a.dp(36), a.dp(12), a.dp(36));
-            qrCard.addView(offHint);
+            offHint.setPadding(a.dp(8), a.dp(24), a.dp(8), a.dp(24));
+            qrHostView.addView(offHint);
         }
+    }
 
-        LinearLayout.LayoutParams rightLp = new LinearLayout.LayoutParams(0, -2, 0.85f);
-        columns.addView(qrCard, rightLp);
-        a.body.addView(columns, new LinearLayout.LayoutParams(-1, -2));
+    private void updateReceiverBadge(boolean enabled, CastService svc) {
+        if (receiverBadgeView == null) return;
+        if (!enabled) {
+            receiverBadgeView.setText("● 本机投屏接收已关闭");
+            receiverBadgeView.setTextColor(MainActivity.MUTED);
+        } else if (svc != null && !svc.closed) {
+            if (svc.ssdpActive) {
+                receiverBadgeView.setText(
+                        "● DLNA / Bonjour 接收在线 · 手机端视频软件与 Marco Movie iOS 均可直接发现");
+            } else if (svc.bonjourActive) {
+                receiverBadgeView.setText(
+                        "● Bonjour / 局域网直连在线（系统占用 1900 端口，Marco Movie iOS 可自动发现）");
+            } else {
+                receiverBadgeView.setText("● 局域网直连在线（系统占用 1900 端口，Marco Movie iOS 可自动发现或输入下方 IP）");
+            }
+            receiverBadgeView.setTextColor(0xff66d4cf);
+        } else {
+            receiverBadgeView.setText("● 正在启动局域网投屏接收服务…");
+            receiverBadgeView.setTextColor(0xffffb340);
+        }
     }
 
     void refreshLiveStatus() {
+        boolean enabled = a.prefs.getBoolean(Prefs.CAST_ENABLED, true);
+        updateReceiverBadge(enabled, a.castService);
         if (liveStatusView != null && a.castService != null) {
             liveStatusView.setText("当前状态：" + a.castService.lastClientInfo);
         }

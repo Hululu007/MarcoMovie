@@ -45,22 +45,32 @@ final class AppDialog extends Dialog {
                 });
     }
 
+    static int computeMaxContentHeight(int winH, int chromeH, int outerMarginY, int minH) {
+        int available = Math.max(0, winH - Math.max(0, outerMarginY) - Math.max(0, chromeH));
+        return Math.max(minH, available);
+    }
+
     @Override
     public void show() {
         LinearLayout panel = a.vertical();
         panel.setTag("app-dialog");
-        panel.setPadding(a.dp(24), a.dp(22), a.dp(24), a.dp(16));
+        panel.setMinimumWidth(0);
+        int padH = a.dp(a.isTvDevice() ? 22 : 20);
+        int padTop = a.dp(a.isTvDevice() ? 20 : 20);
+        int padBottom = a.dp(16);
+        panel.setPadding(padH, padTop, padH, padBottom);
         a.glass(panel, 28);
+        TextView titleView = null;
         if (spec.title != null) {
-            TextView title = a.text(spec.title, 23, MainActivity.WHITE);
-            title.setTypeface(null, Typeface.BOLD);
-            panel.addView(title);
-            a.gap(panel, 14);
+            titleView = a.text(spec.title, a.isTvDevice() ? 22 : 20, MainActivity.WHITE);
+            titleView.setTypeface(null, Typeface.BOLD);
+            panel.addView(titleView);
+            a.gap(panel, 12);
         }
         LinearLayout content = a.vertical();
         content.setClipChildren(false);
         content.setClipToPadding(false);
-        content.setPadding(a.dp(8), a.dp(6), a.dp(8), a.dp(6));
+        content.setPadding(a.dp(6), a.dp(4), a.dp(6), a.dp(4));
         if (spec.message != null) {
             TextView message = a.text(spec.message, 15, 0xffd0d0d5);
             message.setLineSpacing(a.dp(4), 1);
@@ -95,36 +105,12 @@ final class AppDialog extends Dialog {
         int marginH = a.isTvDevice() ? a.dp(72) : a.dp(32);
         int width =
                 Math.min(
-                        a.dp(spec.wide ? 860 : (spec.view == null ? 500 : 680)),
+                        a.dp(spec.wide ? 840 : (spec.view == null ? 520 : 660)),
                         a.windowWidth() - marginH);
-        int maxHeight = Math.max(a.dp(140), a.windowHeight() - a.dp(spec.wide ? 140 : 200));
-        content.measure(
-                View.MeasureSpec.makeMeasureSpec(width - a.dp(48), View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
-        ScrollView scroller = new TvScrollView(a);
-        scroller.setVerticalScrollBarEnabled(false);
-        scroller.addView(content);
-        FrameLayout clip =
-                new FrameLayout(a) {
-                    protected void dispatchDraw(Canvas c) {
-                        int save = c.save();
-                        c.clipRect(0, 0, getWidth(), getHeight());
-                        super.dispatchDraw(c);
-                        c.restoreToCount(save);
-                    }
-                };
-        clip.setTag("scroll-viewport-clip");
-        clip.setClipChildren(true);
-        clip.setClipToPadding(true);
-        clip.addView(scroller, new FrameLayout.LayoutParams(-1, -1));
-        panel.addView(
-                clip,
-                new LinearLayout.LayoutParams(
-                        -1, Math.min(maxHeight, content.getMeasuredHeight())));
+        int innerWidth = Math.max(a.dp(200), width - padH * 2);
+
         LinearLayout footer = a.row();
-        footer.setGravity(Gravity.RIGHT);
-        a.gap(panel, 14);
-        panel.addView(footer, new LinearLayout.LayoutParams(-1, -2));
+        footer.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
         boolean compactFooter = spec.buttons.size() >= 3 || !a.isTvDevice();
         for (int code : new int[] {-3, -2, -1})
             if (spec.buttons.containsKey(code)) {
@@ -154,6 +140,60 @@ final class AppDialog extends Dialog {
                 }
                 actions.put(code, button);
             }
+
+        int chromeHeight = padTop + padBottom;
+        if (titleView != null) {
+            titleView.measure(
+                    View.MeasureSpec.makeMeasureSpec(innerWidth, View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            chromeHeight += titleView.getMeasuredHeight() + a.dp(12);
+        }
+        if (footer.getChildCount() > 0) {
+            footer.measure(
+                    View.MeasureSpec.makeMeasureSpec(innerWidth, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            chromeHeight += footer.getMeasuredHeight() + a.dp(14);
+        }
+        int outerMarginY = a.dp(a.isTvDevice() ? 56 : 96);
+        final int maxHeight =
+                computeMaxContentHeight(a.windowHeight(), chromeHeight, outerMarginY, a.dp(110));
+
+        content.measure(
+                View.MeasureSpec.makeMeasureSpec(innerWidth, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        ScrollView scroller = new TvScrollView(a);
+        scroller.setVerticalScrollBarEnabled(false);
+        scroller.addView(content, new ScrollView.LayoutParams(-1, -2));
+        final FrameLayout clip =
+                new FrameLayout(a) {
+                    protected void dispatchDraw(Canvas c) {
+                        int save = c.save();
+                        c.clipRect(0, 0, getWidth(), getHeight());
+                        super.dispatchDraw(c);
+                        c.restoreToCount(save);
+                    }
+                };
+        clip.setTag("scroll-viewport-clip");
+        clip.setClipChildren(true);
+        clip.setClipToPadding(true);
+        clip.addView(scroller, new FrameLayout.LayoutParams(-1, -1));
+        panel.addView(
+                clip,
+                new LinearLayout.LayoutParams(
+                        -1, Math.min(maxHeight, Math.max(a.dp(24), content.getMeasuredHeight()))));
+        content.addOnLayoutChangeListener(
+                (v, l, t, r, b, ol, ot, orr, ob) -> {
+                    int desired = Math.min(maxHeight, Math.max(a.dp(24), b - t));
+                    ViewGroup.LayoutParams clp = clip.getLayoutParams();
+                    if (clp != null && clp.height != desired) {
+                        clp.height = desired;
+                        clip.setLayoutParams(clp);
+                    }
+                });
+        if (footer.getChildCount() > 0) {
+            a.gap(panel, 12);
+            panel.addView(footer, new LinearLayout.LayoutParams(-1, -2));
+        }
         for (int i = 0; i < content.getChildCount(); i++)
             if (content.getChildAt(i) instanceof Button) style((Button) content.getChildAt(i));
         for (Button button : actions.values()) style(button);
@@ -163,6 +203,7 @@ final class AppDialog extends Dialog {
         a.appDialog = this;
         Window w = getWindow();
         w.setBackgroundDrawableResource(android.R.color.transparent);
+        w.getDecorView().setMinimumWidth(0);
         w.setLayout(width, -2);
         w.setGravity(Gravity.CENTER);
         w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);

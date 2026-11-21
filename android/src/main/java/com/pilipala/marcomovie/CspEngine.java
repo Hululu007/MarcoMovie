@@ -23,11 +23,24 @@ public final class CspEngine implements SourceEngine {
     static final Map<String, DexClassLoader> LOADERS = new HashMap<>();
     static final Set<ClassLoader> ALL_PLUGIN_LOADERS =
             Collections.synchronizedSet(new LinkedHashSet<>());
+    static final Set<ClassLoader> INITIALIZED_PROXY_LOADERS =
+            Collections.synchronizedSet(new LinkedHashSet<>());
     static volatile String activeJarDeclaration = "";
     static volatile DexClassLoader activeProxyLoader;
     static volatile String pendingPluginDanmaku = "";
     static volatile long pendingPluginDanmakuAtMs = 0L;
     static volatile PluginApplication pluginAppWrapper;
+
+    static boolean hasGrantedAllFilesAccess() {
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            try {
+                return android.os.Environment.isExternalStorageManager();
+            } catch (Throwable ignored) {
+                return false;
+            }
+        }
+        return false;
+    }
 
     static boolean isStoragePermission(String permission) {
         if (permission == null) return false;
@@ -71,7 +84,7 @@ public final class CspEngine implements SourceEngine {
 
         @Override
         public int checkSelfPermission(String permission) {
-            if (isStoragePermission(permission)) {
+            if (isStoragePermission(permission) && hasGrantedAllFilesAccess()) {
                 return android.content.pm.PackageManager.PERMISSION_GRANTED;
             }
             return base.checkSelfPermission(permission);
@@ -79,7 +92,7 @@ public final class CspEngine implements SourceEngine {
 
         @Override
         public int checkPermission(String permission, int pid, int uid) {
-            if (isStoragePermission(permission)) {
+            if (isStoragePermission(permission) && hasGrantedAllFilesAccess()) {
                 return android.content.pm.PackageManager.PERMISSION_GRANTED;
             }
             return base.checkPermission(permission, pid, uid);
@@ -687,6 +700,26 @@ public final class CspEngine implements SourceEngine {
         }
     }
 
+    static void initPluginProxy(ClassLoader loader) {
+        if (loader == null) return;
+        for (ClassLoader cl : collectPluginLoaders(loader, null)) {
+            if (!INITIALIZED_PROXY_LOADERS.add(cl)) continue;
+            for (String proxyClassName :
+                    new String[] {
+                        "com.github.catvod.spider.Proxy", "com.github.catvod.spider.ProxyOrigin"
+                    }) {
+                try {
+                    Class<?> proxyClass = Class.forName(proxyClassName, false, cl);
+                    Method initMethod = proxyClass.getMethod("init");
+                    if (Modifier.isStatic(initMethod.getModifiers())) {
+                        initMethod.invoke(null);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+    }
+
     static void syncPluginProxyPort(ClassLoader loader, int port) {
         if (loader == null || port <= 0) return;
         for (ClassLoader cl : collectPluginLoaders(loader, null)) {
@@ -724,6 +757,28 @@ public final class CspEngine implements SourceEngine {
             File files = app.getFilesDir(), cache = app.getCacheDir();
             if (files != null && !files.exists()) files.mkdirs();
             if (cache != null && !cache.exists()) cache.mkdirs();
+            if (files != null) {
+                File privateTv = new File(files, "TV");
+                if (!privateTv.exists()) privateTv.mkdirs();
+            }
+            File extFiles = app.getExternalFilesDir(null);
+            if (extFiles != null) {
+                File extAppTv = new File(extFiles, "TV");
+                if (!extAppTv.exists()) extAppTv.mkdirs();
+            }
+            boolean canWriteExternal =
+                    hasGrantedAllFilesAccess()
+                            || android.os.Build.VERSION.SDK_INT < 23
+                            || app.checkSelfPermission(
+                                            android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            if (canWriteExternal) {
+                File extRoot = android.os.Environment.getExternalStorageDirectory();
+                if (extRoot != null) {
+                    File sharedTv = new File(extRoot, "TV");
+                    if (!sharedTv.exists()) sharedTv.mkdirs();
+                }
+            }
             File database = app.getDatabasePath("tv");
             File folder = database.getParentFile();
             if (folder != null && !folder.exists()) folder.mkdirs();
@@ -874,7 +929,9 @@ public final class CspEngine implements SourceEngine {
     }
 
     public static boolean eligible(Cms.Site s) {
-        return s.type == 3
+        return s != null
+                && s.type == 3
+                && s.api != null
                 && s.api.startsWith("csp_")
                 && s.api.substring(4).matches("[A-Za-z0-9_$.]+");
     }
@@ -891,6 +948,9 @@ public final class CspEngine implements SourceEngine {
         if (body == null) return false;
         if (body instanceof String) return !((String) body).trim().isEmpty();
         if (body instanceof byte[]) return ((byte[]) body).length > 0;
+        if (body instanceof ByteArrayInputStream) {
+            return ((ByteArrayInputStream) body).available() > 0;
+        }
         return true;
     }
 
@@ -898,6 +958,8 @@ public final class CspEngine implements SourceEngine {
             throws Throwable {
         Throwable last = null;
         Object[] fallbackResult = null;
+        String doVal = params == null ? "" : String.valueOf(params.get("do"));
+        boolean isDanmuRoute = doVal != null && doVal.toLowerCase(Locale.ROOT).contains("danm");
         for (ClassLoader cl : collectPluginLoaders(rootLoader, null)) {
             for (String proxyClassName :
                     new String[] {
@@ -909,7 +971,32 @@ public final class CspEngine implements SourceEngine {
                     Object raw = m.invoke(null, params);
                     if (raw instanceof Object[]) {
                         Object[] arr = (Object[]) raw;
-                        if (isUsableProxyResult(arr)) return arr;
+                        boolean nonEmptyStream = true;
+                        if (isDanmuRoute && arr.length > 2 && arr[2] instanceof InputStream) {
+                            InputStream is = (InputStream) arr[2];
+                            try {
+                                byte[] peek = new byte[4096];
+                                int read = is.read(peek);
+                                if (read <= 0) {
+                                    nonEmptyStream = false;
+                                    try {
+                                        is.close();
+                                    } catch (Throwable ignored) {
+                                    }
+                                    arr = arr.clone();
+                                    arr[2] = new ByteArrayInputStream(new byte[0]);
+                                } else {
+                                    arr = arr.clone();
+                                    arr[2] =
+                                            new SequenceInputStream(
+                                                    new ByteArrayInputStream(peek, 0, read), is);
+                                }
+                            } catch (Throwable peekErr) {
+                                nonEmptyStream = false;
+                                last = peekErr;
+                            }
+                        }
+                        if (nonEmptyStream && isUsableProxyResult(arr)) return arr;
                         if (fallbackResult == null) fallbackResult = arr;
                     }
                 } catch (ClassNotFoundException | NoSuchMethodException ignored) {
@@ -956,6 +1043,7 @@ public final class CspEngine implements SourceEngine {
         Object[] fallbackResult = null;
         for (DexClassLoader candidate : candidates) {
             syncPluginProxyPort(candidate, ProxyAddress.port);
+            initPluginProxy(candidate);
             syncPluginActivity(candidate, MainActivity.activeActivity);
             try {
                 Object[] res = invokeProxyOnLoader(candidate, params);
@@ -1137,6 +1225,7 @@ public final class CspEngine implements SourceEngine {
         return call(
                 "player",
                 () -> {
+                    initPluginProxy(spider.getClass().getClassLoader());
                     Throwable lastError = null;
                     String raw = null;
                     for (int attempt = 0; attempt < 2; attempt++) {

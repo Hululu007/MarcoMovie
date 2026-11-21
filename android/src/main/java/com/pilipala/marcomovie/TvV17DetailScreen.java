@@ -20,14 +20,15 @@ import java.util.List;
 /**
  * Apple TV+ inspired immersive TV detail screen.
  *
- * <p>Spacious, left-aligned cinema hierarchy over a full-bleed backdrop:
- * - Upper ~51% viewport reserved as an unobstructed artwork breathing window
- * - Row 1: Giant bold title + circular Heart favorite button (hollow ♡ / Apple Red ♥)
- * - Row 2: Official year · country/region · total episodes / duration
- * - Row 3: Authentic Douban & Rotten Tomatoes badges
- * - Row 4: Dedicated single action row — Play button + Line/Episodes popup button
- * - Row 5: Small-type single-episode filename from the active line (+ resume caption)
- * - Below: Spacious plot synopsis + display-only circular-avatar cast strip (non-focusable)
+ * <p>Spacious, left-aligned cinema hierarchy over a full-bleed official HD landscape backdrop:
+ * - Row 1: Giant bold title + small circular Heart favorite button beside it
+ * - Row 2: Unified nameplate badge bar — Year · Country/Region · Real episode count & season count
+ *          (when multi-season) · 4K/HDR/Dolby spec badges · authentic Douban/RT ratings · source
+ * - Row 3: Drama/movie synopsis (+ full synopsis trigger when truncated)
+ * - Row 4: Action row — Play / Continue button + Episodes/Lines popup button (+ optional source switch)
+ * - Row 5: Small subtitle beneath buttons showing last played route's resource name when continuing
+ * - Row 6: Display-only cast strip (circular portrait avatar badges)
+ * - Row 7: Related multi-season shelf (if multi-season)
  */
 final class TvV17DetailScreen {
     interface Actions {
@@ -49,8 +50,11 @@ final class TvV17DetailScreen {
     final FrameLayout view;
     final ImmersivePoster cover;
     final LinearLayout seasonHost;
+    final Button back;
     final Button play;
     final Button episodesBtn;
+    final Button seasonsBtn;
+    final Button switchSourceBtn;
     final Button favorite;
     final TextView episodeFileView;
     final TextView historyView;
@@ -58,19 +62,20 @@ final class TvV17DetailScreen {
     final TvScrollView scroll;
     final LinearLayout content;
     private final MainActivity host;
-    private final Cms.Site site;
-    private final TextView factsView;
-    private final TextView doubanBadge;
-    private final TextView rtBadge;
-    private final LinearLayout ratingRow;
-    private final MediaBadgeView.BadgeFlowLayout specBadgeRow;
+    private Cms.Site site;
+    private Cms.Video video;
+    private final MediaBadgeView.BadgeFlowLayout nameplateRow;
     private final TextView synopsisView;
     private final Button synopsisMoreBtn;
     private final LinearLayout castSection;
     private final LinearLayout castRow;
-    private final Cms.Video video;
+    private Runnable seasonsAction;
+    private Runnable switchSourceAction;
+    private ImmersivePoster.SubjectDetails officialDetails;
+    private int detectedSeasonCount;
     private double resolvedDouban = 0.0;
     private int resolvedRt = -1;
+    private WatchHistory.Entry currentBookmark;
 
     TvV17DetailScreen(
             MainActivity a,
@@ -120,39 +125,40 @@ final class TvV17DetailScreen {
         view.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
 
         content = a.vertical();
-        content.setPadding(a.dp(58), a.dp(28), a.dp(58), a.dp(64));
+        content.setPadding(a.dp(56), a.dp(26), a.dp(56), a.dp(64));
         content.setClipChildren(false);
         content.setClipToPadding(false);
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
 
         // Top-left floating frosted back button
-        Button back = DetailScreen.glassNavButton(a, "‹ 返回", "detail-back", false, actions::back);
+        back = DetailScreen.glassNavButton(a, "‹ 返回", "detail-back", false, actions::back);
         back.setId(View.generateViewId());
         content.addView(back, new LinearLayout.LayoutParams(-2, a.dp(38)));
 
-        // Generous upper breathing window so the title's top edge sits at left middle-lower (~51%)
+        // Balanced upper artwork breathing window (~38-42% viewport) so title, nameplate badges,
+        // synopsis, play/episodes buttons and last-played caption all sit cleanly above the fold.
         float density = Math.max(1f, a.getResources().getDisplayMetrics().density);
         float screenHeightDp = a.windowHeight() / density;
         float screenWidthDp = a.windowWidth() / density;
-        int targetTitleTopDp = Math.round(screenHeightDp * 0.51f);
-        int breathingDp = Math.max(148, Math.min(340, targetTitleTopDp - 66));
+        int targetTitleTopDp = Math.round(screenHeightDp * 0.36f);
+        int breathingDp = Math.max(96, Math.min(220, targetTitleTopDp - 58));
         View breathingRoom = new View(a);
         content.addView(breathingRoom, new LinearLayout.LayoutParams(1, a.dp(breathingDp)));
 
-        int heroWidthPx = a.dp(Math.max(460, Math.min(720, Math.round(screenWidthDp * 0.64f))));
+        int heroWidthPx = a.dp(Math.max(480, Math.min(760, Math.round(screenWidthDp * 0.66f))));
         LinearLayout heroColumn = a.vertical();
         heroColumn.setTag("detail-hero");
         heroColumn.setClipChildren(false);
         heroColumn.setClipToPadding(false);
         content.addView(heroColumn, new LinearLayout.LayoutParams(heroWidthPx, -2));
 
-        // 1. Largest Bold Title + Heart Favorite Icon Button right beside it
+        // 1. Bold Title + small circular Heart Favorite button beside it
         LinearLayout titleRow = a.row();
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
         titleRow.setClipChildren(false);
         titleRow.setClipToPadding(false);
 
-        TextView title = a.text(video.title == null ? "" : video.title, 38, 0xfff5f5f7);
+        TextView title = a.text(video.title == null ? "" : video.title, 36, 0xfff5f5f7);
         title.setTag("detail-title");
         title.setTypeface(null, Typeface.BOLD);
         title.setMaxLines(2);
@@ -180,68 +186,46 @@ final class TvV17DetailScreen {
         titleRow.addView(favorite, favLp);
         heroColumn.addView(titleRow, new LinearLayout.LayoutParams(-1, -2));
 
-        // 2. Official Metadata Line: Year · Region · Total Episodes / Duration
-        factsView = a.text(ImmersivePoster.formatOfficialFactLine(video, null), 14.5f, 0xe2ebebf5);
-        factsView.setTag("detail-facts");
-        factsView.setMaxLines(2);
-        factsView.setEllipsize(TextUtils.TruncateAt.END);
-        factsView.setShadowLayer(a.dp(6), 0, a.dp(1), 0x80000000);
-        factsView.setVisibility(factsView.getText().length() > 0 ? View.VISIBLE : View.GONE);
-        LinearLayout.LayoutParams factsLp = new LinearLayout.LayoutParams(-1, -2);
-        factsLp.topMargin = a.dp(14);
-        heroColumn.addView(factsView, factsLp);
+        // 2. Unified Nameplate Badges Row: Year · Country/Region · Seasons · Episodes ·
+        // 4K/HDR/Dolby · Ratings · Source
+        nameplateRow = MediaBadgeView.createRow(a, "detail-nameplates", false);
+        nameplateRow.setGapPx(a.dp(8));
+        LinearLayout.LayoutParams nameplateLp = new LinearLayout.LayoutParams(-1, -2);
+        nameplateLp.topMargin = a.dp(14);
+        heroColumn.addView(nameplateRow, nameplateLp);
 
-        // 3. Authentic Rating Badges: Douban Score · Rotten Tomatoes · Source
-        ratingRow = a.row();
-        ratingRow.setTag("detail-rating-row");
-        ratingRow.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams ratingLp = new LinearLayout.LayoutParams(-2, -2);
-        ratingLp.topMargin = a.dp(12);
-        heroColumn.addView(ratingRow, ratingLp);
+        // 3. Plot Synopsis directly below nameplate badges, ABOVE Play & Episodes buttons
+        String initialSynopsis = video.description == null ? "" : video.description.trim();
+        synopsisView = a.text(initialSynopsis, 14, 0xd8e8edf7);
+        synopsisView.setTag("detail-synopsis");
+        synopsisView.setMaxLines(3);
+        synopsisView.setEllipsize(TextUtils.TruncateAt.END);
+        synopsisView.setLineSpacing(a.dp(3), 1.18f);
+        synopsisView.setShadowLayer(a.dp(6), 0, a.dp(1), 0x80000000);
+        synopsisView.setVisibility(initialSynopsis.isEmpty() ? View.GONE : View.VISIBLE);
+        LinearLayout.LayoutParams synopsisLp = new LinearLayout.LayoutParams(-1, -2);
+        synopsisLp.topMargin = a.dp(14);
+        heroColumn.addView(synopsisView, synopsisLp);
 
-        doubanBadge = a.text("", 12.5f, 0xff6ee7b7);
-        doubanBadge.setTag("detail-douban-rating");
-        doubanBadge.setSingleLine(true);
-        doubanBadge.setTypeface(null, Typeface.BOLD);
-        doubanBadge.setPadding(a.dp(12), a.dp(4.5f), a.dp(12), a.dp(4.5f));
-        doubanBadge.setBackground(MobileDetailScreen.glassBg(a, 0x3800b51d, 0x6634d399, 999));
-        LinearLayout.LayoutParams dbLp = new LinearLayout.LayoutParams(-2, -2);
-        dbLp.rightMargin = a.dp(10);
-        ratingRow.addView(doubanBadge, dbLp);
+        synopsisMoreBtn =
+                DetailScreen.glassNavButton(a, "查看完整简介 ›", "synopsis", false, actions::synopsis);
+        synopsisMoreBtn.setId(View.generateViewId());
+        synopsisMoreBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        synopsisMoreBtn.setMinHeight(a.dp(30));
+        synopsisMoreBtn.setMinimumHeight(a.dp(30));
+        synopsisMoreBtn.setPadding(a.dp(13), a.dp(4), a.dp(13), a.dp(4));
+        synopsisMoreBtn.setVisibility(initialSynopsis.length() > 64 ? View.VISIBLE : View.GONE);
+        LinearLayout.LayoutParams moreLp = new LinearLayout.LayoutParams(-2, a.dp(30));
+        moreLp.topMargin = a.dp(8);
+        heroColumn.addView(synopsisMoreBtn, moreLp);
 
-        rtBadge = a.text("", 12.5f, 0xffffb4a2);
-        rtBadge.setTag("detail-rt-rating");
-        rtBadge.setSingleLine(true);
-        rtBadge.setTypeface(null, Typeface.BOLD);
-        rtBadge.setPadding(a.dp(12), a.dp(4.5f), a.dp(12), a.dp(4.5f));
-        rtBadge.setBackground(MobileDetailScreen.glassBg(a, 0x38fa320a, 0x66ff6b4a, 999));
-        LinearLayout.LayoutParams rtLp = new LinearLayout.LayoutParams(-2, -2);
-        rtLp.rightMargin = a.dp(10);
-        ratingRow.addView(rtBadge, rtLp);
-
-        if (site.name != null && !site.name.trim().isEmpty()) {
-            TextView siteLabel = a.text(site.name.trim(), 12, 0xd8ffffff);
-            siteLabel.setSingleLine(true);
-            siteLabel.setPadding(a.dp(12), a.dp(4.5f), a.dp(12), a.dp(4.5f));
-            siteLabel.setBackground(MobileDetailScreen.glassBg(a, 0x24ffffff, 0x36ffffff, 999));
-            ratingRow.addView(siteLabel);
-        }
-        applyRatings(0.0, -1);
-
-        // 3b. Plain-text Media Spec Badges (bypassing URLDecoder so '+' in HDR10+/DD+ stays intact)
-        specBadgeRow = MediaBadgeView.createRow(a, "detail-spec-badges", false);
-        LinearLayout.LayoutParams specLp = new LinearLayout.LayoutParams(-1, -2);
-        specLp.topMargin = a.dp(10);
-        heroColumn.addView(specBadgeRow, specLp);
-        refreshSpecBadges();
-
-        // 4. Dedicated Action Row directly below ratings: Play + Episodes/Lines Popup Button
+        // 4. Primary Action Row directly below synopsis: Play + Episodes (+ optional Source Switch)
         LinearLayout buttons = a.row();
         buttons.setGravity(Gravity.CENTER_VERTICAL);
         buttons.setClipChildren(false);
         buttons.setClipToPadding(false);
         LinearLayout.LayoutParams buttonsLp = new LinearLayout.LayoutParams(-1, -2);
-        buttonsLp.topMargin = a.dp(22);
+        buttonsLp.topMargin = a.dp(18);
         heroColumn.addView(buttons, buttonsLp);
 
         play = DetailScreen.heroPlayButton(a, playLabel, "detail-play", actions::play);
@@ -249,11 +233,11 @@ final class TvV17DetailScreen {
         play.setEnabled(playEnabled);
         play.setSingleLine(true);
         play.setEllipsize(TextUtils.TruncateAt.END);
-        play.setMinWidth(a.dp(172));
-        play.setMinimumWidth(a.dp(172));
-        play.setMaxWidth(a.dp(230));
-        play.setPadding(a.dp(26), 0, a.dp(26), 0);
-        buttons.addView(play, new LinearLayout.LayoutParams(-2, a.dp(48)));
+        play.setMinWidth(a.dp(168));
+        play.setMinimumWidth(a.dp(168));
+        play.setMaxWidth(a.dp(236));
+        play.setPadding(a.dp(24), 0, a.dp(24), 0);
+        buttons.addView(play, new LinearLayout.LayoutParams(-2, a.dp(46)));
 
         episodesBtn =
                 DetailScreen.glassNavButton(
@@ -267,24 +251,54 @@ final class TvV17DetailScreen {
         episodesBtn.setVisibility(playEnabled ? View.VISIBLE : View.GONE);
         episodesBtn.setSingleLine(true);
         episodesBtn.setEllipsize(TextUtils.TruncateAt.END);
-        episodesBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14.5f);
-        episodesBtn.setPadding(a.dp(22), a.dp(10), a.dp(22), a.dp(10));
-        LinearLayout.LayoutParams epBtnLp = new LinearLayout.LayoutParams(-2, a.dp(48));
-        epBtnLp.leftMargin = a.dp(14);
+        episodesBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+        episodesBtn.setPadding(a.dp(20), a.dp(10), a.dp(20), a.dp(10));
+        LinearLayout.LayoutParams epBtnLp = new LinearLayout.LayoutParams(-2, a.dp(46));
+        epBtnLp.leftMargin = a.dp(12);
         buttons.addView(episodesBtn, epBtnLp);
 
-        // Ensure D-pad UP from Play / Episodes always lands directly on the Heart Favorite button
-        play.setNextFocusUpId(favorite.getId());
-        episodesBtn.setNextFocusUpId(favorite.getId());
-        favorite.setNextFocusUpId(back.getId());
-        back.setNextFocusDownId(favorite.getId());
-        if (playEnabled) {
-            favorite.setNextFocusDownId(play.getId());
-        }
+        seasonsBtn =
+                DetailScreen.glassNavButton(
+                        a,
+                        "☰ 选季",
+                        "detail-seasons-trigger",
+                        false,
+                        () -> {
+                            if (seasonsAction != null) seasonsAction.run();
+                        });
+        seasonsBtn.setId(View.generateViewId());
+        seasonsBtn.setVisibility(View.GONE);
+        seasonsBtn.setSingleLine(true);
+        seasonsBtn.setEllipsize(TextUtils.TruncateAt.END);
+        seasonsBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+        seasonsBtn.setPadding(a.dp(18), a.dp(10), a.dp(18), a.dp(10));
+        LinearLayout.LayoutParams seasonBtnLp = new LinearLayout.LayoutParams(-2, a.dp(46));
+        seasonBtnLp.leftMargin = a.dp(12);
+        buttons.addView(seasonsBtn, seasonBtnLp);
 
-        // 5. Small single-episode filename from active line directly below Play button
+        switchSourceBtn =
+                DetailScreen.glassNavButton(
+                        a,
+                        "⇄ 切换来源",
+                        "detail-switch-source",
+                        false,
+                        () -> {
+                            if (switchSourceAction != null) switchSourceAction.run();
+                        });
+        switchSourceBtn.setId(View.generateViewId());
+        switchSourceBtn.setVisibility(View.GONE);
+        switchSourceBtn.setSingleLine(true);
+        switchSourceBtn.setEllipsize(TextUtils.TruncateAt.END);
+        switchSourceBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+        switchSourceBtn.setPadding(a.dp(18), a.dp(10), a.dp(18), a.dp(10));
+        LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(-2, a.dp(46));
+        swLp.leftMargin = a.dp(12);
+        buttons.addView(switchSourceBtn, swLp);
+
+        // 5. Small subtitle beneath Play/Episodes showing last played route resource name (+
+        // progress)
         episodeFileView =
-                a.text(episodeFileCaption == null ? "" : episodeFileCaption, 12.5f, 0xb0ebebf5);
+                a.text(episodeFileCaption == null ? "" : episodeFileCaption, 12.5f, 0xb8ebebf5);
         episodeFileView.setTag("detail-episode-file");
         episodeFileView.setMaxLines(2);
         episodeFileView.setEllipsize(TextUtils.TruncateAt.END);
@@ -293,57 +307,24 @@ final class TvV17DetailScreen {
         episodeFileView.setVisibility(
                 episodeFileView.getText().length() > 0 ? View.VISIBLE : View.GONE);
         LinearLayout.LayoutParams fileLp = new LinearLayout.LayoutParams(-1, -2);
-        fileLp.topMargin = a.dp(12);
+        fileLp.topMargin = a.dp(10);
         heroColumn.addView(episodeFileView, fileLp);
 
-        historyView = a.text(historyCaption == null ? "" : historyCaption, 12, 0x98d4dae8);
+        historyView = a.text(historyCaption == null ? "" : historyCaption, 12, 0x9cd4dae8);
         historyView.setTag("detail-history");
         historyView.setVisibility(historyView.getText().length() > 0 ? View.VISIBLE : View.GONE);
         LinearLayout.LayoutParams historyLp = new LinearLayout.LayoutParams(-1, -2);
-        historyLp.topMargin = a.dp(5);
+        historyLp.topMargin = a.dp(4);
         heroColumn.addView(historyView, historyLp);
 
-        statusView = a.text("", 13, MainActivity.MUTED);
+        statusView = a.text("", 12.5f, MainActivity.MUTED);
         statusView.setTag("detail-loading");
         statusView.setVisibility(View.GONE);
         LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(-1, -2);
-        statusLp.topMargin = a.dp(8);
+        statusLp.topMargin = a.dp(6);
         heroColumn.addView(statusView, statusLp);
 
-        // 6. Plot Synopsis (airy spacing below primary hero actions)
-        String initialSynopsis = video.description == null ? "" : video.description.trim();
-        synopsisView = a.text(initialSynopsis, 14, 0xd0e6ebf4);
-        synopsisView.setTag("detail-synopsis");
-        synopsisView.setMaxLines(4);
-        synopsisView.setEllipsize(TextUtils.TruncateAt.END);
-        synopsisView.setLineSpacing(a.dp(3), 1.18f);
-        synopsisView.setShadowLayer(a.dp(6), 0, a.dp(1), 0x80000000);
-        synopsisView.setVisibility(initialSynopsis.isEmpty() ? View.GONE : View.VISIBLE);
-        LinearLayout.LayoutParams synopsisLp = new LinearLayout.LayoutParams(-1, -2);
-        synopsisLp.topMargin = a.dp(24);
-        heroColumn.addView(synopsisView, synopsisLp);
-
-        synopsisMoreBtn =
-                DetailScreen.glassNavButton(a, "查看完整简介 ›", "synopsis", false, actions::synopsis);
-        synopsisMoreBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-        synopsisMoreBtn.setMinHeight(a.dp(32));
-        synopsisMoreBtn.setMinimumHeight(a.dp(32));
-        synopsisMoreBtn.setPadding(a.dp(14), a.dp(5), a.dp(14), a.dp(5));
-        synopsisMoreBtn.setVisibility(initialSynopsis.length() > 60 ? View.VISIBLE : View.GONE);
-        LinearLayout.LayoutParams moreLp = new LinearLayout.LayoutParams(-2, a.dp(32));
-        moreLp.topMargin = a.dp(10);
-        heroColumn.addView(synopsisMoreBtn, moreLp);
-
-        // 7. Related Seasons Shelf (if multi-season)
-        seasonHost = a.vertical();
-        seasonHost.setTag("detail-seasons");
-        seasonHost.setClipChildren(false);
-        seasonHost.setClipToPadding(false);
-        LinearLayout.LayoutParams seasonLp = new LinearLayout.LayoutParams(-1, -2);
-        seasonLp.topMargin = a.dp(26);
-        content.addView(seasonHost, seasonLp);
-
-        // 8. Display-Only Cast Strip with Circular Portrait Avatars (non-focusable)
+        // 6. Display-Only Cast Strip with Circular Portrait Avatar Badges (directly below buttons)
         castSection = a.vertical();
         castSection.setTag("detail-cast-section");
         castSection.setFocusable(false);
@@ -352,10 +333,10 @@ final class TvV17DetailScreen {
         castSection.setClipChildren(false);
         castSection.setClipToPadding(false);
         LinearLayout.LayoutParams castSecLp = new LinearLayout.LayoutParams(-1, -2);
-        castSecLp.topMargin = a.dp(30);
+        castSecLp.topMargin = a.dp(22);
         content.addView(castSection, castSecLp);
 
-        TextView castLabel = a.text("演职员", 13.5f, 0xb0ebebf5);
+        TextView castLabel = a.text("演职员", 13.5f, 0xb8ebebf5);
         castLabel.setTypeface(null, Typeface.BOLD);
         castSection.addView(castLabel, new LinearLayout.LayoutParams(-2, -2));
 
@@ -367,7 +348,7 @@ final class TvV17DetailScreen {
         castScroll.setClickable(false);
         castScroll.setClipChildren(false);
         castScroll.setClipToPadding(false);
-        castScroll.setPadding(0, a.dp(14), 0, a.dp(8));
+        castScroll.setPadding(0, a.dp(12), 0, a.dp(6));
         castRow = a.row();
         castRow.setFocusable(false);
         castRow.setFocusableInTouchMode(false);
@@ -376,10 +357,23 @@ final class TvV17DetailScreen {
         castScroll.addView(castRow, new FrameLayout.LayoutParams(-2, -2));
         castSection.addView(castScroll, new LinearLayout.LayoutParams(-1, -2));
 
+        // 7. Related Multi-Season Shelf (below cast strip if multi-season)
+        seasonHost = a.vertical();
+        seasonHost.setTag("detail-seasons");
+        seasonHost.setClipChildren(false);
+        seasonHost.setClipToPadding(false);
+        LinearLayout.LayoutParams seasonLp = new LinearLayout.LayoutParams(-1, -2);
+        seasonLp.topMargin = a.dp(22);
+        content.addView(seasonHost, seasonLp);
+
+        wireHeroFocus();
+        applyRatings(0.0, -1);
+        rebuildNameplateBadges();
         populateCast(ImmersivePoster.parseCastNamesFallback(video.director, video.actor));
 
-        // Kick off verified artwork, ratings, and official Douban metadata/cast enrichment
-        boolean likelyTv = hasMultipleEpisodes(video);
+        // Kick off verified official HD landscape artwork, ratings, and Douban metadata/cast
+        boolean likelyTv =
+                hasMultipleEpisodes(video) || (video.tag != null && video.tag.contains("剧"));
         String artwork =
                 verifiedBackdrop != null && !verifiedBackdrop.trim().isEmpty()
                         ? verifiedBackdrop.trim()
@@ -400,22 +394,17 @@ final class TvV17DetailScreen {
                 video,
                 details -> {
                     if (details == null) return;
-                    String updatedFacts = ImmersivePoster.formatOfficialFactLine(video, details);
-                    if (!updatedFacts.isEmpty()) {
-                        factsView.setText(updatedFacts);
-                        factsView.setVisibility(View.VISIBLE);
-                    }
+                    officialDetails = details;
                     if (details.doubanScore >= 2.0 || details.rtPercent > 0) {
                         applyRatings(details.doubanScore, details.rtPercent);
+                    } else {
+                        rebuildNameplateBadges();
                     }
                     if (!details.intro.isEmpty()
-                            && (video.description == null
-                                    || video.description.trim().length() < 18)) {
-                        video.description = details.intro;
-                        synopsisView.setText(details.intro);
-                        synopsisView.setVisibility(View.VISIBLE);
-                        synopsisMoreBtn.setVisibility(
-                                details.intro.length() > 60 ? View.VISIBLE : View.GONE);
+                            && (this.video.description == null
+                                    || this.video.description.trim().length() < 18)) {
+                        this.video.description = details.intro;
+                        updateSynopsisText(details.intro);
                     }
                     if (!details.cast.isEmpty()) {
                         populateCast(details.cast);
@@ -427,6 +416,176 @@ final class TvV17DetailScreen {
                         a.poster(details.posterUrl, cover.image, true);
                     }
                 });
+    }
+
+    private void wireHeroFocus() {
+        int abovePlayId =
+                synopsisMoreBtn.getVisibility() == View.VISIBLE
+                        ? synopsisMoreBtn.getId()
+                        : favorite.getId();
+        play.setNextFocusUpId(abovePlayId);
+        episodesBtn.setNextFocusUpId(abovePlayId);
+        seasonsBtn.setNextFocusUpId(abovePlayId);
+        switchSourceBtn.setNextFocusUpId(abovePlayId);
+        synopsisMoreBtn.setNextFocusUpId(favorite.getId());
+        synopsisMoreBtn.setNextFocusDownId(play.isEnabled() ? play.getId() : View.NO_ID);
+        favorite.setNextFocusUpId(back.getId());
+        back.setNextFocusDownId(favorite.getId());
+        if (synopsisMoreBtn.getVisibility() == View.VISIBLE) {
+            favorite.setNextFocusDownId(synopsisMoreBtn.getId());
+        } else if (play.isEnabled()) {
+            favorite.setNextFocusDownId(play.getId());
+        } else if (switchSourceBtn.getVisibility() == View.VISIBLE) {
+            favorite.setNextFocusDownId(switchSourceBtn.getId());
+        }
+    }
+
+    private void updateSynopsisText(String raw) {
+        String text = raw == null ? "" : raw.trim();
+        synopsisView.setText(text);
+        synopsisView.setVisibility(text.isEmpty() ? View.GONE : View.VISIBLE);
+        synopsisMoreBtn.setVisibility(text.length() > 64 ? View.VISIBLE : View.GONE);
+        wireHeroFocus();
+    }
+
+    void setDetectedSeasonCount(int seasons) {
+        if (seasons > detectedSeasonCount) {
+            detectedSeasonCount = seasons;
+            rebuildNameplateBadges();
+        }
+    }
+
+    void setBookmark(WatchHistory.Entry bookmark) {
+        this.currentBookmark = bookmark;
+        rebuildNameplateBadges();
+    }
+
+    void setLoadingStatus(String message) {
+        String text = message == null ? "" : message.trim();
+        statusView.setText(text);
+        statusView.setVisibility(text.isEmpty() ? View.GONE : View.VISIBLE);
+    }
+
+    void setSeasonsAction(String label, Runnable action) {
+        this.seasonsAction = action;
+        if (action == null || label == null || label.trim().isEmpty()) {
+            seasonsBtn.setVisibility(View.GONE);
+        } else {
+            seasonsBtn.setText(label.trim());
+            seasonsBtn.setVisibility(View.VISIBLE);
+        }
+        wireHeroFocus();
+    }
+
+    void setSourceSwitchAction(String label, Runnable action) {
+        this.switchSourceAction = action;
+        if (action == null || label == null || label.trim().isEmpty()) {
+            switchSourceBtn.setVisibility(View.GONE);
+        } else {
+            switchSourceBtn.setText(label.trim());
+            switchSourceBtn.setVisibility(View.VISIBLE);
+        }
+        wireHeroFocus();
+    }
+
+    /**
+     * Patches the live detail screen in-place when async source detail / curated lookup finishes,
+     * keeping the official backdrop and Douban enrichment completely intact with zero screen flash.
+     */
+    void bindResolvedVideo(
+            Cms.Site resolvedSite,
+            Cms.Video resolvedVideo,
+            WatchHistory.Entry bookmark,
+            boolean isFavorite,
+            String playLabel,
+            String episodesButtonLabel,
+            String episodeFileCaption,
+            String historyCaption) {
+        if (resolvedSite != null) this.site = resolvedSite;
+        if (resolvedVideo != null) this.video = resolvedVideo;
+        this.currentBookmark = bookmark;
+
+        boolean playable =
+                this.video != null && this.video.lines != null && !this.video.lines.isEmpty();
+        play.setEnabled(playable);
+        play.setText(playLabel != null && !playLabel.isEmpty() ? playLabel : "► 开始播放");
+        episodesBtn.setEnabled(playable);
+        episodesBtn.setVisibility(playable ? View.VISIBLE : View.GONE);
+        if (episodesButtonLabel != null && !episodesButtonLabel.isEmpty()) {
+            episodesBtn.setText(episodesButtonLabel);
+        }
+        setFavorite(isFavorite);
+
+        String continueLine =
+                formatContinuePlaySubtitle(bookmark, episodeFileCaption, historyCaption);
+        if (!continueLine.isEmpty()) {
+            episodeFileView.setText(continueLine);
+            episodeFileView.setVisibility(View.VISIBLE);
+            historyView.setText("");
+            historyView.setVisibility(View.GONE);
+        } else {
+            episodeFileView.setText(episodeFileCaption == null ? "" : episodeFileCaption);
+            episodeFileView.setVisibility(
+                    episodeFileView.getText().length() > 0 ? View.VISIBLE : View.GONE);
+            historyView.setText(historyCaption == null ? "" : historyCaption);
+            historyView.setVisibility(
+                    historyView.getText().length() > 0 ? View.VISIBLE : View.GONE);
+        }
+
+        if (this.video != null
+                && this.video.description != null
+                && !this.video.description.trim().isEmpty()
+                && (synopsisView.getText().length() < 18
+                        || officialDetails == null
+                        || officialDetails.intro.isEmpty())) {
+            updateSynopsisText(this.video.description);
+        }
+        if (this.video != null
+                && (officialDetails == null || officialDetails.cast.isEmpty())
+                && castRow.getChildCount() == 0) {
+            populateCast(
+                    ImmersivePoster.parseCastNamesFallback(this.video.director, this.video.actor));
+        }
+        if (this.video != null
+                && cover.backdrop.wideBitmap == null
+                && this.video.poster != null
+                && !this.video.poster.trim().isEmpty()) {
+            cover.load(
+                    this.video.poster,
+                    this.video.title,
+                    this.video.year,
+                    this.video.actor,
+                    this.video.director,
+                    true,
+                    hasMultipleEpisodes(this.video));
+        }
+        rebuildNameplateBadges();
+        wireHeroFocus();
+    }
+
+    static String formatContinuePlaySubtitle(
+            WatchHistory.Entry bookmark, String episodeFileCaption, String historyCaption) {
+        if (bookmark == null) return "";
+        String resource = episodeFileCaption == null ? "" : episodeFileCaption.trim();
+        if (resource.isEmpty()) {
+            String line = bookmark.line == null ? "" : bookmark.line.trim();
+            String ep = bookmark.episode == null ? "" : bookmark.episode.trim();
+            if (!line.isEmpty() && !ep.isEmpty()) resource = line + "  ·  " + ep;
+            else if (!ep.isEmpty()) resource = ep;
+            else resource = line;
+        }
+        if (resource.isEmpty()) return historyCaption == null ? "" : historyCaption.trim();
+        String progress =
+                bookmark.complete()
+                        ? "已看完"
+                        : PlaybackController.formatTime(bookmark.position)
+                                + (bookmark.duration > 0
+                                        ? " / " + PlaybackController.formatTime(bookmark.duration)
+                                        : "");
+        if (!progress.isEmpty()) {
+            return "上次播放：" + resource + "  ·  " + progress;
+        }
+        return "上次播放：" + resource;
     }
 
     static String formatEpisodeFileCaption(Cms.Line line, Cms.Episode episode) {
@@ -506,21 +665,64 @@ final class TvV17DetailScreen {
 
     void updateEpisodeCaption(String caption, String buttonLabel) {
         if (caption != null) {
-            episodeFileView.setText(caption);
-            episodeFileView.setVisibility(caption.isEmpty() ? View.GONE : View.VISIBLE);
+            String continueLine = formatContinuePlaySubtitle(currentBookmark, caption, "");
+            if (!continueLine.isEmpty()) {
+                episodeFileView.setText(continueLine);
+                episodeFileView.setVisibility(View.VISIBLE);
+                historyView.setVisibility(View.GONE);
+            } else {
+                episodeFileView.setText(caption);
+                episodeFileView.setVisibility(caption.isEmpty() ? View.GONE : View.VISIBLE);
+            }
         }
         if (buttonLabel != null && !buttonLabel.isEmpty()) {
             episodesBtn.setText(buttonLabel);
         }
-        refreshSpecBadges();
+        rebuildNameplateBadges();
     }
 
-    private void refreshSpecBadges() {
-        WatchHistory.Entry bookmark = null;
-        for (WatchHistory.Entry entry : host.watchHistory()) {
-            if (site.key.equals(entry.site) && video.id != null && video.id.equals(entry.id)) {
-                bookmark = entry;
-                break;
+    private TextView buildNameplatePill(
+            String text, int textColor, int fillColor, int strokeColor) {
+        TextView pill = host.text(text, 12.5f, textColor);
+        pill.setSingleLine(true);
+        pill.setTypeface(null, Typeface.BOLD);
+        pill.setIncludeFontPadding(false);
+        pill.setPadding(host.dp(10), host.dp(4.5f), host.dp(10), host.dp(4.5f));
+        pill.setBackground(MobileDetailScreen.glassBg(host, fillColor, strokeColor, 8));
+        return pill;
+    }
+
+    private void rebuildNameplateBadges() {
+        nameplateRow.removeAllViews();
+        if (video == null) {
+            nameplateRow.setVisibility(View.GONE);
+            return;
+        }
+        boolean reduceTransparency =
+                host.prefs != null && host.prefs.getBoolean(Prefs.REDUCED_TRANSPARENCY, false);
+        int neutralFill = reduceTransparency ? 0xe6202633 : 0x52161c28;
+        int neutralStroke = reduceTransparency ? 0x99ffffff : 0x42ffffff;
+
+        // 1. Official facts nameplates: Year, Country/Region, Season count (when multi-season),
+        //    real episode count / duration, and primary genre
+        java.util.List<String> factTokens =
+                ImmersivePoster.buildOfficialFactBadges(
+                        video, officialDetails, detectedSeasonCount);
+        for (String token : factTokens) {
+            if (token == null || token.trim().isEmpty()) continue;
+            TextView pill =
+                    buildNameplatePill(token.trim(), 0xf2f4f7fc, neutralFill, neutralStroke);
+            nameplateRow.addView(pill, new android.view.ViewGroup.LayoutParams(-2, -2));
+        }
+
+        // 2. 4K / HDR / Dolby Vision / Atmos technical spec nameplate badges
+        WatchHistory.Entry bookmark = currentBookmark;
+        if (bookmark == null && site != null && video.id != null) {
+            for (WatchHistory.Entry entry : host.watchHistory()) {
+                if (site.key.equals(entry.site) && video.id.equals(entry.id)) {
+                    bookmark = entry;
+                    break;
+                }
             }
         }
         Cms.Line activeLine = null;
@@ -549,13 +751,57 @@ final class TvV17DetailScreen {
                 }
             }
         }
-        MediaBadgeView.populateRow(
-                host,
-                specBadgeRow,
-                MediaBadgeView.extractForHero(host, video.remarks, activeLine, activeEpisode),
-                MediaBadgeView.HERO_MAX_BADGES,
-                false,
-                true);
+        List<MediaBadges.Badge> specs =
+                MediaBadgeView.extractForHero(host, video.remarks, activeLine, activeEpisode);
+        if (specs != null) {
+            int maxSpecs = Math.min(MediaBadgeView.HERO_MAX_BADGES, specs.size());
+            for (int i = 0; i < maxSpecs; i++) {
+                TextView specPill = MediaBadgeView.createPill(host, specs.get(i), false, true);
+                nameplateRow.addView(specPill, new android.view.ViewGroup.LayoutParams(-2, -2));
+            }
+        }
+
+        // 3. Authentic Douban & Rotten Tomatoes rating nameplates
+        double db = resolvedDouban;
+        if (db < 2.0) {
+            db = Cms.parseValidDoubanScore(video.doubanScore);
+        }
+        if (db >= 2.0 && db <= 9.9) {
+            TextView dbPill =
+                    buildNameplatePill(
+                            String.format(java.util.Locale.US, "豆瓣 %.1f", db),
+                            0xff6ee7b7,
+                            reduceTransparency ? 0xe6113a26 : 0x4200b51d,
+                            0x7034d399);
+            dbPill.setTag("detail-douban-rating");
+            nameplateRow.addView(dbPill, new android.view.ViewGroup.LayoutParams(-2, -2));
+        }
+        if (resolvedRt >= 1 && resolvedRt <= 100) {
+            TextView rtPill =
+                    buildNameplatePill(
+                            "烂番茄 " + resolvedRt + "%",
+                            0xffffb4a2,
+                            reduceTransparency ? 0xe6451b14 : 0x42fa320a,
+                            0x70ff6b4a);
+            rtPill.setTag("detail-rt-rating");
+            nameplateRow.addView(rtPill, new android.view.ViewGroup.LayoutParams(-2, -2));
+        }
+
+        // 4. Active source pill
+        if (site != null
+                && site.name != null
+                && !site.name.trim().isEmpty()
+                && !TvCuratedHome.isCuratedSite(site)) {
+            TextView srcPill =
+                    buildNameplatePill(
+                            site.name.trim(),
+                            0xdceef3ff,
+                            reduceTransparency ? 0xe61d2433 : 0x36ffffff,
+                            0x48ffffff);
+            nameplateRow.addView(srcPill, new android.view.ViewGroup.LayoutParams(-2, -2));
+        }
+
+        nameplateRow.setVisibility(nameplateRow.getChildCount() > 0 ? View.VISIBLE : View.GONE);
     }
 
     private static boolean hasMultipleEpisodes(Cms.Video video) {
@@ -573,16 +819,7 @@ final class TvV17DetailScreen {
         if (rtPercent >= 1 && rtPercent <= 100) {
             resolvedRt = rtPercent;
         }
-        MobileDetailScreen.updateRatingBadges(
-                doubanBadge, rtBadge, video, resolvedDouban, resolvedRt);
-        boolean anyVisible = false;
-        for (int i = 0; i < ratingRow.getChildCount(); i++) {
-            if (ratingRow.getChildAt(i).getVisibility() == View.VISIBLE) {
-                anyVisible = true;
-                break;
-            }
-        }
-        ratingRow.setVisibility(anyVisible ? View.VISIBLE : View.GONE);
+        rebuildNameplateBadges();
     }
 
     private void populateCast(List<ImmersivePoster.CastMember> members) {
@@ -601,7 +838,15 @@ final class TvV17DetailScreen {
         }
     }
 
+    static int castAvatarAccent(String name) {
+        String safe = name == null ? "" : name;
+        return AVATAR_ACCENTS[(safe.hashCode() & 0x7fffffff) % AVATAR_ACCENTS.length];
+    }
+
     private LinearLayout buildCastCard(final ImmersivePoster.CastMember member, int index) {
+        final String safeName = member == null || member.name == null ? "" : member.name;
+        final String safeAvatar =
+                member == null || member.avatarUrl == null ? "" : member.avatarUrl;
         LinearLayout card = host.vertical();
         card.setTag("detail-cast:" + index);
         card.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -615,7 +860,7 @@ final class TvV17DetailScreen {
 
         int avatarPx = host.dp(58);
         final FrameLayout avatarFrame = new FrameLayout(host);
-        int accent = AVATAR_ACCENTS[Math.abs(member.name.hashCode()) % AVATAR_ACCENTS.length];
+        int accent = castAvatarAccent(safeName);
         GradientDrawable monogramBg = new GradientDrawable();
         monogramBg.setShape(GradientDrawable.OVAL);
         monogramBg.setColor(accent);
@@ -630,19 +875,17 @@ final class TvV17DetailScreen {
         avatarFrame.setClipToOutline(true);
 
         String initial =
-                member.name.isEmpty()
-                        ? "?"
-                        : member.name.substring(0, Math.min(1, member.name.length()));
+                safeName.isEmpty() ? "?" : safeName.substring(0, Math.min(1, safeName.length()));
         TextView monogram = host.text(initial, 19, 0xf0ffffff);
         monogram.setTypeface(null, Typeface.BOLD);
         monogram.setGravity(Gravity.CENTER);
         avatarFrame.addView(monogram, new FrameLayout.LayoutParams(-1, -1));
 
-        if (!member.avatarUrl.isEmpty()) {
+        if (!safeAvatar.isEmpty()) {
             ImageView photo = new ImageView(host);
             photo.setScaleType(ImageView.ScaleType.CENTER_CROP);
             avatarFrame.addView(photo, new FrameLayout.LayoutParams(-1, -1));
-            host.poster(member.avatarUrl, photo, false);
+            host.poster(safeAvatar, photo, false);
         }
 
         FrameLayout ringWrap = new FrameLayout(host);
@@ -658,7 +901,7 @@ final class TvV17DetailScreen {
                 ringWrap,
                 new LinearLayout.LayoutParams(avatarPx + ringPad * 2, avatarPx + ringPad * 2));
 
-        TextView nameTv = host.text(member.name, 12.5f, 0xeeffffff);
+        TextView nameTv = host.text(safeName, 12.5f, 0xeeffffff);
         nameTv.setSingleLine(true);
         nameTv.setEllipsize(TextUtils.TruncateAt.END);
         nameTv.setGravity(Gravity.CENTER);
