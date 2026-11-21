@@ -158,20 +158,40 @@ public final class LiveEpgService {
                 String canon =
                         LiveQualityPolicy.canonicalChannelName(displayName)
                                 .toLowerCase(Locale.ROOT);
-                idByCanonicalName.computeIfAbsent(canon, k -> new HashSet<>()).add(idKey);
+                Set<String> nameIds = idByCanonicalName.get(canon);
+                if (nameIds == null) {
+                    nameIds = new HashSet<>();
+                    idByCanonicalName.put(canon, nameIds);
+                }
+                nameIds.add(idKey);
             }
             String canonId =
                     LiveQualityPolicy.canonicalChannelName(channelId).toLowerCase(Locale.ROOT);
-            idByCanonicalName.computeIfAbsent(canonId, k -> new HashSet<>()).add(idKey);
+            Set<String> canonIds = idByCanonicalName.get(canonId);
+            if (canonIds == null) {
+                canonIds = new HashSet<>();
+                idByCanonicalName.put(canonId, canonIds);
+            }
+            canonIds.add(idKey);
         }
 
         void addProgram(String channelId, Program program) {
             if (channelId == null || channelId.trim().isEmpty() || program.title.isEmpty()) return;
             String idKey = channelId.trim().toLowerCase(Locale.ROOT);
-            byChannelId.computeIfAbsent(idKey, k -> new ArrayList<>()).add(program);
+            List<Program> programs = byChannelId.get(idKey);
+            if (programs == null) {
+                programs = new ArrayList<>();
+                byChannelId.put(idKey, programs);
+            }
+            programs.add(program);
             String canonId =
                     LiveQualityPolicy.canonicalChannelName(channelId).toLowerCase(Locale.ROOT);
-            idByCanonicalName.computeIfAbsent(canonId, k -> new HashSet<>()).add(idKey);
+            Set<String> canonIds = idByCanonicalName.get(canonId);
+            if (canonIds == null) {
+                canonIds = new HashSet<>();
+                idByCanonicalName.put(canonId, canonIds);
+            }
+            canonIds.add(idKey);
         }
 
         void finalizeSort() {

@@ -1,3 +1,17 @@
+## 2026-11-21 [草案] 全端统一美学、iOS 26 液态玻璃播放页重构、分片弹幕引擎与桌面 Anime4K（Android TV 0.5.30 · Android 手机/平板 0.5.27 · Android Lite 0.5.8 · Windows 0.5.25 · macOS 0.5.20 · iOS / iPadOS 0.5.35）
+
+> 注：本条目对应已确认版本号的发布说明草案；Apple TV 与 HarmonyOS NEXT 保持 `0.1.1` 不变。正式安装包构建校验与 8 类物理真机 A/B 对照验收待后续执行。
+
+- [Android 电视 / 盒子 0.5.30](docs/releases/android-tv-v0.5.30.md) · [Android 手机 / 平板 0.5.27](docs/releases/android-mobile-v0.5.27.md) · [Android Lite 0.5.8](docs/releases/android-lite-v0.5.8.md) · [Windows 0.5.25](docs/releases/windows-v0.5.25.md) · [macOS 0.5.20](docs/releases/macos-v0.5.20.md) · [iOS / iPadOS 0.5.35](docs/releases/ios-v0.5.35.md)
+- **跨平台纯文字媒体规格徽章引擎（六端协同）**：Java（`MediaBadges`）、API 14 单 DEX Lite（`LiteBadges`）与 Flutter（`MediaBadges`）共享 `45` 条匹配规则与 `3` 条组合规则（`165/165` 黄金样例三端零差异）；绕过 `URLDecoder` 对 `'+'` 的破坏，统一输出 `4K`、`HDR10+`、`DV · ATMOS`、`DD+ 5.1` 等纯文字胶囊（零第三方商标图形），覆盖 `TvV17DetailScreen`、`MobileDetailScreen`、`LiteActivity`（元数据行与线路胶囊纯文字拼接）、`DetailScreen`、`windows_detail.dart` 及播放页起播规格条。
+- **iOS 26 同心液态玻璃播放页重构与全端 HUD / 触控手势升级（iOS / iPadOS / Android / Windows / macOS）**：
+  - iOS / iPadOS 重构 `IosPlayerChrome`，采用 `40pt` 同心圆角顶栏、整合式规格徽章条、`56/76/56pt` 折射高光中心播控、`5pt -> 10pt` 流体伸缩进度条胶囊及 `<= 7` 项精简胶囊坞，彻底取代旧版右侧 `16` 项拥挤竖条；倍速、定时关闭、画面/内核、音轨、字幕与弹幕设置优先呼出原生 `UISheetPresentationController` 半屏选择面板，零活跃视频纹理多 `UiKitView`、`glasswork.frag` HUD 隐藏零功耗，并完整适配 `UIAccessibility.isReduceTransparencyEnabled` 与 iOS 14–18 回退。
+  - Android 手机/平板与 iOS/iPadOS 完整保留并升级「长按 `>= 350ms` 激活 `2.0×` 倍速 → 左右横滑切换 `1.25× / 1.5× / 2.0× / 3.0×` → 上滑 `>= 48dp` 锁定倍速」状态机，支持两侧双击步进、多指/来电/切集中断复位及 `PlaybackController` 单行放宽复用常驻细进度条；Android TV 保留 `SeekGesture` 遥控加速预览与 `TvMarkerHost`，新增遥控焦点 `3` 秒跳过倒计时与定时关闭；Windows / macOS `DesktopPlayerHud` 支持 `2.5s` 静止隐藏、滚轮音量、`←` / `→` 加速预览、`Esc` 取消、`S` / `[` `]` 倍速与 `D` 弹幕开关（Windows 保持 `winFastGlass` 无模糊底板）。
+- **清洁室 30 秒分片弹幕引擎与字幕置顶 Z 轴修正（Android TV / 手机平板 / Windows / macOS / iOS / iPadOS）**：默认服务地址为空 `""`，仅在用户配置兼容服务或导入本地弹幕文件后生效；实现 `mmdanmu://v1` 来源绑定、有符号有效时钟（负偏移不冻结 `0.0s` 弹幕）、`30s` 窗口拉取与 `60%` 预取、`{w-1, w, w+1}` 三窗口无缝跨界、`HTTP 410` 单飞重试（单窗最多 `1` 次、单集 `<= 3` 次）、`180ms` Seek 防抖取消、线性运动学尾缘无碰撞轨道与 `O(N)` 静态 ReDoS 拦截器（屏蔽词在窗口入缓存时预过滤，不在绘制帧重复匹配）；严格修正双端渲染层序为 `视频 -> 弹幕 -> 字幕 -> HUD`，Android TV 补齐 `30` 帧 `P90` 帧耗时自适应降行（`2..8` 行）。
+- **分级进入转场、极光氛围、F8 丝带加载与 5 幕新手引导（非 Lite 全端）**：Flutter 端提供 `player_enter.frag` 门户转场 + `IosNativeRouteGate.runWithPlaceholders` 单帧无黑洞占位 + 减少动态效果 / 着色器失败 / `> 16ms` 截图三重自动降级（Windows 保持 `185ms` 快速缩放过渡），Android 端分层提供 API 33+ AGSL `RuntimeShader`（全出血竖屏不遮挡首帧）、API 23–32 硬件 `RenderNode`（冻结 `GlassworkSurface` 重采样并保留已缓存模糊材质）与 TV `<= 220ms` 零着色器轻量化缩放；非 TV/Windows 端空态、关于与引导页接入 `aurora` 极光背景，缓冲状态统一升级为 `1.6s` 金属丝带 `M` 加载器；新增适配触控/宽屏/遥控器全焦点链的 5 幕独立新手引导（配 `14` 张程序化生成的 `360×540` 8-bit 索引 PNG 虚构「示例」海报，总计 `320,175` 字节）与最多展示 `3` 次的首播操作提示。
+- **桌面专属 Anime4K `v4.0.1` 实时超分（Windows / macOS）**：内置 MIT 许可 `bloc97/Anime4K v4.0.1` 6 枚官方 GLSL 着色器并经 SHA-256 校验，支持播放器内 **「关闭 / 性能 / 均衡 / 画质」** 热切换（`> 1080p` 提示显卡负载）；Windows 仅在开启预设时临时切至 `spline36`，关闭立即恢复低开销 `bilinear`；移动端、iOS 与 HarmonyOS NEXT 严格隐藏禁用。
+- **跨端隔离与验证边界**：Apple TV 与 HarmonyOS NEXT 本轮保持 `0.1.1` 只读未改，新增 Flutter 逻辑均已通过 `!OhosRuntime.isOhos` 隔离。已通过 `check_public_content.py`、`sync_readme_versions.py --check`、`format_java.py --check`（`261` 文件）、全部 Android/Lite JVM 回归及 `18` 套 Flutter UX/一致性测试（`193` 项全绿）；各端新版本号正式包构建与 8 类物理真机 A/B 对照验收尚待执行。
+
 ## 2026-11-20 原生 iOS 26 Liquid Glass 全面升级、全屏影院搜索重构与脚本扩展包/自建网关（iOS / iPadOS 0.5.34）
 
 - [iOS / iPadOS 0.5.34](docs/releases/ios-v0.5.34.md)

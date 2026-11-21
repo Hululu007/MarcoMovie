@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:marco_movie/core/cms_client.dart';
 import 'package:marco_movie/ui/adaptive_shell.dart';
 import 'package:marco_movie/ui/apple_theme.dart';
+import 'package:marco_movie/ui/onboarding/onboarding_prefs.dart';
 import 'test_storage_helper.dart';
 
 Future<void> openPrivacyUnlock(WidgetTester tester) async {
@@ -105,7 +106,11 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    final storage = await initTestStorage();
+    final storage = await initTestStorage(
+      initialPrefs: const {
+        OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+      },
+    );
     await tester.pumpWidget(
       MaterialApp(
         home: AdaptiveShell(storage: storage, client: CmsClient()),
@@ -145,7 +150,11 @@ void main() {
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
-      final storage = await initTestStorage();
+      final storage = await initTestStorage(
+      initialPrefs: const {
+        OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+      },
+    );
       await storage.saveConfig(
         '{"sites":[{"key":"long","name":"很长的线路名称高清影视完整显示","type":1,"api":"https://source.example/api"},{"key":"pending","name":"未移植测试线路","type":3,"api":"csp_TestPendingGuard","group":"扩展分组"}]}',
       );
@@ -210,7 +219,11 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    final storage = await initTestStorage();
+    final storage = await initTestStorage(
+      initialPrefs: const {
+        OnboardingPrefs.doneVersionKey: OnboardingPrefs.currentVersion,
+      },
+    );
     await storage.saveConfig(
       '{"sites":[{"key":"test","name":"测试源","type":1,"api":"https://source.example/api"}]}',
     );

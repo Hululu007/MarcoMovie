@@ -6,7 +6,7 @@
   </picture>
   <h1>Marco Movie</h1>
   <p>支持 Android 电视、手机、平板，HarmonyOS NEXT（手机 / 平板 / 智慧屏），Apple TV（tvOS）及 Windows / macOS / iOS 多端自适应的播放器。</p>
-  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.5.26 · Android 电视：0.5.29 · Android Lite：0.5.7 · Windows：0.5.24 · macOS：0.5.19 · iOS：0.5.34 · Apple TV：0.1.1 · HarmonyOS NEXT：0.1.1 · 各端独立更新</p>
+  <p>作者：<a href="https://github.com/Pilipala9919">Pilipala</a> · Android 手机：0.5.27 · Android 电视：0.5.30 · Android Lite：0.5.8 · Windows：0.5.25 · macOS：0.5.20 · iOS：0.5.35 · Apple TV：0.1.1 · HarmonyOS NEXT：0.1.1 · 各端独立更新</p>
   <p><a href="https://marcotv.wlj9919.top/movie/">镜像下载与产品展示</a> · <a href="https://github.com/Pilipala9919/MarcoMovie/releases">GitHub 下载</a> · <a href="docs/USER_GUIDE.md">使用指南</a> · <a href="docs/BUILD.md">构建说明</a> · <a href="docs/PRIVACY.md">隐私说明</a></p>
 </div>
 
@@ -25,18 +25,18 @@ Marco Movie 希望让大屏电视、随身手机、平板电脑与桌面端上�
 | 电视端导航 | Android TV、Apple TV（Siri Remote 焦点引擎）与鸿蒙智慧屏均配备 10 英尺大屏交互：首页悬浮图标/顶部 Dock、遥控方向键连续焦点移动、分类筛选与按返回键回到原浏览位置 |
 | 手机 / 平板专属 UI | 自动识别触屏手机与平板（Android、iOS / iPadOS、HarmonyOS NEXT 手机/平板），进入独立移动端界面：保留系统状态栏、去除遥控器白色焦点框；竖屏底部导航栏、横屏切换侧边导航栏 |
 | 大屏与移动端首页 | 电视端提供继续观看横卡、完整分类名称与默认 5–8 列海报墙；手机端提供顶部片源胶囊切换、单行横向滑动分类条、紧凑继续观看条与 3 列触控海报网格（平板横屏 5 列） |
-| 内容详情与选集 | 电视端左固定大海报、右独立滚动；手机端采用左海报右信息紧凑卡片、可折叠简介、横向滑动线路胶囊、每 50 集自动分组标签、正序/倒序切换与触控选集网格 |
+| 内容详情与选集 | 电视端左对齐沉浸影院或分栏滚动；手机端采用左海报右信息紧凑卡片、可折叠简介、横向滑动线路胶囊、每 50 集自动分组标签、正序/倒序切换与触控选集网格；全端（含 Lite 纯文字标签）接入统一纯文字媒体规格徽章（`4K` / `HDR10+` / `DV · ATMOS` 等，零第三方商标图形） |
 | 我的收藏与历史 | 详情页一键收藏；整合观看历史与我的收藏，支持单条删除与一键清空；数据保存于本机 |
 | 全局搜索 | 在已导入、可搜索的配置项之间并发检索；Android 电视端内置遥控拼音键盘（支持中文、全拼、首拼），Apple TV 支持系统搜索与听写；手机/平板端直接调起系统输入法软键盘 |
-| 播放控制与触屏手势 | 电视端（Android TV / Apple TV / 鸿蒙智慧屏）确认键暂停/继续、上下键呼出工具条、倍速/比例/音轨/内封字幕切换；手机/平板端支持**双击暂停/继续、左右滑动快进快退、左半屏上下滑调亮度、右半屏上下滑调音量、长按 2 倍速快进** |
-| 播放内核 | Android 采用 Media3 + FFmpeg / AV1 / VP9 软解扩展（[范围与限制](docs/DECODERS.md)）；Apple TV 采用原生 `AVPlayer`（支持 HLS / 4K HDR10 / 杜比视界）；HarmonyOS NEXT 采用原生 ArkTS `AVPlayer` + `XComponent` GPU 硬件纹理；桌面与 iOS 采用 `media_kit`（`libmpv`） |
-| 字幕与弹幕 | 外挂 SRT / VTT / ASS / TTML 字幕及流内音轨/字幕轨切换；可加载兼容的弹幕数据，不提供在线弹幕资源 |
+| 播放控制与触屏手势 | 电视端（Android TV / Apple TV / 鸿蒙智慧屏）确认键暂停/继续、遥控长按加速快进预览、3 秒片头/片尾跳过倒计时与定时关闭；手机/平板端支持**双击自定义（播放暂停/左右步进）、左右滑快进快退、左半屏亮度、右半屏音量、长按 2.0× 倍速并横滑切换 `1.25×–3.0×` 与上滑锁定**；iOS/iPadOS 26 采用同心液态玻璃空间影院 HUD 与原生半屏面板；桌面端支持 2.5s 鼠标自动隐藏、滚轮调音量、`←`/`→` 加速预览（`Esc` 取消）、`S`/`[`/`]` 倍速与 `D` 弹幕开关 |
+| 播放内核 | Android 采用 Media3 + FFmpeg / AV1 / VP9 软解扩展（[范围与限制](docs/DECODERS.md)）；Apple TV 采用原生 `AVPlayer`（支持 HLS / 4K HDR10 / 杜比视界）；HarmonyOS NEXT 采用原生 ArkTS `AVPlayer` + `XComponent` GPU 硬件纹理；桌面与 iOS 采用 `media_kit`（`libmpv`），Windows / macOS 可选热切换 `Anime4K v4.0.1` 实时超分 |
+| 字幕与弹幕 | 外挂 SRT / VTT / ASS / TTML 字幕及流内音轨/字幕轨切换（字幕严格渲染在弹幕上方）；内置清洁室 30 秒分片弹幕引擎（默认服务地址为空，无碰撞轨道与 ReDoS 防护），仅在用户自行配置兼容服务或导入本地 XML/JSON 弹幕文件后生效，不提供在线弹幕资源 |
 | 直播列表 | 读取用户提供的兼容 M3U / TXT 列表与分组；电视端支持遥控快速换台；手机与桌面端提供分组与频道列表点选即播 |
-| 配置导入管理 | 电视端（Android TV / Apple TV / 鸿蒙智慧屏）提供同一局域网手机扫码推送、手动输入与备份导入；**手机/平板/桌面端直接提供原生输入框、剪贴板一键粘贴导入与本地 JSON 文件选择**；全端支持配置备份与还原 |
+| 配置导入管理 | 电视端（Android TV / Apple TV / 鸿蒙智慧屏）提供同一局域网手机扫码推送、手动输入与备份导入；**手机/平板/桌面端直接提供原生输入框、剪贴板一键粘贴导入与本地 JSON 文件选择**；新增 5 幕独立新手引导（配程序化抽象几何「示例」海报，不内置真实影片或内容源），全端支持配置备份与还原 |
 | 跨平台客户端 | 涵盖原生 Android（手机/平板/电视/Lite）、`tvos/` 原生 Apple TV（`tvOS 16.0+` `.ipa`）、`flutter/ohos/` HarmonyOS NEXT 通用包（`API 12+` 手机 / 平板 / 2in1 / 智慧屏单包自适应 `.hap`）及 `flutter/` Windows（x64 `.exe`）、macOS（`.app`）、iOS / iPadOS（`.ipa`），互通 `marco-movie-backup` 备份文件 |
 | 多端网络同步 | 全平台（Android 电视 / 手机平板 / Lite、Apple TV、HarmonyOS NEXT、iOS / iPadOS、Windows、macOS）互通 `marco-movie-sync` v2 协议：支持用户自配 WebDAV（坚果云 / NAS / Alist / Nextcloud 等）自动云同步与同一局域网点对点双向免云盘直连同步，合并观看历史进度、我的收藏及可选的公开订阅源配置；严格隔离隐私空间与网盘 / Emby 登录凭据 |
 | 软件更新 | 设置内检查更新；镜像优先、GitHub 备用，下载后核对 SHA-256 校验值 |
-| 个性化与网盘代理 | 海报配色柔光、自定义壁纸、减少动态效果、界面缩放；全端支持用户本人在夸克 / UC / 百度 / 阿里云盘扫码授权及本机 `127.0.0.1` 6 路并发分片回环代理播放 4K 原画，不内置账号 |
+| 个性化与网盘代理 | 海报配色柔光、极光氛围背景（空态/关于/引导页，按系统减少动态效果自动停帧）、分级转场动效与金属丝带 `M` 品牌加载器、自定义壁纸、界面缩放；全端支持用户本人在夸克 / UC / 百度 / 阿里云盘扫码授权及本机 `127.0.0.1` 6 路并发分片回环代理播放 4K 原画，不内置账号 |
 
 全局搜索的范围是**用户已导入的配置**，不是互联网全网搜索。拼音匹配结合本地字词典和已浏览/搜索过的标题，首拼存在歧义时可改用完整中文。功能存在不代表任意配置或服务都兼容。
 
@@ -59,8 +59,9 @@ Marco Movie 希望让大屏电视、随身手机、平板电脑与桌面端上�
 ## 设备与兼容性说明
 
 - **Android**：标准版最低 Android 6.0（API 23），Lite 版最低 Android 4.0（API 14）；当前主要实机验证环境为 Android 9、ARM 32 位电视。
-- **Apple TV（tvOS）**：最低 tvOS 16.0；已通过 Swift 自动化回归与 Xcode Release 云端构建验证，支持 `AVPlayer` 原生播放、QuickJS-NG 脚本源、`marco-movie-sync` v2 及四盘扫码 + 6 路并发 Range 代理，尚未宣称完成全型号物理 Apple TV 真机验收。
-- **HarmonyOS NEXT（纯血鸿蒙）**：最低 API 12（HarmonyOS 5.0+），单 HAP 同时适配手机、平板/2in1 与鸿蒙智慧屏（大屏自动切换 10 英尺遥控焦点界面）；已通过 OpenHarmony Flutter 与 DevEco SDK 云端构建打包验证，尚未宣称完成全型号物理鸿蒙真机验收。
+- **Windows / macOS / iOS / iPadOS**：iOS / iPadOS 最低 14.0（Xcode 26.6 / iOS 26 SDK 编译下支持原生 Liquid Glass 控件与半屏面板，iOS 14–18 自动平滑回退）；Windows / macOS 可选热切换 MIT 许可 `Anime4K v4.0.1` 实时超分着色器（Windows 关闭时保持低开销 `bilinear`）。
+- **Apple TV（tvOS）**：最低 tvOS 16.0（当前版本保持 `0.1.1`）；已通过 Swift 自动化回归与 Xcode Release 云端构建验证，支持 `AVPlayer` 原生播放、QuickJS-NG 脚本源、`marco-movie-sync` v2 及四盘扫码 + 6 路并发 Range 代理，尚未宣称完成全型号物理 Apple TV 真机验收。
+- **HarmonyOS NEXT（纯血鸿蒙）**：最低 API 12（HarmonyOS 5.0+，当前版本保持 `0.1.1`），单 HAP 同时适配手机、平板/2in1 与鸿蒙智慧屏（大屏自动切换 10 英尺遥控焦点界面）；已通过 OpenHarmony Flutter 与 DevEco SDK 云端构建打包验证，尚未宣称完成全型号物理鸿蒙真机验收。
 - 兼容标准 JSON/XML 内容接口及各端已实现的脚本/网盘扩展形式。没有承诺所有配置、网盘、直播列表、编码或第三方服务都可使用。
 - 磁力组件属于 Android 实验能力，要求 Android 8.0+；已完成本地协议测试，尚不作为所有设备上的稳定视频播放能力宣传。
 - DRM 仅传递合法授权相关参数，不绕过授权；尚未完成授权样本的端到端验收。
