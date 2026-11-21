@@ -194,6 +194,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   final PageController _iosHeroPageController = PageController();
   int _iosHeroIndex = 0;
   bool _homeRefreshing = false;
+  bool _iosHeroPullArmed = false;
   final Map<String, Color> _iosHeroAmbientColors = {};
   final Set<String> _iosHeroAmbientPending = {};
   int _currentPage = 1;
@@ -2163,7 +2164,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             compactHeader: compactHeader,
             sourceControls: sourceControls,
           );
-          final iosHeroHeight = (maxH * 0.65).clamp(470.0, 580.0);
+          final iosHeroHeight = (maxH * 0.69).clamp(500.0, 620.0);
 
           List<Widget> buildSourceCatalogSlivers() {
             return [
@@ -2376,8 +2377,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       child: Padding(
                         padding: EdgeInsets.only(
                           top: emittedCount == 0 && showIosImmersiveHero
-                              ? 4
-                              : 20,
+                              ? 14
+                              : 22,
                         ),
                         child: CuratedDiscoverySection(
                           visibleSectionIds: [sectionId],
@@ -2450,34 +2451,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               slivers: [
                 if (isIosMobileHome) ...[
                   if (showIosImmersiveHero)
-                    SliverAppBar(
-                      primary: false,
-                      automaticallyImplyLeading: false,
-                      toolbarHeight: 0,
-                      collapsedHeight: 0,
-                      expandedHeight: iosHeroHeight,
-                      floating: false,
-                      pinned: false,
-                      stretch: true,
-                      stretchTriggerOffset: 86,
-                      onStretchTrigger: () {
-                        final done = Completer<void>();
-                        WidgetsBinding.instance.addPostFrameCallback((_) async {
-                          try {
-                            if (mounted) {
-                              await _refreshCurrentHomeView();
-                            }
-                          } finally {
-                            if (!done.isCompleted) done.complete();
-                          }
-                        });
-                        return done.future;
-                      },
-                      backgroundColor: Colors.transparent,
-                      surfaceTintColor: Colors.transparent,
-                      elevation: 0,
-                      scrolledUnderElevation: 0,
-                      flexibleSpace: _buildIosImmersiveHeroBillboard(
+                    SliverToBoxAdapter(
+                      child: _buildIosImmersiveHeroBillboard(
                         context,
                         site: _activeSite!,
                         featuredList: heroCandidates,
@@ -2663,6 +2638,38 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             );
           final autoPagingScrollView = NotificationListener<ScrollNotification>(
             onNotification: (notification) {
+              if (showIosImmersiveHero &&
+                  notification.metrics.axis == Axis.vertical) {
+                final overscroll = -notification.metrics.pixels;
+                if (notification is ScrollUpdateNotification) {
+                  if (notification.dragDetails != null) {
+                    if (overscroll >= 84.0 &&
+                        !_iosHeroPullArmed &&
+                        !_homeRefreshing) {
+                      _iosHeroPullArmed = true;
+                      HapticFeedback.mediumImpact();
+                    } else if (overscroll < 56.0 && _iosHeroPullArmed) {
+                      _iosHeroPullArmed = false;
+                    }
+                  } else if (_iosHeroPullArmed && !_homeRefreshing) {
+                    _iosHeroPullArmed = false;
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (mounted && !_homeRefreshing) {
+                        unawaited(_refreshCurrentHomeView());
+                      }
+                    });
+                  }
+                } else if (notification is ScrollEndNotification &&
+                    _iosHeroPullArmed &&
+                    !_homeRefreshing) {
+                  _iosHeroPullArmed = false;
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted && !_homeRefreshing) {
+                      unawaited(_refreshCurrentHomeView());
+                    }
+                  });
+                }
+              }
               if (notification.metrics.axis == Axis.vertical &&
                   (notification.metrics.maxScrollExtent > 0 ||
                       notification.metrics.pixels > 16) &&
@@ -2732,7 +2739,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   top: 0,
                   left: 0,
                   right: 0,
-                  height: topSafePad + 24,
+                  height: topSafePad + 54,
                   child: IgnorePointer(
                     child: AnimatedBuilder(
                       animation: _homeScrollController,
@@ -2742,7 +2749,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 ? _homeScrollController.offset
                                 : 0.0;
                         final scrimOpacity =
-                            ((offset - 120.0) / 140.0).clamp(0.0, 1.0);
+                            ((offset - 18.0) / 150.0).clamp(0.0, 1.0);
                         if (scrimOpacity <= 0.01) {
                           return const SizedBox.shrink();
                         }
@@ -2755,10 +2762,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             end: Alignment.bottomCenter,
                             colors: [
                               bgColor.withValues(alpha: 0.94),
-                              bgColor.withValues(alpha: 0.72),
+                              bgColor.withValues(alpha: 0.78),
+                              bgColor.withValues(alpha: 0.44),
+                              bgColor.withValues(alpha: 0.14),
                               bgColor.withValues(alpha: 0.0),
                             ],
-                            stops: const [0.0, 0.58, 1.0],
+                            stops: const [0.0, 0.28, 0.56, 0.80, 1.0],
                           ),
                         ),
                       ),
@@ -3274,422 +3283,471 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ? Colors.white.withValues(alpha: 0.76)
         : const Color(0xFF474F5E);
     final veilColor = isDark ? const Color(0xFF05060A) : palette.background;
-    final posterTopInset = topSafePad + 44.0;
 
-    return LayoutBuilder(
+    return SizedBox(
       key: const ValueKey('ios-home-immersive-hero'),
-      builder: (context, constraints) {
-        final currentH =
-            constraints.maxHeight > 0 ? constraints.maxHeight : heroHeight;
-        final overscroll = math.max(0.0, currentH - heroHeight);
-        final stretchScale =
-            (1.0 + (overscroll / math.max(heroHeight, 1.0)) * 0.62)
-                .clamp(1.0, 1.44);
-        final pullProgress = ((overscroll - 10.0) / 68.0).clamp(0.0, 1.0);
-        final showRefreshPill = _homeRefreshing || pullProgress > 0.08;
-        final refreshPillOpacity =
-            _homeRefreshing ? 1.0 : pullProgress.clamp(0.0, 1.0);
+      height: heroHeight,
+      width: double.infinity,
+      child: AnimatedBuilder(
+        animation: _homeScrollController,
+        builder: (context, _) {
+          final rawOffset = _homeScrollController.positions.length == 1
+              ? _homeScrollController.offset
+              : 0.0;
+          final overscroll = math.max(0.0, -rawOffset);
+          final stretchedHeight = heroHeight + overscroll;
+          final stretchScale =
+              (1.0 + (overscroll / math.max(heroHeight, 1.0)) * 0.68)
+                  .clamp(1.0, 1.44);
+          final pullProgress = ((overscroll - 12.0) / 72.0).clamp(0.0, 1.0);
+          final showRefreshPill = _homeRefreshing || pullProgress > 0.06;
+          final refreshPillOpacity =
+              _homeRefreshing ? 1.0 : pullProgress.clamp(0.0, 1.0);
 
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            // 1. Poster-extracted ambient color aura rising smoothly behind the
-            //    Dynamic Island and fading completely to transparent at the bottom
-            //    so it blends into AppleAmbientBackground with zero hard seam.
-            IgnorePointer(
-              child: AnimatedContainer(
-                key: const ValueKey('ios-hero-top-ambient-aura'),
-                duration: const Duration(milliseconds: 420),
-                curve: Curves.easeOutCubic,
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      topAmbientTint.withValues(alpha: isDark ? 0.96 : 0.94),
-                      topAmbientTint.withValues(alpha: isDark ? 0.76 : 0.74),
-                      topAmbientTint.withValues(alpha: isDark ? 0.30 : 0.26),
-                      Colors.transparent,
-                    ],
-                    stops: const [0.0, 0.28, 0.64, 1.0],
-                  ),
-                ),
-              ),
-            ),
-
-            // 2. Swipeable HD Posters shifted below the Dynamic Island, zooming
-            //    smoothly on pull-to-refresh and alpha-feathering at BOTH top &
-            //    bottom edges.
-            PageView.builder(
-              controller: _iosHeroPageController,
-              physics: const BouncingScrollPhysics(),
-              itemCount: featuredList.length,
-              onPageChanged: (index) {
-                if (mounted && _iosHeroIndex != index) {
-                  setState(() => _iosHeroIndex = index);
-                  _onPosterCacheUpdated();
-                }
-              },
-              itemBuilder: (context, index) {
-                final featured = featuredList[index];
-                final metaParts = <String>[
-                  if (featured.year.trim().isNotEmpty) featured.year.trim(),
-                  if (featured.area.trim().isNotEmpty) featured.area.trim(),
-                  if (featured.remarks.trim().isNotEmpty)
-                    featured.remarks.trim(),
-                ];
-                final infoLine = featured.description.trim().isNotEmpty
-                    ? featured.description.trim()
-                    : (featured.actor.trim().isNotEmpty
-                        ? '主演：${featured.actor.trim()}'
-                        : '');
-                return Builder(
-                  builder: (heroTapCtx) => GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onTap: () => _openVideoDetail(
-                      site,
-                      featured,
-                      sourceContext: heroTapCtx,
-                      sourceRadius: 24.0,
-                    ),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        // Downward-shifted HD poster with intrinsic top+bottom
-                        // alpha feathering & pull-down elastic zoom.
-                        Positioned(
-                          top: posterTopInset,
-                          left: 0,
-                          right: 0,
-                          bottom: 0,
-                          child: ClipRect(
-                            child: Transform.scale(
-                              key: const ValueKey('ios-hero-stretch-zoom'),
-                              scale: stretchScale,
-                              alignment: const Alignment(0.0, -0.18),
-                              child: ShaderMask(
-                                blendMode: BlendMode.dstIn,
-                                shaderCallback: (rect) => const LinearGradient(
-                                  begin: Alignment.topCenter,
-                                  end: Alignment.bottomCenter,
-                                  colors: [
-                                    Color(0x00FFFFFF),
-                                    Color(0xA6FFFFFF),
-                                    Color(0xFFFFFFFF),
-                                    Color(0xFFFFFFFF),
-                                    Color(0xB8FFFFFF),
-                                    Color(0x3DFFFFFF),
-                                    Color(0x00FFFFFF),
-                                  ],
-                                  stops: [
-                                    0.0,
-                                    0.10,
-                                    0.20,
-                                    0.58,
-                                    0.76,
-                                    0.90,
-                                    1.0,
-                                  ],
-                                ).createShader(rect),
-                                child: PosterImage(
-                                  url: featured.poster,
-                                  title: featured.title,
-                                  year: featured.year,
-                                  highRes: true,
-                                  fit: BoxFit.cover,
-                                  alignment: const Alignment(0.0, -0.20),
-                                  placeholder: Container(
-                                    color: topAmbientTint.withValues(
-                                      alpha: 0.45,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        // Soft feathered reading veil behind title/synopsis
-                        // (fades back to 0% alpha at both top & bottom edges!).
-                        Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 0,
-                          height: 230,
-                          child: IgnorePointer(
-                            child: DecoratedBox(
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.topCenter,
-                                  end: Alignment.bottomCenter,
-                                  colors: [
-                                    Colors.transparent,
-                                    veilColor.withValues(
-                                      alpha: isDark ? 0.56 : 0.70,
-                                    ),
-                                    veilColor.withValues(
-                                      alpha: isDark ? 0.42 : 0.62,
-                                    ),
-                                    Colors.transparent,
-                                  ],
-                                  stops: const [0.0, 0.36, 0.76, 1.0],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        Positioned(
-                          left: horizontalPad + 6,
-                          right: horizontalPad + 6,
-                          bottom: featuredList.length > 1 ? 32 : 18,
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 9,
-                                  vertical: 3.5,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: isDark
-                                      ? Colors.white.withValues(alpha: 0.16)
-                                      : Colors.white.withValues(alpha: 0.80),
-                                  borderRadius: BorderRadius.circular(999),
-                                  border: Border.all(
-                                    color: isDark
-                                        ? Colors.white.withValues(alpha: 0.22)
-                                        : Colors.black.withValues(alpha: 0.08),
-                                    width: 0.6,
-                                  ),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      CupertinoIcons.sparkles,
-                                      color: isDark
-                                          ? const Color(0xFF5AC8FA)
-                                          : palette.accent,
-                                      size: 11,
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Flexible(
-                                      child: Text(
-                                        '今日首推 · ${site.name}',
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: primaryInk,
-                                          fontSize: 10.5,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                featured.title,
-                                maxLines: 2,
-                                textAlign: TextAlign.center,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: primaryInk,
-                                  fontSize: 25,
-                                  fontWeight: FontWeight.w800,
-                                  letterSpacing: -0.5,
-                                  height: 1.15,
-                                  shadows: isDark
-                                      ? const [
-                                          Shadow(
-                                            color: Color(0x88000000),
-                                            blurRadius: 12,
-                                            offset: Offset(0, 2),
-                                          ),
-                                        ]
-                                      : null,
-                                ),
-                              ),
-                              if (metaParts.isNotEmpty) ...[
-                                const SizedBox(height: 6),
-                                Text(
-                                  metaParts.join(' · '),
-                                  maxLines: 1,
-                                  textAlign: TextAlign.center,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: secondaryInk,
-                                    fontSize: 12.5,
-                                    fontWeight: FontWeight.w600,
-                                    letterSpacing: 0.1,
-                                  ),
-                                ),
-                              ],
-                              if (infoLine.isNotEmpty) ...[
-                                const SizedBox(height: 6),
-                                Text(
-                                  infoLine,
-                                  maxLines: 2,
-                                  textAlign: TextAlign.center,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: bodyInk,
-                                    fontSize: 12,
-                                    height: 1.38,
-                                  ),
-                                ),
-                              ],
-                              const SizedBox(height: 12),
-                              ApplePressableScale(
-                                pressedScale: 0.94,
-                                onTap: () => _openVideoDetail(
-                                  site,
-                                  featured,
-                                  sourceContext: heroTapCtx,
-                                  sourceRadius: 24.0,
-                                ),
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 18,
-                                    vertical: 8,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: AppleColors.systemBlue,
-                                    borderRadius: BorderRadius.circular(999),
-                                    boxShadow: const [
-                                      BoxShadow(
-                                        color: Color(0x4D0A84FF),
-                                        blurRadius: 14,
-                                        offset: Offset(0, 4),
-                                      ),
-                                    ],
-                                  ),
-                                  child: const Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(
-                                        CupertinoIcons.play_fill,
-                                        color: Colors.white,
-                                        size: 12.5,
-                                      ),
-                                      SizedBox(width: 5),
-                                      Text(
-                                        '立即观看',
-                                        style: TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w700,
-                                          letterSpacing: -0.1,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-
-            // 3. Floating Header Row comfortably nestled in the top ambient aura
-            Positioned(
-              top: topSafePad + 6,
-              left: horizontalPad,
-              right: horizontalPad,
-              child: headerOverlay,
-            ),
-
-            // 4. Translucent pull-to-refresh pill while pulling/refreshing
-            if (showRefreshPill)
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              // 1. Overflowing poster-extracted ambient aura: extends 280pt above
+              //    screen top (for arbitrary pull-down overscroll) and bleeds 110pt
+              //    past hero bottom to 0% alpha — making any seam impossible.
               Positioned(
-                top: topSafePad + 54,
+                top: -overscroll - 280.0,
                 left: 0,
                 right: 0,
+                height: stretchedHeight + 390.0,
                 child: IgnorePointer(
-                  child: Center(
-                    child: Opacity(
-                      opacity: refreshPillOpacity,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 5.5,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isDark
-                              ? Colors.black.withValues(alpha: 0.56)
-                              : Colors.white.withValues(alpha: 0.84),
-                          borderRadius: BorderRadius.circular(999),
-                          border: Border.all(
-                            color: isDark
-                                ? Colors.white.withValues(alpha: 0.16)
-                                : Colors.black.withValues(alpha: 0.08),
-                            width: 0.6,
-                          ),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            CupertinoActivityIndicator(
-                              radius: 7.5,
-                              color: primaryInk,
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              _homeRefreshing
-                                  ? '正在刷新片单'
-                                  : (pullProgress >= 0.95 ? '松手立即刷新' : '下拉放大刷新'),
-                              textScaler: TextScaler.noScaling,
-                              style: TextStyle(
-                                color: primaryInk,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
+                  child: AnimatedContainer(
+                    key: const ValueKey('ios-hero-top-ambient-aura'),
+                    duration: const Duration(milliseconds: 420),
+                    curve: Curves.easeOutCubic,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          topAmbientTint.withValues(alpha: isDark ? 0.94 : 0.92),
+                          topAmbientTint.withValues(alpha: isDark ? 0.88 : 0.86),
+                          topAmbientTint.withValues(alpha: isDark ? 0.54 : 0.50),
+                          topAmbientTint.withValues(alpha: isDark ? 0.18 : 0.16),
+                          Colors.transparent,
+                        ],
+                        stops: const [0.0, 0.36, 0.58, 0.80, 1.0],
                       ),
                     ),
                   ),
                 ),
               ),
 
-            // 5. Centered carousel pagination dots
-            if (featuredList.length > 1)
+              // 2. Full-bleed swipeable HD Posters anchored to screen y = 0 on
+              //    overscroll and scrolling smoothly away as a single intact block
+              //    when scrolling down. ShaderMask wraps OUTSIDE ClipRect +
+              //    Transform.scale so neither top nor bottom can EVER show a cut line!
               Positioned(
+                top: -overscroll,
                 left: 0,
                 right: 0,
-                bottom: 12,
-                child: IgnorePointer(
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      for (int i = 0; i < featuredList.length; i++)
-                        AnimatedContainer(
-                          duration: const Duration(milliseconds: 220),
-                          curve: Curves.easeOutCubic,
-                          margin: const EdgeInsets.symmetric(horizontal: 3),
-                          width: i == activeIdx ? 18 : 5.5,
-                          height: 5.5,
-                          decoration: BoxDecoration(
-                            color: i == activeIdx
-                                ? primaryInk
-                                : primaryInk.withValues(alpha: 0.30),
-                            borderRadius: BorderRadius.circular(999),
-                          ),
+                height: stretchedHeight,
+                child: PageView.builder(
+                  controller: _iosHeroPageController,
+                  physics: const BouncingScrollPhysics(),
+                  itemCount: featuredList.length,
+                  onPageChanged: (index) {
+                    if (mounted && _iosHeroIndex != index) {
+                      setState(() => _iosHeroIndex = index);
+                      _onPosterCacheUpdated();
+                    }
+                  },
+                  itemBuilder: (context, index) {
+                    final featured = featuredList[index];
+                    final metaParts = <String>[
+                      if (featured.year.trim().isNotEmpty) featured.year.trim(),
+                      if (featured.area.trim().isNotEmpty) featured.area.trim(),
+                      if (featured.remarks.trim().isNotEmpty)
+                        featured.remarks.trim(),
+                    ];
+                    final infoLine = featured.description.trim().isNotEmpty
+                        ? featured.description.trim()
+                        : (featured.actor.trim().isNotEmpty
+                            ? '主演：${featured.actor.trim()}'
+                            : '');
+                    return Builder(
+                      builder: (heroTapCtx) => GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => _openVideoDetail(
+                          site,
+                          featured,
+                          sourceContext: heroTapCtx,
+                          sourceRadius: 24.0,
                         ),
-                    ],
-                  ),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            // Outer ShaderMask spans the full stretched height
+                            // [0 .. stretchedHeight] with ultra-wide smoothstep
+                            // top (0% behind Dynamic Island -> 100% over ~145pt)
+                            // and bottom (100% -> 0% over ~265pt) alpha feathers!
+                            Positioned.fill(
+                              child: ShaderMask(
+                                blendMode: BlendMode.dstIn,
+                                shaderCallback: (rect) {
+                                  final h =
+                                      rect.height > 1 ? rect.height : heroHeight;
+                                  final t0 =
+                                      ((topSafePad * 0.55) / h).clamp(0.03, 0.11);
+                                  final t1 = ((topSafePad + 36.0) / h)
+                                      .clamp(t0 + 0.04, 0.22);
+                                  final t2 = ((topSafePad + 88.0) / h)
+                                      .clamp(t1 + 0.05, 0.34);
+                                  final t3 = ((topSafePad + 144.0) / h)
+                                      .clamp(t2 + 0.05, 0.44);
+                                  return LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: const [
+                                      Color(0x00FFFFFF),
+                                      Color(0x00FFFFFF),
+                                      Color(0x30FFFFFF),
+                                      Color(0xB3FFFFFF),
+                                      Color(0xFFFFFFFF),
+                                      Color(0xFFFFFFFF),
+                                      Color(0xD9FFFFFF),
+                                      Color(0x8CFFFFFF),
+                                      Color(0x3DFFFFFF),
+                                      Color(0x12FFFFFF),
+                                      Color(0x00FFFFFF),
+                                    ],
+                                    stops: [
+                                      0.0,
+                                      t0,
+                                      t1,
+                                      t2,
+                                      t3,
+                                      0.52,
+                                      0.63,
+                                      0.74,
+                                      0.84,
+                                      0.93,
+                                      1.0,
+                                    ],
+                                  ).createShader(rect);
+                                },
+                                child: ClipRect(
+                                  child: Transform.scale(
+                                    key: const ValueKey('ios-hero-stretch-zoom'),
+                                    scale: stretchScale,
+                                    alignment: const Alignment(0.0, -0.08),
+                                    child: PosterImage(
+                                      url: featured.poster,
+                                      title: featured.title,
+                                      year: featured.year,
+                                      highRes: true,
+                                      fit: BoxFit.cover,
+                                      alignment: const Alignment(0.0, -0.22),
+                                      placeholder: Container(
+                                        color: topAmbientTint.withValues(
+                                          alpha: 0.45,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+
+                            // Airy multi-stop reading scrim strictly behind text
+                            // & CTA — fades smoothly to exact 0% at BOTH top and
+                            // bottom edges so it never creates a dark band seam.
+                            Positioned(
+                              left: 0,
+                              right: 0,
+                              bottom: 0,
+                              height: 280,
+                              child: IgnorePointer(
+                                child: DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      begin: Alignment.topCenter,
+                                      end: Alignment.bottomCenter,
+                                      colors: [
+                                        Colors.transparent,
+                                        veilColor.withValues(
+                                          alpha: isDark ? 0.44 : 0.62,
+                                        ),
+                                        veilColor.withValues(
+                                          alpha: isDark ? 0.34 : 0.54,
+                                        ),
+                                        veilColor.withValues(
+                                          alpha: isDark ? 0.10 : 0.18,
+                                        ),
+                                        Colors.transparent,
+                                      ],
+                                      stops: const [0.0, 0.34, 0.66, 0.88, 1.0],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+
+                            Positioned(
+                              left: horizontalPad + 6,
+                              right: horizontalPad + 6,
+                              bottom: featuredList.length > 1 ? 40 : 22,
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 9,
+                                      vertical: 3.5,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: isDark
+                                          ? Colors.white.withValues(alpha: 0.16)
+                                          : Colors.white.withValues(alpha: 0.80),
+                                      borderRadius: BorderRadius.circular(999),
+                                      border: Border.all(
+                                        color: isDark
+                                            ? Colors.white.withValues(alpha: 0.22)
+                                            : Colors.black.withValues(alpha: 0.08),
+                                        width: 0.6,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          CupertinoIcons.sparkles,
+                                          color: isDark
+                                              ? const Color(0xFF5AC8FA)
+                                              : palette.accent,
+                                          size: 11,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Flexible(
+                                          child: Text(
+                                            '今日首推 · ${site.name}',
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              color: primaryInk,
+                                              fontSize: 10.5,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    featured.title,
+                                    maxLines: 2,
+                                    textAlign: TextAlign.center,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: primaryInk,
+                                      fontSize: 25,
+                                      fontWeight: FontWeight.w800,
+                                      letterSpacing: -0.5,
+                                      height: 1.15,
+                                      shadows: isDark
+                                          ? const [
+                                              Shadow(
+                                                color: Color(0x88000000),
+                                                blurRadius: 12,
+                                                offset: Offset(0, 2),
+                                              ),
+                                            ]
+                                          : null,
+                                    ),
+                                  ),
+                                  if (metaParts.isNotEmpty) ...[
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      metaParts.join(' · '),
+                                      maxLines: 1,
+                                      textAlign: TextAlign.center,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: secondaryInk,
+                                        fontSize: 12.5,
+                                        fontWeight: FontWeight.w600,
+                                        letterSpacing: 0.1,
+                                      ),
+                                    ),
+                                  ],
+                                  if (infoLine.isNotEmpty) ...[
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      infoLine,
+                                      maxLines: 2,
+                                      textAlign: TextAlign.center,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: bodyInk,
+                                        fontSize: 12,
+                                        height: 1.38,
+                                      ),
+                                    ),
+                                  ],
+                                  const SizedBox(height: 12),
+                                  ApplePressableScale(
+                                    pressedScale: 0.94,
+                                    onTap: () => _openVideoDetail(
+                                      site,
+                                      featured,
+                                      sourceContext: heroTapCtx,
+                                      sourceRadius: 24.0,
+                                    ),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 18,
+                                        vertical: 8,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: AppleColors.systemBlue,
+                                        borderRadius: BorderRadius.circular(999),
+                                        boxShadow: const [
+                                          BoxShadow(
+                                            color: Color(0x4D0A84FF),
+                                            blurRadius: 14,
+                                            offset: Offset(0, 4),
+                                          ),
+                                        ],
+                                      ),
+                                      child: const Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(
+                                            CupertinoIcons.play_fill,
+                                            color: Colors.white,
+                                            size: 12.5,
+                                          ),
+                                          SizedBox(width: 5),
+                                          Text(
+                                            '立即观看',
+                                            style: TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w700,
+                                              letterSpacing: -0.1,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ),
-          ],
-        );
-      },
+
+              // 3. Floating Header Row nestled in the top ambient aura: gently
+              //    tracks pull-down overscroll and scrolls upward cleanly as one
+              //    intact piece when scrolling down (never crushed or sliced!).
+              Positioned(
+                key: const ValueKey('ios-hero-floating-header'),
+                top: topSafePad + 6 - overscroll * 0.82,
+                left: horizontalPad,
+                right: horizontalPad,
+                child: headerOverlay,
+              ),
+
+              // 4. Translucent pull-to-refresh pill while pulling/refreshing
+              if (showRefreshPill)
+                Positioned(
+                  top: topSafePad + 54 - overscroll * 0.52,
+                  left: 0,
+                  right: 0,
+                  child: IgnorePointer(
+                    child: Center(
+                      child: Opacity(
+                        opacity: refreshPillOpacity,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 5.5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: isDark
+                                ? Colors.black.withValues(alpha: 0.56)
+                                : Colors.white.withValues(alpha: 0.84),
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(
+                              color: isDark
+                                  ? Colors.white.withValues(alpha: 0.16)
+                                  : Colors.black.withValues(alpha: 0.08),
+                              width: 0.6,
+                            ),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              CupertinoActivityIndicator(
+                                radius: 7.5,
+                                color: primaryInk,
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                _homeRefreshing
+                                    ? '正在刷新片单'
+                                    : (pullProgress >= 0.95
+                                        ? '松手立即刷新'
+                                        : '下拉放大刷新'),
+                                textScaler: TextScaler.noScaling,
+                                style: TextStyle(
+                                  color: primaryInk,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+
+              // 5. Centered carousel pagination dots with airy bottom clearance
+              if (featuredList.length > 1)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 16,
+                  child: IgnorePointer(
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        for (int i = 0; i < featuredList.length; i++)
+                          AnimatedContainer(
+                            duration: const Duration(milliseconds: 220),
+                            curve: Curves.easeOutCubic,
+                            margin: const EdgeInsets.symmetric(horizontal: 3),
+                            width: i == activeIdx ? 18 : 5.5,
+                            height: 5.5,
+                            decoration: BoxDecoration(
+                              color: i == activeIdx
+                                  ? primaryInk
+                                  : primaryInk.withValues(alpha: 0.30),
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
     );
   }
   Widget _buildWelcomeOnboarding(BuildContext context) {

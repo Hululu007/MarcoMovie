@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1171,8 +1172,8 @@ void main() {
       expect(find.byKey(const Key('curated-module-weekly_trending')), findsOneWidget);
       expect(find.byKey(const Key('curated-module-cn_variety')), findsOneWidget);
 
-      // Tap editorial vine card -> launches Black Hole Vortex -> Poster Wall page,
-      // then cycle replay button through Tetris Tumble and Gravity Stack!
+      // Tap editorial vine card -> launches Black Hole Vortex -> Poster Wall page
+      // with borderless immersive header and NO top-right animation button!
       await tester.ensureVisible(
         find.byKey(const Key('curated-module-cn_variety')),
       );
@@ -1182,6 +1183,12 @@ void main() {
       await tester.pump(const Duration(milliseconds: 360));
       expect(find.byKey(const Key('curated-gravity-wall-page')), findsOneWidget);
       expect(
+        find.byKey(const Key('curated-wall-immersive-header')),
+        findsOneWidget,
+      );
+      expect(find.byType(CupertinoNavigationBar), findsNothing);
+      expect(find.byKey(const Key('curated-gravity-replay-btn')), findsNothing);
+      expect(
         find.byKey(const Key('curated-wall-style-blackHoleVortex')),
         findsOneWidget,
       );
@@ -1190,26 +1197,27 @@ void main() {
       await tester.pump(const Duration(milliseconds: 700));
       await tester.pump(const Duration(milliseconds: 600));
       expect(find.byKey(const Key('curated-gravity-wall-grid')), findsOneWidget);
-      expect(find.byKey(const Key('curated-gravity-replay-btn')), findsOneWidget);
 
-      // Cycle to Tetris Tumble
-      await tester.tap(find.byKey(const Key('curated-gravity-replay-btn')));
+      // Pop back and open a Tetris Tumble collection to confirm varied styles
+      final nav = tester.state<NavigatorState>(find.byType(Navigator).first);
+      nav.pop();
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.byKey(const Key('curated-module-disney')),
+      );
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 420));
+      await tester.tap(find.byKey(const Key('curated-module-disney')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 380));
       expect(
         find.byKey(const Key('curated-wall-style-tetrisTumble')),
         findsOneWidget,
       );
-      await tester.pump(const Duration(milliseconds: 1100));
-
-      // Cycle to Gravity Stack
-      await tester.tap(find.byKey(const Key('curated-gravity-replay-btn')));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 420));
       expect(
-        find.byKey(const Key('curated-wall-style-gravityStack')),
+        find.byKey(const Key('curated-wall-immersive-header')),
         findsOneWidget,
       );
+      expect(find.byKey(const Key('curated-gravity-replay-btn')), findsNothing);
       await tester.pump(const Duration(milliseconds: 1100));
 
       // Tear down the standalone discovery navigator before mounting AdaptiveShell.
@@ -1285,13 +1293,25 @@ void main() {
       await tester.pump(const Duration(milliseconds: 350));
       expect(heroFinder, findsOneWidget);
 
+      // Scroll down 260px -> Hero & its floating header scroll cleanly upward as
+      // one intact block (never crushed or sliced by a collapsed SliverAppBar!)
+      final homeScrollCtrl =
+          tester.widget<CustomScrollView>(find.byType(CustomScrollView).first).controller!;
+      final headerInitialTop = tester
+          .getTopLeft(find.byKey(const ValueKey('ios-hero-floating-header')))
+          .dy;
+      homeScrollCtrl.jumpTo(240.0);
+      await tester.pump();
+      final headerScrolledTop = tester
+          .getTopLeft(find.byKey(const ValueKey('ios-hero-floating-header')))
+          .dy;
+      expect(headerScrolledTop, closeTo(headerInitialTop - 240.0, 2.0));
+
       // Scroll down to 片源最新更新 and verify Category/Filter bar sits directly BELOW it
       final updatesHeaderFinder =
           find.byKey(const ValueKey('home-source-updates-header'));
       final categoryBarFinder =
           find.byKey(const ValueKey('home-category-filter-bar'));
-      final homeScrollCtrl =
-          tester.widget<CustomScrollView>(find.byType(CustomScrollView).first).controller!;
       for (double offset = 350.0;
           offset <= homeScrollCtrl.position.maxScrollExtent + 350.0 &&
               categoryBarFinder.evaluate().isEmpty;

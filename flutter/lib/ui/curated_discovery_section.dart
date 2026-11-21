@@ -6,6 +6,7 @@ import '../core/curated_discovery.dart';
 import '../core/models.dart';
 import '../core/storage_service.dart';
 import 'apple_theme.dart';
+import 'ios_liquid_glass.dart';
 import 'poster_expand_route.dart';
 import 'poster_image.dart';
 
@@ -2112,7 +2113,8 @@ class _CuratedGravityWallPage extends StatefulWidget {
 class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
     with SingleTickerProviderStateMixin {
   late final AnimationController _ctrl;
-  late CuratedWallEntranceStyle _activeStyle;
+  final ScrollController _scrollCtrl = ScrollController();
+  late final CuratedWallEntranceStyle _activeStyle;
   bool _playedHaptic1 = false;
   bool _playedHaptic2 = false;
   bool _playedHaptic3 = false;
@@ -2144,12 +2146,6 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
     (8, 3, false, 0.10),
     (-38, 3, true, -0.11),
   ];
-
-  String get _styleLabel => switch (_activeStyle) {
-        CuratedWallEntranceStyle.blackHoleVortex => '黑洞吸入',
-        CuratedWallEntranceStyle.tetrisTumble => '方块堆叠',
-        CuratedWallEntranceStyle.gravityStack => '重力展开',
-      };
 
   @override
   void initState() {
@@ -2188,19 +2184,6 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
     }
   }
 
-  void _cycleAndReplayAnimation() {
-    const styles = CuratedWallEntranceStyle.values;
-    final nextIdx = (styles.indexOf(_activeStyle) + 1) % styles.length;
-    setState(() {
-      _activeStyle = styles[nextIdx];
-      _playedHaptic1 = false;
-      _playedHaptic2 = false;
-      _playedHaptic3 = false;
-    });
-    HapticFeedback.selectionClick();
-    _ctrl.forward(from: 0.0);
-  }
-
   static double _gravityFallWithBounce(double u) {
     final t = u.clamp(0.0, 1.0);
     if (t < 0.72) {
@@ -2216,204 +2199,314 @@ class _CuratedGravityWallPageState extends State<_CuratedGravityWallPage>
   void dispose() {
     _ctrl.removeListener(_handleAnimationTick);
     _ctrl.dispose();
+    _scrollCtrl.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = ApplePalette.of(context);
+    final topSafePad = MediaQuery.paddingOf(context).top;
+    final bottomSafePad = MediaQuery.paddingOf(context).bottom;
     final animCount = math.min(widget.items.length, _maxAnimatedCards);
+    final hasSubtitle = widget.subtitle.trim().isNotEmpty;
+    final headerContentH = hasSubtitle ? 52.0 : 44.0;
+    final topPad = topSafePad + headerContentH + 18.0;
 
     return Scaffold(
       key: const Key('curated-gravity-wall-page'),
       backgroundColor: palette.background,
-      appBar: CupertinoNavigationBar(
-        backgroundColor: palette.navBarBg,
-        border: Border(
-          bottom: BorderSide(
-            color: palette.separator,
-            width: 0.5,
-          ),
-        ),
-        middle: Text(
-          widget.title,
-          style: TextStyle(
-            color: palette.labelPrimary,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        trailing: CupertinoButton(
-          key: const Key('curated-gravity-replay-btn'),
-          padding: EdgeInsets.zero,
-          minimumSize: const Size(28, 28),
-          onPressed: _cycleAndReplayAnimation,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                _styleLabel,
-                textScaler: TextScaler.noScaling,
-                style: TextStyle(
-                  color: widget.accentColor,
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.w700,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          // 1. Subtle edge-to-edge ambient accent aura rising behind Dynamic Island
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: topSafePad + 184,
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      widget.accentColor.withValues(
+                        alpha: palette.isDark ? 0.30 : 0.20,
+                      ),
+                      widget.accentColor.withValues(
+                        alpha: palette.isDark ? 0.12 : 0.08,
+                      ),
+                      Colors.transparent,
+                    ],
+                    stops: const [0.0, 0.52, 1.0],
+                  ),
                 ),
               ),
-              const SizedBox(width: 4),
-              Icon(
-                CupertinoIcons.sparkles,
-                size: 16,
-                color: widget.accentColor,
-              ),
-            ],
+            ),
           ),
-        ),
-      ),
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          final width = constraints.maxWidth;
-          final height = constraints.maxHeight;
-          const hPad = 16.0;
-          const topPad = 16.0;
-          const crossSpacing = 12.0;
-          const mainSpacing = 14.0;
-          final crossCount = width >= 620 ? 4 : 3;
-          final cellW =
-              (width - hPad * 2 - crossSpacing * (crossCount - 1)) / crossCount;
-          final cellH = cellW / 0.60;
-          final posterH = cellH - 36;
 
-          final stackW = math.min(136.0, width * 0.34);
-          final stackH = stackW * 1.48;
-          final stackCenterX = (width - stackW) * 0.5;
-          final stackCenterY = (height - stackH) * 0.44;
+          // 2. Full-bleed Physics Entrance & Interactive Poster Wall
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final width = constraints.maxWidth;
+              final height = constraints.maxHeight;
+              const hPad = 16.0;
+              const crossSpacing = 12.0;
+              const mainSpacing = 14.0;
+              final crossCount = width >= 620 ? 4 : 3;
+              final cellW =
+                  (width - hPad * 2 - crossSpacing * (crossCount - 1)) /
+                      crossCount;
+              final cellH = cellW / 0.60;
+              final posterH = cellH - 36;
 
-          return AnimatedBuilder(
-            animation: _ctrl,
-            builder: (context, gridChild) {
-              final v = _ctrl.value;
-              final gridOpacity =
-                  v >= 0.86 ? ((v - 0.86) / 0.14).clamp(0.0, 1.0) : 0.0;
-              final overlayVisible = v < 0.995;
+              final stackW = math.min(136.0, width * 0.34);
+              final stackH = stackW * 1.48;
+              final stackCenterX = (width - stackW) * 0.5;
+              final stackCenterY = (height - stackH) * 0.46;
 
-              return Stack(
-                key: Key('curated-wall-style-${_activeStyle.name}'),
-                fit: StackFit.expand,
-                children: [
-                  IgnorePointer(
-                    ignoring: v < 0.92,
-                    child: Opacity(
-                      opacity: gridOpacity,
-                      child: gridChild,
-                    ),
-                  ),
-                  if (overlayVisible)
-                    IgnorePointer(
-                      child: Opacity(
-                        opacity: v > 0.90
-                            ? (1.0 - ((v - 0.90) / 0.10)).clamp(0.0, 1.0)
-                            : 1.0,
-                        child: Stack(
-                          clipBehavior: Clip.none,
-                          children: [
-                            if (_activeStyle ==
-                                CuratedWallEntranceStyle.blackHoleVortex)
-                              Positioned.fill(
-                                child: CustomPaint(
-                                  key: const Key('curated-black-hole-vortex'),
-                                  painter: _BlackHoleVortexPainter(
-                                    progress: v,
-                                    accentColor: widget.accentColor,
-                                    isDark: palette.isDark,
-                                  ),
-                                ),
-                              )
-                            else if (v < 0.64)
-                              Positioned.fill(
-                                child: Opacity(
-                                  opacity: (1.0 - (v / 0.64)).clamp(0.0, 1.0) *
-                                      0.32,
-                                  child: DecoratedBox(
-                                    decoration: BoxDecoration(
-                                      gradient: RadialGradient(
-                                        center: const Alignment(0, -0.06),
-                                        radius: 0.72,
-                                        colors: [
-                                          widget.accentColor
-                                              .withValues(alpha: 0.40),
-                                          Colors.transparent,
-                                        ],
+              return AnimatedBuilder(
+                animation: _ctrl,
+                builder: (context, gridChild) {
+                  final v = _ctrl.value;
+                  final gridOpacity =
+                      v >= 0.86 ? ((v - 0.86) / 0.14).clamp(0.0, 1.0) : 0.0;
+                  final overlayVisible = v < 0.995;
+
+                  return Stack(
+                    key: Key('curated-wall-style-${_activeStyle.name}'),
+                    fit: StackFit.expand,
+                    children: [
+                      IgnorePointer(
+                        ignoring: v < 0.92,
+                        child: Opacity(
+                          opacity: gridOpacity,
+                          child: gridChild,
+                        ),
+                      ),
+                      if (overlayVisible)
+                        IgnorePointer(
+                          child: Opacity(
+                            opacity: v > 0.90
+                                ? (1.0 - ((v - 0.90) / 0.10)).clamp(0.0, 1.0)
+                                : 1.0,
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                if (_activeStyle ==
+                                    CuratedWallEntranceStyle.blackHoleVortex)
+                                  Positioned.fill(
+                                    child: CustomPaint(
+                                      key: const Key(
+                                        'curated-black-hole-vortex',
+                                      ),
+                                      painter: _BlackHoleVortexPainter(
+                                        progress: v,
+                                        accentColor: widget.accentColor,
+                                        isDark: palette.isDark,
+                                      ),
+                                    ),
+                                  )
+                                else if (v < 0.64)
+                                  Positioned.fill(
+                                    child: Opacity(
+                                      opacity:
+                                          (1.0 - (v / 0.64)).clamp(0.0, 1.0) *
+                                              0.32,
+                                      child: DecoratedBox(
+                                        decoration: BoxDecoration(
+                                          gradient: RadialGradient(
+                                            center: const Alignment(0, -0.06),
+                                            radius: 0.72,
+                                            colors: [
+                                              widget.accentColor
+                                                  .withValues(alpha: 0.40),
+                                              Colors.transparent,
+                                            ],
+                                          ),
+                                        ),
                                       ),
                                     ),
                                   ),
-                                ),
-                              ),
-                            for (int i = 0; i < animCount; i++)
-                              _buildPhysicsCard(
-                                index: i,
-                                count: animCount,
-                                progress: v,
-                                video: widget.items[i],
-                                viewportW: width,
-                                viewportH: height,
-                                crossCount: crossCount,
-                                hPad: hPad,
-                                topPad: topPad,
-                                crossSpacing: crossSpacing,
-                                mainSpacing: mainSpacing,
-                                cellW: cellW,
-                                cellH: cellH,
-                                posterH: posterH,
-                                stackW: stackW,
-                                stackH: stackH,
-                                stackCenterX: stackCenterX,
-                                stackCenterY: stackCenterY,
-                                palette: palette,
-                              ),
-                          ],
+                                for (int i = 0; i < animCount; i++)
+                                  _buildPhysicsCard(
+                                    index: i,
+                                    count: animCount,
+                                    progress: v,
+                                    video: widget.items[i],
+                                    viewportW: width,
+                                    viewportH: height,
+                                    crossCount: crossCount,
+                                    hPad: hPad,
+                                    topPad: topPad,
+                                    crossSpacing: crossSpacing,
+                                    mainSpacing: mainSpacing,
+                                    cellW: cellW,
+                                    cellH: cellH,
+                                    posterH: posterH,
+                                    stackW: stackW,
+                                    stackH: stackH,
+                                    stackCenterX: stackCenterX,
+                                    stackCenterY: stackCenterY,
+                                    palette: palette,
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  );
+                },
+                child: GridView.builder(
+                  key: const Key('curated-gravity-wall-grid'),
+                  controller: _scrollCtrl,
+                  padding: EdgeInsets.fromLTRB(
+                    hPad,
+                    topPad,
+                    hPad,
+                    math.max(36.0, bottomSafePad + 24.0),
+                  ),
+                  physics: const BouncingScrollPhysics(
+                    parent: AlwaysScrollableScrollPhysics(),
+                  ),
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: crossCount,
+                    childAspectRatio: 0.60,
+                    crossAxisSpacing: crossSpacing,
+                    mainAxisSpacing: mainSpacing,
+                  ),
+                  itemCount: widget.items.length,
+                  itemBuilder: (context, index) {
+                    final v = widget.items[index];
+                    final cid = 'curated-wall-${widget.title}-${v.id}-$index';
+                    return _CuratedPosterCard(
+                      video: v,
+                      cardId: cid,
+                      accentColor: widget.accentColor,
+                      palette: palette,
+                      onTap: (cardCtx) {
+                        HapticFeedback.selectionClick();
+                        if (widget.onOpenVideoFromCard != null) {
+                          widget.onOpenVideoFromCard!(v, cardCtx, 13.0, cid);
+                        } else {
+                          widget.onOpenVideo(v);
+                        }
+                      },
+                    );
+                  },
+                ),
+              );
+            },
+          ),
+
+          // 3. Immersive floating borderless title bar (no top-right animation
+          //    button; smooth feathered scroll veil + Liquid Glass back pill).
+          Positioned(
+            key: const Key('curated-wall-immersive-header'),
+            top: 0,
+            left: 0,
+            right: 0,
+            child: AnimatedBuilder(
+              animation: _scrollCtrl,
+              builder: (context, headerChild) {
+                final scrollOffset = _scrollCtrl.positions.length == 1
+                    ? _scrollCtrl.offset
+                    : 0.0;
+                final depth = (scrollOffset / 52.0).clamp(0.0, 1.0);
+                final topAlpha = 0.64 + depth * 0.30;
+                final midAlpha = 0.34 + depth * 0.38;
+                final lowAlpha = 0.08 + depth * 0.16;
+                return DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        palette.background.withValues(alpha: topAlpha),
+                        palette.background.withValues(alpha: midAlpha),
+                        palette.background.withValues(alpha: lowAlpha),
+                        Colors.transparent,
+                      ],
+                      stops: const [0.0, 0.50, 0.78, 1.0],
+                    ),
+                  ),
+                  child: headerChild,
+                );
+              },
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(14, topSafePad + 6, 14, 18),
+                child: Row(
+                  children: [
+                    IosNativeGlassButton(
+                      style: 'circle',
+                      symbol: 'chevron.left',
+                      symbolSize: 16,
+                      width: 38,
+                      height: 38,
+                      accessibilityLabel: '返回',
+                      onTap: () => Navigator.of(context).maybePop(),
+                      fallback: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => Navigator.of(context).maybePop(),
+                        child: LiquidGlass(
+                          width: 38,
+                          height: 38,
+                          borderRadius: 999,
+                          tint: palette.isDark
+                              ? const Color(0x401E1E24)
+                              : const Color(0xCCFFFFFF),
+                          child: Icon(
+                            CupertinoIcons.chevron_back,
+                            size: 18,
+                            color: palette.labelPrimary,
+                          ),
                         ),
                       ),
                     ),
-                ],
-              );
-            },
-            child: GridView.builder(
-              key: const Key('curated-gravity-wall-grid'),
-              padding: const EdgeInsets.fromLTRB(
-                hPad,
-                topPad,
-                hPad,
-                36,
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Text(
+                            widget.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: palette.labelPrimary,
+                              fontSize: 17.5,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: -0.35,
+                            ),
+                          ),
+                          if (hasSubtitle) ...[
+                            const SizedBox(height: 1.5),
+                            Text(
+                              widget.subtitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: palette.labelSecondary,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 48),
+                  ],
+                ),
               ),
-              physics: const BouncingScrollPhysics(),
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: crossCount,
-                childAspectRatio: 0.60,
-                crossAxisSpacing: crossSpacing,
-                mainAxisSpacing: mainSpacing,
-              ),
-              itemCount: widget.items.length,
-              itemBuilder: (context, index) {
-                final v = widget.items[index];
-                final cid = 'curated-wall-${widget.title}-${v.id}-$index';
-                return _CuratedPosterCard(
-                  video: v,
-                  cardId: cid,
-                  accentColor: widget.accentColor,
-                  palette: palette,
-                  onTap: (cardCtx) {
-                    HapticFeedback.selectionClick();
-                    if (widget.onOpenVideoFromCard != null) {
-                      widget.onOpenVideoFromCard!(v, cardCtx, 13.0, cid);
-                    } else {
-                      widget.onOpenVideo(v);
-                    }
-                  },
-                );
-              },
             ),
-          );
-        },
+          ),
+        ],
       ),
     );
   }
