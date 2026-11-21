@@ -27,5 +27,17 @@
   - 冷启动 PSS 内存由 `169 MB + ~80 MB WebView` 降至 **`132 MB`（0 WebView 进程、51 线程）**；
   - 点击热门剧集进入详情页 PSS 由 `352 MB`（触发 LMK 强杀）降至 **`188 MB`**、总堆分配由 `439 MB` 降至 **`106 MB`**（`0` 个 `catpaw-node` / 失控搜索线程）；
   - 全链路 4K 播放（`197 MB` PSS）、无框右上角 HUD 字体区分、底部细进度条实时开关隐藏/显示、播放中按返回浅层页 + 选集弹窗、单一 `18652` 端口投屏广播及连续强停重开均实机截屏验证通过。
-- **自动化回归与构建**：待填充最终构建提交、包校验和与 CI 记录。
+- **自动化构建与回归校验（精确构建提交 `1706e22e31cb943ec8825ab0117b62593fb00ed8`）**：
+  - GitHub Actions 公开守卫与 Android 构建验证通过：[Public content checks（44915956588）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44915956588)（`1513` 追踪文件零告警、README 版本对齐、Java 格式与离线检查全绿）及 [Build Multiplatform（44915956538）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44915956538) 中的 [Public Guardrails & Offline Java Checks（136881495162）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44915956538/job/136881495162) 与 [Build & Verify Android TV/Phone/Tablet APK（136882734363）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44915956538/job/136882734363) 全部通过；
+  - 本地官方正式签名构建（`MARCOMOVIE_RELEASE=1`，`git_dirty: false`）通过 `API 23` 回调字节码校验（`640` 个应用类）、`run_tv_ux_optimization_checks.py`（`52/52` 项专项检查）、`v1/v2/v3` 签名与 `zipalign` 校验，并已在同台 Xiaomi `MiTV-ASTP0` 电视上覆盖安装同 SHA-256 最终正式包完成冷启动无崩溃校验（`versionCode=96`，`0` Fatal）；
+  - Android 6（API 23）模拟器回归（[44915956539](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44915956539)）中 `SubtitleProbe` 与 `SourceHostProbe`（`122/122` 项）通过，无 API 23 崩溃或回调兼容回归；旧版 V17 首页探针 `HomeProbe` 初始焦点断言与 `LoadingProbe` 1 项断言待后续适配新版推荐首页布局。
 - **已知边界与限制**：物理实测覆盖 Xiaomi Android 9 电视，不代表对全部第三方电视盒固件、全部第三方片源站点或所有 4K/HDR 码流完成穷尽验收。
+
+## 安装与校验
+
+- **正式包名**：`com.pilipala.marcomovie`（TV edition，`minSdk 23` / `targetSdk 28`；保留同字节兼容别名 `MarcoMovie-0.6.0-preview.apk`）。
+- **TV APK SHA-256**：`MarcoMovie-0.6.0-android-tv.apk`（`35672158` B）— `f368ff08f19678fec4b804ed29158e95c92370f1daadeebb2f9998234550ed4c`。
+- **对应源码包 SHA-256**：`MarcoMovie-android-tv-v0.6.0-source.zip`（`10504071` B）— `35b8b9c56278894e9a598a7d90cf1a58d00f713d1c4cdc7b2d23895331a385d8`。
+- **官方签名证书 SHA-256**：`2549f01e89c41201ea171847048228c6df79a7c57fff2ec9a439195c757a80de`（与既有正式版一致，覆盖安装保留配置、收藏与观看记录）。
+- **精确构建提交**：`1706e22e31cb943ec8825ab0117b62593fb00ed8`。
+- **跨端隔离**：本次仅发布 Android 电视 / 盒子独立版本（`android-tv-v0.6.0`），Android 手机/平板（`0.5.27`）、Android Lite（`0.5.8`）、Windows（`0.6.0`）、macOS、iOS/iPadOS、Apple TV 与 HarmonyOS NEXT 版本号及既有发行包均保持不变。
