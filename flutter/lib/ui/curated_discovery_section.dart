@@ -440,6 +440,7 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final textScale = MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.2);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -450,7 +451,7 @@ class _PortraitDiscoveryShelf extends StatelessWidget {
         ),
         const SizedBox(height: 10),
         SizedBox(
-          height: 210,
+          height: 168 + 42 * textScale,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             physics: const BouncingScrollPhysics(),
@@ -497,6 +498,7 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final textScale = MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.2);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -507,7 +509,7 @@ class _LandscapeDiscoveryShelf extends StatelessWidget {
         ),
         const SizedBox(height: 10),
         SizedBox(
-          height: 162,
+          height: 126 + 40 * textScale,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             physics: const BouncingScrollPhysics(),
@@ -700,6 +702,7 @@ class _EditorialCollectionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final textScale = MediaQuery.textScalerOf(context).scale(1.0).clamp(1.0, 2.2);
     final heroItem = items.isNotEmpty ? items.first : null;
     final subItems = items.length > 2
         ? items.sublist(1, 3)
@@ -712,7 +715,7 @@ class _EditorialCollectionCard extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       child: Container(
         width: 306,
-        height: 322,
+        height: 274 + 48 * textScale,
         decoration: BoxDecoration(
           color: tintBase,
           borderRadius: BorderRadius.circular(22),
@@ -1157,24 +1160,29 @@ class _StudioFanCard extends StatelessWidget {
               // Left brand identity badge
               Positioned(
                 left: 16,
-                top: 0,
-                bottom: 0,
+                top: 8,
+                bottom: 8,
                 width: 112,
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildBrandWordmark(),
-                    const SizedBox(height: 5),
-                    Text(
-                      '${items.length} 部精选',
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.62),
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.w500,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildBrandWordmark(),
+                      const SizedBox(height: 5),
+                      Text(
+                        '${items.length} 部精选',
+                        textScaler: TextScaler.noScaling,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.62),
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -1302,7 +1310,7 @@ class _StackedCategoryPill extends StatelessWidget {
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Container(
-        height: 58,
+        constraints: const BoxConstraints(minHeight: 58),
         padding: const EdgeInsets.fromLTRB(12, 6, 16, 6),
         decoration: BoxDecoration(
           color: palette.isDark

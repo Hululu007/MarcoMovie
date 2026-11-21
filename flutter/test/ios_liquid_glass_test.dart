@@ -343,17 +343,18 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 400));
 
-      final views = tester.widgetList<UiKitView>(find.byType(UiKitView)).toList();
-      final types = views.map((v) => v.viewType).toList();
-      expect(types, contains('marco_movie/ios26_dock'));
-      expect(types, contains('marco_movie/ios26_segmented_control'));
+      // Top viewport mounts the Dock + Source UIMenu + Netdisk glass button.
+      final topViews =
+          tester.widgetList<UiKitView>(find.byType(UiKitView)).toList();
+      final topTypes = topViews.map((v) => v.viewType).toList();
+      expect(topTypes, contains('marco_movie/ios26_dock'));
       expect(
-        types.where((t) => t == 'marco_movie/ios26_glass_button').length,
-        greaterThanOrEqualTo(3), // Source UIMenu + Netdisk circle + Filter capsule
+        topTypes.where((t) => t == 'marco_movie/ios26_glass_button').length,
+        greaterThanOrEqualTo(2), // Source UIMenu + Netdisk circle
       );
 
       // Verify the source switcher button passes native UIMenu items.
-      final sourceButton = views.firstWhere((v) {
+      final sourceButton = topViews.firstWhere((v) {
         if (v.viewType != 'marco_movie/ios26_glass_button') return false;
         final params = v.creationParams as Map<dynamic, dynamic>;
         return params['menuItems'] != null;
@@ -363,6 +364,33 @@ void main() {
               as List<dynamic>;
       expect(menuItems.length, greaterThanOrEqualTo(2));
       expect((menuItems.first as Map)['id'], '__all__');
+
+      // Scroll down below 片单发现 / 片源最新更新 where Category SegmentedControl + Filter button live.
+      final categoryBarFinder =
+          find.byKey(const ValueKey('home-category-filter-bar'));
+      final homeScrollCtrl =
+          tester.widget<CustomScrollView>(find.byType(CustomScrollView).first).controller!;
+      for (double offset = 350.0;
+          offset <= homeScrollCtrl.position.maxScrollExtent + 350.0 &&
+              categoryBarFinder.evaluate().isEmpty;
+          offset += 350.0) {
+        homeScrollCtrl.jumpTo(
+          offset.clamp(0.0, homeScrollCtrl.position.maxScrollExtent),
+        );
+        await tester.pump();
+      }
+      expect(categoryBarFinder, findsOneWidget);
+      final categoryViews = tester
+          .widgetList<UiKitView>(
+            find.descendant(
+              of: categoryBarFinder,
+              matching: find.byType(UiKitView),
+            ),
+          )
+          .map((v) => v.viewType)
+          .toList();
+      expect(categoryViews, contains('marco_movie/ios26_segmented_control'));
+      expect(categoryViews, contains('marco_movie/ios26_glass_button'));
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     },
