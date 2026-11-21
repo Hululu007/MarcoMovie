@@ -1238,6 +1238,9 @@ public interface DanmuProvider {
             }
         }
 
+        private static final Object REGEX_WARMUP_LOCK = new Object();
+        private static volatile boolean regexEngineWarmed = false;
+
         private final String[] plainLowerRules;
         private final Pattern[] regexRules;
         private final AtomicLong evaluationCount = new AtomicLong();
@@ -1245,6 +1248,47 @@ public interface DanmuProvider {
         private BlockFilter(String[] plainLowerRules, Pattern[] regexRules) {
             this.plainLowerRules = plainLowerRules;
             this.regexRules = regexRules;
+        }
+
+        private static String repeatChar180(char ch, char tail) {
+            char[] buf = new char[180];
+            Arrays.fill(buf, 0, 179, ch);
+            buf[179] = tail;
+            return new String(buf);
+        }
+
+        /**
+         * Warms shared java.util.regex bytecode paths once per JVM so the first user-visible or
+         * test regex evaluation avoids cold-interpreter latency spikes.
+         */
+        private static void warmRegexEngineIfNeeded() {
+            if (regexEngineWarmed) return;
+            synchronized (REGEX_WARMUP_LOCK) {
+                if (regexEngineWarmed) return;
+                String asciiSample = repeatChar180('a', '!');
+                String cjkSample = repeatChar180('\u4e00', '!');
+                String digitSample = repeatChar180('1', '!');
+                Pattern[] warmupPatterns =
+                        new Pattern[] {
+                            Pattern.compile(
+                                    "[^x]{20}[^x]+y|[^x]{20}[^x]+z", Pattern.CASE_INSENSITIVE),
+                            Pattern.compile("[a-z]+z|[a-z]+z", Pattern.CASE_INSENSITIVE),
+                            Pattern.compile("[a-z]+[a-z]{2}z", Pattern.CASE_INSENSITIVE),
+                            Pattern.compile(".*剧透预警", Pattern.CASE_INSENSITIVE),
+                            Pattern.compile("a.*b|c.*d", Pattern.CASE_INSENSITIVE),
+                            Pattern.compile("[a-z]+\\.com", Pattern.CASE_INSENSITIVE),
+                            Pattern.compile(
+                                    "(a|aa)(a|aa)z|[a-z]{1,4}[0-9]{1,4}", Pattern.CASE_INSENSITIVE)
+                        };
+                for (Pattern p : warmupPatterns) {
+                    for (int i = 0; i < 600; i++) {
+                        p.matcher(asciiSample).find();
+                        p.matcher(cjkSample).find();
+                        p.matcher(digitSample).find();
+                    }
+                }
+                regexEngineWarmed = true;
+            }
         }
 
         private static boolean isRuleWhitespace(char ch) {
@@ -1317,6 +1361,9 @@ public interface DanmuProvider {
                 accepted++;
             }
             if (plains.isEmpty() && regexes.isEmpty()) return EMPTY;
+            if (!regexes.isEmpty()) {
+                warmRegexEngineIfNeeded();
+            }
             return new BlockFilter(plains.toArray(new String[0]), regexes.toArray(new Pattern[0]));
         }
 
