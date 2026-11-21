@@ -89,7 +89,7 @@ class SourceChoiceSliver extends StatelessWidget {
               }
             },
             child: Opacity(
-              opacity: isSupported ? 1.0 : 0.54,
+              opacity: isSupported ? 1.0 : 0.52,
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10.5),
                 decoration: BoxDecoration(
