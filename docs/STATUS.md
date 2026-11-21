@@ -17,17 +17,19 @@
 | 应用内更新与同步 | 镜像与 GitHub 双源版本检查、SHA-256 摘要校验、包名/版本递增/同签名证书校验；全端互通 `marco-movie-sync` v2（WebDAV + 局域网双向同步）与 `marco-movie-backup` | 仅对同签名更新包放行；不静默后台安装；隐私空间与网盘凭据严格隔离本机 |
 | 多端专属界面与跨平台 | Android 电视（V17 沉浸界面）、手机/平板（`MobileShell`）、Lite（API 14 单 DEX）；`flutter/` 覆盖 Windows / macOS / iOS / iPadOS；Apple TV（`tvos/`，`0.1.1`）与 HarmonyOS NEXT（`flutter/ohos/` + `flutter/lib/ui/tv/`，`0.1.1`）在本轮保持只读不改 | 新增 Flutter 能力均通过 `!OhosRuntime.isOhos` 隔离；Flutter 端不支持 Android 专属 `.jar` 插件 |
 
-## 当前集成分支验证范围（2026-11-21 · `feat/ux-integration-20261120 @ 82f38cd2`）
+## 当前发行版本验证范围（2026-11-21 · 构建提交 `78017bfb`）
 
-1. **公开合规与代码格式守卫**：
-   - `scripts/check_public_content.py`：`1507` 个追踪文件零告警通过。
-   - `scripts/format_java.py --check`：`261` 个 Java 文件格式检查通过。
-2. **Android / TV / Lite 纯 JVM 与一致性回归（全量通过）**：
-   - `android/tests/run_checks.py` 汇总套件：`CmsChecks`（`57` 项）、`CloudSyncChecks`（`96` 项）、`SecureStorageChecks`（`47` 项 + API 23 字节码校验）、`MediaBadgeChecks`（`165/165` 黄金样例在 `MediaBadges` / `LiteBadges` 零差异）、`PlayerGestureChecks`（`190` 项）、`DanmuEngineChecks`（`294` 断言）、`MotionTokenChecks`（`965` 断言）、`OnboardingStateChecks`（`114` 断言）与 `Wave2AndroidWireChecks`（`397` 项）。
-   - `run_compat_checks.py`（`86` 项）、`run_review_fix_checks.py`（`58` 项）、`run_seek_checks.py`（`25` 项）、`run_player_lock_checks.py`（`30` 项）、`run_tv_v17_marker_checks.py`（`25` 项）、`run_tv_v17_safety_checks.py`（`59` 项）、`run_glasswork_checks.py`（`14` 场景）与 `run_conformance_checks.py`（`20/20`）。
-   - Lite API 14 单 DEX 校验：`scripts/test_lite_jvm.py`（API 14 `bootclasspath` 与 `D8 --min-api 14` 单 DEX 编译、`194` 项 JVM 检查、`8` 项 TLS 检查）与 `scripts/test_lite_conformance.py`（`20` 项中 `18` 项通过、`2` 项 Lite 跳过）。
-3. **Flutter 跨端 UX、一致性与鸿蒙隔离测试**：
-   - 实跑 `18` 套核心测试文件（`media_badges_test`、`player_gesture_state_machine_test`、`player_hud_test`、`ios_player_chrome_test`、`desktop_player_hud_test`、`danmu_protocol_and_cache_test`、`danmu_layer_and_settings_test`、`motion_tokens_test`、`motion_aurora_background_test`、`motion_brand_logo_loader_test`、`motion_player_enter_transition_test`、`onboarding_test`、`wave2_anime4k_test`、`wave2_motion_wiring_test`、`wave2_wiring_and_gate1_test`、`detail_player_transition_integration_test`、`conformance_test`、`harmonyos_and_tv_ui_test`），共 `193` 项全部通过。
+1. **公开合规、版本对齐与代码格式守卫**：
+   - `scripts/check_public_content.py`：`1513` 个追踪文件零告警通过（GitHub Actions `44857333149` / `44857333769`）。
+   - `scripts/sync_readme_versions.py --check` 零漂移通过；`scripts/format_java.py --check`（`261` 个 Java 文件）通过。
+2. **Android / TV / Lite 构建、API 23 与 JVM 校验（`78017bfb` 构建实测 + 基线回归）**：
+   - 在构建提交 `78017bfb` 上通过 GitHub Actions Guardrails 校验（`CmsChecks` `57` 项、`DanmuEngineChecks` `294` 断言、`Glasswork` `14` 场景与 Android 编译校验）及本地 `MARCOMOVIE_RELEASE=1` 官方签名构建（`API 23` 字节码校验 `627` 应用类、`native Guard import` `170` 项、`v1/v2/v3` 签名与 `zipalign` 校验）。
+   - Lite API 14 单 DEX 构建与校验（`78017bfb`）：API 14 `bootclasspath` 与 `D8 --min-api 14` 单 DEX 编译、`194` 项 TV Lite JVM 检查、`8` 项 TLS 检查，全部通过。
+   - 前序基线（`82f38cd2`）已通过全套 `android/tests/run_checks.py`（`CloudSyncChecks` `96`、`SecureStorageChecks` `47`、`MediaBadgeChecks` `165/165`、`PlayerGestureChecks` `190`、`MotionTokenChecks` `965`、`OnboardingStateChecks` `114`、`Wave2AndroidWireChecks` `397`）及 `run_compat_checks.py`、`run_review_fix_checks.py`、`run_seek_checks.py`、`run_player_lock_checks.py`、`run_tv_v17_marker_checks.py`、`run_tv_v17_safety_checks.py`、`run_conformance_checks.py`（`20/20`）与 `test_lite_conformance.py`（`18` 通过、`2` 跳过）。
+3. **Flutter 跨端测试与多平台云端构建（`78017bfb` · Run `44857333769` 全 7 任务通过）**：
+   - Windows x64 Runner：`1179` 项 Flutter 测试通过（`9` 项非桌面平台专属跳过）+ `13` 项 `libmpv-2.dll` 打包回放检验通过，产出 Inno Setup `.exe` 与绿色便携 `.zip`。
+   - macOS Runner：`1179` 项 Flutter 测试通过（`9` 项非桌面平台专属跳过）+ `3` 项 `Mpv.framework/Mpv` 打包回放检验通过，产出通用 `.zip`；Guardrails Runner 完成 `34` 项 Flutter 三端规范一致性测试。
+   - iOS Runner：Xcode `26.6`（iOS `26` SDK）下 `1179` 项 Flutter 测试通过（`9` 项专属跳过），产出通用未签名 `.ipa`；Apple TV 与 HarmonyOS NEXT 云端构建任务亦保持全绿（代码与版本号维持 `0.1.1` 不变）。
 
 ## 0.4.16 验证范围
 
@@ -51,9 +53,9 @@
 
 ## 仍在完善
 
-- **待构建与待实机验证项（`feat/ux-integration-20261120`）**：
-  - 6 个变动端（Android 电视 `0.5.30`、Android 手机/平板 `0.5.27`、Android Lite `0.5.8`、Windows `0.5.25`、macOS `0.5.20`、iOS/iPadOS `0.5.35`）已写入版本清单，尚待完成新版本号下的正式本地/CI 云端构建及 Windows / macOS / iOS / Android 正式发行产物校验；
-  - 8 类物理设备 A/B 对照实机验收（Android 9 ARM32 电视盒子 `>= 50fps`、Android 手机、Android 平板、Android 4.x Lite 盒子、Windows、Mac、iPhone 与 iPad）尚待真机实测；
+- **已发行与待实机验证项（`78017bfb` · 已发布 6 端 GitHub Releases）**：
+  - 6 个变动端（Android 电视 `0.5.30`、Android 手机/平板 `0.5.27`、Android Lite `0.5.8`、Windows `0.5.25`、macOS `0.5.20`、iOS/iPadOS `0.5.35`）已完成 `78017bfb` 构建、SHA-256 校验与 GitHub Releases 独立发行；
+  - 8 类物理设备 A/B 对照实机验收（Android 9 ARM32 电视盒子 `>= 50fps`、Android 手机、Android 平板、Android 4.x Lite 盒子、Windows、Mac、iPhone 与 iPad）仍待真机实测；
   - Apple TV 与 HarmonyOS NEXT（`0.1.1`）本轮未作功能改动，且本地未安装 HarmonyOS `hvigorw` 编译工具链，未执行本地 `.hap` 打包。
 - 全部网盘授权流程、任意扩展或直播列表、长时间播放、所有解码器、DRM 授权样本和磁力视频的电视端表现均未完成穷尽验证。配置导入成功不等于可用；第三方服务还可能随时变更。
 

@@ -1,6 +1,6 @@
 # Marco Movie Android 电视 / 盒子 0.5.30
 
-> **发布说明草案**：应用版本 `0.5.30`（版本代码 `94`）；最低 Android 6 / API 23。待正式签名打包及真机 A/B 对照验收完成后补齐构建提交、APK SHA-256 与实机结论。
+发布日期：2026-11-21。应用版本 `0.5.30`（版本代码 `94`）；最低 Android 6 / API 23。本次更新围绕电视大屏端 V17 沉浸影院详情接入统一媒体规格徽章、遥控器 3 秒片头/片尾跳过与定时关闭、清洁室 30 秒分片弹幕引擎与帧率自适应降级、零模糊硬件进入转场及遥控器 5 幕新手引导进行升级；Apple TV 与 HarmonyOS NEXT（`0.1.1`）保持不变。
 
 ## 本次更新
 
@@ -11,17 +11,17 @@
 
 ## 验证边界
 
-- **已完成自动化主机回归（基于 `feat/ux-integration-20261120 @ 82f38cd2`，未改版本号前）**：
-  - `scripts/check_public_content.py`（`1507` 文件零告警）、`scripts/format_java.py --check`（`261` Java 文件格式通过）；
-  - `android/tests/run_checks.py` 及其汇总套件：`CmsChecks`（`57` 项）、`CloudSyncChecks`（`96` 项）、`SecureStorageChecks`（`47` 项）、`MediaBadgeChecks`（`165/165` 黄金样例与三端零差异）、`PlayerGestureChecks`（`190` 项）、`DanmuEngineChecks`（`294` 断言，含电视端稳态零分配与超过 `64` 分钟长片 `w>=128` 验证）、`MotionTokenChecks`（`965` 断言）、`OnboardingStateChecks`（`114` 断言）、`Wave2AndroidWireChecks`（`397` 项，含 TV 嵌套硬件层守卫）；
-  - `run_compat_checks.py`（`86` 项）、`run_review_fix_checks.py`（`58` 项）、`run_seek_checks.py`（`25` 项）、`run_player_lock_checks.py`（`30` 项）、`run_tv_v17_marker_checks.py`（`25` 项）、`run_tv_v17_safety_checks.py`（`59` 项）、`run_glasswork_checks.py`（`14` 场景）与 `run_conformance_checks.py`（`20/20`）全部通过。
-- **待完成项（严禁未测先宣称）**：
-  - 尚待使用确认版本号执行正式签名构建；
-  - 尚待在 Android 9 ARM32 电视盒子上完成与 `android-tv-v0.5.29` 的 A/B 对照实机验收（含 `dumpsys gfxinfo framestats` 验证全链路 `>= 50fps`）。
+- **已完成自动化构建与回归校验（精确构建提交 `78017bfb79cf4430681436b53cfcf67b77f44e5b`）**：
+  - GitHub Actions 守卫与 Android 编译验证：[Public content checks（44857333149）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44857333149) 与 [Build Multiplatform（44857333769）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44857333769) 全任务通过（`1513` 追踪文件零告警、README 版本对齐、`DanmuEngineChecks` `294` 断言、`CmsChecks` `57` 项、`Glasswork` `14` 场景、`34` 项 Flutter 三端规范测试及 Android 工程编译校验）；
+  - 本地官方正式签名构建（`MARCOMOVIE_RELEASE=1`，`git_dirty: false`）通过 `API 23` 回调字节码校验（`627` 个应用类）、`native Guard import`（`170` 项）及 `v1/v2/v3` 签名与 `zipalign` 校验（并已在前序基线提交完成全套 `android/tests/run_checks.py` 与专题回归验证）。
+- **待完成真机实测项（严禁未测先宣称）**：
+  - 尚未在物理 Android 9 ARM32 电视盒子上完成 `android-tv-v0.5.30` 与 `android-tv-v0.5.29` 的 A/B 对照实机验收（含 `dumpsys gfxinfo framestats` 验证全链路 `>= 50fps`、遥控器长按快进与分片弹幕稳态帧率实测）。
 
 ## 安装与校验
 
-- **正式包名**：`com.pilipala.marcomovie`（TV edition，兼容别名 `MarcoMovie-0.5.30-preview.apk`）。
-- **输出包（待正式构建）**：`MarcoMovie-0.5.30-android-tv.apk`（`minSdk 23` / `targetSdk 28`）。
-- **构建提交与校验摘要**：待正式签名打包并完成真机 A/B 验收后填入。
+- **正式包名**：`com.pilipala.marcomovie`（TV edition，`minSdk 23` / `targetSdk 28`；同字节兼容别名 `MarcoMovie-0.5.30-preview.apk`）。
+- **TV APK SHA-256**：`MarcoMovie-0.5.30-android-tv.apk`（`36639635` B）— `bf10e758ca7d5ee8b0ab207a114e206a7a613521def739eaa9c97de21aa75ae5`。
+- **对应源码包 SHA-256**：`MarcoMovie-android-tv-v0.5.30-source.zip`（`10694716` B）— `bf212f4fc77844f1ab44795fc5dff3ef0da8d27f64c36c15b7c12c3cf95be242`。
+- **官方签名证书 SHA-256**：`2549f01e89c41201ea171847048228c6df79a7c57fff2ec9a439195c757a80de`（与既有正式版一致，覆盖安装保留配置、收藏与观看记录）。
+- **精确构建提交**：`78017bfb79cf4430681436b53cfcf67b77f44e5b`。[多端构建与校验记录（44857333769）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44857333769)。
 - **跨端隔离**：本次发布范围与 Apple TV（`0.1.1`）及 HarmonyOS NEXT（`0.1.1`）无关，两者版本号与代码保持不变。

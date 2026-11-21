@@ -1,6 +1,6 @@
 # Marco Movie iOS / iPadOS 0.5.35
 
-> **发布说明草案**：发布日期待定；应用版本 `0.5.35`（构建号 `85`），基于 Xcode 26.6 / iOS 26 SDK 编译并继续兼容 iOS / iPadOS 14.0+（iOS 14–18 自动平滑回退高保真毛玻璃组件）。待 Mac 环境 Xcode 打包及 iPhone / iPad 真机 A/B 对照验收后补齐构建提交与校验摘要。
+发布日期：2026-11-21。应用版本 `0.5.35`（构建号 `85`），基于 Xcode `26.6` / iOS `26` SDK 编译，并继续兼容 iOS / iPadOS `14.0+`（iOS 14–18 自动平滑回退高保真毛玻璃组件）。本次更新全面重构与原生 `0.5.34` Liquid Glass 美学统一的播放页（`IosPlayerChrome`）、触控长按/横滑/锁定倍速状态机、无黑洞详情进播放门户转场、清洁室 30 秒分片弹幕引擎与原生按钮 5 幕新手引导。
 
 ## 更新内容
 
@@ -14,10 +14,11 @@
 
 ## 包信息与构建记录
 
-- **未签名 IPA（iPhone / iPad 通用，待正式构建）**：`MarcoMovie-0.5.35-ios-iphone-ipad-unsigned.ipa`（更新兼容别名 `MarcoMovie-0.5.35-ios-unsigned.ipa`）。
-- **SHA-256 / 源码包 / 构建记录**：待 Mac 环境 Xcode Release 构建完成后填入。
+- **未签名 IPA（iPhone / iPad 通用）**：`MarcoMovie-0.5.35-ios-iphone-ipad-unsigned.ipa`（`62919248` B，更新兼容别名 `MarcoMovie-0.5.35-ios-unsigned.ipa`），SHA-256：`4fc577c661825e8acc996ea138eebc8345117f3e8c1854b3467eee23fef03683`。
+- **对应源码包**：`MarcoMovie-ios-v0.5.35-source.zip`（`10670020` B），SHA-256：`92ddb214cd048602b6aa34275939759f2da883a5895d024e5becb22bcb429d77`。
+- **构建提交与 CI 记录**：`78017bfb79cf4430681436b53cfcf67b77f44e5b`。[iOS / iPadOS 原生构建与全量校验（44857333769）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44857333769) / [公开守卫记录（44857333149）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44857333149)。
 
 ## 验证范围与已知限制
 
-- **已完成自动化验证（基于 `feat/ux-integration-20261120 @ 82f38cd2`）**：通过 `scripts/check_public_content.py`（`1507` 文件）及 `18` 套跨端 UX / 一致性 / 鸿蒙隔离 `flutter test` 测试集共 `193` 项测试全绿（含 `ios_player_chrome_test`、`player_hud_test`、`player_gesture_state_machine_test`、`detail_player_transition_integration_test`、`motion_player_enter_transition_test`、`danmu_*_test`、`onboarding_test`、`wave2_motion_wiring_test`、`wave2_wiring_and_gate1_test` 等，已覆盖 `IosNativeRouteGate` 占位恢复、竖屏无灰块遮挡、`reduceTransparency` 降级、多指打断防误 seek 与 `!OhosRuntime.isOhos` 隔离）。
-- **待完成验证**：尚未在 Mac Xcode `26.6` 执行新版本号 Release `.ipa` 打包与二进制/最低版本校验，亦未在物理 iPhone（含灵动岛/刘海屏与 iOS 26 / iOS 15–18 设备）及 iPad（分屏多任务与全屏状态栏协同）上完成对照 `ios-v0.5.34` 的真机 A/B 验收。
+- **已完成自动化构建与校验**：在 `78017bfb79cf4430681436b53cfcf67b77f44e5b` 上于 macOS 云端 Runner 完成 `flutter test` 全套测试（`1179` 项通过、`9` 项非 iOS 平台专属跳过）、Xcode `26.6` 原生 Release `.ipa` 编译打包与二进制结构校验，以及 `1513` 个追踪文件公开内容守卫校验；未签名 IPA 支持巨魔（TrollStore）直接覆盖安装或个人自签工具安装。
+- **待完成真机验证**：尚未在物理 iPhone（含灵动岛/刘海屏与 iOS 26 / iOS 15–18 设备）及 iPad（分屏多任务与全屏状态栏协同）上完成对照 `ios-v0.5.34` 的真机 A/B 验收。

@@ -1,6 +1,6 @@
 # Marco Movie Android 手机 / 平板 0.5.27
 
-> **发布说明草案**：发布日期待定；应用版本 `0.5.27`（版本代码 `95`，严格高于当前全包最高 `versionCode 93`，确保同包名 `com.pilipala.marcomovie` 覆盖升级不冲突）。待正式签名构建及真机 A/B 对照验收后补齐构建记录与校验摘要。
+发布日期：2026-11-21。应用版本 `0.5.27`（版本代码 `95`，严格高于既有全包最高 `versionCode 93`，确保同包名 `com.pilipala.marcomovie` 覆盖升级不冲突）。本次更新围绕 Android 手机与平板端统一纯文字媒体规格徽章、触控手势长按/横滑/上滑锁定倍速状态机、清洁室 30 秒分片弹幕与字幕置顶 Z 轴修正、API 33+ AGSL 与 API 23–32 硬件平滑转场、极光氛围及 5 幕故事化新手引导进行升级。
 
 ## 更新内容
 
@@ -11,10 +11,13 @@
 
 ## 包信息与构建记录
 
-- **安装包（ARM64 + ARMv7 双架构，待正式构建）**：`MarcoMovie-0.5.27-android-mobile.apk`（兼容别名 `MarcoMovie-0.5.27-mobile.apk`），包名 `com.pilipala.marcomovie`。
-- **SHA-256 / 源码包 / 构建记录**：待正式签名打包后填入。
+- **安装包（ARM64 + ARMv7 双架构）**：`MarcoMovie-0.5.27-android-mobile.apk`（`64419499` B，更新兼容别名 `MarcoMovie-0.5.27-mobile.apk`），包名 `com.pilipala.marcomovie`，`minSdk 23` / `targetSdk 28`。
+- **APK SHA-256**：`df9a5213b3e8df746b31b4fbec16e2e6898a4b21a2057652c233311dd3617c98`。
+- **官方签名证书 SHA-256**：`2549f01e89c41201ea171847048228c6df79a7c57fff2ec9a439195c757a80de`（与既有正式版一致，支持保留本地数据直接覆盖安装）。
+- **对应源码包 SHA-256**：`MarcoMovie-android-mobile-v0.5.27-source.zip`（`10708828` B）— `a073faed1f0098cc77830a7cfaef10a27c3473fa305509fc8abd149fcafe3009`。
+- **构建提交与 CI 记录**：`78017bfb79cf4430681436b53cfcf67b77f44e5b`。[多端构建与校验记录（44857333769）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44857333769) / [公开守卫记录（44857333149）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44857333149)。
 
 ## 验证范围与已知限制
 
-- **已完成自动化验证（基于 `feat/ux-integration-20261120 @ 82f38cd2`）**：通过 `check_public_content.py`（`1507` 文件）、`format_java.py --check`（`261` 文件）、`run_checks.py`（含 `MediaBadgeChecks` `165/165`、`PlayerGestureChecks` `190` 项、`DanmuEngineChecks` `294` 断言、`MotionTokenChecks` `965` 断言、`OnboardingStateChecks` `114` 断言、`Wave2AndroidWireChecks` `397` 项）、`run_compat_checks.py`（`86` 项）、`run_review_fix_checks.py`（`58` 项）、`run_player_lock_checks.py`（`30` 项）、`run_seek_checks.py`（`25` 项）及 `run_conformance_checks.py`（`20/20`）。
-- **待完成验证**：尚未生成新版本号正式包，亦未在物理 Android 手机与平板上完成与 `android-mobile-v0.5.26` 的 A/B 对照实机测试（含横竖屏切换、挖孔屏避让、来电中断倍速复位与 `60fps` 帧率验证）。
+- **已完成自动化构建与校验**：在 `78017bfb79cf4430681436b53cfcf67b77f44e5b` 通过 GitHub Actions 公开守卫（`1513` 文件）、`DanmuEngineChecks`（`294` 断言）、`CmsChecks`（`57` 项）、`34` 项 Flutter 三端一致性与 Android 构建验证，并在本地通过 `MARCOMOVIE_RELEASE=1` 官方签名构建、`API 23` 字节码校验（`627` 应用类）、`native Guard import`（`170` 项）与 `zipalign`/签名检验。
+- **待完成真机验证**：尚未在物理 Android 手机与平板上完成与 `android-mobile-v0.5.26` 的 A/B 对照实机测试（含横竖屏切换、挖孔屏避让、来电中断倍速复位与 `60fps` 帧率验证）。

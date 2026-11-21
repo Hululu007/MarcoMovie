@@ -1,6 +1,6 @@
 # Marco Movie Windows 0.5.25
 
-> **发布说明草案**：发布日期待定；应用版本 `0.5.25`（构建号 `75`）。待 Windows x64 Release 构建（Inno Setup 安装包与绿色便携包）及真机 A/B 对照验收后补齐构建提交与校验摘要。
+发布日期：2026-11-21。应用版本 `0.5.25`（构建号 `75`）。本次更新保留 Windows 桌面既有 `winFastGlass` 无模糊高速架构、静态背景与完整本地用户数据兼容，新增桌面专属 `Anime4K v4.0.1` 4 档热切换、`DesktopPlayerHud` 键鼠播放交互与细进度条、清洁室 30 秒分片弹幕引擎、详情媒体规格徽章及宽屏双栏 5 幕新手引导。
 
 ## 更新内容
 
@@ -11,11 +11,12 @@
 
 ## 包信息与构建记录
 
-- **Windows 64 位安装版（待正式构建）**：`MarcoMovie-0.5.25-windows-x64-setup.exe`（兼容别名 `MarcoMovie-0.5.25-windows-setup.exe`）。
-- **Windows 64 位绿色便携版（待正式构建）**：`MarcoMovie-0.5.25-windows-x64-portable.zip`（兼容别名 `MarcoMovie-0.5.25-windows-x64.zip`）。
-- **SHA-256 / 源码包 / 构建记录**：待 Windows x64 Release 构建完成后填入。
+- **Windows 64 位安装版（Inno Setup）**：`MarcoMovie-0.5.25-windows-x64-setup.exe`（`51068115` B，兼容别名 `MarcoMovie-0.5.25-windows-setup.exe`），SHA-256：`f0ee4cb34bc741e61c524c96e6c64bad1b43c957a5247336c9dee661590388a6`。
+- **Windows 64 位绿色便携版**：`MarcoMovie-0.5.25-windows-x64-portable.zip`（`73846129` B，兼容别名 `MarcoMovie-0.5.25-windows-x64.zip`），SHA-256：`db1a5b21d3b06bd70c140e3da504ef40bde4d225f221e41db2e3e39e6da3d2e2`。
+- **对应源码包**：`MarcoMovie-windows-v0.5.25-source.zip`（`10684132` B），SHA-256：`532338b85e6bff4ccca5c876ce40f9395491cbe88c7fba93b24e1154ff961667`。
+- **构建提交与 CI 记录**：`78017bfb79cf4430681436b53cfcf67b77f44e5b`。[Windows x64 原生构建与全量校验（44857333769）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44857333769) / [公开守卫记录（44857333149）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44857333149)。
 
 ## 验证范围与已知限制
 
-- **已完成自动化验证（基于 `feat/ux-integration-20261120 @ 82f38cd2`）**：通过 `scripts/check_public_content.py`（`1507` 文件）及 `18` 套跨端 UX / 一致性 / 鸿蒙隔离 `flutter test` 测试集共 `193` 项测试全绿（含 `media_badges_test`、`desktop_player_hud_test`、`wave2_anime4k_test`、`wave2_motion_wiring_test`、`detail_player_transition_integration_test`、`danmu_*_test`、`onboarding_test`、`wave2_wiring_and_gate1_test`、`conformance_test` 等，已实测覆盖 Windows `bilinear <-> spline36` 切换/恢复、`185ms` 快速路由、焦点不抢占与 `winFastGlass` 守卫）。
-- **待完成验证**：尚未在 Windows 桌面开启开发者模式执行新版本号的 `flutter build windows --release` 与 Inno Setup 6 安装包打包、`libmpv-2.dll` 打包回放检验，以及 Windows 物理机 A/B 对照验收（含 Anime4K `v4.0.1` 着色器实际画面与 `4K` 弹幕帧率验证）。
+- **已完成自动化构建与校验**：在 `78017bfb79cf4430681436b53cfcf67b77f44e5b` 上于 Windows 云端 Runner 完成 `flutter test` 全套测试（`1179` 项通过、`9` 项非桌面平台专属跳过）、`libmpv-2.dll` 打包媒体回放专项校验（`13` 项通过）、`flutter build windows --release` 原生编译、Inno Setup 6 安装包打包及 `1513` 个追踪文件公开内容守卫校验。
+- **待完成真机验证**：尚未在物理 Windows PC 上完成与 `windows-v0.5.24` 的 A/B 对照实机验收（含实际显卡下 Anime4K `v4.0.1` 4 档热切换画面与 `4K` 分片弹幕帧率实测）。安装包与便携程序未购买商业代码签名证书，Windows SmartScreen 首次运行如提示未知发布者需手动确认运行。

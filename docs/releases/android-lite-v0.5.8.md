@@ -1,6 +1,6 @@
 # Marco Movie Android Lite 0.5.8
 
-> **发布说明草案**：发布日期待定；应用版本 `0.5.8`（versionCode `58`）。专为 Android 4.0+（API 14+）老旧电视、机顶盒与老手机打造的超轻量单 DEX 独立版本（包名 `com.pilipala.marcomovie.lite`，可与标准版共存）。待正式签名打包及老旧盒子 A/B 对照验收后补齐构建记录。
+发布日期：2026-11-21。应用版本 `0.5.8`（versionCode `58`）。专为 Android 4.0+（API 14+）老旧电视、机顶盒与老手机打造的超轻量单 DEX 独立版本（包名 `com.pilipala.marcomovie.lite`，可与标准版共存），本次更新在零第三方库/动画引入的前提下落地与标准版完全一致的纯文字媒体规格标签（`LiteBadges`）。
 
 ## 更新内容
 
@@ -9,10 +9,13 @@
 
 ## 包信息与构建记录
 
-- **安装包（待正式构建）**：`MarcoMovie-0.5.8-android-lite.apk`（更新兼容别名 `MarcoMovie-0.5.8-lite.apk`），包名 `com.pilipala.marcomovie.lite`。
-- **SHA-256 / 源码包 / 构建记录**：待正式签名打包后填入。
+- **安装包**：`MarcoMovie-0.5.8-android-lite.apk`（`1279136` B，更新兼容别名 `MarcoMovie-0.5.8-lite.apk`），包名 `com.pilipala.marcomovie.lite`，`compile_api: 14` / `min_api: 14`。
+- **APK SHA-256**：`3884d1522374b9d0a8b77a92dd361955cad6de96d164e53df60304d408560942`。
+- **官方签名证书 SHA-256**：`2549f01e89c41201ea171847048228c6df79a7c57fff2ec9a439195c757a80de`（支持 `v1/v2/v3` 签名，直接覆盖既有 Lite 版本）。
+- **对应源码包 SHA-256**：`MarcoMovie-android-lite-v0.5.8-source.zip`（`10698244` B）— `e620844e9ca35eab844110f260ef9b4d0e6e19565ddd150b32ae6c17454f4019`（附构建报告 `build-report.json`）。
+- **构建提交与 CI 记录**：`78017bfb79cf4430681436b53cfcf67b77f44e5b`。[多端构建与校验记录（44857333769）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44857333769) / [公开守卫记录（44857333149）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44857333149)。
 
 ## 验证范围与已知限制
 
-- **已完成自动化验证（基于 `feat/ux-integration-20261120 @ 82f38cd2`）**：通过 `check_public_content.py`（`1507` 文件）、`scripts/test_lite_jvm.py`（API 14 `bootclasspath` 编译与 `D8 --min-api 14` 单 DEX 校验、`194` 项 TV Lite JVM 回归及 `8` 项 TLS 能力检查）、`scripts/test_lite_conformance.py`（`20` 项三端一致性套件中 `18` 项通过、`2` 项 Lite 配置跳过）以及 `MediaBadgeChecks`（验证 `LiteBadges` 与 `MediaBadges` 在 `165/165` 黄金样例上完全零差异）。
-- **待完成验证**：尚待写入新版本号构建正式包并核验最终单 DEX 字节大小与方法数增量，以及在 Android 4.x 物理旧盒子上对照 `android-lite-v0.5.7` 完成实机焦点与冷启动验收。
+- **已完成自动化构建与校验**：在 `78017bfb79cf4430681436b53cfcf67b77f44e5b` 通过 API 14 `bootclasspath` 与 `D8 --min-api 14` 单 DEX 编译、`194` 项 TV Lite JVM 回归、`8` 项 TLS 能力检查、`1513` 追踪文件公开守卫、官方正式签名校验及 GitHub Actions 多端流水线校验（全任务通过）。
+- **待完成真机验证**：尚未在物理 Android 4.x 旧盒子上对照 `android-lite-v0.5.7` 完成实机焦点与冷启动验收。
