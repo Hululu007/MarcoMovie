@@ -27,6 +27,7 @@ class CuratedDiscoverySection extends StatefulWidget {
 
 class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
   final Map<String, List<CmsVideo>> _itemsByModule = {};
+  String _selectedModuleId = '';
 
   @override
   void initState() {
@@ -107,17 +108,107 @@ class _CuratedDiscoverySectionState extends State<CuratedDiscoverySection> {
             ],
           ),
         ),
-        for (final spec in CuratedDiscoveryService.modules) ...[
-          _CuratedModuleShelf(
-            spec: spec,
-            items: _itemsByModule[spec.id] ?? spec.seedItems,
-            palette: palette,
-            onOpenAll: () => _openModuleAll(spec),
-            onOpenVideo: widget.onOpenVideo,
+        const SizedBox(height: 6),
+        SizedBox(
+          height: 32,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            children: [
+              _CuratedModulePill(
+                label: '全部专题',
+                selected: _selectedModuleId.isEmpty,
+                accentColor: palette.accent,
+                palette: palette,
+                onTap: () {
+                  HapticFeedback.selectionClick();
+                  setState(() => _selectedModuleId = '');
+                },
+              ),
+              for (final spec in CuratedDiscoveryService.modules) ...[
+                const SizedBox(width: 8),
+                _CuratedModulePill(
+                  label: spec.title,
+                  selected: _selectedModuleId == spec.id,
+                  accentColor: spec.accentColor,
+                  palette: palette,
+                  onTap: () {
+                    HapticFeedback.selectionClick();
+                    setState(() {
+                      _selectedModuleId =
+                          _selectedModuleId == spec.id ? '' : spec.id;
+                    });
+                  },
+                ),
+              ],
+            ],
           ),
-          const SizedBox(height: 18),
-        ],
+        ),
+        const SizedBox(height: 12),
+        for (final spec in CuratedDiscoveryService.modules)
+          if (_selectedModuleId.isEmpty || _selectedModuleId == spec.id) ...[
+            _CuratedModuleShelf(
+              spec: spec,
+              items: _itemsByModule[spec.id] ?? spec.seedItems,
+              palette: palette,
+              onOpenAll: () => _openModuleAll(spec),
+              onOpenVideo: widget.onOpenVideo,
+            ),
+            const SizedBox(height: 18),
+          ],
       ],
+    );
+  }
+}
+
+class _CuratedModulePill extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final Color accentColor;
+  final ApplePalette palette;
+  final VoidCallback onTap;
+
+  const _CuratedModulePill({
+    required this.label,
+    required this.selected,
+    required this.accentColor,
+    required this.palette,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: selected
+              ? accentColor.withValues(alpha: palette.isDark ? 0.24 : 0.14)
+              : (palette.isDark
+                  ? Colors.white.withValues(alpha: 0.08)
+                  : Colors.white),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: selected
+                ? accentColor.withValues(alpha: 0.72)
+                : (palette.isDark
+                    ? Colors.white.withValues(alpha: 0.14)
+                    : Colors.black.withValues(alpha: 0.08)),
+            width: 0.85,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? accentColor : palette.labelSecondary,
+            fontSize: 12,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
+          ),
+        ),
+      ),
     );
   }
 }

@@ -120,8 +120,8 @@ class SourceChoiceSliver extends StatelessWidget {
                             softWrap: true,
                             style: TextStyle(
                               color: isSupported
-                                  ? AppleColors.labelPrimary
-                                  : AppleColors.labelSecondary,
+                                  ? ApplePalette.of(context).labelPrimary
+                                  : ApplePalette.of(context).labelSecondary,
                               fontSize: 13.5,
                               fontWeight: FontWeight.w700,
                               height: 1.35,
@@ -147,7 +147,7 @@ class SourceChoiceSliver extends StatelessWidget {
                                   : Icons.star_border_rounded,
                               color: preferredKey == site.key
                                   ? Colors.amber
-                                  : AppleColors.labelSecondary,
+                                  : ApplePalette.of(context).labelSecondary,
                             ),
                           ),
                         if (onManageSite != null)
@@ -161,9 +161,9 @@ class SourceChoiceSliver extends StatelessWidget {
                             iconSize: 17,
                             tooltip: '分组 / 编辑 / 删除线路',
                             onPressed: () => onManageSite!(site),
-                            icon: const Icon(
+                            icon: Icon(
                               Icons.more_horiz_rounded,
-                              color: AppleColors.labelSecondary,
+                              color: ApplePalette.of(context).labelSecondary,
                             ),
                           ),
                       ],
@@ -204,8 +204,8 @@ class SourceChoiceSliver extends StatelessWidget {
                         ),
                         Text(
                           site.group.trim().isEmpty ? '默认分组' : site.group,
-                          style: const TextStyle(
-                            color: AppleColors.labelSecondary,
+                          style: TextStyle(
+                            color: ApplePalette.of(context).labelSecondary,
                             fontSize: 11,
                           ),
                         ),

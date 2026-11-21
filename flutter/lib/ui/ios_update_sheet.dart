@@ -356,7 +356,7 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
                                 : AppleColors.systemGreen,
                             size: 20,
                           ),
-                          const SizedBox(width: 8),
+                          SizedBox(width: 8),
                         ],
                         Expanded(
                           child: Text(
@@ -367,8 +367,8 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
                                         : 'Marco Movie 已是最新版本')
                                     : '可用版本 ${release.version}')
                                 : (_checking ? '正在检查软件更新…' : '软件更新状态'),
-                            style: const TextStyle(
-                              color: AppleColors.labelPrimary,
+                            style: TextStyle(
+                              color: ApplePalette.of(context).labelPrimary,
                               fontSize: 16,
                               fontWeight: FontWeight.w600,
                             ),
@@ -387,23 +387,23 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
                         _downloading ||
                         _saved ||
                         (!_checking && !_status.startsWith('正在连接'))) ...[
-                      const SizedBox(height: 10),
+                      SizedBox(height: 10),
                       Text(
                         _status,
                         key: const ValueKey('ios-update-status'),
-                        style: const TextStyle(
-                          color: AppleColors.labelSecondary,
+                        style: TextStyle(
+                          color: ApplePalette.of(context).labelSecondary,
                           fontSize: 13,
                           height: 1.45,
                         ),
                       ),
                     ],
                     if (release != null && release.notes.isNotEmpty) ...[
-                      const SizedBox(height: 14),
-                      const Text(
+                      SizedBox(height: 14),
+                      Text(
                         '更新摘要',
                         style: TextStyle(
-                          color: AppleColors.labelPrimary,
+                          color: ApplePalette.of(context).labelPrimary,
                           fontSize: 13.5,
                           fontWeight: FontWeight.w600,
                         ),
@@ -465,16 +465,16 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
       padding: const EdgeInsets.all(20),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Text(_validVersion(_version) ? '当前版本  $_version' : '当前版本暂无法读取',
-            style: const TextStyle(
-                color: AppleColors.labelSecondary, fontSize: 13)),
-        const SizedBox(height: 12),
+            style: TextStyle(
+                color: ApplePalette.of(context).labelSecondary, fontSize: 13)),
+        SizedBox(height: 12),
         if (release != null) ...[
           Text(
               _validVersion(_version)
                   ? (_newer ? '发现新版本 ${release.version}' : '当前已是最新版本')
                   : '可用版本 ${release.version}',
-              style: const TextStyle(
-                  color: AppleColors.labelPrimary,
+              style: TextStyle(
+                  color: ApplePalette.of(context).labelPrimary,
                   fontSize: 23,
                   fontWeight: FontWeight.w700)),
           const SizedBox(height: 8),
@@ -483,7 +483,7 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
           LinearProgressIndicator(
               key: const ValueKey('ios-update-progress'),
               value: _downloading ? _progress : null),
-          const SizedBox(height: 12),
+          SizedBox(height: 12),
         ],
         // Keep status visible even after an error or handoff.
         if (release == null ||
@@ -492,8 +492,8 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
             (!_checking && !_status.startsWith('正在连接'))) ...[
           Text(_status,
               key: const ValueKey('ios-update-status'),
-              style: const TextStyle(
-                  color: AppleColors.labelSecondary, height: 1.5)),
+              style: TextStyle(
+                  color: ApplePalette.of(context).labelSecondary, height: 1.5)),
           const SizedBox(height: 16),
         ],
         Wrap(spacing: 10, runSpacing: 10, children: [
@@ -529,10 +529,10 @@ class _IosUpdateSheetState extends State<IosUpdateSheet> {
           ],
         ]),
         if (release != null && release.notes.isNotEmpty) ...[
-          const SizedBox(height: 24),
-          const Text('更新摘要',
+          SizedBox(height: 24),
+          Text('更新摘要',
               style: TextStyle(
-                  color: AppleColors.labelPrimary,
+                  color: ApplePalette.of(context).labelPrimary,
                   fontWeight: FontWeight.w600)),
           const SizedBox(height: 8),
           ReleaseNotesSummaryView(rawNotes: release.notes),

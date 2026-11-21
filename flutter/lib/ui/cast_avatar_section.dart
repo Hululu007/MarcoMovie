@@ -1,8 +1,8 @@
+import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import '../core/cast_avatar_service.dart';
 import 'apple_theme.dart';
-import 'poster_image.dart';
 
 /// Horizontal circular actor/director avatar carousel used on both the Detail
 /// page (选集页) and the iOS Portrait Companion Player (腾讯视频模式).
@@ -62,7 +62,9 @@ class _CastAvatarSectionState extends State<CastAvatarSection> {
       return;
     }
     final cached = CastAvatarService.peekCached(widget.title);
-    if (cached != null && cached.isNotEmpty) {
+    if (cached != null &&
+        cached.isNotEmpty &&
+        cached.any((m) => m.avatarUrl.isNotEmpty)) {
       _members = cached;
       _loading = false;
       return;
@@ -230,12 +232,8 @@ class _CastAvatarCard extends StatelessWidget {
       ),
       child: ClipOval(
         child: member.avatarUrl.isNotEmpty
-            ? PosterImage(
+            ? _CastPortraitImage(
                 url: member.avatarUrl,
-                title: member.name,
-                fit: BoxFit.cover,
-                alignment: Alignment.topCenter,
-                fadeIn: true,
                 placeholder: fallbackAvatar,
               )
             : fallbackAvatar,
@@ -282,6 +280,68 @@ class _CastAvatarCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _CastPortraitImage extends StatefulWidget {
+  final String url;
+  final Widget placeholder;
+
+  const _CastPortraitImage({
+    required this.url,
+    required this.placeholder,
+  });
+
+  @override
+  State<_CastPortraitImage> createState() => _CastPortraitImageState();
+}
+
+class _CastPortraitImageState extends State<_CastPortraitImage> {
+  Uint8List? _bytes;
+  int _gen = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant _CastPortraitImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.url != widget.url) {
+      _load();
+    }
+  }
+
+  void _load() {
+    final gen = ++_gen;
+    final sync = CastAvatarService.peekAvatarBytes(widget.url);
+    if (sync != null) {
+      _bytes = sync;
+      return;
+    }
+    _bytes = null;
+    CastAvatarService.loadAvatarBytes(widget.url).then((data) {
+      if (!mounted || gen != _gen || data == null) return;
+      setState(() => _bytes = data);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final data = _bytes;
+    if (data == null) return widget.placeholder;
+    return Image.memory(
+      data,
+      width: 60,
+      height: 60,
+      fit: BoxFit.cover,
+      alignment: Alignment.topCenter,
+      cacheWidth: 180,
+      gaplessPlayback: true,
+      errorBuilder: (_, __, ___) => widget.placeholder,
     );
   }
 }

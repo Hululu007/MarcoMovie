@@ -996,11 +996,13 @@ void main() {
         await tester.tap(find.byKey(const Key('player-unlock-button')));
         await tester.pump(const Duration(milliseconds: 100));
 
-        // Verify standalone AppleGlassSurface under reduceTransparency renders #F51E1E22 with zero GlassworkBackdrop,
+        // Verify standalone AppleGlassSurface under reduceTransparency renders #F51E1E22 in Dark Mode with zero GlassworkBackdrop,
         // and respects !OhosRuntime.isOhos guard.
         await tester.pumpWidget(
-          const MaterialApp(
-            home: Scaffold(
+          MaterialApp(
+            key: const ValueKey('m04-dark-glass-surface'),
+            theme: ThemeData.dark(),
+            home: const Scaffold(
               body: AppleGlassSurface(child: Text('glass-check')),
             ),
           ),

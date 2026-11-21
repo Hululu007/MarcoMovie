@@ -28,7 +28,16 @@ class IosLiquidGlassBridge {
   static bool? _testReduceTransparencyOverride;
   static bool _incomingHandlerInstalled = false;
   static bool _sheetPresentationInFlight = false;
+  static final ValueNotifier<bool> activeSheetNotifier =
+      ValueNotifier<bool>(false);
   static int _pinSessionCounter = 0;
+
+  static void _setSheetPresentationInFlight(bool active) {
+    _sheetPresentationInFlight = active;
+    if (activeSheetNotifier.value != active) {
+      activeSheetNotifier.value = active;
+    }
+  }
 
   @visibleForTesting
   static bool get isSheetPresentationInFlight => _sheetPresentationInFlight;
@@ -221,6 +230,7 @@ class IosLiquidGlassBridge {
       _initialized = false;
       _testReduceTransparencyOverride = null;
       _sheetPresentationInFlight = false;
+      activeSheetNotifier.value = false;
       reduceTransparencyNotifier.value = false;
       _pinCallbacks.clear();
     }
@@ -558,7 +568,7 @@ class IosNativeGlassButton extends StatefulWidget {
   final String? trailingSymbol;
   final String label;
   final double symbolSize;
-  final Color foregroundColor;
+  final Color? foregroundColor;
   final Color? tintColor;
   final String? accessibilityLabel;
   final double? width;
@@ -577,7 +587,7 @@ class IosNativeGlassButton extends StatefulWidget {
     this.trailingSymbol,
     this.label = '',
     this.symbolSize = 17,
-    this.foregroundColor = Colors.white,
+    this.foregroundColor,
     this.tintColor,
     this.accessibilityLabel,
     this.width,
@@ -596,6 +606,14 @@ class IosNativeGlassButton extends StatefulWidget {
 
 class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
   MethodChannel? _channel;
+  Brightness? _lastBrightness;
+
+  Color _effectiveForegroundColor() {
+    if (widget.foregroundColor != null) return widget.foregroundColor!;
+    if (widget.tintColor != null) return Colors.white;
+    final isDark = CupertinoTheme.brightnessOf(context) == Brightness.dark;
+    return isDark ? Colors.white : const Color(0xFF111318);
+  }
 
   Map<String, dynamic> _buildParams({double? initialWidth}) => <String, dynamic>{
         'style': widget.style,
@@ -604,7 +622,7 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
           'trailingSymbol': widget.trailingSymbol,
         'label': widget.label,
         'symbolSize': widget.symbolSize,
-        'foregroundColor': widget.foregroundColor.toARGB32(),
+        'foregroundColor': _effectiveForegroundColor().toARGB32(),
         if (widget.tintColor != null)
           'tintColor': widget.tintColor!.toARGB32(),
         'accessibilityLabel': widget.accessibilityLabel ?? widget.label,
@@ -614,6 +632,18 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
         if (initialWidth != null) 'initialWidth': initialWidth,
         'initialHeight': widget.height,
       };
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final brightness = CupertinoTheme.brightnessOf(context);
+    if (_lastBrightness != null &&
+        _lastBrightness != brightness &&
+        _channel != null) {
+      unawaited(_safeUpdate(_channel!));
+    }
+    _lastBrightness = brightness;
+  }
 
   void _onViewCreated(int id) {
     _channel?.setMethodCallHandler(null);
@@ -697,7 +727,7 @@ class _IosNativeGlassButtonState extends State<IosNativeGlassButton> {
               trailingSymbol: widget.trailingSymbol,
               label: widget.label,
               symbolSize: widget.symbolSize,
-              foregroundColor: widget.foregroundColor,
+              foregroundColor: _effectiveForegroundColor(),
               tintColor: widget.tintColor,
               width: _resolvedWidth(context),
               height: widget.height,
@@ -1574,7 +1604,7 @@ Future<IosNativeFilterResult?> showAppleNativeFilterSheet({
 }) async {
   if (!IosLiquidGlassBridge.isAvailable) return null;
   if (IosLiquidGlassBridge._sheetPresentationInFlight) return null;
-  IosLiquidGlassBridge._sheetPresentationInFlight = true;
+  IosLiquidGlassBridge._setSheetPresentationInFlight(true);
   try {
     final result = await IosLiquidGlassBridge.channel
         .invokeMapMethod<String, dynamic>(
@@ -1602,7 +1632,7 @@ Future<IosNativeFilterResult?> showAppleNativeFilterSheet({
   } catch (_) {
     return null;
   } finally {
-    IosLiquidGlassBridge._sheetPresentationInFlight = false;
+    IosLiquidGlassBridge._setSheetPresentationInFlight(false);
   }
 }
 
@@ -1719,7 +1749,7 @@ Future<String?> showAppleNativeAlert(
 }) async {
   if (IosLiquidGlassBridge.isAvailable) {
     if (IosLiquidGlassBridge._sheetPresentationInFlight) return null;
-    IosLiquidGlassBridge._sheetPresentationInFlight = true;
+    IosLiquidGlassBridge._setSheetPresentationInFlight(true);
     try {
       return await IosLiquidGlassBridge.channel.invokeMethod<String>(
         'showAlert',
@@ -1734,7 +1764,7 @@ Future<String?> showAppleNativeAlert(
     } catch (_) {
       // Fall through to Flutter CupertinoAlertDialog.
     } finally {
-      IosLiquidGlassBridge._sheetPresentationInFlight = false;
+      IosLiquidGlassBridge._setSheetPresentationInFlight(false);
     }
   }
   if (!context.mounted) return null;
@@ -1775,7 +1805,7 @@ Future<T?> showAppleNativeActionSheet<T>(
 }) async {
   if (IosLiquidGlassBridge.isAvailable) {
     if (IosLiquidGlassBridge._sheetPresentationInFlight) return null;
-    IosLiquidGlassBridge._sheetPresentationInFlight = true;
+    IosLiquidGlassBridge._setSheetPresentationInFlight(true);
     try {
       final pickedId = await IosLiquidGlassBridge.channel.invokeMethod<String>(
         'showActionSheet',
@@ -1804,7 +1834,7 @@ Future<T?> showAppleNativeActionSheet<T>(
     } catch (_) {
       // Fall through to Flutter CupertinoActionSheet.
     } finally {
-      IosLiquidGlassBridge._sheetPresentationInFlight = false;
+      IosLiquidGlassBridge._setSheetPresentationInFlight(false);
     }
   }
   if (!context.mounted) return null;
@@ -1874,7 +1904,7 @@ Future<T?> showAppleNativeOptionSheet<T>(
 }) async {
   if (IosLiquidGlassBridge.isAvailable) {
     if (IosLiquidGlassBridge._sheetPresentationInFlight) return null;
-    IosLiquidGlassBridge._sheetPresentationInFlight = true;
+    IosLiquidGlassBridge._setSheetPresentationInFlight(true);
     final effectiveOpaque =
         forceOpaque || IosLiquidGlassBridge.reduceTransparency;
     try {
@@ -1924,7 +1954,7 @@ Future<T?> showAppleNativeOptionSheet<T>(
     } catch (_) {
       // Fall through to Flutter fallback below.
     } finally {
-      IosLiquidGlassBridge._sheetPresentationInFlight = false;
+      IosLiquidGlassBridge._setSheetPresentationInFlight(false);
     }
   }
   if (fallback != null) {

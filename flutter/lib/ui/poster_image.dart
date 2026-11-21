@@ -2589,6 +2589,86 @@ class PosterLoader {
               req?.abort();
             } catch (_) {}
           }
+          // Fallback: Douban Mobile Rexxar subject search (resolves recent
+          // 2025/2026 dramas where `subject_suggest` returns `[]`).
+          HttpClientRequest? rexxarReq;
+          try {
+            final q = Uri.encodeQueryComponent(variant);
+            final rexxarUri = Uri.parse(
+              'https://m.douban.com/rexxar/api/v2/search/subjects?type=movie&q=$q',
+            );
+            rexxarReq = await _client
+                .getUrl(rexxarUri)
+                .timeout(const Duration(milliseconds: 2400));
+            rexxarReq.headers.set('User-Agent', _mobileSafariUa);
+            rexxarReq.headers.set('Referer', 'https://m.douban.com/');
+            rexxarReq.headers.set('Cookie', bidCookie);
+            rexxarReq.headers.set('Accept', 'application/json');
+            final rResp = await rexxarReq
+                .close()
+                .timeout(const Duration(milliseconds: 2400));
+            if (rResp.statusCode >= 200 && rResp.statusCode < 300) {
+              final rBody = await utf8.decoder
+                  .bind(rResp)
+                  .join()
+                  .timeout(const Duration(milliseconds: 2400));
+              final rDecoded = jsonDecode(rBody);
+              if (rDecoded is Map) {
+                final subj = rDecoded['subjects'];
+                final rItems =
+                    (subj is Map ? subj['items'] : null) ?? rDecoded['items'];
+                if (rItems is List) {
+                  var addedRexxar = false;
+                  for (final entry in rItems.whereType<Map>()) {
+                    final target = entry['target'] is Map
+                        ? Map<String, dynamic>.from(entry['target'] as Map)
+                        : Map<String, dynamic>.from(entry);
+                    final tType = (entry['target_type'] ?? target['type'] ?? '')
+                        .toString()
+                        .toLowerCase();
+                    if (tType.isNotEmpty && tType != 'movie' && tType != 'tv') {
+                      continue;
+                    }
+                    final candTitle = (target['title'] ?? '').toString().trim();
+                    if (!_isSameWorkTitle(candTitle, cleanTitle)) continue;
+                    final candYear =
+                        int.tryParse((target['year'] ?? '').toString().trim());
+                    if (targetYear != null &&
+                        candYear != null &&
+                        (candYear - targetYear).abs() > 1) {
+                      continue;
+                    }
+                    final sid = (target['id'] ?? '').toString().trim();
+                    if (sid.isNotEmpty) {
+                      _doubanSubjectIdCache[scopedKey] = (
+                        id: sid,
+                        isTv: tType == 'tv',
+                      );
+                    }
+                    final pic = target['pic'];
+                    final rawCover = (target['cover_url'] ??
+                            (pic is Map
+                                ? (pic['large'] ?? pic['normal'] ?? '')
+                                : ''))
+                        .toString()
+                        .trim();
+                    if (rawCover.isNotEmpty &&
+                        !isPersonOrAvatarImageUrl(rawCover)) {
+                      addPrimaryHd(upgradeUrlToHd(rawCover));
+                      addedRexxar = true;
+                    }
+                  }
+                  if (addedRexxar) break;
+                }
+              }
+            } else {
+              await rResp.drain<void>();
+            }
+          } catch (_) {
+            try {
+              rexxarReq?.abort();
+            } catch (_) {}
+          }
         }
       }(),
 
@@ -3254,7 +3334,9 @@ class _PosterImageState extends State<PosterImage>
   ) async {
     final hasLiveCmsUrl = widget.url.trim().isNotEmpty &&
         !PosterLoader._isKnownDeadPosterHost(widget.url);
-    final alreadyGood = hasLiveCmsUrl
+    // Detail hero (`highRes: true`) fills the full screen width and MUST be a
+    // true HD poster (>= 560x760); never settle for blurry CMS thumbnails.
+    final alreadyGood = (hasLiveCmsUrl && !widget.highRes)
         ? await PosterLoader.isClearPosterBytes(currentBytes)
         : await PosterLoader.isTrueHdPoster(currentBytes);
     if (!mounted || widget.title.trim() != requestedTitle) return;

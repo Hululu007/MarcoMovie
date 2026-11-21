@@ -1246,7 +1246,7 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     let navId = ObjectIdentifier(nav)
     vc.navIdentity = navId
     nav.modalPresentationStyle = .pageSheet
-    nav.overrideUserInterfaceStyle = .dark
+    nav.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     nav.presentationController?.delegate = vc
     if let sheet = nav.sheetPresentationController {
       sheet.detents = [.medium(), .large()]
@@ -1314,15 +1314,19 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    overrideUserInterfaceStyle = .dark
+    overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
       view.backgroundColor = .clear
     } else {
-      view.backgroundColor = UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+      view.backgroundColor = MarcoLiquidGlassSupport.isEffectiveDark
+        ? UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+        : UIColor.systemGroupedBackground
     }
     #else
-    view.backgroundColor = UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+    view.backgroundColor = MarcoLiquidGlassSupport.isEffectiveDark
+      ? UIColor(red: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+      : UIColor.systemGroupedBackground
     #endif
 
     navigationItem.title = sheetTitle
@@ -1390,7 +1394,9 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     let header = UILabel()
     header.text = title
     header.font = UIFont.systemFont(ofSize: 13.5, weight: .semibold)
-    header.textColor = UIColor.white.withAlphaComponent(0.72)
+    header.textColor = MarcoLiquidGlassSupport.isEffectiveDark
+      ? UIColor.white.withAlphaComponent(0.72)
+      : UIColor.secondaryLabel
 
     let wrap = MarcoWrapChipContainerView()
     wrap.translatesAutoresizingMaskIntoConstraints = false
@@ -1399,7 +1405,7 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     for (idx, label) in labels.enumerated() {
       let btn = UIButton(type: .system)
       btn.tag = idx
-      btn.overrideUserInterfaceStyle = .dark
+      btn.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
       btn.addTarget(self, action: action, for: .touchUpInside)
       applyChipStyle(btn, title: label, selected: false)
       buttons.append(btn)
@@ -1414,13 +1420,16 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
   }
 
   private func applyChipStyle(_ button: UIButton, title: String, selected: Bool) {
+    let dark = MarcoLiquidGlassSupport.isEffectiveDark
     var titleAttr = AttributedString(title)
     titleAttr.font = UIFont.systemFont(ofSize: 13.0, weight: selected ? .bold : .medium)
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
       var cfg = selected ? UIButton.Configuration.prominentGlass() : UIButton.Configuration.glass()
       cfg.attributedTitle = titleAttr
-      cfg.baseForegroundColor = selected ? .white : UIColor.white.withAlphaComponent(0.88)
+      cfg.baseForegroundColor = selected
+        ? .white
+        : (dark ? UIColor.white.withAlphaComponent(0.88) : UIColor.label)
       if selected {
         cfg.baseBackgroundColor = UIColor.systemBlue
       }
@@ -1432,8 +1441,12 @@ private final class MarcoNativeFilterSheetController: UIViewController, UIAdapti
     #endif
     var cfg = UIButton.Configuration.filled()
     cfg.attributedTitle = titleAttr
-    cfg.baseForegroundColor = selected ? .white : UIColor.white.withAlphaComponent(0.86)
-    cfg.baseBackgroundColor = selected ? UIColor.systemBlue : UIColor(white: 0.22, alpha: 0.85)
+    cfg.baseForegroundColor = selected
+      ? .white
+      : (dark ? UIColor.white.withAlphaComponent(0.86) : UIColor.label)
+    cfg.baseBackgroundColor = selected
+      ? UIColor.systemBlue
+      : (dark ? UIColor(white: 0.22, alpha: 0.85) : UIColor.secondarySystemFill)
     cfg.cornerStyle = .capsule
     cfg.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 13, bottom: 7, trailing: 13)
     button.configuration = cfg
@@ -2281,9 +2294,9 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
     clipsToBounds = false
     isMultipleTouchEnabled = false
     isExclusiveTouch = true
-    overrideUserInterfaceStyle = .dark
+    overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
-    effectView.overrideUserInterfaceStyle = .dark
+    effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     effectView.isUserInteractionEnabled = false
     effectView.translatesAutoresizingMaskIntoConstraints = false
     #if compiler(>=6.2)
@@ -2366,18 +2379,34 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
   }
 
   private func applySlotAppearances(activeIndex: Int) {
+    let dark = MarcoLiquidGlassSupport.isEffectiveDark
     let normalCfg = UIImage.SymbolConfiguration(pointSize: 20.5, weight: .medium)
     let selectedCfg = UIImage.SymbolConfiguration(pointSize: 20.5, weight: .semibold)
+    let activeColor: UIColor = dark ? .white : UIColor.systemBlue
+    let inactiveColor: UIColor = dark
+      ? UIColor.white.withAlphaComponent(0.84)
+      : UIColor(red: 0.14, green: 0.15, blue: 0.18, alpha: 0.82)
+    selectionLensView.layer.borderColor = (dark
+      ? UIColor.white.withAlphaComponent(0.18)
+      : UIColor.black.withAlphaComponent(0.06)).cgColor
     for (idx, slot) in slotViews.enumerated() where idx < specs.count {
       let spec = specs[idx]
       let isSelected = idx == activeIndex
       let symName = isSelected ? spec.selectedSymbol : spec.symbol
       slot.iconView.image = UIImage(systemName: symName, withConfiguration: isSelected ? selectedCfg : normalCfg)
-      slot.iconView.tintColor = isSelected ? .white : UIColor.white.withAlphaComponent(0.84)
-      slot.titleLabel.textColor = isSelected ? .white : UIColor.white.withAlphaComponent(0.84)
+      slot.iconView.tintColor = isSelected ? activeColor : inactiveColor
+      slot.titleLabel.textColor = isSelected ? activeColor : inactiveColor
       slot.titleLabel.font = UIFont.systemFont(ofSize: 10.5, weight: isSelected ? .semibold : .medium)
       slot.accessibilityTraits = isSelected ? [.button, .selected] : [.button]
     }
+  }
+
+  func refreshAppearance() {
+    overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    applySlotAppearances(activeIndex: isScrubbing ? highlightedIndex : selectedIndex)
+    let slotPos = scrubContinuousSlot ?? CGFloat(selectedIndex)
+    positionLens(slotPosition: slotPos, animated: false, lifted: isScrubbing)
   }
 
   private func lensMetrics(for slotPosition: CGFloat) -> (bounds: CGRect, center: CGPoint)? {
@@ -2402,7 +2431,10 @@ private final class MarcoNativeLiquidTabCapsuleView: UIView {
       self.selectionLensView.transform = lifted
         ? CGAffineTransform(scaleX: 1.045, y: 1.045)
         : .identity
-      self.selectionLensView.backgroundColor = UIColor.white.withAlphaComponent(lifted ? 0.22 : 0.16)
+      let dark = MarcoLiquidGlassSupport.isEffectiveDark
+      self.selectionLensView.backgroundColor = dark
+        ? UIColor.white.withAlphaComponent(lifted ? 0.22 : 0.16)
+        : UIColor.black.withAlphaComponent(lifted ? 0.12 : 0.08)
     }
     if animated {
       UIView.animate(
@@ -2527,9 +2559,9 @@ private final class MarcoInteractiveCircleGlassControl: UIControl {
     backgroundColor = .clear
     isOpaque = false
     clipsToBounds = false
-    overrideUserInterfaceStyle = .dark
+    overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
-    effectView.overrideUserInterfaceStyle = .dark
+    effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     effectView.isUserInteractionEnabled = false
     effectView.translatesAutoresizingMaskIntoConstraints = false
     #if compiler(>=6.2)
@@ -2552,7 +2584,7 @@ private final class MarcoInteractiveCircleGlassControl: UIControl {
     effectView.contentView.addSubview(iconView)
 
     menuOverlayButton.backgroundColor = .clear
-    menuOverlayButton.overrideUserInterfaceStyle = .dark
+    menuOverlayButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     menuOverlayButton.showsMenuAsPrimaryAction = true
     menuOverlayButton.isHidden = true
     menuOverlayButton.translatesAutoresizingMaskIntoConstraints = false
@@ -2609,6 +2641,9 @@ private final class MarcoInteractiveCircleGlassControl: UIControl {
     menu: UIMenu?
   ) {
     MarcoLiquidGlassSupport.withoutAnimations {
+      self.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      self.effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      self.menuOverlayButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
       #if compiler(>=6.2)
       if #available(iOS 26.0, *) {
         if !self.hasConfiguredEffect || self.configuredTintARGB != tintARGB {
@@ -2658,7 +2693,7 @@ private final class MarcoDockContainerView: UIView {
     isOpaque = false
     clipsToBounds = false
     insetsLayoutMarginsFromSafeArea = false
-    overrideUserInterfaceStyle = .dark
+    overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
     addSubview(tabCapsule)
 
@@ -2673,6 +2708,26 @@ private final class MarcoDockContainerView: UIView {
     logoButton.transform = CGAffineTransform(scaleX: 0.55, y: 0.55)
     configureLogoButton()
     addSubview(logoButton)
+
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(handleAppearanceChanged),
+      name: MarcoLiquidGlassSupport.appearanceChangedNotification,
+      object: nil
+    )
+  }
+
+  deinit {
+    NotificationCenter.default.removeObserver(self)
+  }
+
+  @objc private func handleAppearanceChanged() {
+    overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    tabCapsule.refreshAppearance()
+    searchButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    logoButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+    configureSearchButton()
+    configureLogoButton()
   }
 
   @available(*, unavailable)
@@ -2683,9 +2738,12 @@ private final class MarcoDockContainerView: UIView {
   private func configureSearchButton() {
     let symbolConfig = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .medium)
     let icon = UIImage(systemName: "magnifyingglass", withConfiguration: symbolConfig)
+    let fg: UIColor = MarcoLiquidGlassSupport.isEffectiveDark
+      ? .white
+      : UIColor(red: 0.09, green: 0.10, blue: 0.14, alpha: 0.92)
     searchButton.configure(
       image: icon,
-      foregroundColor: .white,
+      foregroundColor: fg,
       tintColor: nil,
       tintARGB: nil,
       menu: nil
@@ -2694,9 +2752,12 @@ private final class MarcoDockContainerView: UIView {
 
   private func configureLogoButton() {
     let logo = MarcoLiquidGlassSupport.brandLogoImage
+    let fg: UIColor = MarcoLiquidGlassSupport.isEffectiveDark
+      ? .white
+      : UIColor(red: 0.09, green: 0.10, blue: 0.14, alpha: 0.92)
     logoButton.configure(
       image: logo,
-      foregroundColor: .white,
+      foregroundColor: fg,
       tintColor: nil,
       tintARGB: nil,
       menu: nil
@@ -3030,9 +3091,9 @@ private final class MarcoInteractiveCapsuleGlassControl: UIControl {
     super.init(frame: frame)
     backgroundColor = .clear
     isOpaque = false
-    overrideUserInterfaceStyle = .dark
+    overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
-    effectView.overrideUserInterfaceStyle = .dark
+    effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     effectView.isUserInteractionEnabled = false
     effectView.translatesAutoresizingMaskIntoConstraints = false
     #if compiler(>=6.2)
@@ -3076,7 +3137,7 @@ private final class MarcoInteractiveCapsuleGlassControl: UIControl {
     stack.addArrangedSubview(trailingIcon)
 
     menuOverlayButton.backgroundColor = .clear
-    menuOverlayButton.overrideUserInterfaceStyle = .dark
+    menuOverlayButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     menuOverlayButton.showsMenuAsPrimaryAction = true
     menuOverlayButton.isHidden = true
     menuOverlayButton.translatesAutoresizingMaskIntoConstraints = false
@@ -3137,6 +3198,9 @@ private final class MarcoInteractiveCapsuleGlassControl: UIControl {
     menu: UIMenu?
   ) {
     MarcoLiquidGlassSupport.withoutAnimations {
+      self.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      self.effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
+      self.menuOverlayButton.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
       #if compiler(>=6.2)
       if #available(iOS 26.0, *) {
         if !self.hasConfiguredEffect || self.configuredTintARGB != tintARGB {
@@ -3218,7 +3282,7 @@ private final class MarcoNativeGlassButtonPlatformView: NSObject, FlutterPlatfor
       self.hostView.backgroundColor = .clear
       self.hostView.isOpaque = false
       self.hostView.clipsToBounds = false
-      self.hostView.overrideUserInterfaceStyle = .dark
+      self.hostView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
       self.circleControl.translatesAutoresizingMaskIntoConstraints = false
       self.circleControl.addTarget(self, action: #selector(self.handleTap), for: .touchUpInside)
@@ -3372,9 +3436,9 @@ private final class MarcoGlassPillHostView: UIView {
     backgroundColor = .clear
     isOpaque = false
     clipsToBounds = false
-    overrideUserInterfaceStyle = .dark
+    overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
 
-    effectView.overrideUserInterfaceStyle = .dark
+    effectView.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
     effectView.translatesAutoresizingMaskIntoConstraints = false
     #if compiler(>=6.2)
     if #available(iOS 26.0, *) {
@@ -3500,7 +3564,7 @@ private final class MarcoNativeGlassPillPlatformView: NSObject, FlutterPlatformV
         }
         let btn = UIButton(type: .system)
         btn.tag = idx
-        btn.overrideUserInterfaceStyle = .dark
+        btn.overrideUserInterfaceStyle = MarcoLiquidGlassSupport.interfaceStyle
         btn.translatesAutoresizingMaskIntoConstraints = false
         btn.addTarget(self, action: #selector(itemTapped(_:)), for: .touchUpInside)
         NSLayoutConstraint.activate([

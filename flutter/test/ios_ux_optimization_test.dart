@@ -550,12 +550,11 @@ void main() {
         ),
       );
       await tester.pump();
-      expect(find.text('近期国内热门'), findsOneWidget);
-      expect(find.text('豆瓣高分'), findsOneWidget);
-      expect(find.text('烂番茄新鲜认证'), findsOneWidget);
-      expect(find.text('迪士尼 · 皮克斯'), findsOneWidget);
-      expect(find.text('漫威宇宙'), findsOneWidget);
-      expect(find.text('DC 宇宙'), findsOneWidget);
+      expect(find.text('全部专题'), findsOneWidget);
+      for (final spec in CuratedDiscoveryService.modules) {
+        expect(find.byKey(Key('curated-module-${spec.id}')), findsOneWidget);
+        expect(find.text(spec.title), findsAtLeastNWidgets(1));
+      }
 
       // 2. DetailScreen opened from curated card with ZERO user sources -> cannot play!
       SharedPreferences.setMockInitialValues({});
@@ -616,8 +615,9 @@ void main() {
       expect(storage.appThemeMode, 'light');
       expect(AppleTheme.fromPref(storage.appThemeMode), ThemeMode.light);
 
-      // Verify ApplePalette resolves crisp white background in light mode & true black in dark mode
-      expect(ApplePalette.light.background, const Color(0xFFFFFFFF));
+      // Verify ApplePalette resolves crisp grouped alabaster canvas + pure white cards in light mode & true black in dark mode
+      expect(ApplePalette.light.background, const Color(0xFFF2F3F7));
+      expect(ApplePalette.light.groupedPrimary, const Color(0xFFFFFFFF));
       expect(ApplePalette.dark.background, const Color(0xFF000000));
 
       // Verify IosNativeSlider responds to tap on track (fixes hard-to-tap bug!)
@@ -731,6 +731,112 @@ void main() {
         find.byKey(const Key('favorite-dynamic-island-feedback')),
         findsNothing,
       );
+    },
+  );
+
+  testWidgets(
+    'Real-device polish regressions: Light Mode contrast, Douban Rexxar credits items schema, frosted portrait companion, and HUD stays visible while popover is open',
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+    (tester) async {
+      // 1. Light Mode palette & AppleGroupedTile render dark legible ink on light alabaster canvas
+      expect(ApplePalette.light.background.computeLuminance(), greaterThan(0.85));
+      expect(ApplePalette.light.labelPrimary.computeLuminance(), lessThan(0.05));
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.light(),
+          home: Scaffold(
+            body: AppleGroupedSection(
+              header: '浅色测试分组',
+              children: [
+                AppleGroupedTile(
+                  icon: Icons.palette,
+                  title: '浅色标题可读性',
+                  subtitle: '副标题同样清晰可见',
+                  onTap: () {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      final titleWidget = tester.widget<Text>(find.text('浅色标题可读性'));
+      expect(titleWidget.style!.color, ApplePalette.light.labelPrimary);
+
+      // 2. Douban Rexxar flat `items` schema parsing + role cleanup + http/webp upgrade
+      final parsedCast = CastAvatarService.parseDoubanCreditsPayload({
+        'items': [
+          {
+            'name': '代露娃',
+            'character': '主演 Actor',
+            'avatar': {
+              'large': 'http://img3.doubanio.com/view/personage/m/public/demo.webp',
+            },
+          },
+          {
+            'name': '郭锋',
+            'character': '导演 Director',
+            'avatar': {
+              'normal': 'https://img3.doubanio.com/view/personage/m/public/dir.jpg',
+            },
+          },
+        ],
+      });
+      expect(parsedCast, hasLength(2));
+      expect(parsedCast.first.name, '代露娃');
+      expect(parsedCast.first.role, '主演');
+      expect(
+        parsedCast.first.avatarUrl,
+        'https://img3.doubanio.com/view/personage/m/public/demo.jpg',
+      );
+      expect(parsedCast[1].role, '导演');
+
+      // 3. Player HUD MUST NOT auto-hide while a Liquid Glass popover is open (4.5s > 3.5s)
+      tester.view.devicePixelRatio = 1.0;
+      tester.view.physicalSize = const Size(844, 390);
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      final storage = await initTestStorage();
+      final prefs = PlayerHudPrefs.inMemory(isDesktop: false);
+      addTearDown(prefs.dispose);
+      final player = _FakePlayer();
+      addTearDown(player.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.dark(),
+          home: PlayerScreen(
+            site: testSite,
+            video: testVideo,
+            initialLineIndex: 0,
+            initialEpisodeIndex: 0,
+            storage: storage,
+            debugPlayer: player,
+            debugVideoSurface: const ColoredBox(color: Colors.black),
+            debugHudPrefs: prefs,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.byType(IosPlayerChrome), findsOneWidget);
+
+      // Open Lines popover bubble
+      await tester.tap(find.byKey(const ValueKey('ios-dock-action-lines')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('ios-glass-popover-bubble')), findsOneWidget);
+
+      // Wait 4.5s (> 3.5s auto-hide delay) -> HUD MUST still stay visible!
+      await tester.pump(const Duration(milliseconds: 4500));
+      expect(find.byType(IosPlayerChrome), findsOneWidget);
+
+      // Dismiss popover -> HUD resumes auto-hide cleanly
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 100));
     },
   );
 }

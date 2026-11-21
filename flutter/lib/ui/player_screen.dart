@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' show ImageFilter;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -55,6 +56,7 @@ import 'player/sleep_timer.dart';
 import 'player/slim_progress_bar.dart';
 import 'player/speed_capsule.dart';
 import 'player/start_spec_overlay.dart';
+import 'poster_image.dart';
 import 'source_verification_dialog.dart';
 import 'tv/tv_player_overlay.dart';
 import 'windows_title_bar.dart';
@@ -555,6 +557,19 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _cancelTransientInteractions(GestureInterruptReason reason) {
+    if (reason == GestureInterruptReason.dialogOpened) {
+      _hideTimer?.cancel();
+      _hudUnmountTimer?.cancel();
+      if (_hudFadingOut || _hudAutoHidden || !_controlsVisible) {
+        if (mounted) {
+          setState(() {
+            _hudFadingOut = false;
+            _hudAutoHidden = false;
+            _controlsVisible = true;
+          });
+        }
+      }
+    }
     _gestureTickTimer?.cancel();
     _gestureTickTimer = null;
     _verticalHudClearTimer?.cancel();
@@ -697,6 +712,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       _onReduceTransparencyChanged,
     );
     GlassworkBackdrop.intensity.addListener(_onReduceTransparencyChanged);
+    IosLiquidGlassBridge.activeSheetNotifier.addListener(
+      _onPlayerOverlayStateChanged,
+    );
+    activeIosGlassPopoverCount.addListener(_onPlayerOverlayStateChanged);
+    activeAppleModalSheetCount.addListener(_onPlayerOverlayStateChanged);
     _clockText = _formatClockNow();
     _clockTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (!mounted || !_alwaysShowClock) return;
@@ -1757,6 +1777,38 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  bool get _hasActivePlayerOverlay {
+    return IosLiquidGlassBridge.activeSheetNotifier.value ||
+        activeIosGlassPopoverCount.value > 0 ||
+        activeAppleModalSheetCount.value > 0;
+  }
+
+  void _onPlayerOverlayStateChanged() {
+    if (!mounted) return;
+    if (_hasActivePlayerOverlay) {
+      _hideTimer?.cancel();
+      _hudUnmountTimer?.cancel();
+      if (_hudFadingOut || _hudAutoHidden || !_controlsVisible) {
+        void restoreHud() {
+          if (!mounted) return;
+          setState(() {
+            _hudFadingOut = false;
+            _hudAutoHidden = false;
+            _controlsVisible = true;
+          });
+        }
+        if (SchedulerBinding.instance.schedulerPhase ==
+            SchedulerPhase.persistentCallbacks) {
+          WidgetsBinding.instance.addPostFrameCallback((_) => restoreHud());
+        } else {
+          restoreHud();
+        }
+      }
+    } else if (_controlsVisible && !_screenLocked && _playing) {
+      _scheduleHide();
+    }
+  }
+
   void _scheduleHide() {
     _hideTimer?.cancel();
     _hudUnmountTimer?.cancel();
@@ -1766,6 +1818,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     if (_screenLocked ||
         _isSliderDragging ||
+        _hasActivePlayerOverlay ||
         (isWindowsDesktopUi && _windowsMoreControls)) {
       return;
     }
@@ -1776,6 +1829,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (mounted &&
           !_screenLocked &&
           !_isSliderDragging &&
+          !_hasActivePlayerOverlay &&
           _playing &&
           !_loading &&
           !_buffering &&
@@ -1787,6 +1841,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               _hudFadingOut &&
               !_screenLocked &&
               !_isSliderDragging &&
+              !_hasActivePlayerOverlay &&
               _playing &&
               !_loading &&
               !_buffering &&
@@ -2596,6 +2651,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       _onReduceTransparencyChanged,
     );
     GlassworkBackdrop.intensity.removeListener(_onReduceTransparencyChanged);
+    IosLiquidGlassBridge.activeSheetNotifier.removeListener(
+      _onPlayerOverlayStateChanged,
+    );
+    activeIosGlassPopoverCount.removeListener(_onPlayerOverlayStateChanged);
+    activeAppleModalSheetCount.removeListener(_onPlayerOverlayStateChanged);
     _hudPrefs.removeListener(_onHudSubstateChanged);
     if (_ownsHudPrefs) {
       _hudPrefs.dispose();
@@ -4650,10 +4710,118 @@ class _PlayerScreenState extends State<PlayerScreen>
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
 
-    return Container(
+    final isDark = palette.isDark;
+    final glassCardBg = isDark
+        ? Colors.white.withValues(alpha: 0.085)
+        : Colors.white.withValues(alpha: 0.58);
+    final glassCardBorder = isDark
+        ? Colors.white.withValues(alpha: 0.16)
+        : Colors.white.withValues(alpha: 0.82);
+    final glassChipBg = isDark
+        ? Colors.white.withValues(alpha: 0.09)
+        : Colors.white.withValues(alpha: 0.52);
+
+    return ClipRect(
       key: const Key('ios-portrait-companion-sheet'),
-      color: palette.background,
-      child: ListView(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Base poster-tinted frosted glass backdrop (渐变毛玻璃质感)
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: isDark
+                    ? const [
+                        Color(0xFF1A1E2A),
+                        Color(0xFF10121A),
+                        Color(0xFF090A0F),
+                      ]
+                    : const [
+                        Color(0xFFDDE3F0),
+                        Color(0xFFE9EDF6),
+                        Color(0xFFF1F3F8),
+                      ],
+              ),
+            ),
+          ),
+          if (widget.video.poster.trim().isNotEmpty ||
+              widget.video.title.trim().isNotEmpty)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: Opacity(
+                  opacity: isDark ? 0.42 : 0.34,
+                  child: ImageFiltered(
+                    imageFilter: ImageFilter.blur(
+                      sigmaX: 44,
+                      sigmaY: 44,
+                      tileMode: TileMode.decal,
+                    ),
+                    child: PosterImage(
+                      url: widget.video.poster,
+                      title: widget.video.title,
+                      year: widget.video.year,
+                      fit: BoxFit.cover,
+                      forBackdrop: true,
+                      placeholder: const SizedBox.shrink(),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: BackdropFilter(
+                filter: ImageFilter.blur(
+                  sigmaX: _storageReduceTransparency ? 0.0 : 26.0,
+                  sigmaY: _storageReduceTransparency ? 0.0 : 26.0,
+                ),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: isDark
+                          ? const [
+                              Color(0xB8141720),
+                              Color(0xDC0E1018),
+                              Color(0xF0090A0F),
+                            ]
+                          : const [
+                              Color(0xB0DCE2F0),
+                              Color(0xD4E8ECF5),
+                              Color(0xEAF0F2F8),
+                            ],
+                      stops: const [0.0, 0.38, 1.0],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // Soft cinema-edge seam gradient from top 16:9 video frame into glass
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 24,
+            child: IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: isDark ? 0.38 : 0.16),
+                      Colors.transparent,
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          ListView(
         padding: EdgeInsets.fromLTRB(
           0,
           14,
@@ -4796,12 +4964,21 @@ class _PlayerScreenState extends State<PlayerScreen>
                       width: double.infinity,
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: palette.groupedPrimary,
+                        color: glassCardBg,
                         borderRadius: BorderRadius.circular(14),
                         border: Border.all(
-                          color: palette.hairline,
-                          width: 0.6,
+                          color: glassCardBorder,
+                          width: 0.85,
                         ),
+                        boxShadow: isDark
+                            ? null
+                            : [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.04),
+                                  blurRadius: 12,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -4917,14 +5094,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                             ),
                             decoration: BoxDecoration(
                               color: selected
-                                  ? palette.accent.withValues(alpha: 0.16)
-                                  : palette.groupedPrimary,
+                                  ? palette.accent.withValues(alpha: 0.18)
+                                  : glassChipBg,
                               borderRadius: BorderRadius.circular(999),
                               border: Border.all(
                                 color: selected
-                                    ? palette.accent.withValues(alpha: 0.6)
-                                    : palette.hairline,
-                                width: 0.8,
+                                    ? palette.accent.withValues(alpha: 0.65)
+                                    : glassCardBorder,
+                                width: 0.85,
                               ),
                             ),
                             child: Text(
@@ -4972,13 +5149,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                           decoration: BoxDecoration(
                             color: i == _episodeIndex
                                 ? palette.accent
-                                : palette.groupedPrimary,
+                                : glassChipBg,
                             borderRadius: BorderRadius.circular(11),
                             border: Border.all(
                               color: i == _episodeIndex
                                   ? palette.accent
-                                  : palette.hairline,
-                              width: 0.8,
+                                  : glassCardBorder,
+                              width: 0.85,
                             ),
                           ),
                           child: Text(
@@ -5003,6 +5180,8 @@ class _PlayerScreenState extends State<PlayerScreen>
               ],
             ),
           ),
+        ],
+      ),
         ],
       ),
     );
@@ -8618,13 +8797,28 @@ class _CompanionActionChip extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 8),
           decoration: BoxDecoration(
             color: active
-                ? color.withValues(alpha: 0.14)
-                : palette.groupedPrimary,
-            borderRadius: BorderRadius.circular(12),
+                ? color.withValues(alpha: palette.isDark ? 0.22 : 0.16)
+                : (palette.isDark
+                    ? Colors.white.withValues(alpha: 0.085)
+                    : Colors.white.withValues(alpha: 0.56)),
+            borderRadius: BorderRadius.circular(13),
             border: Border.all(
-              color: active ? color.withValues(alpha: 0.45) : palette.hairline,
-              width: 0.75,
+              color: active
+                  ? color.withValues(alpha: 0.5)
+                  : (palette.isDark
+                      ? Colors.white.withValues(alpha: 0.16)
+                      : Colors.white.withValues(alpha: 0.82)),
+              width: 0.85,
             ),
+            boxShadow: palette.isDark
+                ? null
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.04),
+                      blurRadius: 10,
+                      offset: const Offset(0, 3),
+                    ),
+                  ],
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,

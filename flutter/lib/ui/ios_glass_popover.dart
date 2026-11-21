@@ -14,6 +14,11 @@ Rect? rectForGlobalKey(GlobalKey? key) {
   return topLeft & box.size;
 }
 
+/// Tracks how many floating Liquid Glass popovers are currently open so active
+/// overlays (such as the video player HUD) pause auto-hide while a popover is
+/// displayed.
+final ValueNotifier<int> activeIosGlassPopoverCount = ValueNotifier<int>(0);
+
 /// Shows a compact, native-style Liquid Glass bubble popover anchored to
 /// [anchorRect] rather than a full-screen covering modal sheet.
 ///
@@ -86,7 +91,7 @@ Alignment _popoverScaleAlignment(BuildContext context, Rect? anchorRect) {
   return Alignment(ax, ay);
 }
 
-class _IosGlassPopoverOverlay extends StatelessWidget {
+class _IosGlassPopoverOverlay extends StatefulWidget {
   final Rect? anchorRect;
   final String title;
   final double maxWidth;
@@ -108,7 +113,35 @@ class _IosGlassPopoverOverlay extends StatelessWidget {
   });
 
   @override
+  State<_IosGlassPopoverOverlay> createState() =>
+      _IosGlassPopoverOverlayState();
+}
+
+class _IosGlassPopoverOverlayState extends State<_IosGlassPopoverOverlay> {
+  @override
+  void initState() {
+    super.initState();
+    activeIosGlassPopoverCount.value++;
+  }
+
+  @override
+  void dispose() {
+    if (activeIosGlassPopoverCount.value > 0) {
+      activeIosGlassPopoverCount.value--;
+    }
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final anchorRect = widget.anchorRect;
+    final title = widget.title;
+    final maxWidth = widget.maxWidth;
+    final maxHeight = widget.maxHeight;
+    final forceDark = widget.forceDark;
+    final trailing = widget.trailing;
+    final contentPadding = widget.contentPadding;
+    final builder = widget.builder;
     final media = MediaQuery.of(context);
     final screen = media.size;
     final safe = media.padding;
@@ -224,7 +257,7 @@ class _IosGlassPopoverOverlay extends StatelessWidget {
                                 ),
                               ),
                             ),
-                            if (trailing != null) trailing!,
+                            if (trailing != null) trailing,
                           ],
                         ),
                       ),

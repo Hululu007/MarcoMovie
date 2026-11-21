@@ -976,13 +976,44 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     });
     try {
       CmsListing listing;
-      if (targetCategoryId.isEmpty && _primaryTab == 'recommend' && page == 1) {
+      if (targetCategoryId.isEmpty &&
+          _primaryTab == 'recommend' &&
+          !filter.hasSubFilter &&
+          page == 1) {
         final (cats, homeListing) = await read(() => widget.client.fetchHome(site));
         if (!mounted || epoch != _categoryEpoch || _activeSite?.key != site.key) return;
         if (_categories.isEmpty && cats.isNotEmpty) {
           _categories = cats;
         }
         listing = homeListing;
+      } else if (targetCategoryId.isEmpty && filter.hasSubFilter) {
+        // Filtering from the default "推荐" tab: resolve a real category from
+        // the active site so server-side filters (Wogg / CatPaw / DRPY / CMS)
+        // actually execute instead of returning an unfiltered home page.
+        String fallbackCatId = '';
+        List<String> fallbackChildren = const [];
+        if (_categories.isNotEmpty) {
+          final genre = filter.genreLabel.trim();
+          CmsCategory? matchedCat;
+          if (genre.isNotEmpty && genre != '全部') {
+            for (final c in _categories) {
+              if (c.name.contains(genre)) {
+                matchedCat = c;
+                break;
+              }
+            }
+          }
+          final chosen = matchedCat ?? _categories.first;
+          fallbackCatId = chosen.id;
+          fallbackChildren = CmsParser.childCategoryIds(_categories, chosen.id);
+        }
+        listing = await read(() => widget.client.fetchCategory(
+          site,
+          fallbackCatId,
+          page,
+          childIds: fallbackChildren,
+          filter: filter,
+        ));
       } else if (targetCategoryId.isEmpty) {
         // Recommend tab pagination (page > 1) or unfiltered query:
         // First request default feed page (`categoryId: ''`).
@@ -2140,11 +2171,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                       size: 13.5,
                                     ),
                                     if (!compactHeader) ...[
-                                      const SizedBox(width: 4),
+                                      SizedBox(width: 4),
                                       Text(
                                         netdiskLabel,
-                                        style: const TextStyle(
-                                          color: AppleColors.labelPrimary,
+                                        style: TextStyle(
+                                          color: ApplePalette.of(context).labelPrimary,
                                           fontSize: 12.5,
                                           fontWeight: FontWeight.w600,
                                         ),
@@ -2190,16 +2221,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     if (!_privateSessionUnlocked &&
                         widget.storage.showContinueWatching &&
                         history.isNotEmpty) ...[
-                      const SizedBox(height: 20),
+                      SizedBox(height: 20),
                       Padding(
                         padding:
                             EdgeInsets.symmetric(horizontal: horizontalPad),
                         child: Row(
                           children: [
-                            const Text(
+                            Text(
                               '历史记录',
                               style: TextStyle(
-                                color: AppleColors.labelPrimary,
+                                color: ApplePalette.of(context).labelPrimary,
                                 fontSize: 19,
                                 fontWeight: FontWeight.w700,
                                 letterSpacing: -0.4,
@@ -2368,9 +2399,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                       color: (_filterExpanded ||
                                               activeFilterCount > 0)
                                           ? Colors.white
-                                          : AppleColors.labelPrimary,
+                                          : ApplePalette.of(context).labelPrimary,
                                     ),
-                                    const SizedBox(width: 5),
+                                    SizedBox(width: 5),
                                     Text(
                                       activeFilterCount > 0
                                           ? '筛选 · $activeFilterCount'
@@ -2379,7 +2410,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                         color: (_filterExpanded ||
                                                 activeFilterCount > 0)
                                             ? Colors.white
-                                            : AppleColors.labelPrimary,
+                                            : ApplePalette.of(context).labelPrimary,
                                         fontSize: 13,
                                         fontWeight: FontWeight.w600,
                                       ),
@@ -2392,6 +2423,84 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         ],
                       ),
                     ),
+                    // Active filter chips summary when user has applied filters
+                    if (activeFilterCount > 0 && !_filterExpanded)
+                      Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          horizontalPad,
+                          10,
+                          horizontalPad,
+                          0,
+                        ),
+                        child: Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            if (_filterSubCategoryId.isNotEmpty)
+                              _buildActiveFilterBadge(
+                                _categories
+                                        .where((c) => c.id == _filterSubCategoryId)
+                                        .map((c) => c.name)
+                                        .firstOrNull ??
+                                    _filterSubCategoryId,
+                                onClear: () {
+                                  setState(() => _filterSubCategoryId = '');
+                                  _reloadFilteredListing(page: 1);
+                                },
+                              ),
+                            if (_filterGenreLabel.isNotEmpty)
+                              _buildActiveFilterBadge(
+                                _filterGenreLabel,
+                                onClear: () {
+                                  setState(() => _filterGenreLabel = '');
+                                  _reloadFilteredListing(page: 1);
+                                },
+                              ),
+                            if (_filterArea.isNotEmpty)
+                              _buildActiveFilterBadge(
+                                _filterArea,
+                                onClear: () {
+                                  setState(() => _filterArea = '');
+                                  _reloadFilteredListing(page: 1);
+                                },
+                              ),
+                            if (_filterYear.isNotEmpty)
+                              _buildActiveFilterBadge(
+                                _filterYear,
+                                onClear: () {
+                                  setState(() => _filterYear = '');
+                                  _reloadFilteredListing(page: 1);
+                                },
+                              ),
+                            GestureDetector(
+                              onTap: () {
+                                setState(() {
+                                  _filterSubCategoryId = '';
+                                  _filterGenreLabel = '';
+                                  _filterArea = '';
+                                  _filterYear = '';
+                                });
+                                _reloadFilteredListing(page: 1);
+                              },
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 4,
+                                ),
+                                child: Text(
+                                  '清除全部',
+                                  style: TextStyle(
+                                    color: ApplePalette.of(context).systemBlue,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     // Collapsible Multi-Dimension Filter Drawer (类别 / 国家地区 / 年份)
                     AnimatedSize(
                       duration: const Duration(milliseconds: 260),
@@ -2414,6 +2523,64 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             ),
           ),
           if (_activeSite != null) ...[
+            if (!_privateSessionUnlocked &&
+                widget.storage.showCuratedDiscovery &&
+                _primaryTab == 'recommend' &&
+                !_currentFilter.hasSubFilter &&
+                _filterSubCategoryId.isEmpty &&
+                _homeError == null) ...[
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 14),
+                  child: CuratedDiscoverySection(
+                    hasUserSources: (_config?.publicAvailableSites ?? const [])
+                        .any((s) => s.searchable),
+                    loadLive: !Platform.environment.containsKey('FLUTTER_TEST'),
+                    onOpenVideo: (video) => _openVideoDetail(
+                      CuratedDiscoveryService.curatedSiteSentinel,
+                      video,
+                    ),
+                  ),
+                ),
+              ),
+              if (_homeVideos.isNotEmpty)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      horizontalPad,
+                      4,
+                      horizontalPad,
+                      8,
+                    ),
+                    child: Row(
+                      children: [
+                        Text(
+                          '片源最新更新',
+                          style: TextStyle(
+                            color: ApplePalette.of(context).labelPrimary,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -0.35,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            _activeSite!.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: ApplePalette.of(context).labelTertiary,
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
             if (_homeError != null)
               SliverFillRemaining(
                 hasScrollBody: false,
@@ -2423,17 +2590,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Icon(
+                        Icon(
                           CupertinoIcons.exclamationmark_triangle_fill,
                           color: AppleColors.systemOrange,
                           size: 38,
                         ),
-                        const SizedBox(height: 12),
+                        SizedBox(height: 12),
                         Text(
                           _homeError!,
                           textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: AppleColors.labelSecondary,
+                          style: TextStyle(
+                            color: ApplePalette.of(context).labelSecondary,
                             fontSize: 14,
                           ),
                         ),
@@ -2502,25 +2669,6 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ),
               ),
-            if (!_privateSessionUnlocked &&
-                widget.storage.showCuratedDiscovery &&
-                _primaryTab == 'recommend' &&
-                !_currentFilter.hasSubFilter &&
-                _homeError == null)
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 16),
-                  child: CuratedDiscoverySection(
-                    hasUserSources: (_config?.publicAvailableSites ?? const [])
-                        .any((s) => s.searchable),
-                    loadLive: !Platform.environment.containsKey('FLUTTER_TEST'),
-                    onOpenVideo: (video) => _openVideoDetail(
-                      CuratedDiscoveryService.curatedSiteSentinel,
-                      video,
-                    ),
-                  ),
-                ),
-              ),
             SliverToBoxAdapter(
               child: Padding(
                 padding: EdgeInsets.only(
@@ -2544,12 +2692,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                         Text(
                                           '「${_activeSite!.name}」为网盘搜索专用源，不提供首页推荐片单，请直接搜索影片',
                                           textAlign: TextAlign.center,
-                                          style: const TextStyle(
-                                            color: AppleColors.labelSecondary,
+                                          style: TextStyle(
+                                            color: ApplePalette.of(context).labelSecondary,
                                             fontSize: 14,
                                           ),
                                         ),
-                                        const SizedBox(height: 14),
+                                        SizedBox(height: 14),
                                         AppleCapsuleButton(
                                           label: '立即搜索影片',
                                           icon: CupertinoIcons.search,
@@ -2558,10 +2706,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                         ),
                                       ],
                                     )
-                                  : const Text(
+                                  : Text(
                                       '当前筛选条件下暂无影片，试试调整筛选或切换分类',
                                       style: TextStyle(
-                                        color: AppleColors.labelSecondary,
+                                        color: ApplePalette.of(context).labelSecondary,
                                         fontSize: 14,
                                       ),
                                     ),
@@ -2601,21 +2749,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           ],
         ],
       );
-          final showCuratedBelowGrid = _activeSite != null &&
-              !_privateSessionUnlocked &&
-              widget.storage.showCuratedDiscovery &&
-              _primaryTab == 'recommend' &&
-              !_currentFilter.hasSubFilter &&
-              _homeError == null;
-          final autoPageExtentThreshold =
-              showCuratedBelowGrid ? 2100.0 : 420.0;
           final autoPagingScrollView = NotificationListener<ScrollNotification>(
             onNotification: (notification) {
               if (notification.metrics.axis == Axis.vertical &&
-                  ((!showCuratedBelowGrid &&
-                          notification.metrics.maxScrollExtent > 0) ||
+                  (notification.metrics.maxScrollExtent > 0 ||
                       notification.metrics.pixels > 16) &&
-                  notification.metrics.extentAfter < autoPageExtentThreshold &&
+                  notification.metrics.extentAfter < 420 &&
                   !_homeLoading &&
                   !_loadingMore &&
                   !_autoPagingScheduled &&
@@ -2683,23 +2822,23 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     fontSize: 24,
                     stacked: true,
                   ),
-                  const SizedBox(height: 16),
-                  const Text(
+                  SizedBox(height: 16),
+                  Text(
                     '把今晚，留给好故事。',
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: AppleColors.labelPrimary,
+                      color: ApplePalette.of(context).labelPrimary,
                       fontSize: 24,
                       fontWeight: FontWeight.w700,
                       letterSpacing: -0.5,
                     ),
                   ),
-                  const SizedBox(height: 10),
-                  const Text(
+                  SizedBox(height: 10),
+                  Text(
                     '适用于手机、平板与桌面的播放器。导入自己的订阅或本地配置后开始使用。',
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: AppleColors.labelSecondary,
+                      color: ApplePalette.of(context).labelSecondary,
                       fontSize: 14,
                       height: 1.5,
                     ),
@@ -2732,12 +2871,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       onPressed: _showBackupRestoreDialog,
                     ),
                   ),
-                  const SizedBox(height: 20),
-                  const Text(
+                  SizedBox(height: 20),
+                  Text(
                     '本产品仅为播放工具，不内置、不提供、不托管任何影视资源或配置地址。',
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: AppleColors.labelTertiary,
+                      color: ApplePalette.of(context).labelTertiary,
                       fontSize: 11,
                       height: 1.4,
                     ),
@@ -2757,7 +2896,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
+          Row(
             children: [
               Icon(
                 CupertinoIcons.eye_slash_fill,
@@ -2769,7 +2908,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 child: Text(
                   '隐私分组模式 · 独立无痕空间',
                   style: TextStyle(
-                    color: AppleColors.labelPrimary,
+                    color: ApplePalette.of(context).labelPrimary,
                     fontSize: 17,
                     fontWeight: FontWeight.w700,
                   ),
@@ -2777,11 +2916,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
             ],
           ),
-          const SizedBox(height: 10),
-          const Text(
+          SizedBox(height: 10),
+          Text(
             '当前尚未添加任何隐私分组订阅。隐私空间与正常模式完全隔离：不保留观看历史记录，搜索、收藏与片源数据互不共通。',
             style: TextStyle(
-              color: AppleColors.labelSecondary,
+              color: ApplePalette.of(context).labelSecondary,
               fontSize: 13,
               height: 1.5,
             ),
@@ -2844,17 +2983,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         children: [
           Row(
             children: [
-              const Icon(
+              Icon(
                 CupertinoIcons.info_circle_fill,
                 color: AppleColors.systemBlue,
                 size: 22,
               ),
-              const SizedBox(width: 10),
+              SizedBox(width: 10),
               Expanded(
                 child: Text(
                   titleText,
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
+                  style: TextStyle(
+                    color: ApplePalette.of(context).labelPrimary,
                     fontSize: 16,
                     fontWeight: FontWeight.w700,
                   ),
@@ -2862,11 +3001,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
             ],
           ),
-          const SizedBox(height: 10),
+          SizedBox(height: 10),
           Text(
             bodyText,
-            style: const TextStyle(
-              color: AppleColors.labelSecondary,
+            style: TextStyle(
+              color: ApplePalette.of(context).labelSecondary,
               fontSize: 13,
               height: 1.5,
             ),
@@ -3189,6 +3328,44 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       ),
     );
   }
+  Widget _buildActiveFilterBadge(String label, {required VoidCallback onClear}) {
+    final palette = ApplePalette.of(context);
+    return GestureDetector(
+      onTap: onClear,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4.5),
+        decoration: BoxDecoration(
+          color: palette.systemBlue.withValues(alpha: palette.isDark ? 0.22 : 0.12),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: palette.systemBlue.withValues(alpha: 0.45),
+            width: 0.8,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                color: palette.systemBlue,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Icon(
+              CupertinoIcons.xmark_circle_fill,
+              size: 13,
+              color: palette.systemBlue.withValues(alpha: 0.8),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildHomeFilterDrawer() {
     final subCats = CmsParser.subCategoriesForPrimaryTab(
       _categories,
@@ -3212,16 +3389,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         children: [
           Row(
             children: [
-              const Icon(
+              Icon(
                 CupertinoIcons.slider_horizontal_3,
                 color: AppleColors.systemBlue,
                 size: 14,
               ),
-              const SizedBox(width: 6),
-              const Text(
+              SizedBox(width: 6),
+              Text(
                 '多维片库筛选',
                 style: TextStyle(
-                  color: AppleColors.labelPrimary,
+                  color: ApplePalette.of(context).labelPrimary,
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
                 ),
@@ -3362,8 +3539,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
           width: 36,
           child: Text(
             title,
-            style: const TextStyle(
-              color: AppleColors.labelSecondary,
+            style: TextStyle(
+              color: ApplePalette.of(context).labelSecondary,
               fontSize: 12,
               fontWeight: FontWeight.w600,
             ),
@@ -3432,7 +3609,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             fontSize: 12,
           ),
           style: TextStyle(
-            color: selected ? Colors.white : AppleColors.labelPrimary,
+            color: selected ? Colors.white : ApplePalette.of(context).labelPrimary,
             fontSize: 12,
             height: 1.1,
             fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
@@ -3521,7 +3698,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ),
               ),
-              const SizedBox(width: 11),
+              SizedBox(width: 11),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -3531,26 +3708,26 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       entry.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppleColors.labelPrimary,
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelPrimary,
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                         letterSpacing: -0.2,
                       ),
                     ),
-                    const SizedBox(height: 3),
+                    SizedBox(height: 3),
                     Text(
                       entry.episode.isEmpty
                           ? (pct > 0 ? '已看 $pct%' : '继续观看')
                           : entry.episode,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppleColors.labelSecondary,
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelSecondary,
                         fontSize: 12,
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    SizedBox(height: 8),
                     ClipRRect(
                       borderRadius: BorderRadius.circular(999),
                       child: LinearProgressIndicator(
@@ -3558,7 +3735,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             ? entry.progressFraction
                             : 0.15,
                         minHeight: 3.5,
-                        backgroundColor: AppleColors.groupedTertiary,
+                        backgroundColor: ApplePalette.of(context).groupedTertiary,
                         valueColor: const AlwaysStoppedAnimation<Color>(
                           AppleColors.systemBlue,
                         ),
@@ -3656,17 +3833,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         children: [
           Row(
             children: [
-              const Icon(
+              Icon(
                 CupertinoIcons.qrcode_viewfinder,
                 color: Color(0xFF5AC8FA),
                 size: 22,
               ),
-              const SizedBox(width: 8),
+              SizedBox(width: 8),
               Expanded(
                 child: Text(
                   '${site.name} · 电视端网盘扫码与账号管理',
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
+                  style: TextStyle(
+                    color: ApplePalette.of(context).labelPrimary,
                     fontSize: 16,
                     fontWeight: FontWeight.w700,
                   ),
@@ -3687,11 +3864,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               ),
             ],
           ),
-          const SizedBox(height: 8),
-          const Text(
+          SizedBox(height: 8),
+          Text(
             '点击下方网盘即可弹出官方扫码窗口，支持夸克（我的夸父）、UC（我的优汐）、百度（我的嘟嘟）、阿里云盘（我的阿狸）4K 原画线路：',
             style: TextStyle(
-              color: AppleColors.labelSecondary,
+              color: ApplePalette.of(context).labelSecondary,
               fontSize: 12.5,
               height: 1.4,
             ),
@@ -3727,7 +3904,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
   }
   Widget _buildPosterPlaceholder() {
     return Container(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
@@ -3735,9 +3912,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         ),
       ),
       alignment: Alignment.center,
-      child: const Icon(
+      child: Icon(
         CupertinoIcons.film,
-        color: AppleColors.labelTertiary,
+        color: ApplePalette.of(context).labelTertiary,
         size: 26,
       ),
     );
@@ -3940,8 +4117,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               },
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: AppleColors.labelSecondary,
+              style: TextStyle(
+                color: ApplePalette.of(context).labelSecondary,
                 fontSize: 11,
               ),
             ),
@@ -4411,7 +4588,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     letterSpacing: -0.3,
                   ),
                 ),
-                const SizedBox(height: 4),
+                SizedBox(height: 4),
                 Text(
                   isLoading
                       ? (loadingText ?? '正在安全校验…')
@@ -4419,10 +4596,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     color: isLoading
-                        ? AppleColors.labelPrimary
+                        ? ApplePalette.of(context).labelPrimary
                         : (hasError
                             ? AppleColors.systemRed
-                            : AppleColors.labelSecondary),
+                            : ApplePalette.of(context).labelSecondary),
                     fontSize: 12.5,
                     height: 1.35,
                   ),
@@ -4599,11 +4776,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         height: 68,
         child: Center(
           child: icon != null
-              ? Icon(icon, color: AppleColors.labelSecondary, size: 22)
+              ? Icon(icon, color: ApplePalette.of(context).labelSecondary, size: 22)
               : Text(
                   label ?? '',
-                  style: const TextStyle(
-                    color: AppleColors.labelSecondary,
+                  style: TextStyle(
+                    color: ApplePalette.of(context).labelSecondary,
                     fontSize: 15,
                     fontWeight: FontWeight.w600,
                   ),
@@ -4673,28 +4850,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ],
               ),
-              const SizedBox(height: 16),
+              SizedBox(height: 16),
               if (privateSites.isEmpty &&
                   privateSubs.isEmpty &&
                   privateLives.isEmpty)
                 Container(
                   padding: const EdgeInsets.all(24),
                   decoration: BoxDecoration(
-                    color: AppleColors.groupedSecondary,
+                    color: ApplePalette.of(context).groupedSecondary,
                     borderRadius: BorderRadius.circular(16),
                   ),
-                  child: const Column(
+                  child: Column(
                     children: [
                       Icon(
                         CupertinoIcons.eye_slash_fill,
-                        color: AppleColors.labelTertiary,
+                        color: ApplePalette.of(context).labelTertiary,
                         size: 38,
                       ),
                       SizedBox(height: 10),
                       Text(
                         '隐藏列表暂无隐私资源',
                         style: TextStyle(
-                          color: AppleColors.labelPrimary,
+                          color: ApplePalette.of(context).labelPrimary,
                           fontSize: 15,
                           fontWeight: FontWeight.w600,
                         ),
@@ -4704,7 +4881,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         '点击上方「导入隐私订阅」，或将下方现有订阅设为「隐私」，即可在此安全访问；日常浏览时完全隐藏。',
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                          color: AppleColors.labelSecondary,
+                          color: ApplePalette.of(context).labelSecondary,
                           fontSize: 12.5,
                           height: 1.4,
                         ),
@@ -4728,7 +4905,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           ? '${s.group} · ${s.api}'
                           : '${s.group} · ${s.unsupportedReason}',
                       trailing: selected
-                          ? const Icon(
+                          ? Icon(
                               CupertinoIcons.checkmark_alt,
                               color: AppleColors.systemBlue,
                               size: 18,
@@ -4738,7 +4915,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               style: TextStyle(
                                 color: s.supported
                                     ? AppleColors.systemBlue
-                                    : AppleColors.labelTertiary,
+                                    : ApplePalette.of(context).labelTertiary,
                                 fontSize: 12,
                               ),
                             ),
@@ -4868,30 +5045,30 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(
+                Icon(
                   CupertinoIcons.dot_radiowaves_left_right,
-                  color: AppleColors.labelTertiary,
+                  color: ApplePalette.of(context).labelTertiary,
                   size: 48,
                 ),
-                const SizedBox(height: 12),
+                SizedBox(height: 12),
                 Text(
                   hasPluginOnlyLives
                       ? '当前订阅的直播源需要专用插件'
                       : '当前配置未包含 M3U / TXT 直播源',
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
+                  style: TextStyle(
+                    color: ApplePalette.of(context).labelPrimary,
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(height: 6),
+                SizedBox(height: 6),
                 Text(
                   hasPluginOnlyLives
                       ? '所选订阅中的直播线路依赖 Android 本地代理插件，当前设备暂不支持；可导入 M3U / TXT 直播地址观看。'
                       : '可直接导入 M3U / TXT 直播订阅地址或包含 lives 节点的 JSON 配置。',
                   textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: AppleColors.labelSecondary,
+                  style: TextStyle(
+                    color: ApplePalette.of(context).labelSecondary,
                     fontSize: 13,
                   ),
                 ),
@@ -4953,10 +5130,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             // Header Row: Title + Channel Count + Quick Channel Filter Search Box
             Row(
               children: [
-                const Text(
+                Text(
                   '电视直播',
                   style: TextStyle(
-                    color: AppleColors.labelPrimary,
+                    color: ApplePalette.of(context).labelPrimary,
                     fontSize: 26,
                     fontWeight: FontWeight.w800,
                     letterSpacing: -0.6,
@@ -4981,8 +5158,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       '$totalChannelCount 频道',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppleColors.labelSecondary,
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelSecondary,
                         fontSize: 11.5,
                         fontWeight: FontWeight.w600,
                       ),
@@ -5099,17 +5276,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Icon(
+                        Icon(
                           CupertinoIcons.wifi_exclamationmark,
-                          color: AppleColors.labelTertiary,
+                          color: ApplePalette.of(context).labelTertiary,
                           size: 38,
                         ),
-                        const SizedBox(height: 12),
+                        SizedBox(height: 12),
                         Text(
                           _liveError!,
                           textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: AppleColors.labelSecondary,
+                          style: TextStyle(
+                            color: ApplePalette.of(context).labelSecondary,
                             fontSize: 14,
                             height: 1.5,
                           ),
@@ -5129,12 +5306,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ),
               )
             else if (visibleChannels.isEmpty)
-              const Expanded(
+              Expanded(
                 child: Center(
                   child: Text(
                     '未找到匹配的直播频道',
                     style: TextStyle(
-                      color: AppleColors.labelSecondary,
+                      color: ApplePalette.of(context).labelSecondary,
                       fontSize: 14,
                     ),
                   ),
@@ -5283,25 +5460,25 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   Container(
                     width: 8,
                     height: 8,
-                    decoration: const BoxDecoration(
+                    decoration: BoxDecoration(
                       color: AppleColors.systemGreen,
                       shape: BoxShape.circle,
                     ),
                   ),
-                  const SizedBox(width: 10),
+                  SizedBox(width: 10),
                   Expanded(
                     child: Text(
                       '线路 ${idx + 1}',
-                      style: const TextStyle(
-                        color: AppleColors.labelPrimary,
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelPrimary,
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
-                  const Icon(
+                  Icon(
                     CupertinoIcons.play_fill,
-                    color: AppleColors.labelSecondary,
+                    color: ApplePalette.of(context).labelSecondary,
                     size: 14,
                   ),
                 ],
@@ -5426,19 +5603,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         Container(
                           width: 6,
                           height: 6,
-                          decoration: const BoxDecoration(
+                          decoration: BoxDecoration(
                             color: Color(0xFF34D399),
                             shape: BoxShape.circle,
                           ),
                         ),
-                        const SizedBox(width: 5),
+                        SizedBox(width: 5),
                         Expanded(
                           child: Text(
                             channel.group,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: AppleColors.labelSecondary,
+                            style: TextStyle(
+                              color: ApplePalette.of(context).labelSecondary,
                               fontSize: 11,
                               fontWeight: FontWeight.w500,
                             ),
@@ -5460,7 +5637,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ),
                               child: Text(
                                 '${channel.urls.length}源 ▾',
-                                style: const TextStyle(
+                                style: TextStyle(
                                   color: Color(0xE6FFFFFF),
                                   fontSize: 10,
                                   fontWeight: FontWeight.w600,
@@ -5469,10 +5646,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             ),
                           )
                         else
-                          const Text(
+                          Text(
                             '直连',
                             style: TextStyle(
-                              color: AppleColors.labelTertiary,
+                              color: ApplePalette.of(context).labelTertiary,
                               fontSize: 10.5,
                             ),
                           ),
@@ -5638,13 +5815,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         builder: (ctx, setSheetState) {
           final history = widget.storage.getWatchHistory();
           if (history.isEmpty) {
-            return const Padding(
+            return Padding(
               padding: EdgeInsets.all(40),
               child: Center(
                 child: Text(
                   '暂无观看历史记录',
                   style: TextStyle(
-                    color: AppleColors.labelSecondary,
+                    color: ApplePalette.of(context).labelSecondary,
                     fontSize: 14,
                   ),
                 ),
@@ -5674,12 +5851,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     SizedBox(height: idx == 0 ? 8 : 10),
                 itemBuilder: (ctx, idx) {
                   if (idx == 0) {
-                    return const Padding(
+                    return Padding(
                       padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                       child: Text(
                         '提示：向左滑动单条记录可显示「删除」按钮',
                         style: TextStyle(
-                          color: AppleColors.labelTertiary,
+                          color: ApplePalette.of(context).labelTertiary,
                           fontSize: 12,
                         ),
                       ),
@@ -5744,8 +5921,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               children: [
                 Text(
                   _privateSessionUnlocked ? '隐私片库' : '我的片库',
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
+                  style: TextStyle(
+                    color: ApplePalette.of(context).labelPrimary,
                     fontSize: 28,
                     fontWeight: FontWeight.w700,
                     letterSpacing: -0.6,
@@ -5817,7 +5994,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
               ],
             ),
-            const SizedBox(height: 12),
+            SizedBox(height: 12),
             SizedBox(
               width: double.infinity,
               child: IosNativeSegmentedControl(
@@ -5825,38 +6002,40 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 selectedIndex: _librarySegment,
                 onChanged: (v) => setState(() => _librarySegment = v),
                 fallback: CupertinoSlidingSegmentedControl<int>(
-                  backgroundColor: AppleColors.fill,
-                  thumbColor: const Color(0xFF636366),
+                  backgroundColor: ApplePalette.of(context).fill,
+                  thumbColor: ApplePalette.of(context).isDark
+                      ? const Color(0xFF636366)
+                      : Colors.white,
                   groupValue: _librarySegment,
-                  children: const {
+                  children: {
                     0: Padding(
-                      padding: EdgeInsets.symmetric(vertical: 7),
+                      padding: const EdgeInsets.symmetric(vertical: 7),
                       child: Text(
                         '收藏片单',
                         style: TextStyle(
-                          color: AppleColors.labelPrimary,
+                          color: ApplePalette.of(context).labelPrimary,
                           fontSize: 13,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
                     1: Padding(
-                      padding: EdgeInsets.symmetric(vertical: 7),
+                      padding: const EdgeInsets.symmetric(vertical: 7),
                       child: Text(
                         '观看历史',
                         style: TextStyle(
-                          color: AppleColors.labelPrimary,
+                          color: ApplePalette.of(context).labelPrimary,
                           fontSize: 13,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
                     ),
                     2: Padding(
-                      padding: EdgeInsets.symmetric(vertical: 7),
+                      padding: const EdgeInsets.symmetric(vertical: 7),
                       child: Text(
                         '离线下载',
                         style: TextStyle(
-                          color: AppleColors.labelPrimary,
+                          color: ApplePalette.of(context).labelPrimary,
                           fontSize: 13,
                           fontWeight: FontWeight.w600,
                         ),
@@ -5869,7 +6048,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ),
               ),
             ),
-            const SizedBox(height: 16),
+            SizedBox(height: 16),
             if (_librarySegment == 2)
               Expanded(child: _buildDownloadsList(useSidebar: useSidebar))
             else
@@ -5881,8 +6060,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             _privateSessionUnlocked
                                 ? '隐私片库还没有收藏任何影片'
                                 : '还没有收藏任何影片',
-                            style: const TextStyle(
-                              color: AppleColors.labelSecondary,
+                            style: TextStyle(
+                              color: ApplePalette.of(context).labelSecondary,
                               fontSize: 14,
                             ),
                           ),
@@ -5939,7 +6118,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           },
                         ))
                   : (_privateSessionUnlocked
-                      ? const Center(
+                      ? Center(
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -5952,7 +6131,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               Text(
                                 '隐私模式不保留任何观看历史记录',
                                 style: TextStyle(
-                                  color: AppleColors.labelPrimary,
+                                  color: ApplePalette.of(context).labelPrimary,
                                   fontSize: 15,
                                   fontWeight: FontWeight.w600,
                                 ),
@@ -5961,7 +6140,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               Text(
                                 '隐私分组中的播放进度、搜索与收藏均与正常模式完全隔离',
                                 style: TextStyle(
-                                  color: AppleColors.labelSecondary,
+                                  color: ApplePalette.of(context).labelSecondary,
                                   fontSize: 12.5,
                                 ),
                               ),
@@ -5969,11 +6148,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           ),
                         )
                       : (history.isEmpty
-                          ? const Center(
+                          ? Center(
                               child: Text(
                                 '暂无观看历史',
                                 style: TextStyle(
-                                  color: AppleColors.labelSecondary,
+                                  color: ApplePalette.of(context).labelSecondary,
                                   fontSize: 14,
                                 ),
                               ),
@@ -5984,10 +6163,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ),
                               itemCount: history.length + 1,
                               separatorBuilder: (_, __) =>
-                                  const SizedBox(height: 8),
+                                  SizedBox(height: 8),
                               itemBuilder: (ctx, idx) {
                                 if (idx == 0) {
-                                  return const Padding(
+                                  return Padding(
                                     padding: EdgeInsets.only(
                                       left: 4,
                                       bottom: 2,
@@ -5995,7 +6174,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     child: Text(
                                       '提示：向左滑动单条记录可显示「删除」按钮',
                                       style: TextStyle(
-                                        color: AppleColors.labelTertiary,
+                                        color: ApplePalette.of(context).labelTertiary,
                                         fontSize: 12,
                                       ),
                                     ),
@@ -6035,29 +6214,29 @@ class _AdaptiveShellState extends State<AdaptiveShell>
       animation: service,
       builder: (context, _) {
         if (!service.isReady) {
-          return const Center(
+          return Center(
             child: Text(
               '当前设备暂不支持离线下载',
-              style: TextStyle(color: AppleColors.labelSecondary, fontSize: 14),
+              style: TextStyle(color: ApplePalette.of(context).labelSecondary, fontSize: 14),
             ),
           );
         }
         final tasks = service.tasks;
         if (tasks.isEmpty) {
-          return const Center(
+          return Center(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
                   CupertinoIcons.arrow_down_circle,
-                  color: AppleColors.labelTertiary,
+                  color: ApplePalette.of(context).labelTertiary,
                   size: 46,
                 ),
                 SizedBox(height: 12),
                 Text(
                   '还没有下载任何影片',
                   style: TextStyle(
-                    color: AppleColors.labelPrimary,
+                    color: ApplePalette.of(context).labelPrimary,
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
                   ),
@@ -6067,7 +6246,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   '在影片详情页点击「下载」，即可在没有网络时观看',
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    color: AppleColors.labelSecondary,
+                    color: ApplePalette.of(context).labelSecondary,
                     fontSize: 13,
                   ),
                 ),
@@ -6087,8 +6266,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   children: [
                     Text(
                       active > 0 ? '$active 个任务进行中' : '下载已暂停',
-                      style: const TextStyle(
-                        color: AppleColors.labelSecondary,
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelSecondary,
                         fontSize: 13,
                       ),
                     ),
@@ -6117,8 +6296,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
                 child: Text(
                   '保存位置：${service.rootPath}',
-                  style: const TextStyle(
-                    color: AppleColors.labelTertiary,
+                  style: TextStyle(
+                    color: ApplePalette.of(context).labelTertiary,
                     fontSize: 11,
                   ),
                 ),
@@ -6134,7 +6313,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
     final failed = t.status == DownloadStatus.failed;
     final statusColor = failed
         ? AppleColors.systemRed
-        : (done ? AppleColors.systemGreen : AppleColors.labelSecondary);
+        : (done ? AppleColors.systemGreen : ApplePalette.of(context).labelSecondary);
     IconData actionIcon;
     VoidCallback action;
     if (done) {
@@ -6169,7 +6348,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ),
                 ),
               ),
-              const SizedBox(width: 12),
+              SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -6178,23 +6357,23 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       t.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppleColors.labelPrimary,
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelPrimary,
                         fontSize: 15,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    const SizedBox(height: 2),
+                    SizedBox(height: 2),
                     Text(
                       '${t.episodeName} · ${t.lineName}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppleColors.labelSecondary,
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelSecondary,
                         fontSize: 12,
                       ),
                     ),
-                    const SizedBox(height: 6),
+                    SizedBox(height: 6),
                     if (!done) ...[
                       ClipRRect(
                         borderRadius: BorderRadius.circular(2),
@@ -6204,7 +6383,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               ? null
                               : t.progress.clamp(0.0, 1.0),
                           minHeight: 3,
-                          backgroundColor: AppleColors.fill,
+                          backgroundColor: ApplePalette.of(context).fill,
                           valueColor: AlwaysStoppedAnimation<Color>(
                             failed
                                 ? AppleColors.systemRed
@@ -6223,7 +6402,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   ],
                 ),
               ),
-              const SizedBox(width: 6),
+              SizedBox(width: 6),
               CupertinoButton(
                 padding: const EdgeInsets.all(4),
                 minSize: 34,
@@ -6232,7 +6411,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   actionIcon,
                   size: 27,
                   color: done
-                      ? AppleColors.labelPrimary
+                      ? ApplePalette.of(context).labelPrimary
                       : AppleColors.systemBlue,
                 ),
               ),
@@ -6240,10 +6419,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 padding: const EdgeInsets.all(4),
                 minSize: 34,
                 onPressed: () => _confirmDeleteDownload(t),
-                child: const Icon(
+                child: Icon(
                   CupertinoIcons.trash,
                   size: 19,
-                  color: AppleColors.labelTertiary,
+                  color: ApplePalette.of(context).labelTertiary,
                 ),
               ),
             ],
@@ -6412,7 +6591,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 child: Icon(icon, size: 17, color: Colors.white),
               ),
             ),
-            const SizedBox(width: 14),
+            SizedBox(width: 14),
             Expanded(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -6422,8 +6601,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     title,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: AppleColors.labelPrimary,
+                    style: TextStyle(
+                      color: ApplePalette.of(context).labelPrimary,
                       fontSize: 15.5,
                       fontWeight: FontWeight.w600,
                       letterSpacing: 0.1,
@@ -6431,13 +6610,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                   ),
                   if (subtitle != null && subtitle.isNotEmpty) ...[
-                    const SizedBox(height: 3),
+                    SizedBox(height: 3),
                     Text(
                       subtitle,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: AppleColors.labelSecondary,
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelSecondary,
                         fontSize: 12.5,
                         fontWeight: FontWeight.w400,
                         letterSpacing: 0.1,
@@ -6462,8 +6641,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       textAlign: TextAlign.right,
-                      style: const TextStyle(
-                        color: AppleColors.labelSecondary,
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelSecondary,
                         fontSize: 14,
                         fontWeight: FontWeight.w400,
                         letterSpacing: 0.1,
@@ -6525,12 +6704,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               useSidebar ? 36 : MediaQuery.paddingOf(context).bottom + 28,
             ),
             children: [
-              const Padding(
+              Padding(
                 padding: EdgeInsets.only(left: 4, bottom: 16),
                 child: Text(
                   '设置',
                   style: TextStyle(
-                    color: AppleColors.labelPrimary,
+                    color: ApplePalette.of(context).labelPrimary,
                     fontSize: 30,
                     fontWeight: FontWeight.w700,
                     letterSpacing: 0.2,
@@ -6751,12 +6930,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         ),
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    const Expanded(
+                    SizedBox(width: 12),
+                    Expanded(
                       child: Text(
                         '毛玻璃通透度',
                         style: TextStyle(
-                          color: AppleColors.labelPrimary,
+                          color: ApplePalette.of(context).labelPrimary,
                           fontSize: 15.5,
                           fontWeight: FontWeight.w600,
                           letterSpacing: 0.1,
@@ -6765,8 +6944,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                     Text(
                       '$pct% · $levelLabel',
-                      style: const TextStyle(
-                        color: AppleColors.labelSecondary,
+                      style: TextStyle(
+                        color: ApplePalette.of(context).labelSecondary,
                         fontSize: 14,
                         fontWeight: FontWeight.w400,
                         letterSpacing: 0.1,
@@ -6774,13 +6953,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                   ],
                 ),
-                const SizedBox(height: 6),
+                SizedBox(height: 6),
                 Row(
                   children: [
-                    const Icon(
+                    Icon(
                       CupertinoIcons.drop,
                       size: 15,
-                      color: AppleColors.labelSecondary,
+                      color: ApplePalette.of(context).labelSecondary,
                     ),
                     const SizedBox(width: 8),
                     Expanded(
@@ -6862,18 +7041,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 children: [
                                   Text(
                                     title,
-                                    style: const TextStyle(
-                                      color: AppleColors.labelPrimary,
+                                    style: TextStyle(
+                                      color: ApplePalette.of(context).labelPrimary,
                                       fontSize: 25,
                                       fontWeight: FontWeight.w700,
                                       letterSpacing: 0.2,
                                     ),
                                   ),
-                                  const SizedBox(height: 6),
+                                  SizedBox(height: 6),
                                   Text(
                                     subtitle,
-                                    style: const TextStyle(
-                                      color: AppleColors.labelSecondary,
+                                    style: TextStyle(
+                                      color: ApplePalette.of(context).labelSecondary,
                                       fontSize: 13,
                                       height: 1.45,
                                       letterSpacing: 0.1,
@@ -8290,28 +8469,28 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     child: Icon(icon, size: 17, color: Colors.white),
                   ),
                 ),
-                const SizedBox(width: 12),
+                SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         title,
-                        style: const TextStyle(
-                          color: AppleColors.labelPrimary,
+                        style: TextStyle(
+                          color: ApplePalette.of(context).labelPrimary,
                           fontSize: 15.5,
                           fontWeight: FontWeight.w600,
                           letterSpacing: 0.1,
                           height: 1.28,
                         ),
                       ),
-                      const SizedBox(height: 3),
+                      SizedBox(height: 3),
                       Text(
                         subtitle,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: AppleColors.labelSecondary,
+                        style: TextStyle(
+                          color: ApplePalette.of(context).labelSecondary,
                           fontSize: 12.5,
                           height: 1.35,
                           letterSpacing: 0.1,
@@ -8320,7 +8499,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ],
                   ),
                 ),
-                const SizedBox(width: 10),
+                SizedBox(width: 10),
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -8329,12 +8508,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       style: TextStyle(
                         color: expanded
                             ? AppleColors.systemBlue
-                            : AppleColors.labelSecondary,
+                            : ApplePalette.of(context).labelSecondary,
                         fontSize: 14.5,
                         fontWeight: FontWeight.w400,
                       ),
                     ),
-                    const SizedBox(width: 5),
+                    SizedBox(width: 5),
                     AnimatedRotation(
                       turns: expanded ? 0.5 : 0.0,
                       duration: const Duration(milliseconds: 220),
@@ -8344,7 +8523,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         size: 13.5,
                         color: expanded
                             ? AppleColors.systemBlue
-                            : AppleColors.labelTertiary,
+                            : ApplePalette.of(context).labelTertiary,
                       ),
                     ),
                   ],
@@ -8446,18 +8625,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 style: TextStyle(
                                   color: selected
                                       ? const Color(0xFF5AC8FA)
-                                      : AppleColors.labelPrimary,
+                                      : ApplePalette.of(context).labelPrimary,
                                   fontSize: 14,
                                   fontWeight: selected
                                       ? FontWeight.w700
                                       : FontWeight.w500,
                                 ),
                               ),
-                              const SizedBox(height: 2.5),
+                              SizedBox(height: 2.5),
                               Text(
                                 opt.$3,
-                                style: const TextStyle(
-                                  color: AppleColors.labelSecondary,
+                                style: TextStyle(
+                                  color: ApplePalette.of(context).labelSecondary,
                                   fontSize: 11.5,
                                   height: 1.35,
                                 ),
@@ -8465,7 +8644,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             ],
                           ),
                         ),
-                        const SizedBox(width: 8),
+                        SizedBox(width: 8),
                         Icon(
                           selected
                               ? CupertinoIcons.checkmark_circle_fill
@@ -8473,7 +8652,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           size: 19,
                           color: selected
                               ? AppleColors.systemBlue
-                              : AppleColors.labelTertiary,
+                              : ApplePalette.of(context).labelTertiary,
                         ),
                       ],
                     ),
@@ -8549,7 +8728,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           ),
                         ),
                       ),
-                      const SizedBox(width: 12),
+                      SizedBox(width: 12),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -8559,18 +8738,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               style: TextStyle(
                                 color: selected
                                     ? const Color(0xFF5AC8FA)
-                                    : AppleColors.labelPrimary,
+                                    : ApplePalette.of(context).labelPrimary,
                                 fontSize: 14,
                                 fontWeight: selected
                                     ? FontWeight.w700
                                     : FontWeight.w500,
                               ),
                             ),
-                            const SizedBox(height: 2),
+                            SizedBox(height: 2),
                             Text(
                               item.$3,
-                              style: const TextStyle(
-                                color: AppleColors.labelSecondary,
+                              style: TextStyle(
+                                color: ApplePalette.of(context).labelSecondary,
                                 fontSize: 11.5,
                               ),
                             ),
@@ -8584,7 +8763,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         size: 19,
                         color: selected
                             ? AppleColors.systemBlue
-                            : AppleColors.labelTertiary,
+                            : ApplePalette.of(context).labelTertiary,
                       ),
                     ],
                   ),
@@ -8955,13 +9134,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               : AppleColors.systemGreen,
                           size: 22,
                         ),
-                        const SizedBox(width: 8),
+                        SizedBox(width: 8),
                       ],
                       Expanded(
                         child: Text(
                           statusText,
-                          style: const TextStyle(
-                            color: AppleColors.labelPrimary,
+                          style: TextStyle(
+                            color: ApplePalette.of(context).labelPrimary,
                             fontSize: 15,
                             fontWeight: FontWeight.w700,
                           ),
@@ -8977,20 +9156,20 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         value: progress,
                         minHeight: 6,
                         backgroundColor: const Color(0x26FFFFFF),
-                        valueColor: const AlwaysStoppedAnimation<Color>(
+                        valueColor: AlwaysStoppedAnimation<Color>(
                           AppleColors.systemBlue,
                         ),
                       ),
                     ),
                   ],
                   if (releaseNotes.isNotEmpty) ...[
-                    const SizedBox(height: 14),
+                    SizedBox(height: 14),
                     Container(
                       width: double.infinity,
                       constraints: const BoxConstraints(maxHeight: 240),
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: AppleColors.groupedSecondary,
+                        color: ApplePalette.of(context).groupedSecondary,
                         borderRadius: BorderRadius.circular(12),
                         border: Border.all(
                           color: AppleColors.glassBorder,
@@ -9096,10 +9275,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'Apple 影院级预设背景',
                   style: TextStyle(
-                    color: AppleColors.labelSecondary,
+                    color: ApplePalette.of(context).labelSecondary,
                     fontSize: 12.5,
                     fontWeight: FontWeight.w600,
                   ),
@@ -9184,16 +9363,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       ),
                   ],
                 ),
-                const SizedBox(height: 20),
-                const Text(
+                SizedBox(height: 20),
+                Text(
                   '自定义高清壁纸（支持图片直链 URL 或本地图片路径）',
                   style: TextStyle(
-                    color: AppleColors.labelSecondary,
+                    color: ApplePalette.of(context).labelSecondary,
                     fontSize: 12.5,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(height: 8),
+                SizedBox(height: 8),
                 TextSelectionMouseGuard(
                   child: CupertinoTextField(
                     controller: urlCtrl,
@@ -9203,19 +9382,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       vertical: 10,
                     ),
                     decoration: BoxDecoration(
-                      color: AppleColors.groupedSecondary,
+                      color: ApplePalette.of(context).groupedSecondary,
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(
                         color: AppleColors.glassBorder,
                         width: 0.5,
                       ),
                     ),
-                    style: const TextStyle(
-                      color: AppleColors.labelPrimary,
+                    style: TextStyle(
+                      color: ApplePalette.of(context).labelPrimary,
                       fontSize: 13.5,
                     ),
-                    placeholderStyle: const TextStyle(
-                      color: AppleColors.labelTertiary,
+                    placeholderStyle: TextStyle(
+                      color: ApplePalette.of(context).labelTertiary,
                       fontSize: 13,
                     ),
                   ),
@@ -9293,10 +9472,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     Navigator.of(context).pop();
                     _quickImportFromClipboard();
                   },
-                  child: const Text(
+                  child: Text(
                     '剪贴板导入',
                     style: TextStyle(
-                      color: AppleColors.labelSecondary,
+                      color: ApplePalette.of(context).labelSecondary,
                       fontSize: 13,
                     ),
                   ),
@@ -9332,26 +9511,26 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(
+                  Icon(
                     CupertinoIcons.folder_badge_plus,
-                    color: AppleColors.labelTertiary,
+                    color: ApplePalette.of(context).labelTertiary,
                     size: 44,
                   ),
-                  const SizedBox(height: 12),
-                  const Text(
+                  SizedBox(height: 12),
+                  Text(
                     '暂未添加多订阅分组',
                     style: TextStyle(
-                      color: AppleColors.labelPrimary,
+                      color: ApplePalette.of(context).labelPrimary,
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const SizedBox(height: 6),
-                  const Text(
+                  SizedBox(height: 6),
+                  Text(
                     '支持同时导入多个 VOD / M3U / JSON 订阅地址，或一键从剪贴板读取并按分组归类管理。',
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: AppleColors.labelSecondary,
+                      color: ApplePalette.of(context).labelSecondary,
                       fontSize: 13,
                     ),
                   ),
@@ -9458,7 +9637,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                   ],
                 ),
-                const SizedBox(height: 14),
+                SizedBox(height: 14),
               ],
               for (final entry in byGroup.entries) ...[
                 AppleGroupedSection(
@@ -9470,7 +9649,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           : CupertinoIcons.link,
                       iconBgColor: sub.enabled
                           ? AppleColors.systemBlue
-                          : AppleColors.groupedTertiary,
+                          : ApplePalette.of(context).groupedTertiary,
                       title: '${sub.name} · [${sub.format}]',
                       subtitle:
                           '${sub.siteCount} 片源 · ${sub.liveCount} 直播${sub.warehouseUrl.isNotEmpty ? " · ${sub.warehouseUrl}" : (sub.url.isNotEmpty ? " · ${sub.url}" : "")}',
@@ -9563,7 +9742,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (loading)
-                  const Padding(
+                  Padding(
                     padding: EdgeInsets.all(14),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -9573,7 +9752,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         Text(
                           '正在加载所选子仓库…',
                           style: TextStyle(
-                            color: AppleColors.labelSecondary,
+                            color: ApplePalette.of(context).labelSecondary,
                             fontSize: 13,
                           ),
                         ),
@@ -9596,7 +9775,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     shrinkWrap: true,
                     padding: const EdgeInsets.all(16),
                     itemCount: depots.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    separatorBuilder: (_, __) => SizedBox(height: 8),
                     itemBuilder: (ctx, i) {
                       final d = depots[i];
                       final owners = widget.storage.getSubscriptions()
@@ -9607,14 +9786,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         decoration: BoxDecoration(
                           color: isCurrent
                               ? const Color(0x330A84FF)
-                              : AppleColors.groupedSecondary,
+                              : ApplePalette.of(context).groupedSecondary,
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: AppleGroupedTile(
                           icon: CupertinoIcons.archivebox_fill,
                           iconBgColor: isCurrent
                               ? AppleColors.systemBlue
-                              : AppleColors.groupedTertiary,
+                              : ApplePalette.of(context).groupedTertiary,
                           title: d.name,
                           subtitle: d.url,
                           trailing: isCurrent
@@ -9730,10 +9909,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   '选择已有分组或输入新分组名称：',
                   style: TextStyle(
-                    color: AppleColors.labelSecondary,
+                    color: ApplePalette.of(context).labelSecondary,
                     fontSize: 13,
                   ),
                 ),
@@ -9753,7 +9932,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           decoration: BoxDecoration(
                             color: g == ctrl.text.trim()
                                 ? const Color(0x400A84FF)
-                                : AppleColors.groupedSecondary,
+                                : ApplePalette.of(context).groupedSecondary,
                             borderRadius: BorderRadius.circular(999),
                             border: Border.all(
                               color: g == ctrl.text.trim()
@@ -9767,7 +9946,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             style: TextStyle(
                               color: g == ctrl.text.trim()
                                   ? Colors.white
-                                  : AppleColors.labelPrimary,
+                                  : ApplePalette.of(context).labelPrimary,
                               fontSize: 13,
                               fontWeight: g == ctrl.text.trim()
                                   ? FontWeight.w600
@@ -9778,18 +9957,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       ),
                   ],
                 ),
-                const SizedBox(height: 14),
+                SizedBox(height: 14),
                 TextSelectionMouseGuard(
                   child: CupertinoTextField(
                     controller: ctrl,
                     placeholder: '输入自定义分组名称…',
-                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                    style: TextStyle(color: Colors.white, fontSize: 14),
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
                       vertical: 10,
                     ),
                     decoration: BoxDecoration(
-                      color: AppleColors.groupedSecondary,
+                      color: ApplePalette.of(context).groupedSecondary,
                       borderRadius: BorderRadius.circular(10),
                     ),
                     onChanged: (_) {
@@ -9896,8 +10075,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             padding: const EdgeInsets.only(bottom: 6, top: 10),
             child: Text(
               label,
-              style: const TextStyle(
-                color: AppleColors.labelSecondary,
+              style: TextStyle(
+                color: ApplePalette.of(context).labelSecondary,
                 fontSize: 12.5,
                 fontWeight: FontWeight.w600,
               ),
@@ -9914,10 +10093,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
               placeholder: placeholder,
               maxLines: maxLines,
               autocorrect: false,
-              style: const TextStyle(color: Colors.white, fontSize: 13.5),
+              style: TextStyle(color: Colors.white, fontSize: 13.5),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               decoration: BoxDecoration(
-                color: AppleColors.groupedSecondary,
+                color: ApplePalette.of(context).groupedSecondary,
                 borderRadius: BorderRadius.circular(10),
               ),
             ),
@@ -9949,7 +10128,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           decoration: BoxDecoration(
                             color: groupCtrl.text.trim() == g
                                 ? const Color(0x400A84FF)
-                                : AppleColors.groupedSecondary,
+                                : ApplePalette.of(context).groupedSecondary,
                             borderRadius: BorderRadius.circular(999),
                             border: Border.all(
                               color: groupCtrl.text.trim() == g
@@ -9960,8 +10139,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           ),
                           child: Text(
                             g,
-                            style: const TextStyle(
-                              color: AppleColors.labelPrimary,
+                            style: TextStyle(
+                              color: ApplePalette.of(context).labelPrimary,
                               fontSize: 12,
                             ),
                           ),
@@ -9975,23 +10154,23 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 textInput(playUrlCtrl, '留空使用直连或全局解析'),
                 fieldLabel('扩展参数 Ext（可选）'),
                 textInput(extCtrl, '自定义扩展配置或规则地址', maxLines: 2),
-                const SizedBox(height: 12),
+                SizedBox(height: 12),
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 12,
                     vertical: 8,
                   ),
                   decoration: BoxDecoration(
-                    color: AppleColors.groupedSecondary,
+                    color: ApplePalette.of(context).groupedSecondary,
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Row(
                     children: [
-                      const Expanded(
+                      Expanded(
                         child: Text(
                           '允许参与全站聚合搜索',
                           style: TextStyle(
-                            color: AppleColors.labelPrimary,
+                            color: ApplePalette.of(context).labelPrimary,
                             fontSize: 13.5,
                           ),
                         ),
@@ -10237,13 +10416,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             privateMode: privateMode,
           );
           if (entries.isEmpty) {
-            return const Padding(
+            return Padding(
               padding: EdgeInsets.all(28),
               child: Center(
                 child: Text(
                   '暂无已删除的线路',
                   style: TextStyle(
-                    color: AppleColors.labelSecondary,
+                    color: ApplePalette.of(context).labelSecondary,
                     fontSize: 14,
                   ),
                 ),
@@ -10260,8 +10439,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     Expanded(
                       child: Text(
                         '共 ${entries.length} 条已删线路',
-                        style: const TextStyle(
-                          color: AppleColors.labelSecondary,
+                        style: TextStyle(
+                          color: ApplePalette.of(context).labelSecondary,
                           fontSize: 13,
                         ),
                       ),
@@ -10294,7 +10473,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   shrinkWrap: true,
                   padding: const EdgeInsets.all(16),
                   itemCount: entries.length,
-                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  separatorBuilder: (_, __) => SizedBox(height: 8),
                   itemBuilder: (_, i) {
                     final item = entries[i];
                     return Container(
@@ -10303,7 +10482,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         vertical: 10,
                       ),
                       decoration: BoxDecoration(
-                        color: AppleColors.groupedSecondary,
+                        color: ApplePalette.of(context).groupedSecondary,
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: Row(
@@ -10314,19 +10493,19 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               children: [
                                 Text(
                                   item.site.name,
-                                  style: const TextStyle(
-                                    color: AppleColors.labelPrimary,
+                                  style: TextStyle(
+                                    color: ApplePalette.of(context).labelPrimary,
                                     fontSize: 14,
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
-                                const SizedBox(height: 2),
+                                SizedBox(height: 2),
                                 Text(
                                   '${item.site.group} · ${item.site.api}',
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: AppleColors.labelSecondary,
+                                  style: TextStyle(
+                                    color: ApplePalette.of(context).labelSecondary,
                                     fontSize: 12,
                                   ),
                                 ),
@@ -10430,14 +10609,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             dense: true,
             title: Text(
               site.name,
-              style: const TextStyle(color: AppleColors.labelPrimary),
+              style: TextStyle(color: ApplePalette.of(context).labelPrimary),
             ),
             subtitle: Text(
               '$g · ${site.supported ? "可用" : "未适配"}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: AppleColors.labelSecondary,
+              style: TextStyle(
+                color: ApplePalette.of(context).labelSecondary,
                 fontSize: 12,
               ),
             ),
@@ -10457,18 +10636,18 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         : CupertinoIcons.circle,
                     color: checked
                         ? AppleColors.systemBlue
-                        : AppleColors.labelSecondary,
+                        : ApplePalette.of(context).labelSecondary,
                     size: 21,
                   )
                 : (reorderIndex != null
                       ? ReorderableDragStartListener(
                           index: reorderIndex,
-                          child: const Icon(Icons.drag_handle),
+                          child: Icon(Icons.drag_handle),
                         )
-                      : const Icon(
+                      : Icon(
                           CupertinoIcons.line_horizontal_3,
                           size: 18,
-                          color: AppleColors.labelTertiary,
+                          color: ApplePalette.of(context).labelTertiary,
                         )),
             trailing: batchMode
                 ? null
@@ -10501,7 +10680,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                             vertical: 3,
                           ),
                           decoration: BoxDecoration(
-                            color: AppleColors.groupedSecondary,
+                            color: ApplePalette.of(context).groupedSecondary,
                             borderRadius: BorderRadius.circular(999),
                             border: Border.all(
                               color: const Color(0x2EFFFFFF),
@@ -10510,8 +10689,8 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           ),
                           child: Text(
                             g,
-                            style: const TextStyle(
-                              color: AppleColors.labelSecondary,
+                            style: TextStyle(
+                              color: ApplePalette.of(context).labelSecondary,
                               fontSize: 11.5,
                             ),
                           ),
@@ -10624,10 +10803,10 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           selectedKeys.addAll(visibleKeys);
                         }
                       }),
-                      child: const Text(
+                      child: Text(
                         '全选当前组',
                         style: TextStyle(
-                          color: AppleColors.labelSecondary,
+                          color: ApplePalette.of(context).labelSecondary,
                           fontSize: 12.5,
                         ),
                       ),
@@ -10738,7 +10917,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   padding: const EdgeInsets.symmetric(horizontal: 12),
                   scrollDirection: Axis.horizontal,
                   itemCount: groups.length,
-                  separatorBuilder: (_, __) => const SizedBox(width: 6),
+                  separatorBuilder: (_, __) => SizedBox(width: 6),
                   itemBuilder: (_, idx) {
                     final g = groups[idx];
                     final isSel = g == selectedGroup;
@@ -10750,7 +10929,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                         decoration: BoxDecoration(
                           color: isSel
                               ? AppleColors.systemBlue
-                              : AppleColors.groupedSecondary,
+                              : ApplePalette.of(context).groupedSecondary,
                           borderRadius: BorderRadius.circular(999),
                         ),
                         child: Text(
@@ -10758,7 +10937,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                           style: TextStyle(
                             color: isSel
                                 ? Colors.white
-                                : AppleColors.labelPrimary,
+                                : ApplePalette.of(context).labelPrimary,
                             fontSize: 12,
                             fontWeight: isSel
                                 ? FontWeight.w600
@@ -11176,7 +11355,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               style: TextStyle(
                                 color: isSelected
                                     ? Colors.white
-                                    : AppleColors.labelPrimary,
+                                    : ApplePalette.of(context).labelPrimary,
                                 fontSize: 13,
                                 height: 1.1,
                                 fontWeight: isSelected
@@ -11184,14 +11363,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                     : FontWeight.w500,
                               ),
                             ),
-                            const SizedBox(width: 6),
+                            SizedBox(width: 6),
                             Text(
                                 '$count',
                                 textAlign: TextAlign.center,
                                 style: TextStyle(
                                   color: isSelected
                                       ? Colors.white
-                                      : AppleColors.labelSecondary,
+                                      : ApplePalette.of(context).labelSecondary,
                                   fontSize: 11,
                                   height: 1.0,
                                   fontWeight: FontWeight.w700,
@@ -11242,9 +11421,9 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                               size: 13.5,
                               color: onlyAvailable
                                   ? AppleColors.systemBlue
-                                  : AppleColors.labelSecondary,
+                                  : ApplePalette.of(context).labelSecondary,
                             ),
-                            const SizedBox(width: 5),
+                            SizedBox(width: 5),
                             Flexible(
                               child: Text(
                                 onlyAvailable
@@ -11255,7 +11434,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                                 style: TextStyle(
                                   color: onlyAvailable
                                       ? Colors.white
-                                      : AppleColors.labelSecondary,
+                                      : ApplePalette.of(context).labelSecondary,
                                   fontSize: 12,
                                   fontWeight: FontWeight.w600,
                                 ),
@@ -11269,14 +11448,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                 ],
               ),
             ],
-            const SizedBox(height: 12),
+            SizedBox(height: 12),
                 ],
               )),
               if (filteredSites.isEmpty)
-                const SliverToBoxAdapter(child: Padding(
-                  padding: EdgeInsets.all(24),
+                SliverToBoxAdapter(child: Padding(
+                  padding: const EdgeInsets.all(24),
                   child: Text('未找到匹配的片源', style: TextStyle(
-                    color: AppleColors.labelSecondary, fontSize: 14)),
+                    color: ApplePalette.of(context).labelSecondary, fontSize: 14)),
                 ))
               else
                 SourceChoiceSliver(
@@ -11630,13 +11809,13 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       if (ctx.mounted) setModalState(() => errorText = '读取本地订阅失败：$e');
                     }
                   },
-                  child: const Text('选择本地订阅或 ZIP 配置包'),
+                  child: Text('选择本地订阅或 ZIP 配置包'),
                 ),
                 // 1. Group Selector
-                const Text(
+                Text(
                   '订阅分组（可选择预设或直接输入自定义分组名）',
                   style: TextStyle(
-                    color: AppleColors.labelSecondary,
+                    color: ApplePalette.of(context).labelSecondary,
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
                   ),
@@ -11654,7 +11833,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       ),
                   ],
                 ),
-                const SizedBox(height: 8),
+                SizedBox(height: 8),
                 TextSelectionMouseGuard(
                   child: CupertinoTextField(
                     controller: groupCtrl,
@@ -11663,17 +11842,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       horizontal: 12,
                       vertical: 10,
                     ),
-                    style: const TextStyle(
-                      color: AppleColors.labelPrimary,
+                    style: TextStyle(
+                      color: ApplePalette.of(context).labelPrimary,
                       fontSize: 13.5,
                     ),
-                    placeholderStyle: const TextStyle(
-                      color: AppleColors.labelTertiary,
+                    placeholderStyle: TextStyle(
+                      color: ApplePalette.of(context).labelTertiary,
                       fontSize: 13,
                     ),
                     onChanged: (_) => setModalState(() {}),
                     decoration: BoxDecoration(
-                      color: AppleColors.groupedSecondary,
+                      color: ApplePalette.of(context).groupedSecondary,
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(
                         color: AppleColors.glassBorder,
@@ -11682,7 +11861,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                   ),
                 ),
-                const SizedBox(height: 14),
+                SizedBox(height: 14),
                 if (showPrivacyToggle) ...[
                   Container(
                     padding: const EdgeInsets.symmetric(
@@ -11690,7 +11869,7 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       vertical: 8,
                     ),
                     decoration: BoxDecoration(
-                      color: AppleColors.groupedSecondary,
+                      color: ApplePalette.of(context).groupedSecondary,
                       borderRadius: BorderRadius.circular(11),
                       border: Border.all(
                         color: AppleColors.glassBorder,
@@ -11699,17 +11878,17 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                     child: Row(
                       children: [
-                        const Icon(
+                        Icon(
                           CupertinoIcons.lock_shield_fill,
                           color: AppleColors.systemPurple,
                           size: 18,
                         ),
-                        const SizedBox(width: 8),
-                        const Expanded(
+                        SizedBox(width: 8),
+                        Expanded(
                           child: Text(
                             '设为隐私分组',
                             style: TextStyle(
-                              color: AppleColors.labelPrimary,
+                              color: ApplePalette.of(context).labelPrimary,
                               fontSize: 13.5,
                               fontWeight: FontWeight.w600,
                             ),
@@ -11731,16 +11910,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       ],
                     ),
                   ),
-                  const SizedBox(height: 14),
+                  SizedBox(height: 14),
                 ],
                 // 3. Multi-subscription URLs input
                 Row(
                   children: [
-                    const Expanded(
+                    Expanded(
                       child: Text(
                         '订阅地址（支持多行批量导入 · 兼容 VOD / M3U / JSON / 多仓）',
                         style: TextStyle(
-                          color: AppleColors.labelSecondary,
+                          color: ApplePalette.of(context).labelSecondary,
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
                         ),
@@ -11802,16 +11981,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                       horizontal: 14,
                       vertical: 10,
                     ),
-                    style: const TextStyle(
-                      color: AppleColors.labelPrimary,
+                    style: TextStyle(
+                      color: ApplePalette.of(context).labelPrimary,
                       fontSize: 13.5,
                     ),
-                    placeholderStyle: const TextStyle(
-                      color: AppleColors.labelTertiary,
+                    placeholderStyle: TextStyle(
+                      color: ApplePalette.of(context).labelTertiary,
                       fontSize: 12.5,
                     ),
                     decoration: BoxDecoration(
-                      color: AppleColors.groupedSecondary,
+                      color: ApplePalette.of(context).groupedSecondary,
                       borderRadius: BorderRadius.circular(11),
                       border: Border.all(
                         color: AppleColors.glassBorder,
@@ -11820,11 +11999,11 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     ),
                   ),
                 ),
-                const SizedBox(height: 14),
-                const Text(
+                SizedBox(height: 14),
+                Text(
                   '或粘贴 JSON / M3U / TXT / JS / PY 配置内容（脚本是否可用取决于运行环境）',
                   style: TextStyle(
-                    color: AppleColors.labelSecondary,
+                    color: ApplePalette.of(context).labelSecondary,
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
                   ),
@@ -11842,16 +12021,16 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                     smartQuotesType: SmartQuotesType.disabled,
                     smartDashesType: SmartDashesType.disabled,
                     padding: const EdgeInsets.all(12),
-                    style: const TextStyle(
-                      color: AppleColors.labelPrimary,
+                    style: TextStyle(
+                      color: ApplePalette.of(context).labelPrimary,
                       fontSize: 13,
                     ),
-                    placeholderStyle: const TextStyle(
-                      color: AppleColors.labelTertiary,
+                    placeholderStyle: TextStyle(
+                      color: ApplePalette.of(context).labelTertiary,
                       fontSize: 12.5,
                     ),
                     decoration: BoxDecoration(
-                      color: AppleColors.groupedSecondary,
+                      color: ApplePalette.of(context).groupedSecondary,
                       borderRadius: BorderRadius.circular(11),
                       border: Border.all(
                         color: AppleColors.glassBorder,
@@ -11941,14 +12120,14 @@ class _AdaptiveShellState extends State<AdaptiveShell>
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text(
+              Text(
                 '与 Android 电视/手机端 MarcoMovie-1 备份格式双向兼容：',
                 style: TextStyle(
-                  color: AppleColors.labelSecondary,
+                  color: ApplePalette.of(context).labelSecondary,
                   fontSize: 12,
                 ),
               ),
-              const SizedBox(height: 10),
+              SizedBox(height: 10),
               TextSelectionMouseGuard(
                 child: CupertinoTextField(
                   controller: ctrl,
@@ -11959,12 +12138,12 @@ class _AdaptiveShellState extends State<AdaptiveShell>
                   smartQuotesType: SmartQuotesType.disabled,
                   smartDashesType: SmartDashesType.disabled,
                   padding: const EdgeInsets.all(12),
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
+                  style: TextStyle(
+                    color: ApplePalette.of(context).labelPrimary,
                     fontSize: 12,
                   ),
                   decoration: BoxDecoration(
-                    color: AppleColors.groupedSecondary,
+                    color: ApplePalette.of(context).groupedSecondary,
                     borderRadius: BorderRadius.circular(11),
                     border: Border.all(
                       color: AppleColors.glassBorder,
@@ -12115,27 +12294,27 @@ class _AdaptiveShellState extends State<AdaptiveShell>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
+            Text(
               '诊断包已自动脱敏所有 Cookie、Token、密码及私有 URL 参数，可安全分享用于排查故障：',
               style: TextStyle(
-                color: AppleColors.labelSecondary,
+                color: ApplePalette.of(context).labelSecondary,
                 fontSize: 12,
               ),
             ),
-            const SizedBox(height: 12),
+            SizedBox(height: 12),
             TextSelectionMouseGuard(
               child: CupertinoTextField(
                 controller: TextEditingController(text: bundle),
                 maxLines: 12,
                 minLines: 8,
                 readOnly: true,
-                style: const TextStyle(
-                  color: AppleColors.labelPrimary,
+                style: TextStyle(
+                  color: ApplePalette.of(context).labelPrimary,
                   fontSize: 11,
                   fontFamily: 'monospace',
                 ),
                 decoration: BoxDecoration(
-                  color: AppleColors.groupedSecondary,
+                  color: ApplePalette.of(context).groupedSecondary,
                   borderRadius: BorderRadius.circular(10),
                 ),
               ),
@@ -12242,8 +12421,8 @@ class _IosBackupRestorePanelState extends State<_IosBackupRestorePanel> {
                   smartQuotesType: SmartQuotesType.disabled,
                   smartDashesType: SmartDashesType.disabled,
                   padding: const EdgeInsets.all(12),
-                  style: const TextStyle(
-                    color: AppleColors.labelPrimary,
+                  style: TextStyle(
+                    color: ApplePalette.of(context).labelPrimary,
                     fontSize: 12.5,
                   ),
                   decoration: BoxDecoration(
@@ -12352,7 +12531,7 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
 
   Widget _buildFallbackPosterPlaceholder() {
     return Container(
-      decoration: const BoxDecoration(
+      decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
@@ -12360,9 +12539,9 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
         ),
       ),
       alignment: Alignment.center,
-      child: const Icon(
+      child: Icon(
         CupertinoIcons.film,
-        color: AppleColors.labelTertiary,
+        color: ApplePalette.of(context).labelTertiary,
         size: 22,
       ),
     );
@@ -12510,7 +12689,7 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                             ),
                           ),
                         ),
-                        const SizedBox(width: 13),
+                        SizedBox(width: 13),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -12520,24 +12699,24 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                                 h.title,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: AppleColors.labelPrimary,
+                                style: TextStyle(
+                                  color: ApplePalette.of(context).labelPrimary,
                                   fontSize: 15.5,
                                   fontWeight: FontWeight.w600,
                                   letterSpacing: -0.25,
                                 ),
                               ),
-                              const SizedBox(height: 4),
+                              SizedBox(height: 4),
                               Text(
                                 '$epLabel · 已看 $pct%',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: AppleColors.labelSecondary,
+                                style: TextStyle(
+                                  color: ApplePalette.of(context).labelSecondary,
                                   fontSize: 12.5,
                                 ),
                               ),
-                              const SizedBox(height: 8),
+                              SizedBox(height: 8),
                               ClipRRect(
                                 borderRadius: BorderRadius.circular(999),
                                 child: LinearProgressIndicator(
@@ -12545,7 +12724,7 @@ class _SwipeToDeleteHistoryTileState extends State<_SwipeToDeleteHistoryTile> {
                                       ? h.progressFraction
                                       : 0.12,
                                   minHeight: 3.5,
-                                  backgroundColor: AppleColors.groupedTertiary,
+                                  backgroundColor: ApplePalette.of(context).groupedTertiary,
                                   valueColor:
                                       const AlwaysStoppedAnimation<Color>(
                                     AppleColors.systemBlue,
