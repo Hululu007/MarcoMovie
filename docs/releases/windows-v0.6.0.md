@@ -27,7 +27,10 @@
 
 ## 包信息与构建记录
 
-- 待当前提交完成 GitHub Actions Windows x64 云端全量构建与校验后补充最终 SHA-256 与文件大小记录。
+- **Windows 64 位安装版（Inno Setup）**：`MarcoMovie-0.6.0-windows-x64-setup.exe`（`51129937` B，兼容别名 `MarcoMovie-0.6.0-windows-setup.exe`），SHA-256：`301c652c5e2a7a4ad5210287154d8e30aa56112df1c981d60c6c5bfa49ae7fbd`。
+- **Windows 64 位绿色便携版**：`MarcoMovie-0.6.0-windows-x64-portable.zip`（`73920593` B，兼容别名 `MarcoMovie-0.6.0-windows-x64.zip`），SHA-256：`7338b4cd154377621aae6091326c55d3eeb59bffc57d24b31a3e32b6006e8c3e`。
+- **对应源码包**：`MarcoMovie-windows-v0.6.0-source.zip`（`10706578` B），SHA-256：`b11ae525953bf5c014ff02493d69a20c59ddbdcb71d2206766849399187830e3`。
+- **构建提交与 CI 记录**：`9cb86ed280c119e1b0654af46a5571f52ae9a79d`。[Windows x64 原生构建与全量校验（44884390833）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44884390833) / [公开守卫记录（44884390802）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44884390802) / [跨端源回归（44884390814）](https://github.com/Pilipala9919/MarcoMovie/actions/runs/44884390814)。
 
 ## 验证范围与已知限制
 
